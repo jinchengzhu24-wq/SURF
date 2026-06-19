@@ -3,8 +3,9 @@ using System.Collections.Generic;
 using UnityEngine;
 
 public class Player : MonoBehaviour
-{    
-    public float moveDistance;
+{
+    public float moveDistance = 1f;
+
     private void Update()
     {
         Move();
@@ -34,20 +35,56 @@ public class Player : MonoBehaviour
             dir = Vector3.right;
         }
 
-        if (dir != Vector3.zero)
+        if (dir == Vector3.zero)
         {
-            Vector3 nextPos = transform.position + dir;
-
-            Collider2D hit = Physics2D.OverlapPoint(nextPos);
-
-            if (hit == null)
-            {
-                transform.position = nextPos;
-            }
-            else if (!hit.CompareTag("Wall") && !hit.CompareTag("Water"))
-            {
-                transform.position = nextPos;
-            }
+            return;
         }
+
+        Vector3 nextPos = transform.position + dir * moveDistance;
+
+        if (IsBlocked(nextPos))
+        {
+            return;
+        }
+
+        Box box = GetBox(nextPos);
+
+        if (box != null)
+        {
+            Vector3 boxNextPos = box.transform.position + dir * moveDistance;
+
+            if (IsBlocked(boxNextPos) || GetBox(boxNextPos) != null)
+            {
+                return;
+            }
+
+            box.Move(dir * moveDistance);
+        }
+
+        transform.position = nextPos;
+    }
+
+    private bool IsBlocked(Vector3 position)
+    {
+        Collider2D hit = Physics2D.OverlapPoint(position);
+
+        if (hit == null)
+        {
+            return false;
+        }
+
+        return hit.CompareTag("Wall") || hit.CompareTag("Water");
+    }
+
+    private Box GetBox(Vector3 position)
+    {
+        Collider2D hit = Physics2D.OverlapPoint(position);
+
+        if (hit == null)
+        {
+            return null;
+        }
+
+        return hit.GetComponent<Box>();
     }
 }

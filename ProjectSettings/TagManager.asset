@@ -46,6 +46,12 @@ TagManager:
   - name: Ground
     uniqueID: 2403361393
     locked: 0
+  - name: Location
+    uniqueID: 3221377397
+    locked: 0
   - name: Player
     uniqueID: 2312087379
+    locked: 0
+  - name: Box
+    uniqueID: 3588019201
     locked: 0
