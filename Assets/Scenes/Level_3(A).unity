@@ -275,12 +275,17 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   rows:
-  - '#######'
-  - '#  t  #'
-  - '#  s  #'
-  - '#  p  #'
-  - '# @@@ #'
-  - '#######'
+  - '   #######    '
+  - '  ##     ##   '
+  - ' ##  t    ### '
+  - ' #   ###    # '
+  - ' # @@@   s  # '
+  - ' ###  ##    # '
+  - '   #   t ## # '
+  - '   # s    @ # '
+  - '   ### ##   # '
+  - '     #  p  ## '
+  - '     #######  '
 --- !u!4 &693111689
 Transform:
   m_ObjectHideFlags: 0
@@ -346,6 +351,8 @@ MonoBehaviour:
   cellSize: 1
   levelRoot: {fileID: 20737122}
   clearTilemapsOnLoad: 1
+  centerMap: 1
+  extraCellOffset: {x: 0, y: 0}
 --- !u!4 &1056471161
 Transform:
   m_ObjectHideFlags: 0
