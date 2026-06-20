@@ -10,7 +10,7 @@ public class PlayerAnimation : MonoBehaviour
     {
         animator = GetComponent<Animator>();
     }
-    public void Animation()
+    public void Win()
     {
         animator.SetTrigger("Win");
     }
