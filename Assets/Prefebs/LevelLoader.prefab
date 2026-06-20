@@ -1,6 +1,6 @@
 %YAML 1.1
 %TAG !u! tag:unity3d.com,2011:
---- !u!1 &1599936489669368165
+--- !u!1 &1582820367515823401
 GameObject:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -8,8 +8,8 @@ GameObject:
   m_PrefabAsset: {fileID: 0}
   serializedVersion: 6
   m_Component:
-  - component: {fileID: 501889265585675004}
-  - component: {fileID: 701465096115162154}
+  - component: {fileID: 7227678548045289669}
+  - component: {fileID: 6475747495041295870}
   m_Layer: 0
   m_Name: LevelLoader
   m_TagString: Untagged
@@ -17,13 +17,13 @@ GameObject:
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
   m_IsActive: 1
---- !u!4 &501889265585675004
+--- !u!4 &7227678548045289669
 Transform:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1599936489669368165}
+  m_GameObject: {fileID: 1582820367515823401}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
@@ -32,13 +32,13 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &701465096115162154
+--- !u!114 &6475747495041295870
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1599936489669368165}
+  m_GameObject: {fileID: 1582820367515823401}
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: b23ef8d48e09098448b777a6a5a077ef, type: 3}
@@ -46,11 +46,24 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   levelData: {fileID: 0}
   levelManager: {fileID: 0}
-  playerPrefab: {fileID: 0}
-  boxPrefab: {fileID: 0}
-  startPrefab: {fileID: 0}
-  targetPrefab: {fileID: 0}
-  wallPrefab: {fileID: 0}
-  waterPrefab: {fileID: 0}
+  playerPrefab: {fileID: 7399579409665555644, guid: a054dd8190047434dbdaa4f309a6b5a6, type: 3}
+  boxPrefab: {fileID: 8787754953425066811, guid: 1eb0b683f356d9144adbfb4306b6774c, type: 3}
+  startPrefab: {fileID: 7352139241926149589, guid: af6b1766ca192d8459cfd7ba564c5a84, type: 3}
+  targetPrefab: {fileID: 3582683993962839180, guid: 20cbfa965e129f64081f888923a36093, type: 3}
+  groundTilemap: {fileID: 0}
+  wallTilemap: {fileID: 0}
+  waterTilemap: {fileID: 0}
+  groundTile: {fileID: 11400000, guid: 03a640683c08b4a48ba0614e9905a22c, type: 2}
+  groundRightWallTile: {fileID: 11400000, guid: c75dd86a0cb98584e91b88edcf182229, type: 2}
+  wallTile: {fileID: 11400000, guid: 1c56f3a11a854cc44addb02e69878f9f, type: 2}
+  wallVerticalTile: {fileID: 11400000, guid: 2ad7627673a8f39488f6592a5af6aa85, type: 2}
+  wallRightAndRightDownTile: {fileID: 11400000, guid: 84188c559cd7f5c46b1e2b4db55d7b1a, type: 2}
+  waterTile: {fileID: 11400000, guid: 0545f61cdcba0474e994d20a16c7be10, type: 2}
+  waterTopGroundTile: {fileID: 11400000, guid: 191cf975c468d98478420c33127afcd1, type: 2}
+  waterRightWallTile: {fileID: 11400000, guid: f3b8c726c8f506048b41519b8b16c31f, type: 2}
+  waterTopGroundRightWallTile: {fileID: 11400000, guid: f006b7f7892caf643bd9b9b12d223787, type: 2}
   cellSize: 1
   levelRoot: {fileID: 0}
+  clearTilemapsOnLoad: 1
+  centerMap: 1
+  extraCellOffset: {x: 0, y: 0}
