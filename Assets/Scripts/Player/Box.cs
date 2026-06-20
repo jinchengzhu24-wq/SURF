@@ -15,7 +15,10 @@ public class Box : MonoBehaviour
 
     public void Awake()
     {
-        transform.position = start.position;
+        if (start != null)
+        {
+            transform.position = start.position;
+        }
     }
 
     private void Update()
