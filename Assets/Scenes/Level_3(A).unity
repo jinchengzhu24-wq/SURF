@@ -487,6 +487,10 @@ PrefabInstance:
       propertyPath: groundTilemap
       value: 
       objectReference: {fileID: 1529207703}
+    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+      propertyPath: wallSurroundedTile
+      value: 
+      objectReference: {fileID: 11400000, guid: 371faf0e911c5954bac403a2b907ed8d, type: 2}
     - target: {fileID: 7227678548045289669, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: m_LocalPosition.x
       value: 0
@@ -583,6 +587,30 @@ PrefabInstance:
     - target: {fileID: 4809463662136315365, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+      propertyPath: rows.Array.data[3]
+      value: ' #.@@.......# '
+      objectReference: {fileID: 0}
+    - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+      propertyPath: rows.Array.data[4]
+      value: ' #.@@....s..# '
+      objectReference: {fileID: 0}
+    - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+      propertyPath: rows.Array.data[5]
+      value: ' ###..#.....# '
+      objectReference: {fileID: 0}
+    - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+      propertyPath: rows.Array.data[6]
+      value: '   #...t.#..# '
+      objectReference: {fileID: 0}
+    - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+      propertyPath: rows.Array.data[7]
+      value: '   #.s......# '
+      objectReference: {fileID: 0}
+    - target: {fileID: 5296066713330375552, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+      propertyPath: rows.Array.data[8]
+      value: '   ###..#...# '
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []

@@ -24,6 +24,7 @@ public class LevelLoader : MonoBehaviour
     public TileBase wallTile;
     public TileBase wallVerticalTile;
     public TileBase wallRightAndRightDownTile;
+    public TileBase wallSurroundedTile;
     public TileBase waterTile;
     public TileBase waterTopGroundTile;
     public TileBase waterRightWallTile;
@@ -125,7 +126,10 @@ public class LevelLoader : MonoBehaviour
         }
         else if (tile == '@')
         {
-            SetTile(waterTilemap, GetWaterTile(x, y), cellPosition);
+            if (!IsWall(x, y - 1))
+            {
+                SetTile(waterTilemap, GetWaterTile(x, y), cellPosition);
+            }
         }
         else if (tile == '#')
         {
@@ -190,6 +194,12 @@ public class LevelLoader : MonoBehaviour
 
     private void SetGroundTile(char tile, int x, int y, Vector3Int cellPosition)
     {
+        if (IsSurroundedWall(x, y))
+        {
+            SetTile(groundTilemap, groundTile, cellPosition);
+            return;
+        }
+
         if (IsGround(tile))
         {
             SetTile(groundTilemap, GetGroundTile(x, y), cellPosition);
@@ -231,6 +241,16 @@ public class LevelLoader : MonoBehaviour
 
     private TileBase GetWallTile(int x, int y)
     {
+        if (IsSurroundedWall(x, y))
+        {
+            return GetFallbackTile(wallSurroundedTile, wallTile);
+        }
+
+        if (IsWall(x, y - 1) && (IsWall(x - 1, y) || IsWall(x + 1, y)))
+        {
+            return wallTile;
+        }
+
         if (IsWall(x + 1, y) && IsWall(x + 1, y + 1))
         {
             return GetFallbackTile(wallRightAndRightDownTile, wallTile);
@@ -254,6 +274,34 @@ public class LevelLoader : MonoBehaviour
         return GetMapTile(x, y) == '#';
     }
 
+    private bool IsWater(int x, int y)
+    {
+        return GetMapTile(x, y) == '@';
+    }
+
+    private bool HasTile(int x, int y)
+    {
+        char tile = GetMapTile(x, y);
+        return tile != '\0' && tile != ' ';
+    }
+
+    private bool HasTilesAround(int x, int y)
+    {
+        return HasTile(x - 1, y - 1)
+            && HasTile(x, y - 1)
+            && HasTile(x + 1, y - 1)
+            && HasTile(x - 1, y)
+            && HasTile(x + 1, y)
+            && HasTile(x - 1, y + 1)
+            && HasTile(x, y + 1)
+            && HasTile(x + 1, y + 1);
+    }
+
+    private bool IsSurroundedWall(int x, int y)
+    {
+        return IsWall(x, y) && HasTilesAround(x, y) && !IsWater(x, y + 1);
+    }
+
     private bool IsGround(int x, int y)
     {
         return IsGround(GetMapTile(x, y));
@@ -261,7 +309,7 @@ public class LevelLoader : MonoBehaviour
 
     private bool IsGround(char tile)
     {
-        return tile == ' ' || tile == 'p' || tile == 's' || tile == 't';
+        return tile == '.' || tile == 'p' || tile == 's' || tile == 't';
     }
 
     private char GetMapTile(int x, int y)

@@ -8,7 +8,7 @@ public class PlayerAnimation : MonoBehaviour
 
     private void Start()
     {
-        animator = GetComponent<Animator>();
+        animator = GetComponentInChildren<Animator>();
     }
     public void Win()
     {
