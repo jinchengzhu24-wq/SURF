@@ -16,12 +16,4 @@ public class LevelData : MonoBehaviour
         "     #..p..## ",
         "     #######  "
     };
-
-    // p = player start
-    // s = box start
-    // t = target
-    // @ = water
-    // # = wall
-    // . = ground
-    // space = empty
 }

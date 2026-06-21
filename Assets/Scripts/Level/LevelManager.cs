@@ -1,26 +1,33 @@
 using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 public class LevelManager : MonoBehaviour
-{   
+{
+    public enum CompleteAction
+    {
+        LoadNextScene,
+        StayInCurrentScene
+    }
+
     public PlayerAnimation anim;
 
     [Header("Level Info")]
     public int boxCount;
-
     public int reachedCount;
 
     [Header("Black Panel")]
     public Image blackPanel;
-
     public float fadeTime = 1f;
+    public float completeDelay = 1.5f;
+
+    [Header("Complete Action")]
+    public CompleteAction completeAction = CompleteAction.LoadNextScene;
 
     private void Start()
     {
-        boxCount = FindObjectsOfType<Box>().Length;
+        ResetLevelState();
         StartCoroutine(Fade(1, 0));
     }
 
@@ -28,10 +35,9 @@ public class LevelManager : MonoBehaviour
     {
         reachedCount++;
 
-        if(reachedCount == boxCount)
+        if (reachedCount == boxCount)
         {
-            anim.Win();
-            StartCoroutine(LoadNextLevel());
+            StartCoroutine(CompleteLevel());
         }
     }
 
@@ -39,19 +45,55 @@ public class LevelManager : MonoBehaviour
     {
         reachedCount--;
     }
-    private IEnumerator LoadNextLevel()
-    //协程:便于中间暂停的函数
+
+    public void ResetLevelState()
     {
-        yield return new WaitForSeconds(1.5f);
+        boxCount = FindObjectsOfType<Box>().Length;
+        reachedCount = 0;
+    }
+
+    private IEnumerator CompleteLevel()
+    {
+        if (anim != null)
+        {
+            anim.Win();
+        }
+
+        yield return new WaitForSeconds(completeDelay);
 
         yield return Fade(0, 1);
 
+        if (completeAction == CompleteAction.LoadNextScene)
+        {
+            LoadNextScene();
+        }
+        else
+        {
+            yield return Fade(1, 0);
+        }
+    }
+
+    private void LoadNextScene()
+    {
         int currentIndex = SceneManager.GetActiveScene().buildIndex;
-        SceneManager.LoadScene(currentIndex + 1);
+        int nextIndex = currentIndex + 1;
+
+        if (nextIndex >= SceneManager.sceneCountInBuildSettings)
+        {
+            Debug.LogWarning("LevelManager: No next scene in Build Settings.");
+            return;
+        }
+
+        SceneManager.LoadScene(nextIndex);
     }
 
     private IEnumerator Fade(float startAlpha, float endAlpha)
     {
+        if (blackPanel == null)
+        {
+            yield break;
+        }
+
         float timer = 0;
 
         while (timer < fadeTime)
@@ -68,5 +110,5 @@ public class LevelManager : MonoBehaviour
         Color finalColor = blackPanel.color;
         finalColor.a = endAlpha;
         blackPanel.color = finalColor;
-    }   
+    }
 }

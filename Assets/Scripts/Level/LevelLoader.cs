@@ -3,6 +3,30 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Tilemaps;
 
+// 当前 LevelData 字符含义：
+// - p：玩家起点，生成 Player prefab，并且该格也视为地面。
+// - s：箱子起点，生成 Start prefab 和 Box prefab，并且该格也视为地面。
+// - t：箱子终点，生成 Target prefab，并且该格也视为地面。
+// - .：普通地面。
+// - #：墙体。
+// - @：水面。
+// - 空格：空白区域，不生成任何瓦片或物体。
+//
+// 当前地面瓦片类型：
+// - groundTile：普通地面。
+// - groundRightWallTile：右侧是墙时使用的地面。
+//
+// 当前墙体瓦片类型：
+// - wallTile：普通墙。
+// - wallVerticalTile：上方或下方有墙时使用的墙。
+// - wallRightAndRightDownTile：右侧和右下都有墙时使用的墙。
+// - wallSurroundedTile：周围八个方向都有瓦片，且下方不是水时使用的特殊墙。
+//
+// 当前水面瓦片类型：
+// - waterTile：普通水面。
+// - waterTopGroundTile：上方是地面时使用的水面。
+// - waterRightWallTile：右侧是墙时使用的水面。
+// - waterTopGroundRightWallTile：上方是地面且右侧是墙时使用的水面。
 public class LevelLoader : MonoBehaviour
 {
     [Header("Level Data")]
