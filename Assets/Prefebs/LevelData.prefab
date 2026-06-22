@@ -77,8 +77,14 @@ MonoBehaviour:
   minWaterHeight: 2
   maxWaterWidth: 4
   maxWaterHeight: 4
+  minWaterAreas: 1
   maxWaterAreas: 2
-  maxGenerateAttempts: 100
+  maxGenerateAttempts: 300
+  enableIrregularOuterWalls: 1
+  minWallObstacleBlocks: 1
+  maxWallObstacleBlocks: 3
+  minSolutionSteps: 12
+  maxSolutionSteps: 35
   minReversePulls: 8
   maxReversePulls: 24
   maxReverseStepAttempts: 200

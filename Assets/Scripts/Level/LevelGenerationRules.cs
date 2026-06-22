@@ -26,10 +26,22 @@ public class LevelGenerationRules : MonoBehaviour
     public int minWaterHeight = 2;
     public int maxWaterWidth = 4;
     public int maxWaterHeight = 4;
+    public int minWaterAreas = 1;
     public int maxWaterAreas = 2;
 
     [Header("Search")]
-    public int maxGenerateAttempts = 100;
+    public int maxGenerateAttempts = 300;
+
+    [Header("Outer Walls")]
+    public bool enableIrregularOuterWalls = true;
+
+    [Header("Wall Obstacles")]
+    public int minWallObstacleBlocks = 1;
+    public int maxWallObstacleBlocks = 3;
+
+    [Header("Difficulty")]
+    public int minSolutionSteps = 12;
+    public int maxSolutionSteps = 35;
 
     [Header("Reverse Generation")]
     public int minReversePulls = 8;
@@ -47,8 +59,14 @@ public class LevelGenerationRules : MonoBehaviour
             && minWaterHeight > 0
             && maxWaterWidth >= minWaterWidth
             && maxWaterHeight >= minWaterHeight
+            && minWaterAreas >= 0
+            && maxWaterAreas >= minWaterAreas
             && maxWaterAreas >= 0
             && maxGenerateAttempts > 0
+            && minWallObstacleBlocks >= 0
+            && maxWallObstacleBlocks >= minWallObstacleBlocks
+            && minSolutionSteps >= 0
+            && maxSolutionSteps >= minSolutionSteps
             && minReversePulls >= 0
             && maxReversePulls >= minReversePulls
             && maxReverseStepAttempts > 0;
