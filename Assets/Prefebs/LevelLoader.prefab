@@ -46,6 +46,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   levelData: {fileID: 0}
   levelManager: {fileID: 0}
+  levelGenerator: {fileID: 0}
+  generateBeforeLoad: 1
   playerPrefab: {fileID: 7399579409665555644, guid: a054dd8190047434dbdaa4f309a6b5a6, type: 3}
   boxPrefab: {fileID: 8787754953425066811, guid: 1eb0b683f356d9144adbfb4306b6774c, type: 3}
   startPrefab: {fileID: 7352139241926149589, guid: af6b1766ca192d8459cfd7ba564c5a84, type: 3}

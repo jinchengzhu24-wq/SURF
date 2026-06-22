@@ -10,6 +10,8 @@ GameObject:
   m_Component:
   - component: {fileID: 4809463662136315365}
   - component: {fileID: 5296066713330375552}
+  - component: {fileID: 8610000000000000001}
+  - component: {fileID: 8610000000000000002}
   m_Layer: 0
   m_Name: LevelData
   m_TagString: Untagged
@@ -56,3 +58,51 @@ MonoBehaviour:
   - '   ###.##...# '
   - '     #..p..## '
   - '     #######  '
+--- !u!114 &8610000000000000001
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2724436488463390175}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c10a5cf07c55c78479f50ae1ef4d5948, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  width: 12
+  height: 10
+  boxCount: 2
+  minWaterWidth: 2
+  minWaterHeight: 2
+  maxWaterWidth: 4
+  maxWaterHeight: 4
+  maxWaterAreas: 2
+  maxGenerateAttempts: 100
+  minReversePulls: 8
+  maxReversePulls: 24
+  maxReverseStepAttempts: 200
+  useFixedSeed: 0
+  seed: 0
+--- !u!114 &8610000000000000002
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2724436488463390175}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 55b7cf5e20fc4c1fbb79f84855d569b4, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  levelData: {fileID: 5296066713330375552}
+  levelLoader: {fileID: 0}
+  levelSolver: {fileID: 0}
+  rules: {fileID: 8610000000000000001}
+  generateOnAwake: 0
+  logGenerationResult: 1
+  lastAttempts: 0
+  lastReversePulls: 0
+  lastSearchedStates: 0
+  lastSolutionSteps: 0

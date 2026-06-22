@@ -33,6 +33,10 @@ public class LevelLoader : MonoBehaviour
     public LevelData levelData;
     public LevelManager levelManager;
 
+    [Header("Generation")]
+    public LevelGenerator levelGenerator;
+    public bool generateBeforeLoad = true;
+
     [Header("Prefabs")]
     public GameObject playerPrefab;
     public GameObject boxPrefab;
@@ -61,6 +65,8 @@ public class LevelLoader : MonoBehaviour
     public bool centerMap = true;
     public Vector2Int extraCellOffset;
 
+    private readonly List<GameObject> spawnedObjects = new List<GameObject>();
+
     private void Awake()
     {
         if (levelManager == null)
@@ -68,15 +74,67 @@ public class LevelLoader : MonoBehaviour
             levelManager = FindObjectOfType<LevelManager>();
         }
 
+        if (levelGenerator == null)
+        {
+            levelGenerator = FindObjectOfType<LevelGenerator>();
+        }
+
+        GenerateLevelIfNeeded();
         LoadLevel();
     }
 
-    private void LoadLevel()
+    private void GenerateLevelIfNeeded()
+    {
+        if (!generateBeforeLoad || levelGenerator == null)
+        {
+            return;
+        }
+
+        GenerateLevel();
+    }
+
+    public void GenerateAndReload()
+    {
+        GenerateLevel();
+        LoadLevel();
+    }
+
+    private bool GenerateLevel()
+    {
+        if (levelGenerator == null)
+        {
+            levelGenerator = FindObjectOfType<LevelGenerator>();
+        }
+
+        if (levelGenerator == null)
+        {
+            return false;
+        }
+
+        if (levelData != null)
+        {
+            levelGenerator.levelData = levelData;
+        }
+
+        levelGenerator.levelLoader = this;
+
+        if (levelGenerator.Generate() && levelGenerator.levelData != null)
+        {
+            levelData = levelGenerator.levelData;
+            return true;
+        }
+
+        return false;
+    }
+
+    public void LoadLevel()
     {
         if (levelData == null || levelData.rows == null)
         {
             return;
         }
+
+        ClearSpawnedObjects();
 
         if (clearTilemapsOnLoad)
         {
@@ -99,6 +157,11 @@ public class LevelLoader : MonoBehaviour
                 SetGroundTile(tile, x, y, cellPosition);
                 SpawnTile(tile, x, y, cellPosition, position);
             }
+        }
+
+        if (levelManager != null)
+        {
+            levelManager.ResetLevelState();
         }
     }
 
@@ -203,7 +266,9 @@ public class LevelLoader : MonoBehaviour
             return null;
         }
 
-        return Instantiate(prefab, position, Quaternion.identity, levelRoot);
+        GameObject instance = Instantiate(prefab, position, Quaternion.identity, levelRoot);
+        spawnedObjects.Add(instance);
+        return instance;
     }
 
     private void SetTile(Tilemap tilemap, TileBase tile, Vector3Int cellPosition)
@@ -225,6 +290,12 @@ public class LevelLoader : MonoBehaviour
         }
 
         if (IsGround(tile))
+        {
+            SetTile(groundTilemap, GetGroundTile(x, y), cellPosition);
+            return;
+        }
+
+        if (tile == '@' && IsWall(x, y - 1))
         {
             SetTile(groundTilemap, GetGroundTile(x, y), cellPosition);
         }
@@ -396,5 +467,36 @@ public class LevelLoader : MonoBehaviour
         {
             waterTilemap.ClearAllTiles();
         }
+    }
+
+    private void ClearSpawnedObjects()
+    {
+        if (levelManager != null)
+        {
+            levelManager.anim = null;
+        }
+
+        for (int i = spawnedObjects.Count - 1; i >= 0; i--)
+        {
+            GameObject spawnedObject = spawnedObjects[i];
+
+            if (spawnedObject == null)
+            {
+                continue;
+            }
+
+            spawnedObject.SetActive(false);
+
+            if (Application.isPlaying)
+            {
+                Destroy(spawnedObject);
+            }
+            else
+            {
+                DestroyImmediate(spawnedObject);
+            }
+        }
+
+        spawnedObjects.Clear();
     }
 }

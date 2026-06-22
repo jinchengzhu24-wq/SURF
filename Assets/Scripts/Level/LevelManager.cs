@@ -8,10 +8,12 @@ public class LevelManager : MonoBehaviour
     public enum CompleteAction
     {
         LoadNextScene,
-        StayInCurrentScene
+        StayInCurrentScene,
+        GenerateNewLevel
     }
 
     public PlayerAnimation anim;
+    public LevelLoader levelLoader;
 
     [Header("Level Info")]
     public int boxCount;
@@ -27,6 +29,11 @@ public class LevelManager : MonoBehaviour
 
     private void Start()
     {
+        if (levelLoader == null)
+        {
+            levelLoader = FindObjectOfType<LevelLoader>();
+        }
+
         ResetLevelState();
         StartCoroutine(Fade(1, 0));
     }
@@ -67,10 +74,31 @@ public class LevelManager : MonoBehaviour
         {
             LoadNextScene();
         }
+        else if (completeAction == CompleteAction.GenerateNewLevel)
+        {
+            GenerateNewLevel();
+            yield return Fade(1, 0);
+        }
         else
         {
             yield return Fade(1, 0);
         }
+    }
+
+    private void GenerateNewLevel()
+    {
+        if (levelLoader == null)
+        {
+            levelLoader = FindObjectOfType<LevelLoader>();
+        }
+
+        if (levelLoader == null)
+        {
+            Debug.LogWarning("LevelManager: Cannot generate a new level because LevelLoader is missing.");
+            return;
+        }
+
+        levelLoader.GenerateAndReload();
     }
 
     private void LoadNextScene()

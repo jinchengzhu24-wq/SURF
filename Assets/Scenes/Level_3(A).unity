@@ -304,6 +304,28 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b0a6ae7e3f256444289f598ce3ebd1d7, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!114 &898566770 stripped
+MonoBehaviour:
+  m_CorrespondingSourceObject: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+  m_PrefabInstance: {fileID: 762085700308938659}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b23ef8d48e09098448b777a6a5a077ef, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+--- !u!114 &898566771 stripped
+MonoBehaviour:
+  m_CorrespondingSourceObject: {fileID: 8610000000000000002, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+  m_PrefabInstance: {fileID: 7147846580436670795}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 55b7cf5e20fc4c1fbb79f84855d569b4, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
 --- !u!1839735485 &1529207703 stripped
 Tilemap:
   m_CorrespondingSourceObject: {fileID: 6435375551559729349, guid: fc8dd058a9b326d4fa4b56093b37cd1f, type: 3}
@@ -495,8 +517,12 @@ PrefabInstance:
       value: 
       objectReference: {fileID: 1678132969}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
+      propertyPath: levelLoader
+      value: 
+      objectReference: {fileID: 898566770}
+    - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: completeAction
-      value: 1
+      value: 2
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
@@ -519,6 +545,14 @@ PrefabInstance:
       propertyPath: levelData
       value: 
       objectReference: {fileID: 693111688}
+    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+      propertyPath: levelGenerator
+      value: 
+      objectReference: {fileID: 898566771}
+    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+      propertyPath: generateBeforeLoad
+      value: 1
+      objectReference: {fileID: 0}
     - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: levelRoot
       value: 
@@ -664,6 +698,14 @@ PrefabInstance:
       propertyPath: rows.Array.data[8]
       value: '   ###..#...# '
       objectReference: {fileID: 0}
+    - target: {fileID: 8610000000000000002, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+      propertyPath: levelLoader
+      value: 
+      objectReference: {fileID: 898566770}
+    - target: {fileID: 8610000000000000002, guid: cd5f4b82860c32c4f8855d3dc7bf1b80, type: 3}
+      propertyPath: levelSolver
+      value: 
+      objectReference: {fileID: 344306084}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []

@@ -31,6 +31,13 @@ public class LevelGenerationRules : MonoBehaviour
     [Header("Search")]
     public int maxGenerateAttempts = 100;
 
+    [Header("Reverse Generation")]
+    public int minReversePulls = 8;
+    public int maxReversePulls = 24;
+    public int maxReverseStepAttempts = 200;
+    public bool useFixedSeed;
+    public int seed;
+
     public bool IsValid()
     {
         return width >= 5
@@ -41,7 +48,10 @@ public class LevelGenerationRules : MonoBehaviour
             && maxWaterWidth >= minWaterWidth
             && maxWaterHeight >= minWaterHeight
             && maxWaterAreas >= 0
-            && maxGenerateAttempts > 0;
+            && maxGenerateAttempts > 0
+            && minReversePulls >= 0
+            && maxReversePulls >= minReversePulls
+            && maxReverseStepAttempts > 0;
     }
 
     public bool IsInsideMap(Vector2Int position)

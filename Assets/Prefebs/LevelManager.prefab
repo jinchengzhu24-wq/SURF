@@ -45,7 +45,10 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   anim: {fileID: 0}
+  levelLoader: {fileID: 0}
   boxCount: 0
   reachedCount: 0
   blackPanel: {fileID: 0}
   fadeTime: 1
+  completeDelay: 1.5
+  completeAction: 0
