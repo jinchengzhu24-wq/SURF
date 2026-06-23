@@ -76,7 +76,7 @@ public class LevelManager : MonoBehaviour
         }
         else if (completeAction == CompleteAction.GenerateNewLevel)
         {
-            GenerateNewLevel();
+            yield return GenerateNewLevel();
             yield return Fade(1, 0);
         }
         else
@@ -85,7 +85,7 @@ public class LevelManager : MonoBehaviour
         }
     }
 
-    private void GenerateNewLevel()
+    private IEnumerator GenerateNewLevel()
     {
         if (levelLoader == null)
         {
@@ -95,10 +95,17 @@ public class LevelManager : MonoBehaviour
         if (levelLoader == null)
         {
             Debug.LogWarning("LevelManager: Cannot generate a new level because LevelLoader is missing.");
-            return;
+            yield break;
         }
 
-        levelLoader.GenerateAndReload();
+        if (levelLoader.useLLMPlan)
+        {
+            yield return levelLoader.GenerateAndReloadWithLLMPlanRoutine();
+        }
+        else
+        {
+            levelLoader.GenerateAndReload();
+        }
     }
 
     private void LoadNextScene()

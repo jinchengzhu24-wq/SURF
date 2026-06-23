@@ -120,20 +120,27 @@ public class LevelSolver : MonoBehaviour
             return;
         }
 
-        bool solved = CanSolve(out int searchedStates, out int solutionSteps);
+        bool solved = CanSolve(out int searchedStates, out int solutionSteps, out int pushCount);
 
         Debug.Log(
             "LevelSolver solved level:"
             + " solvable=" + solved
             + ", searchedStates=" + searchedStates
             + ", solutionSteps=" + solutionSteps
+            + ", pushCount=" + pushCount
         );
     }
 
     public bool CanSolve(out int searchedStates, out int solutionSteps)
     {
+        return CanSolve(out searchedStates, out solutionSteps, out _);
+    }
+
+    public bool CanSolve(out int searchedStates, out int solutionSteps, out int pushCount)
+    {
         searchedStates = 0;
         solutionSteps = -1;
+        pushCount = -1;
 
         if (!CanStartSolving())
         {
@@ -141,7 +148,7 @@ public class LevelSolver : MonoBehaviour
         }
 
         List<Vector2Int> startBoxes = GetSortedBoxes(boxes);
-        SolverState startState = new SolverState(playerPos, startBoxes, 0);
+        SolverState startState = new SolverState(playerPos, startBoxes, 0, 0);
         Queue<SolverState> openStates = new Queue<SolverState>();
         HashSet<string> visitedStates = new HashSet<string>();
 
@@ -156,6 +163,7 @@ public class LevelSolver : MonoBehaviour
             if (IsSolved(current.boxes))
             {
                 solutionSteps = current.steps;
+                pushCount = current.pushes;
                 return true;
             }
 
@@ -195,7 +203,7 @@ public class LevelSolver : MonoBehaviour
             nextBoxes[boxIndex] = nextBox;
             nextBoxes = GetSortedBoxes(nextBoxes);
 
-            AddState(nextPlayer, nextBoxes, current.steps + 1, openStates, visitedStates);
+            AddState(nextPlayer, nextBoxes, current.steps + 1, current.pushes + 1, openStates, visitedStates);
         }
         else
         {
@@ -204,7 +212,7 @@ public class LevelSolver : MonoBehaviour
                 return;
             }
 
-            AddState(nextPlayer, current.boxes, current.steps + 1, openStates, visitedStates);
+            AddState(nextPlayer, current.boxes, current.steps + 1, current.pushes, openStates, visitedStates);
         }
     }
 
@@ -212,6 +220,7 @@ public class LevelSolver : MonoBehaviour
         Vector2Int player,
         List<Vector2Int> stateBoxes,
         int steps,
+        int pushes,
         Queue<SolverState> openStates,
         HashSet<string> visitedStates)
     {
@@ -223,7 +232,7 @@ public class LevelSolver : MonoBehaviour
         }
 
         visitedStates.Add(key);
-        openStates.Enqueue(new SolverState(player, stateBoxes, steps));
+        openStates.Enqueue(new SolverState(player, stateBoxes, steps, pushes));
     }
 
     private bool CanStartSolving()
@@ -400,12 +409,14 @@ public class LevelSolver : MonoBehaviour
         public readonly Vector2Int player;
         public readonly List<Vector2Int> boxes;
         public readonly int steps;
+        public readonly int pushes;
 
-        public SolverState(Vector2Int player, List<Vector2Int> boxes, int steps)
+        public SolverState(Vector2Int player, List<Vector2Int> boxes, int steps, int pushes)
         {
             this.player = player;
             this.boxes = boxes;
             this.steps = steps;
+            this.pushes = pushes;
         }
     }
 }

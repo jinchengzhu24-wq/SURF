@@ -21,7 +21,34 @@ public class LLMLevelDesignClient : MonoBehaviour
                 yield break;
             }
 
-            LevelDesignPlan plan = JsonUtility.FromJson<LevelDesignPlan>(request.downloadHandler.text);
+            LevelDesignPlan plan = null;
+
+            try
+            {
+                plan = JsonUtility.FromJson<LevelDesignPlan>(request.downloadHandler.text);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("LLMLevelDesignClient could not parse plan JSON: " + exception.Message);
+            }
+
+            if (plan != null)
+            {
+                Debug.Log(
+                    "LLMLevelDesignClient received plan:"
+                    + " solutionSteps=" + plan.minSolutionSteps + "-" + plan.maxSolutionSteps
+                    + ", pushes=" + plan.minPushes + "-" + plan.maxPushes
+                    + ", waterAreas=" + plan.minWaterAreas + "-" + plan.maxWaterAreas
+                    + ", wallObstacleBlocks=" + plan.minWallObstacleBlocks + "-" + plan.maxWallObstacleBlocks
+                    + ", reversePulls=" + plan.minReversePulls + "-" + plan.maxReversePulls
+                    + ", archetype=" + plan.archetype
+                    + ", targetLayout=" + plan.targetLayout
+                    + ", obstacleStyle=" + plan.obstacleStyle
+                    + ", waterStyle=" + plan.waterStyle
+                    + ", style=" + plan.style
+                );
+            }
+
             onSuccess?.Invoke(plan);
         }
     }

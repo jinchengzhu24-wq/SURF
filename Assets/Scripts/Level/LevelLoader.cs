@@ -35,7 +35,9 @@ public class LevelLoader : MonoBehaviour
 
     [Header("Generation")]
     public LevelGenerator levelGenerator;
+    public LLMLevelDesignClient llmClient;
     public bool generateBeforeLoad = true;
+    public bool useLLMPlan;
 
     [Header("Prefabs")]
     public GameObject playerPrefab;
@@ -74,13 +76,17 @@ public class LevelLoader : MonoBehaviour
             levelManager = FindObjectOfType<LevelManager>();
         }
 
-        if (levelGenerator == null)
-        {
-            levelGenerator = FindObjectOfType<LevelGenerator>();
-        }
+        ResolveGenerationReferences();
 
-        GenerateLevelIfNeeded();
-        LoadLevel();
+        if (generateBeforeLoad && useLLMPlan)
+        {
+            StartCoroutine(GenerateAndLoadWithLLMPlanRoutine());
+        }
+        else
+        {
+            GenerateLevelIfNeeded();
+            LoadLevel();
+        }
     }
 
     private void GenerateLevelIfNeeded()
@@ -99,12 +105,28 @@ public class LevelLoader : MonoBehaviour
         LoadLevel();
     }
 
+    [ContextMenu("Generate With LLM Plan")]
+    public void GenerateWithLLMPlan()
+    {
+        StartCoroutine(GenerateAndReloadWithLLMPlanRoutine());
+    }
+
+    public IEnumerator GenerateAndReloadWithLLMPlanRoutine()
+    {
+        yield return RequestAndApplyLLMPlan();
+        GenerateAndReload();
+    }
+
+    private IEnumerator GenerateAndLoadWithLLMPlanRoutine()
+    {
+        yield return RequestAndApplyLLMPlan();
+        GenerateLevel();
+        LoadLevel();
+    }
+
     private bool GenerateLevel()
     {
-        if (levelGenerator == null)
-        {
-            levelGenerator = FindObjectOfType<LevelGenerator>();
-        }
+        ResolveGenerationReferences();
 
         if (levelGenerator == null)
         {
@@ -125,6 +147,52 @@ public class LevelLoader : MonoBehaviour
         }
 
         return false;
+    }
+
+    private IEnumerator RequestAndApplyLLMPlan()
+    {
+        ResolveGenerationReferences();
+
+        if (llmClient == null)
+        {
+            Debug.LogWarning("LevelLoader: LLM plan client is missing. Using local generation rules fallback.");
+            yield break;
+        }
+
+        LevelDesignPlan plan = null;
+        yield return llmClient.RequestPlan(result => plan = result);
+
+        if (plan == null)
+        {
+            Debug.LogWarning("LevelLoader: LLM plan request failed. Using local generation rules fallback.");
+            yield break;
+        }
+
+        if (levelGenerator == null)
+        {
+            Debug.LogWarning("LevelLoader: Cannot apply LLM plan because LevelGenerator is missing.");
+            yield break;
+        }
+
+        levelGenerator.ApplyPlan(plan);
+    }
+
+    private void ResolveGenerationReferences()
+    {
+        if (levelManager == null)
+        {
+            levelManager = FindObjectOfType<LevelManager>();
+        }
+
+        if (levelGenerator == null)
+        {
+            levelGenerator = FindObjectOfType<LevelGenerator>();
+        }
+
+        if (llmClient == null)
+        {
+            llmClient = FindObjectOfType<LLMLevelDesignClient>();
+        }
     }
 
     public void LoadLevel()

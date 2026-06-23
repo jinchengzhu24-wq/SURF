@@ -27,6 +27,10 @@
 *.opendb
 *.VC.db
 
+# Backend local secrets/cache
+Backend/.env
+Backend/__pycache__/
+
 # Unity generated meta/debug artifacts
 *.pidb.meta
 *.pdb.meta

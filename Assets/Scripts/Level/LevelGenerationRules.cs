@@ -42,6 +42,8 @@ public class LevelGenerationRules : MonoBehaviour
     [Header("Difficulty")]
     public int minSolutionSteps = 12;
     public int maxSolutionSteps = 35;
+    public int minPushes = 0;
+    public int maxPushes = 999;
 
     [Header("Reverse Generation")]
     public int minReversePulls = 8;
@@ -67,6 +69,8 @@ public class LevelGenerationRules : MonoBehaviour
             && maxWallObstacleBlocks >= minWallObstacleBlocks
             && minSolutionSteps >= 0
             && maxSolutionSteps >= minSolutionSteps
+            && minPushes >= 0
+            && maxPushes >= minPushes
             && minReversePulls >= 0
             && maxReversePulls >= minReversePulls
             && maxReverseStepAttempts > 0;
