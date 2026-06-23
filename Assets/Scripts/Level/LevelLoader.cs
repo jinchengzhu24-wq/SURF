@@ -38,6 +38,8 @@ public class LevelLoader : MonoBehaviour
     public LLMLevelDesignClient llmClient;
     public bool generateBeforeLoad = true;
     public bool useLLMPlan;
+    public bool useCachedLLMPlan = true;
+    public float cachedPlanWaitSeconds = 1f;
 
     [Header("Prefabs")]
     public GameObject playerPrefab;
@@ -174,13 +176,25 @@ public class LevelLoader : MonoBehaviour
     {
         ResolveGenerationReferences();
 
+        LevelDesignPlan plan = null;
+
+        if (useCachedLLMPlan)
+        {
+            yield return RequestCachedLLMPlan(result => plan = result);
+        }
+
+        if (plan != null)
+        {
+            ApplyLLMPlan(plan);
+            yield break;
+        }
+
         if (llmClient == null)
         {
             Debug.LogWarning("LevelLoader: LLM plan client is missing. Using local generation rules fallback.");
             yield break;
         }
 
-        LevelDesignPlan plan = null;
         yield return llmClient.RequestPlan(result => plan = result);
 
         if (plan == null)
@@ -189,10 +203,49 @@ public class LevelLoader : MonoBehaviour
             yield break;
         }
 
+        ApplyLLMPlan(plan);
+    }
+
+    private IEnumerator RequestCachedLLMPlan(System.Action<LevelDesignPlan> onComplete)
+    {
+        LLMLevelPlanCache cache = LLMLevelPlanCache.Instance;
+
+        if (cache == null)
+        {
+            Debug.Log("LevelLoader: LLM plan cache miss because cache is missing.");
+            onComplete?.Invoke(null);
+            yield break;
+        }
+
+        if (cache.TryTakePlan(out LevelDesignPlan plan))
+        {
+            onComplete?.Invoke(plan);
+            yield break;
+        }
+
+        cache.EnsurePlanBuffer();
+
+        if (cachedPlanWaitSeconds > 0f && cache.IsRequesting)
+        {
+            yield return cache.WaitForPlan(cachedPlanWaitSeconds, result => plan = result);
+
+            if (plan != null)
+            {
+                onComplete?.Invoke(plan);
+                yield break;
+            }
+        }
+
+        Debug.Log("LevelLoader: LLM plan cache miss. Requesting a plan directly.");
+        onComplete?.Invoke(null);
+    }
+
+    private void ApplyLLMPlan(LevelDesignPlan plan)
+    {
         if (levelGenerator == null)
         {
             Debug.LogWarning("LevelLoader: Cannot apply LLM plan because LevelGenerator is missing.");
-            yield break;
+            return;
         }
 
         levelGenerator.ApplyPlan(plan);

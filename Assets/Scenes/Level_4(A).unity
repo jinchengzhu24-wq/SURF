@@ -382,6 +382,14 @@ PrefabInstance:
       value: 1
       objectReference: {fileID: 0}
     - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+      propertyPath: useCachedLLMPlan
+      value: 1
+      objectReference: {fileID: 0}
+    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+      propertyPath: cachedPlanWaitSeconds
+      value: 1
+      objectReference: {fileID: 0}
+    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: wallTilemap
       value: 
       objectReference: {fileID: 1439778766}
