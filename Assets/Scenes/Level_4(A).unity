@@ -374,6 +374,14 @@ PrefabInstance:
       value: 
       objectReference: {fileID: 928296179}
     - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+      propertyPath: llmClient
+      value: 
+      objectReference: {fileID: 1726369419}
+    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+      propertyPath: useLLMPlan
+      value: 1
+      objectReference: {fileID: 0}
+    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: wallTilemap
       value: 
       objectReference: {fileID: 1439778766}
@@ -393,14 +401,6 @@ PrefabInstance:
       propertyPath: levelGenerator
       value: 
       objectReference: {fileID: 1798143834}
-    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
-      propertyPath: llmClient
-      value:
-      objectReference: {fileID: 1726369419}
-    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
-      propertyPath: useLLMPlan
-      value: 1
-      objectReference: {fileID: 0}
     - target: {fileID: 7227678548045289669, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: m_LocalPosition.x
       value: 0
@@ -719,7 +719,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: maxGeneratedLevelCount
-      value: 2
+      value: 3
       objectReference: {fileID: 0}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: generatedLevelLimitAction

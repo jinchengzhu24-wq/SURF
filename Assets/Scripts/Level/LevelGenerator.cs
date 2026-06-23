@@ -92,7 +92,82 @@ public class LevelGenerator : MonoBehaviour
             ? new System.Random(rules.seed)
             : new System.Random();
 
-        for (int attempt = 1; attempt <= rules.maxGenerateAttempts; attempt++)
+        if (TryGenerateWithCurrentRules("strict", rules.maxGenerateAttempts, true))
+        {
+            return true;
+        }
+
+        if (hasDesignBlueprint && TryGenerateRelaxedBlueprint())
+        {
+            return true;
+        }
+
+        Debug.LogWarning("LevelGenerator: Failed to generate a solvable level.");
+        return false;
+    }
+
+    private bool TryGenerateRelaxedBlueprint()
+    {
+        int originalMinSolutionSteps = rules.minSolutionSteps;
+        int originalMaxSolutionSteps = rules.maxSolutionSteps;
+        int originalMinPushes = rules.minPushes;
+        int originalMaxPushes = rules.maxPushes;
+        bool originalHasDesignBlueprint = hasDesignBlueprint;
+
+        rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 8);
+        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 12);
+        rules.minPushes = Mathf.Max(6, originalMinPushes - 4);
+        rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 8);
+
+        if (logGenerationResult)
+        {
+            Debug.LogWarning(
+                "LevelGenerator: Strict LLM blueprint failed. Retrying relaxed blueprint:"
+                + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
+                + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
+            );
+        }
+
+        if (TryGenerateWithCurrentRules("relaxed-blueprint", rules.maxGenerateAttempts, true))
+        {
+            return true;
+        }
+
+        hasDesignBlueprint = false;
+        rules.minSolutionSteps = 10;
+        rules.maxSolutionSteps = Mathf.Max(45, originalMaxSolutionSteps + 20);
+        rules.minPushes = 4;
+        rules.maxPushes = Mathf.Max(30, originalMaxPushes + 12);
+
+        if (logGenerationResult)
+        {
+            Debug.LogWarning(
+                "LevelGenerator: Relaxed blueprint failed. Retrying algorithm fallback:"
+                + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
+                + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
+            );
+        }
+
+        bool generatedFallback = TryGenerateWithCurrentRules("algorithm-fallback", rules.maxGenerateAttempts, true);
+        hasDesignBlueprint = originalHasDesignBlueprint;
+
+        if (!generatedFallback)
+        {
+            rules.minSolutionSteps = originalMinSolutionSteps;
+            rules.maxSolutionSteps = originalMaxSolutionSteps;
+            rules.minPushes = originalMinPushes;
+            rules.maxPushes = originalMaxPushes;
+        }
+
+        return generatedFallback;
+    }
+
+    private bool TryGenerateWithCurrentRules(string mode, int maxAttempts, bool logRejections)
+    {
+        int rejectedBySolve = 0;
+        int rejectedByDifficulty = 0;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
             if (!TryCreateCandidate(out string[] rows, out int reversePulls))
             {
@@ -109,6 +184,7 @@ public class LevelGenerator : MonoBehaviour
 
             if (!levelSolver.CanSolve(out int searchedStates, out int solutionSteps, out int pushCount))
             {
+                rejectedBySolve++;
                 continue;
             }
 
@@ -117,6 +193,7 @@ public class LevelGenerator : MonoBehaviour
                 || pushCount < rules.minPushes
                 || pushCount > rules.maxPushes)
             {
+                rejectedByDifficulty++;
                 continue;
             }
 
@@ -135,7 +212,8 @@ public class LevelGenerator : MonoBehaviour
             {
                 Debug.Log(
                     "LevelGenerator generated level:"
-                    + " attempts=" + lastAttempts
+                    + " mode=" + mode
+                    + ", attempts=" + lastAttempts
                     + ", reversePulls=" + lastReversePulls
                     + ", searchedStates=" + lastSearchedStates
                     + ", solutionSteps=" + lastSolutionSteps
@@ -146,7 +224,16 @@ public class LevelGenerator : MonoBehaviour
             return true;
         }
 
-        Debug.LogWarning("LevelGenerator: Failed to generate a solvable level.");
+        if (logRejections && logGenerationResult)
+        {
+            Debug.LogWarning(
+                "LevelGenerator generation mode failed:"
+                + " mode=" + mode
+                + ", rejectedBySolve=" + rejectedBySolve
+                + ", rejectedByDifficulty=" + rejectedByDifficulty
+            );
+        }
+
         return false;
     }
 
