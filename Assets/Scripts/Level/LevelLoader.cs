@@ -84,25 +84,27 @@ public class LevelLoader : MonoBehaviour
         }
         else
         {
-            GenerateLevelIfNeeded();
+            bool generatedLevel = GenerateLevelIfNeeded();
             LoadLevel();
+            NotifyGeneratedLevelIfNeeded(generatedLevel);
         }
     }
 
-    private void GenerateLevelIfNeeded()
+    private bool GenerateLevelIfNeeded()
     {
         if (!generateBeforeLoad || levelGenerator == null)
         {
-            return;
+            return false;
         }
 
-        GenerateLevel();
+        return GenerateLevel();
     }
 
     public void GenerateAndReload()
     {
-        GenerateLevel();
+        bool generatedLevel = GenerateLevel();
         LoadLevel();
+        NotifyGeneratedLevelIfNeeded(generatedLevel);
     }
 
     [ContextMenu("Generate With LLM Plan")]
@@ -120,8 +122,27 @@ public class LevelLoader : MonoBehaviour
     private IEnumerator GenerateAndLoadWithLLMPlanRoutine()
     {
         yield return RequestAndApplyLLMPlan();
-        GenerateLevel();
+        bool generatedLevel = GenerateLevel();
         LoadLevel();
+        NotifyGeneratedLevelIfNeeded(generatedLevel);
+    }
+
+    private void NotifyGeneratedLevelIfNeeded(bool generatedLevel)
+    {
+        if (!generatedLevel)
+        {
+            return;
+        }
+
+        if (levelManager == null)
+        {
+            levelManager = FindObjectOfType<LevelManager>();
+        }
+
+        if (levelManager != null)
+        {
+            levelManager.RegisterGeneratedLevel();
+        }
     }
 
     private bool GenerateLevel()

@@ -12,6 +12,13 @@ public class LevelManager : MonoBehaviour
         GenerateNewLevel
     }
 
+    public enum GeneratedLevelLimitAction
+    {
+        LoadNextScene,
+        StopGame,
+        StayInCurrentScene
+    }
+
     public PlayerAnimation anim;
     public LevelLoader levelLoader;
 
@@ -26,6 +33,11 @@ public class LevelManager : MonoBehaviour
 
     [Header("Complete Action")]
     public CompleteAction completeAction = CompleteAction.LoadNextScene;
+
+    [Header("Generated Level Limit")]
+    public int maxGeneratedLevelCount;
+    public GeneratedLevelLimitAction generatedLevelLimitAction = GeneratedLevelLimitAction.LoadNextScene;
+    public int generatedLevelCount;
 
     private void Start()
     {
@@ -59,6 +71,17 @@ public class LevelManager : MonoBehaviour
         reachedCount = 0;
     }
 
+    public void RegisterGeneratedLevel()
+    {
+        generatedLevelCount++;
+
+        Debug.Log(
+            "LevelManager registered generated level:"
+            + " generatedLevelCount=" + generatedLevelCount
+            + ", maxGeneratedLevelCount=" + maxGeneratedLevelCount
+        );
+    }
+
     private IEnumerator CompleteLevel()
     {
         if (anim != null)
@@ -76,8 +99,43 @@ public class LevelManager : MonoBehaviour
         }
         else if (completeAction == CompleteAction.GenerateNewLevel)
         {
+            if (HasReachedGeneratedLevelLimit())
+            {
+                yield return HandleGeneratedLevelLimit();
+                yield break;
+            }
+
             yield return GenerateNewLevel();
             yield return Fade(1, 0);
+        }
+        else
+        {
+            yield return Fade(1, 0);
+        }
+    }
+
+    private bool HasReachedGeneratedLevelLimit()
+    {
+        return maxGeneratedLevelCount > 0
+            && generatedLevelCount >= maxGeneratedLevelCount;
+    }
+
+    private IEnumerator HandleGeneratedLevelLimit()
+    {
+        Debug.Log(
+            "LevelManager generated level limit reached:"
+            + " generatedLevelCount=" + generatedLevelCount
+            + ", maxGeneratedLevelCount=" + maxGeneratedLevelCount
+            + ", action=" + generatedLevelLimitAction
+        );
+
+        if (generatedLevelLimitAction == GeneratedLevelLimitAction.LoadNextScene)
+        {
+            LoadNextScene();
+        }
+        else if (generatedLevelLimitAction == GeneratedLevelLimitAction.StopGame)
+        {
+            StopGame();
         }
         else
         {
@@ -120,6 +178,17 @@ public class LevelManager : MonoBehaviour
         }
 
         SceneManager.LoadScene(nextIndex);
+    }
+
+    private void StopGame()
+    {
+        Debug.Log("LevelManager: Stop game requested.");
+
+#if UNITY_EDITOR
+        UnityEditor.EditorApplication.isPlaying = false;
+#else
+        Application.Quit();
+#endif
     }
 
     private IEnumerator Fade(float startAlpha, float endAlpha)
