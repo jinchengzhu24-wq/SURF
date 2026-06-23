@@ -21,6 +21,10 @@ public class LevelGenerator : MonoBehaviour
     public int lastSolutionSteps;
     public int lastPushes;
 
+    [Header("Repeat Prevention")]
+    public bool rejectRecentlyGeneratedLayouts = true;
+    public int recentGeneratedLayoutHistory = 6;
+
     private const char Ground = '.';
     private const char Wall = '#';
     private const char Water = '@';
@@ -33,6 +37,12 @@ public class LevelGenerator : MonoBehaviour
     private const string DefaultTargetLayout = "split_pair";
     private const string DefaultObstacleStyle = "central_baffle";
     private const string DefaultWaterStyle = "side_pool";
+
+    private static readonly Queue<string> recentFullLevelSignatures = new Queue<string>();
+    private static readonly HashSet<string> recentFullLevelLookup = new HashSet<string>();
+    private static readonly Queue<string> recentStructureSignatures = new Queue<string>();
+    private static readonly HashSet<string> recentStructureLookup = new HashSet<string>();
+    private static int runtimeSeedCounter;
 
     private static readonly Vector2Int[] directions =
     {
@@ -90,7 +100,7 @@ public class LevelGenerator : MonoBehaviour
 
         random = rules.useFixedSeed
             ? new System.Random(rules.seed)
-            : new System.Random();
+            : new System.Random(GetRuntimeSeed());
 
         if (TryGenerateWithCurrentRules("strict", rules.maxGenerateAttempts, true))
         {
@@ -166,11 +176,18 @@ public class LevelGenerator : MonoBehaviour
     {
         int rejectedBySolve = 0;
         int rejectedByDifficulty = 0;
+        int rejectedByRepeat = 0;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
             if (!TryCreateCandidate(out string[] rows, out int reversePulls))
             {
+                continue;
+            }
+
+            if (IsRecentlyGeneratedLayout(rows))
+            {
+                rejectedByRepeat++;
                 continue;
             }
 
@@ -202,6 +219,7 @@ public class LevelGenerator : MonoBehaviour
             lastSearchedStates = searchedStates;
             lastSolutionSteps = solutionSteps;
             lastPushes = pushCount;
+            RememberGeneratedLayout(rows);
 
             if (levelLoader != null)
             {
@@ -231,6 +249,7 @@ public class LevelGenerator : MonoBehaviour
                 + " mode=" + mode
                 + ", rejectedBySolve=" + rejectedBySolve
                 + ", rejectedByDifficulty=" + rejectedByDifficulty
+                + ", rejectedByRepeat=" + rejectedByRepeat
             );
         }
 
@@ -1837,5 +1856,107 @@ public class LevelGenerator : MonoBehaviour
     private int NextInclusive(int min, int max)
     {
         return random.Next(min, max + 1);
+    }
+
+    private int GetRuntimeSeed()
+    {
+        unchecked
+        {
+            runtimeSeedCounter++;
+            return System.Environment.TickCount
+                ^ (runtimeSeedCounter * 397)
+                ^ (GetInstanceID() * 17);
+        }
+    }
+
+    private bool IsRecentlyGeneratedLayout(string[] rows)
+    {
+        if (!rejectRecentlyGeneratedLayouts || recentGeneratedLayoutHistory <= 0 || rows == null)
+        {
+            return false;
+        }
+
+        string fullSignature = GetFullLevelSignature(rows);
+        string structureSignature = GetStructureSignature(rows);
+
+        bool repeated = recentFullLevelLookup.Contains(fullSignature)
+            || recentStructureLookup.Contains(structureSignature);
+
+        if (repeated && logGenerationResult)
+        {
+            Debug.Log(
+                "LevelGenerator rejected repeated layout:"
+                + " recentGeneratedLayoutHistory=" + recentGeneratedLayoutHistory
+            );
+        }
+
+        return repeated;
+    }
+
+    private void RememberGeneratedLayout(string[] rows)
+    {
+        if (!rejectRecentlyGeneratedLayouts || recentGeneratedLayoutHistory <= 0 || rows == null)
+        {
+            return;
+        }
+
+        RememberSignature(
+            recentFullLevelSignatures,
+            recentFullLevelLookup,
+            GetFullLevelSignature(rows),
+            recentGeneratedLayoutHistory
+        );
+
+        RememberSignature(
+            recentStructureSignatures,
+            recentStructureLookup,
+            GetStructureSignature(rows),
+            recentGeneratedLayoutHistory
+        );
+    }
+
+    private static void RememberSignature(
+        Queue<string> signatures,
+        HashSet<string> lookup,
+        string signature,
+        int maxHistory)
+    {
+        if (string.IsNullOrEmpty(signature) || lookup.Contains(signature))
+        {
+            return;
+        }
+
+        signatures.Enqueue(signature);
+        lookup.Add(signature);
+
+        while (signatures.Count > maxHistory)
+        {
+            lookup.Remove(signatures.Dequeue());
+        }
+    }
+
+    private string GetFullLevelSignature(string[] rows)
+    {
+        return string.Join("\n", rows);
+    }
+
+    private string GetStructureSignature(string[] rows)
+    {
+        System.Text.StringBuilder builder = new System.Text.StringBuilder();
+
+        for (int y = 0; y < rows.Length; y++)
+        {
+            string row = rows[y];
+
+            for (int x = 0; x < row.Length; x++)
+            {
+                char tile = row[x];
+                builder.Append(tile == Player || tile == Box || tile == Target ? Ground : tile);
+            }
+
+            builder.Append('\n');
+        }
+
+        return builder.ToString();
     }
 }

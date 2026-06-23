@@ -60,6 +60,51 @@ DEFAULT_PLAN = {
     "designNote": "Hard two-box route with a forced choke point and separated goals.",
 }
 
+FALLBACK_PLANS = [
+    DEFAULT_PLAN,
+    {
+        "minSolutionSteps": 22,
+        "maxSolutionSteps": 40,
+        "minWaterAreas": 1,
+        "maxWaterAreas": 2,
+        "minWallObstacleBlocks": 2,
+        "maxWallObstacleBlocks": 3,
+        "minPushes": 10,
+        "maxPushes": 20,
+        "minReversePulls": 18,
+        "maxReversePulls": 32,
+        "style": "guarded goal room",
+        "archetype": "goal_room",
+        "targetLayout": "clustered",
+        "obstacleStyle": "goal_guard",
+        "waterStyle": "corner_pool",
+        "designNote": "Compact goal room pressure with clustered targets and a guarded approach.",
+    },
+    {
+        "minSolutionSteps": 24,
+        "maxSolutionSteps": 44,
+        "minWaterAreas": 1,
+        "maxWaterAreas": 2,
+        "minWallObstacleBlocks": 2,
+        "maxWallObstacleBlocks": 3,
+        "minPushes": 12,
+        "maxPushes": 22,
+        "minReversePulls": 18,
+        "maxReversePulls": 34,
+        "style": "split route pressure",
+        "archetype": "split_route",
+        "targetLayout": "split_pair",
+        "obstacleStyle": "central_baffle",
+        "waterStyle": "route_divider",
+        "designNote": "Separated goals and a central baffle encourage route planning.",
+    },
+]
+
+RECENT_BLUEPRINT_LIMIT = 3
+recent_blueprints = []
+fallback_plan_index = 0
+plan_history_lock = threading.Lock()
+
 LIMITS = {
     "minSolutionSteps": (18, 30),
     "maxSolutionSteps": (32, 50),
@@ -109,6 +154,8 @@ def create_level_plan():
     try:
         model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
         base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+        temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
+        variation_seed = int(time.time() * 1000)
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
 
         response = client.chat.completions.create(
@@ -155,16 +202,21 @@ def create_level_plan():
                         "maxPushes, minWaterAreas, maxWaterAreas, minWallObstacleBlocks, "
                         "maxWallObstacleBlocks, minReversePulls, maxReversePulls, "
                         "style, archetype, targetLayout, obstacleStyle, waterStyle, "
-                        "designNote."
+                        "designNote. "
+                        f"Variation seed: {variation_seed}. "
+                        f"Avoid these recent blueprint combinations if possible: "
+                        f"{get_recent_blueprint_hint()}."
                     ),
                 },
             ],
             response_format={"type": "json_object"},
+            temperature=temperature,
             stream=False,
         )
 
         content = response.choices[0].message.content
         plan = validate_plan(json.loads(content))
+        remember_blueprint(plan)
         print(f"Generated level plan from DeepSeek using {model}: {plan}")
         return plan
     except Exception as exception:
@@ -238,8 +290,52 @@ def validate_plan(plan):
 
 
 def fallback_plan(reason):
+    plan = get_next_fallback_plan()
+    remember_blueprint(plan)
     print(f"Generated level plan from fallback: {reason}")
-    return DEFAULT_PLAN.copy()
+    return plan
+
+
+def get_next_fallback_plan():
+    global fallback_plan_index
+
+    with plan_history_lock:
+        plan = FALLBACK_PLANS[fallback_plan_index % len(FALLBACK_PLANS)].copy()
+        fallback_plan_index += 1
+
+    return plan
+
+
+def remember_blueprint(plan):
+    key = get_blueprint_key(plan)
+
+    with plan_history_lock:
+        if key in recent_blueprints:
+            recent_blueprints.remove(key)
+
+        recent_blueprints.append(key)
+
+        while len(recent_blueprints) > RECENT_BLUEPRINT_LIMIT:
+            recent_blueprints.pop(0)
+
+
+def get_recent_blueprint_hint():
+    with plan_history_lock:
+        if not recent_blueprints:
+            return "none"
+
+        return "; ".join(recent_blueprints)
+
+
+def get_blueprint_key(plan):
+    return "|".join(
+        [
+            str(plan.get("archetype", "")),
+            str(plan.get("targetLayout", "")),
+            str(plan.get("obstacleStyle", "")),
+            str(plan.get("waterStyle", "")),
+        ]
+    )
 
 
 def open_browser():

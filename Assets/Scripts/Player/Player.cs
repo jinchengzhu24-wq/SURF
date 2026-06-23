@@ -1,10 +1,18 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Tilemaps;
 
 public class Player : MonoBehaviour
 {
     public float moveDistance = 1f;
+
+    private readonly List<Tilemap> blockingTilemaps = new List<Tilemap>();
+
+    private void Awake()
+    {
+        RefreshBlockingTilemaps();
+    }
 
     private void Update()
     {
@@ -66,25 +74,80 @@ public class Player : MonoBehaviour
 
     private bool IsBlocked(Vector3 position)
     {
-        Collider2D hit = Physics2D.OverlapPoint(position);
-
-        if (hit == null)
+        if (IsBlockedByTilemap(position))
         {
-            return false;
+            return true;
         }
 
-        return hit.CompareTag("Wall") || hit.CompareTag("Water");
+        Collider2D[] hits = Physics2D.OverlapPointAll(position);
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            if (hits[i].CompareTag("Wall") || hits[i].CompareTag("Water"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsBlockedByTilemap(Vector3 position)
+    {
+        if (blockingTilemaps.Count == 0)
+        {
+            RefreshBlockingTilemaps();
+        }
+
+        for (int i = 0; i < blockingTilemaps.Count; i++)
+        {
+            Tilemap tilemap = blockingTilemaps[i];
+
+            if (tilemap == null)
+            {
+                continue;
+            }
+
+            Vector3Int cell = tilemap.WorldToCell(position);
+            if (tilemap.HasTile(cell))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void RefreshBlockingTilemaps()
+    {
+        blockingTilemaps.Clear();
+
+        Tilemap[] tilemaps = FindObjectsOfType<Tilemap>();
+
+        for (int i = 0; i < tilemaps.Length; i++)
+        {
+            Tilemap tilemap = tilemaps[i];
+
+            if (tilemap.CompareTag("Wall") || tilemap.CompareTag("Water"))
+            {
+                blockingTilemaps.Add(tilemap);
+            }
+        }
     }
 
     private Box GetBox(Vector3 position)
     {
-        Collider2D hit = Physics2D.OverlapPoint(position);
+        Collider2D[] hits = Physics2D.OverlapPointAll(position);
 
-        if (hit == null)
+        for (int i = 0; i < hits.Length; i++)
         {
-            return null;
+            Box box = hits[i].GetComponent<Box>();
+            if (box != null)
+            {
+                return box;
+            }
         }
 
-        return hit.GetComponent<Box>();
+        return null;
     }
 }

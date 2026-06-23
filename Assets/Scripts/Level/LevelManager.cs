@@ -39,6 +39,12 @@ public class LevelManager : MonoBehaviour
     public GeneratedLevelLimitAction generatedLevelLimitAction = GeneratedLevelLimitAction.LoadNextScene;
     public int generatedLevelCount;
 
+    [Header("Restart")]
+    public bool allowRestartWithR = true;
+    public KeyCode restartKey = KeyCode.R;
+
+    private bool isCompletingLevel;
+
     private void Start()
     {
         if (levelLoader == null)
@@ -50,8 +56,26 @@ public class LevelManager : MonoBehaviour
         StartCoroutine(Fade(1, 0));
     }
 
+    private void Update()
+    {
+        if (!allowRestartWithR || isCompletingLevel)
+        {
+            return;
+        }
+
+        if (Input.GetKeyDown(restartKey))
+        {
+            RestartCurrentLevel();
+        }
+    }
+
     public void BoxReachTarget()
     {
+        if (isCompletingLevel)
+        {
+            return;
+        }
+
         reachedCount++;
 
         if (reachedCount == boxCount)
@@ -71,6 +95,25 @@ public class LevelManager : MonoBehaviour
         reachedCount = 0;
     }
 
+    public void RestartCurrentLevel()
+    {
+        if (levelLoader == null)
+        {
+            levelLoader = FindObjectOfType<LevelLoader>();
+        }
+
+        if (levelLoader == null)
+        {
+            Debug.LogWarning("LevelManager: Cannot restart because LevelLoader is missing.");
+            return;
+        }
+
+        Debug.Log("LevelManager restarted current level.");
+
+        levelLoader.LoadLevel();
+        SetBlackPanelAlpha(0);
+    }
+
     public void RegisterGeneratedLevel()
     {
         generatedLevelCount++;
@@ -84,6 +127,8 @@ public class LevelManager : MonoBehaviour
 
     private IEnumerator CompleteLevel()
     {
+        isCompletingLevel = true;
+
         if (anim != null)
         {
             anim.Win();
@@ -102,6 +147,7 @@ public class LevelManager : MonoBehaviour
             if (HasReachedGeneratedLevelLimit())
             {
                 yield return HandleGeneratedLevelLimit();
+                isCompletingLevel = false;
                 yield break;
             }
 
@@ -112,6 +158,8 @@ public class LevelManager : MonoBehaviour
         {
             yield return Fade(1, 0);
         }
+
+        isCompletingLevel = false;
     }
 
     private bool HasReachedGeneratedLevelLimit()
@@ -164,6 +212,18 @@ public class LevelManager : MonoBehaviour
         {
             levelLoader.GenerateAndReload();
         }
+    }
+
+    private void SetBlackPanelAlpha(float alpha)
+    {
+        if (blackPanel == null)
+        {
+            return;
+        }
+
+        Color color = blackPanel.color;
+        color.a = alpha;
+        blackPanel.color = color;
     }
 
     private void LoadNextScene()
