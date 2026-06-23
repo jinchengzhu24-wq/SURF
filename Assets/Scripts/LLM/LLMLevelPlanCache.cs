@@ -51,6 +51,32 @@ public class LLMLevelPlanCache : MonoBehaviour
         }
     }
 
+    private void OnDisable()
+    {
+        CancelPrefetch();
+    }
+
+    private void OnDestroy()
+    {
+        if (Instance == this)
+        {
+            Instance = null;
+        }
+
+        CancelPrefetch();
+    }
+
+    private void CancelPrefetch()
+    {
+        StopAllCoroutines();
+        isRequesting = false;
+
+        if (llmClient != null)
+        {
+            llmClient.CancelActiveRequests();
+        }
+    }
+
     public bool TryTakePlan(out LevelDesignPlan plan)
     {
         if (cachedPlans.Count == 0)
