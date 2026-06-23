@@ -93,6 +93,11 @@ public class LevelManager : MonoBehaviour
     {
         boxCount = FindObjectsOfType<Box>().Length;
         reachedCount = 0;
+
+        if (!isCompletingLevel)
+        {
+            SetPlayerInputEnabled(true);
+        }
     }
 
     public void RestartCurrentLevel()
@@ -111,6 +116,7 @@ public class LevelManager : MonoBehaviour
         Debug.Log("LevelManager restarted current level.");
 
         levelLoader.LoadLevel();
+        SetPlayerInputEnabled(true);
         SetBlackPanelAlpha(0);
     }
 
@@ -128,6 +134,7 @@ public class LevelManager : MonoBehaviour
     private IEnumerator CompleteLevel()
     {
         isCompletingLevel = true;
+        SetPlayerInputEnabled(false);
 
         if (anim != null)
         {
@@ -153,6 +160,7 @@ public class LevelManager : MonoBehaviour
 
             yield return GenerateNewLevel();
             yield return Fade(1, 0);
+            SetPlayerInputEnabled(true);
         }
         else
         {
@@ -211,6 +219,16 @@ public class LevelManager : MonoBehaviour
         else
         {
             levelLoader.GenerateAndReload();
+        }
+    }
+
+    private void SetPlayerInputEnabled(bool enabled)
+    {
+        Player player = FindObjectOfType<Player>();
+
+        if (player != null)
+        {
+            player.SetInputEnabled(enabled);
         }
     }
 

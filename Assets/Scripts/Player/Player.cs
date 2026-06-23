@@ -6,6 +6,7 @@ using UnityEngine.Tilemaps;
 public class Player : MonoBehaviour
 {
     public float moveDistance = 1f;
+    public bool inputEnabled = true;
 
     private readonly List<Tilemap> blockingTilemaps = new List<Tilemap>();
 
@@ -16,7 +17,17 @@ public class Player : MonoBehaviour
 
     private void Update()
     {
+        if (!inputEnabled)
+        {
+            return;
+        }
+
         Move();
+    }
+
+    public void SetInputEnabled(bool enabled)
+    {
+        inputEnabled = enabled;
     }
 
     private void Move()
