@@ -10,8 +10,8 @@ using UnityEditor;
 
 public class LLMLevelDesignClient : MonoBehaviour
 {
-    public string endpoint = "http://127.0.0.1:8000/generate-level-plan";
-    public int requestTimeoutSeconds = 20;
+    public string endpoint = "https://surf-an4f.onrender.com/generate-level-plan";
+    public int requestTimeoutSeconds = 60;
 
     private readonly List<UnityWebRequest> activeRequests = new List<UnityWebRequest>();
     private bool isCancellingRequests;

@@ -566,7 +566,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b6c1f9a0f0d0af744ae62d3d40284dfb, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  endpoint: http://127.0.0.1:8000/generate-level-plan
+  endpoint: https://surf-an4f.onrender.com/generate-level-plan
 --- !u!4 &1726369420
 Transform:
   m_ObjectHideFlags: 0
