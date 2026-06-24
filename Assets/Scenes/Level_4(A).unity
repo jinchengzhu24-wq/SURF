@@ -731,7 +731,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: generatedLevelLimitAction
-      value: 1
+      value: 3
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []

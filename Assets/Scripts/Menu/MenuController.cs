@@ -15,4 +15,15 @@ public class MenuController : MonoBehaviour
 
         SceneManager.LoadScene(targetSceneName);
     }
+
+    public void QuitGame()
+    {
+        Debug.Log("MenuController: Quit game requested.");
+
+#if UNITY_EDITOR
+        UnityEditor.EditorApplication.isPlaying = false;
+#else
+        Application.Quit();
+#endif
+    }
 }

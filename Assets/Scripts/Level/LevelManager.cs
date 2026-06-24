@@ -9,14 +9,16 @@ public class LevelManager : MonoBehaviour
     {
         LoadNextScene,
         StayInCurrentScene,
-        GenerateNewLevel
+        GenerateNewLevel,
+        LoadMenuScene
     }
 
     public enum GeneratedLevelLimitAction
     {
         LoadNextScene,
         StopGame,
-        StayInCurrentScene
+        StayInCurrentScene,
+        LoadMenuScene
     }
 
     public PlayerAnimation anim;
@@ -33,6 +35,7 @@ public class LevelManager : MonoBehaviour
 
     [Header("Complete Action")]
     public CompleteAction completeAction = CompleteAction.LoadNextScene;
+    public string menuSceneName = "Menu";
 
     [Header("Generated Level Limit")]
     public int maxGeneratedLevelCount;
@@ -52,6 +55,7 @@ public class LevelManager : MonoBehaviour
             levelLoader = FindObjectOfType<LevelLoader>();
         }
 
+        StretchBlackPanelToFullscreen();
         ResetLevelState();
         StartCoroutine(Fade(1, 0));
     }
@@ -162,6 +166,10 @@ public class LevelManager : MonoBehaviour
             yield return Fade(1, 0);
             SetPlayerInputEnabled(true);
         }
+        else if (completeAction == CompleteAction.LoadMenuScene)
+        {
+            LoadMenuScene();
+        }
         else
         {
             yield return Fade(1, 0);
@@ -192,6 +200,10 @@ public class LevelManager : MonoBehaviour
         else if (generatedLevelLimitAction == GeneratedLevelLimitAction.StopGame)
         {
             StopGame();
+        }
+        else if (generatedLevelLimitAction == GeneratedLevelLimitAction.LoadMenuScene)
+        {
+            LoadMenuScene();
         }
         else
         {
@@ -244,6 +256,27 @@ public class LevelManager : MonoBehaviour
         blackPanel.color = color;
     }
 
+    private void StretchBlackPanelToFullscreen()
+    {
+        if (blackPanel == null)
+        {
+            return;
+        }
+
+        RectTransform rectTransform = blackPanel.transform as RectTransform;
+
+        if (rectTransform == null)
+        {
+            return;
+        }
+
+        rectTransform.anchorMin = Vector2.zero;
+        rectTransform.anchorMax = Vector2.one;
+        rectTransform.offsetMin = Vector2.zero;
+        rectTransform.offsetMax = Vector2.zero;
+        rectTransform.localScale = Vector3.one;
+    }
+
     private void LoadNextScene()
     {
         int currentIndex = SceneManager.GetActiveScene().buildIndex;
@@ -256,6 +289,17 @@ public class LevelManager : MonoBehaviour
         }
 
         SceneManager.LoadScene(nextIndex);
+    }
+
+    private void LoadMenuScene()
+    {
+        if (string.IsNullOrEmpty(menuSceneName))
+        {
+            Debug.LogWarning("LevelManager: Menu scene name is empty.");
+            return;
+        }
+
+        SceneManager.LoadScene(menuSceneName);
     }
 
     private void StopGame()
