@@ -11,7 +11,7 @@ using UnityEditor;
 public class LLMLevelDesignClient : MonoBehaviour
 {
     public string endpoint = "https://surf-an4f.onrender.com/generate-level-plan";
-    public int requestTimeoutSeconds = 60;
+    public int requestTimeoutSeconds = 180;
 
     private readonly List<UnityWebRequest> activeRequests = new List<UnityWebRequest>();
     private bool isCancellingRequests;
@@ -79,8 +79,16 @@ public class LLMLevelDesignClient : MonoBehaviour
 
         isCancellingRequests = false;
 
+        float startedAt = Time.realtimeSinceStartup;
+        Debug.Log(
+            "LLMLevelDesignClient request started:"
+            + " endpoint=" + endpoint
+            + ", timeoutSeconds=" + requestTimeoutSeconds
+        );
+
         UnityWebRequest request = UnityWebRequest.Get(endpoint);
         request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+        request.SetRequestHeader("Accept", "application/json");
         activeRequests.Add(request);
 
         UnityWebRequestAsyncOperation operation = request.SendWebRequest();
@@ -102,7 +110,12 @@ public class LLMLevelDesignClient : MonoBehaviour
         {
             if (!isCancellingRequests)
             {
-                Debug.LogWarning("LLMLevelDesignClient failed: " + request.error);
+                Debug.LogWarning(
+                    "LLMLevelDesignClient failed:"
+                    + " error=" + request.error
+                    + ", responseCode=" + request.responseCode
+                    + ", elapsedSeconds=" + GetElapsedSeconds(startedAt)
+                );
             }
 
             CleanupRequest(request);
@@ -118,14 +131,21 @@ public class LLMLevelDesignClient : MonoBehaviour
         }
         catch (Exception exception)
         {
-            Debug.LogWarning("LLMLevelDesignClient could not parse plan JSON: " + exception.Message);
+            Debug.LogWarning(
+                "LLMLevelDesignClient could not parse plan JSON:"
+                + " error=" + exception.Message
+                + ", responseCode=" + request.responseCode
+                + ", elapsedSeconds=" + GetElapsedSeconds(startedAt)
+            );
         }
 
         if (plan != null)
         {
             Debug.Log(
                 "LLMLevelDesignClient received plan:"
-                + " solutionSteps=" + plan.minSolutionSteps + "-" + plan.maxSolutionSteps
+                + " responseCode=" + request.responseCode
+                + ", elapsedSeconds=" + GetElapsedSeconds(startedAt)
+                + ", solutionSteps=" + plan.minSolutionSteps + "-" + plan.maxSolutionSteps
                 + ", pushes=" + plan.minPushes + "-" + plan.maxPushes
                 + ", waterAreas=" + plan.minWaterAreas + "-" + plan.maxWaterAreas
                 + ", wallObstacleBlocks=" + plan.minWallObstacleBlocks + "-" + plan.maxWallObstacleBlocks
@@ -153,5 +173,10 @@ public class LLMLevelDesignClient : MonoBehaviour
         {
             request.Dispose();
         }
+    }
+
+    private float GetElapsedSeconds(float startedAt)
+    {
+        return Mathf.Round((Time.realtimeSinceStartup - startedAt) * 100f) / 100f;
     }
 }
