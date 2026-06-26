@@ -387,7 +387,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: cachedPlanWaitSeconds
-      value: 120
+      value: 1
       objectReference: {fileID: 0}
     - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: wallTilemap
@@ -566,7 +566,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b6c1f9a0f0d0af744ae62d3d40284dfb, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  endpoint: https://surf-an4f.onrender.com/generate-level-plan
+  endpoint: http://111.231.136.4:8000/generate-level-plan
   requestTimeoutSeconds: 180
 --- !u!4 &1726369420
 Transform:

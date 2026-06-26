@@ -806,7 +806,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b6c1f9a0f0d0af744ae62d3d40284dfb, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  endpoint: https://surf-an4f.onrender.com/generate-level-plan
+  endpoint: http://111.231.136.4:8000/generate-level-plan
   requestTimeoutSeconds: 180
 --- !u!114 &3189217403
 MonoBehaviour:
