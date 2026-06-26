@@ -10,7 +10,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel
@@ -23,7 +23,6 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 FRONTEND_DIR = PROJECT_DIR / "Frontend"
-FRONTEND_INDEX_FILE = FRONTEND_DIR / "index.html"
 STUDY_LOG_DIR = BASE_DIR / "study_logs"
 STUDY_LOG_FILE = STUDY_LOG_DIR / "level_records.jsonl"
 
@@ -174,7 +173,7 @@ def get_level_records():
 
 @app.get("/level-records-view", response_class=HTMLResponse)
 def get_level_records_view(cleared: int = 0):
-    target = "/level-records-dashboard"
+    target = "/frontend/"
 
     if cleared == 1:
         target += "?cleared=1"
@@ -183,18 +182,13 @@ def get_level_records_view(cleared: int = 0):
 
 
 @app.get("/level-records-dashboard")
-def get_level_records_dashboard():
-    if not FRONTEND_INDEX_FILE.exists():
-        return HTMLResponse(
-            (
-                "<!doctype html><title>Frontend Missing</title>"
-                "<h1>Frontend files are missing</h1>"
-                "<p>Upload the Frontend folder next to Backend.</p>"
-            ),
-            status_code=500,
-        )
+def get_level_records_dashboard(cleared: int = 0):
+    target = "/frontend/"
 
-    return FileResponse(FRONTEND_INDEX_FILE)
+    if cleared == 1:
+        target += "?cleared=1"
+
+    return RedirectResponse(target, status_code=302)
 
 
 @app.get("/level-records-data")

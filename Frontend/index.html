@@ -4,7 +4,12 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sokoban Records Dashboard</title>
-    <link rel="stylesheet" href="./styles.css">
+    <script>
+        window.FRONTEND_ASSET_BASE = window.location.protocol === "file:"
+            ? "."
+            : (window.location.pathname.startsWith("/frontend/") ? "." : "/frontend");
+        document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/styles.css">');
+    </script>
 </head>
 <body>
     <div class="app">
@@ -132,6 +137,10 @@
         </main>
     </div>
 
-    <script src="./app.js"></script>
+    <script>
+        const script = document.createElement("script");
+        script.src = window.FRONTEND_ASSET_BASE + "/app.js";
+        document.body.appendChild(script);
+    </script>
 </body>
 </html>
