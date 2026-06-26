@@ -18,6 +18,15 @@ public class LLMLevelDesignClient : MonoBehaviour
 
 #if UNITY_EDITOR
     [InitializeOnLoadMethod]
+    private static void AllowHttpRequestsInEditor()
+    {
+        if (PlayerSettings.insecureHttpOption != InsecureHttpOption.AlwaysAllowed)
+        {
+            PlayerSettings.insecureHttpOption = InsecureHttpOption.AlwaysAllowed;
+        }
+    }
+
+    [InitializeOnLoadMethod]
     private static void RegisterAssemblyReloadHook()
     {
         AssemblyReloadEvents.beforeAssemblyReload -= CancelAllActiveClients;
