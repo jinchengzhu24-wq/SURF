@@ -10,7 +10,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -164,10 +164,20 @@ def get_level_records():
 
 
 @app.get("/level-records-view", response_class=HTMLResponse)
-def get_level_records_view():
+def get_level_records_view(cleared: int = 0):
     events, malformed_count = read_level_record_events()
     levels = merge_level_records(events)
-    return render_level_records_view(events, levels, malformed_count)
+    return render_level_records_view(events, levels, malformed_count, cleared == 1)
+
+
+@app.post("/clear-level-records")
+def clear_level_records():
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        STUDY_LOG_FILE.write_text("", encoding="utf-8")
+
+    return RedirectResponse("/level-records-view?cleared=1", status_code=303)
 
 
 @app.get("/generate-level-plan")
@@ -259,7 +269,7 @@ def merge_level_records(events):
     )
 
 
-def render_level_records_view(events, levels, malformed_count):
+def render_level_records_view(events, levels, malformed_count, cleared):
     session_ids = {
         event.get("sessionId")
         for event in events
@@ -275,6 +285,11 @@ def render_level_records_view(events, levels, malformed_count):
             "No level records found yet."
             "</td></tr>"
         )
+
+    notice_html = ""
+
+    if cleared:
+        notice_html = '<div class="notice">Records cleared.</div>'
 
     return f"""<!doctype html>
 <html lang="en">
@@ -316,12 +331,37 @@ def render_level_records_view(events, levels, malformed_count):
             color: #17202a;
         }}
         .toolbar {{
+            display: flex;
+            align-items: center;
+            gap: 14px;
             margin: 18px 0;
         }}
         .toolbar a {{
             color: #175cd3;
             text-decoration: none;
-            margin-right: 14px;
+        }}
+        .toolbar form {{
+            margin: 0;
+        }}
+        .danger-button {{
+            padding: 7px 11px;
+            border: 1px solid #c7372f;
+            border-radius: 4px;
+            color: #ffffff;
+            background: #c7372f;
+            cursor: pointer;
+            font-size: 13px;
+        }}
+        .danger-button:hover {{
+            background: #a82d27;
+        }}
+        .notice {{
+            margin: 12px 0 18px;
+            padding: 10px 12px;
+            border: 1px solid #b7dfc1;
+            border-radius: 6px;
+            color: #14532d;
+            background: #eaf8ee;
         }}
         table {{
             width: 100%;
@@ -379,6 +419,7 @@ def render_level_records_view(events, levels, malformed_count):
 <body>
     <h1>Sokoban Level Records</h1>
     <div class="meta">Human-readable view generated from <code>{escape_text(str(STUDY_LOG_FILE))}</code>.</div>
+    {notice_html}
     <div class="summary">
         <div class="stat"><strong>{len(events)}</strong>events</div>
         <div class="stat"><strong>{len(levels)}</strong>levels</div>
@@ -390,6 +431,9 @@ def render_level_records_view(events, levels, malformed_count):
     <div class="toolbar">
         <a href="/level-records">Raw JSONL</a>
         <a href="/docs">API Docs</a>
+        <form method="post" action="/clear-level-records" onsubmit="return confirm('Clear all level records? This cannot be undone.');">
+            <button class="danger-button" type="submit">Clear Records</button>
+        </form>
     </div>
     <table>
         <thead>
