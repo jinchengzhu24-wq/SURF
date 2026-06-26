@@ -9,6 +9,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -151,6 +152,14 @@ async def record_level_start(request: Request):
 @app.post("/record-level-end")
 async def record_level_end(request: Request):
     return await append_level_record(request, "level-end")
+
+
+@app.get("/level-records", response_class=PlainTextResponse)
+def get_level_records():
+    if not STUDY_LOG_FILE.exists():
+        return ""
+
+    return STUDY_LOG_FILE.read_text(encoding="utf-8")
 
 
 @app.get("/generate-level-plan")
