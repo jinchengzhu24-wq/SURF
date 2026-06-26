@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import threading
@@ -9,7 +10,7 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -162,6 +163,13 @@ def get_level_records():
     return STUDY_LOG_FILE.read_text(encoding="utf-8")
 
 
+@app.get("/level-records-view", response_class=HTMLResponse)
+def get_level_records_view():
+    events, malformed_count = read_level_record_events()
+    levels = merge_level_records(events)
+    return render_level_records_view(events, levels, malformed_count)
+
+
 @app.get("/generate-level-plan")
 def generate_level_plan():
     return create_level_plan()
@@ -188,6 +196,327 @@ async def append_level_record(request: Request, default_event_type: str):
         "eventType": data["eventType"],
         "logFile": str(STUDY_LOG_FILE),
     }
+
+
+def read_level_record_events():
+    if not STUDY_LOG_FILE.exists():
+        return [], 0
+
+    events = []
+    malformed_count = 0
+
+    with STUDY_LOG_FILE.open("r", encoding="utf-8") as log_file:
+        for line in log_file:
+            line = line.strip()
+
+            if not line:
+                continue
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                malformed_count += 1
+                continue
+
+            if isinstance(data, dict):
+                events.append(data)
+            else:
+                malformed_count += 1
+
+    return events, malformed_count
+
+
+def merge_level_records(events):
+    levels = {}
+
+    for index, event in enumerate(events):
+        level_run_id = str(event.get("levelRunId") or f"missing-run-{index + 1}")
+
+        if level_run_id not in levels:
+            levels[level_run_id] = {
+                "levelRunId": level_run_id,
+                "start": None,
+                "end": None,
+                "events": [],
+                "order": index,
+            }
+
+        level = levels[level_run_id]
+        level["events"].append(event)
+        event_type = event.get("eventType")
+
+        if event_type == "level-start":
+            level["start"] = event
+        elif event_type == "level-end":
+            level["end"] = event
+
+    return sorted(
+        levels.values(),
+        key=lambda level: (
+            get_level_sort_value(level),
+            level["order"],
+        ),
+    )
+
+
+def render_level_records_view(events, levels, malformed_count):
+    session_ids = {
+        event.get("sessionId")
+        for event in events
+        if event.get("sessionId")
+    }
+    completed_count = sum(1 for level in levels if get_level_end(level) and get_level_end(level).get("completed"))
+    missing_end_count = sum(1 for level in levels if not get_level_end(level))
+    rows_html = "\n".join(render_level_row(level) for level in levels)
+
+    if not rows_html:
+        rows_html = (
+            '<tr><td colspan="16" class="empty">'
+            "No level records found yet."
+            "</td></tr>"
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sokoban Level Records</title>
+    <style>
+        body {{
+            margin: 24px;
+            font-family: Arial, Helvetica, sans-serif;
+            color: #20242a;
+            background: #f5f7fb;
+        }}
+        h1 {{
+            margin: 0 0 8px;
+            font-size: 28px;
+        }}
+        .meta {{
+            margin-bottom: 18px;
+            color: #5e6875;
+        }}
+        .summary {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 18px 0;
+        }}
+        .stat {{
+            min-width: 130px;
+            padding: 12px 14px;
+            border: 1px solid #d9e0ea;
+            border-radius: 6px;
+            background: #ffffff;
+        }}
+        .stat strong {{
+            display: block;
+            font-size: 22px;
+            color: #17202a;
+        }}
+        .toolbar {{
+            margin: 18px 0;
+        }}
+        .toolbar a {{
+            color: #175cd3;
+            text-decoration: none;
+            margin-right: 14px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            background: #ffffff;
+            border: 1px solid #d9e0ea;
+        }}
+        th, td {{
+            padding: 8px 10px;
+            border-bottom: 1px solid #e6ebf2;
+            vertical-align: top;
+            text-align: left;
+            font-size: 13px;
+        }}
+        th {{
+            position: sticky;
+            top: 0;
+            background: #edf2f7;
+            z-index: 1;
+        }}
+        tr:nth-child(even) td {{
+            background: #fafcff;
+        }}
+        .status-completed {{
+            color: #16703b;
+            font-weight: 700;
+        }}
+        .status-missing {{
+            color: #a45c00;
+            font-weight: 700;
+        }}
+        .map {{
+            margin: 0;
+            padding: 8px;
+            min-width: 160px;
+            border-radius: 4px;
+            background: #17202a;
+            color: #f7fafc;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.25;
+            white-space: pre;
+        }}
+        .small {{
+            color: #697586;
+            font-size: 12px;
+        }}
+        .empty {{
+            padding: 24px;
+            text-align: center;
+            color: #697586;
+        }}
+    </style>
+</head>
+<body>
+    <h1>Sokoban Level Records</h1>
+    <div class="meta">Human-readable view generated from <code>{escape_text(str(STUDY_LOG_FILE))}</code>.</div>
+    <div class="summary">
+        <div class="stat"><strong>{len(events)}</strong>events</div>
+        <div class="stat"><strong>{len(levels)}</strong>levels</div>
+        <div class="stat"><strong>{len(session_ids)}</strong>sessions</div>
+        <div class="stat"><strong>{completed_count}</strong>completed</div>
+        <div class="stat"><strong>{missing_end_count}</strong>missing end</div>
+        <div class="stat"><strong>{malformed_count}</strong>malformed</div>
+    </div>
+    <div class="toolbar">
+        <a href="/level-records">Raw JSONL</a>
+        <a href="/docs">API Docs</a>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Session</th>
+                <th>Level</th>
+                <th>Source</th>
+                <th>Status</th>
+                <th>Duration</th>
+                <th>Moves</th>
+                <th>Pushes</th>
+                <th>Restarts</th>
+                <th>Solution</th>
+                <th>Solver Pushes</th>
+                <th>Attempts</th>
+                <th>Wall</th>
+                <th>Water</th>
+                <th>Dead Corner</th>
+                <th>Map Hash</th>
+                <th>Map</th>
+            </tr>
+        </thead>
+        <tbody>
+            {rows_html}
+        </tbody>
+    </table>
+</body>
+</html>"""
+
+
+def render_level_row(level):
+    start = get_level_start(level)
+    end = get_level_end(level)
+    source = value_or_dash(get_record_value(start, "source"))
+    completed = get_record_value(end, "completed") if end else None
+    status_class = "status-completed" if completed else "status-missing"
+    status_text = "completed" if completed else "missing end"
+
+    if end and not completed:
+        status_text = value_or_dash(get_record_value(end, "endReason"))
+
+    structure = get_record_value(start, "structure") or {}
+
+    return f"""<tr>
+    <td>{escape_text(short_id(get_record_value(start, "sessionId") or get_record_value(end, "sessionId")))}</td>
+    <td>{escape_text(value_or_dash(get_record_value(start, "levelIndex") or get_record_value(end, "levelIndex")))}</td>
+    <td>{escape_text(source)}</td>
+    <td class="{status_class}">{escape_text(status_text)}</td>
+    <td>{escape_text(format_seconds(get_record_value(end, "durationSeconds")))}</td>
+    <td>{escape_text(value_or_dash(get_record_value(end, "moveCount")))}</td>
+    <td>{escape_text(value_or_dash(get_record_value(end, "pushCount")))}</td>
+    <td>{escape_text(value_or_dash(get_record_value(end, "restartCount")))}</td>
+    <td>{escape_text(value_or_dash(get_record_value(start, "solutionSteps")))}</td>
+    <td>{escape_text(value_or_dash(get_record_value(start, "solverPushes")))}</td>
+    <td>{escape_text(value_or_dash(get_record_value(start, "generationAttempts")))}</td>
+    <td>{escape_text(format_ratio(structure.get("wallDensity")))}</td>
+    <td>{escape_text(format_ratio(structure.get("waterDensity")))}</td>
+    <td>{escape_text(format_ratio(structure.get("deadCornerRisk")))}</td>
+    <td><span class="small">{escape_text(value_or_dash(structure.get("mapHash")))}</span></td>
+    <td><pre class="map">{render_map_rows(get_record_value(start, "rows"))}</pre></td>
+</tr>"""
+
+
+def get_level_sort_value(level):
+    start = get_level_start(level)
+    end = get_level_end(level)
+    level_index = get_record_value(start, "levelIndex") or get_record_value(end, "levelIndex")
+
+    if isinstance(level_index, int):
+        return level_index
+
+    return 999999
+
+
+def get_level_start(level):
+    return level.get("start")
+
+
+def get_level_end(level):
+    return level.get("end")
+
+
+def get_record_value(record, key):
+    if not isinstance(record, dict):
+        return None
+
+    return record.get(key)
+
+
+def render_map_rows(rows):
+    if not rows:
+        return "-"
+
+    return escape_text("\n".join(str(row) for row in rows))
+
+
+def format_seconds(value):
+    if isinstance(value, (int, float)):
+        return f"{value:.1f}s"
+
+    return "-"
+
+
+def format_ratio(value):
+    if isinstance(value, (int, float)):
+        return f"{value:.3f}"
+
+    return "-"
+
+
+def value_or_dash(value):
+    if value is None or value == "":
+        return "-"
+
+    return str(value)
+
+
+def short_id(value):
+    if not value:
+        return "-"
+
+    value = str(value)
+    return value[:8]
+
+
+def escape_text(value):
+    return html.escape(str(value), quote=True)
 
 
 def create_level_plan():
