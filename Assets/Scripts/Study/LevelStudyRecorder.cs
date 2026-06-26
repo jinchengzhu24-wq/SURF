@@ -7,7 +7,7 @@ using UnityEngine.Networking;
 
 public class LevelStudyRecorder : MonoBehaviour
 {
-    private const string DefaultBackendBaseUrl = "https://surf-an4f.onrender.com";
+    private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
     private const string LevelStartPath = "/record-level-start";
     private const string LevelEndPath = "/record-level-end";
 
