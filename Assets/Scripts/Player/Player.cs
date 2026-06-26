@@ -67,6 +67,7 @@ public class Player : MonoBehaviour
         }
 
         Box box = GetBox(nextPos);
+        bool pushedBox = false;
 
         if (box != null)
         {
@@ -78,9 +79,11 @@ public class Player : MonoBehaviour
             }
 
             box.Move(dir * moveDistance);
+            pushedBox = true;
         }
 
         transform.position = nextPos;
+        LevelStudyRecorder.RecordPlayerMove(pushedBox);
     }
 
     private bool IsBlocked(Vector3 position)

@@ -70,6 +70,7 @@ public class LevelLoader : MonoBehaviour
     public Vector2Int extraCellOffset;
 
     private readonly List<GameObject> spawnedObjects = new List<GameObject>();
+    private bool currentLoadUsedLLMPlan;
 
     private void Awake()
     {
@@ -156,6 +157,11 @@ public class LevelLoader : MonoBehaviour
             return false;
         }
 
+        if (!useLLMPlan)
+        {
+            currentLoadUsedLLMPlan = false;
+        }
+
         if (levelData != null)
         {
             levelGenerator.levelData = levelData;
@@ -175,6 +181,7 @@ public class LevelLoader : MonoBehaviour
     private IEnumerator RequestAndApplyLLMPlan()
     {
         ResolveGenerationReferences();
+        currentLoadUsedLLMPlan = false;
 
         LevelDesignPlan plan = null;
 
@@ -249,6 +256,22 @@ public class LevelLoader : MonoBehaviour
         }
 
         levelGenerator.ApplyPlan(plan);
+        currentLoadUsedLLMPlan = true;
+    }
+
+    public string GetCurrentLevelSource()
+    {
+        if (!generateBeforeLoad || levelGenerator == null)
+        {
+            return "Static";
+        }
+
+        if (useLLMPlan)
+        {
+            return currentLoadUsedLLMPlan ? "LLMGuided" : "Fallback";
+        }
+
+        return "Algorithm";
     }
 
     private void ResolveGenerationReferences()
@@ -305,6 +328,8 @@ public class LevelLoader : MonoBehaviour
         {
             levelManager.ResetLevelState();
         }
+
+        LevelStudyRecorder.RecordLevelStarted(this);
     }
 
     private Vector3Int GetCellPosition(int x, int y, int mapWidth, int mapHeight)

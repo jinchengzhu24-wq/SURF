@@ -119,6 +119,7 @@ public class LevelManager : MonoBehaviour
 
         Debug.Log("LevelManager restarted current level.");
 
+        LevelStudyRecorder.RecordLevelRestarted();
         levelLoader.LoadLevel();
         SetPlayerInputEnabled(true);
         SetBlackPanelAlpha(0);
@@ -139,6 +140,7 @@ public class LevelManager : MonoBehaviour
     {
         isCompletingLevel = true;
         SetPlayerInputEnabled(false);
+        LevelStudyRecorder.RecordLevelCompleted();
 
         if (anim != null)
         {

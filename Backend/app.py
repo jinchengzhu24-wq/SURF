@@ -7,7 +7,7 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from pydantic import BaseModel
@@ -18,6 +18,8 @@ START_URL = f"http://{HOST}:{PORT}/generate-level-plan"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 BASE_DIR = Path(__file__).resolve().parent
+STUDY_LOG_DIR = BASE_DIR / "study_logs"
+STUDY_LOG_FILE = STUDY_LOG_DIR / "level_records.jsonl"
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -104,6 +106,7 @@ RECENT_BLUEPRINT_LIMIT = 3
 recent_blueprints = []
 fallback_plan_index = 0
 plan_history_lock = threading.Lock()
+study_record_lock = threading.Lock()
 
 LIMITS = {
     "minSolutionSteps": (18, 30),
@@ -140,9 +143,42 @@ def health():
     return {"status": "ok"}
 
 
+@app.post("/record-level-start")
+async def record_level_start(request: Request):
+    return await append_level_record(request, "level-start")
+
+
+@app.post("/record-level-end")
+async def record_level_end(request: Request):
+    return await append_level_record(request, "level-end")
+
+
 @app.get("/generate-level-plan")
 def generate_level_plan():
     return create_level_plan()
+
+
+async def append_level_record(request: Request, default_event_type: str):
+    data = await request.json()
+
+    if not isinstance(data, dict):
+        data = {"payload": data}
+
+    data.setdefault("eventType", default_event_type)
+    data["serverReceivedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        with STUDY_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(data, ensure_ascii=False))
+            log_file.write("\n")
+
+    return {
+        "status": "ok",
+        "eventType": data["eventType"],
+        "logFile": str(STUDY_LOG_FILE),
+    }
 
 
 def create_level_plan():
