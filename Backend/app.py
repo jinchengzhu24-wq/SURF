@@ -10,7 +10,8 @@ import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -20,6 +21,9 @@ START_URL = f"http://{HOST}:{PORT}/generate-level-plan"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
+FRONTEND_DIR = PROJECT_DIR / "Frontend"
+FRONTEND_INDEX_FILE = FRONTEND_DIR / "index.html"
 STUDY_LOG_DIR = BASE_DIR / "study_logs"
 STUDY_LOG_FILE = STUDY_LOG_DIR / "level_records.jsonl"
 
@@ -131,6 +135,11 @@ ENUMS = {
 }
 
 app = FastAPI()
+app.mount(
+    "/frontend",
+    StaticFiles(directory=FRONTEND_DIR, html=True, check_dir=False),
+    name="frontend",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -165,6 +174,38 @@ def get_level_records():
 
 @app.get("/level-records-view", response_class=HTMLResponse)
 def get_level_records_view(cleared: int = 0):
+    target = "/level-records-dashboard"
+
+    if cleared == 1:
+        target += "?cleared=1"
+
+    return RedirectResponse(target, status_code=302)
+
+
+@app.get("/level-records-dashboard")
+def get_level_records_dashboard():
+    if not FRONTEND_INDEX_FILE.exists():
+        return HTMLResponse(
+            (
+                "<!doctype html><title>Frontend Missing</title>"
+                "<h1>Frontend files are missing</h1>"
+                "<p>Upload the Frontend folder next to Backend.</p>"
+            ),
+            status_code=500,
+        )
+
+    return FileResponse(FRONTEND_INDEX_FILE)
+
+
+@app.get("/level-records-data")
+def get_level_records_data():
+    events, malformed_count = read_level_record_events()
+    levels = merge_level_records(events)
+    return build_level_records_payload(events, levels, malformed_count)
+
+
+@app.get("/level-records-legacy", response_class=HTMLResponse)
+def get_level_records_legacy(cleared: int = 0):
     events, malformed_count = read_level_record_events()
     levels = merge_level_records(events)
     return render_level_records_view(events, levels, malformed_count, cleared == 1)
@@ -267,6 +308,80 @@ def merge_level_records(events):
             level["order"],
         ),
     )
+
+
+def build_level_records_payload(events, levels, malformed_count):
+    session_ids = {
+        event.get("sessionId")
+        for event in events
+        if event.get("sessionId")
+    }
+    completed_count = 0
+    missing_end_count = 0
+    restarted_count = 0
+    total_duration_seconds = 0.0
+    ended_level_count = 0
+    total_moves = 0
+    total_pushes = 0
+    source_counts = {}
+
+    for level in levels:
+        start = get_level_start(level)
+        end = get_level_end(level)
+        source = value_or_dash(get_record_value(start, "source"))
+        source_counts[source] = source_counts.get(source, 0) + 1
+
+        if not end:
+            missing_end_count += 1
+            continue
+
+        if get_record_value(end, "completed"):
+            completed_count += 1
+
+        if get_record_value(end, "endReason") == "restarted":
+            restarted_count += 1
+
+        duration = get_record_value(end, "durationSeconds")
+
+        if isinstance(duration, (int, float)):
+            total_duration_seconds += duration
+            ended_level_count += 1
+
+        move_count = get_record_value(end, "moveCount")
+        push_count = get_record_value(end, "pushCount")
+
+        if isinstance(move_count, int):
+            total_moves += move_count
+
+        if isinstance(push_count, int):
+            total_pushes += push_count
+
+    average_duration_seconds = (
+        total_duration_seconds / ended_level_count
+        if ended_level_count > 0
+        else 0
+    )
+
+    return {
+        "summary": {
+            "eventCount": len(events),
+            "levelCount": len(levels),
+            "sessionCount": len(session_ids),
+            "completedCount": completed_count,
+            "missingEndCount": missing_end_count,
+            "restartedCount": restarted_count,
+            "malformedCount": malformed_count,
+            "totalMoves": total_moves,
+            "totalPushes": total_pushes,
+            "averageDurationSeconds": round(average_duration_seconds, 2),
+            "sourceCounts": source_counts,
+        },
+        "events": events,
+        "levels": levels,
+        "malformedCount": malformed_count,
+        "logFile": str(STUDY_LOG_FILE),
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
 
 def render_level_records_view(events, levels, malformed_count, cleared):

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sokoban Records Dashboard</title>
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <div class="app">
+        <header class="topbar">
+            <div class="title">
+                <h1>Sokoban Records Dashboard</h1>
+                <div class="subtitle" id="dataSource">Loading records...</div>
+            </div>
+            <div class="actions">
+                <button class="icon-button" id="refreshButton" type="button" title="Refresh" aria-label="Refresh">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M21 12a9 9 0 0 1-15 6.7"></path>
+                        <path d="M3 12a9 9 0 0 1 15-6.7"></path>
+                        <path d="M3 18v-5h5"></path>
+                        <path d="M21 6v5h-5"></path>
+                    </svg>
+                </button>
+                <a class="icon-button" id="rawLink" href="#" title="Raw JSONL" aria-label="Raw JSONL">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <path d="M14 2v6h6"></path>
+                        <path d="M8 13h8"></path>
+                        <path d="M8 17h5"></path>
+                    </svg>
+                </a>
+                <a class="icon-button" id="legacyLink" href="#" title="Legacy table" aria-label="Legacy table">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M3 5h18"></path>
+                        <path d="M3 12h18"></path>
+                        <path d="M3 19h18"></path>
+                        <path d="M8 5v14"></path>
+                    </svg>
+                </a>
+                <a class="icon-button" id="docsLink" href="#" title="API docs" aria-label="API docs">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                    </svg>
+                </a>
+                <button class="text-button danger" id="clearButton" type="button">Clear</button>
+            </div>
+        </header>
+
+        <main>
+            <div class="notice" id="notice">Records cleared.</div>
+            <div class="status-line" id="statusLine">Preparing dashboard...</div>
+
+            <section class="summary" aria-label="Summary">
+                <div class="stat"><strong id="statEvents">0</strong><span>events</span></div>
+                <div class="stat"><strong id="statLevels">0</strong><span>levels</span></div>
+                <div class="stat"><strong id="statSessions">0</strong><span>sessions</span></div>
+                <div class="stat"><strong id="statCompleted">0</strong><span>completed</span></div>
+                <div class="stat"><strong id="statMissing">0</strong><span>missing end</span></div>
+                <div class="stat"><strong id="statAvg">0s</strong><span>avg duration</span></div>
+            </section>
+
+            <section class="controls" aria-label="Filters">
+                <label class="field">
+                    <input id="searchInput" type="search" placeholder="Search session, level, source, map hash">
+                </label>
+                <label class="field">
+                    <select id="statusFilter">
+                        <option value="all">All statuses</option>
+                        <option value="completed">Completed</option>
+                        <option value="missing">Missing end</option>
+                        <option value="failed">Restarted or failed</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <select id="sourceFilter">
+                        <option value="all">All sources</option>
+                    </select>
+                </label>
+            </section>
+
+            <section class="workspace">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2>Level Runs</h2>
+                        <span class="hint" id="resultCount">0 shown</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Level</th>
+                                    <th>Status</th>
+                                    <th>Source</th>
+                                    <th>Duration</th>
+                                    <th>Moves</th>
+                                    <th>Pushes</th>
+                                    <th>Solution</th>
+                                    <th>Map Hash</th>
+                                </tr>
+                            </thead>
+                            <tbody id="recordsBody">
+                                <tr><td colspan="8" class="empty-state">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <aside class="panel">
+                    <div class="panel-header">
+                        <h2>Selected Map</h2>
+                        <span class="hint" id="selectedTitle">No selection</span>
+                    </div>
+                    <div class="details-body">
+                        <div class="map-frame">
+                            <div class="map-grid" id="mapGrid"></div>
+                        </div>
+                        <div class="legend">
+                            <span class="legend-item"><span class="legend-swatch tile-floor"></span>floor</span>
+                            <span class="legend-item"><span class="legend-swatch tile-wall"></span>wall</span>
+                            <span class="legend-item"><span class="legend-swatch tile-water"></span>water</span>
+                            <span class="legend-item"><span class="legend-swatch tile-player"></span>player</span>
+                            <span class="legend-item"><span class="legend-swatch tile-box"></span>box</span>
+                            <span class="legend-item"><span class="legend-swatch tile-target"></span>target</span>
+                        </div>
+                        <div class="metrics" id="detailMetrics"></div>
+                        <pre class="raw" id="rawDetails">No level selected.</pre>
+                    </div>
+                </aside>
+            </section>
+        </main>
+    </div>
+
+    <script src="./app.js"></script>
+</body>
+</html>
