@@ -38,6 +38,63 @@ public class LevelGenerator : MonoBehaviour
     private const string DefaultObstacleStyle = "central_baffle";
     private const string DefaultWaterStyle = "side_pool";
 
+    private enum CandidateFailureReason
+    {
+        None,
+        BaseGrid,
+        WallObstacles,
+        WaterAreas,
+        Targets,
+        Player,
+        ReversePulls,
+        TileRules,
+        BuildRows
+    }
+
+    private sealed class LevelQualityReport
+    {
+        public int score;
+        public int solutionSteps;
+        public int pushes;
+        public int reversePulls;
+        public int searchedStates;
+        public int waterTiles;
+        public int waterAreas;
+        public int surroundedWallCount;
+        public int obstacleInfluence;
+        public int targetDistance;
+        public int structureSimilarity;
+
+        public string Summary()
+        {
+            return "score=" + score
+                + ", solutionSteps=" + solutionSteps
+                + ", pushes=" + pushes
+                + ", reversePulls=" + reversePulls
+                + ", searchedStates=" + searchedStates
+                + ", waterTiles=" + waterTiles
+                + ", waterAreas=" + waterAreas
+                + ", surroundedWalls=" + surroundedWallCount
+                + ", obstacleInfluence=" + obstacleInfluence
+                + ", targetDistance=" + targetDistance
+                + ", structureSimilarity=" + structureSimilarity;
+        }
+    }
+
+    private sealed class GeneratedCandidate
+    {
+        public readonly string[] rows;
+        public readonly int attempt;
+        public readonly LevelQualityReport quality;
+
+        public GeneratedCandidate(string[] rows, int attempt, LevelQualityReport quality)
+        {
+            this.rows = rows;
+            this.attempt = attempt;
+            this.quality = quality;
+        }
+    }
+
     private static readonly Queue<string> recentFullLevelSignatures = new Queue<string>();
     private static readonly HashSet<string> recentFullLevelLookup = new HashSet<string>();
     private static readonly Queue<string> recentStructureSignatures = new Queue<string>();
@@ -65,6 +122,7 @@ public class LevelGenerator : MonoBehaviour
     private string currentObstacleStyle = DefaultObstacleStyle;
     private string currentWaterStyle = DefaultWaterStyle;
     private string currentDesignNote = "";
+    private bool activeLLMQualityGate;
 
     private void Awake()
     {
@@ -89,6 +147,29 @@ public class LevelGenerator : MonoBehaviour
         }
     }
 
+    public int GetLLMPlanRetryCount()
+    {
+        ResolveReferences();
+        return rules != null ? Mathf.Max(1, rules.llmMaxPlanRetries) : 2;
+    }
+
+    public void SetLLMQualityGateRequired(bool required)
+    {
+        activeLLMQualityGate = required;
+    }
+
+    public void ClearDesignPlan(bool keepLLMQualityGate = false)
+    {
+        hasDesignBlueprint = false;
+        activeLLMQualityGate = keepLLMQualityGate;
+        currentArchetype = DefaultArchetype;
+        currentTargetLayout = DefaultTargetLayout;
+        currentObstacleStyle = DefaultObstacleStyle;
+        currentWaterStyle = DefaultWaterStyle;
+        currentDesignNote = "";
+        currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(DefaultArchetype);
+    }
+
     public bool Generate()
     {
         ResolveReferences();
@@ -107,7 +188,7 @@ public class LevelGenerator : MonoBehaviour
             return true;
         }
 
-        if (hasDesignBlueprint && TryGenerateRelaxedBlueprint())
+        if ((hasDesignBlueprint || activeLLMQualityGate) && TryGenerateRelaxedBlueprint())
         {
             return true;
         }
@@ -122,12 +203,21 @@ public class LevelGenerator : MonoBehaviour
         int originalMaxSolutionSteps = rules.maxSolutionSteps;
         int originalMinPushes = rules.minPushes;
         int originalMaxPushes = rules.maxPushes;
+        int originalMinWaterAreas = rules.minWaterAreas;
+        int originalMaxWaterAreas = rules.maxWaterAreas;
+        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
+        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
+        int originalMinReversePulls = rules.minReversePulls;
+        int originalMaxReversePulls = rules.maxReversePulls;
         bool originalHasDesignBlueprint = hasDesignBlueprint;
+        bool originalActiveLLMQualityGate = activeLLMQualityGate;
 
         rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 8);
         rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 12);
         rules.minPushes = Mathf.Max(6, originalMinPushes - 4);
         rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 8);
+        rules.minReversePulls = Mathf.Max(6, originalMinReversePulls - 8);
+        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls + 8);
 
         if (logGenerationResult)
         {
@@ -135,11 +225,26 @@ public class LevelGenerator : MonoBehaviour
                 "LevelGenerator: Strict LLM blueprint failed. Retrying relaxed blueprint:"
                 + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
                 + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
+                + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
             );
         }
 
         if (TryGenerateWithCurrentRules("relaxed-blueprint", rules.maxGenerateAttempts, true))
         {
+            RestoreGenerationRules(
+                originalMinSolutionSteps,
+                originalMaxSolutionSteps,
+                originalMinPushes,
+                originalMaxPushes,
+                originalMinWaterAreas,
+                originalMaxWaterAreas,
+                originalMinWallObstacleBlocks,
+                originalMaxWallObstacleBlocks,
+                originalMinReversePulls,
+                originalMaxReversePulls,
+                originalHasDesignBlueprint,
+                originalActiveLLMQualityGate
+            );
             return true;
         }
 
@@ -148,6 +253,12 @@ public class LevelGenerator : MonoBehaviour
         rules.maxSolutionSteps = Mathf.Max(45, originalMaxSolutionSteps + 20);
         rules.minPushes = 4;
         rules.maxPushes = Mathf.Max(30, originalMaxPushes + 12);
+        rules.minWaterAreas = activeLLMQualityGate ? 1 : 0;
+        rules.maxWaterAreas = Mathf.Max(1, originalMaxWaterAreas);
+        rules.minWallObstacleBlocks = activeLLMQualityGate ? 1 : 0;
+        rules.maxWallObstacleBlocks = Mathf.Max(1, originalMaxWallObstacleBlocks);
+        rules.minReversePulls = Mathf.Max(4, originalMinReversePulls - 12);
+        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls + 12);
 
         if (logGenerationResult)
         {
@@ -155,37 +266,86 @@ public class LevelGenerator : MonoBehaviour
                 "LevelGenerator: Relaxed blueprint failed. Retrying algorithm fallback:"
                 + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
                 + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
+                + ", waterAreas=" + rules.minWaterAreas + "-" + rules.maxWaterAreas
+                + ", wallObstacleBlocks=" + rules.minWallObstacleBlocks + "-" + rules.maxWallObstacleBlocks
+                + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
             );
         }
 
         bool generatedFallback = TryGenerateWithCurrentRules("algorithm-fallback", rules.maxGenerateAttempts, true);
-        hasDesignBlueprint = originalHasDesignBlueprint;
-
-        if (!generatedFallback)
-        {
-            rules.minSolutionSteps = originalMinSolutionSteps;
-            rules.maxSolutionSteps = originalMaxSolutionSteps;
-            rules.minPushes = originalMinPushes;
-            rules.maxPushes = originalMaxPushes;
-        }
+        RestoreGenerationRules(
+            originalMinSolutionSteps,
+            originalMaxSolutionSteps,
+            originalMinPushes,
+            originalMaxPushes,
+            originalMinWaterAreas,
+            originalMaxWaterAreas,
+            originalMinWallObstacleBlocks,
+            originalMaxWallObstacleBlocks,
+            originalMinReversePulls,
+            originalMaxReversePulls,
+            originalHasDesignBlueprint,
+            originalActiveLLMQualityGate
+        );
 
         return generatedFallback;
     }
 
+    private void RestoreGenerationRules(
+        int minSolutionSteps,
+        int maxSolutionSteps,
+        int minPushes,
+        int maxPushes,
+        int minWaterAreas,
+        int maxWaterAreas,
+        int minWallObstacleBlocks,
+        int maxWallObstacleBlocks,
+        int minReversePulls,
+        int maxReversePulls,
+        bool restoreDesignBlueprint,
+        bool restoreActiveLLMQualityGate)
+    {
+        rules.minSolutionSteps = minSolutionSteps;
+        rules.maxSolutionSteps = maxSolutionSteps;
+        rules.minPushes = minPushes;
+        rules.maxPushes = maxPushes;
+        rules.minWaterAreas = minWaterAreas;
+        rules.maxWaterAreas = maxWaterAreas;
+        rules.minWallObstacleBlocks = minWallObstacleBlocks;
+        rules.maxWallObstacleBlocks = maxWallObstacleBlocks;
+        rules.minReversePulls = minReversePulls;
+        rules.maxReversePulls = maxReversePulls;
+        hasDesignBlueprint = restoreDesignBlueprint;
+        activeLLMQualityGate = restoreActiveLLMQualityGate;
+    }
+
     private bool TryGenerateWithCurrentRules(string mode, int maxAttempts, bool logRejections)
     {
+        float modeStartedAt = Time.realtimeSinceStartup;
         int rejectedBySolve = 0;
         int rejectedByDifficulty = 0;
+        int rejectedByParse = 0;
         int rejectedByRepeat = 0;
+        int rejectedByQuality = 0;
+        int rejectedByObstacleInfluence = 0;
+        int scoredCandidates = 0;
+        int selectableCandidates = 0;
+        int qualifiedCandidates = 0;
+        int candidatesSinceFirstQualified = 0;
+        int[] candidateFailures = new int[(int)CandidateFailureReason.BuildRows + 1];
+        int candidateSampleTarget = GetCandidateSampleTarget();
+        GeneratedCandidate bestCandidate = null;
+        GeneratedCandidate bestQualifiedCandidate = null;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            if (!TryCreateCandidate(out string[] rows, out int reversePulls))
+            if (!TryCreateCandidate(out string[] rows, out int reversePulls, out CandidateFailureReason failureReason))
             {
+                candidateFailures[(int)failureReason]++;
                 continue;
             }
 
-            if (IsRecentlyGeneratedLayout(rows))
+            if (IsRecentlyGeneratedLayout(rows, RequiresLLMQualityGate()))
             {
                 rejectedByRepeat++;
                 continue;
@@ -196,6 +356,7 @@ public class LevelGenerator : MonoBehaviour
 
             if (!levelSolver.ParseLevel())
             {
+                rejectedByParse++;
                 continue;
             }
 
@@ -205,40 +366,85 @@ public class LevelGenerator : MonoBehaviour
                 continue;
             }
 
-            if (solutionSteps < rules.minSolutionSteps
+            if (solutionSteps < GetEffectiveMinSolutionSteps()
                 || solutionSteps > rules.maxSolutionSteps
-                || pushCount < rules.minPushes
+                || pushCount < GetEffectiveMinPushes()
                 || pushCount > rules.maxPushes)
             {
                 rejectedByDifficulty++;
                 continue;
             }
 
-            lastAttempts = attempt;
-            lastReversePulls = reversePulls;
-            lastSearchedStates = searchedStates;
-            lastSolutionSteps = solutionSteps;
-            lastPushes = pushCount;
-            RememberGeneratedLayout(rows);
+            LevelQualityReport quality = BuildQualityReport(
+                rows,
+                reversePulls,
+                searchedStates,
+                solutionSteps,
+                pushCount
+            );
+            scoredCandidates++;
 
-            if (levelLoader != null)
+            if (!MeetsRequiredObstacleInfluence(quality))
             {
-                levelLoader.levelData = levelData;
+                rejectedByObstacleInfluence++;
+                rejectedByQuality++;
+                continue;
             }
 
-            if (logGenerationResult)
+            GeneratedCandidate candidate = new GeneratedCandidate(CloneRows(rows), attempt, quality);
+            selectableCandidates++;
+
+            if (bestCandidate == null || IsBetterCandidate(candidate, bestCandidate))
             {
-                Debug.Log(
-                    "LevelGenerator generated level:"
-                    + " mode=" + mode
-                    + ", attempts=" + lastAttempts
-                    + ", reversePulls=" + lastReversePulls
-                    + ", searchedStates=" + lastSearchedStates
-                    + ", solutionSteps=" + lastSolutionSteps
-                    + ", pushes=" + lastPushes
-                );
+                bestCandidate = candidate;
             }
 
+            if (MeetsRequiredQuality(quality))
+            {
+                qualifiedCandidates++;
+
+                if (bestQualifiedCandidate == null || IsBetterCandidate(candidate, bestQualifiedCandidate))
+                {
+                    bestQualifiedCandidate = candidate;
+                }
+            }
+            else
+            {
+                rejectedByQuality++;
+            }
+
+            if (RequiresLLMQualityGate() && bestQualifiedCandidate != null)
+            {
+                candidatesSinceFirstQualified++;
+            }
+
+            if (ShouldStopCollectingCandidates(
+                    selectableCandidates,
+                    qualifiedCandidates,
+                    candidatesSinceFirstQualified,
+                    candidateSampleTarget))
+            {
+                break;
+            }
+        }
+
+        GeneratedCandidate selectedCandidate = bestQualifiedCandidate;
+
+        if (selectedCandidate == null && !RequiresLLMQualityGate())
+        {
+            selectedCandidate = bestCandidate;
+        }
+
+        if (selectedCandidate != null)
+        {
+            AcceptCandidate(
+                selectedCandidate,
+                mode,
+                scoredCandidates,
+                selectableCandidates,
+                qualifiedCandidates,
+                GetElapsedMilliseconds(modeStartedAt)
+            );
             return true;
         }
 
@@ -247,13 +453,214 @@ public class LevelGenerator : MonoBehaviour
             Debug.LogWarning(
                 "LevelGenerator generation mode failed:"
                 + " mode=" + mode
+                + ", candidateFailures=" + FormatCandidateFailures(candidateFailures)
+                + ", rejectedByParse=" + rejectedByParse
                 + ", rejectedBySolve=" + rejectedBySolve
                 + ", rejectedByDifficulty=" + rejectedByDifficulty
                 + ", rejectedByRepeat=" + rejectedByRepeat
+                + ", rejectedByQuality=" + rejectedByQuality
+                + ", rejectedByObstacleInfluence=" + rejectedByObstacleInfluence
+                + ", scoredCandidates=" + scoredCandidates
+                + ", selectableCandidates=" + selectableCandidates
+                + ", qualifiedCandidates=" + qualifiedCandidates
+                + ", elapsedMs=" + GetElapsedMilliseconds(modeStartedAt)
             );
         }
 
         return false;
+    }
+
+    private int GetCandidateSampleTarget()
+    {
+        return RequiresLLMQualityGate()
+            ? Mathf.Max(1, rules.llmCandidateSampleCount)
+            : Mathf.Max(1, rules.algorithmCandidateSampleCount);
+    }
+
+    private bool ShouldStopCollectingCandidates(
+        int selectableCandidates,
+        int qualifiedCandidates,
+        int candidatesSinceFirstQualified,
+        int candidateSampleTarget)
+    {
+        if (RequiresLLMQualityGate())
+        {
+            return qualifiedCandidates > 0 && candidatesSinceFirstQualified > candidateSampleTarget;
+        }
+
+        return selectableCandidates >= candidateSampleTarget;
+    }
+
+    private bool IsBetterCandidate(GeneratedCandidate candidate, GeneratedCandidate currentBest)
+    {
+        if (candidate.quality.score != currentBest.quality.score)
+        {
+            return candidate.quality.score > currentBest.quality.score;
+        }
+
+        if (candidate.quality.solutionSteps != currentBest.quality.solutionSteps)
+        {
+            return candidate.quality.solutionSteps > currentBest.quality.solutionSteps;
+        }
+
+        return candidate.quality.pushes > currentBest.quality.pushes;
+    }
+
+    private bool MeetsRequiredQuality(LevelQualityReport quality)
+    {
+        if (RequiresLLMQualityGate())
+        {
+            return quality.waterTiles >= rules.llmMinimumWaterTiles
+                && quality.surroundedWallCount >= rules.llmMinimumSurroundedWalls
+                && quality.structureSimilarity < rules.recentStructureSimilarityThreshold
+                && quality.score >= rules.llmMinimumQualityScore;
+        }
+
+        return MeetsRequiredObstacleInfluence(quality)
+            && quality.score >= rules.algorithmMinimumQualityScore;
+    }
+
+    private bool MeetsRequiredObstacleInfluence(LevelQualityReport quality)
+    {
+        return RequiresLLMQualityGate()
+            || quality.obstacleInfluence >= rules.algorithmMinimumObstacleInfluence;
+    }
+
+    private void AcceptCandidate(
+        GeneratedCandidate candidate,
+        string mode,
+        int scoredCandidates,
+        int selectableCandidates,
+        int qualifiedCandidates,
+        int elapsedMs)
+    {
+        levelData.rows = CloneRows(candidate.rows);
+        levelSolver.levelData = levelData;
+        lastAttempts = candidate.attempt;
+        lastReversePulls = candidate.quality.reversePulls;
+        lastSearchedStates = candidate.quality.searchedStates;
+        lastSolutionSteps = candidate.quality.solutionSteps;
+        lastPushes = candidate.quality.pushes;
+        RememberGeneratedLayout(levelData.rows);
+
+        if (levelLoader != null)
+        {
+            levelLoader.levelData = levelData;
+        }
+
+        if (logGenerationResult)
+        {
+            Debug.Log(
+                "LevelGenerator generated level:"
+                + " mode=" + mode
+                + ", attempts=" + lastAttempts
+                + ", scoredCandidates=" + scoredCandidates
+                + ", selectableCandidates=" + selectableCandidates
+                + ", qualifiedCandidates=" + qualifiedCandidates
+                + ", elapsedMs=" + elapsedMs
+                + ", " + candidate.quality.Summary()
+            );
+        }
+    }
+
+    private LevelQualityReport BuildQualityReport(
+        string[] rows,
+        int reversePulls,
+        int searchedStates,
+        int solutionSteps,
+        int pushes)
+    {
+        LevelQualityReport quality = new LevelQualityReport();
+        quality.solutionSteps = solutionSteps;
+        quality.pushes = pushes;
+        quality.reversePulls = reversePulls;
+        quality.searchedStates = searchedStates;
+        quality.waterTiles = CountTiles(rows, Water);
+        quality.waterAreas = CountWaterAreas(rows);
+        quality.surroundedWallCount = CountSurroundedWalls(rows);
+        quality.obstacleInfluence = CountObstacleInfluence(rows);
+        quality.targetDistance = GetTargetDistance(rows);
+        quality.structureSimilarity = GetMaxRecentStructureSimilarity(rows);
+        quality.score = GetQualityScore(quality);
+        return quality;
+    }
+
+    private int GetQualityScore(LevelQualityReport quality)
+    {
+        int score = 0;
+        score += quality.solutionSteps * 3;
+        score += quality.pushes * 10;
+        score += quality.reversePulls * 2;
+        score += Mathf.Min(quality.searchedStates / 100, 40);
+        score += Mathf.Min(quality.waterTiles, 12) * 3;
+        score += quality.waterAreas * 20;
+        score += Mathf.Min(quality.surroundedWallCount, 3) * 45;
+        score += Mathf.Min(quality.obstacleInfluence, 8) * 18;
+        score += quality.targetDistance * 6;
+        score -= quality.structureSimilarity;
+        return score;
+    }
+
+    private int GetEffectiveMinSolutionSteps()
+    {
+        if (RequiresLLMQualityGate())
+        {
+            return rules.minSolutionSteps;
+        }
+
+        return Mathf.Max(rules.minSolutionSteps, rules.algorithmPreferredMinSolutionSteps);
+    }
+
+    private int GetEffectiveMinPushes()
+    {
+        if (RequiresLLMQualityGate())
+        {
+            return rules.minPushes;
+        }
+
+        return Mathf.Max(rules.minPushes, rules.algorithmPreferredMinPushes);
+    }
+
+    private int GetEffectiveMinReversePulls()
+    {
+        if (RequiresLLMQualityGate())
+        {
+            return rules.minReversePulls;
+        }
+
+        return Mathf.Max(rules.minReversePulls, rules.algorithmPreferredMinReversePulls);
+    }
+
+    private int GetEffectiveMaxReversePulls()
+    {
+        return Mathf.Max(GetEffectiveMinReversePulls(), rules.maxReversePulls);
+    }
+
+    private bool RequiresLLMQualityGate()
+    {
+        return activeLLMQualityGate;
+    }
+
+    private int GetElapsedMilliseconds(float startedAt)
+    {
+        return Mathf.RoundToInt((Time.realtimeSinceStartup - startedAt) * 1000f);
+    }
+
+    private string FormatCandidateFailures(int[] candidateFailures)
+    {
+        List<string> parts = new List<string>();
+
+        for (int i = 1; i < candidateFailures.Length; i++)
+        {
+            if (candidateFailures[i] <= 0)
+            {
+                continue;
+            }
+
+            parts.Add(((CandidateFailureReason)i) + "=" + candidateFailures[i]);
+        }
+
+        return parts.Count > 0 ? string.Join(", ", parts.ToArray()) : "none";
     }
 
     public void ApplyPlan(LevelDesignPlan plan)
@@ -297,13 +704,14 @@ public class LevelGenerator : MonoBehaviour
         currentDesignNote = string.IsNullOrEmpty(plan.designNote) ? "" : plan.designNote;
         currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(currentArchetype);
         hasDesignBlueprint = true;
+        activeLLMQualityGate = true;
 
-        rules.maxGenerateAttempts = Mathf.Max(rules.maxGenerateAttempts, 800);
-        rules.maxReverseStepAttempts = Mathf.Max(rules.maxReverseStepAttempts, 400);
+        rules.maxGenerateAttempts = Mathf.Min(rules.maxGenerateAttempts, 450);
+        rules.maxReverseStepAttempts = Mathf.Min(rules.maxReverseStepAttempts, 320);
 
         if (levelSolver != null)
         {
-            levelSolver.maxSearchStates = Mathf.Max(levelSolver.maxSearchStates, 200000);
+            levelSolver.maxSearchStates = Mathf.Min(levelSolver.maxSearchStates, 120000);
         }
 
         if (logGenerationResult)
@@ -392,51 +800,93 @@ public class LevelGenerator : MonoBehaviour
         return true;
     }
 
-    private bool TryCreateCandidate(out string[] rows, out int reversePulls)
+    private bool TryCreateCandidate(
+        out string[] rows,
+        out int reversePulls,
+        out CandidateFailureReason failureReason)
     {
         rows = null;
         reversePulls = 0;
+        failureReason = CandidateFailureReason.None;
 
         if (!TryCreateBaseGrid(out char[,] grid))
         {
+            failureReason = CandidateFailureReason.BaseGrid;
             return false;
         }
+
+        bool placedTargets = false;
 
         if (hasDesignBlueprint)
         {
-            if (!TryAddWallObstacleBlocks(grid) || !TryAddWaterAreas(grid))
+            if (!TryAddWallObstacleBlocks(grid))
             {
+                failureReason = CandidateFailureReason.WallObstacles;
+                return false;
+            }
+
+            if (!TryAddWaterAreas(grid))
+            {
+                failureReason = CandidateFailureReason.WaterAreas;
                 return false;
             }
         }
-        else if (!TryAddWaterAreas(grid) || !TryAddWallObstacleBlocks(grid))
+        else
         {
-            return false;
+            if (!TryAddWaterAreas(grid))
+            {
+                failureReason = CandidateFailureReason.WaterAreas;
+                return false;
+            }
+
+            if (!TryPlaceTargets(grid))
+            {
+                failureReason = CandidateFailureReason.Targets;
+                return false;
+            }
+
+            placedTargets = true;
+
+            if (!TryAddWallObstacleBlocks(grid))
+            {
+                failureReason = CandidateFailureReason.WallObstacles;
+                return false;
+            }
         }
 
-        if (!TryPlaceTargets(grid))
+        if (!placedTargets && !TryPlaceTargets(grid))
         {
+            failureReason = CandidateFailureReason.Targets;
             return false;
         }
 
         if (!TryPlacePlayer(grid))
         {
+            failureReason = CandidateFailureReason.Player;
             return false;
         }
 
-        int targetPulls = NextInclusive(rules.minReversePulls, rules.maxReversePulls);
+        int targetPulls = NextInclusive(GetEffectiveMinReversePulls(), GetEffectiveMaxReversePulls());
 
         if (!TryReversePulls(grid, targetPulls, out reversePulls))
         {
+            failureReason = CandidateFailureReason.ReversePulls;
             return false;
         }
 
         if (!ValidateTileRules(grid, true))
         {
+            failureReason = CandidateFailureReason.TileRules;
             return false;
         }
 
-        return TryBuildRows(grid, out rows);
+        if (!TryBuildRows(grid, out rows))
+        {
+            failureReason = CandidateFailureReason.BuildRows;
+            return false;
+        }
+
+        return true;
     }
 
     private bool TryCreateBaseGrid(out char[,] grid)
@@ -637,14 +1087,20 @@ public class LevelGenerator : MonoBehaviour
         int placedObstacles = 0;
         int maxAttempts = Mathf.Max(80, obstacleCount * 50);
 
-        if (hasDesignBlueprint)
+        if (RequiresLLMQualityGate() && placedObstacles < obstacleCount)
         {
-            if (!TryAddTemplateWallObstacleBlock(grid))
+            if (TryAddSurroundedWallObstacleBlock(grid))
             {
-                return false;
+                placedObstacles++;
             }
+        }
 
-            placedObstacles++;
+        if (hasDesignBlueprint && placedObstacles < obstacleCount)
+        {
+            if (TryAddTemplateWallObstacleBlock(grid))
+            {
+                placedObstacles++;
+            }
         }
 
         for (int attempt = 0; attempt < maxAttempts && placedObstacles < obstacleCount; attempt++)
@@ -656,6 +1112,30 @@ public class LevelGenerator : MonoBehaviour
         }
 
         return placedObstacles >= obstacleCount;
+    }
+
+    private bool TryAddSurroundedWallObstacleBlock(char[,] grid)
+    {
+        string[] shape = { "#" };
+        List<Vector2Int> origins = GetWallObstacleOriginCandidates(
+            grid,
+            shape,
+            GetWallObstacleShapeSize(shape)
+        );
+
+        Shuffle(origins);
+        origins.Sort((left, right) => GetWallObstacleOriginScore(right, Vector2Int.one)
+            .CompareTo(GetWallObstacleOriginScore(left, Vector2Int.one)));
+
+        for (int i = 0; i < origins.Count; i++)
+        {
+            if (TryCommitWallObstacleShape(grid, origins[i], shape))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private bool TryAddWallObstacleBlock(char[,] grid)
@@ -806,22 +1286,64 @@ public class LevelGenerator : MonoBehaviour
         int templateScore = hasDesignBlueprint
             ? GetAnchorScore(center, currentStructureTemplate.obstacleAnchors, 80)
             : 0;
+        int routeScore = GetWallObstacleRouteScore(center);
 
         if (currentObstacleStyle == "side_choke")
         {
             int sideDistance = Mathf.Min(center.x - 1, rules.width - 2 - center.x);
             int verticalCenterDistance = Mathf.Abs(center.y - mapCenter.y);
-            return 120 - sideDistance * 10 - verticalCenterDistance * 3 + templateScore;
+            return 120 - sideDistance * 10 - verticalCenterDistance * 3 + templateScore + routeScore;
         }
 
         if (currentObstacleStyle == "goal_guard")
         {
             int edgeDistance = GetDistanceToNearestPlayableEdge(center);
             int horizontalCenterDistance = Mathf.Abs(center.x - mapCenter.x);
-            return 120 - edgeDistance * 8 - horizontalCenterDistance * 2 + templateScore;
+            return 120 - edgeDistance * 8 - horizontalCenterDistance * 2 + templateScore + routeScore;
         }
 
-        return 120 - ManhattanDistance(center, mapCenter) * 8 + templateScore;
+        return 120 - ManhattanDistance(center, mapCenter) * 8 + templateScore + routeScore;
+    }
+
+    private int GetWallObstacleRouteScore(Vector2Int center)
+    {
+        if (targets.Count == 0)
+        {
+            return 0;
+        }
+
+        int nearestTargetDistance = GetNearestDistance(center, targets);
+        int score = Mathf.Max(0, 72 - nearestTargetDistance * 16);
+
+        if (IsNearTargetCorridor(center))
+        {
+            score += 45;
+        }
+
+        Vector2Int mapCenter = GetMapCenter();
+        score += Mathf.Max(0, 28 - ManhattanDistance(center, mapCenter) * 4);
+        return score;
+    }
+
+    private bool IsNearTargetCorridor(Vector2Int position)
+    {
+        if (targets.Count < 2)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < targets.Count; i++)
+        {
+            for (int j = i + 1; j < targets.Count; j++)
+            {
+                if (IsNearAxisAlignedCorridor(position, targets[i], targets[j], 2))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private bool CanPlaceWallObstacleShape(char[,] grid, Vector2Int origin, string[] shape)
@@ -850,7 +1372,9 @@ public class LevelGenerator : MonoBehaviour
                     continue;
                 }
 
-                if (HasWaterBelow(grid, new Vector2Int(x, y)))
+                Vector2Int position = new Vector2Int(x, y);
+
+                if (targetLookup.Contains(position) || HasWaterBelow(grid, position))
                 {
                     return false;
                 }
@@ -1404,6 +1928,320 @@ public class LevelGenerator : MonoBehaviour
         rows[position.y] = new string(row);
     }
 
+    private string[] CloneRows(string[] rows)
+    {
+        if (rows == null)
+        {
+            return null;
+        }
+
+        string[] clone = new string[rows.Length];
+
+        for (int i = 0; i < rows.Length; i++)
+        {
+            clone[i] = rows[i] ?? "";
+        }
+
+        return clone;
+    }
+
+    private int CountTiles(string[] rows, char tile)
+    {
+        int count = 0;
+
+        for (int y = 0; y < rows.Length; y++)
+        {
+            string row = rows[y] ?? "";
+
+            for (int x = 0; x < row.Length; x++)
+            {
+                if (row[x] == tile)
+                {
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    private int CountWaterAreas(string[] rows)
+    {
+        HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
+        int waterAreas = 0;
+
+        for (int y = 0; y < rows.Length; y++)
+        {
+            string row = rows[y] ?? "";
+
+            for (int x = 0; x < row.Length; x++)
+            {
+                Vector2Int position = new Vector2Int(x, y);
+
+                if (row[x] != Water || visited.Contains(position))
+                {
+                    continue;
+                }
+
+                waterAreas++;
+                VisitWaterArea(rows, position, visited);
+            }
+        }
+
+        return waterAreas;
+    }
+
+    private void VisitWaterArea(string[] rows, Vector2Int start, HashSet<Vector2Int> visited)
+    {
+        Queue<Vector2Int> open = new Queue<Vector2Int>();
+        open.Enqueue(start);
+        visited.Add(start);
+
+        while (open.Count > 0)
+        {
+            Vector2Int current = open.Dequeue();
+
+            for (int i = 0; i < directions.Length; i++)
+            {
+                Vector2Int next = current + directions[i];
+
+                if (visited.Contains(next) || GetRowsTile(rows, next) != Water)
+                {
+                    continue;
+                }
+
+                visited.Add(next);
+                open.Enqueue(next);
+            }
+        }
+    }
+
+    private int CountSurroundedWalls(string[] rows)
+    {
+        int count = 0;
+
+        for (int y = 0; y < rows.Length; y++)
+        {
+            string row = rows[y] ?? "";
+
+            for (int x = 0; x < row.Length; x++)
+            {
+                if (IsSurroundedWallTileShape(rows, new Vector2Int(x, y)))
+                {
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    private int GetTargetDistance(string[] rows)
+    {
+        List<Vector2Int> targetPositions = new List<Vector2Int>();
+
+        for (int y = 0; y < rows.Length; y++)
+        {
+            string row = rows[y] ?? "";
+
+            for (int x = 0; x < row.Length; x++)
+            {
+                if (row[x] == Target)
+                {
+                    targetPositions.Add(new Vector2Int(x, y));
+                }
+            }
+        }
+
+        int distance = 0;
+
+        for (int i = 0; i < targetPositions.Count; i++)
+        {
+            for (int j = i + 1; j < targetPositions.Count; j++)
+            {
+                distance += ManhattanDistance(targetPositions[i], targetPositions[j]);
+            }
+        }
+
+        return distance;
+    }
+
+    private int CountObstacleInfluence(string[] rows)
+    {
+        List<Vector2Int> targetPositions = GetRowsPositions(rows, Target);
+        List<Vector2Int> boxPositions = GetRowsPositions(rows, Box);
+        List<Vector2Int> playerPositions = GetRowsPositions(rows, Player);
+
+        if (targetPositions.Count == 0 || boxPositions.Count == 0)
+        {
+            return 0;
+        }
+
+        int influence = 0;
+
+        for (int y = 1; y < rows.Length - 1; y++)
+        {
+            string row = rows[y] ?? "";
+
+            for (int x = 1; x < row.Length - 1; x++)
+            {
+                Vector2Int position = new Vector2Int(x, y);
+
+                if (GetRowsTile(rows, position) != Wall)
+                {
+                    continue;
+                }
+
+                int tileInfluence = 0;
+                int nearestTargetDistance = GetNearestDistance(position, targetPositions);
+                int nearestBoxDistance = GetNearestDistance(position, boxPositions);
+
+                if (nearestTargetDistance <= 2)
+                {
+                    tileInfluence += 2;
+                }
+                else if (nearestTargetDistance <= 3)
+                {
+                    tileInfluence++;
+                }
+
+                if (nearestBoxDistance <= 2)
+                {
+                    tileInfluence += 2;
+                }
+                else if (nearestBoxDistance <= 3)
+                {
+                    tileInfluence++;
+                }
+
+                if (IsNearAnyBoxTargetCorridor(position, boxPositions, targetPositions))
+                {
+                    tileInfluence += 2;
+                }
+
+                if (playerPositions.Count > 0 && GetNearestDistance(position, playerPositions) <= 4)
+                {
+                    tileInfluence++;
+                }
+
+                if (IsChokeInfluenceWall(rows, position))
+                {
+                    tileInfluence++;
+                }
+
+                influence += Mathf.Min(tileInfluence, 5);
+            }
+        }
+
+        return influence;
+    }
+
+    private List<Vector2Int> GetRowsPositions(string[] rows, char tile)
+    {
+        List<Vector2Int> positions = new List<Vector2Int>();
+
+        for (int y = 0; y < rows.Length; y++)
+        {
+            string row = rows[y] ?? "";
+
+            for (int x = 0; x < row.Length; x++)
+            {
+                if (row[x] == tile)
+                {
+                    positions.Add(new Vector2Int(x, y));
+                }
+            }
+        }
+
+        return positions;
+    }
+
+    private bool IsNearAnyBoxTargetCorridor(
+        Vector2Int position,
+        List<Vector2Int> boxPositions,
+        List<Vector2Int> targetPositions)
+    {
+        for (int boxIndex = 0; boxIndex < boxPositions.Count; boxIndex++)
+        {
+            for (int targetIndex = 0; targetIndex < targetPositions.Count; targetIndex++)
+            {
+                if (IsNearAxisAlignedCorridor(
+                        position,
+                        boxPositions[boxIndex],
+                        targetPositions[targetIndex],
+                        2))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsChokeInfluenceWall(string[] rows, Vector2Int position)
+    {
+        bool leftOpen = IsRowsWalkableForInfluence(rows, position + new Vector2Int(-1, 0));
+        bool rightOpen = IsRowsWalkableForInfluence(rows, position + new Vector2Int(1, 0));
+        bool upOpen = IsRowsWalkableForInfluence(rows, position + new Vector2Int(0, -1));
+        bool downOpen = IsRowsWalkableForInfluence(rows, position + new Vector2Int(0, 1));
+        return (leftOpen && rightOpen && !upOpen && !downOpen)
+            || (upOpen && downOpen && !leftOpen && !rightOpen);
+    }
+
+    private bool IsRowsWalkableForInfluence(string[] rows, Vector2Int position)
+    {
+        char tile = GetRowsTile(rows, position);
+        return tile == Ground || tile == Player || tile == Box || tile == Target;
+    }
+
+    private bool IsSurroundedWallTileShape(string[] rows, Vector2Int position)
+    {
+        return GetRowsTile(rows, position) == Wall
+            && HasRowsTilesAround(rows, position)
+            && GetRowsTile(rows, position + new Vector2Int(0, 1)) != Water;
+    }
+
+    private bool HasRowsTilesAround(string[] rows, Vector2Int position)
+    {
+        for (int yOffset = -1; yOffset <= 1; yOffset++)
+        {
+            for (int xOffset = -1; xOffset <= 1; xOffset++)
+            {
+                if (xOffset == 0 && yOffset == 0)
+                {
+                    continue;
+                }
+
+                char tile = GetRowsTile(rows, position + new Vector2Int(xOffset, yOffset));
+
+                if (tile == '\0' || tile == Empty)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private char GetRowsTile(string[] rows, Vector2Int position)
+    {
+        if (rows == null || position.y < 0 || position.y >= rows.Length)
+        {
+            return '\0';
+        }
+
+        string row = rows[position.y] ?? "";
+
+        if (position.x < 0 || position.x >= row.Length)
+        {
+            return '\0';
+        }
+
+        return row[position.x];
+    }
+
     private List<Vector2Int> GetGroundCells(char[,] grid)
     {
         List<Vector2Int> cells = new List<Vector2Int>();
@@ -1781,6 +2619,48 @@ public class LevelGenerator : MonoBehaviour
         return Mathf.Abs(first.x - second.x) + Mathf.Abs(first.y - second.y);
     }
 
+    private int GetNearestDistance(Vector2Int position, List<Vector2Int> positions)
+    {
+        if (positions == null || positions.Count == 0)
+        {
+            return int.MaxValue;
+        }
+
+        int bestDistance = int.MaxValue;
+
+        for (int i = 0; i < positions.Count; i++)
+        {
+            bestDistance = Mathf.Min(bestDistance, ManhattanDistance(position, positions[i]));
+        }
+
+        return bestDistance;
+    }
+
+    private bool IsNearAxisAlignedCorridor(
+        Vector2Int position,
+        Vector2Int first,
+        Vector2Int second,
+        int tolerance)
+    {
+        int minX = Mathf.Min(first.x, second.x) - tolerance;
+        int maxX = Mathf.Max(first.x, second.x) + tolerance;
+        int minY = Mathf.Min(first.y, second.y) - tolerance;
+        int maxY = Mathf.Max(first.y, second.y) + tolerance;
+
+        bool insideHorizontalRange = position.x >= minX
+            && position.x <= maxX;
+        bool insideVerticalRange = position.y >= minY
+            && position.y <= maxY;
+        bool nearHorizontalCorridor = insideHorizontalRange
+            && (Mathf.Abs(position.y - first.y) <= tolerance
+                || Mathf.Abs(position.y - second.y) <= tolerance);
+        bool nearVerticalCorridor = insideVerticalRange
+            && (Mathf.Abs(position.x - first.x) <= tolerance
+                || Mathf.Abs(position.x - second.x) <= tolerance);
+
+        return nearHorizontalCorridor || nearVerticalCorridor;
+    }
+
     private bool IsNearPlayableEdge(Vector2Int position)
     {
         return GetDistanceToNearestPlayableEdge(position) <= 2;
@@ -1869,7 +2749,7 @@ public class LevelGenerator : MonoBehaviour
         }
     }
 
-    private bool IsRecentlyGeneratedLayout(string[] rows)
+    private bool IsRecentlyGeneratedLayout(string[] rows, bool rejectSimilar)
     {
         if (!rejectRecentlyGeneratedLayouts || recentGeneratedLayoutHistory <= 0 || rows == null)
         {
@@ -1878,15 +2758,19 @@ public class LevelGenerator : MonoBehaviour
 
         string fullSignature = GetFullLevelSignature(rows);
         string structureSignature = GetStructureSignature(rows);
+        int structureSimilarity = GetMaxRecentStructureSimilarity(structureSignature);
 
         bool repeated = recentFullLevelLookup.Contains(fullSignature)
-            || recentStructureLookup.Contains(structureSignature);
+            || recentStructureLookup.Contains(structureSignature)
+            || (rejectSimilar && structureSimilarity >= rules.recentStructureSimilarityThreshold);
 
         if (repeated && logGenerationResult)
         {
             Debug.Log(
                 "LevelGenerator rejected repeated layout:"
                 + " recentGeneratedLayoutHistory=" + recentGeneratedLayoutHistory
+                + ", structureSimilarity=" + structureSimilarity
+                + ", threshold=" + rules.recentStructureSimilarityThreshold
             );
         }
 
@@ -1958,5 +2842,58 @@ public class LevelGenerator : MonoBehaviour
         }
 
         return builder.ToString();
+    }
+
+    private int GetMaxRecentStructureSimilarity(string[] rows)
+    {
+        return GetMaxRecentStructureSimilarity(GetStructureSignature(rows));
+    }
+
+    private int GetMaxRecentStructureSimilarity(string structureSignature)
+    {
+        if (string.IsNullOrEmpty(structureSignature) || recentStructureSignatures.Count == 0)
+        {
+            return 0;
+        }
+
+        int maxSimilarity = 0;
+
+        foreach (string recentSignature in recentStructureSignatures)
+        {
+            maxSimilarity = Mathf.Max(
+                maxSimilarity,
+                GetStructureSimilarityPercent(structureSignature, recentSignature)
+            );
+        }
+
+        return maxSimilarity;
+    }
+
+    private int GetStructureSimilarityPercent(string first, string second)
+    {
+        if (string.IsNullOrEmpty(first) || string.IsNullOrEmpty(second))
+        {
+            return 0;
+        }
+
+        int maxLength = Mathf.Max(first.Length, second.Length);
+
+        if (maxLength == 0)
+        {
+            return 0;
+        }
+
+        int same = 0;
+        int minLength = Mathf.Min(first.Length, second.Length);
+
+        for (int i = 0; i < minLength; i++)
+        {
+            if (first[i] == second[i])
+            {
+                same++;
+            }
+        }
+
+        return Mathf.RoundToInt((same * 100f) / maxLength);
     }
 }

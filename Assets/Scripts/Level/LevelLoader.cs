@@ -136,24 +136,61 @@ public class LevelLoader : MonoBehaviour
 
     public IEnumerator GenerateAndReloadWithLLMPlanRoutine(System.Action<bool> onComplete = null)
     {
-        yield return RequestAndApplyLLMPlan();
-        bool generatedLevel = GenerateAndReload();
-        onComplete?.Invoke(generatedLevel);
+        yield return GenerateWithLLMPlanAttemptsRoutine(onComplete);
     }
 
     private IEnumerator GenerateAndLoadWithLLMPlanRoutine()
     {
-        yield return RequestAndApplyLLMPlan();
-        bool generatedLevel = GenerateLevel();
+        yield return GenerateWithLLMPlanAttemptsRoutine(null);
+    }
 
-        if (!generatedLevel)
+    private IEnumerator GenerateWithLLMPlanAttemptsRoutine(System.Action<bool> onComplete)
+    {
+        ResolveGenerationReferences();
+        int maxPlanAttempts = GetLLMPlanAttemptCount();
+
+        for (int attempt = 1; attempt <= maxPlanAttempts; attempt++)
         {
-            Debug.LogWarning("LevelLoader: Initial LLM generated level failed. No stale level will be loaded.");
-            yield break;
+            if (levelGenerator != null)
+            {
+                levelGenerator.SetLLMQualityGateRequired(true);
+            }
+
+            yield return RequestAndApplyLLMPlan();
+            bool generatedLevel = GenerateLevel();
+
+            if (generatedLevel)
+            {
+                LoadLevel();
+                NotifyGeneratedLevelIfNeeded(true);
+                onComplete?.Invoke(true);
+                yield break;
+            }
+
+            Debug.LogWarning(
+                "LevelLoader: LLM generated level attempt failed."
+                + " attempt=" + attempt
+                + ", maxPlanAttempts=" + maxPlanAttempts
+                + ". No stale level will be loaded."
+            );
         }
 
-        LoadLevel();
-        NotifyGeneratedLevelIfNeeded(true);
+        Debug.LogWarning(
+            "LevelLoader: LLM generated level failed after all plan attempts."
+            + " maxPlanAttempts=" + maxPlanAttempts
+            + ". No stale level will be loaded."
+        );
+        onComplete?.Invoke(false);
+    }
+
+    private int GetLLMPlanAttemptCount()
+    {
+        if (levelGenerator == null)
+        {
+            return 2;
+        }
+
+        return levelGenerator.GetLLMPlanRetryCount();
     }
 
     private void NotifyGeneratedLevelIfNeeded(bool generatedLevel)
@@ -186,6 +223,7 @@ public class LevelLoader : MonoBehaviour
         if (!useLLMPlan)
         {
             currentLoadUsedLLMPlan = false;
+            levelGenerator.ClearDesignPlan();
         }
 
         if (levelData != null)
@@ -225,6 +263,10 @@ public class LevelLoader : MonoBehaviour
         if (llmClient == null)
         {
             Debug.LogWarning("LevelLoader: LLM plan client is missing. Using local generation rules fallback.");
+            if (levelGenerator != null)
+            {
+                levelGenerator.ClearDesignPlan(true);
+            }
             yield break;
         }
 
@@ -233,6 +275,10 @@ public class LevelLoader : MonoBehaviour
         if (plan == null)
         {
             Debug.LogWarning("LevelLoader: LLM plan request failed. Using local generation rules fallback.");
+            if (levelGenerator != null)
+            {
+                levelGenerator.ClearDesignPlan(true);
+            }
             yield break;
         }
 

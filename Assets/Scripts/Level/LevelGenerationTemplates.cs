@@ -83,6 +83,20 @@ public static class LevelGenerationTemplates
             "##",
             ".#",
             ".#"
+        },
+        new string[]
+        {
+            "#"
+        },
+        new string[]
+        {
+            "#.",
+            ".#"
+        },
+        new string[]
+        {
+            ".#",
+            "#."
         }
     };
 
@@ -139,7 +153,7 @@ public static class LevelGenerationTemplates
                 new Vector2Int(6, 4),
                 new Vector2Int(6, 5)
             },
-            new int[] { 1, 6, 7 },
+            new int[] { 1, 6, 7, 8, 9 },
             new Vector2Int[]
             {
                 new Vector2Int(8, 4),
@@ -158,7 +172,7 @@ public static class LevelGenerationTemplates
                 new Vector2Int(4, 4),
                 new Vector2Int(5, 5)
             },
-            new int[] { 0, 1, 3, 7 },
+            new int[] { 0, 1, 3, 7, 8, 10 },
             new Vector2Int[]
             {
                 new Vector2Int(8, 3),
@@ -177,7 +191,7 @@ public static class LevelGenerationTemplates
                 new Vector2Int(5, 4),
                 new Vector2Int(6, 5)
             },
-            new int[] { 2, 3, 4, 5 },
+            new int[] { 2, 3, 4, 5, 8, 9, 10 },
             new Vector2Int[]
             {
                 new Vector2Int(3, 3),
@@ -196,7 +210,7 @@ public static class LevelGenerationTemplates
                 new Vector2Int(5, 4),
                 new Vector2Int(6, 4)
             },
-            new int[] { 2, 3, 6 },
+            new int[] { 2, 3, 6, 8, 9 },
             new Vector2Int[]
             {
                 new Vector2Int(4, 4),

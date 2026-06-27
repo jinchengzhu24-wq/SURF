@@ -80,6 +80,18 @@ MonoBehaviour:
   minWaterAreas: 1
   maxWaterAreas: 2
   maxGenerateAttempts: 300
+  algorithmCandidateSampleCount: 10
+  algorithmMinimumQualityScore: 220
+  algorithmPreferredMinSolutionSteps: 22
+  algorithmPreferredMinPushes: 8
+  algorithmPreferredMinReversePulls: 18
+  algorithmMinimumObstacleInfluence: 2
+  llmCandidateSampleCount: 2
+  llmMinimumQualityScore: 220
+  llmMinimumWaterTiles: 4
+  llmMinimumSurroundedWalls: 1
+  llmMaxPlanRetries: 2
+  recentStructureSimilarityThreshold: 86
   enableIrregularOuterWalls: 1
   minWallObstacleBlocks: 1
   maxWallObstacleBlocks: 3

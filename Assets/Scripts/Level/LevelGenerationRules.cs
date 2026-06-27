@@ -32,6 +32,21 @@ public class LevelGenerationRules : MonoBehaviour
     [Header("Search")]
     public int maxGenerateAttempts = 300;
 
+    [Header("Candidate Quality")]
+    public int algorithmCandidateSampleCount = 10;
+    public int algorithmMinimumQualityScore = 220;
+    public int algorithmPreferredMinSolutionSteps = 22;
+    public int algorithmPreferredMinPushes = 8;
+    public int algorithmPreferredMinReversePulls = 18;
+    public int algorithmMinimumObstacleInfluence = 2;
+    public int llmCandidateSampleCount = 2;
+    public int llmMinimumQualityScore = 220;
+    public int llmMinimumWaterTiles = 4;
+    public int llmMinimumSurroundedWalls = 1;
+    public int llmMaxPlanRetries = 2;
+    [Range(0, 100)]
+    public int recentStructureSimilarityThreshold = 86;
+
     [Header("Outer Walls")]
     public bool enableIrregularOuterWalls = true;
 
@@ -65,6 +80,19 @@ public class LevelGenerationRules : MonoBehaviour
             && maxWaterAreas >= minWaterAreas
             && maxWaterAreas >= 0
             && maxGenerateAttempts > 0
+            && algorithmCandidateSampleCount > 0
+            && algorithmMinimumQualityScore >= 0
+            && algorithmPreferredMinSolutionSteps >= 0
+            && algorithmPreferredMinPushes >= 0
+            && algorithmPreferredMinReversePulls >= 0
+            && algorithmMinimumObstacleInfluence >= 0
+            && llmCandidateSampleCount > 0
+            && llmMinimumQualityScore >= 0
+            && llmMinimumWaterTiles >= 0
+            && llmMinimumSurroundedWalls >= 0
+            && llmMaxPlanRetries > 0
+            && recentStructureSimilarityThreshold >= 0
+            && recentStructureSimilarityThreshold <= 100
             && minWallObstacleBlocks >= 0
             && maxWallObstacleBlocks >= minWallObstacleBlocks
             && minSolutionSteps >= 0
