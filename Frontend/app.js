@@ -222,7 +222,7 @@ function renderTable() {
             formatSeconds(end.durationSeconds),
             value(end.moveCount),
             value(end.pushCount),
-            formatRange(start.solutionSteps, start.solverPushes),
+            value(start.solutionSteps),
             value(structure.mapHash)
         ];
 
@@ -442,12 +442,6 @@ function formatPercent(input) {
     }
 
     return Math.round(input * 100) + "%";
-}
-
-function formatRange(steps, pushes) {
-    const left = value(steps);
-    const right = value(pushes);
-    return left === "-" && right === "-" ? "-" : left + " / " + right;
 }
 
 function formatTimestamp(input) {
