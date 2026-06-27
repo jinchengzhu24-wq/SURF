@@ -164,7 +164,16 @@ public class LevelManager : MonoBehaviour
                 yield break;
             }
 
-            yield return GenerateNewLevel();
+            bool generatedNewLevel = false;
+            yield return GenerateNewLevel(result => generatedNewLevel = result);
+
+            if (!generatedNewLevel)
+            {
+                yield return HandleGeneratedLevelFailure();
+                isCompletingLevel = false;
+                yield break;
+            }
+
             yield return Fade(1, 0);
             SetPlayerInputEnabled(true);
         }
@@ -195,6 +204,23 @@ public class LevelManager : MonoBehaviour
             + ", action=" + generatedLevelLimitAction
         );
 
+        yield return HandleGeneratedLevelLimitAction();
+    }
+
+    private IEnumerator HandleGeneratedLevelFailure()
+    {
+        Debug.LogWarning(
+            "LevelManager generated level failed:"
+            + " generatedLevelCount=" + generatedLevelCount
+            + ", maxGeneratedLevelCount=" + maxGeneratedLevelCount
+            + ", action=" + generatedLevelLimitAction
+        );
+
+        yield return HandleGeneratedLevelLimitAction();
+    }
+
+    private IEnumerator HandleGeneratedLevelLimitAction()
+    {
         if (generatedLevelLimitAction == GeneratedLevelLimitAction.LoadNextScene)
         {
             LoadNextScene();
@@ -213,7 +239,7 @@ public class LevelManager : MonoBehaviour
         }
     }
 
-    private IEnumerator GenerateNewLevel()
+    private IEnumerator GenerateNewLevel(System.Action<bool> onComplete)
     {
         if (levelLoader == null)
         {
@@ -223,16 +249,19 @@ public class LevelManager : MonoBehaviour
         if (levelLoader == null)
         {
             Debug.LogWarning("LevelManager: Cannot generate a new level because LevelLoader is missing.");
+            onComplete?.Invoke(false);
             yield break;
         }
 
         if (levelLoader.useLLMPlan)
         {
-            yield return levelLoader.GenerateAndReloadWithLLMPlanRoutine();
+            bool generatedLevel = false;
+            yield return levelLoader.GenerateAndReloadWithLLMPlanRoutine(result => generatedLevel = result);
+            onComplete?.Invoke(generatedLevel);
         }
         else
         {
-            levelLoader.GenerateAndReload();
+            onComplete?.Invoke(levelLoader.GenerateAndReload());
         }
     }
 

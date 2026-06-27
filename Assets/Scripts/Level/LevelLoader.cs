@@ -29,6 +29,15 @@ using UnityEngine.Tilemaps;
 // - waterTopGroundRightWallTile：上方是地面且右侧是墙时使用的水面。
 public class LevelLoader : MonoBehaviour
 {
+    private enum WallTileKind
+    {
+        Surrounded,
+        NormalCorner,
+        RightAndRightDown,
+        Vertical,
+        Default
+    }
+
     [Header("Level Data")]
     public LevelData levelData;
     public LevelManager levelManager;
@@ -85,29 +94,38 @@ public class LevelLoader : MonoBehaviour
         {
             StartCoroutine(GenerateAndLoadWithLLMPlanRoutine());
         }
+        else if (generateBeforeLoad)
+        {
+            bool generatedLevel = GenerateLevel();
+
+            if (!generatedLevel)
+            {
+                Debug.LogWarning("LevelLoader: Initial generated level failed. No stale level will be loaded.");
+                return;
+            }
+
+            LoadLevel();
+            NotifyGeneratedLevelIfNeeded(true);
+        }
         else
         {
-            bool generatedLevel = GenerateLevelIfNeeded();
             LoadLevel();
-            NotifyGeneratedLevelIfNeeded(generatedLevel);
         }
     }
 
-    private bool GenerateLevelIfNeeded()
+    public bool GenerateAndReload()
     {
-        if (!generateBeforeLoad || levelGenerator == null)
+        bool generatedLevel = GenerateLevel();
+
+        if (!generatedLevel)
         {
+            Debug.LogWarning("LevelLoader: GenerateAndReload failed. Keeping the current level loaded.");
             return false;
         }
 
-        return GenerateLevel();
-    }
-
-    public void GenerateAndReload()
-    {
-        bool generatedLevel = GenerateLevel();
         LoadLevel();
-        NotifyGeneratedLevelIfNeeded(generatedLevel);
+        NotifyGeneratedLevelIfNeeded(true);
+        return true;
     }
 
     [ContextMenu("Generate With LLM Plan")]
@@ -116,18 +134,26 @@ public class LevelLoader : MonoBehaviour
         StartCoroutine(GenerateAndReloadWithLLMPlanRoutine());
     }
 
-    public IEnumerator GenerateAndReloadWithLLMPlanRoutine()
+    public IEnumerator GenerateAndReloadWithLLMPlanRoutine(System.Action<bool> onComplete = null)
     {
         yield return RequestAndApplyLLMPlan();
-        GenerateAndReload();
+        bool generatedLevel = GenerateAndReload();
+        onComplete?.Invoke(generatedLevel);
     }
 
     private IEnumerator GenerateAndLoadWithLLMPlanRoutine()
     {
         yield return RequestAndApplyLLMPlan();
         bool generatedLevel = GenerateLevel();
+
+        if (!generatedLevel)
+        {
+            Debug.LogWarning("LevelLoader: Initial LLM generated level failed. No stale level will be loaded.");
+            yield break;
+        }
+
         LoadLevel();
-        NotifyGeneratedLevelIfNeeded(generatedLevel);
+        NotifyGeneratedLevelIfNeeded(true);
     }
 
     private void NotifyGeneratedLevelIfNeeded(bool generatedLevel)
@@ -324,6 +350,10 @@ public class LevelLoader : MonoBehaviour
             }
         }
 
+        ValidateSurroundedWallTiles(mapWidth, mapHeight);
+        ApplySurroundedWallTileCorrections(mapWidth, mapHeight);
+        ValidateSurroundedWallTiles(mapWidth, mapHeight);
+
         if (levelManager != null)
         {
             levelManager.ResetLevelState();
@@ -503,22 +533,19 @@ public class LevelLoader : MonoBehaviour
 
     private TileBase GetWallTile(int x, int y)
     {
-        if (IsSurroundedWall(x, y))
+        WallTileKind tileKind = GetWallTileKind(x, y);
+
+        if (tileKind == WallTileKind.Surrounded)
         {
-            return GetFallbackTile(wallSurroundedTile, wallTile);
+            return GetSurroundedWallTile();
         }
 
-        if (IsWall(x, y - 1) && (IsWall(x - 1, y) || IsWall(x + 1, y)))
-        {
-            return wallTile;
-        }
-
-        if (IsWall(x + 1, y) && IsWall(x + 1, y + 1))
+        if (tileKind == WallTileKind.RightAndRightDown)
         {
             return GetFallbackTile(wallRightAndRightDownTile, wallTile);
         }
 
-        if (IsWall(x, y - 1) || IsWall(x, y + 1))
+        if (tileKind == WallTileKind.Vertical)
         {
             return GetFallbackTile(wallVerticalTile, wallTile);
         }
@@ -526,9 +553,124 @@ public class LevelLoader : MonoBehaviour
         return wallTile;
     }
 
+    private WallTileKind GetWallTileKind(int x, int y)
+    {
+        if (IsSurroundedWall(x, y))
+        {
+            return WallTileKind.Surrounded;
+        }
+
+        if (IsWall(x, y - 1) && (IsWall(x - 1, y) || IsWall(x + 1, y)))
+        {
+            return WallTileKind.NormalCorner;
+        }
+
+        if (IsWall(x + 1, y) && IsWall(x + 1, y + 1))
+        {
+            return WallTileKind.RightAndRightDown;
+        }
+
+        if (IsWall(x, y - 1) || IsWall(x, y + 1))
+        {
+            return WallTileKind.Vertical;
+        }
+
+        return WallTileKind.Default;
+    }
+
+    private TileBase GetSurroundedWallTile()
+    {
+        return GetFallbackTile(wallSurroundedTile, wallTile);
+    }
+
+    private void ApplySurroundedWallTileCorrections(int mapWidth, int mapHeight)
+    {
+        if (wallTilemap == null)
+        {
+            return;
+        }
+
+        TileBase surroundedTile = GetSurroundedWallTile();
+
+        if (surroundedTile == null)
+        {
+            return;
+        }
+
+        for (int y = 0; y < levelData.rows.Length; y++)
+        {
+            string row = levelData.rows[y] ?? "";
+
+            for (int x = 0; x < row.Length; x++)
+            {
+                if (!IsSurroundedWall(x, y))
+                {
+                    continue;
+                }
+
+                wallTilemap.SetTile(GetCellPosition(x, y, mapWidth, mapHeight), surroundedTile);
+            }
+        }
+    }
+
+    private void ValidateSurroundedWallTiles(int mapWidth, int mapHeight)
+    {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        if (wallTilemap == null)
+        {
+            return;
+        }
+
+        TileBase surroundedTile = GetSurroundedWallTile();
+
+        if (surroundedTile == null)
+        {
+            Debug.LogWarning("LevelLoader: wallSurroundedTile and wallTile are both missing.");
+            return;
+        }
+
+        for (int y = 0; y < levelData.rows.Length; y++)
+        {
+            string row = levelData.rows[y] ?? "";
+
+            for (int x = 0; x < row.Length; x++)
+            {
+                if (!IsSurroundedWall(x, y))
+                {
+                    continue;
+                }
+
+                Vector3Int cellPosition = GetCellPosition(x, y, mapWidth, mapHeight);
+                TileBase actualTile = wallTilemap.GetTile(cellPosition);
+
+                if (actualTile == surroundedTile)
+                {
+                    continue;
+                }
+
+                Debug.LogWarning(
+                    "LevelLoader: Surrounded wall tile mismatch:"
+                    + " mapHash=" + GetLevelMapHash()
+                    + ", grid=(" + x + "," + y + ")"
+                    + ", cell=" + cellPosition
+                    + ", kind=" + GetWallTileKind(x, y)
+                    + ", neighbors=" + GetTileNeighborhoodDebug(x, y)
+                    + ", expected=" + GetTileName(surroundedTile)
+                    + ", actual=" + GetTileName(actualTile)
+                );
+            }
+        }
+#endif
+    }
+
     private TileBase GetFallbackTile(TileBase tile, TileBase fallbackTile)
     {
         return tile != null ? tile : fallbackTile;
+    }
+
+    private string GetTileName(TileBase tile)
+    {
+        return tile != null ? tile.name : "null";
     }
 
     private bool IsWall(int x, int y)
@@ -562,6 +704,58 @@ public class LevelLoader : MonoBehaviour
     private bool IsSurroundedWall(int x, int y)
     {
         return IsWall(x, y) && HasTilesAround(x, y) && !IsWater(x, y + 1);
+    }
+
+    private string GetTileNeighborhoodDebug(int x, int y)
+    {
+        return "["
+            + GetDebugTile(x - 1, y - 1)
+            + GetDebugTile(x, y - 1)
+            + GetDebugTile(x + 1, y - 1)
+            + "/"
+            + GetDebugTile(x - 1, y)
+            + GetDebugTile(x, y)
+            + GetDebugTile(x + 1, y)
+            + "/"
+            + GetDebugTile(x - 1, y + 1)
+            + GetDebugTile(x, y + 1)
+            + GetDebugTile(x + 1, y + 1)
+            + "]";
+    }
+
+    private char GetDebugTile(int x, int y)
+    {
+        char tile = GetMapTile(x, y);
+        return tile == '\0' ? '!' : tile;
+    }
+
+    private string GetLevelMapHash()
+    {
+        if (levelData == null || levelData.rows == null)
+        {
+            return "";
+        }
+
+        unchecked
+        {
+            uint hash = 2166136261;
+
+            for (int i = 0; i < levelData.rows.Length; i++)
+            {
+                string row = levelData.rows[i] ?? "";
+
+                for (int j = 0; j < row.Length; j++)
+                {
+                    hash ^= row[j];
+                    hash *= 16777619;
+                }
+
+                hash ^= '\n';
+                hash *= 16777619;
+            }
+
+            return hash.ToString("x8");
+        }
     }
 
     private bool IsGround(int x, int y)

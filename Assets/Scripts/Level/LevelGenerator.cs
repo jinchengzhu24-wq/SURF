@@ -1599,7 +1599,7 @@ public class LevelGenerator : MonoBehaviour
 
     private bool IsSupportedWallTileShape(char[,] grid, Vector2Int position)
     {
-        if (IsSurroundedWallShape(grid, position))
+        if (IsSurroundedWallTileShape(grid, position))
         {
             return true;
         }
@@ -1628,7 +1628,7 @@ public class LevelGenerator : MonoBehaviour
         return left && right;
     }
 
-    private bool IsSurroundedWallShape(char[,] grid, Vector2Int position)
+    private bool IsSurroundedWallTileShape(char[,] grid, Vector2Int position)
     {
         return IsWallAt(grid, position)
             && HasTilesAround(grid, position)
