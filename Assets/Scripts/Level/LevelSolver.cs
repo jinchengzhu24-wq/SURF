@@ -384,24 +384,7 @@ public class LevelSolver : MonoBehaviour
 
     private char GetMapTile(Vector2Int position)
     {
-        if (levelData == null || levelData.rows == null)
-        {
-            return '\0';
-        }
-
-        if (position.y < 0 || position.y >= levelData.rows.Length)
-        {
-            return '\0';
-        }
-
-        string row = levelData.rows[position.y];
-
-        if (position.x < 0 || position.x >= row.Length)
-        {
-            return '\0';
-        }
-
-        return row[position.x];
+        return LevelData.GetMapTile(levelData, position);
     }
 
     private class SolverState

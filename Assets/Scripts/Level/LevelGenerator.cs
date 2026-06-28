@@ -136,16 +136,22 @@ public class LevelGenerator : MonoBehaviour
     [ContextMenu("Generate And Reload")]
     public void GenerateAndReload()
     {
-        if (!Generate())
-        {
-            return;
-        }
+        ResolveReferences();
 
         if (levelLoader != null)
         {
-            levelLoader.levelData = levelData;
-            levelLoader.LoadLevel();
+            levelLoader.levelGenerator = this;
+
+            if (levelData != null)
+            {
+                levelLoader.levelData = levelData;
+            }
+
+            levelLoader.GenerateAndReload();
+            return;
         }
+
+        Generate();
     }
 
     public int GetLLMPlanRetryCount()
@@ -1025,22 +1031,7 @@ public class LevelGenerator : MonoBehaviour
 
     private int GetOuterShellTemplateIndex()
     {
-        if (currentArchetype == "goal_room")
-        {
-            return currentStructureTemplate.outerShellTemplateIndex;
-        }
-
-        if (currentArchetype == "bottleneck_corridor")
-        {
-            return currentStructureTemplate.outerShellTemplateIndex;
-        }
-
-        if (currentArchetype == "split_route")
-        {
-            return currentStructureTemplate.outerShellTemplateIndex;
-        }
-
-        if (hasDesignBlueprint)
+        if (hasDesignBlueprint && currentStructureTemplate != null)
         {
             return currentStructureTemplate.outerShellTemplateIndex;
         }
@@ -2123,7 +2114,7 @@ public class LevelGenerator : MonoBehaviour
             {
                 Vector2Int next = current + directions[i];
 
-                if (visited.Contains(next) || GetRowsTile(rows, next) != Water)
+                if (visited.Contains(next) || LevelData.GetMapTile(rows, next) != Water)
                 {
                     continue;
                 }
@@ -2144,7 +2135,7 @@ public class LevelGenerator : MonoBehaviour
 
             for (int x = 0; x < row.Length; x++)
             {
-                if (IsSurroundedWallTileShape(rows, new Vector2Int(x, y)))
+                if (LevelData.IsSurroundedWall(rows, new Vector2Int(x, y)))
                 {
                     count++;
                 }
@@ -2205,7 +2196,7 @@ public class LevelGenerator : MonoBehaviour
             {
                 Vector2Int position = new Vector2Int(x, y);
 
-                if (GetRowsTile(rows, position) != Wall)
+                if (LevelData.GetMapTile(rows, position) != Wall)
                 {
                     continue;
                 }
@@ -2309,55 +2300,7 @@ public class LevelGenerator : MonoBehaviour
 
     private bool IsRowsWalkableForInfluence(string[] rows, Vector2Int position)
     {
-        char tile = GetRowsTile(rows, position);
-        return tile == Ground || tile == Player || tile == Box || tile == Target;
-    }
-
-    private bool IsSurroundedWallTileShape(string[] rows, Vector2Int position)
-    {
-        return GetRowsTile(rows, position) == Wall
-            && HasRowsTilesAround(rows, position)
-            && GetRowsTile(rows, position + new Vector2Int(0, 1)) != Water;
-    }
-
-    private bool HasRowsTilesAround(string[] rows, Vector2Int position)
-    {
-        for (int yOffset = -1; yOffset <= 1; yOffset++)
-        {
-            for (int xOffset = -1; xOffset <= 1; xOffset++)
-            {
-                if (xOffset == 0 && yOffset == 0)
-                {
-                    continue;
-                }
-
-                char tile = GetRowsTile(rows, position + new Vector2Int(xOffset, yOffset));
-
-                if (tile == '\0' || tile == Empty)
-                {
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-
-    private char GetRowsTile(string[] rows, Vector2Int position)
-    {
-        if (rows == null || position.y < 0 || position.y >= rows.Length)
-        {
-            return '\0';
-        }
-
-        string row = rows[position.y] ?? "";
-
-        if (position.x < 0 || position.x >= row.Length)
-        {
-            return '\0';
-        }
-
-        return row[position.x];
+        return LevelData.IsGround(LevelData.GetMapTile(rows, position));
     }
 
     private List<Vector2Int> GetGroundCells(char[,] grid)
@@ -2555,33 +2498,20 @@ public class LevelGenerator : MonoBehaviour
 
     private bool IsSupportedWallTileShape(char[,] grid, Vector2Int position)
     {
-        if (IsSurroundedWallTileShape(grid, position))
-        {
-            return true;
-        }
-
         bool up = IsWallAt(grid, position + new Vector2Int(0, -1));
         bool down = IsWallAt(grid, position + new Vector2Int(0, 1));
         bool left = IsWallAt(grid, position + new Vector2Int(-1, 0));
         bool right = IsWallAt(grid, position + new Vector2Int(1, 0));
         bool rightDown = IsWallAt(grid, position + new Vector2Int(1, 1));
 
-        if (up && (left || right))
-        {
-            return true;
-        }
-
-        if (right && rightDown)
-        {
-            return true;
-        }
-
-        if (up || down)
-        {
-            return true;
-        }
-
-        return left && right;
+        return LevelData.IsSupportedWallShape(
+            IsSurroundedWallTileShape(grid, position),
+            up,
+            down,
+            left,
+            right,
+            rightDown
+        );
     }
 
     private bool IsSurroundedWallTileShape(char[,] grid, Vector2Int position)
@@ -2829,23 +2759,12 @@ public class LevelGenerator : MonoBehaviour
         return Mathf.Min(Mathf.Min(topLeft, topRight), Mathf.Min(bottomLeft, bottomRight));
     }
 
-    private void Shuffle(List<Vector2Int> positions)
-    {
-        for (int i = positions.Count - 1; i > 0; i--)
-        {
-            int swapIndex = random.Next(i + 1);
-            Vector2Int value = positions[i];
-            positions[i] = positions[swapIndex];
-            positions[swapIndex] = value;
-        }
-    }
-
-    private void Shuffle(List<int> values)
+    private void Shuffle<T>(List<T> values)
     {
         for (int i = values.Count - 1; i > 0; i--)
         {
             int swapIndex = random.Next(i + 1);
-            int value = values[i];
+            T value = values[i];
             values[i] = values[swapIndex];
             values[swapIndex] = value;
         }

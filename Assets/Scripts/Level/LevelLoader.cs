@@ -606,17 +606,17 @@ public class LevelLoader : MonoBehaviour
             return WallTileKind.Surrounded;
         }
 
-        if (IsWall(x, y - 1) && (IsWall(x - 1, y) || IsWall(x + 1, y)))
+        if (LevelData.HasNormalCornerWallShape(levelData != null ? levelData.rows : null, x, y))
         {
             return WallTileKind.NormalCorner;
         }
 
-        if (IsWall(x + 1, y) && IsWall(x + 1, y + 1))
+        if (LevelData.HasRightAndRightDownWallShape(levelData != null ? levelData.rows : null, x, y))
         {
             return WallTileKind.RightAndRightDown;
         }
 
-        if (IsWall(x, y - 1) || IsWall(x, y + 1))
+        if (LevelData.HasVerticalWallShape(levelData != null ? levelData.rows : null, x, y))
         {
             return WallTileKind.Vertical;
         }
@@ -721,58 +721,22 @@ public class LevelLoader : MonoBehaviour
 
     private bool IsWall(int x, int y)
     {
-        return GetMapTile(x, y) == '#';
+        return LevelData.IsWall(levelData != null ? levelData.rows : null, x, y);
     }
 
     private bool IsWater(int x, int y)
     {
-        return GetMapTile(x, y) == '@';
-    }
-
-    private bool HasTile(int x, int y)
-    {
-        char tile = GetMapTile(x, y);
-        return tile != '\0' && tile != ' ';
-    }
-
-    private bool HasTilesAround(int x, int y)
-    {
-        return HasTile(x - 1, y - 1)
-            && HasTile(x, y - 1)
-            && HasTile(x + 1, y - 1)
-            && HasTile(x - 1, y)
-            && HasTile(x + 1, y)
-            && HasTile(x - 1, y + 1)
-            && HasTile(x, y + 1)
-            && HasTile(x + 1, y + 1);
+        return LevelData.IsWater(levelData != null ? levelData.rows : null, x, y);
     }
 
     private bool IsSurroundedWall(int x, int y)
     {
-        return IsWall(x, y) && HasTilesAround(x, y) && !IsWater(x, y + 1);
+        return LevelData.IsSurroundedWall(levelData != null ? levelData.rows : null, x, y);
     }
 
     private string GetTileNeighborhoodDebug(int x, int y)
     {
-        return "["
-            + GetDebugTile(x - 1, y - 1)
-            + GetDebugTile(x, y - 1)
-            + GetDebugTile(x + 1, y - 1)
-            + "/"
-            + GetDebugTile(x - 1, y)
-            + GetDebugTile(x, y)
-            + GetDebugTile(x + 1, y)
-            + "/"
-            + GetDebugTile(x - 1, y + 1)
-            + GetDebugTile(x, y + 1)
-            + GetDebugTile(x + 1, y + 1)
-            + "]";
-    }
-
-    private char GetDebugTile(int x, int y)
-    {
-        char tile = GetMapTile(x, y);
-        return tile == '\0' ? '!' : tile;
+        return LevelData.GetTileNeighborhoodDebug(levelData != null ? levelData.rows : null, x, y);
     }
 
     private string GetLevelMapHash()
@@ -806,34 +770,12 @@ public class LevelLoader : MonoBehaviour
 
     private bool IsGround(int x, int y)
     {
-        return IsGround(GetMapTile(x, y));
+        return LevelData.IsGround(levelData != null ? levelData.rows : null, x, y);
     }
 
     private bool IsGround(char tile)
     {
-        return tile == '.' || tile == 'p' || tile == 's' || tile == 't';
-    }
-
-    private char GetMapTile(int x, int y)
-    {
-        if (levelData == null || levelData.rows == null)
-        {
-            return '\0';
-        }
-
-        if (y < 0 || y >= levelData.rows.Length)
-        {
-            return '\0';
-        }
-
-        string row = levelData.rows[y];
-
-        if (x < 0 || x >= row.Length)
-        {
-            return '\0';
-        }
-
-        return row[x];
+        return LevelData.IsGround(tile);
     }
 
     private Vector3 GetWorldPosition(Vector3Int cellPosition)

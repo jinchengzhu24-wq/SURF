@@ -151,21 +151,4 @@ public class LevelGenerationRules : MonoBehaviour
         return IsInsidePlayableArea(min) && IsInsidePlayableArea(max);
     }
 
-    public int GetRandomWaterWidth()
-    {
-        return Random.Range(minWaterWidth, maxWaterWidth + 1);
-    }
-
-    public int GetRandomWaterHeight()
-    {
-        return Random.Range(minWaterHeight, maxWaterHeight + 1);
-    }
-
-    public Vector2Int GetRandomPlayablePosition()
-    {
-        return new Vector2Int(
-            Random.Range(1, width - 1),
-            Random.Range(1, height - 1)
-        );
-    }
 }
