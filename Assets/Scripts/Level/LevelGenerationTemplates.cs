@@ -140,6 +140,58 @@ public static class LevelGenerationTemplates
             "##.......## ",
             " ##.....##  ",
             "  #######   "
+        },
+        new string[]
+        {
+            " #########  ",
+            " #.......#  ",
+            "##.......#  ",
+            "#........## ",
+            "#.........# ",
+            "##........# ",
+            " #........##",
+            " #.........#",
+            " ##.......# ",
+            "  ######### "
+        },
+        new string[]
+        {
+            "  ######### ",
+            " ##.......# ",
+            " #........# ",
+            " #........##",
+            "##.........#",
+            "#..........#",
+            "#.........##",
+            "##........# ",
+            " #.......## ",
+            " #########  "
+        },
+        new string[]
+        {
+            " ########   ",
+            "##......##  ",
+            "#........#  ",
+            "#.........# ",
+            "##........##",
+            " #.........#",
+            " #.........#",
+            " ##.......##",
+            "  ##.....## ",
+            "   #######  "
+        },
+        new string[]
+        {
+            "  ########  ",
+            " ##......## ",
+            "##........# ",
+            "#.........# ",
+            "#........## ",
+            "##.......#  ",
+            " #.......## ",
+            " #........# ",
+            " ##......## ",
+            "  ########  "
         }
     };
 
@@ -151,18 +203,24 @@ public static class LevelGenerationTemplates
             new Vector2Int[]
             {
                 new Vector2Int(6, 4),
-                new Vector2Int(6, 5)
+                new Vector2Int(6, 5),
+                new Vector2Int(5, 4),
+                new Vector2Int(7, 5)
             },
             new int[] { 1, 6, 7, 8, 9 },
             new Vector2Int[]
             {
                 new Vector2Int(8, 4),
-                new Vector2Int(8, 5)
+                new Vector2Int(8, 5),
+                new Vector2Int(9, 3),
+                new Vector2Int(9, 6)
             },
             new Vector2Int[]
             {
                 new Vector2Int(2, 6),
-                new Vector2Int(3, 6)
+                new Vector2Int(3, 6),
+                new Vector2Int(2, 4),
+                new Vector2Int(3, 7)
             }),
         new StructureTemplate(
             "bottleneck_corridor",
@@ -170,18 +228,23 @@ public static class LevelGenerationTemplates
             new Vector2Int[]
             {
                 new Vector2Int(4, 4),
-                new Vector2Int(5, 5)
+                new Vector2Int(5, 5),
+                new Vector2Int(6, 4),
+                new Vector2Int(7, 5)
             },
             new int[] { 0, 1, 3, 7, 8, 10 },
             new Vector2Int[]
             {
                 new Vector2Int(8, 3),
-                new Vector2Int(8, 6)
+                new Vector2Int(8, 6),
+                new Vector2Int(9, 4),
+                new Vector2Int(4, 7)
             },
             new Vector2Int[]
             {
                 new Vector2Int(2, 5),
-                new Vector2Int(3, 6)
+                new Vector2Int(3, 6),
+                new Vector2Int(8, 5)
             }),
         new StructureTemplate(
             "split_route",
@@ -189,18 +252,24 @@ public static class LevelGenerationTemplates
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
-                new Vector2Int(6, 5)
+                new Vector2Int(6, 5),
+                new Vector2Int(4, 5),
+                new Vector2Int(7, 4)
             },
             new int[] { 2, 3, 4, 5, 8, 9, 10 },
             new Vector2Int[]
             {
                 new Vector2Int(3, 3),
-                new Vector2Int(8, 6)
+                new Vector2Int(8, 6),
+                new Vector2Int(3, 6),
+                new Vector2Int(8, 3)
             },
             new Vector2Int[]
             {
                 new Vector2Int(5, 6),
-                new Vector2Int(6, 6)
+                new Vector2Int(6, 6),
+                new Vector2Int(2, 5),
+                new Vector2Int(9, 5)
             }),
         new StructureTemplate(
             "open_workshop",
@@ -208,17 +277,119 @@ public static class LevelGenerationTemplates
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
-                new Vector2Int(6, 4)
+                new Vector2Int(6, 4),
+                new Vector2Int(4, 6),
+                new Vector2Int(7, 6)
             },
             new int[] { 2, 3, 6, 8, 9 },
             new Vector2Int[]
             {
                 new Vector2Int(4, 4),
-                new Vector2Int(7, 5)
+                new Vector2Int(7, 5),
+                new Vector2Int(3, 6),
+                new Vector2Int(8, 3)
             },
             new Vector2Int[]
             {
                 new Vector2Int(2, 6),
+                new Vector2Int(9, 6)
+            }),
+        new StructureTemplate(
+            "goal_room",
+            3,
+            new Vector2Int[]
+            {
+                new Vector2Int(6, 3),
+                new Vector2Int(7, 4),
+                new Vector2Int(5, 6),
+                new Vector2Int(8, 6)
+            },
+            new int[] { 0, 2, 6, 8, 9, 10 },
+            new Vector2Int[]
+            {
+                new Vector2Int(8, 3),
+                new Vector2Int(9, 4),
+                new Vector2Int(8, 6),
+                new Vector2Int(9, 7)
+            },
+            new Vector2Int[]
+            {
+                new Vector2Int(2, 5),
+                new Vector2Int(3, 6),
+                new Vector2Int(4, 7)
+            }),
+        new StructureTemplate(
+            "bottleneck_corridor",
+            4,
+            new Vector2Int[]
+            {
+                new Vector2Int(3, 4),
+                new Vector2Int(4, 5),
+                new Vector2Int(6, 4),
+                new Vector2Int(7, 5)
+            },
+            new int[] { 1, 3, 5, 7, 8, 10 },
+            new Vector2Int[]
+            {
+                new Vector2Int(8, 2),
+                new Vector2Int(9, 5),
+                new Vector2Int(7, 7),
+                new Vector2Int(3, 7)
+            },
+            new Vector2Int[]
+            {
+                new Vector2Int(2, 4),
+                new Vector2Int(3, 5),
+                new Vector2Int(8, 6)
+            }),
+        new StructureTemplate(
+            "split_route",
+            5,
+            new Vector2Int[]
+            {
+                new Vector2Int(5, 3),
+                new Vector2Int(6, 4),
+                new Vector2Int(5, 6),
+                new Vector2Int(7, 6)
+            },
+            new int[] { 2, 3, 4, 5, 8, 9, 10 },
+            new Vector2Int[]
+            {
+                new Vector2Int(2, 3),
+                new Vector2Int(3, 6),
+                new Vector2Int(8, 3),
+                new Vector2Int(9, 6)
+            },
+            new Vector2Int[]
+            {
+                new Vector2Int(5, 5),
+                new Vector2Int(6, 5),
+                new Vector2Int(7, 6),
+                new Vector2Int(2, 6)
+            }),
+        new StructureTemplate(
+            "open_workshop",
+            6,
+            new Vector2Int[]
+            {
+                new Vector2Int(4, 3),
+                new Vector2Int(7, 3),
+                new Vector2Int(5, 5),
+                new Vector2Int(8, 6)
+            },
+            new int[] { 0, 2, 3, 6, 8, 9 },
+            new Vector2Int[]
+            {
+                new Vector2Int(3, 4),
+                new Vector2Int(4, 6),
+                new Vector2Int(7, 3),
+                new Vector2Int(8, 6)
+            },
+            new Vector2Int[]
+            {
+                new Vector2Int(2, 5),
+                new Vector2Int(8, 5),
+                new Vector2Int(3, 7),
                 new Vector2Int(9, 6)
             })
     };

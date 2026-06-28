@@ -100,6 +100,7 @@ public class LevelGenerator : MonoBehaviour
     private static readonly Queue<string> recentStructureSignatures = new Queue<string>();
     private static readonly HashSet<string> recentStructureLookup = new HashSet<string>();
     private static int runtimeSeedCounter;
+    private static int algorithmTemplateCursor;
 
     private static readonly Vector2Int[] directions =
     {
@@ -182,6 +183,11 @@ public class LevelGenerator : MonoBehaviour
         random = rules.useFixedSeed
             ? new System.Random(rules.seed)
             : new System.Random(GetRuntimeSeed());
+
+        if (!activeLLMQualityGate)
+        {
+            ApplyAlgorithmDesignBlueprint();
+        }
 
         if (TryGenerateWithCurrentRules("strict", rules.maxGenerateAttempts, true))
         {
@@ -345,7 +351,7 @@ public class LevelGenerator : MonoBehaviour
                 continue;
             }
 
-            if (IsRecentlyGeneratedLayout(rows, RequiresLLMQualityGate()))
+            if (IsRecentlyGeneratedLayout(rows, true))
             {
                 rejectedByRepeat++;
                 continue;
@@ -731,6 +737,98 @@ public class LevelGenerator : MonoBehaviour
                 + ", designNote=" + currentDesignNote
             );
         }
+    }
+
+    private void ApplyAlgorithmDesignBlueprint()
+    {
+        LevelGenerationTemplates.StructureTemplate[] templates = LevelGenerationTemplates.StructureTemplates;
+
+        if (templates == null || templates.Length == 0)
+        {
+            currentArchetype = DefaultArchetype;
+            currentTargetLayout = DefaultTargetLayout;
+            currentObstacleStyle = DefaultObstacleStyle;
+            currentWaterStyle = DefaultWaterStyle;
+            currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(DefaultArchetype);
+            return;
+        }
+
+        int templateIndex = algorithmTemplateCursor % templates.Length;
+
+        if (templateIndex < 0)
+        {
+            templateIndex += templates.Length;
+        }
+
+        algorithmTemplateCursor++;
+        currentStructureTemplate = templates[templateIndex];
+        currentArchetype = currentStructureTemplate.archetype;
+        currentTargetLayout = GetAlgorithmTargetLayout(currentArchetype);
+        currentObstacleStyle = GetAlgorithmObstacleStyle(currentArchetype);
+        currentWaterStyle = GetAlgorithmWaterStyle(currentArchetype);
+        currentDesignNote = "Algorithm template variation";
+        hasDesignBlueprint = true;
+        activeLLMQualityGate = false;
+    }
+
+    private string GetAlgorithmTargetLayout(string archetype)
+    {
+        if (archetype == "goal_room")
+        {
+            return random.Next(3) == 0 ? "edge_cluster" : "clustered";
+        }
+
+        if (archetype == "bottleneck_corridor")
+        {
+            return random.Next(2) == 0 ? "split_pair" : "edge_cluster";
+        }
+
+        if (archetype == "split_route")
+        {
+            return "split_pair";
+        }
+
+        return random.Next(2) == 0 ? "split_pair" : "clustered";
+    }
+
+    private string GetAlgorithmObstacleStyle(string archetype)
+    {
+        if (archetype == "goal_room")
+        {
+            return "goal_guard";
+        }
+
+        if (archetype == "bottleneck_corridor")
+        {
+            return "side_choke";
+        }
+
+        if (archetype == "split_route")
+        {
+            return "central_baffle";
+        }
+
+        return random.Next(2) == 0 ? "central_baffle" : "side_choke";
+    }
+
+    private string GetAlgorithmWaterStyle(string archetype)
+    {
+        if (archetype == "goal_room")
+        {
+            return random.Next(2) == 0 ? "corner_pool" : "side_pool";
+        }
+
+        if (archetype == "bottleneck_corridor")
+        {
+            return random.Next(2) == 0 ? "side_pool" : "route_divider";
+        }
+
+        if (archetype == "split_route")
+        {
+            return "route_divider";
+        }
+
+        return random.Next(2) == 0 ? "side_pool" : "corner_pool";
     }
 
     private void ResolveReferences()
@@ -1573,45 +1671,65 @@ public class LevelGenerator : MonoBehaviour
             return false;
         }
 
-        List<Vector2Int> selected = new List<Vector2Int>();
+        List<int> anchorOrder = new List<int>();
 
-        for (int anchorIndex = 0; anchorIndex < rules.boxCount; anchorIndex++)
+        for (int i = 0; i < currentStructureTemplate.targetAnchors.Length; i++)
         {
-            Vector2Int anchor = currentStructureTemplate.targetAnchors[anchorIndex];
-            int bestDistance = int.MaxValue;
-            Vector2Int bestCandidate = Vector2Int.zero;
-            bool foundCandidate = false;
-
-            for (int i = 0; i < candidates.Count; i++)
-            {
-                Vector2Int candidate = candidates[i];
-
-                if (ContainsPosition(selected, candidate))
-                {
-                    continue;
-                }
-
-                int distance = ManhattanDistance(candidate, anchor);
-
-                if (distance >= bestDistance)
-                {
-                    continue;
-                }
-
-                bestDistance = distance;
-                bestCandidate = candidate;
-                foundCandidate = true;
-            }
-
-            if (!foundCandidate || bestDistance > 4)
-            {
-                return false;
-            }
-
-            selected.Add(bestCandidate);
+            anchorOrder.Add(i);
         }
 
-        return CommitTargetPositions(selected);
+        Shuffle(anchorOrder);
+
+        for (int startIndex = 0; startIndex < anchorOrder.Count; startIndex++)
+        {
+            List<Vector2Int> selected = new List<Vector2Int>();
+            bool foundAllAnchors = true;
+
+            for (int offset = 0; offset < rules.boxCount; offset++)
+            {
+                int anchorIndex = anchorOrder[(startIndex + offset) % anchorOrder.Count];
+                Vector2Int anchor = currentStructureTemplate.targetAnchors[anchorIndex];
+                int bestDistance = int.MaxValue;
+                Vector2Int bestCandidate = Vector2Int.zero;
+                bool foundCandidate = false;
+
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    Vector2Int candidate = candidates[i];
+
+                    if (ContainsPosition(selected, candidate))
+                    {
+                        continue;
+                    }
+
+                    int distance = ManhattanDistance(candidate, anchor);
+
+                    if (distance >= bestDistance)
+                    {
+                        continue;
+                    }
+
+                    bestDistance = distance;
+                    bestCandidate = candidate;
+                    foundCandidate = true;
+                }
+
+                if (!foundCandidate || bestDistance > 4)
+                {
+                    foundAllAnchors = false;
+                    break;
+                }
+
+                selected.Add(bestCandidate);
+            }
+
+            if (foundAllAnchors && CommitTargetPositions(selected))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private bool TryPlaceClusteredTargets(List<Vector2Int> candidates, bool requireEdge)
