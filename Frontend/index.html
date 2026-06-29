@@ -88,30 +88,55 @@
             </section>
 
             <section class="workspace">
-                <div class="panel">
-                    <div class="panel-header">
-                        <h2>Level Runs</h2>
-                        <span class="hint" id="resultCount">0 shown</span>
+                <div class="workspace-main">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <h2>Level Runs</h2>
+                            <span class="hint" id="resultCount">0 shown</span>
+                        </div>
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Level</th>
+                                        <th>Status</th>
+                                        <th>Source</th>
+                                        <th>Duration</th>
+                                        <th>Moves</th>
+                                        <th>Pushes</th>
+                                        <th>Solution</th>
+                                        <th>Map Hash</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="recordsBody">
+                                    <tr><td colspan="8" class="empty-state">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="table-wrap">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Level</th>
-                                    <th>Status</th>
-                                    <th>Source</th>
-                                    <th>Duration</th>
-                                    <th>Moves</th>
-                                    <th>Pushes</th>
-                                    <th>Solution</th>
-                                    <th>Map Hash</th>
-                                </tr>
-                            </thead>
-                            <tbody id="recordsBody">
-                                <tr><td colspan="8" class="empty-state">Loading...</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
+
+                    <section class="panel survey-panel">
+                        <div class="panel-header">
+                            <h2>Survey Responses</h2>
+                            <span class="hint" id="surveyCount">0 shown</span>
+                        </div>
+                        <div class="table-wrap survey-table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Survey</th>
+                                        <th>Session</th>
+                                        <th>Duration</th>
+                                        <th>Answers</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="surveyBody">
+                                    <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
                 </div>
 
                 <aside class="panel">
@@ -135,29 +160,6 @@
                         <pre class="raw" id="rawDetails">No level selected.</pre>
                     </div>
                 </aside>
-            </section>
-
-            <section class="panel survey-panel">
-                <div class="panel-header">
-                    <h2>Survey Responses</h2>
-                    <span class="hint" id="surveyCount">0 shown</span>
-                </div>
-                <div class="table-wrap survey-table-wrap">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Survey</th>
-                                <th>Session</th>
-                                <th>Duration</th>
-                                <th>Answers</th>
-                            </tr>
-                        </thead>
-                        <tbody id="surveyBody">
-                            <tr><td colspan="5" class="empty-state">Loading...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
             </section>
         </main>
     </div>

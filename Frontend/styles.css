@@ -192,8 +192,14 @@ main {
     align-items: start;
 }
 
+.workspace-main {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+}
+
 .survey-panel {
-    margin-top: 16px;
+    min-width: 0;
 }
 
 .survey-table-wrap {
