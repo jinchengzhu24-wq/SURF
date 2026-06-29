@@ -77,10 +77,11 @@ public class QuestionnaireController : MonoBehaviour
         {
             QuestionnaireOptionButton option = optionButtons[i];
             option.ResolveReferences();
-            option.SetSelected(false);
             option.Button.onClick.RemoveAllListeners();
             option.Button.onClick.AddListener(() => SelectOption(option));
         }
+
+        RefreshSelectionVisuals();
 
         if (submitButton != null)
         {
@@ -92,16 +93,20 @@ public class QuestionnaireController : MonoBehaviour
     private void SelectOption(QuestionnaireOptionButton selectedOption)
     {
         selectedOptions[selectedOption.questionIndex] = selectedOption;
+        RefreshSelectionVisuals();
+        UpdateSubmitState();
+    }
 
+    private void RefreshSelectionVisuals()
+    {
         for (int i = 0; i < optionButtons.Length; i++)
         {
             QuestionnaireOptionButton option = optionButtons[i];
-            bool selected = option.questionIndex == selectedOption.questionIndex
-                && option.optionIndex == selectedOption.optionIndex;
+            QuestionnaireOptionButton selectedOption;
+            bool selected = selectedOptions.TryGetValue(option.questionIndex, out selectedOption)
+                && selectedOption.optionIndex == option.optionIndex;
             option.SetSelected(selected);
         }
-
-        UpdateSubmitState();
     }
 
     private void UpdateSubmitState()

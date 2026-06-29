@@ -1937,7 +1937,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   surveyId: post_play_survey
   surveyTitle: Questionnaire
-  nextSceneName: 
+  nextSceneName: Menu
   submitButton: {fileID: 2300000119}
   statusText: {fileID: 2300000114}
   backendBaseUrl: http://111.231.136.4:8000

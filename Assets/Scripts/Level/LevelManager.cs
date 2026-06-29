@@ -40,6 +40,7 @@ public class LevelManager : MonoBehaviour
     [Header("Generated Level Limit")]
     public int maxGeneratedLevelCount;
     public GeneratedLevelLimitAction generatedLevelLimitAction = GeneratedLevelLimitAction.LoadNextScene;
+    public GeneratedLevelLimitAction generatedLevelFailureAction = GeneratedLevelLimitAction.LoadNextScene;
     public int generatedLevelCount;
 
     [Header("Restart")]
@@ -204,7 +205,7 @@ public class LevelManager : MonoBehaviour
             + ", action=" + generatedLevelLimitAction
         );
 
-        yield return HandleGeneratedLevelLimitAction();
+        yield return HandleGeneratedLevelAction(generatedLevelLimitAction);
     }
 
     private IEnumerator HandleGeneratedLevelFailure()
@@ -213,23 +214,23 @@ public class LevelManager : MonoBehaviour
             "LevelManager generated level failed:"
             + " generatedLevelCount=" + generatedLevelCount
             + ", maxGeneratedLevelCount=" + maxGeneratedLevelCount
-            + ", action=" + generatedLevelLimitAction
+            + ", action=" + generatedLevelFailureAction
         );
 
-        yield return HandleGeneratedLevelLimitAction();
+        yield return HandleGeneratedLevelAction(generatedLevelFailureAction);
     }
 
-    private IEnumerator HandleGeneratedLevelLimitAction()
+    private IEnumerator HandleGeneratedLevelAction(GeneratedLevelLimitAction action)
     {
-        if (generatedLevelLimitAction == GeneratedLevelLimitAction.LoadNextScene)
+        if (action == GeneratedLevelLimitAction.LoadNextScene)
         {
             LoadNextScene();
         }
-        else if (generatedLevelLimitAction == GeneratedLevelLimitAction.StopGame)
+        else if (action == GeneratedLevelLimitAction.StopGame)
         {
             StopGame();
         }
-        else if (generatedLevelLimitAction == GeneratedLevelLimitAction.LoadMenuScene)
+        else if (action == GeneratedLevelLimitAction.LoadMenuScene)
         {
             LoadMenuScene();
         }
