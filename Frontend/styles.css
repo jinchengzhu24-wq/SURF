@@ -429,20 +429,6 @@ tbody tr.selected td {
     overflow-wrap: anywhere;
 }
 
-.raw {
-    margin-top: 14px;
-    padding: 11px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: #f8fafc;
-    color: #334155;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: 12px;
-    line-height: 1.45;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-}
-
 @media (max-width: 1100px) {
     .summary {
         grid-template-columns: repeat(3, minmax(118px, 1fr));

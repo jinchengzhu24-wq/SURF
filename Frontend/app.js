@@ -29,7 +29,6 @@ const elements = {
     selectedTitle: document.getElementById("selectedTitle"),
     mapGrid: document.getElementById("mapGrid"),
     detailMetrics: document.getElementById("detailMetrics"),
-    rawDetails: document.getElementById("rawDetails"),
     refreshButton: document.getElementById("refreshButton"),
     clearButton: document.getElementById("clearButton"),
     rawLink: document.getElementById("rawLink"),
@@ -329,7 +328,6 @@ function renderDetails(level) {
 
     if (!level) {
         elements.selectedTitle.textContent = "No selection";
-        elements.rawDetails.textContent = "No level selected.";
         return;
     }
 
@@ -368,11 +366,6 @@ function renderDetails(level) {
         elements.detailMetrics.appendChild(item);
     });
 
-    elements.rawDetails.textContent = JSON.stringify({
-        start,
-        end,
-        events: level.events || []
-    }, null, 2);
 }
 
 function renderMap(rows) {
