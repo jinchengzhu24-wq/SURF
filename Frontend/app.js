@@ -17,11 +17,15 @@ const elements = {
     statCompleted: document.getElementById("statCompleted"),
     statMissing: document.getElementById("statMissing"),
     statAvg: document.getElementById("statAvg"),
+    statSurveys: document.getElementById("statSurveys"),
+    statSurveyAvg: document.getElementById("statSurveyAvg"),
     searchInput: document.getElementById("searchInput"),
     statusFilter: document.getElementById("statusFilter"),
     sourceFilter: document.getElementById("sourceFilter"),
     resultCount: document.getElementById("resultCount"),
     recordsBody: document.getElementById("recordsBody"),
+    surveyCount: document.getElementById("surveyCount"),
+    surveyBody: document.getElementById("surveyBody"),
     selectedTitle: document.getElementById("selectedTitle"),
     mapGrid: document.getElementById("mapGrid"),
     detailMetrics: document.getElementById("detailMetrics"),
@@ -93,16 +97,18 @@ async function loadData(manual) {
         renderSummary(state.payload.summary || {});
         renderSourceFilter(state.payload.summary && state.payload.summary.sourceCounts);
         applyFilters();
+        renderSurveyTable();
         setStatus("Last loaded " + formatTimestamp(state.payload.generatedAt));
         elements.dataSource.textContent = "API: " + state.apiBase;
     } catch (error) {
         setStatus("Could not load records: " + error.message);
         elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
+        elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
     }
 }
 
 async function clearRecords() {
-    if (!window.confirm("Clear all level records? This cannot be undone.")) {
+    if (!window.confirm("Clear all records? This cannot be undone.")) {
         return;
     }
 
@@ -125,12 +131,15 @@ async function clearRecords() {
 }
 
 function renderSummary(summary) {
+    const surveySummary = (state.payload && state.payload.surveySummary) || {};
     elements.statEvents.textContent = numberValue(summary.eventCount);
     elements.statLevels.textContent = numberValue(summary.levelCount);
     elements.statSessions.textContent = numberValue(summary.sessionCount);
     elements.statCompleted.textContent = numberValue(summary.completedCount);
     elements.statMissing.textContent = numberValue(summary.missingEndCount);
     elements.statAvg.textContent = formatSeconds(summary.averageDurationSeconds);
+    elements.statSurveys.textContent = numberValue(surveySummary.responseCount);
+    elements.statSurveyAvg.textContent = formatSeconds(surveySummary.averageDurationSeconds);
 }
 
 function renderSourceFilter(sourceCounts) {
@@ -251,6 +260,47 @@ function renderTable() {
         });
 
         elements.recordsBody.appendChild(row);
+    });
+}
+
+function renderSurveyTable() {
+    const responses = (state.payload && state.payload.surveyResponses) || [];
+    elements.surveyBody.textContent = "";
+    elements.surveyCount.textContent = responses.length + " shown";
+
+    if (responses.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.className = "empty-state";
+        cell.textContent = "No survey responses yet.";
+        row.appendChild(cell);
+        elements.surveyBody.appendChild(row);
+        return;
+    }
+
+    responses.forEach(response => {
+        const row = document.createElement("tr");
+        const cells = [
+            formatTimestamp(response.serverReceivedAt || response.timestamp),
+            value(response.surveyTitle || response.surveyId),
+            shortId(response.sessionId),
+            formatSeconds(response.durationSeconds),
+            formatSurveyAnswers(response.answers)
+        ];
+
+        cells.forEach((text, index) => {
+            const cell = document.createElement("td");
+
+            if (index === 4) {
+                cell.className = "answers-cell";
+            }
+
+            cell.textContent = text;
+            row.appendChild(cell);
+        });
+
+        elements.surveyBody.appendChild(row);
     });
 }
 
@@ -442,6 +492,18 @@ function formatPercent(input) {
     }
 
     return Math.round(input * 100) + "%";
+}
+
+function formatSurveyAnswers(answers) {
+    if (!Array.isArray(answers) || answers.length === 0) {
+        return "-";
+    }
+
+    return answers.map(answer => {
+        const index = value(answer.questionIndex);
+        const option = value(answer.optionText || answer.optionId);
+        return "Q" + index + ": " + option;
+    }).join("; ");
 }
 
 function formatTimestamp(input) {

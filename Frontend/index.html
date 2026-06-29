@@ -64,6 +64,8 @@
                 <div class="stat"><strong id="statCompleted">0</strong><span>completed</span></div>
                 <div class="stat"><strong id="statMissing">0</strong><span>missing end</span></div>
                 <div class="stat"><strong id="statAvg">0s</strong><span>avg duration</span></div>
+                <div class="stat"><strong id="statSurveys">0</strong><span>surveys</span></div>
+                <div class="stat"><strong id="statSurveyAvg">0s</strong><span>survey avg</span></div>
             </section>
 
             <section class="controls" aria-label="Filters">
@@ -133,6 +135,29 @@
                         <pre class="raw" id="rawDetails">No level selected.</pre>
                     </div>
                 </aside>
+            </section>
+
+            <section class="panel survey-panel">
+                <div class="panel-header">
+                    <h2>Survey Responses</h2>
+                    <span class="hint" id="surveyCount">0 shown</span>
+                </div>
+                <div class="table-wrap survey-table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Survey</th>
+                                <th>Session</th>
+                                <th>Duration</th>
+                                <th>Answers</th>
+                            </tr>
+                        </thead>
+                        <tbody id="surveyBody">
+                            <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </section>
         </main>
     </div>

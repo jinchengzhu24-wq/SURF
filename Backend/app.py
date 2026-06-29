@@ -25,6 +25,7 @@ PROJECT_DIR = BASE_DIR.parent
 FRONTEND_DIR = PROJECT_DIR / "Frontend"
 STUDY_LOG_DIR = BASE_DIR / "study_logs"
 STUDY_LOG_FILE = STUDY_LOG_DIR / "level_records.jsonl"
+SURVEY_LOG_FILE = STUDY_LOG_DIR / "survey_responses.jsonl"
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -163,12 +164,31 @@ async def record_level_end(request: Request):
     return await append_level_record(request, "level-end")
 
 
+@app.post("/record-survey-response")
+async def record_survey_response(request: Request):
+    return await append_survey_record(request)
+
+
 @app.get("/level-records", response_class=PlainTextResponse)
 def get_level_records():
     if not STUDY_LOG_FILE.exists():
         return ""
 
     return STUDY_LOG_FILE.read_text(encoding="utf-8")
+
+
+@app.get("/survey-records", response_class=PlainTextResponse)
+def get_survey_records():
+    if not SURVEY_LOG_FILE.exists():
+        return ""
+
+    return SURVEY_LOG_FILE.read_text(encoding="utf-8")
+
+
+@app.get("/survey-records-data")
+def get_survey_records_data():
+    responses, malformed_count = read_survey_response_events()
+    return build_survey_records_payload(responses, malformed_count)
 
 
 @app.get("/level-records-view", response_class=HTMLResponse)
@@ -195,7 +215,16 @@ def get_level_records_dashboard(cleared: int = 0):
 def get_level_records_data():
     events, malformed_count = read_level_record_events()
     levels = merge_level_records(events)
-    return build_level_records_payload(events, levels, malformed_count)
+    payload = build_level_records_payload(events, levels, malformed_count)
+    survey_responses, survey_malformed_count = read_survey_response_events()
+    survey_payload = build_survey_records_payload(
+        survey_responses,
+        survey_malformed_count,
+    )
+    payload["surveySummary"] = survey_payload["summary"]
+    payload["surveyResponses"] = survey_payload["responses"]
+    payload["surveyMalformedCount"] = survey_payload["malformedCount"]
+    return payload
 
 
 @app.get("/level-records-legacy", response_class=HTMLResponse)
@@ -211,6 +240,7 @@ def clear_level_records():
 
     with study_record_lock:
         STUDY_LOG_FILE.write_text("", encoding="utf-8")
+        SURVEY_LOG_FILE.write_text("", encoding="utf-8")
 
     return RedirectResponse("/level-records-view?cleared=1", status_code=303)
 
@@ -243,14 +273,45 @@ async def append_level_record(request: Request, default_event_type: str):
     }
 
 
+async def append_survey_record(request: Request):
+    data = await request.json()
+
+    if not isinstance(data, dict):
+        data = {"payload": data}
+
+    data.setdefault("eventType", "survey-response")
+    data["serverReceivedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        with SURVEY_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(data, ensure_ascii=False))
+            log_file.write("\n")
+
+    return {
+        "status": "ok",
+        "eventType": data["eventType"],
+        "logFile": str(SURVEY_LOG_FILE),
+    }
+
+
 def read_level_record_events():
-    if not STUDY_LOG_FILE.exists():
+    return read_jsonl_records(STUDY_LOG_FILE)
+
+
+def read_survey_response_events():
+    return read_jsonl_records(SURVEY_LOG_FILE)
+
+
+def read_jsonl_records(path):
+    if not path.exists():
         return [], 0
 
-    events = []
+    records = []
     malformed_count = 0
 
-    with STUDY_LOG_FILE.open("r", encoding="utf-8") as log_file:
+    with path.open("r", encoding="utf-8") as log_file:
         for line in log_file:
             line = line.strip()
 
@@ -264,11 +325,11 @@ def read_level_record_events():
                 continue
 
             if isinstance(data, dict):
-                events.append(data)
+                records.append(data)
             else:
                 malformed_count += 1
 
-    return events, malformed_count
+    return records, malformed_count
 
 
 def merge_level_records(events):
@@ -374,6 +435,60 @@ def build_level_records_payload(events, levels, malformed_count):
         "levels": levels,
         "malformedCount": malformed_count,
         "logFile": str(STUDY_LOG_FILE),
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def build_survey_records_payload(responses, malformed_count):
+    session_ids = {
+        response.get("sessionId")
+        for response in responses
+        if response.get("sessionId")
+    }
+    survey_counts = {}
+    total_duration_seconds = 0.0
+    duration_count = 0
+    answer_count = 0
+
+    for response in responses:
+        survey_id = value_or_dash(response.get("surveyId"))
+        survey_counts[survey_id] = survey_counts.get(survey_id, 0) + 1
+
+        duration = response.get("durationSeconds")
+
+        if isinstance(duration, (int, float)):
+            total_duration_seconds += duration
+            duration_count += 1
+
+        answers = response.get("answers")
+
+        if isinstance(answers, list):
+            answer_count += len(answers)
+
+    average_duration_seconds = (
+        total_duration_seconds / duration_count
+        if duration_count > 0
+        else 0
+    )
+
+    sorted_responses = sorted(
+        responses,
+        key=lambda response: response.get("serverReceivedAt") or response.get("timestamp") or "",
+        reverse=True,
+    )
+
+    return {
+        "summary": {
+            "responseCount": len(responses),
+            "sessionCount": len(session_ids),
+            "answerCount": answer_count,
+            "averageDurationSeconds": round(average_duration_seconds, 2),
+            "malformedCount": malformed_count,
+            "surveyCounts": survey_counts,
+        },
+        "responses": sorted_responses,
+        "malformedCount": malformed_count,
+        "logFile": str(SURVEY_LOG_FILE),
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 

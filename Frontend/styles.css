@@ -135,7 +135,7 @@ main {
 
 .summary {
     display: grid;
-    grid-template-columns: repeat(6, minmax(118px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
     gap: 10px;
     margin-bottom: 16px;
 }
@@ -190,6 +190,15 @@ main {
     grid-template-columns: minmax(520px, 1.35fr) minmax(330px, 0.65fr);
     gap: 16px;
     align-items: start;
+}
+
+.survey-panel {
+    margin-top: 16px;
+}
+
+.survey-table-wrap {
+    max-height: 280px;
+    min-height: 180px;
 }
 
 .panel {
@@ -286,6 +295,12 @@ tbody tr.selected td {
 .small {
     color: var(--muted);
     font-size: 12px;
+}
+
+.answers-cell {
+    max-width: 620px;
+    white-space: normal;
+    line-height: 1.45;
 }
 
 .empty-state {
