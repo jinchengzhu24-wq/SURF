@@ -471,8 +471,13 @@ def build_survey_records_payload(responses, malformed_count):
         else 0
     )
 
+    normalized_responses = [
+        normalize_survey_response(response)
+        for response in responses
+    ]
+
     sorted_responses = sorted(
-        responses,
+        normalized_responses,
         key=lambda response: response.get("serverReceivedAt") or response.get("timestamp") or "",
         reverse=True,
     )
@@ -491,6 +496,51 @@ def build_survey_records_payload(responses, malformed_count):
         "logFile": str(SURVEY_LOG_FILE),
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+
+def normalize_survey_response(response):
+    normalized = dict(response)
+    answer_details = []
+    answers = response.get("answers")
+
+    if isinstance(answers, list):
+        for answer in answers:
+            if isinstance(answer, dict):
+                answer_details.append(normalize_survey_answer(answer))
+
+    normalized["playerNickname"] = get_survey_player_name(response)
+    normalized["answerDetails"] = answer_details
+    normalized["answersSummary"] = (
+        "; ".join(answer["displayText"] for answer in answer_details)
+        if answer_details
+        else "-"
+    )
+    return normalized
+
+
+def normalize_survey_answer(answer):
+    normalized = dict(answer)
+    question_index = value_or_dash(answer.get("questionIndex"))
+    question_text = value_or_dash(answer.get("questionText") or answer.get("questionId"))
+    option_text = value_or_dash(answer.get("optionText") or answer.get("optionId"))
+    question_label = f"Q{question_index}" if question_index != "-" else "Question"
+
+    normalized["questionLabel"] = question_label
+    normalized["optionLabel"] = option_text
+    normalized["displayText"] = (
+        f"{question_label}: {question_text} -> {option_text}"
+        if question_text != "-"
+        else f"{question_label}: {option_text}"
+    )
+    return normalized
+
+
+def get_survey_player_name(response):
+    return value_or_dash(
+        response.get("playerName")
+        or response.get("playerNickname")
+        or response.get("nickname")
+    )
 
 
 def render_level_records_view(events, levels, malformed_count, cleared):

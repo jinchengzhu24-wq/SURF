@@ -102,7 +102,7 @@ async function loadData(manual) {
     } catch (error) {
         setStatus("Could not load records: " + error.message);
         elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
-        elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
+        elements.surveyBody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load survey responses.</td></tr>';
     }
 }
 
@@ -270,7 +270,7 @@ function renderSurveyTable() {
     if (responses.length === 0) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 5;
+        cell.colSpan = 6;
         cell.className = "empty-state";
         cell.textContent = "No survey responses yet.";
         row.appendChild(cell);
@@ -283,15 +283,16 @@ function renderSurveyTable() {
         const cells = [
             formatTimestamp(response.serverReceivedAt || response.timestamp),
             value(response.surveyTitle || response.surveyId),
+            value(response.playerNickname || response.playerName || response.nickname),
             shortId(response.sessionId),
             formatSeconds(response.durationSeconds),
-            formatSurveyAnswers(response.answers)
+            formatSurveyAnswers(response)
         ];
 
         cells.forEach((text, index) => {
             const cell = document.createElement("td");
 
-            if (index === 4) {
+            if (index === 5) {
                 cell.className = "answers-cell";
             }
 
@@ -487,15 +488,30 @@ function formatPercent(input) {
     return Math.round(input * 100) + "%";
 }
 
-function formatSurveyAnswers(answers) {
+function formatSurveyAnswers(response) {
+    if (response && response.answersSummary && response.answersSummary !== "-") {
+        return response.answersSummary;
+    }
+
+    const answers = response && Array.isArray(response.answerDetails)
+        ? response.answerDetails
+        : response && response.answers;
+
     if (!Array.isArray(answers) || answers.length === 0) {
         return "-";
     }
 
     return answers.map(answer => {
         const index = value(answer.questionIndex);
-        const option = value(answer.optionText || answer.optionId);
-        return "Q" + index + ": " + option;
+        const question = value(answer.questionText || answer.questionId);
+        const option = value(answer.optionLabel || answer.optionText || answer.optionId);
+        const label = index === "-" ? "Question" : "Q" + index;
+
+        if (question !== "-") {
+            return label + ": " + question + " -> " + option;
+        }
+
+        return label + ": " + option;
     }).join("; ");
 }
 
