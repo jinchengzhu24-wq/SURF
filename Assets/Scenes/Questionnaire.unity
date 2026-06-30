@@ -2214,7 +2214,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -128, y: 280}
+  m_AnchoredPosition: {x: -199, y: 280}
   m_SizeDelta: {x: 1000, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1172981184
@@ -2295,7 +2295,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -430, y: 215}
+  m_AnchoredPosition: {x: -504, y: 215}
   m_SizeDelta: {x: 400, y: 50}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1347971039
@@ -2739,6 +2739,7 @@ GameObject:
   - component: {fileID: 2300000002}
   - component: {fileID: 2300000003}
   - component: {fileID: 2300000004}
+  - component: {fileID: 2300000005}
   m_Layer: 5
   m_Name: SurveyTitleText
   m_TagString: Untagged
@@ -2807,6 +2808,21 @@ MonoBehaviour:
     m_VerticalOverflow: 0
     m_LineSpacing: 1
   m_Text: Questionnaire
+--- !u!114 &2300000005
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2300000001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: cfabb0440166ab443bba8876756fdfa9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  m_EffectColor: {r: 0, g: 0, b: 0, a: 0.5}
+  m_EffectDistance: {x: 10, y: -8}
+  m_UseGraphicAlpha: 1
 --- !u!1 &2300000009
 GameObject:
   m_ObjectHideFlags: 0
@@ -2841,7 +2857,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -128, y: 154}
+  m_AnchoredPosition: {x: -199, y: 154}
   m_SizeDelta: {x: 1000, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000011
@@ -2885,7 +2901,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: In which level did you notice a change in the level generation logic?
+  m_Text: In which level did you notice a change?
 --- !u!1 &2300000013
 GameObject:
   m_ObjectHideFlags: 0
@@ -2924,7 +2940,7 @@ RectTransform:
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
   m_AnchoredPosition: {x: -477, y: 72}
-  m_SizeDelta: {x: 300, y: 52}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000015
 CanvasRenderer:
@@ -3042,8 +3058,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 6, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000020
 CanvasRenderer:
@@ -3146,8 +3162,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -147, y: 72}
-  m_SizeDelta: {x: 300, y: 52}
+  m_AnchoredPosition: {x: 50, y: 72}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000025
 CanvasRenderer:
@@ -3265,8 +3281,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 4.999939, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000030
 CanvasRenderer:
@@ -3369,8 +3385,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 183, y: 72}
-  m_SizeDelta: {x: 300, y: 52}
+  m_AnchoredPosition: {x: 570, y: 72}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000035
 CanvasRenderer:
@@ -3488,8 +3504,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 18, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000040
 CanvasRenderer:
@@ -3589,7 +3605,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -128, y: 4}
+  m_AnchoredPosition: {x: -199, y: 4}
   m_SizeDelta: {x: 1000, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000045
@@ -3633,7 +3649,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Placeholder question 2
+  m_Text: What made you notice the change?
 --- !u!1 &2300000047
 GameObject:
   m_ObjectHideFlags: 0
@@ -3672,7 +3688,7 @@ RectTransform:
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
   m_AnchoredPosition: {x: -477, y: -78}
-  m_SizeDelta: {x: 300, y: 52}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000049
 CanvasRenderer:
@@ -3790,8 +3806,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 6, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000054
 CanvasRenderer:
@@ -3834,7 +3850,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Option A
+  m_Text: Difficulty changed
 --- !u!114 &2300000056
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3894,8 +3910,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -147, y: -78}
-  m_SizeDelta: {x: 300, y: 52}
+  m_AnchoredPosition: {x: 50, y: -78}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000059
 CanvasRenderer:
@@ -4013,8 +4029,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 4.999939, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000064
 CanvasRenderer:
@@ -4057,7 +4073,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Option B
+  m_Text: Layout felt different
 --- !u!114 &2300000066
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4117,8 +4133,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 183, y: -78}
-  m_SizeDelta: {x: 300, y: 52}
+  m_AnchoredPosition: {x: 570, y: -78}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000069
 CanvasRenderer:
@@ -4236,8 +4252,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 18, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000074
 CanvasRenderer:
@@ -4280,7 +4296,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Option C
+  m_Text: Unnatural design
 --- !u!114 &2300000076
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4337,7 +4353,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -128, y: -146}
+  m_AnchoredPosition: {x: -199, y: -146}
   m_SizeDelta: {x: 1000, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000079
@@ -4381,7 +4397,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Placeholder question 3
+  m_Text: Did the change affect your gameplay experience?
 --- !u!1 &2300000081
 GameObject:
   m_ObjectHideFlags: 0
@@ -4420,7 +4436,7 @@ RectTransform:
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
   m_AnchoredPosition: {x: -477, y: -228}
-  m_SizeDelta: {x: 300, y: 52}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000083
 CanvasRenderer:
@@ -4538,8 +4554,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 6, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000088
 CanvasRenderer:
@@ -4582,7 +4598,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Option A
+  m_Text: Improved
 --- !u!114 &2300000090
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4642,8 +4658,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -147, y: -228}
-  m_SizeDelta: {x: 300, y: 52}
+  m_AnchoredPosition: {x: 50, y: -228}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000093
 CanvasRenderer:
@@ -4761,8 +4777,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 5, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000098
 CanvasRenderer:
@@ -4805,7 +4821,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Option B
+  m_Text: Worsened
 --- !u!114 &2300000100
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4865,8 +4881,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 183, y: -228}
-  m_SizeDelta: {x: 300, y: 52}
+  m_AnchoredPosition: {x: 570, y: -228}
+  m_SizeDelta: {x: 450, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000103
 CanvasRenderer:
@@ -4984,8 +5000,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 0}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 0, y: 0}
-  m_SizeDelta: {x: 0, y: 0}
+  m_AnchoredPosition: {x: 18, y: 0}
+  m_SizeDelta: {x: 91.5386, y: 0}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000108
 CanvasRenderer:
@@ -5028,7 +5044,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Option C
+  m_Text: No difference
 --- !u!114 &2300000110
 MonoBehaviour:
   m_ObjectHideFlags: 0
