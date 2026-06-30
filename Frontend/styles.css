@@ -306,7 +306,11 @@ tbody tr.selected td {
 .answers-cell {
     max-width: 620px;
     white-space: normal;
-    line-height: 1.45;
+    line-height: 1.4;
+}
+
+.answer-line + .answer-line {
+    margin-top: 4px;
 }
 
 .empty-state {

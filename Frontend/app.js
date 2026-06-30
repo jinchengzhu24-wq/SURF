@@ -102,7 +102,7 @@ async function loadData(manual) {
     } catch (error) {
         setStatus("Could not load records: " + error.message);
         elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
-        elements.surveyBody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load survey responses.</td></tr>';
+        elements.surveyBody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load survey responses.</td></tr>';
     }
 }
 
@@ -270,7 +270,7 @@ function renderSurveyTable() {
     if (responses.length === 0) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 6;
+        cell.colSpan = 4;
         cell.className = "empty-state";
         cell.textContent = "No survey responses yet.";
         row.appendChild(cell);
@@ -283,22 +283,19 @@ function renderSurveyTable() {
         const cells = [
             formatTimestamp(response.serverReceivedAt || response.timestamp),
             value(response.surveyTitle || response.surveyId),
-            value(response.playerNickname || response.playerName || response.nickname),
-            shortId(response.sessionId),
-            formatSeconds(response.durationSeconds),
-            formatSurveyAnswers(response)
+            value(response.playerNickname || response.playerName || response.nickname)
         ];
 
-        cells.forEach((text, index) => {
+        cells.forEach(text => {
             const cell = document.createElement("td");
-
-            if (index === 5) {
-                cell.className = "answers-cell";
-            }
-
             cell.textContent = text;
             row.appendChild(cell);
         });
+
+        const answersCell = document.createElement("td");
+        answersCell.className = "answers-cell";
+        renderSurveyAnswerLines(answersCell, response);
+        row.appendChild(answersCell);
 
         elements.surveyBody.appendChild(row);
     });
@@ -488,17 +485,17 @@ function formatPercent(input) {
     return Math.round(input * 100) + "%";
 }
 
-function formatSurveyAnswers(response) {
-    if (response && response.answersSummary && response.answersSummary !== "-") {
-        return response.answersSummary;
-    }
-
+function getSurveyAnswerLines(response) {
     const answers = response && Array.isArray(response.answerDetails)
         ? response.answerDetails
         : response && response.answers;
 
     if (!Array.isArray(answers) || answers.length === 0) {
-        return "-";
+        if (response && response.answersSummary && response.answersSummary !== "-") {
+            return String(response.answersSummary).split(";").map(line => line.trim()).filter(Boolean);
+        }
+
+        return [];
     }
 
     return answers.map(answer => {
@@ -512,7 +509,23 @@ function formatSurveyAnswers(response) {
         }
 
         return label + ": " + option;
-    }).join("; ");
+    });
+}
+
+function renderSurveyAnswerLines(cell, response) {
+    const lines = getSurveyAnswerLines(response);
+
+    if (lines.length === 0) {
+        cell.textContent = "-";
+        return;
+    }
+
+    lines.forEach(line => {
+        const lineNode = document.createElement("div");
+        lineNode.className = "answer-line";
+        lineNode.textContent = line;
+        cell.appendChild(lineNode);
+    });
 }
 
 function formatTimestamp(input) {
