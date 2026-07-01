@@ -332,6 +332,7 @@ tbody tr.selected td {
     display: flex;
     align-items: center;
     gap: 12px;
+    flex: 1 1 auto;
     color: var(--muted);
     font-size: 12px;
 }
@@ -339,6 +340,34 @@ tbody tr.selected td {
 .round-meta span {
     display: inline-flex;
     align-items: center;
+}
+
+.round-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.round-action {
+    min-height: 26px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    background: var(--surface);
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.round-action:hover {
+    border-color: #b8c4d2;
+    background: #f1f5f9;
+}
+
+.round-action-danger {
+    border-color: #f1b4ad;
+    color: var(--red);
 }
 
 .level-row .level-index-cell {

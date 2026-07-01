@@ -8,7 +8,7 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -47,6 +47,15 @@ class LevelDesignPlan(BaseModel):
     obstacleStyle: str
     waterStyle: str
     designNote: str
+
+
+class RenameRoundRequest(BaseModel):
+    roundId: str
+    displayName: str
+
+
+class RoundRequest(BaseModel):
+    roundId: str
 
 
 DEFAULT_PLAN = {
@@ -234,6 +243,76 @@ def get_level_records_legacy(cleared: int = 0):
     return render_level_records_view(events, levels, malformed_count, cleared == 1)
 
 
+@app.post("/rename-round")
+def rename_round(request: RenameRoundRequest):
+    round_id = normalize_round_id(request.roundId)
+    display_name = normalize_round_display_name(request.displayName)
+
+    if not round_id:
+        raise HTTPException(status_code=400, detail="roundId is required")
+
+    if round_id == "legacy-round":
+        raise HTTPException(status_code=400, detail="Legacy Round cannot be renamed")
+
+    if not display_name:
+        raise HTTPException(status_code=400, detail="displayName is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_level_record_events()
+        matched_count = 0
+
+        for record in records:
+            if is_level_event_in_round(record, round_id):
+                record["roundDisplayName"] = display_name
+                matched_count += 1
+
+        if matched_count == 0:
+            raise HTTPException(status_code=404, detail="Round not found")
+
+        write_jsonl_records(STUDY_LOG_FILE, records)
+
+    return {
+        "status": "ok",
+        "roundId": round_id,
+        "displayName": display_name,
+        "updatedEventCount": matched_count,
+    }
+
+
+@app.post("/delete-round")
+def delete_round(request: RoundRequest):
+    round_id = normalize_round_id(request.roundId)
+
+    if not round_id:
+        raise HTTPException(status_code=400, detail="roundId is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_level_record_events()
+        remaining_records = []
+        deleted_count = 0
+
+        for record in records:
+            if is_level_event_in_round(record, round_id):
+                deleted_count += 1
+            else:
+                remaining_records.append(record)
+
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Round not found")
+
+        write_jsonl_records(STUDY_LOG_FILE, remaining_records)
+
+    return {
+        "status": "ok",
+        "roundId": round_id,
+        "deletedEventCount": deleted_count,
+    }
+
+
 @app.post("/clear-level-records")
 def clear_level_records():
     STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -330,6 +409,15 @@ def read_jsonl_records(path):
                 malformed_count += 1
 
     return records, malformed_count
+
+
+def write_jsonl_records(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", encoding="utf-8") as log_file:
+        for record in records:
+            log_file.write(json.dumps(record, ensure_ascii=False))
+            log_file.write("\n")
 
 
 def merge_level_records(events):
@@ -459,6 +547,7 @@ def build_round_records(levels):
             rounds[round_id] = {
                 "roundId": round_id,
                 "displayName": "Legacy Round" if not has_round_id else "",
+                "customDisplayName": "",
                 "shortId": short_id(round_id),
                 "isLegacy": not has_round_id,
                 "isInferred": not has_round_id,
@@ -482,6 +571,10 @@ def build_round_records(levels):
         if round_record["isLegacy"] and has_round_id:
             round_record["isLegacy"] = False
             round_record["isInferred"] = False
+
+        custom_display_name = get_round_display_name(start, end)
+        if custom_display_name and not round_record["isLegacy"]:
+            round_record["customDisplayName"] = custom_display_name
 
         round_index = (
             get_record_value(start, "gameRoundIndex")
@@ -544,7 +637,10 @@ def build_round_records(levels):
             round_record["displayName"] = "Legacy Round"
             continue
 
-        round_record["displayName"] = f"Round {sequence}"
+        round_record["displayName"] = (
+            round_record["customDisplayName"]
+            or f"Round {sequence}"
+        )
         sequence += 1
 
     return sorted(
@@ -865,7 +961,10 @@ def render_level_row(level):
 
     structure = get_record_value(start, "structure") or {}
     round_id = get_record_value(start, "gameRoundId") or get_record_value(end, "gameRoundId")
-    round_text = short_id(round_id) if round_id else "Legacy Round"
+    round_text = (
+        get_round_display_name(start, end)
+        or (short_id(round_id) if round_id else "Legacy Round")
+    )
 
     return f"""<tr>
     <td>{escape_text(round_text)}</td>
@@ -969,6 +1068,45 @@ def get_record_value(record, key):
         return None
 
     return record.get(key)
+
+
+def normalize_round_id(value):
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def normalize_round_display_name(value):
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def is_level_event_in_round(record, round_id):
+    if not isinstance(record, dict):
+        return False
+
+    record_round_id = record.get("gameRoundId")
+
+    if round_id == "legacy-round":
+        return not record_round_id
+
+    return str(record_round_id or "") == round_id
+
+
+def get_round_display_name(start, end):
+    for record in (end, start):
+        value = get_record_value(record, "roundDisplayName")
+
+        if value is not None:
+            display_name = normalize_round_display_name(value)
+
+            if display_name:
+                return display_name
+
+    return ""
 
 
 def render_map_rows(rows):

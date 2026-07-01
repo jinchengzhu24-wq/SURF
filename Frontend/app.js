@@ -430,7 +430,34 @@ function renderRoundRow(round) {
         meta.appendChild(item);
     });
 
-    content.append(toggle, titleWrap, meta);
+    const actions = document.createElement("div");
+    actions.className = "round-actions";
+
+    if (!round.isLegacy) {
+        const renameButton = document.createElement("button");
+        renameButton.className = "round-action";
+        renameButton.type = "button";
+        renameButton.title = "Rename round";
+        renameButton.textContent = "Rename";
+        renameButton.addEventListener("click", event => {
+            event.stopPropagation();
+            renameRound(round);
+        });
+        actions.appendChild(renameButton);
+    }
+
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "round-action round-action-danger";
+    deleteButton.type = "button";
+    deleteButton.title = "Delete round";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", event => {
+        event.stopPropagation();
+        deleteRound(round);
+    });
+    actions.appendChild(deleteButton);
+
+    content.append(toggle, titleWrap, meta, actions);
     cell.appendChild(content);
     row.appendChild(cell);
     return row;
@@ -498,6 +525,97 @@ function toggleRound(roundId) {
     }
 
     renderTable();
+}
+
+async function renameRound(round) {
+    const nextName = window.prompt("Rename round", round.displayName);
+
+    if (nextName === null) {
+        return;
+    }
+
+    const displayName = nextName.trim();
+
+    if (!displayName) {
+        window.alert("Round name cannot be empty.");
+        return;
+    }
+
+    setStatus("Renaming round...");
+
+    try {
+        const response = await fetch(apiUrl("/rename-round"), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                roundId: round.roundId,
+                displayName: displayName
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(await getResponseError(response));
+        }
+
+        showNotice("Round renamed.");
+        await loadData(true);
+    } catch (error) {
+        setStatus("Could not rename round: " + error.message);
+    }
+}
+
+async function deleteRound(round) {
+    const confirmed = window.confirm(
+        "Delete " + round.displayName + "? This permanently removes its level records."
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    setStatus("Deleting round...");
+
+    try {
+        const response = await fetch(apiUrl("/delete-round"), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                roundId: round.roundId
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(await getResponseError(response));
+        }
+
+        if ((round.levels || []).some(level => level.levelRunId === state.selectedRunId)) {
+            state.selectedRunId = null;
+        }
+
+        state.expandedRoundIds.delete(round.roundId);
+        showNotice("Round deleted.");
+        await loadData(true);
+    } catch (error) {
+        setStatus("Could not delete round: " + error.message);
+    }
+}
+
+async function getResponseError(response) {
+    try {
+        const data = await response.json();
+
+        if (data && data.detail) {
+            return data.detail;
+        }
+    } catch (error) {
+        // Fall back to the HTTP status below.
+    }
+
+    return "HTTP " + response.status;
 }
 
 function renderSurveyTable() {
