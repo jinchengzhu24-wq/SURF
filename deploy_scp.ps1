@@ -13,10 +13,16 @@ $scpCommand = Get-Command scp -ErrorAction SilentlyContinue
 if ($scpCommand) {
     $scpPath = $scpCommand.Source
 } else {
-    $scpPath = Join-Path $env:WINDIR "System32\OpenSSH\scp.exe"
+    $scpCandidates = @(
+        (Join-Path $env:WINDIR "System32\OpenSSH\scp.exe"),
+        (Join-Path $env:WINDIR "Sysnative\OpenSSH\scp.exe")
+    )
+    $scpPath = $scpCandidates | Where-Object {
+        Test-Path -LiteralPath $_
+    } | Select-Object -First 1
 }
 
-if (-not (Test-Path -LiteralPath $scpPath)) {
+if (-not $scpPath -or -not (Test-Path -LiteralPath $scpPath)) {
     throw "scp was not found. Install Windows OpenSSH Client, or add scp.exe to PATH."
 }
 
