@@ -13,6 +13,7 @@ public class MenuController : MonoBehaviour
             return;
         }
 
+        LevelStudyRecorder.BeginGameRound();
         SceneManager.LoadScene(targetSceneName);
     }
 

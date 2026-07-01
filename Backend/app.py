@@ -371,6 +371,7 @@ def build_level_records_payload(events, levels, malformed_count):
         for event in events
         if event.get("sessionId")
     }
+    rounds = build_round_records(levels)
     completed_count = 0
     missing_end_count = 0
     restarted_count = 0
@@ -421,6 +422,7 @@ def build_level_records_payload(events, levels, malformed_count):
         "summary": {
             "eventCount": len(events),
             "levelCount": len(levels),
+            "roundCount": len(rounds),
             "sessionCount": len(session_ids),
             "completedCount": completed_count,
             "missingEndCount": missing_end_count,
@@ -433,10 +435,126 @@ def build_level_records_payload(events, levels, malformed_count):
         },
         "events": events,
         "levels": levels,
+        "rounds": rounds,
         "malformedCount": malformed_count,
         "logFile": str(STUDY_LOG_FILE),
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+
+def build_round_records(levels):
+    rounds = {}
+
+    for level in levels:
+        start = get_level_start(level)
+        end = get_level_end(level)
+        raw_round_id = (
+            get_record_value(start, "gameRoundId")
+            or get_record_value(end, "gameRoundId")
+        )
+        has_round_id = bool(raw_round_id)
+        round_id = str(raw_round_id) if has_round_id else "legacy-round"
+
+        if round_id not in rounds:
+            rounds[round_id] = {
+                "roundId": round_id,
+                "displayName": "Legacy Round" if not has_round_id else "",
+                "shortId": short_id(round_id),
+                "isLegacy": not has_round_id,
+                "isInferred": not has_round_id,
+                "roundIndex": None,
+                "levels": [],
+                "levelCount": 0,
+                "completedCount": 0,
+                "missingEndCount": 0,
+                "failedCount": 0,
+                "restartedCount": 0,
+                "totalDurationSeconds": 0.0,
+                "startedAt": None,
+                "endedAt": None,
+                "sceneNames": [],
+                "order": level.get("order", 0),
+            }
+
+        round_record = rounds[round_id]
+        level["roundId"] = round_id
+
+        if round_record["isLegacy"] and has_round_id:
+            round_record["isLegacy"] = False
+            round_record["isInferred"] = False
+
+        round_index = (
+            get_record_value(start, "gameRoundIndex")
+            or get_record_value(end, "gameRoundIndex")
+        )
+        if isinstance(round_index, int) and round_index > 0:
+            round_record["roundIndex"] = round_index
+
+        scene_name = (
+            get_record_value(start, "sceneName")
+            or get_record_value(end, "sceneName")
+        )
+        if scene_name and scene_name not in round_record["sceneNames"]:
+            round_record["sceneNames"].append(scene_name)
+
+        started_at = get_level_started_at(level)
+        ended_at = get_level_ended_at(level)
+        round_record["startedAt"] = earliest_time(round_record["startedAt"], started_at)
+        round_record["endedAt"] = latest_time(round_record["endedAt"], ended_at)
+
+        round_record["levels"].append(level)
+        round_record["levelCount"] += 1
+
+        if not end:
+            round_record["missingEndCount"] += 1
+        elif get_record_value(end, "completed"):
+            round_record["completedCount"] += 1
+        elif get_record_value(end, "endReason") == "restarted":
+            round_record["restartedCount"] += 1
+        else:
+            round_record["failedCount"] += 1
+
+        duration = get_record_value(end, "durationSeconds")
+        if isinstance(duration, (int, float)):
+            round_record["totalDurationSeconds"] += duration
+
+    ordered_for_labels = sorted(
+        rounds.values(),
+        key=lambda round_record: (
+            round_record["startedAt"] or round_record["endedAt"] or "",
+            round_record["order"],
+        ),
+    )
+
+    sequence = 1
+    for round_record in ordered_for_labels:
+        round_record["levels"] = sorted(
+            round_record["levels"],
+            key=lambda level: (
+                get_round_level_sort_value(level),
+                level.get("order", 0),
+            ),
+        )
+        round_record["totalDurationSeconds"] = round(
+            round_record["totalDurationSeconds"],
+            2,
+        )
+
+        if round_record["isLegacy"]:
+            round_record["displayName"] = "Legacy Round"
+            continue
+
+        round_record["displayName"] = f"Round {sequence}"
+        sequence += 1
+
+    return sorted(
+        ordered_for_labels,
+        key=lambda round_record: (
+            round_record["startedAt"] or round_record["endedAt"] or "",
+            round_record["order"],
+        ),
+        reverse=True,
+    )
 
 
 def build_survey_records_payload(responses, malformed_count):
@@ -544,11 +662,7 @@ def get_survey_player_name(response):
 
 
 def render_level_records_view(events, levels, malformed_count, cleared):
-    session_ids = {
-        event.get("sessionId")
-        for event in events
-        if event.get("sessionId")
-    }
+    rounds = build_round_records(levels)
     completed_count = sum(1 for level in levels if get_level_end(level) and get_level_end(level).get("completed"))
     missing_end_count = sum(1 for level in levels if not get_level_end(level))
     rows_html = "\n".join(render_level_row(level) for level in levels)
@@ -697,7 +811,7 @@ def render_level_records_view(events, levels, malformed_count, cleared):
     <div class="summary">
         <div class="stat"><strong>{len(events)}</strong>events</div>
         <div class="stat"><strong>{len(levels)}</strong>levels</div>
-        <div class="stat"><strong>{len(session_ids)}</strong>sessions</div>
+        <div class="stat"><strong>{len(rounds)}</strong>rounds</div>
         <div class="stat"><strong>{completed_count}</strong>completed</div>
         <div class="stat"><strong>{missing_end_count}</strong>missing end</div>
         <div class="stat"><strong>{malformed_count}</strong>malformed</div>
@@ -712,7 +826,7 @@ def render_level_records_view(events, levels, malformed_count, cleared):
     <table>
         <thead>
             <tr>
-                <th>Session</th>
+                <th>Round</th>
                 <th>Level</th>
                 <th>Source</th>
                 <th>Status</th>
@@ -750,9 +864,11 @@ def render_level_row(level):
         status_text = value_or_dash(get_record_value(end, "endReason"))
 
     structure = get_record_value(start, "structure") or {}
+    round_id = get_record_value(start, "gameRoundId") or get_record_value(end, "gameRoundId")
+    round_text = short_id(round_id) if round_id else "Legacy Round"
 
     return f"""<tr>
-    <td>{escape_text(short_id(get_record_value(start, "sessionId") or get_record_value(end, "sessionId")))}</td>
+    <td>{escape_text(round_text)}</td>
     <td>{escape_text(value_or_dash(get_record_value(start, "levelIndex") or get_record_value(end, "levelIndex")))}</td>
     <td>{escape_text(source)}</td>
     <td class="{status_class}">{escape_text(status_text)}</td>
@@ -780,6 +896,64 @@ def get_level_sort_value(level):
         return level_index
 
     return 999999
+
+
+def get_round_level_sort_value(level):
+    start = get_level_start(level)
+    end = get_level_end(level)
+    round_level_index = (
+        get_record_value(start, "roundLevelIndex")
+        or get_record_value(end, "roundLevelIndex")
+    )
+
+    if isinstance(round_level_index, int):
+        return round_level_index
+
+    return get_level_sort_value(level)
+
+
+def get_level_started_at(level):
+    start = get_level_start(level)
+    end = get_level_end(level)
+    return (
+        get_record_value(start, "gameRoundStartedAt")
+        or get_record_value(start, "timestamp")
+        or get_record_value(start, "serverReceivedAt")
+        or get_record_value(end, "timestamp")
+        or get_record_value(end, "serverReceivedAt")
+    )
+
+
+def get_level_ended_at(level):
+    start = get_level_start(level)
+    end = get_level_end(level)
+    return (
+        get_record_value(end, "timestamp")
+        or get_record_value(end, "serverReceivedAt")
+        or get_record_value(start, "timestamp")
+        or get_record_value(start, "serverReceivedAt")
+        or get_record_value(start, "gameRoundStartedAt")
+    )
+
+
+def earliest_time(current_value, next_value):
+    if not current_value:
+        return next_value
+
+    if not next_value:
+        return current_value
+
+    return min(str(current_value), str(next_value))
+
+
+def latest_time(current_value, next_value):
+    if not current_value:
+        return next_value
+
+    if not next_value:
+        return current_value
+
+    return max(str(current_value), str(next_value))
 
 
 def get_level_start(level):

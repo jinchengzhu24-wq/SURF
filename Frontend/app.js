@@ -3,8 +3,11 @@ const DEFAULT_API_BASE = "http://111.231.136.4:8000";
 const state = {
     apiBase: resolveApiBase(),
     payload: null,
+    filteredRounds: [],
     filteredLevels: [],
-    selectedRunId: null
+    selectedRunId: null,
+    expandedRoundIds: new Set(),
+    hasInitializedRoundExpansion: false
 };
 
 const elements = {
@@ -91,8 +94,15 @@ async function loadData(manual) {
             throw new Error("HTTP " + response.status);
         }
 
+        const previousSelectedRunId = state.selectedRunId;
         state.payload = await response.json();
-        state.selectedRunId = null;
+        state.selectedRunId = previousSelectedRunId;
+
+        if (!manual) {
+            state.expandedRoundIds.clear();
+            state.hasInitializedRoundExpansion = false;
+        }
+
         renderSummary(state.payload.summary || {});
         renderSourceFilter(state.payload.summary && state.payload.summary.sourceCounts);
         applyFilters();
@@ -122,6 +132,9 @@ async function clearRecords() {
             throw new Error("HTTP " + response.status);
         }
 
+        state.selectedRunId = null;
+        state.expandedRoundIds.clear();
+        state.hasInitializedRoundExpansion = false;
         showNotice("Records cleared.");
         await loadData(true);
     } catch (error) {
@@ -131,9 +144,12 @@ async function clearRecords() {
 
 function renderSummary(summary) {
     const surveySummary = (state.payload && state.payload.surveySummary) || {};
+    const roundCount = typeof summary.roundCount === "number"
+        ? summary.roundCount
+        : getAllRounds().length;
     elements.statEvents.textContent = numberValue(summary.eventCount);
     elements.statLevels.textContent = numberValue(summary.levelCount);
-    elements.statSessions.textContent = numberValue(summary.sessionCount);
+    elements.statSessions.textContent = numberValue(roundCount);
     elements.statCompleted.textContent = numberValue(summary.completedCount);
     elements.statMissing.textContent = numberValue(summary.missingEndCount);
     elements.statAvg.textContent = formatSeconds(summary.averageDurationSeconds);
@@ -163,41 +179,178 @@ function applyFilters() {
     const search = elements.searchInput.value.trim().toLowerCase();
     const status = elements.statusFilter.value;
     const source = elements.sourceFilter.value;
+    const allRounds = getAllRounds();
 
-    state.filteredLevels = (state.payload.levels || []).filter(level => {
-        const start = level.start || {};
-        const end = level.end || {};
-        const structure = start.structure || {};
-        const rowStatus = getStatusKey(level);
-        const rowSource = value(start.source);
-        const haystack = [
-            level.levelRunId,
-            start.sessionId,
-            end.sessionId,
-            start.levelIndex,
-            end.levelIndex,
-            rowSource,
-            structure.mapHash
-        ].join(" ").toLowerCase();
+    state.filteredRounds = [];
+    state.filteredLevels = [];
 
-        if (status !== "all" && rowStatus !== status) {
-            return false;
+    allRounds.forEach(round => {
+        const matchingLevels = (round.levels || []).filter(level => (
+            levelMatchesFilters(level, round, search, status, source)
+        ));
+
+        if (matchingLevels.length === 0) {
+            return;
         }
 
-        if (source !== "all" && rowSource !== source) {
-            return false;
-        }
-
-        return !search || haystack.includes(search);
+        const filteredRound = buildFilteredRound(round, matchingLevels);
+        state.filteredRounds.push(filteredRound);
+        state.filteredLevels.push(...matchingLevels);
     });
 
+    ensureRoundExpansion();
     renderTable();
     keepOrSelectFirst();
 }
 
+function getAllRounds() {
+    const payload = state.payload || {};
+    const apiRounds = Array.isArray(payload.rounds) ? payload.rounds : [];
+
+    if (apiRounds.length > 0) {
+        return apiRounds.map(normalizeRound);
+    }
+
+    const levels = Array.isArray(payload.levels) ? payload.levels : [];
+
+    if (levels.length === 0) {
+        return [];
+    }
+
+    return [
+        normalizeRound({
+            roundId: "legacy-round",
+            displayName: "Legacy Round",
+            shortId: "legacy",
+            isLegacy: true,
+            isInferred: true,
+            levels: levels
+        }, 0)
+    ];
+}
+
+function normalizeRound(round, index) {
+    const roundId = String(round.roundId || "round-" + (index + 1));
+    const displayName = round.displayName
+        || (round.isLegacy ? "Legacy Round" : "Round " + (index + 1));
+    const shortRoundId = round.shortId || shortId(roundId);
+    const levels = Array.isArray(round.levels) ? round.levels : [];
+
+    levels.forEach(level => {
+        level.roundId = roundId;
+        level.roundDisplayName = displayName;
+        level.roundShortId = shortRoundId;
+    });
+
+    return Object.assign({}, round, {
+        roundId: roundId,
+        displayName: displayName,
+        shortId: shortRoundId,
+        levels: levels,
+        sceneNames: Array.isArray(round.sceneNames) ? round.sceneNames : []
+    });
+}
+
+function buildFilteredRound(round, levels) {
+    const summary = summarizeLevels(levels);
+
+    return Object.assign({}, round, summary, {
+        levels: levels,
+        levelCount: levels.length
+    });
+}
+
+function summarizeLevels(levels) {
+    const summary = {
+        completedCount: 0,
+        missingEndCount: 0,
+        failedCount: 0,
+        restartedCount: 0,
+        totalDurationSeconds: 0
+    };
+
+    levels.forEach(level => {
+        const end = level.end || null;
+
+        if (!end) {
+            summary.missingEndCount++;
+        } else if (end.completed) {
+            summary.completedCount++;
+        } else if (end.endReason === "restarted") {
+            summary.restartedCount++;
+        } else {
+            summary.failedCount++;
+        }
+
+        if (end && typeof end.durationSeconds === "number") {
+            summary.totalDurationSeconds += end.durationSeconds;
+        }
+    });
+
+    summary.totalDurationSeconds = Math.round(summary.totalDurationSeconds * 100) / 100;
+    return summary;
+}
+
+function levelMatchesFilters(level, round, search, status, source) {
+    const start = level.start || {};
+    const end = level.end || {};
+    const structure = start.structure || {};
+    const rowStatus = getStatusKey(level);
+    const rowSource = value(start.source);
+    const haystack = [
+        round.roundId,
+        round.displayName,
+        round.shortId,
+        (round.sceneNames || []).join(" "),
+        level.levelRunId,
+        start.gameRoundId,
+        end.gameRoundId,
+        start.roundLevelIndex,
+        end.roundLevelIndex,
+        start.levelIndex,
+        end.levelIndex,
+        rowSource,
+        structure.mapHash
+    ].join(" ").toLowerCase();
+
+    if (status !== "all" && rowStatus !== status) {
+        return false;
+    }
+
+    if (source !== "all" && rowSource !== source) {
+        return false;
+    }
+
+    return !search || haystack.includes(search);
+}
+
+function ensureRoundExpansion() {
+    if (state.filteredRounds.length === 0) {
+        return;
+    }
+
+    if (!state.hasInitializedRoundExpansion) {
+        state.expandedRoundIds.clear();
+        state.expandedRoundIds.add(state.filteredRounds[0].roundId);
+        state.hasInitializedRoundExpansion = true;
+        return;
+    }
+
+    const hasExpandedVisibleRound = state.filteredRounds.some(round => (
+        state.expandedRoundIds.has(round.roundId)
+    ));
+
+    if (!hasExpandedVisibleRound) {
+        state.expandedRoundIds.add(state.filteredRounds[0].roundId);
+    }
+}
+
 function renderTable() {
     elements.recordsBody.textContent = "";
-    elements.resultCount.textContent = state.filteredLevels.length + " shown";
+    elements.resultCount.textContent = formatShownCount(
+        state.filteredRounds.length,
+        state.filteredLevels.length
+    );
 
     if (state.filteredLevels.length === 0) {
         const row = document.createElement("tr");
@@ -211,55 +364,140 @@ function renderTable() {
         return;
     }
 
-    state.filteredLevels.forEach(level => {
-        const row = document.createElement("tr");
-        row.dataset.runId = level.levelRunId;
+    state.filteredRounds.forEach(round => {
+        elements.recordsBody.appendChild(renderRoundRow(round));
 
-        if (level.levelRunId === state.selectedRunId) {
-            row.classList.add("selected");
+        if (!state.expandedRoundIds.has(round.roundId)) {
+            return;
         }
 
-        const start = level.start || {};
-        const end = level.end || {};
-        const structure = start.structure || {};
-        const status = getStatus(level);
-        const cells = [
-            value(start.levelIndex || end.levelIndex),
-            status.label,
-            value(start.source),
-            formatSeconds(end.durationSeconds),
-            value(end.moveCount),
-            value(end.pushCount),
-            value(start.solutionSteps),
-            value(structure.mapHash)
-        ];
-
-        cells.forEach((text, index) => {
-            const cell = document.createElement("td");
-
-            if (index === 1) {
-                const badge = document.createElement("span");
-                badge.className = "badge " + status.className;
-                badge.textContent = text;
-                cell.appendChild(badge);
-            } else if (index === 7) {
-                cell.className = "small";
-                cell.textContent = text;
-            } else {
-                cell.textContent = text;
-            }
-
-            row.appendChild(cell);
+        round.levels.forEach(level => {
+            elements.recordsBody.appendChild(renderLevelRow(level));
         });
-
-        row.addEventListener("click", () => {
-            state.selectedRunId = level.levelRunId;
-            renderTable();
-            renderDetails(level);
-        });
-
-        elements.recordsBody.appendChild(row);
     });
+}
+
+function renderRoundRow(round) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    const expanded = state.expandedRoundIds.has(round.roundId);
+    row.className = "round-row";
+    row.dataset.roundId = round.roundId;
+    row.addEventListener("click", () => toggleRound(round.roundId));
+
+    if (expanded) {
+        row.classList.add("round-expanded");
+    }
+
+    cell.colSpan = 8;
+
+    const content = document.createElement("div");
+    content.className = "round-header-content";
+
+    const toggle = document.createElement("button");
+    toggle.className = "round-toggle";
+    toggle.type = "button";
+    toggle.title = expanded ? "Collapse round" : "Expand round";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.textContent = ">";
+
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "round-title";
+
+    const title = document.createElement("strong");
+    title.textContent = round.displayName;
+    titleWrap.appendChild(title);
+
+    if (!round.isLegacy) {
+        const id = document.createElement("span");
+        id.className = "round-id";
+        id.textContent = "#" + shortId(round.roundId);
+        titleWrap.appendChild(id);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "round-meta";
+    [
+        formatSceneNames(round.sceneNames),
+        plural(round.levelCount, "level"),
+        getRoundCompletionText(round),
+        formatSeconds(round.totalDurationSeconds),
+        formatOptionalTimestamp(round.startedAt)
+    ].forEach(text => {
+        const item = document.createElement("span");
+        item.textContent = text;
+        meta.appendChild(item);
+    });
+
+    content.append(toggle, titleWrap, meta);
+    cell.appendChild(content);
+    row.appendChild(cell);
+    return row;
+}
+
+function renderLevelRow(level) {
+    const row = document.createElement("tr");
+    row.className = "level-row";
+    row.dataset.runId = level.levelRunId;
+
+    if (level.levelRunId === state.selectedRunId) {
+        row.classList.add("selected");
+    }
+
+    const start = level.start || {};
+    const end = level.end || {};
+    const structure = start.structure || {};
+    const status = getStatus(level);
+    const cells = [
+        value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex),
+        status.label,
+        value(start.source),
+        formatSeconds(end.durationSeconds),
+        value(end.moveCount),
+        value(end.pushCount),
+        value(start.solutionSteps),
+        value(structure.mapHash)
+    ];
+
+    cells.forEach((text, index) => {
+        const cell = document.createElement("td");
+
+        if (index === 0) {
+            cell.className = "level-index-cell";
+            cell.textContent = text;
+        } else if (index === 1) {
+            const badge = document.createElement("span");
+            badge.className = "badge " + status.className;
+            badge.textContent = text;
+            cell.appendChild(badge);
+        } else if (index === 7) {
+            cell.className = "small";
+            cell.textContent = text;
+        } else {
+            cell.textContent = text;
+        }
+
+        row.appendChild(cell);
+    });
+
+    row.addEventListener("click", () => {
+        state.selectedRunId = level.levelRunId;
+        renderTable();
+        renderDetails(level);
+    });
+
+    return row;
+}
+
+function toggleRound(roundId) {
+    if (state.expandedRoundIds.has(roundId)) {
+        state.expandedRoundIds.delete(roundId);
+    } else {
+        state.expandedRoundIds.add(roundId);
+    }
+
+    renderTable();
 }
 
 function renderSurveyTable() {
@@ -333,11 +571,12 @@ function renderDetails(level) {
     const end = level.end || {};
     const structure = start.structure || {};
     const rows = Array.isArray(start.rows) ? start.rows : [];
-    elements.selectedTitle.textContent = "Level " + value(start.levelIndex || end.levelIndex);
+    const displayLevel = start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex;
+    elements.selectedTitle.textContent = "Level " + value(displayLevel);
     renderMap(rows);
 
     [
-        ["Session", shortId(start.sessionId || end.sessionId)],
+        ["Round", value(level.roundDisplayName)],
         ["Run", shortId(level.levelRunId)],
         ["Source", value(start.source)],
         ["Status", getStatus(level).label],
@@ -435,6 +674,39 @@ function getStatusKey(level) {
     return getStatus(level).key;
 }
 
+function getRoundCompletionText(round) {
+    const stoppedCount = (round.failedCount || 0) + (round.restartedCount || 0);
+    const parts = [
+        (round.completedCount || 0) + "/" + (round.levelCount || 0) + " completed"
+    ];
+
+    if (round.missingEndCount > 0) {
+        parts.push(round.missingEndCount + " missing");
+    }
+
+    if (stoppedCount > 0) {
+        parts.push(stoppedCount + " stopped");
+    }
+
+    return parts.join(", ");
+}
+
+function formatSceneNames(sceneNames) {
+    if (!Array.isArray(sceneNames) || sceneNames.length === 0) {
+        return "Scene -";
+    }
+
+    return "Scene " + sceneNames.join(", ");
+}
+
+function formatShownCount(roundCount, levelCount) {
+    return plural(roundCount, "round") + " / " + plural(levelCount, "level") + " shown";
+}
+
+function plural(count, singular) {
+    return count + " " + (count === 1 ? singular : singular + "s");
+}
+
 function setStatus(text) {
     elements.statusLine.textContent = text;
 }
@@ -483,6 +755,10 @@ function formatPercent(input) {
     }
 
     return Math.round(input * 100) + "%";
+}
+
+function formatOptionalTimestamp(input) {
+    return input ? formatTimestamp(input) : "-";
 }
 
 function getSurveyAnswerLines(response) {

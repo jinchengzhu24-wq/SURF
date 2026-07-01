@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
 
 public class LevelStudyRecorder : MonoBehaviour
 {
@@ -19,7 +20,11 @@ public class LevelStudyRecorder : MonoBehaviour
     public bool logRecordEvents = true;
 
     private string sessionId;
+    private string gameRoundId;
+    private string gameRoundStartedAt;
     private string levelRunId;
+    private int gameRoundIndex;
+    private int roundLevelIndex;
     private int levelIndex;
     private float levelStartedAt;
     private int moveCount;
@@ -65,6 +70,11 @@ public class LevelStudyRecorder : MonoBehaviour
         Instance.StartLevelRecord(levelLoader);
     }
 
+    public static void BeginGameRound()
+    {
+        Instance.StartGameRound();
+    }
+
     public static void RecordLevelCompleted()
     {
         Instance.EndLevelRecord(true, "completed");
@@ -89,10 +99,12 @@ public class LevelStudyRecorder : MonoBehaviour
         }
 
         EnsureSessionId();
+        EnsureGameRound();
 
         currentLevelLoader = levelLoader;
         levelRunId = Guid.NewGuid().ToString("N");
         levelIndex++;
+        roundLevelIndex++;
         levelStartedAt = Time.realtimeSinceStartup;
         moveCount = 0;
         pushCount = 0;
@@ -107,8 +119,10 @@ public class LevelStudyRecorder : MonoBehaviour
             Debug.Log(
                 "LevelStudyRecorder started level:"
                 + " sessionId=" + sessionId
+                + ", gameRoundId=" + gameRoundId
                 + ", levelRunId=" + levelRunId
                 + ", levelIndex=" + levelIndex
+                + ", roundLevelIndex=" + roundLevelIndex
                 + ", mapHash=" + record.structure.mapHash
                 + ", source=" + record.source
             );
@@ -126,6 +140,11 @@ public class LevelStudyRecorder : MonoBehaviour
         {
             eventType = "level-end",
             sessionId = sessionId,
+            gameRoundId = gameRoundId,
+            gameRoundIndex = gameRoundIndex,
+            roundLevelIndex = roundLevelIndex,
+            gameRoundStartedAt = gameRoundStartedAt,
+            sceneName = SceneManager.GetActiveScene().name,
             levelRunId = levelRunId,
             levelIndex = levelIndex,
             completed = completed,
@@ -144,6 +163,7 @@ public class LevelStudyRecorder : MonoBehaviour
             Debug.Log(
                 "LevelStudyRecorder ended level:"
                 + " sessionId=" + sessionId
+                + ", gameRoundId=" + gameRoundId
                 + ", levelRunId=" + levelRunId
                 + ", completed=" + completed
                 + ", endReason=" + endReason
@@ -181,6 +201,11 @@ public class LevelStudyRecorder : MonoBehaviour
         {
             eventType = "level-start",
             sessionId = sessionId,
+            gameRoundId = gameRoundId,
+            gameRoundIndex = gameRoundIndex,
+            roundLevelIndex = roundLevelIndex,
+            gameRoundStartedAt = gameRoundStartedAt,
+            sceneName = SceneManager.GetActiveScene().name,
             levelRunId = levelRunId,
             levelIndex = levelIndex,
             source = levelLoader.GetCurrentLevelSource(),
@@ -488,6 +513,32 @@ public class LevelStudyRecorder : MonoBehaviour
         }
     }
 
+    private void EnsureGameRound()
+    {
+        if (string.IsNullOrEmpty(gameRoundId))
+        {
+            StartGameRound();
+        }
+    }
+
+    private void StartGameRound()
+    {
+        EnsureSessionId();
+        gameRoundId = Guid.NewGuid().ToString("N");
+        gameRoundStartedAt = DateTime.UtcNow.ToString("o");
+        gameRoundIndex++;
+        roundLevelIndex = 0;
+
+        if (logRecordEvents)
+        {
+            Debug.Log(
+                "LevelStudyRecorder started game round:"
+                + " gameRoundId=" + gameRoundId
+                + ", gameRoundIndex=" + gameRoundIndex
+            );
+        }
+    }
+
     private string[] CloneRows(string[] rows)
     {
         if (rows == null)
@@ -560,6 +611,11 @@ public class LevelStartRecord
 {
     public string eventType;
     public string sessionId;
+    public string gameRoundId;
+    public int gameRoundIndex;
+    public int roundLevelIndex;
+    public string gameRoundStartedAt;
+    public string sceneName;
     public string levelRunId;
     public int levelIndex;
     public string source;
@@ -578,6 +634,11 @@ public class LevelEndRecord
 {
     public string eventType;
     public string sessionId;
+    public string gameRoundId;
+    public int gameRoundIndex;
+    public int roundLevelIndex;
+    public string gameRoundStartedAt;
+    public string sceneName;
     public string levelRunId;
     public int levelIndex;
     public bool completed;

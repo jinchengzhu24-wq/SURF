@@ -273,6 +273,78 @@ tbody tr.selected td {
     background: #edf7f5;
 }
 
+.round-row td {
+    background: #f8fafc;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+.round-row:hover td {
+    background: #eef4f8;
+}
+
+.round-header-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 620px;
+}
+
+.round-toggle {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    background: var(--surface);
+    cursor: pointer;
+    line-height: 1;
+    transition: transform 0.16s ease;
+}
+
+.round-expanded .round-toggle {
+    transform: rotate(90deg);
+}
+
+.round-title {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 150px;
+}
+
+.round-title strong {
+    color: var(--ink);
+    font-size: 13px;
+}
+
+.round-id {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.round-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.round-meta span {
+    display: inline-flex;
+    align-items: center;
+}
+
+.level-row .level-index-cell {
+    padding-left: 32px;
+}
+
 .badge {
     display: inline-flex;
     align-items: center;
