@@ -91,6 +91,44 @@ cd /root/SURF
 - GitHub 连接失败或不想依赖 GitHub
 - 想直接把本地文件覆盖到服务器
 
+推荐在本地 PowerShell 里运行项目自带脚本上传前后端文件：
+
+```powershell
+cd D:\Sokoban_AI_Demo
+.\deploy_scp.ps1
+```
+
+说明：
+
+- `.ps1` 是 PowerShell 脚本的标准后缀名，不是自定义后缀。
+- `.\deploy_scp.ps1` 里的 `.\` 表示“当前目录下的这个文件”，这是 Windows PowerShell 的常用写法。
+- 服务器 Linux/bash 里通常写 `./deploy_scp`，因为 Linux 路径分隔符是 `/`。
+
+如果 PowerShell 提示不允许执行脚本，改用：
+
+```powershell
+cd D:\Sokoban_AI_Demo
+powershell -ExecutionPolicy Bypass -File .\deploy_scp.ps1
+```
+
+这个本地脚本会上传：
+
+```text
+Backend/app.py
+Frontend/index.html
+Frontend/app.js
+Frontend/styles.css
+```
+
+上传完成后，在服务器 OrcaTerm 里执行：
+
+```bash
+cd /root/SURF
+./deploy_scp
+```
+
+如果不想用 PowerShell 脚本，也可以手动执行下面的 `scp` 命令。
+
 先在 Windows CMD 上传后端文件：
 
 ```cmd
@@ -152,45 +190,3 @@ chmod +x deploy_github deploy_scp
 bash deploy_github
 bash deploy_scp
 ```
-
-## 常见问题
-
-### 为什么 `./deploy_github.sh` 找不到？
-
-当前脚本名是：
-
-```text
-deploy_github
-deploy_scp
-```
-
-不是：
-
-```text
-deploy_github.sh
-deploy_scp.sh
-```
-
-所以运行：
-
-```bash
-./deploy_github
-./deploy_scp
-```
-
-`.sh` 在 Linux 里只是文件名的一部分，不是必须后缀。
-
-### 为什么 scp 上传后还要运行 deploy_scp？
-
-`scp` 只负责把文件复制到服务器。
-
-如果改的是后端，正在运行的 uvicorn 进程不会自动重新加载新代码，所以需要运行：
-
-```bash
-./deploy_scp
-```
-
-它会重启后端，让新的 `Backend/app.py` 生效。
-
-如果只改前端，则不需要运行 `deploy_scp`。
-
