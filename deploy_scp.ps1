@@ -8,6 +8,17 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = $PSScriptRoot
 $remoteBase = "${RemoteUser}@${RemoteHost}:${RemoteRoot}"
+$scpCommand = Get-Command scp -ErrorAction SilentlyContinue
+
+if ($scpCommand) {
+    $scpPath = $scpCommand.Source
+} else {
+    $scpPath = Join-Path $env:WINDIR "System32\OpenSSH\scp.exe"
+}
+
+if (-not (Test-Path -LiteralPath $scpPath)) {
+    throw "scp was not found. Install Windows OpenSSH Client, or add scp.exe to PATH."
+}
 
 $files = @(
     @{ Local = "Backend\app.py"; Remote = "Backend/app.py" },
@@ -25,7 +36,7 @@ foreach ($file in $files) {
 
     $target = "$remoteBase/$($file.Remote)"
     Write-Host "Uploading $($file.Local) -> $target"
-    & scp $localPath $target
+    & $scpPath $localPath $target
 
     if ($LASTEXITCODE -ne 0) {
         throw "scp failed for $($file.Local)"
