@@ -460,6 +460,70 @@ Tilemap:
   m_CorrespondingSourceObject: {fileID: 1357586261592123435, guid: fc8dd058a9b326d4fa4b56093b37cd1f, type: 3}
   m_PrefabInstance: {fileID: 7639227654540746133}
   m_PrefabAsset: {fileID: 0}
+--- !u!1 &3189217401
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 3189217404}
+  - component: {fileID: 3189217402}
+  - component: {fileID: 3189217403}
+  m_Layer: 0
+  m_Name: LLM Plan Cache
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &3189217402
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3189217401}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b6c1f9a0f0d0af744ae62d3d40284dfb, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  endpoint: http://111.231.136.4:8000/generate-level-plan
+  requestTimeoutSeconds: 180
+--- !u!114 &3189217403
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3189217401}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 9c2b7a7c8f684dc2a2a6f3305c3b61d1, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  llmClient: {fileID: 3189217402}
+  targetCachedPlanCount: 3
+  maxTotalPlanRequests: 3
+  prefetchOnStart: 1
+  logCacheEvents: 1
+--- !u!4 &3189217404
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3189217401}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1001 &611341720265871608
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -526,7 +590,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: maxGeneratedLevelCount
-      value: 3
+      value: 2
       objectReference: {fileID: 0}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: generatedLevelLimitAction
@@ -776,70 +840,6 @@ PrefabInstance:
     m_AddedGameObjects: []
     m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: fc8dd058a9b326d4fa4b56093b37cd1f, type: 3}
---- !u!1 &3189217401
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 3189217404}
-  - component: {fileID: 3189217402}
-  - component: {fileID: 3189217403}
-  m_Layer: 0
-  m_Name: LLM Plan Cache
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &3189217402
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 3189217401}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: b6c1f9a0f0d0af744ae62d3d40284dfb, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  endpoint: http://111.231.136.4:8000/generate-level-plan
-  requestTimeoutSeconds: 180
---- !u!114 &3189217403
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 3189217401}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 9c2b7a7c8f684dc2a2a6f3305c3b61d1, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  llmClient: {fileID: 3189217402}
-  targetCachedPlanCount: 3
-  maxTotalPlanRequests: 3
-  prefetchOnStart: 1
-  logCacheEvents: 1
---- !u!4 &3189217404
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 3189217401}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

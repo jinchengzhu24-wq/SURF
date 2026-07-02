@@ -978,6 +978,17 @@ public class LevelGenerator : MonoBehaviour
             return false;
         }
 
+        if (HasAdjacentBoxTargetPair())
+        {
+            if (logGenerationResult)
+            {
+                Debug.LogWarning("LevelGenerator: Rejected candidate with adjacent box start and target.");
+            }
+
+            failureReason = CandidateFailureReason.TileRules;
+            return false;
+        }
+
         if (!ValidateTileRules(grid, true))
         {
             failureReason = CandidateFailureReason.TileRules;
@@ -1914,6 +1925,22 @@ public class LevelGenerator : MonoBehaviour
         }
 
         return !targetLookup.Contains(playerPosition);
+    }
+
+    private bool HasAdjacentBoxTargetPair()
+    {
+        for (int boxIndex = 0; boxIndex < boxes.Count; boxIndex++)
+        {
+            for (int targetIndex = 0; targetIndex < targets.Count; targetIndex++)
+            {
+                if (ManhattanDistance(boxes[boxIndex], targets[targetIndex]) == 1)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private bool TryReversePull(char[,] grid, int boxIndex, Vector2Int direction)
