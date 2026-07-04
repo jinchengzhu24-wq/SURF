@@ -11,6 +11,7 @@ public class LevelStudyRecorder : MonoBehaviour
     private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
     private const string LevelStartPath = "/record-level-start";
     private const string LevelEndPath = "/record-level-end";
+    private const string MenuSceneName = "Menu";
 
     private static LevelStudyRecorder instance;
 
@@ -62,7 +63,24 @@ public class LevelStudyRecorder : MonoBehaviour
 
         instance = this;
         DontDestroyOnLoad(gameObject);
+        SceneManager.sceneLoaded += OnSceneLoaded;
         EnsureSessionId();
+    }
+
+    private void OnDestroy()
+    {
+        if (instance == this)
+        {
+            SceneManager.sceneLoaded -= OnSceneLoaded;
+        }
+    }
+
+    private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+    {
+        if (scene.name == MenuSceneName)
+        {
+            ClearGameRound();
+        }
     }
 
     public static void RecordLevelStarted(LevelLoader levelLoader)
@@ -82,8 +100,16 @@ public class LevelStudyRecorder : MonoBehaviour
 
     public static void RecordLevelRestarted()
     {
-        Instance.restartCount++;
-        Instance.EndLevelRecord(false, "restarted");
+        LevelStudyRecorder recorder = Instance;
+
+        if (!recorder.hasActiveLevel || string.IsNullOrEmpty(recorder.levelRunId))
+        {
+            recorder.LogSkippedRecord("level restart");
+            return;
+        }
+
+        recorder.restartCount++;
+        recorder.EndLevelRecord(false, "restarted");
     }
 
     public static void RecordPlayerMove(bool pushedBox)
@@ -99,7 +125,12 @@ public class LevelStudyRecorder : MonoBehaviour
         }
 
         EnsureSessionId();
-        EnsureGameRound();
+
+        if (string.IsNullOrEmpty(gameRoundId))
+        {
+            LogSkippedRecord("level start");
+            return;
+        }
 
         currentLevelLoader = levelLoader;
         levelRunId = Guid.NewGuid().ToString("N");
@@ -133,6 +164,7 @@ public class LevelStudyRecorder : MonoBehaviour
     {
         if (!hasActiveLevel || string.IsNullOrEmpty(levelRunId))
         {
+            LogSkippedRecord("level end");
             return;
         }
 
@@ -513,14 +545,6 @@ public class LevelStudyRecorder : MonoBehaviour
         }
     }
 
-    private void EnsureGameRound()
-    {
-        if (string.IsNullOrEmpty(gameRoundId))
-        {
-            StartGameRound();
-        }
-    }
-
     private void StartGameRound()
     {
         EnsureSessionId();
@@ -538,6 +562,38 @@ public class LevelStudyRecorder : MonoBehaviour
                 + ", gameRoundIndex=" + gameRoundIndex
             );
         }
+    }
+
+    private void ClearGameRound()
+    {
+        if (string.IsNullOrEmpty(gameRoundId))
+        {
+            return;
+        }
+
+        gameRoundId = "";
+        gameRoundStartedAt = "";
+        roundLevelIndex = 0;
+        hasActiveLevel = false;
+        levelRunId = "";
+
+        if (logRecordEvents)
+        {
+            Debug.Log("LevelStudyRecorder cleared active game round.");
+        }
+    }
+
+    private void LogSkippedRecord(string action)
+    {
+        if (!logRecordEvents)
+        {
+            return;
+        }
+
+        Debug.Log(
+            "LevelStudyRecorder skipped " + action
+            + " because no game round is active. Start from Menu to record official rounds."
+        );
     }
 
     private string[] CloneRows(string[] rows)
