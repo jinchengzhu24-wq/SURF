@@ -365,6 +365,11 @@ tbody tr.selected td {
     background: #f1f5f9;
 }
 
+.round-action:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
 .round-action-danger {
     border-color: #f1b4ad;
     color: var(--red);

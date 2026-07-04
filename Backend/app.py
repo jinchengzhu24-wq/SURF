@@ -58,6 +58,11 @@ class RoundRequest(BaseModel):
     roundId: str
 
 
+class DeleteSurveyResponseRequest(BaseModel):
+    responseId: str | None = ""
+    playerNickname: str | None = ""
+
+
 DEFAULT_PLAN = {
     "minSolutionSteps": 22,
     "maxSolutionSteps": 42,
@@ -310,6 +315,68 @@ def delete_round(request: RoundRequest):
         "status": "ok",
         "roundId": round_id,
         "deletedEventCount": deleted_count,
+    }
+
+
+@app.post("/delete-survey-response")
+def delete_survey_response(request: DeleteSurveyResponseRequest):
+    response_id = normalize_survey_identifier(request.responseId)
+    player_nickname = normalize_survey_identifier(request.playerNickname)
+
+    if not response_id and not player_nickname:
+        raise HTTPException(
+            status_code=400,
+            detail="responseId or playerNickname is required",
+        )
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_survey_response_events()
+        remaining_records = []
+        deleted_count = 0
+
+        if response_id:
+            for record in records:
+                record_response_id = normalize_survey_identifier(record.get("responseId"))
+
+                if record_response_id == response_id:
+                    deleted_count += 1
+                else:
+                    remaining_records.append(record)
+
+            if deleted_count == 0:
+                raise HTTPException(status_code=404, detail="Survey response not found")
+        else:
+            matching_indexes = [
+                index
+                for index, record in enumerate(records)
+                if not normalize_survey_identifier(record.get("responseId"))
+                and get_survey_player_identifier(record) == player_nickname
+            ]
+
+            if len(matching_indexes) == 0:
+                raise HTTPException(status_code=404, detail="Survey response not found")
+
+            if len(matching_indexes) > 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Multiple survey responses match this nickname",
+                )
+
+            matched_index = matching_indexes[0]
+            remaining_records = [
+                record
+                for index, record in enumerate(records)
+                if index != matched_index
+            ]
+            deleted_count = 1
+
+        write_jsonl_records(SURVEY_LOG_FILE, remaining_records)
+
+    return {
+        "status": "ok",
+        "deletedResponseCount": deleted_count,
     }
 
 
@@ -1082,6 +1149,24 @@ def normalize_round_display_name(value):
         return ""
 
     return str(value).strip()
+
+
+def normalize_survey_identifier(value):
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def get_survey_player_identifier(response):
+    if not isinstance(response, dict):
+        return ""
+
+    return (
+        normalize_survey_identifier(response.get("playerName"))
+        or normalize_survey_identifier(response.get("playerNickname"))
+        or normalize_survey_identifier(response.get("nickname"))
+    )
 
 
 def is_level_event_in_round(record, round_id):

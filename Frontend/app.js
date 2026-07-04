@@ -118,7 +118,7 @@ async function loadData(manual) {
     } catch (error) {
         setStatus("Could not load records: " + error.message);
         elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
-        elements.surveyBody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load survey responses.</td></tr>';
+        elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
     }
 }
 
@@ -632,7 +632,7 @@ function renderSurveyTable() {
     if (responses.length === 0) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 4;
+        cell.colSpan = 5;
         cell.className = "empty-state";
         cell.textContent = "No survey responses yet.";
         row.appendChild(cell);
@@ -659,8 +659,95 @@ function renderSurveyTable() {
         renderSurveyAnswerLines(answersCell, response);
         row.appendChild(answersCell);
 
+        const actionsCell = document.createElement("td");
+        const deleteButton = document.createElement("button");
+        const deletePayload = getSurveyDeletePayload(response);
+        deleteButton.className = "round-action round-action-danger";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+
+        if (deletePayload) {
+            deleteButton.title = "Delete survey response";
+            deleteButton.addEventListener("click", event => {
+                event.stopPropagation();
+                deleteSurveyResponse(response);
+            });
+        } else {
+            deleteButton.disabled = true;
+            deleteButton.title = "Cannot delete without response ID or nickname";
+        }
+
+        actionsCell.appendChild(deleteButton);
+        row.appendChild(actionsCell);
+
         elements.surveyBody.appendChild(row);
     });
+}
+
+async function deleteSurveyResponse(response) {
+    const deletePayload = getSurveyDeletePayload(response);
+
+    if (!deletePayload) {
+        return;
+    }
+
+    const label = getSurveyDeleteLabel(response);
+    const confirmed = window.confirm(
+        "Delete survey response from " + label + "? This permanently removes it."
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    setStatus("Deleting survey response...");
+
+    try {
+        const apiResponse = await fetch(apiUrl("/delete-survey-response"), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(deletePayload)
+        });
+
+        if (!apiResponse.ok) {
+            throw new Error(await getResponseError(apiResponse));
+        }
+
+        showNotice("Survey response deleted.");
+        await loadData(true);
+    } catch (error) {
+        setStatus("Could not delete survey response: " + error.message);
+    }
+}
+
+function getSurveyDeletePayload(response) {
+    const responseId = normalizeSurveyDeleteText(response.responseId);
+
+    if (responseId) {
+        return { responseId: responseId };
+    }
+
+    const playerNickname = getSurveyNickname(response);
+
+    if (playerNickname) {
+        return { playerNickname: playerNickname };
+    }
+
+    return null;
+}
+
+function getSurveyDeleteLabel(response) {
+    return getSurveyNickname(response)
+        || normalizeSurveyDeleteText(response.surveyTitle || response.surveyId)
+        || "this player";
+}
+
+function getSurveyNickname(response) {
+    return normalizeSurveyDeleteText(response.playerName)
+        || normalizeSurveyDeleteText(response.playerNickname)
+        || normalizeSurveyDeleteText(response.nickname);
 }
 
 function keepOrSelectFirst() {
@@ -850,6 +937,15 @@ function value(input) {
     }
 
     return String(input);
+}
+
+function normalizeSurveyDeleteText(input) {
+    if (input === null || input === undefined) {
+        return "";
+    }
+
+    const text = String(input).trim();
+    return text === "-" ? "" : text;
 }
 
 function numberValue(input) {
