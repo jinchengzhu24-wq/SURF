@@ -31,6 +31,9 @@
 Backend/.env
 Backend/__pycache__/
 
+# Local essay/reference drafts
+/[Aa]ssets/[Ee]ssay[Bb]ase/
+
 # Unity generated meta/debug artifacts
 *.pidb.meta
 *.pdb.meta
