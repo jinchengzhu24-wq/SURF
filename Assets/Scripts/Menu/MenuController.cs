@@ -3,7 +3,7 @@ using UnityEngine.SceneManagement;
 
 public class MenuController : MonoBehaviour
 {
-    public string targetSceneName = "Level_3(H)";
+    public string targetSceneName = "Algorithm_Level";
 
     public void StartGame()
     {

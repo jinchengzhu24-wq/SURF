@@ -1,4 +1,10 @@
 const DEFAULT_API_BASE = "http://111.231.136.4:8000";
+const SCENE_DISPLAY_NAMES = {
+    "Algorithm_Level": "Algorithm Level",
+    "Level_3(H)": "Algorithm Level",
+    "LLM_Level": "LLM Level",
+    "Level_4(A)": "LLM Level"
+};
 
 const state = {
     apiBase: resolveApiBase(),
@@ -814,7 +820,11 @@ function formatSceneNames(sceneNames) {
         return "Scene -";
     }
 
-    return "Scene " + sceneNames.join(", ");
+    return "Scene " + sceneNames.map(formatSceneName).join(", ");
+}
+
+function formatSceneName(sceneName) {
+    return SCENE_DISPLAY_NAMES[sceneName] || sceneName;
 }
 
 function formatShownCount(roundCount, levelCount) {

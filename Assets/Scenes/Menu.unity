@@ -2977,7 +2977,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: a47f2d8d6b964f61a42e7afafc318b24, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  targetSceneName: Level_3(H)
+  targetSceneName: Algorithm_Level
 --- !u!1 &4100100002
 GameObject:
   m_ObjectHideFlags: 0
