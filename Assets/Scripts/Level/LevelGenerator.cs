@@ -100,7 +100,10 @@ public class LevelGenerator : MonoBehaviour
     private static readonly Queue<string> recentStructureSignatures = new Queue<string>();
     private static readonly HashSet<string> recentStructureLookup = new HashSet<string>();
     private static int runtimeSeedCounter;
+    private static int algorithmTemplateRoundCounter;
     private static int algorithmTemplateCursor;
+    private static int[] algorithmTemplateOrder;
+    private static bool algorithmTemplateOrderNeedsShuffle = true;
 
     private static readonly Vector2Int[] directions =
     {
@@ -124,6 +127,13 @@ public class LevelGenerator : MonoBehaviour
     private string currentWaterStyle = DefaultWaterStyle;
     private string currentDesignNote = "";
     private bool activeLLMQualityGate;
+
+    public static void BeginAlgorithmTemplateRound()
+    {
+        algorithmTemplateRoundCounter++;
+        algorithmTemplateCursor = 0;
+        algorithmTemplateOrderNeedsShuffle = true;
+    }
 
     private void Awake()
     {
@@ -759,13 +769,10 @@ public class LevelGenerator : MonoBehaviour
             return;
         }
 
-        int templateIndex = algorithmTemplateCursor % templates.Length;
+        EnsureAlgorithmTemplateOrder(templates);
 
-        if (templateIndex < 0)
-        {
-            templateIndex += templates.Length;
-        }
-
+        int orderIndex = algorithmTemplateCursor % algorithmTemplateOrder.Length;
+        int templateIndex = algorithmTemplateOrder[orderIndex];
         algorithmTemplateCursor++;
         currentStructureTemplate = templates[templateIndex];
         currentArchetype = currentStructureTemplate.archetype;
@@ -775,6 +782,104 @@ public class LevelGenerator : MonoBehaviour
         currentDesignNote = "Algorithm template variation";
         hasDesignBlueprint = true;
         activeLLMQualityGate = false;
+    }
+
+    private void EnsureAlgorithmTemplateOrder(LevelGenerationTemplates.StructureTemplate[] templates)
+    {
+        if (!algorithmTemplateOrderNeedsShuffle
+            && algorithmTemplateOrder != null
+            && algorithmTemplateOrder.Length == templates.Length
+            && algorithmTemplateCursor < algorithmTemplateOrder.Length)
+        {
+            return;
+        }
+
+        int seed = rules != null && rules.useFixedSeed
+            ? rules.seed + algorithmTemplateRoundCounter
+            : GetRuntimeSeed();
+        System.Random shuffleRandom = new System.Random(seed);
+        algorithmTemplateOrder = BuildShuffledAlgorithmTemplateOrder(templates, shuffleRandom);
+        algorithmTemplateCursor = 0;
+        algorithmTemplateOrderNeedsShuffle = false;
+
+        if (logGenerationResult)
+        {
+            Debug.Log(
+                "LevelGenerator shuffled algorithm template order:"
+                + " roundCounter=" + algorithmTemplateRoundCounter
+                + ", seed=" + seed
+                + ", order=" + string.Join(",", algorithmTemplateOrder)
+            );
+        }
+    }
+
+    private static int[] BuildShuffledAlgorithmTemplateOrder(
+        LevelGenerationTemplates.StructureTemplate[] templates,
+        System.Random shuffleRandom)
+    {
+        int[] bestOrder = null;
+        int bestAdjacentMatchCount = int.MaxValue;
+        int attemptCount = Mathf.Max(8, templates.Length * 2);
+
+        for (int attempt = 0; attempt < attemptCount; attempt++)
+        {
+            int[] order = CreateSequentialTemplateOrder(templates.Length);
+            ShuffleTemplateOrder(order, shuffleRandom);
+            int adjacentMatchCount = CountAdjacentArchetypeMatches(order, templates);
+
+            if (adjacentMatchCount < bestAdjacentMatchCount)
+            {
+                bestOrder = order;
+                bestAdjacentMatchCount = adjacentMatchCount;
+
+                if (bestAdjacentMatchCount == 0)
+                {
+                    break;
+                }
+            }
+        }
+
+        return bestOrder ?? CreateSequentialTemplateOrder(templates.Length);
+    }
+
+    private static int[] CreateSequentialTemplateOrder(int count)
+    {
+        int[] order = new int[count];
+
+        for (int i = 0; i < count; i++)
+        {
+            order[i] = i;
+        }
+
+        return order;
+    }
+
+    private static void ShuffleTemplateOrder(int[] order, System.Random shuffleRandom)
+    {
+        for (int i = order.Length - 1; i > 0; i--)
+        {
+            int swapIndex = shuffleRandom.Next(i + 1);
+            int value = order[i];
+            order[i] = order[swapIndex];
+            order[swapIndex] = value;
+        }
+    }
+
+    private static int CountAdjacentArchetypeMatches(
+        int[] order,
+        LevelGenerationTemplates.StructureTemplate[] templates)
+    {
+        int count = 0;
+
+        for (int i = 1; i < order.Length; i++)
+        {
+            if (templates[order[i - 1]].archetype == templates[order[i]].archetype)
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private string GetAlgorithmTargetLayout(string archetype)

@@ -528,6 +528,7 @@ public class LevelStudyRecorder : MonoBehaviour
         gameRoundStartedAt = DateTime.UtcNow.ToString("o");
         gameRoundIndex++;
         roundLevelIndex = 0;
+        LevelGenerator.BeginAlgorithmTemplateRound();
 
         if (logRecordEvents)
         {
