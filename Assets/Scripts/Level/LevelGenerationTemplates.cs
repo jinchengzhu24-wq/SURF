@@ -193,71 +193,6 @@ public static class LevelGenerationTemplates
             " ##......## ",
             "  ########  "
         },
-        new string[]
-        {
-            " #########  ",
-            "##.......## ",
-            "#.........# ",
-            "#.........##",
-            "#..........#",
-            "#.........##",
-            "##........# ",
-            " #........# ",
-            " ##......## ",
-            "  ########  "
-        },
-        new string[]
-        {
-            "  ########  ",
-            " ##......## ",
-            " #........##",
-            "#..........#",
-            "#.........##",
-            "##.........#",
-            "#..........#",
-            "##........# ",
-            " ##......## ",
-            "  ########  "
-        },
-        new string[]
-        {
-            " ########   ",
-            "##......##  ",
-            "#........## ",
-            "#.........# ",
-            "##........# ",
-            " #........##",
-            " #.........#",
-            " ##.......# ",
-            "  ##.....## ",
-            "   #######  "
-        },
-        new string[]
-        {
-            "  ########  ",
-            " ##......## ",
-            "##........# ",
-            "#.........##",
-            "#..........#",
-            "#..........#",
-            "##.........#",
-            " #........##",
-            " ##......## ",
-            "  ########  "
-        },
-        new string[]
-        {
-            "   #######  ",
-            "  ##.....## ",
-            " ##.......# ",
-            "##........##",
-            "#..........#",
-            "#..........#",
-            "##........##",
-            " #.......## ",
-            " ##.....##  ",
-            "  #######   "
-        }
     };
 
     public static readonly StructureTemplate[] StructureTemplates =
@@ -459,7 +394,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "goal_room",
-            7,
+            2,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -483,7 +418,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "goal_room",
-            8,
+            4,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -507,7 +442,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "bottleneck_corridor",
-            9,
+            0,
             new Vector2Int[]
             {
                 new Vector2Int(5, 3),
@@ -531,7 +466,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "bottleneck_corridor",
-            10,
+            6,
             new Vector2Int[]
             {
                 new Vector2Int(4, 3),
@@ -555,7 +490,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "split_route",
-            7,
+            1,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -579,7 +514,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "split_route",
-            11,
+            5,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -603,7 +538,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "open_workshop",
-            10,
+            3,
             new Vector2Int[]
             {
                 new Vector2Int(4, 3),
@@ -628,7 +563,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "open_workshop",
-            8,
+            0,
             new Vector2Int[]
             {
                 new Vector2Int(3, 4),
