@@ -200,7 +200,11 @@ public class LevelGenerator : MonoBehaviour
             ? new System.Random(rules.seed)
             : new System.Random(GetRuntimeSeed());
 
-        if (!activeLLMQualityGate)
+        if (activeLLMQualityGate && hasDesignBlueprint)
+        {
+            currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(currentArchetype, random);
+        }
+        else if (!activeLLMQualityGate)
         {
             ApplyAlgorithmDesignBlueprint();
         }
