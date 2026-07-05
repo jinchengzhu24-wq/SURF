@@ -192,6 +192,71 @@ public static class LevelGenerationTemplates
             " #........# ",
             " ##......## ",
             "  ########  "
+        },
+        new string[]
+        {
+            " #########  ",
+            "##.......## ",
+            "#.........# ",
+            "#.........##",
+            "#..........#",
+            "#.........##",
+            "##........# ",
+            " #........# ",
+            " ##......## ",
+            "  ########  "
+        },
+        new string[]
+        {
+            "  ########  ",
+            " ##......## ",
+            " #........##",
+            "#..........#",
+            "#.........##",
+            "##.........#",
+            "#..........#",
+            "##........# ",
+            " ##......## ",
+            "  ########  "
+        },
+        new string[]
+        {
+            " ########   ",
+            "##......##  ",
+            "#........## ",
+            "#.........# ",
+            "##........# ",
+            " #........##",
+            " #.........#",
+            " ##.......# ",
+            "  ##.....## ",
+            "   #######  "
+        },
+        new string[]
+        {
+            "  ########  ",
+            " ##......## ",
+            "##........# ",
+            "#.........##",
+            "#..........#",
+            "#..........#",
+            "##.........#",
+            " #........##",
+            " ##......## ",
+            "  ########  "
+        },
+        new string[]
+        {
+            "   #######  ",
+            "  ##.....## ",
+            " ##.......# ",
+            "##........##",
+            "#..........#",
+            "#..........#",
+            "##........##",
+            " #.......## ",
+            " ##.....##  ",
+            "  #######   "
         }
     };
 
@@ -394,7 +459,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "goal_room",
-            2,
+            7,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -418,7 +483,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "goal_room",
-            4,
+            8,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -442,7 +507,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "bottleneck_corridor",
-            0,
+            9,
             new Vector2Int[]
             {
                 new Vector2Int(5, 3),
@@ -466,7 +531,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "bottleneck_corridor",
-            6,
+            10,
             new Vector2Int[]
             {
                 new Vector2Int(4, 3),
@@ -490,7 +555,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "split_route",
-            1,
+            7,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -514,7 +579,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "split_route",
-            5,
+            11,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -538,7 +603,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "open_workshop",
-            3,
+            10,
             new Vector2Int[]
             {
                 new Vector2Int(4, 3),
@@ -563,7 +628,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "open_workshop",
-            0,
+            8,
             new Vector2Int[]
             {
                 new Vector2Int(3, 4),
