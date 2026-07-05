@@ -62,6 +62,7 @@ public class LevelGenerator : MonoBehaviour
         public int waterAreas;
         public int surroundedWallCount;
         public int obstacleInfluence;
+        public int boxInteractionScore;
         public int targetDistance;
         public int structureSimilarity;
 
@@ -76,6 +77,7 @@ public class LevelGenerator : MonoBehaviour
                 + ", waterAreas=" + waterAreas
                 + ", surroundedWalls=" + surroundedWallCount
                 + ", obstacleInfluence=" + obstacleInfluence
+                + ", boxInteractionScore=" + boxInteractionScore
                 + ", targetDistance=" + targetDistance
                 + ", structureSimilarity=" + structureSimilarity;
         }
@@ -538,6 +540,7 @@ public class LevelGenerator : MonoBehaviour
         {
             return quality.waterTiles >= rules.llmMinimumWaterTiles
                 && quality.surroundedWallCount >= rules.llmMinimumSurroundedWalls
+                && quality.boxInteractionScore >= rules.llmMinimumBoxInteractionScore
                 && quality.structureSimilarity < rules.recentStructureSimilarityThreshold
                 && quality.score >= rules.llmMinimumQualityScore;
         }
@@ -605,6 +608,7 @@ public class LevelGenerator : MonoBehaviour
         quality.waterAreas = CountWaterAreas(rows);
         quality.surroundedWallCount = CountSurroundedWalls(rows);
         quality.obstacleInfluence = CountObstacleInfluence(rows);
+        quality.boxInteractionScore = GetBoxInteractionScore(rows);
         quality.targetDistance = GetTargetDistance(rows);
         quality.structureSimilarity = GetMaxRecentStructureSimilarity(rows);
         quality.score = GetQualityScore(quality);
@@ -2379,6 +2383,141 @@ public class LevelGenerator : MonoBehaviour
         }
 
         return influence;
+    }
+
+    private int GetBoxInteractionScore(string[] rows)
+    {
+        List<Vector2Int> boxPositions = GetRowsPositions(rows, Box);
+        List<Vector2Int> targetPositions = GetRowsPositions(rows, Target);
+
+        if (boxPositions.Count != 2 || targetPositions.Count < 2)
+        {
+            return 0;
+        }
+
+        int score = 0;
+        int boxDistance = ManhattanDistance(boxPositions[0], boxPositions[1]);
+        int targetDistance = ManhattanDistance(targetPositions[0], targetPositions[1]);
+
+        if (boxDistance <= 2)
+        {
+            score += 2;
+        }
+        else if (boxDistance <= 4)
+        {
+            score += 4;
+        }
+        else if (boxDistance <= 6)
+        {
+            score += 3;
+        }
+        else if (boxDistance <= 8)
+        {
+            score += 1;
+        }
+
+        if (targetDistance <= 3)
+        {
+            score += 3;
+        }
+        else if (targetDistance <= 5)
+        {
+            score += 2;
+        }
+        else if (targetDistance <= 7)
+        {
+            score += 1;
+        }
+
+        int sharedRouteCells = CountSharedBoxRouteCells(rows, boxPositions, targetPositions);
+        int sharedChokeWalls = CountSharedBoxChokeWalls(rows, boxPositions, targetPositions);
+        score += Mathf.Min(sharedRouteCells / 3, 3);
+        score += Mathf.Min(sharedChokeWalls, 3);
+
+        if (boxDistance >= 9 && targetDistance >= 8)
+        {
+            score = Mathf.Max(0, score - 2);
+        }
+
+        return score;
+    }
+
+    private int CountSharedBoxRouteCells(
+        string[] rows,
+        List<Vector2Int> boxPositions,
+        List<Vector2Int> targetPositions)
+    {
+        int count = 0;
+
+        for (int y = 1; y < rows.Length - 1; y++)
+        {
+            string row = rows[y] ?? "";
+
+            for (int x = 1; x < row.Length - 1; x++)
+            {
+                Vector2Int position = new Vector2Int(x, y);
+
+                if (!IsRowsWalkableForInfluence(rows, position))
+                {
+                    continue;
+                }
+
+                if (IsNearBoxTargetRoute(position, boxPositions[0], targetPositions)
+                    && IsNearBoxTargetRoute(position, boxPositions[1], targetPositions))
+                {
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    private int CountSharedBoxChokeWalls(
+        string[] rows,
+        List<Vector2Int> boxPositions,
+        List<Vector2Int> targetPositions)
+    {
+        int count = 0;
+
+        for (int y = 1; y < rows.Length - 1; y++)
+        {
+            string row = rows[y] ?? "";
+
+            for (int x = 1; x < row.Length - 1; x++)
+            {
+                Vector2Int position = new Vector2Int(x, y);
+
+                if (LevelData.GetMapTile(rows, position) != Wall || !IsChokeInfluenceWall(rows, position))
+                {
+                    continue;
+                }
+
+                if (IsNearBoxTargetRoute(position, boxPositions[0], targetPositions)
+                    && IsNearBoxTargetRoute(position, boxPositions[1], targetPositions))
+                {
+                    count++;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    private bool IsNearBoxTargetRoute(
+        Vector2Int position,
+        Vector2Int boxPosition,
+        List<Vector2Int> targetPositions)
+    {
+        for (int i = 0; i < targetPositions.Count; i++)
+        {
+            if (IsNearAxisAlignedCorridor(position, boxPosition, targetPositions[i], 1))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private List<Vector2Int> GetRowsPositions(string[] rows, char tile)

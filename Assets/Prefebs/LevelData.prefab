@@ -90,6 +90,7 @@ MonoBehaviour:
   llmMinimumQualityScore: 220
   llmMinimumWaterTiles: 4
   llmMinimumSurroundedWalls: 1
+  llmMinimumBoxInteractionScore: 4
   llmMaxPlanRetries: 2
   recentStructureSimilarityThreshold: 86
   enableIrregularOuterWalls: 1

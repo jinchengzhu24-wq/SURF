@@ -43,6 +43,7 @@ public class LevelGenerationRules : MonoBehaviour
     public int llmMinimumQualityScore = 220;
     public int llmMinimumWaterTiles = 4;
     public int llmMinimumSurroundedWalls = 1;
+    public int llmMinimumBoxInteractionScore = 4;
     public int llmMaxPlanRetries = 2;
     [Range(0, 100)]
     public int recentStructureSimilarityThreshold = 86;
@@ -90,6 +91,7 @@ public class LevelGenerationRules : MonoBehaviour
             && llmMinimumQualityScore >= 0
             && llmMinimumWaterTiles >= 0
             && llmMinimumSurroundedWalls >= 0
+            && llmMinimumBoxInteractionScore >= 0
             && llmMaxPlanRetries > 0
             && recentStructureSimilarityThreshold >= 0
             && recentStructureSimilarityThreshold <= 100
