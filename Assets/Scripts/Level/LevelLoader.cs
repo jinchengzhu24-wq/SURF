@@ -18,7 +18,7 @@ using UnityEngine.Tilemaps;
 //
 // 当前墙体瓦片类型：
 // - wallTile：普通墙。
-// - wallVerticalTile：上方或下方有墙时使用的墙。
+// - wallVerticalTile：上下都有墙，或下方有墙且左/右有墙时使用的墙。
 // - wallRightAndRightDownTile：右侧和右下都有墙时使用的墙。
 // - wallSurroundedTile：周围八个方向都有瓦片，且下方不是水时使用的特殊墙。
 //

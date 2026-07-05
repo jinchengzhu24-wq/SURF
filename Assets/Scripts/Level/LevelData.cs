@@ -159,7 +159,12 @@ public class LevelData : MonoBehaviour
 
     public static bool HasVerticalWallShape(string[] rows, int x, int y)
     {
-        return IsVerticalWallShape(IsWall(rows, x, y - 1), IsWall(rows, x, y + 1));
+        return IsVerticalWallShape(
+            IsWall(rows, x, y - 1),
+            IsWall(rows, x, y + 1),
+            IsWall(rows, x - 1, y),
+            IsWall(rows, x + 1, y)
+        );
     }
 
     public static bool HasHorizontalWallShape(string[] rows, int x, int y)
@@ -195,7 +200,7 @@ public class LevelData : MonoBehaviour
         return surrounded
             || IsNormalCornerWallShape(up, left, right)
             || IsRightAndRightDownWallShape(right, rightDown)
-            || IsVerticalWallShape(up, down)
+            || IsVerticalWallShape(up, down, left, right)
             || IsHorizontalWallShape(left, right);
     }
 
@@ -209,9 +214,9 @@ public class LevelData : MonoBehaviour
         return right && rightDown;
     }
 
-    public static bool IsVerticalWallShape(bool up, bool down)
+    public static bool IsVerticalWallShape(bool up, bool down, bool left, bool right)
     {
-        return up || down;
+        return (up && down) || (down && (left || right));
     }
 
     public static bool IsHorizontalWallShape(bool left, bool right)
