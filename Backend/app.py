@@ -64,6 +64,10 @@ class DeleteSurveyResponseRequest(BaseModel):
     playerNickname: str | None = ""
 
 
+class DeleteCreativeIdeaRequest(BaseModel):
+    ideaId: str | None = ""
+
+
 DEFAULT_PLAN = {
     "minSolutionSteps": 22,
     "maxSolutionSteps": 42,
@@ -405,6 +409,43 @@ def delete_survey_response(request: DeleteSurveyResponseRequest):
     return {
         "status": "ok",
         "deletedResponseCount": deleted_count,
+    }
+
+
+@app.post("/delete-creative-idea")
+def delete_creative_idea(request: DeleteCreativeIdeaRequest):
+    idea_id = normalize_creative_idea_identifier(request.ideaId)
+
+    if not idea_id:
+        raise HTTPException(status_code=400, detail="ideaId is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_creative_idea_events()
+        remaining_records = []
+        deleted_count = 0
+
+        for record in records:
+            record_idea_id = normalize_creative_idea_identifier(
+                record.get("ideaId")
+                or record.get("id")
+            )
+
+            if record_idea_id == idea_id:
+                deleted_count += 1
+            else:
+                remaining_records.append(record)
+
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Creative idea not found")
+
+        write_jsonl_records(CREATIVE_IDEA_LOG_FILE, remaining_records)
+
+    return {
+        "status": "ok",
+        "ideaId": idea_id,
+        "deletedIdeaCount": deleted_count,
     }
 
 
@@ -1265,6 +1306,14 @@ def normalize_survey_identifier(value):
         return ""
 
     return str(value).strip()
+
+
+def normalize_creative_idea_identifier(value):
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    return "" if text == "-" else text
 
 
 def get_survey_player_identifier(response):

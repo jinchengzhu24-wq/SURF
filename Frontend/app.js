@@ -119,7 +119,7 @@ async function loadData(manual) {
         elements.dataSource.textContent = "API: " + state.apiBase;
     } catch (error) {
         setStatus("Could not load records: " + error.message);
-        elements.creativeIdeasBody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load creative ideas.</td></tr>';
+        elements.creativeIdeasBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load creative ideas.</td></tr>';
         elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
         elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
     }
@@ -470,7 +470,7 @@ function renderCreativeIdeasTable() {
     if (ideas.length === 0) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 4;
+        cell.colSpan = 5;
         cell.className = "empty-state";
         cell.textContent = "No creative workshop ideas yet.";
         row.appendChild(cell);
@@ -499,6 +499,27 @@ function renderCreativeIdeasTable() {
             cell.textContent = text;
             row.appendChild(cell);
         });
+
+        const actionsCell = document.createElement("td");
+        const deleteButton = document.createElement("button");
+        const ideaId = normalizeCreativeIdeaText(idea.ideaId);
+        deleteButton.className = "round-action round-action-danger";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+
+        if (ideaId) {
+            deleteButton.title = "Delete creative idea";
+            deleteButton.addEventListener("click", event => {
+                event.stopPropagation();
+                deleteCreativeIdea(idea);
+            });
+        } else {
+            deleteButton.disabled = true;
+            deleteButton.title = "Cannot delete without idea ID";
+        }
+
+        actionsCell.appendChild(deleteButton);
+        row.appendChild(actionsCell);
 
         elements.creativeIdeasBody.appendChild(row);
     });
@@ -757,6 +778,46 @@ async function deleteSurveyResponse(response) {
     }
 }
 
+async function deleteCreativeIdea(idea) {
+    const ideaId = normalizeCreativeIdeaText(idea.ideaId);
+
+    if (!ideaId) {
+        return;
+    }
+
+    const label = getCreativeIdeaDeleteLabel(idea);
+    const confirmed = window.confirm(
+        "Delete creative idea \"" + label + "\"? This permanently removes it."
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    setStatus("Deleting creative idea...");
+
+    try {
+        const apiResponse = await fetch(apiUrl("/delete-creative-idea"), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                ideaId: ideaId
+            })
+        });
+
+        if (!apiResponse.ok) {
+            throw new Error(await getResponseError(apiResponse));
+        }
+
+        showNotice("Creative idea deleted.");
+        await loadData(true);
+    } catch (error) {
+        setStatus("Could not delete creative idea: " + error.message);
+    }
+}
+
 function getSurveyDeletePayload(response) {
     const responseId = normalizeSurveyDeleteText(response.responseId);
 
@@ -771,6 +832,16 @@ function getSurveyDeletePayload(response) {
     }
 
     return null;
+}
+
+function getCreativeIdeaDeleteLabel(idea) {
+    const ideaText = normalizeCreativeIdeaText(idea.ideaText);
+
+    if (!ideaText) {
+        return shortId(idea.ideaId);
+    }
+
+    return ideaText.length > 40 ? ideaText.slice(0, 40) + "..." : ideaText;
 }
 
 function getSurveyDeleteLabel(response) {
@@ -975,6 +1046,15 @@ function value(input) {
 }
 
 function normalizeSurveyDeleteText(input) {
+    if (input === null || input === undefined) {
+        return "";
+    }
+
+    const text = String(input).trim();
+    return text === "-" ? "" : text;
+}
+
+function normalizeCreativeIdeaText(input) {
     if (input === null || input === undefined) {
         return "";
     }
