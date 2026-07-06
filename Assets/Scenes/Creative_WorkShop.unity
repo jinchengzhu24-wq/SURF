@@ -248,7 +248,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -18.070618, y: 37}
+  m_AnchoredPosition: {x: -18.070618, y: 12}
   m_SizeDelta: {x: 1361.8589, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &476560008
@@ -2293,7 +2293,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -199, y: -112}
+  m_AnchoredPosition: {x: -199, y: -131}
   m_SizeDelta: {x: 1000, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1172981184
@@ -2374,7 +2374,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -169.78613, y: -177}
+  m_AnchoredPosition: {x: -169.78613, y: -196}
   m_SizeDelta: {x: 1068.4277, y: 50}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1347971039
@@ -2599,7 +2599,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 90.65039, y: 116}
+  m_AnchoredPosition: {x: 90.65039, y: 91}
   m_SizeDelta: {x: 1579.3008, y: 103.6337}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1449172206
@@ -2678,7 +2678,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -18.070618, y: -20}
+  m_AnchoredPosition: {x: -18.070618, y: -45}
   m_SizeDelta: {x: 1361.8589, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1536349720
@@ -2757,8 +2757,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 90.65039, y: 238.68317}
-  m_SizeDelta: {x: 1579.3008, y: 103.6337}
+  m_AnchoredPosition: {x: 90.65039, y: 230}
+  m_SizeDelta: {x: 1579.3008, y: 147.0354}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1668752550
 MonoBehaviour:
@@ -2794,7 +2794,8 @@ MonoBehaviour:
     m_VerticalOverflow: 0
     m_LineSpacing: 1
   m_Text: You can mention the style, difficulty, layout, obstacles, or any feeling
-    you want the level to have.
+    you want the level to have. After that, the LLM will generate levels based on
+    your preference
 --- !u!222 &1668752551
 CanvasRenderer:
   m_ObjectHideFlags: 0
