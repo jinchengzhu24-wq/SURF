@@ -26,6 +26,7 @@ FRONTEND_DIR = PROJECT_DIR / "Frontend"
 STUDY_LOG_DIR = BASE_DIR / "study_logs"
 STUDY_LOG_FILE = STUDY_LOG_DIR / "level_records.jsonl"
 SURVEY_LOG_FILE = STUDY_LOG_DIR / "survey_responses.jsonl"
+CREATIVE_IDEA_LOG_FILE = STUDY_LOG_DIR / "creative_ideas.jsonl"
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -183,6 +184,11 @@ async def record_survey_response(request: Request):
     return await append_survey_record(request)
 
 
+@app.post("/record-creative-idea")
+async def record_creative_idea(request: Request):
+    return await append_creative_idea_record(request)
+
+
 @app.get("/level-records", response_class=PlainTextResponse)
 def get_level_records():
     if not STUDY_LOG_FILE.exists():
@@ -199,10 +205,24 @@ def get_survey_records():
     return SURVEY_LOG_FILE.read_text(encoding="utf-8")
 
 
+@app.get("/creative-ideas", response_class=PlainTextResponse)
+def get_creative_ideas():
+    if not CREATIVE_IDEA_LOG_FILE.exists():
+        return ""
+
+    return CREATIVE_IDEA_LOG_FILE.read_text(encoding="utf-8")
+
+
 @app.get("/survey-records-data")
 def get_survey_records_data():
     responses, malformed_count = read_survey_response_events()
     return build_survey_records_payload(responses, malformed_count)
+
+
+@app.get("/creative-ideas-data")
+def get_creative_ideas_data():
+    ideas, malformed_count = read_creative_idea_events()
+    return build_creative_ideas_payload(ideas, malformed_count)
 
 
 @app.get("/level-records-view", response_class=HTMLResponse)
@@ -238,6 +258,14 @@ def get_level_records_data():
     payload["surveySummary"] = survey_payload["summary"]
     payload["surveyResponses"] = survey_payload["responses"]
     payload["surveyMalformedCount"] = survey_payload["malformedCount"]
+    creative_ideas, creative_malformed_count = read_creative_idea_events()
+    creative_payload = build_creative_ideas_payload(
+        creative_ideas,
+        creative_malformed_count,
+    )
+    payload["creativeIdeaSummary"] = creative_payload["summary"]
+    payload["creativeIdeas"] = creative_payload["ideas"]
+    payload["creativeIdeaMalformedCount"] = creative_payload["malformedCount"]
     return payload
 
 
@@ -387,6 +415,7 @@ def clear_level_records():
     with study_record_lock:
         STUDY_LOG_FILE.write_text("", encoding="utf-8")
         SURVEY_LOG_FILE.write_text("", encoding="utf-8")
+        CREATIVE_IDEA_LOG_FILE.write_text("", encoding="utf-8")
 
     return RedirectResponse("/level-records-view?cleared=1", status_code=303)
 
@@ -442,12 +471,47 @@ async def append_survey_record(request: Request):
     }
 
 
+async def append_creative_idea_record(request: Request):
+    data = await request.json()
+
+    if not isinstance(data, dict):
+        data = {"payload": data}
+
+    idea_text = str(data.get("ideaText") or data.get("idea") or "").strip()
+
+    if not idea_text:
+        raise HTTPException(status_code=400, detail="ideaText is required")
+
+    data["ideaText"] = idea_text
+    data.setdefault("eventType", "creative-idea")
+    data.setdefault("ideaId", f"idea-{int(time.time() * 1000)}")
+    data["serverReceivedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        with CREATIVE_IDEA_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(data, ensure_ascii=False))
+            log_file.write("\n")
+
+    return {
+        "status": "ok",
+        "eventType": data["eventType"],
+        "ideaId": data["ideaId"],
+        "logFile": str(CREATIVE_IDEA_LOG_FILE),
+    }
+
+
 def read_level_record_events():
     return read_jsonl_records(STUDY_LOG_FILE)
 
 
 def read_survey_response_events():
     return read_jsonl_records(SURVEY_LOG_FILE)
+
+
+def read_creative_idea_events():
+    return read_jsonl_records(CREATIVE_IDEA_LOG_FILE)
 
 
 def read_jsonl_records(path):
@@ -777,6 +841,51 @@ def build_survey_records_payload(responses, malformed_count):
         "logFile": str(SURVEY_LOG_FILE),
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+
+def build_creative_ideas_payload(ideas, malformed_count):
+    session_ids = {
+        idea.get("sessionId")
+        for idea in ideas
+        if idea.get("sessionId")
+    }
+    normalized_ideas = [
+        normalize_creative_idea(idea)
+        for idea in ideas
+    ]
+    sorted_ideas = sorted(
+        normalized_ideas,
+        key=lambda idea: idea.get("serverReceivedAt") or idea.get("timestamp") or "",
+        reverse=True,
+    )
+
+    return {
+        "summary": {
+            "ideaCount": len(ideas),
+            "sessionCount": len(session_ids),
+            "malformedCount": malformed_count,
+        },
+        "ideas": sorted_ideas,
+        "malformedCount": malformed_count,
+        "logFile": str(CREATIVE_IDEA_LOG_FILE),
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def normalize_creative_idea(idea):
+    normalized = dict(idea)
+    normalized["ideaId"] = value_or_dash(
+        idea.get("ideaId")
+        or idea.get("id")
+    )
+    normalized["sessionId"] = value_or_dash(idea.get("sessionId"))
+    normalized["ideaText"] = value_or_dash(
+        idea.get("ideaText")
+        or idea.get("idea")
+        or idea.get("text")
+    )
+    normalized["sceneName"] = value_or_dash(idea.get("sceneName"))
+    return normalized
 
 
 def normalize_survey_response(response):

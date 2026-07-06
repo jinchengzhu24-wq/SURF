@@ -4,8 +4,14 @@ using UnityEngine.SceneManagement;
 public class MenuController : MonoBehaviour
 {
     public string targetSceneName = "Algorithm_Level";
+    public string creativeWorkshopSceneName = "Creative_WorkShop";
 
     public void StartGame()
+    {
+        LoadScene(creativeWorkshopSceneName, "creative workshop");
+    }
+
+    public void TryGame()
     {
         if (string.IsNullOrEmpty(targetSceneName))
         {
@@ -15,6 +21,17 @@ public class MenuController : MonoBehaviour
 
         LevelStudyRecorder.BeginGameRound();
         SceneManager.LoadScene(targetSceneName);
+    }
+
+    private void LoadScene(string sceneName, string sceneLabel)
+    {
+        if (string.IsNullOrEmpty(sceneName))
+        {
+            Debug.LogWarning("MenuController: " + sceneLabel + " scene name is empty.");
+            return;
+        }
+
+        SceneManager.LoadScene(sceneName);
     }
 
     public void QuitGame()

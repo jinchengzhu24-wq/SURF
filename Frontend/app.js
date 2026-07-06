@@ -3,7 +3,8 @@ const SCENE_DISPLAY_NAMES = {
     "Algorithm_Level": "Algorithm Level",
     "Level_3(H)": "Algorithm Level",
     "LLM_Level": "LLM Level",
-    "Level_4(A)": "LLM Level"
+    "Level_4(A)": "LLM Level",
+    "Creative_WorkShop": "Creative Workshop"
 };
 
 const state = {
@@ -31,6 +32,8 @@ const elements = {
     searchInput: document.getElementById("searchInput"),
     statusFilter: document.getElementById("statusFilter"),
     sourceFilter: document.getElementById("sourceFilter"),
+    creativeIdeaCount: document.getElementById("creativeIdeaCount"),
+    creativeIdeasBody: document.getElementById("creativeIdeasBody"),
     resultCount: document.getElementById("resultCount"),
     recordsBody: document.getElementById("recordsBody"),
     surveyCount: document.getElementById("surveyCount"),
@@ -112,11 +115,13 @@ async function loadData(manual) {
         renderSummary(state.payload.summary || {});
         renderSourceFilter(state.payload.summary && state.payload.summary.sourceCounts);
         applyFilters();
+        renderCreativeIdeasTable();
         renderSurveyTable();
         setStatus("Last loaded " + formatTimestamp(state.payload.generatedAt));
         elements.dataSource.textContent = "API: " + state.apiBase;
     } catch (error) {
         setStatus("Could not load records: " + error.message);
+        elements.creativeIdeasBody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load creative ideas.</td></tr>';
         elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
         elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
     }
@@ -467,6 +472,48 @@ function renderRoundRow(round) {
     cell.appendChild(content);
     row.appendChild(cell);
     return row;
+}
+
+function renderCreativeIdeasTable() {
+    const ideas = (state.payload && state.payload.creativeIdeas) || [];
+    elements.creativeIdeasBody.textContent = "";
+    elements.creativeIdeaCount.textContent = ideas.length + " shown";
+
+    if (ideas.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 4;
+        cell.className = "empty-state";
+        cell.textContent = "No creative workshop ideas yet.";
+        row.appendChild(cell);
+        elements.creativeIdeasBody.appendChild(row);
+        return;
+    }
+
+    ideas.forEach(idea => {
+        const row = document.createElement("tr");
+        const cells = [
+            formatTimestamp(idea.serverReceivedAt || idea.timestamp),
+            value(idea.ideaText),
+            formatSceneName(value(idea.sceneName)),
+            shortId(idea.sessionId)
+        ];
+
+        cells.forEach((text, index) => {
+            const cell = document.createElement("td");
+
+            if (index === 1) {
+                cell.className = "idea-cell";
+            } else if (index === 3) {
+                cell.className = "small";
+            }
+
+            cell.textContent = text;
+            row.appendChild(cell);
+        });
+
+        elements.creativeIdeasBody.appendChild(row);
+    });
 }
 
 function renderLevelRow(level) {

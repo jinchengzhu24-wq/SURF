@@ -202,6 +202,22 @@ main {
     min-width: 0;
 }
 
+.creative-panel {
+    min-width: 0;
+}
+
+.creative-table-wrap {
+    max-height: 240px;
+    min-height: 150px;
+}
+
+.idea-cell {
+    max-width: 420px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+}
+
 .survey-table-wrap {
     max-height: 280px;
     min-height: 180px;

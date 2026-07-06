@@ -1,0 +1,252 @@
+using System;
+using System.Collections;
+using System.Text;
+using TMPro;
+using UnityEngine;
+using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
+using UnityEngine.UI;
+
+public class CreativeWorkshopInputController : MonoBehaviour
+{
+    private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
+    private const string CreativeIdeaPath = "/record-creative-idea";
+    private const string SessionPrefsKey = "SokobanCreativeWorkshopSessionId";
+
+    [Header("Scene UI")]
+    public TMP_InputField ideaInput;
+    public Button submitButton;
+    public Text statusText;
+
+    [Header("Input")]
+    public string ideaPlaceholder = "Enter your idea";
+    [Min(1)]
+    public int ideaCharacterLimit = 240;
+
+    [Header("Backend")]
+    public string backendBaseUrl = DefaultBackendBaseUrl;
+    public int requestTimeoutSeconds = 5;
+    public bool logIdeaEvents = true;
+
+    private float startedAt;
+    private bool isSubmitting;
+
+    private void Awake()
+    {
+        startedAt = Time.realtimeSinceStartup;
+    }
+
+    private void Start()
+    {
+        ResolveSceneReferences();
+        ConfigureInput();
+        WireButtons();
+        SetStatus("");
+        UpdateSubmitState();
+    }
+
+    private void OnDestroy()
+    {
+        if (ideaInput != null)
+        {
+            ideaInput.onValueChanged.RemoveListener(OnIdeaChanged);
+        }
+    }
+
+    private void ResolveSceneReferences()
+    {
+        if (ideaInput == null)
+        {
+            GameObject inputObject = GameObject.Find("InputField");
+
+            if (inputObject != null)
+            {
+                ideaInput = inputObject.GetComponent<TMP_InputField>();
+            }
+        }
+
+        if (ideaInput == null)
+        {
+            ideaInput = FindObjectOfType<TMP_InputField>();
+        }
+
+        if (submitButton == null)
+        {
+            GameObject submitObject = GameObject.Find("SubmitButton");
+
+            if (submitObject != null)
+            {
+                submitButton = submitObject.GetComponent<Button>();
+            }
+        }
+    }
+
+    private void ConfigureInput()
+    {
+        if (ideaInput == null)
+        {
+            return;
+        }
+
+        ideaInput.contentType = TMP_InputField.ContentType.Standard;
+        ideaInput.lineType = TMP_InputField.LineType.SingleLine;
+        ideaInput.characterLimit = Mathf.Max(1, ideaCharacterLimit);
+        ideaInput.richText = false;
+
+        TMP_Text placeholderText = ideaInput.placeholder as TMP_Text;
+
+        if (placeholderText != null && !string.IsNullOrEmpty(ideaPlaceholder))
+        {
+            placeholderText.text = ideaPlaceholder;
+        }
+    }
+
+    private void WireButtons()
+    {
+        if (submitButton != null)
+        {
+            submitButton.onClick.RemoveAllListeners();
+            submitButton.onClick.AddListener(Submit);
+        }
+
+        if (ideaInput != null)
+        {
+            ideaInput.onValueChanged.RemoveListener(OnIdeaChanged);
+            ideaInput.onValueChanged.AddListener(OnIdeaChanged);
+        }
+    }
+
+    private void OnIdeaChanged(string value)
+    {
+        SetStatus("");
+        UpdateSubmitState();
+    }
+
+    private void UpdateSubmitState()
+    {
+        if (submitButton != null)
+        {
+            submitButton.interactable = !isSubmitting && !string.IsNullOrEmpty(IdeaText);
+        }
+    }
+
+    private void Submit()
+    {
+        if (isSubmitting || string.IsNullOrEmpty(IdeaText))
+        {
+            return;
+        }
+
+        StartCoroutine(SubmitRoutine());
+    }
+
+    private IEnumerator SubmitRoutine()
+    {
+        isSubmitting = true;
+        UpdateSubmitState();
+        SetStatus("Submitting...");
+
+        CreativeIdeaRecord record = CreateIdeaRecord();
+        string json = JsonUtility.ToJson(record);
+        byte[] body = Encoding.UTF8.GetBytes(json);
+
+        using (UnityWebRequest request = new UnityWebRequest(GetBackendUrl(CreativeIdeaPath), "POST"))
+        {
+            request.uploadHandler = new UploadHandlerRaw(body);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+
+            yield return request.SendWebRequest();
+
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                SetStatus("Submitted.");
+
+                if (logIdeaEvents)
+                {
+                    Debug.Log("Creative workshop idea submitted: ideaId=" + record.ideaId);
+                }
+            }
+            else
+            {
+                SetStatus("Submit failed: " + request.error);
+                Debug.LogWarning(
+                    "Creative workshop idea submit failed:"
+                    + " error=" + request.error
+                    + ", responseCode=" + request.responseCode
+                );
+            }
+        }
+
+        isSubmitting = false;
+        UpdateSubmitState();
+    }
+
+    private CreativeIdeaRecord CreateIdeaRecord()
+    {
+        return new CreativeIdeaRecord
+        {
+            eventType = "creative-idea",
+            ideaId = Guid.NewGuid().ToString("N"),
+            sessionId = GetOrCreateSessionId(),
+            ideaText = IdeaText,
+            sceneName = SceneManager.GetActiveScene().name,
+            timestamp = DateTime.UtcNow.ToString("o"),
+            durationSeconds = Mathf.Round((Time.realtimeSinceStartup - startedAt) * 100f) / 100f
+        };
+    }
+
+    private string GetBackendUrl(string path)
+    {
+        string baseUrl = string.IsNullOrEmpty(backendBaseUrl)
+            ? DefaultBackendBaseUrl
+            : backendBaseUrl.TrimEnd('/');
+
+        return baseUrl + path;
+    }
+
+    private string GetOrCreateSessionId()
+    {
+        string sessionId = PlayerPrefs.GetString(SessionPrefsKey, "");
+
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            sessionId = Guid.NewGuid().ToString("N");
+            PlayerPrefs.SetString(SessionPrefsKey, sessionId);
+            PlayerPrefs.Save();
+        }
+
+        return sessionId;
+    }
+
+    private void SetStatus(string message)
+    {
+        if (statusText != null)
+        {
+            statusText.text = message;
+        }
+    }
+
+    private string IdeaText
+    {
+        get
+        {
+            return ideaInput != null && ideaInput.text != null
+                ? ideaInput.text.Trim()
+                : "";
+        }
+    }
+}
+
+[Serializable]
+public class CreativeIdeaRecord
+{
+    public string eventType;
+    public string ideaId;
+    public string sessionId;
+    public string ideaText;
+    public string sceneName;
+    public string timestamp;
+    public float durationSeconds;
+}
