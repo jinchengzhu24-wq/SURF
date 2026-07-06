@@ -13,8 +13,7 @@ const state = {
     filteredRounds: [],
     filteredLevels: [],
     selectedRunId: null,
-    expandedRoundIds: new Set(),
-    hasInitializedRoundExpansion: false
+    expandedRoundIds: new Set()
 };
 
 const elements = {
@@ -109,7 +108,6 @@ async function loadData(manual) {
 
         if (!manual) {
             state.expandedRoundIds.clear();
-            state.hasInitializedRoundExpansion = false;
         }
 
         renderSummary(state.payload.summary || {});
@@ -145,7 +143,6 @@ async function clearRecords() {
 
         state.selectedRunId = null;
         state.expandedRoundIds.clear();
-        state.hasInitializedRoundExpansion = false;
         showNotice("Records cleared.");
         await loadData(true);
     } catch (error) {
@@ -336,24 +333,15 @@ function levelMatchesFilters(level, round, search, status, source) {
 }
 
 function ensureRoundExpansion() {
-    if (state.filteredRounds.length === 0) {
-        return;
-    }
+    const visibleRoundIds = new Set(
+        state.filteredRounds.map(round => round.roundId)
+    );
 
-    if (!state.hasInitializedRoundExpansion) {
-        state.expandedRoundIds.clear();
-        state.expandedRoundIds.add(state.filteredRounds[0].roundId);
-        state.hasInitializedRoundExpansion = true;
-        return;
-    }
-
-    const hasExpandedVisibleRound = state.filteredRounds.some(round => (
-        state.expandedRoundIds.has(round.roundId)
-    ));
-
-    if (!hasExpandedVisibleRound) {
-        state.expandedRoundIds.add(state.filteredRounds[0].roundId);
-    }
+    [...state.expandedRoundIds].forEach(roundId => {
+        if (!visibleRoundIds.has(roundId)) {
+            state.expandedRoundIds.delete(roundId);
+        }
+    });
 }
 
 function renderTable() {
