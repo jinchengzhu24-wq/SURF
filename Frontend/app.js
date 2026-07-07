@@ -4,8 +4,11 @@ const SCENE_DISPLAY_NAMES = {
     "Level_3(H)": "Algorithm Level",
     "LLM_Level": "LLM Level",
     "Level_4(A)": "LLM Level",
+    "Custom_Level": "Custom Level",
     "Creative_WorkShop": "Creative Workshop"
 };
+
+const DASHBOARD_LEVEL_SCENE_NAME = "Custom_Level";
 
 const state = {
     apiBase: resolveApiBase(),
@@ -103,7 +106,7 @@ async function loadData(manual) {
         }
 
         const previousSelectedRunId = state.selectedRunId;
-        state.payload = await response.json();
+        state.payload = buildDashboardPayload(await response.json());
         state.selectedRunId = previousSelectedRunId;
 
         if (!manual) {
@@ -177,6 +180,116 @@ function renderSourceFilter(sourceCounts) {
     if ([...elements.sourceFilter.options].some(option => option.value === currentValue)) {
         elements.sourceFilter.value = currentValue;
     }
+}
+
+function buildDashboardPayload(payload) {
+    const sourcePayload = payload || {};
+    const levels = Array.isArray(sourcePayload.levels)
+        ? sourcePayload.levels.filter(isDashboardLevel)
+        : [];
+    const rounds = Array.isArray(sourcePayload.rounds)
+        ? sourcePayload.rounds
+            .map(round => filterRoundForDashboard(round))
+            .filter(round => round !== null)
+        : [];
+
+    return Object.assign({}, sourcePayload, {
+        levels: levels,
+        rounds: rounds,
+        summary: buildDashboardSummary(levels, rounds, sourcePayload.summary || {})
+    });
+}
+
+function filterRoundForDashboard(round) {
+    const levels = Array.isArray(round.levels)
+        ? round.levels.filter(isDashboardLevel)
+        : [];
+
+    if (levels.length === 0) {
+        return null;
+    }
+
+    return Object.assign({}, round, {
+        levels: levels,
+        sceneNames: [DASHBOARD_LEVEL_SCENE_NAME]
+    });
+}
+
+function isDashboardLevel(level) {
+    const start = (level && level.start) || {};
+    const end = (level && level.end) || {};
+    return (start.sceneName || end.sceneName) === DASHBOARD_LEVEL_SCENE_NAME;
+}
+
+function buildDashboardSummary(levels, rounds, baseSummary) {
+    const sessionIds = new Set();
+    const sourceCounts = {};
+    let eventCount = 0;
+    let completedCount = 0;
+    let missingEndCount = 0;
+    let restartedCount = 0;
+    let totalDurationSeconds = 0;
+    let endedLevelCount = 0;
+    let totalMoves = 0;
+    let totalPushes = 0;
+
+    levels.forEach(level => {
+        const start = level.start || {};
+        const end = level.end || null;
+        const source = value(start.source);
+        sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+        eventCount += Array.isArray(level.events)
+            ? level.events.length
+            : (level.start ? 1 : 0) + (level.end ? 1 : 0);
+
+        if (start.sessionId) {
+            sessionIds.add(start.sessionId);
+        } else if (end && end.sessionId) {
+            sessionIds.add(end.sessionId);
+        }
+
+        if (!end) {
+            missingEndCount++;
+            return;
+        }
+
+        if (end.completed) {
+            completedCount++;
+        }
+
+        if (end.endReason === "restarted") {
+            restartedCount++;
+        }
+
+        if (typeof end.durationSeconds === "number") {
+            totalDurationSeconds += end.durationSeconds;
+            endedLevelCount++;
+        }
+
+        if (typeof end.moveCount === "number") {
+            totalMoves += end.moveCount;
+        }
+
+        if (typeof end.pushCount === "number") {
+            totalPushes += end.pushCount;
+        }
+    });
+
+    return Object.assign({}, baseSummary, {
+        eventCount: eventCount,
+        levelCount: levels.length,
+        roundCount: rounds.length,
+        sessionCount: sessionIds.size,
+        completedCount: completedCount,
+        missingEndCount: missingEndCount,
+        restartedCount: restartedCount,
+        totalMoves: totalMoves,
+        totalPushes: totalPushes,
+        averageDurationSeconds: endedLevelCount > 0
+            ? Math.round((totalDurationSeconds / endedLevelCount) * 100) / 100
+            : 0,
+        sourceCounts: sourceCounts
+    });
 }
 
 function applyFilters() {

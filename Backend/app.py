@@ -15,6 +15,11 @@ from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel
 
+try:
+    from level_plan_prompt import build_level_plan_messages
+except ImportError:
+    from .level_plan_prompt import build_level_plan_messages
+
 HOST = "127.0.0.1"
 PORT = 8000
 START_URL = f"http://{HOST}:{PORT}/generate-level-plan"
@@ -462,8 +467,20 @@ def clear_level_records():
 
 
 @app.get("/generate-level-plan")
-def generate_level_plan():
-    return create_level_plan()
+def generate_level_plan(
+    ideaText: str = "",
+    ideaId: str = "",
+    sessionId: str = "",
+    sceneName: str = "",
+):
+    return create_level_plan(
+        {
+            "ideaText": ideaText,
+            "ideaId": ideaId,
+            "sessionId": sessionId,
+            "sceneName": sceneName,
+        }
+    )
 
 
 async def append_level_record(request: Request, default_event_type: str):
@@ -1392,7 +1409,7 @@ def escape_text(value):
     return html.escape(str(value), quote=True)
 
 
-def create_level_plan():
+def create_level_plan(creative_context=None):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
 
     if not api_key or api_key == "your_deepseek_api_key_here":
@@ -1407,55 +1424,11 @@ def create_level_plan():
 
         response = client.chat.completions.create(
             model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a classic Sokoban level design director. Your job is "
-                        "to create a high-level blueprint for an algorithmic Sokoban "
-                        "level generator. Use classic design principles: compact rooms, "
-                        "corridors, choke points, goal-room pressure, route planning, "
-                        "reverse-design thinking, and deadlock avoidance. Do not copy "
-                        "or reproduce any existing online level. Return only valid JSON. "
-                        "Your archetype choice will select a hard local structure "
-                        "template, so choose intentionally. Do not generate map rows, "
-                        "coordinates, tile grids, markdown, or explanations."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Create a fresh, classic-inspired hard blueprint "
-                        "for a 12x10 Sokoban level with exactly 2 boxes. The local "
-                        "algorithm will enforce solvability, wall templates, water "
-                        "placement, and tile rules. Pushes means box pushes, not "
-                        "player walking moves. Choose values inside these "
-                        "inclusive ranges: "
-                        "minSolutionSteps 18-30, maxSolutionSteps 32-50, "
-                        "minPushes 8-16, maxPushes 14-28, "
-                        "minWaterAreas 1-2, maxWaterAreas 1-2, "
-                        "minWallObstacleBlocks exactly 2, maxWallObstacleBlocks 2-3. "
-                        "minReversePulls 14-24, maxReversePulls 24-40. "
-                        "Each max value must be greater than or equal to its min value. "
-                        "Choose exactly one archetype from: goal_room, "
-                        "bottleneck_corridor, split_route, open_workshop. "
-                        "Choose exactly one targetLayout from: clustered, split_pair, "
-                        "edge_cluster. Choose exactly one obstacleStyle from: "
-                        "central_baffle, side_choke, goal_guard. Choose exactly one "
-                        "waterStyle from: corner_pool, side_pool, route_divider. "
-                        "Use a short style label and a short designNote. Return exactly "
-                        "these JSON keys: "
-                        "minSolutionSteps, maxSolutionSteps, minPushes, "
-                        "maxPushes, minWaterAreas, maxWaterAreas, minWallObstacleBlocks, "
-                        "maxWallObstacleBlocks, minReversePulls, maxReversePulls, "
-                        "style, archetype, targetLayout, obstacleStyle, waterStyle, "
-                        "designNote. "
-                        f"Variation seed: {variation_seed}. "
-                        f"Avoid these recent blueprint combinations if possible: "
-                        f"{get_recent_blueprint_hint()}."
-                    ),
-                },
-            ],
+            messages=build_level_plan_messages(
+                variation_seed,
+                get_recent_blueprint_hint(),
+                creative_context,
+            ),
             response_format={"type": "json_object"},
             temperature=temperature,
             stream=False,

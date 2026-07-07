@@ -166,6 +166,8 @@ public class CreativeWorkshopInputController : MonoBehaviour
             if (request.result == UnityWebRequest.Result.Success)
             {
                 SetStatus("Submitted.");
+                CreativeWorkshopContext.SetIdea(record.ideaId, record.sessionId, record.ideaText);
+                LevelStudyRecorder.BeginCustomRound(record.ideaId, record.ideaText);
 
                 if (logIdeaEvents)
                 {

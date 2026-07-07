@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
 
 #if UNITY_EDITOR
 using UnityEditor;
@@ -10,8 +11,13 @@ using UnityEditor;
 
 public class LLMLevelDesignClient : MonoBehaviour
 {
+    private const string CreativeIdeaIdPrefsKey = "SokobanCreativeWorkshopIdeaId";
+    private const string CreativeIdeaSessionIdPrefsKey = "SokobanCreativeWorkshopIdeaSessionId";
+    private const string CreativeIdeaTextPrefsKey = "SokobanCreativeWorkshopIdeaText";
+
     public string endpoint = "http://111.231.136.4:8000/generate-level-plan";
     public int requestTimeoutSeconds = 180;
+    public bool includeCreativeWorkshopIdea;
 
     private readonly List<UnityWebRequest> activeRequests = new List<UnityWebRequest>();
     private bool isCancellingRequests;
@@ -87,15 +93,16 @@ public class LLMLevelDesignClient : MonoBehaviour
         }
 
         isCancellingRequests = false;
+        string requestUrl = GetRequestUrl();
 
         float startedAt = Time.realtimeSinceStartup;
         Debug.Log(
             "LLMLevelDesignClient request started:"
-            + " endpoint=" + endpoint
+            + " endpoint=" + requestUrl
             + ", timeoutSeconds=" + requestTimeoutSeconds
         );
 
-        UnityWebRequest request = UnityWebRequest.Get(endpoint);
+        UnityWebRequest request = UnityWebRequest.Get(requestUrl);
         request.timeout = Mathf.Max(1, requestTimeoutSeconds);
         request.SetRequestHeader("Accept", "application/json");
         activeRequests.Add(request);
@@ -182,6 +189,34 @@ public class LLMLevelDesignClient : MonoBehaviour
         {
             request.Dispose();
         }
+    }
+
+    private string GetRequestUrl()
+    {
+        string requestUrl = endpoint;
+        string ideaText = PlayerPrefs.GetString(CreativeIdeaTextPrefsKey, "");
+
+        if (!includeCreativeWorkshopIdea || string.IsNullOrEmpty(ideaText))
+        {
+            return requestUrl;
+        }
+
+        requestUrl = AppendQueryParameter(requestUrl, "ideaText", ideaText);
+        requestUrl = AppendQueryParameter(requestUrl, "ideaId", PlayerPrefs.GetString(CreativeIdeaIdPrefsKey, ""));
+        requestUrl = AppendQueryParameter(requestUrl, "sessionId", PlayerPrefs.GetString(CreativeIdeaSessionIdPrefsKey, ""));
+        requestUrl = AppendQueryParameter(requestUrl, "sceneName", SceneManager.GetActiveScene().name);
+        return requestUrl;
+    }
+
+    private string AppendQueryParameter(string url, string key, string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return url;
+        }
+
+        string separator = url.Contains("?") ? "&" : "?";
+        return url + separator + key + "=" + Uri.EscapeDataString(value);
     }
 
     private float GetElapsedSeconds(float startedAt)

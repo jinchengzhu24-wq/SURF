@@ -23,6 +23,10 @@ public class LevelStudyRecorder : MonoBehaviour
     private string sessionId;
     private string gameRoundId;
     private string gameRoundStartedAt;
+    private string roundDisplayName;
+    private string roundType;
+    private string creativeIdeaId;
+    private string creativeIdeaText;
     private string levelRunId;
     private int gameRoundIndex;
     private int roundLevelIndex;
@@ -79,6 +83,7 @@ public class LevelStudyRecorder : MonoBehaviour
     {
         if (scene.name == MenuSceneName)
         {
+            CreativeWorkshopContext.Clear();
             ClearGameRound();
         }
     }
@@ -91,6 +96,11 @@ public class LevelStudyRecorder : MonoBehaviour
     public static void BeginGameRound()
     {
         Instance.StartGameRound();
+    }
+
+    public static void BeginCustomRound(string ideaId, string ideaText)
+    {
+        Instance.StartCustomRound(ideaId, ideaText);
     }
 
     public static void RecordLevelCompleted()
@@ -176,6 +186,10 @@ public class LevelStudyRecorder : MonoBehaviour
             gameRoundIndex = gameRoundIndex,
             roundLevelIndex = roundLevelIndex,
             gameRoundStartedAt = gameRoundStartedAt,
+            roundDisplayName = roundDisplayName,
+            roundType = roundType,
+            creativeIdeaId = creativeIdeaId,
+            creativeIdeaText = creativeIdeaText,
             sceneName = SceneManager.GetActiveScene().name,
             levelRunId = levelRunId,
             levelIndex = levelIndex,
@@ -237,6 +251,10 @@ public class LevelStudyRecorder : MonoBehaviour
             gameRoundIndex = gameRoundIndex,
             roundLevelIndex = roundLevelIndex,
             gameRoundStartedAt = gameRoundStartedAt,
+            roundDisplayName = roundDisplayName,
+            roundType = roundType,
+            creativeIdeaId = creativeIdeaId,
+            creativeIdeaText = creativeIdeaText,
             sceneName = SceneManager.GetActiveScene().name,
             levelRunId = levelRunId,
             levelIndex = levelIndex,
@@ -550,6 +568,10 @@ public class LevelStudyRecorder : MonoBehaviour
         EnsureSessionId();
         gameRoundId = Guid.NewGuid().ToString("N");
         gameRoundStartedAt = DateTime.UtcNow.ToString("o");
+        roundDisplayName = "";
+        roundType = "Experiment";
+        creativeIdeaId = "";
+        creativeIdeaText = "";
         gameRoundIndex++;
         roundLevelIndex = 0;
         LevelGenerator.BeginAlgorithmTemplateRound();
@@ -564,6 +586,30 @@ public class LevelStudyRecorder : MonoBehaviour
         }
     }
 
+    private void StartCustomRound(string ideaId, string ideaText)
+    {
+        EnsureSessionId();
+        gameRoundId = Guid.NewGuid().ToString("N");
+        gameRoundStartedAt = DateTime.UtcNow.ToString("o");
+        roundDisplayName = "Custom Idea";
+        roundType = "Custom";
+        creativeIdeaId = ideaId ?? "";
+        creativeIdeaText = ideaText ?? "";
+        gameRoundIndex++;
+        roundLevelIndex = 0;
+        LevelGenerator.BeginAlgorithmTemplateRound();
+
+        if (logRecordEvents)
+        {
+            Debug.Log(
+                "LevelStudyRecorder started custom round:"
+                + " gameRoundId=" + gameRoundId
+                + ", gameRoundIndex=" + gameRoundIndex
+                + ", creativeIdeaId=" + creativeIdeaId
+            );
+        }
+    }
+
     private void ClearGameRound()
     {
         if (string.IsNullOrEmpty(gameRoundId))
@@ -573,6 +619,10 @@ public class LevelStudyRecorder : MonoBehaviour
 
         gameRoundId = "";
         gameRoundStartedAt = "";
+        roundDisplayName = "";
+        roundType = "";
+        creativeIdeaId = "";
+        creativeIdeaText = "";
         roundLevelIndex = 0;
         hasActiveLevel = false;
         levelRunId = "";
@@ -672,6 +722,10 @@ public class LevelStartRecord
     public int gameRoundIndex;
     public int roundLevelIndex;
     public string gameRoundStartedAt;
+    public string roundDisplayName;
+    public string roundType;
+    public string creativeIdeaId;
+    public string creativeIdeaText;
     public string sceneName;
     public string levelRunId;
     public int levelIndex;
@@ -695,6 +749,10 @@ public class LevelEndRecord
     public int gameRoundIndex;
     public int roundLevelIndex;
     public string gameRoundStartedAt;
+    public string roundDisplayName;
+    public string roundType;
+    public string creativeIdeaId;
+    public string creativeIdeaText;
     public string sceneName;
     public string levelRunId;
     public int levelIndex;
