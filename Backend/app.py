@@ -64,6 +64,10 @@ class RoundRequest(BaseModel):
     roundId: str
 
 
+class DeleteLevelRunRequest(BaseModel):
+    levelRunId: str | None = ""
+
+
 class DeleteSurveyResponseRequest(BaseModel):
     responseId: str | None = ""
     playerNickname: str | None = ""
@@ -351,6 +355,40 @@ def delete_round(request: RoundRequest):
     return {
         "status": "ok",
         "roundId": round_id,
+        "deletedEventCount": deleted_count,
+    }
+
+
+@app.post("/delete-level-run")
+def delete_level_run(request: DeleteLevelRunRequest):
+    level_run_id = normalize_level_run_id(request.levelRunId)
+
+    if not level_run_id:
+        raise HTTPException(status_code=400, detail="levelRunId is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_level_record_events()
+        remaining_records = []
+        deleted_count = 0
+
+        for record in records:
+            record_level_run_id = normalize_level_run_id(record.get("levelRunId"))
+
+            if record_level_run_id == level_run_id:
+                deleted_count += 1
+            else:
+                remaining_records.append(record)
+
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Level run not found")
+
+        write_jsonl_records(STUDY_LOG_FILE, remaining_records)
+
+    return {
+        "status": "ok",
+        "levelRunId": level_run_id,
         "deletedEventCount": deleted_count,
     }
 
@@ -1312,6 +1350,13 @@ def normalize_round_id(value):
 
 
 def normalize_round_display_name(value):
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def normalize_level_run_id(value):
     if value is None:
         return ""
 

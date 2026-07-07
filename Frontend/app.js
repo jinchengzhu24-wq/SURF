@@ -15,8 +15,7 @@ const state = {
     payload: null,
     filteredRounds: [],
     filteredLevels: [],
-    selectedRunId: null,
-    expandedRoundIds: new Set()
+    selectedRunId: null
 };
 
 const elements = {
@@ -33,7 +32,6 @@ const elements = {
     statSurveyAvg: document.getElementById("statSurveyAvg"),
     searchInput: document.getElementById("searchInput"),
     statusFilter: document.getElementById("statusFilter"),
-    sourceFilter: document.getElementById("sourceFilter"),
     creativeIdeaCount: document.getElementById("creativeIdeaCount"),
     creativeIdeasBody: document.getElementById("creativeIdeasBody"),
     resultCount: document.getElementById("resultCount"),
@@ -92,7 +90,6 @@ function wireEvents() {
     elements.clearButton.addEventListener("click", clearRecords);
     elements.searchInput.addEventListener("input", applyFilters);
     elements.statusFilter.addEventListener("change", applyFilters);
-    elements.sourceFilter.addEventListener("change", applyFilters);
 }
 
 async function loadData(manual) {
@@ -109,12 +106,7 @@ async function loadData(manual) {
         state.payload = buildDashboardPayload(await response.json());
         state.selectedRunId = previousSelectedRunId;
 
-        if (!manual) {
-            state.expandedRoundIds.clear();
-        }
-
         renderSummary(state.payload.summary || {});
-        renderSourceFilter(state.payload.summary && state.payload.summary.sourceCounts);
         applyFilters();
         renderCreativeIdeasTable();
         renderSurveyTable();
@@ -123,7 +115,7 @@ async function loadData(manual) {
     } catch (error) {
         setStatus("Could not load records: " + error.message);
         elements.creativeIdeasBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load creative ideas.</td></tr>';
-        elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
+        elements.recordsBody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load records.</td></tr>';
         elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
     }
 }
@@ -145,7 +137,6 @@ async function clearRecords() {
         }
 
         state.selectedRunId = null;
-        state.expandedRoundIds.clear();
         showNotice("Records cleared.");
         await loadData(true);
     } catch (error) {
@@ -166,20 +157,6 @@ function renderSummary(summary) {
     elements.statAvg.textContent = formatSeconds(summary.averageDurationSeconds);
     elements.statSurveys.textContent = numberValue(surveySummary.responseCount);
     elements.statSurveyAvg.textContent = formatSeconds(surveySummary.averageDurationSeconds);
-}
-
-function renderSourceFilter(sourceCounts) {
-    const currentValue = elements.sourceFilter.value;
-    elements.sourceFilter.textContent = "";
-    elements.sourceFilter.appendChild(new Option("All sources", "all"));
-
-    Object.keys(sourceCounts || {}).sort().forEach(source => {
-        elements.sourceFilter.appendChild(new Option(source, source));
-    });
-
-    if ([...elements.sourceFilter.options].some(option => option.value === currentValue)) {
-        elements.sourceFilter.value = currentValue;
-    }
 }
 
 function buildDashboardPayload(payload) {
@@ -223,7 +200,6 @@ function isDashboardLevel(level) {
 
 function buildDashboardSummary(levels, rounds, baseSummary) {
     const sessionIds = new Set();
-    const sourceCounts = {};
     let eventCount = 0;
     let completedCount = 0;
     let missingEndCount = 0;
@@ -236,8 +212,6 @@ function buildDashboardSummary(levels, rounds, baseSummary) {
     levels.forEach(level => {
         const start = level.start || {};
         const end = level.end || null;
-        const source = value(start.source);
-        sourceCounts[source] = (sourceCounts[source] || 0) + 1;
         eventCount += Array.isArray(level.events)
             ? level.events.length
             : (level.start ? 1 : 0) + (level.end ? 1 : 0);
@@ -287,8 +261,7 @@ function buildDashboardSummary(levels, rounds, baseSummary) {
         totalPushes: totalPushes,
         averageDurationSeconds: endedLevelCount > 0
             ? Math.round((totalDurationSeconds / endedLevelCount) * 100) / 100
-            : 0,
-        sourceCounts: sourceCounts
+            : 0
     });
 }
 
@@ -299,7 +272,6 @@ function applyFilters() {
 
     const search = elements.searchInput.value.trim().toLowerCase();
     const status = elements.statusFilter.value;
-    const source = elements.sourceFilter.value;
     const allRounds = getAllRounds();
 
     state.filteredRounds = [];
@@ -307,7 +279,7 @@ function applyFilters() {
 
     allRounds.forEach(round => {
         const matchingLevels = (round.levels || []).filter(level => (
-            levelMatchesFilters(level, round, search, status, source)
+            levelMatchesFilters(level, round, search, status)
         ));
 
         if (matchingLevels.length === 0) {
@@ -319,7 +291,6 @@ function applyFilters() {
         state.filteredLevels.push(...matchingLevels);
     });
 
-    ensureRoundExpansion();
     renderTable();
     keepOrSelectFirst();
 }
@@ -412,12 +383,11 @@ function summarizeLevels(levels) {
     return summary;
 }
 
-function levelMatchesFilters(level, round, search, status, source) {
+function levelMatchesFilters(level, round, search, status) {
     const start = level.start || {};
     const end = level.end || {};
     const structure = start.structure || {};
     const rowStatus = getStatusKey(level);
-    const rowSource = value(start.source);
     const haystack = [
         round.roundId,
         round.displayName,
@@ -430,7 +400,6 @@ function levelMatchesFilters(level, round, search, status, source) {
         end.roundLevelIndex,
         start.levelIndex,
         end.levelIndex,
-        rowSource,
         structure.mapHash
     ].join(" ").toLowerCase();
 
@@ -438,23 +407,7 @@ function levelMatchesFilters(level, round, search, status, source) {
         return false;
     }
 
-    if (source !== "all" && rowSource !== source) {
-        return false;
-    }
-
     return !search || haystack.includes(search);
-}
-
-function ensureRoundExpansion() {
-    const visibleRoundIds = new Set(
-        state.filteredRounds.map(round => round.roundId)
-    );
-
-    [...state.expandedRoundIds].forEach(roundId => {
-        if (!visibleRoundIds.has(roundId)) {
-            state.expandedRoundIds.delete(roundId);
-        }
-    });
 }
 
 function renderTable() {
@@ -467,7 +420,7 @@ function renderTable() {
     if (state.filteredLevels.length === 0) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 8;
+        cell.colSpan = 7;
         cell.className = "empty-state";
         cell.textContent = "No matching level records.";
         row.appendChild(cell);
@@ -477,102 +430,10 @@ function renderTable() {
     }
 
     state.filteredRounds.forEach(round => {
-        elements.recordsBody.appendChild(renderRoundRow(round));
-
-        if (!state.expandedRoundIds.has(round.roundId)) {
-            return;
-        }
-
         round.levels.forEach(level => {
             elements.recordsBody.appendChild(renderLevelRow(level));
         });
     });
-}
-
-function renderRoundRow(round) {
-    const row = document.createElement("tr");
-    const cell = document.createElement("td");
-    const expanded = state.expandedRoundIds.has(round.roundId);
-    row.className = "round-row";
-    row.dataset.roundId = round.roundId;
-    row.addEventListener("click", () => toggleRound(round.roundId));
-
-    if (expanded) {
-        row.classList.add("round-expanded");
-    }
-
-    cell.colSpan = 8;
-
-    const content = document.createElement("div");
-    content.className = "round-header-content";
-
-    const toggle = document.createElement("button");
-    toggle.className = "round-toggle";
-    toggle.type = "button";
-    toggle.title = expanded ? "Collapse round" : "Expand round";
-    toggle.setAttribute("aria-label", toggle.title);
-    toggle.setAttribute("aria-expanded", String(expanded));
-    toggle.textContent = ">";
-
-    const titleWrap = document.createElement("div");
-    titleWrap.className = "round-title";
-
-    const title = document.createElement("strong");
-    title.textContent = round.displayName;
-    titleWrap.appendChild(title);
-
-    if (!round.isLegacy) {
-        const id = document.createElement("span");
-        id.className = "round-id";
-        id.textContent = "#" + shortId(round.roundId);
-        titleWrap.appendChild(id);
-    }
-
-    const meta = document.createElement("div");
-    meta.className = "round-meta";
-    [
-        formatSceneNames(round.sceneNames),
-        plural(round.levelCount, "level"),
-        getRoundCompletionText(round),
-        formatSeconds(round.totalDurationSeconds),
-        formatOptionalTimestamp(round.startedAt)
-    ].forEach(text => {
-        const item = document.createElement("span");
-        item.textContent = text;
-        meta.appendChild(item);
-    });
-
-    const actions = document.createElement("div");
-    actions.className = "round-actions";
-
-    if (!round.isLegacy) {
-        const renameButton = document.createElement("button");
-        renameButton.className = "round-action";
-        renameButton.type = "button";
-        renameButton.title = "Rename round";
-        renameButton.textContent = "Rename";
-        renameButton.addEventListener("click", event => {
-            event.stopPropagation();
-            renameRound(round);
-        });
-        actions.appendChild(renameButton);
-    }
-
-    const deleteButton = document.createElement("button");
-    deleteButton.className = "round-action round-action-danger";
-    deleteButton.type = "button";
-    deleteButton.title = "Delete round";
-    deleteButton.textContent = "Delete";
-    deleteButton.addEventListener("click", event => {
-        event.stopPropagation();
-        deleteRound(round);
-    });
-    actions.appendChild(deleteButton);
-
-    content.append(toggle, titleWrap, meta, actions);
-    cell.appendChild(content);
-    row.appendChild(cell);
-    return row;
 }
 
 function renderCreativeIdeasTable() {
@@ -597,7 +458,7 @@ function renderCreativeIdeasTable() {
             formatTimestamp(idea.serverReceivedAt || idea.timestamp),
             value(idea.ideaText),
             formatSceneName(value(idea.sceneName)),
-            shortId(idea.sessionId)
+            getCreativeIdeaMapHash(idea)
         ];
 
         cells.forEach((text, index) => {
@@ -654,8 +515,6 @@ function renderLevelRow(level) {
     const cells = [
         value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex),
         status.label,
-        value(start.source),
-        formatSeconds(end.durationSeconds),
         value(end.moveCount),
         value(end.pushCount),
         value(start.solutionSteps),
@@ -673,7 +532,7 @@ function renderLevelRow(level) {
             badge.className = "badge " + status.className;
             badge.textContent = text;
             cell.appendChild(badge);
-        } else if (index === 7) {
+        } else if (index === 5) {
             cell.className = "small";
             cell.textContent = text;
         } else {
@@ -682,6 +541,8 @@ function renderLevelRow(level) {
 
         row.appendChild(cell);
     });
+
+    row.appendChild(renderLevelActionsCell(level));
 
     row.addEventListener("click", () => {
         state.selectedRunId = level.levelRunId;
@@ -692,18 +553,70 @@ function renderLevelRow(level) {
     return row;
 }
 
-function toggleRound(roundId) {
-    if (state.expandedRoundIds.has(roundId)) {
-        state.expandedRoundIds.delete(roundId);
+function renderLevelActionsCell(level) {
+    const cell = document.createElement("td");
+    const actions = document.createElement("div");
+    const round = getLevelRound(level);
+
+    actions.className = "row-actions";
+
+    const renameButton = document.createElement("button");
+    renameButton.className = "round-action";
+    renameButton.type = "button";
+    renameButton.textContent = "Rename";
+
+    if (round.isLegacy) {
+        renameButton.disabled = true;
+        renameButton.title = "Legacy records cannot be renamed";
     } else {
-        state.expandedRoundIds.add(roundId);
+        renameButton.title = "Rename record";
+        renameButton.addEventListener("click", event => {
+            event.stopPropagation();
+            renameRound(round);
+        });
     }
 
-    renderTable();
+    const deleteButton = document.createElement("button");
+    deleteButton.className = "round-action round-action-danger";
+    deleteButton.type = "button";
+    deleteButton.title = "Delete record";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", event => {
+        event.stopPropagation();
+        deleteLevelRun(level);
+    });
+
+    actions.append(renameButton, deleteButton);
+    cell.appendChild(actions);
+    return cell;
+}
+
+function getLevelRound(level) {
+    const start = level.start || {};
+    const end = level.end || {};
+    const roundId = level.roundId
+        || start.gameRoundId
+        || end.gameRoundId
+        || "legacy-round";
+    const displayName = level.roundDisplayName
+        || getRoundDisplayNameFromRecords(start, end)
+        || (roundId === "legacy-round" ? "Legacy Round" : "Record");
+
+    return {
+        roundId: roundId,
+        displayName: displayName,
+        isLegacy: roundId === "legacy-round",
+        levels: [level]
+    };
+}
+
+function getRoundDisplayNameFromRecords(start, end) {
+    return normalizeCreativeIdeaText(end.roundDisplayName)
+        || normalizeCreativeIdeaText(start.roundDisplayName);
 }
 
 async function renameRound(round) {
-    const nextName = window.prompt("Rename round", round.displayName);
+    const nextName = window.prompt("Rename record", round.displayName);
 
     if (nextName === null) {
         return;
@@ -712,11 +625,11 @@ async function renameRound(round) {
     const displayName = nextName.trim();
 
     if (!displayName) {
-        window.alert("Round name cannot be empty.");
+        window.alert("Record name cannot be empty.");
         return;
     }
 
-    setStatus("Renaming round...");
+    setStatus("Renaming record...");
 
     try {
         const response = await fetch(apiUrl("/rename-round"), {
@@ -734,32 +647,41 @@ async function renameRound(round) {
             throw new Error(await getResponseError(response));
         }
 
-        showNotice("Round renamed.");
+        showNotice("Record renamed.");
         await loadData(true);
     } catch (error) {
-        setStatus("Could not rename round: " + error.message);
+        setStatus("Could not rename record: " + error.message);
     }
 }
 
-async function deleteRound(round) {
+async function deleteLevelRun(level) {
+    const levelRunId = value(level.levelRunId);
+    const start = level.start || {};
+    const end = level.end || {};
+    const displayLevel = value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex);
+
+    if (levelRunId === "-") {
+        return;
+    }
+
     const confirmed = window.confirm(
-        "Delete " + round.displayName + "? This permanently removes its level records."
+        "Delete level " + displayLevel + "? This permanently removes this level record."
     );
 
     if (!confirmed) {
         return;
     }
 
-    setStatus("Deleting round...");
+    setStatus("Deleting level record...");
 
     try {
-        const response = await fetch(apiUrl("/delete-round"), {
+        const response = await fetch(apiUrl("/delete-level-run"), {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                roundId: round.roundId
+                levelRunId: levelRunId
             })
         });
 
@@ -767,15 +689,14 @@ async function deleteRound(round) {
             throw new Error(await getResponseError(response));
         }
 
-        if ((round.levels || []).some(level => level.levelRunId === state.selectedRunId)) {
+        if (level.levelRunId === state.selectedRunId) {
             state.selectedRunId = null;
         }
 
-        state.expandedRoundIds.delete(round.roundId);
-        showNotice("Round deleted.");
+        showNotice("Level record deleted.");
         await loadData(true);
     } catch (error) {
-        setStatus("Could not delete round: " + error.message);
+        setStatus("Could not delete level record: " + error.message);
     }
 }
 
@@ -957,6 +878,44 @@ function getCreativeIdeaDeleteLabel(idea) {
     return ideaText.length > 40 ? ideaText.slice(0, 40) + "..." : ideaText;
 }
 
+function getCreativeIdeaMapHash(idea) {
+    const directMapHash = normalizeCreativeIdeaText(
+        idea.mapHash || (idea.structure && idea.structure.mapHash)
+    );
+
+    if (directMapHash) {
+        return directMapHash;
+    }
+
+    const ideaId = normalizeCreativeIdeaText(idea.ideaId);
+    const ideaText = normalizeCreativeIdeaText(idea.ideaText);
+    const levels = state.payload && Array.isArray(state.payload.levels)
+        ? state.payload.levels
+        : [];
+    const hashes = [];
+
+    levels.forEach(level => {
+        const start = level.start || {};
+        const structure = start.structure || {};
+        const mapHash = normalizeCreativeIdeaText(structure.mapHash);
+
+        if (!mapHash) {
+            return;
+        }
+
+        const levelIdeaId = normalizeCreativeIdeaText(start.creativeIdeaId);
+        const levelIdeaText = normalizeCreativeIdeaText(start.creativeIdeaText);
+        const matchesIdeaId = ideaId && levelIdeaId === ideaId;
+        const matchesIdeaText = !ideaId && ideaText && levelIdeaText === ideaText;
+
+        if ((matchesIdeaId || matchesIdeaText) && !hashes.includes(mapHash)) {
+            hashes.push(mapHash);
+        }
+    });
+
+    return hashes.length > 0 ? hashes.join(", ") : "-";
+}
+
 function getSurveyDeleteLabel(response) {
     return getSurveyNickname(response)
         || normalizeSurveyDeleteText(response.surveyTitle || response.surveyId)
@@ -1008,9 +967,7 @@ function renderDetails(level) {
     [
         ["Round", value(level.roundDisplayName)],
         ["Run", shortId(level.levelRunId)],
-        ["Source", value(start.source)],
         ["Status", getStatus(level).label],
-        ["Duration", formatSeconds(end.durationSeconds)],
         ["Moves", value(end.moveCount)],
         ["Pushes", value(end.pushCount)],
         ["Restarts", value(end.restartCount)],

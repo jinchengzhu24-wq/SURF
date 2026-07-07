@@ -70,7 +70,7 @@
 
             <section class="controls" aria-label="Filters">
                 <label class="field">
-                    <input id="searchInput" type="search" placeholder="Search round, level, source, map hash">
+                    <input id="searchInput" type="search" placeholder="Search round, level, map hash">
                 </label>
                 <label class="field">
                     <select id="statusFilter">
@@ -78,11 +78,6 @@
                         <option value="completed">Completed</option>
                         <option value="missing">Missing end</option>
                         <option value="failed">Restarted or failed</option>
-                    </select>
-                </label>
-                <label class="field">
-                    <select id="sourceFilter">
-                        <option value="all">All sources</option>
                     </select>
                 </label>
             </section>
@@ -101,7 +96,7 @@
                                         <th>Time</th>
                                         <th>Idea</th>
                                         <th>Scene</th>
-                                        <th>Session</th>
+                                        <th>Map Hash</th>
                                         <th>Actions</th>
                                     </tr>
                                 </thead>
@@ -123,16 +118,15 @@
                                     <tr>
                                         <th>Level</th>
                                         <th>Status</th>
-                                        <th>Source</th>
-                                        <th>Duration</th>
                                         <th>Moves</th>
                                         <th>Pushes</th>
                                         <th>Solution</th>
                                         <th>Map Hash</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody id="recordsBody">
-                                    <tr><td colspan="8" class="empty-state">Loading...</td></tr>
+                                    <tr><td colspan="7" class="empty-state">Loading...</td></tr>
                                 </tbody>
                             </table>
                         </div>
