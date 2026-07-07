@@ -28,6 +28,7 @@ if (-not $scpPath -or -not (Test-Path -LiteralPath $scpPath)) {
 
 $files = @(
     @{ Local = "Backend\app.py"; Remote = "Backend/app.py" },
+    @{ Local = "Backend\prompt.py"; Remote = "Backend/prompt.py" },
     @{ Local = "Frontend\index.html"; Remote = "Frontend/index.html" },
     @{ Local = "Frontend\app.js"; Remote = "Frontend/app.js" },
     @{ Local = "Frontend\styles.css"; Remote = "Frontend/styles.css" }

@@ -16,9 +16,9 @@ from openai import OpenAI
 from pydantic import BaseModel
 
 try:
-    from level_plan_prompt import build_level_plan_messages
+    from prompt import build_level_plan_messages
 except ImportError:
-    from .level_plan_prompt import build_level_plan_messages
+    from .prompt import build_level_plan_messages
 
 HOST = "127.0.0.1"
 PORT = 8000
