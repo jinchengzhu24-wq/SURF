@@ -727,6 +727,10 @@ PrefabInstance:
       value: 2
       objectReference: {fileID: 0}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
+      propertyPath: levelToLoad
+      value: Menu
+      objectReference: {fileID: 0}
+    - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: maxGeneratedLevelCount
       value: 2
       objectReference: {fileID: 0}

@@ -23,6 +23,10 @@ public class CreativeWorkshopInputController : MonoBehaviour
     [Min(1)]
     public int ideaCharacterLimit = 240;
 
+    [Header("Flow")]
+    public string nextSceneName = "Questionnaire";
+    public float nextSceneDelaySeconds = 0.75f;
+
     [Header("Backend")]
     public string backendBaseUrl = DefaultBackendBaseUrl;
     public int requestTimeoutSeconds = 5;
@@ -166,6 +170,12 @@ public class CreativeWorkshopInputController : MonoBehaviour
                 if (logIdeaEvents)
                 {
                     Debug.Log("Creative workshop idea submitted: ideaId=" + record.ideaId);
+                }
+
+                if (!string.IsNullOrEmpty(nextSceneName))
+                {
+                    yield return new WaitForSeconds(Mathf.Max(0f, nextSceneDelaySeconds));
+                    SceneManager.LoadScene(nextSceneName);
                 }
             }
             else

@@ -2853,6 +2853,8 @@ MonoBehaviour:
   statusText: {fileID: 0}
   ideaPlaceholder: Enter your idea
   ideaCharacterLimit: 240
+  nextSceneName: Custom_Level
+  nextSceneDelaySeconds: 0.75
   backendBaseUrl: http://111.231.136.4:8000
   requestTimeoutSeconds: 5
   logIdeaEvents: 1

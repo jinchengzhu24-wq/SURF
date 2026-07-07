@@ -35,6 +35,7 @@ public class LevelManager : MonoBehaviour
 
     [Header("Complete Action")]
     public CompleteAction completeAction = CompleteAction.LoadNextScene;
+    public string levelToLoad = "";
     public string menuSceneName = "Menu";
 
     [Header("Generated Level Limit")]
@@ -311,6 +312,12 @@ public class LevelManager : MonoBehaviour
 
     private void LoadNextScene()
     {
+        if (!string.IsNullOrEmpty(levelToLoad))
+        {
+            SceneManager.LoadScene(levelToLoad);
+            return;
+        }
+
         int currentIndex = SceneManager.GetActiveScene().buildIndex;
         int nextIndex = currentIndex + 1;
 
