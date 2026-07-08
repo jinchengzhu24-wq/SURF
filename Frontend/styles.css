@@ -206,6 +206,10 @@ main {
     min-width: 0;
 }
 
+.expansion-panel {
+    min-width: 0;
+}
+
 .creative-table-wrap {
     max-height: 240px;
     min-height: 150px;
@@ -213,6 +217,19 @@ main {
 
 .idea-cell {
     max-width: 420px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+}
+
+.expansion-table-wrap {
+    max-height: 260px;
+    min-height: 170px;
+}
+
+.choice-cell,
+.prompt-cell {
+    max-width: 360px;
     white-space: normal;
     overflow-wrap: anywhere;
     line-height: 1.35;

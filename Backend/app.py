@@ -16,9 +16,9 @@ from openai import OpenAI
 from pydantic import BaseModel
 
 try:
-    from prompt import build_level_plan_messages
+    from prompt import build_creative_idea_expansion_messages, build_level_plan_messages
 except ImportError:
-    from .prompt import build_level_plan_messages
+    from .prompt import build_creative_idea_expansion_messages, build_level_plan_messages
 
 HOST = "127.0.0.1"
 PORT = 8000
@@ -32,6 +32,7 @@ STUDY_LOG_DIR = BASE_DIR / "study_logs"
 STUDY_LOG_FILE = STUDY_LOG_DIR / "level_records.jsonl"
 SURVEY_LOG_FILE = STUDY_LOG_DIR / "survey_responses.jsonl"
 CREATIVE_IDEA_LOG_FILE = STUDY_LOG_DIR / "creative_ideas.jsonl"
+CREATIVE_EXPANSION_CHOICE_LOG_FILE = STUDY_LOG_DIR / "creative_expansion_choices.jsonl"
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -53,6 +54,20 @@ class LevelDesignPlan(BaseModel):
     obstacleStyle: str
     waterStyle: str
     designNote: str
+
+
+class CreativeIdeaExpansionRequest(BaseModel):
+    ideaId: str | None = ""
+    sessionId: str | None = ""
+    ideaText: str | None = ""
+    sceneName: str | None = ""
+
+
+class CreativeIdeaExpansionOption(BaseModel):
+    id: str
+    title: str
+    description: str
+    promptText: str
 
 
 class RenameRoundRequest(BaseModel):
@@ -202,6 +217,23 @@ async def record_creative_idea(request: Request):
     return await append_creative_idea_record(request)
 
 
+@app.post("/record-expansion-choice")
+async def record_expansion_choice(request: Request):
+    return await append_expansion_choice_record(request)
+
+
+@app.post("/expand-creative-idea")
+def expand_creative_idea(request: CreativeIdeaExpansionRequest):
+    data = request.model_dump()
+    idea_text = str(data.get("ideaText") or "").strip()
+
+    if not idea_text:
+        raise HTTPException(status_code=400, detail="ideaText is required")
+
+    data["ideaText"] = idea_text
+    return create_creative_idea_expansion(data)
+
+
 @app.get("/level-records", response_class=PlainTextResponse)
 def get_level_records():
     if not STUDY_LOG_FILE.exists():
@@ -261,9 +293,11 @@ def get_level_records_dashboard(cleared: int = 0):
 @app.get("/level-records-data")
 def get_level_records_data():
     events, malformed_count = read_level_record_events()
+    events = filter_frontend_records(events)
     levels = merge_level_records(events)
     payload = build_level_records_payload(events, levels, malformed_count)
     survey_responses, survey_malformed_count = read_survey_response_events()
+    survey_responses = filter_frontend_records(survey_responses)
     survey_payload = build_survey_records_payload(
         survey_responses,
         survey_malformed_count,
@@ -272,6 +306,7 @@ def get_level_records_data():
     payload["surveyResponses"] = survey_payload["responses"]
     payload["surveyMalformedCount"] = survey_payload["malformedCount"]
     creative_ideas, creative_malformed_count = read_creative_idea_events()
+    creative_ideas = filter_frontend_records(creative_ideas)
     creative_payload = build_creative_ideas_payload(
         creative_ideas,
         creative_malformed_count,
@@ -279,6 +314,15 @@ def get_level_records_data():
     payload["creativeIdeaSummary"] = creative_payload["summary"]
     payload["creativeIdeas"] = creative_payload["ideas"]
     payload["creativeIdeaMalformedCount"] = creative_payload["malformedCount"]
+    expansion_choices, expansion_malformed_count = read_expansion_choice_events()
+    expansion_choices = filter_frontend_records(expansion_choices)
+    expansion_payload = build_expansion_choices_payload(
+        expansion_choices,
+        expansion_malformed_count,
+    )
+    payload["creativeExpansionChoiceSummary"] = expansion_payload["summary"]
+    payload["creativeExpansionChoices"] = expansion_payload["choices"]
+    payload["creativeExpansionChoiceMalformedCount"] = expansion_payload["malformedCount"]
     return payload
 
 
@@ -500,6 +544,7 @@ def clear_level_records():
         STUDY_LOG_FILE.write_text("", encoding="utf-8")
         SURVEY_LOG_FILE.write_text("", encoding="utf-8")
         CREATIVE_IDEA_LOG_FILE.write_text("", encoding="utf-8")
+        CREATIVE_EXPANSION_CHOICE_LOG_FILE.write_text("", encoding="utf-8")
 
     return RedirectResponse("/level-records-view?cleared=1", status_code=303)
 
@@ -598,6 +643,39 @@ async def append_creative_idea_record(request: Request):
     }
 
 
+async def append_expansion_choice_record(request: Request):
+    data = await request.json()
+
+    if not isinstance(data, dict):
+        data = {"payload": data}
+
+    idea_id = str(data.get("ideaId") or "").strip()
+    selected_title = str(data.get("selectedOptionTitle") or "").strip()
+
+    if not idea_id:
+        raise HTTPException(status_code=400, detail="ideaId is required")
+
+    if not selected_title:
+        raise HTTPException(status_code=400, detail="selectedOptionTitle is required")
+
+    data.setdefault("eventType", "creative-expansion-choice")
+    data["serverReceivedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        with CREATIVE_EXPANSION_CHOICE_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(data, ensure_ascii=False))
+            log_file.write("\n")
+
+    return {
+        "status": "ok",
+        "eventType": data["eventType"],
+        "ideaId": idea_id,
+        "logFile": str(CREATIVE_EXPANSION_CHOICE_LOG_FILE),
+    }
+
+
 def read_level_record_events():
     return read_jsonl_records(STUDY_LOG_FILE)
 
@@ -608,6 +686,22 @@ def read_survey_response_events():
 
 def read_creative_idea_events():
     return read_jsonl_records(CREATIVE_IDEA_LOG_FILE)
+
+
+def read_expansion_choice_events():
+    return read_jsonl_records(CREATIVE_EXPANSION_CHOICE_LOG_FILE)
+
+
+def filter_frontend_records(records):
+    return [
+        record
+        for record in records
+        if is_frontend_visible_record(record)
+    ]
+
+
+def is_frontend_visible_record(record):
+    return record.get("officialRound") is True
 
 
 def read_jsonl_records(path):
@@ -968,6 +1062,35 @@ def build_creative_ideas_payload(ideas, malformed_count):
     }
 
 
+def build_expansion_choices_payload(choices, malformed_count):
+    session_ids = {
+        choice.get("sessionId")
+        for choice in choices
+        if choice.get("sessionId")
+    }
+    normalized_choices = [
+        normalize_expansion_choice(choice)
+        for choice in choices
+    ]
+    sorted_choices = sorted(
+        normalized_choices,
+        key=lambda choice: choice.get("serverReceivedAt") or choice.get("timestamp") or "",
+        reverse=True,
+    )
+
+    return {
+        "summary": {
+            "choiceCount": len(choices),
+            "sessionCount": len(session_ids),
+            "malformedCount": malformed_count,
+        },
+        "choices": sorted_choices,
+        "malformedCount": malformed_count,
+        "logFile": str(CREATIVE_EXPANSION_CHOICE_LOG_FILE),
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
 def normalize_creative_idea(idea):
     normalized = dict(idea)
     normalized["ideaId"] = value_or_dash(
@@ -981,6 +1104,31 @@ def normalize_creative_idea(idea):
         or idea.get("text")
     )
     normalized["sceneName"] = value_or_dash(idea.get("sceneName"))
+    return normalized
+
+
+def normalize_expansion_choice(choice):
+    normalized = dict(choice)
+    normalized["ideaId"] = value_or_dash(choice.get("ideaId"))
+    normalized["sessionId"] = value_or_dash(choice.get("sessionId"))
+    normalized["gameRoundId"] = value_or_dash(choice.get("gameRoundId"))
+    normalized["originalIdeaText"] = value_or_dash(
+        choice.get("originalIdeaText")
+        or choice.get("originalIdea")
+    )
+    normalized["selectedOptionId"] = value_or_dash(choice.get("selectedOptionId"))
+    normalized["selectedOptionTitle"] = value_or_dash(choice.get("selectedOptionTitle"))
+    normalized["selectedOptionDescription"] = value_or_dash(
+        choice.get("selectedOptionDescription")
+    )
+    normalized["selectedOptionPromptText"] = value_or_dash(
+        choice.get("selectedOptionPromptText")
+    )
+    normalized["finalIdeaText"] = value_or_dash(
+        choice.get("finalIdeaText")
+        or choice.get("expandedIdeaText")
+    )
+    normalized["sceneName"] = value_or_dash(choice.get("sceneName"))
     return normalized
 
 
@@ -1454,6 +1602,41 @@ def escape_text(value):
     return html.escape(str(value), quote=True)
 
 
+def create_creative_idea_expansion(creative_context):
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+
+    if not api_key or api_key == "your_deepseek_api_key_here":
+        return fallback_creative_idea_expansion(creative_context, "DEEPSEEK_API_KEY is missing")
+
+    try:
+        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+        temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=build_creative_idea_expansion_messages(creative_context),
+            response_format={"type": "json_object"},
+            temperature=temperature,
+            stream=False,
+        )
+
+        content = response.choices[0].message.content
+        options = validate_creative_idea_expansion(json.loads(content))
+        print(f"Generated creative idea expansion from DeepSeek using {model}: {options}")
+        return {
+            "options": options,
+            "usedFallback": False,
+            "message": "",
+        }
+    except Exception as exception:
+        return fallback_creative_idea_expansion(
+            creative_context,
+            f"DeepSeek expansion request failed: {exception}",
+        )
+
+
 def create_level_plan(creative_context=None):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
 
@@ -1552,6 +1735,117 @@ def validate_plan(plan):
         "waterStyle": data["waterStyle"],
         "designNote": design_note[:160],
     }
+
+
+def validate_creative_idea_expansion(payload):
+    if payload is None:
+        raise ValueError("model returned no expansion payload")
+
+    data = payload.model_dump() if hasattr(payload, "model_dump") else payload
+
+    if isinstance(data, list):
+        raw_options = data
+    else:
+        raw_options = dict(data).get("options")
+
+    if not isinstance(raw_options, list) or len(raw_options) < 3:
+        raise ValueError("expansion payload must include at least three options")
+
+    validated = []
+    option_ids = ["A", "B", "C"]
+
+    for index, raw_option in enumerate(raw_options[:3]):
+        option = raw_option.model_dump() if hasattr(raw_option, "model_dump") else dict(raw_option)
+        option_id = clean_expansion_text(option.get("id")) or option_ids[index]
+        title = clean_expansion_text(option.get("title"))[:64]
+        description = clean_expansion_text(option.get("description"))[:320]
+        prompt_text = clean_expansion_text(option.get("promptText"))[:420]
+
+        if not title:
+            raise ValueError(f"option {index + 1} title is required")
+
+        if not description:
+            raise ValueError(f"option {index + 1} description is required")
+
+        if not prompt_text:
+            prompt_text = description
+
+        validated.append(
+            CreativeIdeaExpansionOption(
+                id=option_id[:12],
+                title=title,
+                description=description,
+                promptText=prompt_text,
+            ).model_dump()
+        )
+
+    return validated
+
+
+def fallback_creative_idea_expansion(creative_context, reason):
+    idea_text = clean_expansion_text((creative_context or {}).get("ideaText"))
+    chinese = contains_cjk(idea_text)
+
+    if chinese:
+        options = [
+            {
+                "id": "A",
+                "title": "狭窄绕路型",
+                "description": "围绕原始想法加入更明确的瓶颈通道和绕路压力，适合做成需要提前规划的两箱关卡。",
+                "promptText": "以狭窄通道、绕路规划和轻度水域阻隔为主，保持原始想法的主题，不加入生成器不支持的机制。",
+            },
+            {
+                "id": "B",
+                "title": "分离目标型",
+                "description": "把两个目标区域适度分开，让玩家需要决定先处理哪只箱子，同时保留原始创意的核心感觉。",
+                "promptText": "以分离目标、路线选择和箱子顺序规划为主，参考原始想法并避免偏离其主题。",
+            },
+            {
+                "id": "C",
+                "title": "紧凑精确型",
+                "description": "地图更紧凑，移动空间更受限，强调少量关键推动和防卡死判断。",
+                "promptText": "以紧凑空间、关键推动和死锁规避为主，原始想法作为主题约束和风格来源。",
+            },
+        ]
+    else:
+        options = [
+            {
+                "id": "A",
+                "title": "Narrow Detour",
+                "description": "Turn the idea into a route-planning puzzle with a clear choke point, a small detour, and light water pressure.",
+                "promptText": "Use narrow routes, detour planning, and light water obstacles while preserving the original idea's theme.",
+            },
+            {
+                "id": "B",
+                "title": "Split Goals",
+                "description": "Separate the two target areas so the player has to choose box order while still following the original idea.",
+                "promptText": "Use split goals, route choice, and box-order planning while keeping the original idea as the main constraint.",
+            },
+            {
+                "id": "C",
+                "title": "Compact Precision",
+                "description": "Make the map tighter and more exact, with a few important pushes and careful deadlock avoidance.",
+                "promptText": "Use compact space, precise pushes, and deadlock avoidance while treating the original idea as the theme.",
+            },
+        ]
+
+    print(f"Generated creative idea expansion from fallback: {reason}")
+    return {
+        "options": options,
+        "usedFallback": True,
+        "message": reason,
+    }
+
+
+def clean_expansion_text(value):
+    if value is None:
+        return ""
+
+    return " ".join(str(value).strip().split())
+
+
+def contains_cjk(text):
+    return any("\u4e00" <= character <= "\u9fff" for character in text or "")
 
 
 def fallback_plan(reason):

@@ -8,6 +8,7 @@ public class MenuController : MonoBehaviour
 
     public void StartGame()
     {
+        LevelStudyRecorder.MarkMenuStartedFlow();
         LoadScene(creativeWorkshopSceneName, "creative workshop");
     }
 

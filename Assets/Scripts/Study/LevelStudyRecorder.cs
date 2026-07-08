@@ -36,6 +36,7 @@ public class LevelStudyRecorder : MonoBehaviour
     private int pushCount;
     private int restartCount;
     private bool hasActiveLevel;
+    private bool officialRoundFlow;
     private LevelLoader currentLevelLoader;
 
     public static LevelStudyRecorder Instance
@@ -98,9 +99,34 @@ public class LevelStudyRecorder : MonoBehaviour
         Instance.StartGameRound();
     }
 
+    public static void MarkMenuStartedFlow()
+    {
+        Instance.SetOfficialRoundFlow(true);
+    }
+
+    public static bool IsOfficialRoundFlow
+    {
+        get { return Instance.officialRoundFlow; }
+    }
+
+    public static string CurrentGameRoundId
+    {
+        get { return Instance.gameRoundId ?? ""; }
+    }
+
+    public static int CurrentGameRoundIndex
+    {
+        get { return Instance.gameRoundIndex; }
+    }
+
     public static void BeginCustomRound(string ideaId, string ideaText)
     {
         Instance.StartCustomRound(ideaId, ideaText);
+    }
+
+    public static void UpdateCustomRoundIdea(string ideaId, string ideaText)
+    {
+        Instance.SetCustomRoundIdea(ideaId, ideaText);
     }
 
     public static void RecordLevelCompleted()
@@ -199,6 +225,7 @@ public class LevelStudyRecorder : MonoBehaviour
             moveCount = moveCount,
             pushCount = pushCount,
             restartCount = restartCount,
+            officialRound = officialRoundFlow,
             timestamp = DateTime.UtcNow.ToString("o")
         };
 
@@ -259,6 +286,7 @@ public class LevelStudyRecorder : MonoBehaviour
             levelRunId = levelRunId,
             levelIndex = levelIndex,
             source = levelLoader.GetCurrentLevelSource(),
+            officialRound = officialRoundFlow,
             timestamp = DateTime.UtcNow.ToString("o"),
             solutionSteps = generator != null ? generator.lastSolutionSteps : -1,
             solverPushes = generator != null ? generator.lastPushes : -1,
@@ -566,6 +594,7 @@ public class LevelStudyRecorder : MonoBehaviour
     private void StartGameRound()
     {
         EnsureSessionId();
+        officialRoundFlow = true;
         gameRoundId = Guid.NewGuid().ToString("N");
         gameRoundStartedAt = DateTime.UtcNow.ToString("o");
         roundDisplayName = "";
@@ -610,10 +639,34 @@ public class LevelStudyRecorder : MonoBehaviour
         }
     }
 
+    private void SetCustomRoundIdea(string ideaId, string ideaText)
+    {
+        EnsureSessionId();
+
+        if (string.IsNullOrEmpty(gameRoundId) || roundType != "Custom")
+        {
+            StartCustomRound(ideaId, ideaText);
+            return;
+        }
+
+        creativeIdeaId = ideaId ?? "";
+        creativeIdeaText = ideaText ?? "";
+
+        if (logRecordEvents)
+        {
+            Debug.Log(
+                "LevelStudyRecorder updated custom round idea:"
+                + " gameRoundId=" + gameRoundId
+                + ", creativeIdeaId=" + creativeIdeaId
+            );
+        }
+    }
+
     private void ClearGameRound()
     {
         if (string.IsNullOrEmpty(gameRoundId))
         {
+            officialRoundFlow = false;
             return;
         }
 
@@ -626,6 +679,7 @@ public class LevelStudyRecorder : MonoBehaviour
         roundLevelIndex = 0;
         hasActiveLevel = false;
         levelRunId = "";
+        officialRoundFlow = false;
 
         if (logRecordEvents)
         {
@@ -644,6 +698,16 @@ public class LevelStudyRecorder : MonoBehaviour
             "LevelStudyRecorder skipped " + action
             + " because no game round is active. Start from Menu to record official rounds."
         );
+    }
+
+    private void SetOfficialRoundFlow(bool official)
+    {
+        officialRoundFlow = official;
+
+        if (logRecordEvents)
+        {
+            Debug.Log("LevelStudyRecorder official round flow set to " + officialRoundFlow + ".");
+        }
     }
 
     private string[] CloneRows(string[] rows)
@@ -730,6 +794,7 @@ public class LevelStartRecord
     public string levelRunId;
     public int levelIndex;
     public string source;
+    public bool officialRound;
     public string timestamp;
     public int solutionSteps;
     public int solverPushes;
@@ -762,6 +827,7 @@ public class LevelEndRecord
     public int moveCount;
     public int pushCount;
     public int restartCount;
+    public bool officialRound;
     public string timestamp;
 }
 

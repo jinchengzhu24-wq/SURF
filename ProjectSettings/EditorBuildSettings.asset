@@ -24,6 +24,9 @@ EditorBuildSettings:
     path: Assets/Scenes/Creative_WorkShop.unity
     guid: 1ed258a4326d9b346a8ddc1e6f6d3053
   - enabled: 1
+    path: Assets/Scenes/Expansion.unity
+    guid: fa9320d146af6ce4d809ebecaeae53cf
+  - enabled: 1
     path: Assets/Scenes/Custom_Level.unity
     guid: b6080e3f72f506943bec2da5e52feacb
   - enabled: 1

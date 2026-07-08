@@ -444,6 +444,7 @@ public class QuestionnaireController : MonoBehaviour
             responseId = Guid.NewGuid().ToString("N"),
             playerName = PlayerNameValue,
             sceneName = SceneManager.GetActiveScene().name,
+            officialRound = LevelStudyRecorder.IsOfficialRoundFlow,
             timestamp = DateTime.UtcNow.ToString("o"),
             durationSeconds = Mathf.Round((Time.realtimeSinceStartup - startedAt) * 100f) / 100f,
             answers = answers
@@ -507,6 +508,7 @@ public class SurveyResponseRecord
     public string responseId;
     public string playerName;
     public string sceneName;
+    public bool officialRound;
     public string timestamp;
     public float durationSeconds;
     public SurveyAnswerRecord[] answers;

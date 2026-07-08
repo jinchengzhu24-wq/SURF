@@ -204,6 +204,7 @@ public class CreativeWorkshopInputController : MonoBehaviour
             sessionId = GetOrCreateSessionId(),
             ideaText = IdeaText,
             sceneName = SceneManager.GetActiveScene().name,
+            officialRound = LevelStudyRecorder.IsOfficialRoundFlow,
             timestamp = DateTime.UtcNow.ToString("o"),
             durationSeconds = Mathf.Round((Time.realtimeSinceStartup - startedAt) * 100f) / 100f
         };
@@ -259,6 +260,7 @@ public class CreativeIdeaRecord
     public string sessionId;
     public string ideaText;
     public string sceneName;
+    public bool officialRound;
     public string timestamp;
     public float durationSeconds;
 }

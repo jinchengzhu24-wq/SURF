@@ -5,7 +5,8 @@ const SCENE_DISPLAY_NAMES = {
     "LLM_Level": "LLM Level",
     "Level_4(A)": "LLM Level",
     "Custom_Level": "Custom Level",
-    "Creative_WorkShop": "Creative Workshop"
+    "Creative_WorkShop": "Creative Workshop",
+    "Expansion": "Expansion"
 };
 
 const DASHBOARD_LEVEL_SCENE_NAME = "Custom_Level";
@@ -34,6 +35,8 @@ const elements = {
     statusFilter: document.getElementById("statusFilter"),
     creativeIdeaCount: document.getElementById("creativeIdeaCount"),
     creativeIdeasBody: document.getElementById("creativeIdeasBody"),
+    expansionChoiceCount: document.getElementById("expansionChoiceCount"),
+    expansionChoicesBody: document.getElementById("expansionChoicesBody"),
     resultCount: document.getElementById("resultCount"),
     recordsBody: document.getElementById("recordsBody"),
     surveyCount: document.getElementById("surveyCount"),
@@ -109,12 +112,14 @@ async function loadData(manual) {
         renderSummary(state.payload.summary || {});
         applyFilters();
         renderCreativeIdeasTable();
+        renderExpansionChoicesTable();
         renderSurveyTable();
         setStatus("Last loaded " + formatTimestamp(state.payload.generatedAt));
         elements.dataSource.textContent = "API: " + state.apiBase;
     } catch (error) {
         setStatus("Could not load records: " + error.message);
         elements.creativeIdeasBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load creative ideas.</td></tr>';
+        elements.expansionChoicesBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load expansion choices.</td></tr>';
         elements.recordsBody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load records.</td></tr>';
         elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
     }
@@ -499,6 +504,49 @@ function renderCreativeIdeasTable() {
     });
 }
 
+function renderExpansionChoicesTable() {
+    const choices = (state.payload && state.payload.creativeExpansionChoices) || [];
+    elements.expansionChoicesBody.textContent = "";
+    elements.expansionChoiceCount.textContent = choices.length + " shown";
+
+    if (choices.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 5;
+        cell.className = "empty-state";
+        cell.textContent = "No expansion choices yet.";
+        row.appendChild(cell);
+        elements.expansionChoicesBody.appendChild(row);
+        return;
+    }
+
+    choices.forEach(choice => {
+        const row = document.createElement("tr");
+        const cells = [
+            formatTimestamp(choice.serverReceivedAt || choice.timestamp),
+            getExpansionChoiceLabel(choice),
+            value(choice.originalIdeaText),
+            value(choice.finalIdeaText || choice.selectedOptionPromptText),
+            formatSceneName(value(choice.sceneName))
+        ];
+
+        cells.forEach((text, index) => {
+            const cell = document.createElement("td");
+
+            if (index === 1 || index === 2) {
+                cell.className = "choice-cell";
+            } else if (index === 3) {
+                cell.className = "prompt-cell";
+            }
+
+            cell.textContent = text;
+            row.appendChild(cell);
+        });
+
+        elements.expansionChoicesBody.appendChild(row);
+    });
+}
+
 function renderLevelRow(level) {
     const row = document.createElement("tr");
     row.className = "level-row";
@@ -876,6 +924,17 @@ function getCreativeIdeaDeleteLabel(idea) {
     }
 
     return ideaText.length > 40 ? ideaText.slice(0, 40) + "..." : ideaText;
+}
+
+function getExpansionChoiceLabel(choice) {
+    const optionId = normalizeCreativeIdeaText(choice.selectedOptionId);
+    const optionTitle = normalizeCreativeIdeaText(choice.selectedOptionTitle);
+
+    if (optionId && optionTitle) {
+        return optionId + " - " + optionTitle;
+    }
+
+    return optionTitle || optionId || "-";
 }
 
 function getCreativeIdeaMapHash(idea) {
