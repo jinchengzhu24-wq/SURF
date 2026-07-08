@@ -526,7 +526,7 @@ function renderExpansionChoicesTable() {
             formatTimestamp(choice.serverReceivedAt || choice.timestamp),
             getExpansionChoiceLabel(choice),
             value(choice.originalIdeaText),
-            value(choice.finalIdeaText || choice.selectedOptionPromptText),
+            value(choice.selectedOptionDescription || choice.selectedOptionPromptText),
             formatSceneName(value(choice.sceneName))
         ];
 
