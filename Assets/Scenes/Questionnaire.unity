@@ -2575,16 +2575,16 @@ RectTransform:
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 2300000002}
-  - {fileID: 2300000010}
   - {fileID: 1172981183}
+  - {fileID: 2300000010}
+  - {fileID: 2300000044}
+  - {fileID: 2300000078}
   - {fileID: 2300000014}
   - {fileID: 2300000024}
   - {fileID: 2300000034}
-  - {fileID: 2300000044}
   - {fileID: 2300000048}
   - {fileID: 2300000058}
   - {fileID: 2300000068}
-  - {fileID: 2300000078}
   - {fileID: 2300000082}
   - {fileID: 2300000092}
   - {fileID: 2300000102}
@@ -2857,8 +2857,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -199, y: 154}
-  m_SizeDelta: {x: 1000, y: 45}
+  m_AnchoredPosition: {x: 29.197, y: 154}
+  m_SizeDelta: {x: 1456.394, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000011
 CanvasRenderer:
@@ -2901,7 +2901,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: In which level did you notice a change?
+  m_Text: Before using this tool, how confident were you in designing a game level?
 --- !u!1 &2300000013
 GameObject:
   m_ObjectHideFlags: 0
@@ -3102,7 +3102,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Level 3
+  m_Text: Not confident at all
 --- !u!114 &2300000022
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3325,7 +3325,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Level 4
+  m_Text: Slightly confident
 --- !u!114 &2300000032
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3548,7 +3548,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Level 5
+  m_Text: Very confident
 --- !u!114 &2300000042
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3605,8 +3605,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -199, y: 4}
-  m_SizeDelta: {x: 1000, y: 45}
+  m_AnchoredPosition: {x: -86.05408, y: 4}
+  m_SizeDelta: {x: 1225.8918, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000045
 CanvasRenderer:
@@ -3649,7 +3649,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: What made you notice the change?
+  m_Text: Did the AI suggestions inspire you or limit your thinking?
 --- !u!1 &2300000047
 GameObject:
   m_ObjectHideFlags: 0
@@ -3850,7 +3850,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Difficulty changed
+  m_Text: did not change much
 --- !u!114 &2300000056
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4073,7 +4073,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Layout felt different
+  m_Text: inspired me to explore
 --- !u!114 &2300000066
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4296,7 +4296,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Unnatural design
+  m_Text: limited my own ideas
 --- !u!114 &2300000076
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4353,8 +4353,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -199, y: -146}
-  m_SizeDelta: {x: 1000, y: 45}
+  m_AnchoredPosition: {x: -38.801025, y: -146}
+  m_SizeDelta: {x: 1320.398, y: 45}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!222 &2300000079
 CanvasRenderer:
@@ -4397,7 +4397,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Did the change affect your gameplay experience?
+  m_Text: How much control did you feel during the level creation process?
 --- !u!1 &2300000081
 GameObject:
   m_ObjectHideFlags: 0
@@ -4598,7 +4598,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Improved
+  m_Text: fully in control
 --- !u!114 &2300000090
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4821,7 +4821,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Worsened
+  m_Text: partly in control
 --- !u!114 &2300000100
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -5044,7 +5044,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: No difference
+  m_Text: almost no control
 --- !u!114 &2300000110
 MonoBehaviour:
   m_ObjectHideFlags: 0
