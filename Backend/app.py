@@ -1785,49 +1785,7 @@ def validate_creative_idea_expansion(payload):
 def fallback_creative_idea_expansion(creative_context, reason):
     idea_text = clean_expansion_text((creative_context or {}).get("ideaText"))
     chinese = contains_cjk(idea_text)
-
-    if chinese:
-        options = [
-            {
-                "id": "A",
-                "title": "狭窄绕路型",
-                "description": "围绕原始想法加入更明确的瓶颈通道和绕路压力，适合做成需要提前规划的两箱关卡。",
-                "promptText": "以狭窄通道、绕路规划和轻度水域阻隔为主，保持原始想法的主题，不加入生成器不支持的机制。",
-            },
-            {
-                "id": "B",
-                "title": "分离目标型",
-                "description": "把两个目标区域适度分开，让玩家需要决定先处理哪只箱子，同时保留原始创意的核心感觉。",
-                "promptText": "以分离目标、路线选择和箱子顺序规划为主，参考原始想法并避免偏离其主题。",
-            },
-            {
-                "id": "C",
-                "title": "紧凑精确型",
-                "description": "地图更紧凑，移动空间更受限，强调少量关键推动和防卡死判断。",
-                "promptText": "以紧凑空间、关键推动和死锁规避为主，原始想法作为主题约束和风格来源。",
-            },
-        ]
-    else:
-        options = [
-            {
-                "id": "A",
-                "title": "Narrow Detour",
-                "description": "Turn the idea into a route-planning puzzle with a clear choke point, a small detour, and light water pressure.",
-                "promptText": "Use narrow routes, detour planning, and light water obstacles while preserving the original idea's theme.",
-            },
-            {
-                "id": "B",
-                "title": "Split Goals",
-                "description": "Separate the two target areas so the player has to choose box order while still following the original idea.",
-                "promptText": "Use split goals, route choice, and box-order planning while keeping the original idea as the main constraint.",
-            },
-            {
-                "id": "C",
-                "title": "Compact Precision",
-                "description": "Make the map tighter and more exact, with a few important pushes and careful deadlock avoidance.",
-                "promptText": "Use compact space, precise pushes, and deadlock avoidance while treating the original idea as the theme.",
-            },
-        ]
+    options = build_contextual_expansion_fallback_options(idea_text, chinese)
 
     print(f"Generated creative idea expansion from fallback: {reason}")
     return {
@@ -1835,6 +1793,265 @@ def fallback_creative_idea_expansion(creative_context, reason):
         "usedFallback": True,
         "message": reason,
     }
+
+
+def build_contextual_expansion_fallback_options(idea_text, chinese):
+    tags = classify_expansion_idea(idea_text)
+
+    if "water" in tags:
+        return build_water_fallback_options(chinese, compact="compact" in tags)
+
+    if "maze" in tags:
+        return build_maze_fallback_options(chinese)
+
+    if "compact" in tags:
+        return build_compact_fallback_options(chinese)
+
+    return build_general_fallback_options(chinese)
+
+
+def classify_expansion_idea(idea_text):
+    normalized = clean_expansion_text(idea_text).lower()
+    tags = set()
+
+    if contains_any(normalized, ["water", "river", "pool", "lake", "pond", "obstacle", "水", "河", "池", "湖", "障碍"]):
+        tags.add("water")
+
+    if contains_any(normalized, ["maze", "detour", "corridor", "route", "path", "绕路", "迷宫", "通道", "路线", "走廊"]):
+        tags.add("maze")
+
+    if contains_any(normalized, ["hard", "difficult", "compact", "tight", "deadlock", "tricky", "难", "困难", "紧凑", "狭小", "卡死", "精确"]):
+        tags.add("compact")
+
+    return tags
+
+
+def build_water_fallback_options(chinese, compact=False):
+    if chinese:
+        if compact:
+            return [
+                {
+                    "id": "A",
+                    "title": "紧凑水域分割",
+                    "description": "在紧凑空间里把水障碍放在地图中部，让玩家必须从水边绕行并选择先处理哪只箱子。水会切断直线路径，同时压缩可站位空间。",
+                    "promptText": "围绕原始想法设计紧凑水域分割；用中部水障碍、少量站位、绕行和两箱顺序选择制造压力。",
+                },
+                {
+                    "id": "B",
+                    "title": "水边窄位目标",
+                    "description": "让目标区靠近水边，并把周围空间收紧。玩家需要在靠水的狭窄边缘调整箱子，避免把自己或箱子逼进死角。",
+                    "promptText": "围绕原始想法设计紧凑靠水目标区；用水边站位限制、目标区压力和死锁风险制造解谜重点。",
+                },
+                {
+                    "id": "C",
+                    "title": "双水池挤压",
+                    "description": "在小房间里用两块水域挤出一条弯折路线，让玩家在两个箱子之间来回切换。难点来自水障碍造成的绕行时机和紧凑空间里的站位取舍。",
+                    "promptText": "围绕原始想法设计双水池紧凑绕行；用两块水域、弯折路线、有限站位和箱子切换节奏形成玩法。",
+                },
+            ]
+
+        return [
+            {
+                "id": "A",
+                "title": "水域分割路线",
+                "description": "把水障碍放在地图中部，让玩家必须从水边绕行并选择先处理哪只箱子。水不是装饰，而是切断直线路径的核心压力。",
+                "promptText": "围绕原始想法设计水域分割路线；用中部水障碍制造绕行、顺序选择和两箱路线规划。",
+            },
+            {
+                "id": "B",
+                "title": "水边目标压力",
+                "description": "让目标区靠近水边，箱子推进时可站位空间更少。玩家需要在靠水的狭窄边缘调整箱子，避免把自己或箱子逼进死角。",
+                "promptText": "围绕原始想法设计靠水目标区；用水边站位限制、目标区压力和死锁风险制造解谜重点。",
+            },
+            {
+                "id": "C",
+                "title": "双水池绕行",
+                "description": "用两块小水域制造一条弯折路线，让玩家在两个箱子之间来回切换。难点来自绕水移动的时机，而不是单纯扩大地图。",
+                "promptText": "围绕原始想法设计双水池绕行；用两块水域、弯折路线和箱子切换节奏形成差异化玩法。",
+            },
+        ]
+
+    if compact:
+        return [
+            {
+                "id": "A",
+                "title": "Compact Water Split",
+                "description": "In a compact room, place water through the middle so the player must route around it and choose which box to handle first. The water cuts the direct path and compresses standing space.",
+                "promptText": "Use the original idea with compact space, a central water split, limited standing positions, detour routing, and two-box order pressure.",
+            },
+            {
+                "id": "B",
+                "title": "Tight Waterside Goals",
+                "description": "Put the goal area near water and keep the surrounding space tight. The player has to adjust boxes along a narrow waterside edge without trapping a box or themselves.",
+                "promptText": "Use the original idea with compact waterside goals, edge-position pressure, and deadlock-aware box placement.",
+            },
+            {
+                "id": "C",
+                "title": "Twin Pool Squeeze",
+                "description": "Use two small water areas in a tight room to bend the route and make the player switch attention between boxes. The challenge comes from water detours plus limited standing room.",
+                "promptText": "Use the original idea with two water pools, compact routing, limited standing space, and box-switching rhythm.",
+            },
+        ]
+
+    return [
+        {
+            "id": "A",
+            "title": "Water-Split Route",
+            "description": "Place water through the middle so the player has to route around it and decide which box to handle first. The water acts as the main blocker, not decoration.",
+            "promptText": "Use the original idea with a central water split, detour routing, box-order decisions, and two-box planning pressure.",
+        },
+        {
+            "id": "B",
+            "title": "Waterside Goals",
+            "description": "Put the goal area near water so pushing space is limited along the edge. The puzzle asks the player to adjust boxes without trapping them against the water.",
+            "promptText": "Use the original idea with goals near water, edge-position pressure, and deadlock-aware box placement.",
+        },
+        {
+            "id": "C",
+            "title": "Twin Pool Detour",
+            "description": "Use two small water areas to bend the route and make the player switch attention between boxes. The challenge comes from timing movement around water, not from a larger map.",
+            "promptText": "Use the original idea with two water pools, a bent route, and box-switching rhythm.",
+        },
+    ]
+
+
+def build_maze_fallback_options(chinese):
+    if chinese:
+        return [
+            {
+                "id": "A",
+                "title": "单通道回环",
+                "description": "把路线做成一条需要绕回来的通道，玩家先推开一个箱子打开站位，再回来处理另一个箱子。迷宫感来自回环路线和站位复用。",
+                "promptText": "围绕原始想法设计单通道回环；强调绕路、回到旧位置和两箱处理顺序。",
+            },
+            {
+                "id": "B",
+                "title": "错位走廊",
+                "description": "用错开的走廊让直线推进变得不可靠，玩家必须先把箱子推到中转点，再从另一侧接手。重点是路线切换而不是增加箱子数量。",
+                "promptText": "围绕原始想法设计错位走廊；用中转点、换边接手和路线切换制造迷宫感。",
+            },
+            {
+                "id": "C",
+                "title": "目标区绕入口",
+                "description": "让目标区入口不在正面，玩家需要绕到侧面才能把箱子送进去。难点是提前给第二只箱子留下通路。",
+                "promptText": "围绕原始想法设计侧向目标入口；用绕入口、保留通路和目标区推进顺序形成玩法。",
+            },
+        ]
+
+    return [
+        {
+            "id": "A",
+            "title": "Loopback Corridor",
+            "description": "Shape the route as a corridor the player must loop back through, using one box to open position before returning for the other. The maze feel comes from reused standing space.",
+            "promptText": "Use the original idea with a loopback corridor, detour movement, reused positions, and two-box order planning.",
+        },
+        {
+            "id": "B",
+            "title": "Offset Hallways",
+            "description": "Use staggered corridors so direct pushing is unreliable. The player must move a box to a transfer point, then approach it from another side.",
+            "promptText": "Use the original idea with offset corridors, transfer points, side switching, and route-change pressure.",
+        },
+        {
+            "id": "C",
+            "title": "Side-Entry Goals",
+            "description": "Make the goal area reachable from the side rather than straight ahead. The player has to preserve a path for the second box before closing the entrance.",
+            "promptText": "Use the original idea with side-entry goals, preserved access paths, and ordered target delivery.",
+        },
+    ]
+
+
+def build_compact_fallback_options(chinese):
+    if chinese:
+        return [
+            {
+                "id": "A",
+                "title": "一步失误压力",
+                "description": "空间保持紧凑，但每个箱子都有一个安全中转位。玩家必须判断哪一步会封住通道，避免过早把箱子推到边缘。",
+                "promptText": "围绕原始想法设计紧凑空间；用安全中转位、通道封锁风险和精确推动制造压力。",
+            },
+            {
+                "id": "B",
+                "title": "交叉站位",
+                "description": "两个箱子的路线在中部交叉，玩家需要先让出站位再推进。紧凑感来自互相占位，而不是单纯减少空地。",
+                "promptText": "围绕原始想法设计交叉站位；用两箱路线交叉、让位和推进顺序形成紧凑解谜。",
+            },
+            {
+                "id": "C",
+                "title": "边缘救回",
+                "description": "允许箱子接近边缘，但保留一条可以救回的路线。玩家要把箱子推到危险位置后再利用另一侧站位把它送回目标区。",
+                "promptText": "围绕原始想法设计边缘救回；用危险边缘、可救回路线和站位转换制造难度。",
+            },
+        ]
+
+    return [
+        {
+            "id": "A",
+            "title": "One-Push Pressure",
+            "description": "Keep the space tight but give each box one safe transfer spot. The player has to notice which push will close a corridor too early.",
+            "promptText": "Use the original idea with compact space, safe transfer spots, corridor-blocking risk, and precise pushes.",
+        },
+        {
+            "id": "B",
+            "title": "Crossed Positions",
+            "description": "Make the two box routes cross near the center so the player must clear standing space before advancing. The tightness comes from shared positions.",
+            "promptText": "Use the original idea with crossed box routes, shared standing space, and ordered movement.",
+        },
+        {
+            "id": "C",
+            "title": "Edge Recovery",
+            "description": "Let a box approach a risky edge while preserving one recovery route. The player pushes into danger, then uses the other side to bring it back toward the goals.",
+            "promptText": "Use the original idea with risky edge pushes, a recovery path, and side-switching position play.",
+        },
+    ]
+
+
+def build_general_fallback_options(chinese):
+    if chinese:
+        return [
+            {
+                "id": "A",
+                "title": "顺序抉择",
+                "description": "把原始想法转成一个先后顺序清晰的两箱谜题：先处理一个箱子会打开站位，但也可能挡住另一个箱子的路线。",
+                "promptText": "围绕原始想法设计两箱顺序抉择；强调先后处理、站位打开和路线保留。",
+            },
+            {
+                "id": "B",
+                "title": "入口控制",
+                "description": "让关键区域只有一两个入口，玩家必须决定什么时候进入、什么时候把箱子推出入口。压力来自入口被箱子临时堵住。",
+                "promptText": "围绕原始想法设计入口控制；用少量入口、临时堵路和站位判断制造玩法。",
+            },
+            {
+                "id": "C",
+                "title": "目标区压缩",
+                "description": "目标区更集中，最后几步需要小心安排两个箱子的落点。玩家要提前避免第一个箱子挡住第二个箱子的收尾路线。",
+                "promptText": "围绕原始想法设计目标区压缩；用集中目标、收尾路线和两箱落点顺序形成解谜。",
+            },
+        ]
+
+    return [
+        {
+            "id": "A",
+            "title": "Order Decision",
+            "description": "Turn the idea into a clear two-box order puzzle: solving one box opens standing space, but can also block the other box's route.",
+            "promptText": "Use the original idea with two-box order decisions, opened standing space, and preserved routes.",
+        },
+        {
+            "id": "B",
+            "title": "Entrance Control",
+            "description": "Give the key area only one or two entrances, so the player has to decide when to enter and when to push a box out of the doorway.",
+            "promptText": "Use the original idea with limited entrances, temporary blockage, and standing-position judgment.",
+        },
+        {
+            "id": "C",
+            "title": "Compressed Goals",
+            "description": "Cluster the goal area so the final pushes need careful placement. The first box must not block the second box's finishing route.",
+            "promptText": "Use the original idea with clustered goals, endgame route preservation, and two-box placement order.",
+        },
+    ]
+
+
+def contains_any(text, keywords):
+    return any(keyword in text for keyword in keywords)
 
 
 def clean_expansion_text(value):
