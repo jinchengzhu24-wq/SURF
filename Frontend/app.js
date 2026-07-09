@@ -526,8 +526,7 @@ function renderExpansionChoicesTable() {
             formatTimestamp(choice.serverReceivedAt || choice.timestamp),
             getExpansionChoiceLabel(choice),
             value(choice.originalIdeaText),
-            value(choice.selectedOptionDescription || choice.selectedOptionPromptText),
-            formatSceneName(value(choice.sceneName))
+            value(choice.selectedOptionDescription || choice.selectedOptionPromptText)
         ];
 
         cells.forEach((text, index) => {
@@ -542,6 +541,27 @@ function renderExpansionChoicesTable() {
             cell.textContent = text;
             row.appendChild(cell);
         });
+
+        const actionsCell = document.createElement("td");
+        const deleteButton = document.createElement("button");
+        const choiceId = normalizeCreativeIdeaText(choice.choiceId);
+        deleteButton.className = "round-action round-action-danger";
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+
+        if (choiceId) {
+            deleteButton.title = "Delete expansion choice";
+            deleteButton.addEventListener("click", event => {
+                event.stopPropagation();
+                deleteExpansionChoice(choice);
+            });
+        } else {
+            deleteButton.disabled = true;
+            deleteButton.title = "Cannot delete without choice ID";
+        }
+
+        actionsCell.appendChild(deleteButton);
+        row.appendChild(actionsCell);
 
         elements.expansionChoicesBody.appendChild(row);
     });
@@ -900,6 +920,46 @@ async function deleteCreativeIdea(idea) {
     }
 }
 
+async function deleteExpansionChoice(choice) {
+    const choiceId = normalizeCreativeIdeaText(choice.choiceId);
+
+    if (!choiceId) {
+        return;
+    }
+
+    const label = getExpansionChoiceDeleteLabel(choice);
+    const confirmed = window.confirm(
+        "Delete expansion choice \"" + label + "\"? This permanently removes it."
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    setStatus("Deleting expansion choice...");
+
+    try {
+        const apiResponse = await fetch(apiUrl("/delete-expansion-choice"), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                choiceId: choiceId
+            })
+        });
+
+        if (!apiResponse.ok) {
+            throw new Error(await getResponseError(apiResponse));
+        }
+
+        showNotice("Expansion choice deleted.");
+        await loadData(true);
+    } catch (error) {
+        setStatus("Could not delete expansion choice: " + error.message);
+    }
+}
+
 function getSurveyDeletePayload(response) {
     const responseId = normalizeSurveyDeleteText(response.responseId);
 
@@ -935,6 +995,20 @@ function getExpansionChoiceLabel(choice) {
     }
 
     return optionTitle || optionId || "-";
+}
+
+function getExpansionChoiceDeleteLabel(choice) {
+    const choiceLabel = getExpansionChoiceLabel(choice);
+    const originalIdea = normalizeCreativeIdeaText(choice.originalIdeaText);
+    const label = [choiceLabel, originalIdea]
+        .filter(text => text && text !== "-")
+        .join(" / ");
+
+    if (!label) {
+        return shortId(choice.choiceId);
+    }
+
+    return label.length > 48 ? label.slice(0, 48) + "..." : label;
 }
 
 function getCreativeIdeaMapHash(idea) {

@@ -1,4 +1,5 @@
 import html
+import hashlib
 import json
 import os
 import threading
@@ -90,6 +91,10 @@ class DeleteSurveyResponseRequest(BaseModel):
 
 class DeleteCreativeIdeaRequest(BaseModel):
     ideaId: str | None = ""
+
+
+class DeleteExpansionChoiceRequest(BaseModel):
+    choiceId: str | None = ""
 
 
 DEFAULT_PLAN = {
@@ -536,6 +541,43 @@ def delete_creative_idea(request: DeleteCreativeIdeaRequest):
     }
 
 
+@app.post("/delete-expansion-choice")
+def delete_expansion_choice(request: DeleteExpansionChoiceRequest):
+    choice_id = normalize_expansion_choice_identifier(request.choiceId)
+
+    if not choice_id:
+        raise HTTPException(status_code=400, detail="choiceId is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_expansion_choice_events()
+        remaining_records = []
+        deleted_count = 0
+
+        for record in records:
+            record_choice_id = (
+                normalize_expansion_choice_identifier(record.get("choiceId"))
+                or build_expansion_choice_identifier(record)
+            )
+
+            if record_choice_id == choice_id:
+                deleted_count += 1
+            else:
+                remaining_records.append(record)
+
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Expansion choice not found")
+
+        write_jsonl_records(CREATIVE_EXPANSION_CHOICE_LOG_FILE, remaining_records)
+
+    return {
+        "status": "ok",
+        "choiceId": choice_id,
+        "deletedChoiceCount": deleted_count,
+    }
+
+
 @app.post("/clear-level-records")
 def clear_level_records():
     STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -661,6 +703,9 @@ async def append_expansion_choice_record(request: Request):
     data.setdefault("eventType", "creative-expansion-choice")
     data["serverReceivedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    if not normalize_expansion_choice_identifier(data.get("choiceId")):
+        data["choiceId"] = build_expansion_choice_identifier(data)
+
     STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     with study_record_lock:
@@ -671,6 +716,7 @@ async def append_expansion_choice_record(request: Request):
     return {
         "status": "ok",
         "eventType": data["eventType"],
+        "choiceId": data["choiceId"],
         "ideaId": idea_id,
         "logFile": str(CREATIVE_EXPANSION_CHOICE_LOG_FILE),
     }
@@ -1109,6 +1155,10 @@ def normalize_creative_idea(idea):
 
 def normalize_expansion_choice(choice):
     normalized = dict(choice)
+    normalized["choiceId"] = value_or_dash(
+        choice.get("choiceId")
+        or build_expansion_choice_identifier(choice)
+    )
     normalized["ideaId"] = value_or_dash(choice.get("ideaId"))
     normalized["sessionId"] = value_or_dash(choice.get("sessionId"))
     normalized["gameRoundId"] = value_or_dash(choice.get("gameRoundId"))
@@ -1524,6 +1574,53 @@ def normalize_creative_idea_identifier(value):
 
     text = str(value).strip()
     return "" if text == "-" else text
+
+
+def normalize_expansion_choice_identifier(value):
+    return normalize_creative_idea_identifier(value)
+
+
+def build_expansion_choice_identifier(choice):
+    if not isinstance(choice, dict):
+        choice = {}
+
+    components = [
+        choice.get("serverReceivedAt"),
+        choice.get("timestamp"),
+        choice.get("ideaId"),
+        choice.get("sessionId"),
+        choice.get("gameRoundId"),
+        choice.get("selectedOptionId"),
+        choice.get("selectedOptionTitle"),
+        choice.get("originalIdeaText"),
+        choice.get("finalIdeaText"),
+    ]
+    encoded_components = [
+        normalize_expansion_choice_identifier_component(component)
+        for component in components
+    ]
+    payload = json.dumps(
+        encoded_components,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return "choice-" + digest
+
+
+def normalize_expansion_choice_identifier_component(value):
+    if value is None:
+        return ""
+
+    if isinstance(value, (dict, list)):
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    return str(value).strip()
 
 
 def get_survey_player_identifier(response):
