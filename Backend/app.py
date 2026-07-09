@@ -62,6 +62,8 @@ class CreativeIdeaExpansionRequest(BaseModel):
     sessionId: str | None = ""
     ideaText: str | None = ""
     sceneName: str | None = ""
+    regenerationAttempt: int | None = 0
+    previousOptions: list[dict] | None = None
 
 
 class CreativeIdeaExpansionOption(BaseModel):

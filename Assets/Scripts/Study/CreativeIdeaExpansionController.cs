@@ -15,6 +15,7 @@ public class CreativeIdeaExpansionController : MonoBehaviour
 
     [Header("Scene UI")]
     public Button submitButton;
+    public Button regenerateButton;
     public Text statusText;
     public Text guidanceText;
     public Text originalIdeaText;
@@ -42,6 +43,7 @@ public class CreativeIdeaExpansionController : MonoBehaviour
     private bool isRequesting;
     private bool isContinuing;
     private int selectedOptionIndex = -1;
+    private int regenerationAttempt;
 
     private void Start()
     {
@@ -59,6 +61,11 @@ public class CreativeIdeaExpansionController : MonoBehaviour
         if (submitButton != null)
         {
             submitButton.onClick.RemoveListener(ContinueToLevel);
+        }
+
+        if (regenerateButton != null)
+        {
+            regenerateButton.onClick.RemoveListener(RegenerateExpansion);
         }
 
         if (optionButtons == null)
@@ -107,6 +114,16 @@ public class CreativeIdeaExpansionController : MonoBehaviour
             if (submitObject != null)
             {
                 submitButton = submitObject.GetComponent<Button>();
+            }
+        }
+
+        if (regenerateButton == null)
+        {
+            GameObject regenerateObject = GameObject.Find("Regenerate");
+
+            if (regenerateObject != null)
+            {
+                regenerateButton = regenerateObject.GetComponent<Button>();
             }
         }
 
@@ -212,6 +229,13 @@ public class CreativeIdeaExpansionController : MonoBehaviour
             SetButtonLabel(submitButton, "Generate Level");
         }
 
+        if (regenerateButton != null)
+        {
+            regenerateButton.onClick.RemoveAllListeners();
+            regenerateButton.onClick.AddListener(RegenerateExpansion);
+            SetButtonLabel(regenerateButton, "Regenerate");
+        }
+
         for (int i = 0; i < optionButtons.Length; i++)
         {
             int optionIndex = i;
@@ -249,7 +273,10 @@ public class CreativeIdeaExpansionController : MonoBehaviour
         SetStatus("");
     }
 
-    private IEnumerator RequestExpansionRoutine()
+    private IEnumerator RequestExpansionRoutine(
+        bool isRegeneration = false,
+        CreativeIdeaExpansionOption[] previousOptions = null,
+        int requestRegenerationAttempt = 0)
     {
         if (isRequesting)
         {
@@ -268,7 +295,7 @@ public class CreativeIdeaExpansionController : MonoBehaviour
         }
 
         isRequesting = true;
-        SetStatus("Generating expanded directions...");
+        SetStatus(isRegeneration ? "Regenerating expanded directions..." : "Generating expanded directions...");
         UpdateSubmitState();
 
         CreativeIdeaExpansionRequest requestBody = new CreativeIdeaExpansionRequest
@@ -276,7 +303,9 @@ public class CreativeIdeaExpansionController : MonoBehaviour
             ideaId = GetIdeaId(),
             sessionId = GetSessionId(),
             ideaText = originalIdea,
-            sceneName = SceneManager.GetActiveScene().name
+            sceneName = SceneManager.GetActiveScene().name,
+            regenerationAttempt = isRegeneration ? requestRegenerationAttempt : 0,
+            previousOptions = isRegeneration ? previousOptions : null
         };
 
         string json = JsonUtility.ToJson(requestBody);
@@ -309,6 +338,21 @@ public class CreativeIdeaExpansionController : MonoBehaviour
 
         isRequesting = false;
         UpdateSubmitState();
+    }
+
+    private void RegenerateExpansion()
+    {
+        if (!CanRegenerate())
+        {
+            return;
+        }
+
+        regenerationAttempt += 1;
+        StartCoroutine(RequestExpansionRoutine(
+            true,
+            CopyOptionsForRequest(options),
+            regenerationAttempt
+        ));
     }
 
     private void ApplyResponse(string json)
@@ -450,7 +494,25 @@ public class CreativeIdeaExpansionController : MonoBehaviour
                 && selectedOptionIndex < options.Length;
         }
 
+        if (regenerateButton != null)
+        {
+            regenerateButton.interactable = CanRegenerate();
+        }
+
         UpdateOptionVisuals();
+    }
+
+    private bool CanRegenerate()
+    {
+        return !isRequesting
+            && !isContinuing
+            && !string.IsNullOrEmpty(originalIdea)
+            && HasOptions();
+    }
+
+    private bool HasOptions()
+    {
+        return options != null && options.Length >= 3;
     }
 
     private void ContinueToLevel()
@@ -554,6 +616,36 @@ public class CreativeIdeaExpansionController : MonoBehaviour
             + " Original player idea to respect: \""
             + originalIdea
             + "\". Use the selected design direction as the primary generation intent, but do not drift away from the original idea.";
+    }
+
+    private CreativeIdeaExpansionOption[] CopyOptionsForRequest(CreativeIdeaExpansionOption[] source)
+    {
+        if (source == null)
+        {
+            return null;
+        }
+
+        CreativeIdeaExpansionOption[] copy = new CreativeIdeaExpansionOption[Mathf.Min(3, source.Length)];
+
+        for (int i = 0; i < copy.Length; i++)
+        {
+            CreativeIdeaExpansionOption option = source[i];
+
+            if (option == null)
+            {
+                continue;
+            }
+
+            copy[i] = new CreativeIdeaExpansionOption
+            {
+                id = option.id,
+                title = option.title,
+                description = option.description,
+                promptText = option.promptText
+            };
+        }
+
+        return copy;
     }
 
     private CreativeIdeaExpansionOption[] CreateLocalFallbackOptions()
@@ -703,6 +795,8 @@ public class CreativeIdeaExpansionController : MonoBehaviour
         public string sessionId;
         public string ideaText;
         public string sceneName;
+        public int regenerationAttempt;
+        public CreativeIdeaExpansionOption[] previousOptions;
     }
 
     [Serializable]

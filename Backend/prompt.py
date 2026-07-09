@@ -76,6 +76,10 @@ def build_creative_idea_expansion_messages(creative_context):
     idea_id = normalize_prompt_text(creative_context.get("ideaId"))
     session_id = normalize_prompt_text(creative_context.get("sessionId"))
     scene_name = normalize_prompt_text(creative_context.get("sceneName"))
+    regeneration_attempt = normalize_prompt_int(creative_context.get("regenerationAttempt"))
+    previous_options = normalize_previous_expansion_options(
+        creative_context.get("previousOptions")
+    )
     context_parts = []
 
     if idea_id:
@@ -88,10 +92,15 @@ def build_creative_idea_expansion_messages(creative_context):
         context_parts.append(f"sceneName={scene_name}")
 
     context_text = ", ".join(context_parts) if context_parts else "none"
+    regeneration_text = build_expansion_regeneration_prompt(
+        regeneration_attempt,
+        previous_options,
+    )
     user_prompt = (
         "Expand this player's Sokoban level idea into three options. "
         f"Original idea: \"{idea_text}\". "
         f"Context: {context_text}. "
+        f"{regeneration_text}"
         "All three options must clearly preserve the original idea. Do not use "
         "a fixed trio such as narrow detour, split goals, and compact precision "
         "unless those concepts are directly suggested by the player's words. "
@@ -127,6 +136,76 @@ def build_creative_idea_expansion_messages(creative_context):
             "content": user_prompt,
         },
     ]
+
+
+def build_expansion_regeneration_prompt(regeneration_attempt, previous_options):
+    if regeneration_attempt <= 0:
+        return ""
+
+    prompt = (
+        f"This is regeneration attempt {regeneration_attempt}. Generate a fresh "
+        "replacement set of three options. Do not repeat or closely paraphrase "
+        "any previous option title, route structure, obstacle function, target "
+        "placement pattern, or difficulty rhythm. "
+    )
+
+    if previous_options:
+        previous_text = "; ".join(
+            format_previous_expansion_option(option, index)
+            for index, option in enumerate(previous_options)
+        )
+        prompt += f"Previous options to avoid: {previous_text}. "
+
+    return prompt
+
+
+def format_previous_expansion_option(option, index):
+    option_id = normalize_prompt_text(option.get("id")) or chr(ord("A") + index)
+    title = normalize_prompt_text(option.get("title"))
+    description = normalize_prompt_text(option.get("description"))
+    prompt_text = normalize_prompt_text(option.get("promptText"))
+    parts = []
+
+    if title:
+        parts.append(f"title={title}")
+
+    if description:
+        parts.append(f"description={description}")
+
+    if prompt_text:
+        parts.append(f"promptText={prompt_text}")
+
+    if not parts:
+        return f"{option_id}: empty"
+
+    return f"{option_id}: " + ", ".join(parts)
+
+
+def normalize_previous_expansion_options(value):
+    if not isinstance(value, list):
+        return []
+
+    normalized = []
+
+    for raw_option in value[:3]:
+        if hasattr(raw_option, "model_dump"):
+            option = raw_option.model_dump()
+        elif isinstance(raw_option, dict):
+            option = raw_option
+        else:
+            continue
+
+        normalized_option = {
+            "id": normalize_prompt_text(option.get("id"))[:12],
+            "title": normalize_prompt_text(option.get("title"))[:80],
+            "description": normalize_prompt_text(option.get("description"))[:180],
+            "promptText": normalize_prompt_text(option.get("promptText"))[:220],
+        }
+
+        if any(normalized_option.values()):
+            normalized.append(normalized_option)
+
+    return normalized
 
 
 def build_creative_idea_prompt(creative_context):
@@ -170,3 +249,10 @@ def normalize_prompt_text(value):
 
     text = str(value).strip()
     return " ".join(text.split())
+
+
+def normalize_prompt_int(value):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
