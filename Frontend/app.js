@@ -6,7 +6,8 @@ const SCENE_DISPLAY_NAMES = {
     "Level_4(A)": "LLM Level",
     "Custom_Level": "Custom Level",
     "Creative_WorkShop": "Creative Workshop",
-    "Expansion": "Expansion"
+    "Expansion": "Expansion",
+    "Refinement": "Refinement"
 };
 
 const DASHBOARD_LEVEL_SCENE_NAME = "Custom_Level";
@@ -120,7 +121,7 @@ async function loadData(manual) {
         setStatus("Could not load records: " + error.message);
         elements.creativeIdeasBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load creative ideas.</td></tr>';
         elements.expansionChoicesBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load expansion choices.</td></tr>';
-        elements.recordsBody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load records.</td></tr>';
+        elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
         elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
     }
 }
@@ -393,6 +394,7 @@ function levelMatchesFilters(level, round, search, status) {
     const end = level.end || {};
     const structure = start.structure || {};
     const rowStatus = getStatusKey(level);
+    const ideaHash = getLevelIdeaHash(level);
     const haystack = [
         round.roundId,
         round.displayName,
@@ -405,6 +407,7 @@ function levelMatchesFilters(level, round, search, status) {
         end.roundLevelIndex,
         start.levelIndex,
         end.levelIndex,
+        ideaHash,
         structure.mapHash
     ].join(" ").toLowerCase();
 
@@ -425,7 +428,7 @@ function renderTable() {
     if (state.filteredLevels.length === 0) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 7;
+        cell.colSpan = 8;
         cell.className = "empty-state";
         cell.textContent = "No matching level records.";
         row.appendChild(cell);
@@ -461,18 +464,18 @@ function renderCreativeIdeasTable() {
         const row = document.createElement("tr");
         const cells = [
             formatTimestamp(idea.serverReceivedAt || idea.timestamp),
+            getCreativeIdeaHash(idea),
             value(idea.ideaText),
-            formatSceneName(value(idea.sceneName)),
-            getCreativeIdeaMapHash(idea)
+            formatSceneName(value(idea.sceneName))
         ];
 
         cells.forEach((text, index) => {
             const cell = document.createElement("td");
 
             if (index === 1) {
-                cell.className = "idea-cell";
-            } else if (index === 3) {
                 cell.className = "small";
+            } else if (index === 2) {
+                cell.className = "idea-cell";
             }
 
             cell.textContent = text;
@@ -525,15 +528,17 @@ function renderExpansionChoicesTable() {
         const cells = [
             formatTimestamp(choice.serverReceivedAt || choice.timestamp),
             getExpansionChoiceLabel(choice),
-            value(choice.originalIdeaText),
+            getExpansionChoiceIdeaHash(choice),
             value(choice.selectedOptionDescription || choice.selectedOptionPromptText)
         ];
 
         cells.forEach((text, index) => {
             const cell = document.createElement("td");
 
-            if (index === 1 || index === 2) {
+            if (index === 1) {
                 cell.className = "choice-cell";
+            } else if (index === 2) {
+                cell.className = "small";
             } else if (index === 3) {
                 cell.className = "prompt-cell";
             }
@@ -582,6 +587,7 @@ function renderLevelRow(level) {
     const status = getStatus(level);
     const cells = [
         value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex),
+        getLevelIdeaHash(level),
         status.label,
         value(end.moveCount),
         value(end.pushCount),
@@ -596,11 +602,14 @@ function renderLevelRow(level) {
             cell.className = "level-index-cell";
             cell.textContent = text;
         } else if (index === 1) {
+            cell.className = "small";
+            cell.textContent = text;
+        } else if (index === 2) {
             const badge = document.createElement("span");
             badge.className = "badge " + status.className;
             badge.textContent = text;
             cell.appendChild(badge);
-        } else if (index === 5) {
+        } else if (index === 6) {
             cell.className = "small";
             cell.textContent = text;
         } else {
@@ -999,8 +1008,8 @@ function getExpansionChoiceLabel(choice) {
 
 function getExpansionChoiceDeleteLabel(choice) {
     const choiceLabel = getExpansionChoiceLabel(choice);
-    const originalIdea = normalizeCreativeIdeaText(choice.originalIdeaText);
-    const label = [choiceLabel, originalIdea]
+    const ideaHash = getExpansionChoiceIdeaHash(choice);
+    const label = [choiceLabel, ideaHash]
         .filter(text => text && text !== "-")
         .join(" / ");
 
@@ -1011,42 +1020,67 @@ function getExpansionChoiceDeleteLabel(choice) {
     return label.length > 48 ? label.slice(0, 48) + "..." : label;
 }
 
-function getCreativeIdeaMapHash(idea) {
-    const directMapHash = normalizeCreativeIdeaText(
-        idea.mapHash || (idea.structure && idea.structure.mapHash)
+function getLevelIdeaHash(level) {
+    const start = (level && level.start) || {};
+    const end = (level && level.end) || {};
+    return getIdeaHash(
+        start.creativeIdeaId || end.creativeIdeaId,
+        start.creativeIdeaText || end.creativeIdeaText
+    );
+}
+
+function getCreativeIdeaHash(idea) {
+    const directHash = normalizeCreativeIdeaText(
+        idea && (idea.ideaHash || idea.creativeIdeaHash)
     );
 
-    if (directMapHash) {
-        return directMapHash;
+    if (directHash) {
+        return directHash;
     }
 
-    const ideaId = normalizeCreativeIdeaText(idea.ideaId);
-    const ideaText = normalizeCreativeIdeaText(idea.ideaText);
-    const levels = state.payload && Array.isArray(state.payload.levels)
-        ? state.payload.levels
-        : [];
-    const hashes = [];
+    return getIdeaHash(
+        idea && idea.ideaId,
+        idea && idea.ideaText
+    );
+}
 
-    levels.forEach(level => {
-        const start = level.start || {};
-        const structure = start.structure || {};
-        const mapHash = normalizeCreativeIdeaText(structure.mapHash);
+function getExpansionChoiceIdeaHash(choice) {
+    const directHash = normalizeCreativeIdeaText(
+        choice && (choice.ideaHash || choice.creativeIdeaHash)
+    );
 
-        if (!mapHash) {
-            return;
-        }
+    if (directHash) {
+        return directHash;
+    }
 
-        const levelIdeaId = normalizeCreativeIdeaText(start.creativeIdeaId);
-        const levelIdeaText = normalizeCreativeIdeaText(start.creativeIdeaText);
-        const matchesIdeaId = ideaId && levelIdeaId === ideaId;
-        const matchesIdeaText = !ideaId && ideaText && levelIdeaText === ideaText;
+    return getIdeaHash(
+        choice && choice.ideaId,
+        choice && (choice.originalIdeaText || choice.finalIdeaText)
+    );
+}
 
-        if ((matchesIdeaId || matchesIdeaText) && !hashes.includes(mapHash)) {
-            hashes.push(mapHash);
-        }
-    });
+function getIdeaHash(primaryValue, fallbackValue) {
+    const primary = normalizeCreativeIdeaText(primaryValue);
+    const fallback = normalizeCreativeIdeaText(fallbackValue);
+    const source = primary || fallback;
 
-    return hashes.length > 0 ? hashes.join(", ") : "-";
+    if (!source) {
+        return "-";
+    }
+
+    return stableShortHash(source);
+}
+
+function stableShortHash(input) {
+    let hash = 2166136261;
+    const text = String(input);
+
+    for (let index = 0; index < text.length; index += 1) {
+        hash ^= text.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+
+    return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function getSurveyDeleteLabel(response) {
@@ -1100,6 +1134,7 @@ function renderDetails(level) {
     [
         ["Round", value(level.roundDisplayName)],
         ["Run", shortId(level.levelRunId)],
+        ["Idea hash", getLevelIdeaHash(level)],
         ["Status", getStatus(level).label],
         ["Moves", value(end.moveCount)],
         ["Pushes", value(end.pushCount)],
