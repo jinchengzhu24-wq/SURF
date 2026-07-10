@@ -2382,7 +2382,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Q1
+  m_Text: How good was this level as a Sokoban puzzle?
 --- !u!1 &2300000013
 GameObject:
   m_ObjectHideFlags: 0
@@ -2583,7 +2583,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: A
+  m_Text: Weak or confusing
 --- !u!114 &2300000022
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2806,7 +2806,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: B
+  m_Text: Acceptable
 --- !u!114 &2300000032
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3029,7 +3029,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: C
+  m_Text: Clear and interesting
 --- !u!114 &2300000042
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3130,7 +3130,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Q2
+  m_Text: How clearly did the level show the idea you entered?
 --- !u!1 &2300000047
 GameObject:
   m_ObjectHideFlags: 0
@@ -3331,7 +3331,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: A
+  m_Text: Hard to see
 --- !u!114 &2300000056
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3554,7 +3554,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: B
+  m_Text: Some parts were there
 --- !u!114 &2300000066
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3777,7 +3777,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: C
+  m_Text: Clearly visible
 --- !u!114 &2300000076
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3878,7 +3878,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Q3
+  m_Text: How did the puzzle structure feel?
 --- !u!1 &2300000081
 GameObject:
   m_ObjectHideFlags: 0
@@ -4079,7 +4079,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: A
+  m_Text: Random or unclear
 --- !u!114 &2300000090
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4302,7 +4302,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: B
+  m_Text: Mostly understandable
 --- !u!114 &2300000100
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -4525,7 +4525,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: C
+  m_Text: Well structured
 --- !u!114 &2300000110
 MonoBehaviour:
   m_ObjectHideFlags: 0
