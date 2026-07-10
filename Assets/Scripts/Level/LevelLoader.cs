@@ -142,6 +142,7 @@ public class LevelLoader : MonoBehaviour
 
     private IEnumerator GenerateAndLoadWithLLMPlanRoutine()
     {
+        yield return null;
         yield return GenerateWithLLMPlanAttemptsRoutine(null);
     }
 

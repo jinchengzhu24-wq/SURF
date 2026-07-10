@@ -88,18 +88,28 @@ public class LLMLevelDesignClient : MonoBehaviour
     {
         if (!isActiveAndEnabled)
         {
+            Debug.LogWarning(
+                "LLMLevelDesignClient skipped request because client is inactive:"
+                + " object=" + gameObject.name
+                + ", activeSelf=" + gameObject.activeSelf
+                + ", activeInHierarchy=" + gameObject.activeInHierarchy
+                + ", enabled=" + enabled
+            );
             onSuccess?.Invoke(null);
             yield break;
         }
 
         isCancellingRequests = false;
         string requestUrl = GetRequestUrl();
+        string ideaText = GetCreativeIdeaText();
 
         float startedAt = Time.realtimeSinceStartup;
         Debug.Log(
             "LLMLevelDesignClient request started:"
             + " endpoint=" + requestUrl
             + ", timeoutSeconds=" + requestTimeoutSeconds
+            + ", hasIdeaText=" + !string.IsNullOrEmpty(ideaText)
+            + ", ideaTextLength=" + ideaText.Length
         );
 
         UnityWebRequest request = UnityWebRequest.Get(requestUrl);
@@ -113,6 +123,14 @@ public class LLMLevelDesignClient : MonoBehaviour
         {
             if (isCancellingRequests || !isActiveAndEnabled)
             {
+                Debug.LogWarning(
+                    "LLMLevelDesignClient request aborted:"
+                    + " isCancellingRequests=" + isCancellingRequests
+                    + ", activeSelf=" + gameObject.activeSelf
+                    + ", activeInHierarchy=" + gameObject.activeInHierarchy
+                    + ", enabled=" + enabled
+                    + ", elapsedSeconds=" + GetElapsedSeconds(startedAt)
+                );
                 request.Abort();
                 CleanupRequest(request);
                 onSuccess?.Invoke(null);
@@ -194,7 +212,7 @@ public class LLMLevelDesignClient : MonoBehaviour
     private string GetRequestUrl()
     {
         string requestUrl = endpoint;
-        string ideaText = PlayerPrefs.GetString(CreativeIdeaTextPrefsKey, "");
+        string ideaText = GetCreativeIdeaText();
 
         if (!includeCreativeWorkshopIdea || string.IsNullOrEmpty(ideaText))
         {
@@ -206,6 +224,13 @@ public class LLMLevelDesignClient : MonoBehaviour
         requestUrl = AppendQueryParameter(requestUrl, "sessionId", PlayerPrefs.GetString(CreativeIdeaSessionIdPrefsKey, ""));
         requestUrl = AppendQueryParameter(requestUrl, "sceneName", SceneManager.GetActiveScene().name);
         return requestUrl;
+    }
+
+    private string GetCreativeIdeaText()
+    {
+        return !string.IsNullOrEmpty(CreativeWorkshopContext.IdeaText)
+            ? CreativeWorkshopContext.IdeaText
+            : PlayerPrefs.GetString(CreativeIdeaTextPrefsKey, "");
     }
 
     private string AppendQueryParameter(string url, string key, string value)
