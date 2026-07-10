@@ -8,6 +8,7 @@ public class RefinementController : MonoBehaviour
 {
     [Header("Scene UI")]
     public Button submitButton;
+    public Button detailButton;
     public Text statusText;
 
     [Header("Scoring")]
@@ -18,6 +19,7 @@ public class RefinementController : MonoBehaviour
     [Header("Flow")]
     public string questionnaireSceneName = "Questionnaire";
     public string retrySceneName = "Custom_Level";
+    public string designInterpretationSceneName = "Design interpretation";
 
     [Header("Retry Prompt")]
     public string retryPrompt =
@@ -50,6 +52,21 @@ public class RefinementController : MonoBehaviour
             {
                 submitButton = submitObject.GetComponent<Button>();
             }
+        }
+
+        if (detailButton == null)
+        {
+            GameObject detailObject = GameObject.Find("DetailButton");
+
+            if (detailObject != null)
+            {
+                detailButton = detailObject.GetComponent<Button>();
+            }
+        }
+
+        if (detailButton == null)
+        {
+            detailButton = FindButtonByText("Detail");
         }
 
         if (statusText == null)
@@ -90,6 +107,13 @@ public class RefinementController : MonoBehaviour
         {
             submitButton.onClick.RemoveAllListeners();
             submitButton.onClick.AddListener(Submit);
+        }
+
+        if (detailButton != null)
+        {
+            detailButton.onClick.RemoveAllListeners();
+            detailButton.onClick.AddListener(LoadDesignInterpretation);
+            detailButton.interactable = true;
         }
     }
 
@@ -279,6 +303,35 @@ public class RefinementController : MonoBehaviour
         return !string.IsNullOrEmpty(CreativeWorkshopContext.IdeaText)
             ? CreativeWorkshopContext.IdeaText
             : PlayerPrefs.GetString(CreativeWorkshopContext.IdeaTextPrefsKey, "");
+    }
+
+    private Button FindButtonByText(string text)
+    {
+        Button[] buttons = FindObjectsOfType<Button>();
+
+        for (int i = 0; i < buttons.Length; i++)
+        {
+            Button button = buttons[i];
+
+            if (button == null)
+            {
+                continue;
+            }
+
+            Text buttonText = button.GetComponentInChildren<Text>();
+
+            if (buttonText != null && CleanText(buttonText.text) == text)
+            {
+                return button;
+            }
+        }
+
+        return null;
+    }
+
+    private void LoadDesignInterpretation()
+    {
+        LoadScene(designInterpretationSceneName);
     }
 
     private void LoadScene(string sceneName)

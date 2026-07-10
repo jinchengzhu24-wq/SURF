@@ -30,6 +30,7 @@ public class CreativeWorkshopInputController : MonoBehaviour
     [Header("Backend")]
     public string backendBaseUrl = DefaultBackendBaseUrl;
     public int requestTimeoutSeconds = 5;
+    public bool continueWhenBackendFails = true;
     public bool logIdeaEvents = true;
 
     private float startedAt;
@@ -165,34 +166,51 @@ public class CreativeWorkshopInputController : MonoBehaviour
 
             if (request.result == UnityWebRequest.Result.Success)
             {
-                SetStatus("Submitted.");
-                CreativeWorkshopContext.SetIdea(record.ideaId, record.sessionId, record.ideaText);
-                LevelStudyRecorder.BeginCustomRound(record.ideaId, record.ideaText);
-
-                if (logIdeaEvents)
-                {
-                    Debug.Log("Creative workshop idea submitted: ideaId=" + record.ideaId);
-                }
-
-                if (!string.IsNullOrEmpty(nextSceneName))
-                {
-                    yield return new WaitForSeconds(Mathf.Max(0f, nextSceneDelaySeconds));
-                    SceneManager.LoadScene(nextSceneName);
-                }
+                yield return AcceptIdeaAndContinue(record, "Submitted.", true);
             }
             else
             {
-                SetStatus("Submit failed: " + request.error);
                 Debug.LogWarning(
                     "Creative workshop idea submit failed:"
                     + " error=" + request.error
                     + ", responseCode=" + request.responseCode
                 );
+
+                if (continueWhenBackendFails)
+                {
+                    yield return AcceptIdeaAndContinue(record, "Saved locally. Continuing...", false);
+                }
+                else
+                {
+                    SetStatus("Submit failed: " + request.error);
+                }
             }
         }
 
         isSubmitting = false;
         UpdateSubmitState();
+    }
+
+    private IEnumerator AcceptIdeaAndContinue(CreativeIdeaRecord record, string statusMessage, bool recordedRemotely)
+    {
+        SetStatus(statusMessage);
+        CreativeWorkshopContext.SetIdea(record.ideaId, record.sessionId, record.ideaText);
+        LevelStudyRecorder.BeginCustomRound(record.ideaId, record.ideaText);
+
+        if (logIdeaEvents)
+        {
+            Debug.Log(
+                "Creative workshop idea "
+                + (recordedRemotely ? "submitted" : "saved locally after backend failure")
+                + ": ideaId=" + record.ideaId
+            );
+        }
+
+        if (!string.IsNullOrEmpty(nextSceneName))
+        {
+            yield return new WaitForSeconds(Mathf.Max(0f, nextSceneDelaySeconds));
+            SceneManager.LoadScene(nextSceneName);
+        }
     }
 
     private CreativeIdeaRecord CreateIdeaRecord()

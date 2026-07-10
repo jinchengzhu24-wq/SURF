@@ -80,6 +80,7 @@ public class LevelLoader : MonoBehaviour
 
     private readonly List<GameObject> spawnedObjects = new List<GameObject>();
     private bool currentLoadUsedLLMPlan;
+    private LevelDesignPlan pendingLLMPlan;
 
     private void Awake()
     {
@@ -148,6 +149,7 @@ public class LevelLoader : MonoBehaviour
     {
         ResolveGenerationReferences();
         int maxPlanAttempts = GetLLMPlanAttemptCount();
+        ClearPendingLLMPlanContext();
 
         for (int attempt = 1; attempt <= maxPlanAttempts; attempt++)
         {
@@ -162,10 +164,13 @@ public class LevelLoader : MonoBehaviour
             if (generatedLevel)
             {
                 LoadLevel();
+                SaveSuccessfulLLMPlanContext();
                 NotifyGeneratedLevelIfNeeded(true);
                 onComplete?.Invoke(true);
                 yield break;
             }
+
+            ClearPendingLLMPlanContext();
 
             Debug.LogWarning(
                 "LevelLoader: LLM generated level attempt failed."
@@ -180,6 +185,7 @@ public class LevelLoader : MonoBehaviour
             + " maxPlanAttempts=" + maxPlanAttempts
             + ". No stale level will be loaded."
         );
+        ClearPendingLLMPlanContext();
         onComplete?.Invoke(false);
     }
 
@@ -223,6 +229,7 @@ public class LevelLoader : MonoBehaviour
         if (!useLLMPlan)
         {
             currentLoadUsedLLMPlan = false;
+            ClearPendingLLMPlanContext();
             levelGenerator.ClearDesignPlan();
         }
 
@@ -246,6 +253,7 @@ public class LevelLoader : MonoBehaviour
     {
         ResolveGenerationReferences();
         currentLoadUsedLLMPlan = false;
+        pendingLLMPlan = null;
 
         LevelDesignPlan plan = null;
 
@@ -263,6 +271,7 @@ public class LevelLoader : MonoBehaviour
         if (llmClient == null)
         {
             Debug.LogWarning("LevelLoader: LLM plan client is missing. Using local generation rules fallback.");
+            ClearPendingLLMPlanContext();
             if (levelGenerator != null)
             {
                 levelGenerator.ClearDesignPlan(true);
@@ -275,6 +284,7 @@ public class LevelLoader : MonoBehaviour
         if (plan == null)
         {
             Debug.LogWarning("LevelLoader: LLM plan request failed. Using local generation rules fallback.");
+            ClearPendingLLMPlanContext();
             if (levelGenerator != null)
             {
                 levelGenerator.ClearDesignPlan(true);
@@ -324,11 +334,33 @@ public class LevelLoader : MonoBehaviour
         if (levelGenerator == null)
         {
             Debug.LogWarning("LevelLoader: Cannot apply LLM plan because LevelGenerator is missing.");
+            pendingLLMPlan = null;
             return;
         }
 
         levelGenerator.ApplyPlan(plan);
         currentLoadUsedLLMPlan = true;
+        pendingLLMPlan = plan;
+    }
+
+    private void SaveSuccessfulLLMPlanContext()
+    {
+        if (currentLoadUsedLLMPlan && pendingLLMPlan != null)
+        {
+            LevelDesignPlanContext.SaveAppliedPlan(pendingLLMPlan);
+        }
+        else
+        {
+            LevelDesignPlanContext.Clear();
+        }
+
+        pendingLLMPlan = null;
+    }
+
+    private void ClearPendingLLMPlanContext()
+    {
+        pendingLLMPlan = null;
+        LevelDesignPlanContext.Clear();
     }
 
     public string GetCurrentLevelSource()

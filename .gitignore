@@ -37,6 +37,8 @@ Backend/__pycache__/
 # Local font assets
 /[Aa]ssets/[Ff]ont/
 /[Aa]ssets/[Ff]ont.meta
+/[Aa]ssets/[Tt]ext[Mm]esh Pro/
+/[Aa]ssets/[Tt]ext[Mm]esh Pro.meta
 
 # Unity generated meta/debug artifacts
 *.pidb.meta
