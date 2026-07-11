@@ -40,6 +40,12 @@ Backend/__pycache__/
 /[Aa]ssets/[Tt]ext[Mm]esh Pro/
 /[Aa]ssets/[Tt]ext[Mm]esh Pro.meta
 
+# Keep the Chinese runtime fallback used by TMP input fields
+!/[Aa]ssets/[Ff]ont/
+/[Aa]ssets/[Ff]ont/*
+!/[Aa]ssets/[Ff]ont/HarmonyOS_Sans_SC_Regular.ttf
+!/[Aa]ssets/[Ff]ont/HarmonyOS_Sans_SC_Regular.ttf.meta
+
 # Unity generated meta/debug artifacts
 *.pidb.meta
 *.pdb.meta

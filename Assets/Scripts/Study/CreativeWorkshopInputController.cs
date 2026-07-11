@@ -19,6 +19,7 @@ public class CreativeWorkshopInputController : MonoBehaviour
     public Text statusText;
 
     [Header("Input")]
+    public Font chineseFallbackFont;
     public string ideaPlaceholder = "Enter your idea";
     [Min(1)]
     public int ideaCharacterLimit = 240;
@@ -97,6 +98,7 @@ public class CreativeWorkshopInputController : MonoBehaviour
         ideaInput.lineType = TMP_InputField.LineType.SingleLine;
         ideaInput.characterLimit = Mathf.Max(1, ideaCharacterLimit);
         ideaInput.richText = false;
+        TMPDynamicFontFallback.Add(ideaInput.fontAsset, chineseFallbackFont);
 
         TMP_Text placeholderText = ideaInput.placeholder as TMP_Text;
 

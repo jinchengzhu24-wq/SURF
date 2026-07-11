@@ -29,6 +29,7 @@ public class QuestionnaireController : MonoBehaviour
     [Header("Player Name Input")]
     public Font pixelFont;
     public TMP_FontAsset pixelTMPFontAsset;
+    public Font chineseFallbackFont;
     public string playerNamePlaceholder = "Enter your nickname";
     [Min(0)]
     public int playerNameCharacterLimit = 24;
@@ -144,6 +145,7 @@ public class QuestionnaireController : MonoBehaviour
         if (inputFontAsset != null)
         {
             AddFontFallback(inputFontAsset, previousFontAsset);
+            TMPDynamicFontFallback.Add(inputFontAsset, chineseFallbackFont);
             playerNameInput.fontAsset = inputFontAsset;
         }
 
