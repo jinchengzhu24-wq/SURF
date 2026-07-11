@@ -1,7 +1,6 @@
 using System;
 using System.Collections;
 using System.Text;
-using TMPro;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
@@ -14,12 +13,11 @@ public class CreativeWorkshopInputController : MonoBehaviour
     private const string SessionPrefsKey = "SokobanCreativeWorkshopSessionId";
 
     [Header("Scene UI")]
-    public TMP_InputField ideaInput;
+    public InputField ideaInput;
     public Button submitButton;
     public Text statusText;
 
     [Header("Input")]
-    public Font chineseFallbackFont;
     public string ideaPlaceholder = "Enter your idea";
     [Min(1)]
     public int ideaCharacterLimit = 240;
@@ -67,13 +65,13 @@ public class CreativeWorkshopInputController : MonoBehaviour
 
             if (inputObject != null)
             {
-                ideaInput = inputObject.GetComponent<TMP_InputField>();
+                ideaInput = inputObject.GetComponent<InputField>();
             }
         }
 
         if (ideaInput == null)
         {
-            ideaInput = FindObjectOfType<TMP_InputField>();
+            ideaInput = FindObjectOfType<InputField>();
         }
 
         if (submitButton == null)
@@ -94,17 +92,21 @@ public class CreativeWorkshopInputController : MonoBehaviour
             return;
         }
 
-        ideaInput.contentType = TMP_InputField.ContentType.Standard;
-        ideaInput.lineType = TMP_InputField.LineType.SingleLine;
+        ideaInput.contentType = InputField.ContentType.Standard;
+        ideaInput.lineType = InputField.LineType.SingleLine;
         ideaInput.characterLimit = Mathf.Max(1, ideaCharacterLimit);
-        ideaInput.richText = false;
-        TMPDynamicFontFallback.Add(ideaInput.fontAsset, chineseFallbackFont);
 
-        TMP_Text placeholderText = ideaInput.placeholder as TMP_Text;
+        if (ideaInput.textComponent != null)
+        {
+            ideaInput.textComponent.color = Color.black;
+        }
+
+        Text placeholderText = ideaInput.placeholder as Text;
 
         if (placeholderText != null && !string.IsNullOrEmpty(ideaPlaceholder))
         {
             placeholderText.text = ideaPlaceholder;
+            placeholderText.color = new Color(0f, 0f, 0f, 0.45f);
         }
     }
 

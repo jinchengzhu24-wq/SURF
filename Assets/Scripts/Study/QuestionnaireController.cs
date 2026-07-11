@@ -2,11 +2,9 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text;
-using TMPro;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
-using UnityEngine.TextCore.LowLevel;
 using UnityEngine.UI;
 
 public class QuestionnaireController : MonoBehaviour
@@ -24,12 +22,10 @@ public class QuestionnaireController : MonoBehaviour
     [Header("Scene UI")]
     public Button submitButton;
     public Text statusText;
-    public TMP_InputField playerNameInput;
+    public InputField playerNameInput;
 
     [Header("Player Name Input")]
     public Font pixelFont;
-    public TMP_FontAsset pixelTMPFontAsset;
-    public Font chineseFallbackFont;
     public string playerNamePlaceholder = "Enter your nickname";
     [Min(0)]
     public int playerNameCharacterLimit = 24;
@@ -93,17 +89,17 @@ public class QuestionnaireController : MonoBehaviour
 
         if (playerNameInput == null)
         {
-            GameObject inputObject = GameObject.Find("InputField (TMP)");
+            GameObject inputObject = GameObject.Find("InputField");
 
             if (inputObject != null)
             {
-                playerNameInput = inputObject.GetComponent<TMP_InputField>();
+                playerNameInput = inputObject.GetComponent<InputField>();
             }
         }
 
         if (playerNameInput == null)
         {
-            playerNameInput = FindObjectOfType<TMP_InputField>();
+            playerNameInput = FindObjectOfType<InputField>();
         }
     }
 
@@ -139,22 +135,9 @@ public class QuestionnaireController : MonoBehaviour
             return;
         }
 
-        TMP_FontAsset previousFontAsset = playerNameInput.fontAsset;
-        TMP_FontAsset inputFontAsset = ResolvePixelTMPFontAsset();
-
-        if (inputFontAsset != null)
-        {
-            AddFontFallback(inputFontAsset, previousFontAsset);
-            TMPDynamicFontFallback.Add(inputFontAsset, chineseFallbackFont);
-            playerNameInput.fontAsset = inputFontAsset;
-        }
-
-        playerNameInput.contentType = TMP_InputField.ContentType.Standard;
-        playerNameInput.lineType = TMP_InputField.LineType.SingleLine;
+        playerNameInput.contentType = InputField.ContentType.Standard;
+        playerNameInput.lineType = InputField.LineType.SingleLine;
         playerNameInput.characterLimit = Mathf.Max(0, playerNameCharacterLimit);
-        playerNameInput.richText = false;
-        playerNameInput.onFocusSelectAll = false;
-        playerNameInput.resetOnDeActivation = false;
         playerNameInput.caretWidth = 2;
         playerNameInput.customCaretColor = true;
         playerNameInput.caretColor = new Color(0.08f, 0.12f, 0.18f, 1f);
@@ -164,13 +147,12 @@ public class QuestionnaireController : MonoBehaviour
         {
             ApplyInputTextStyle(
                 playerNameInput.textComponent,
-                inputFontAsset,
-                new Color(0.08f, 0.12f, 0.18f, 1f),
-                FontStyles.Normal
+                Color.black,
+                FontStyle.Normal
             );
         }
 
-        TMP_Text placeholderText = playerNameInput.placeholder as TMP_Text;
+        Text placeholderText = playerNameInput.placeholder as Text;
 
         if (placeholderText != null)
         {
@@ -179,9 +161,8 @@ public class QuestionnaireController : MonoBehaviour
                 : playerNamePlaceholder;
             ApplyInputTextStyle(
                 placeholderText,
-                inputFontAsset,
-                new Color(0.08f, 0.12f, 0.18f, 0.45f),
-                FontStyles.Normal
+                new Color(0f, 0f, 0f, 0.45f),
+                FontStyle.Normal
             );
         }
 
@@ -195,103 +176,19 @@ public class QuestionnaireController : MonoBehaviour
         playerNameInput.ForceLabelUpdate();
     }
 
-    private TMP_FontAsset ResolvePixelTMPFontAsset()
+    private void ApplyInputTextStyle(Text text, Color color, FontStyle fontStyle)
     {
-        if (pixelTMPFontAsset != null)
+        if (pixelFont != null)
         {
-            return pixelTMPFontAsset;
-        }
-
-        if (pixelFont == null)
-        {
-            return null;
-        }
-
-#if UNITY_EDITOR
-        if (!Application.isPlaying)
-        {
-            return null;
-        }
-#endif
-
-        pixelTMPFontAsset = TMP_FontAsset.CreateFontAsset(
-            pixelFont,
-            96,
-            8,
-            GlyphRenderMode.SDFAA,
-            1024,
-            1024,
-            AtlasPopulationMode.Dynamic,
-            true
-        );
-
-        if (pixelTMPFontAsset == null)
-        {
-            Debug.LogWarning("Unable to create a TMP font asset from " + pixelFont.name + ".");
-            return null;
-        }
-
-        pixelTMPFontAsset.name = pixelFont.name + " TMP Runtime";
-        PrepareFontAtlas(pixelTMPFontAsset);
-        return pixelTMPFontAsset;
-    }
-
-    private void ApplyInputTextStyle(TMP_Text text, TMP_FontAsset fontAsset, Color color, FontStyles fontStyle)
-    {
-        if (fontAsset != null)
-        {
-            text.font = fontAsset;
+            text.font = pixelFont;
         }
 
         text.color = color;
         text.fontStyle = fontStyle;
-        text.alignment = TextAlignmentOptions.Left;
-        text.enableWordWrapping = false;
-        text.overflowMode = TextOverflowModes.Truncate;
-    }
-
-    private void PrepareFontAtlas(TMP_FontAsset fontAsset)
-    {
-        if (fontAsset == null)
-        {
-            return;
-        }
-
-        if (fontAsset.atlasTextures != null)
-        {
-            for (int i = 0; i < fontAsset.atlasTextures.Length; i++)
-            {
-                Texture2D atlasTexture = fontAsset.atlasTextures[i];
-
-                if (atlasTexture != null)
-                {
-                    atlasTexture.filterMode = FilterMode.Bilinear;
-                    atlasTexture.wrapMode = TextureWrapMode.Clamp;
-                }
-            }
-        }
-
-        fontAsset.TryAddCharacters(
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 _-.,!?:'\"()[]"
-        );
-    }
-
-    private void AddFontFallback(TMP_FontAsset fontAsset, TMP_FontAsset fallbackFontAsset)
-    {
-        if (fontAsset == null || fallbackFontAsset == null || fontAsset == fallbackFontAsset)
-        {
-            return;
-        }
-
-        if (fontAsset.fallbackFontAssetTable == null)
-        {
-            fontAsset.fallbackFontAssetTable = new List<TMP_FontAsset>();
-        }
-
-        if (!fontAsset.fallbackFontAssetTable.Contains(fallbackFontAsset))
-        {
-            fontAsset.fallbackFontAssetTable.Add(fallbackFontAsset);
-        }
+        text.alignment = TextAnchor.MiddleLeft;
+        text.horizontalOverflow = HorizontalWrapMode.Wrap;
+        text.verticalOverflow = VerticalWrapMode.Truncate;
+        text.supportRichText = false;
     }
 
     private void SelectOption(QuestionnaireOptionButton selectedOption)
