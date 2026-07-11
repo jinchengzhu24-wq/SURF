@@ -47,6 +47,7 @@ public class LevelLoader : MonoBehaviour
     public LLMLevelDesignClient llmClient;
     public bool generateBeforeLoad = true;
     public bool useLLMPlan;
+    public bool deferInitialLLMLoad;
     public bool useCachedLLMPlan = true;
     public float cachedPlanWaitSeconds = 1f;
 
@@ -81,6 +82,9 @@ public class LevelLoader : MonoBehaviour
     private readonly List<GameObject> spawnedObjects = new List<GameObject>();
     private bool currentLoadUsedLLMPlan;
     private LevelDesignPlan pendingLLMPlan;
+    private bool hasPreparedInitialLevel;
+
+    public bool HasPreparedInitialLevel => hasPreparedInitialLevel;
 
     private void Awake()
     {
@@ -90,6 +94,11 @@ public class LevelLoader : MonoBehaviour
         }
 
         ResolveGenerationReferences();
+
+        if (deferInitialLLMLoad && generateBeforeLoad && useLLMPlan)
+        {
+            return;
+        }
 
         if (generateBeforeLoad && useLLMPlan)
         {
@@ -137,16 +146,45 @@ public class LevelLoader : MonoBehaviour
 
     public IEnumerator GenerateAndReloadWithLLMPlanRoutine(System.Action<bool> onComplete = null)
     {
-        yield return GenerateWithLLMPlanAttemptsRoutine(onComplete);
+        yield return GenerateWithLLMPlanAttemptsRoutine(true, onComplete);
+    }
+
+    public IEnumerator PrepareInitialLevelWithLLMPlanRoutine(System.Action<bool> onComplete = null)
+    {
+        hasPreparedInitialLevel = false;
+
+        if (!generateBeforeLoad || !useLLMPlan)
+        {
+            Debug.LogWarning("LevelLoader: Deferred initial generation requires generateBeforeLoad and useLLMPlan.");
+            onComplete?.Invoke(false);
+            yield break;
+        }
+
+        yield return GenerateWithLLMPlanAttemptsRoutine(false, onComplete);
+    }
+
+    public bool CommitPreparedInitialLevel()
+    {
+        if (!hasPreparedInitialLevel)
+        {
+            Debug.LogWarning("LevelLoader: No prepared initial level is available to commit.");
+            return false;
+        }
+
+        LoadLevel();
+        SaveSuccessfulLLMPlanContext();
+        NotifyGeneratedLevelIfNeeded(true);
+        hasPreparedInitialLevel = false;
+        return true;
     }
 
     private IEnumerator GenerateAndLoadWithLLMPlanRoutine()
     {
         yield return null;
-        yield return GenerateWithLLMPlanAttemptsRoutine(null);
+        yield return GenerateWithLLMPlanAttemptsRoutine(true, null);
     }
 
-    private IEnumerator GenerateWithLLMPlanAttemptsRoutine(System.Action<bool> onComplete)
+    private IEnumerator GenerateWithLLMPlanAttemptsRoutine(bool loadOnSuccess, System.Action<bool> onComplete)
     {
         ResolveGenerationReferences();
         int maxPlanAttempts = GetLLMPlanAttemptCount();
@@ -164,9 +202,17 @@ public class LevelLoader : MonoBehaviour
 
             if (generatedLevel)
             {
-                LoadLevel();
-                SaveSuccessfulLLMPlanContext();
-                NotifyGeneratedLevelIfNeeded(true);
+                if (loadOnSuccess)
+                {
+                    LoadLevel();
+                    SaveSuccessfulLLMPlanContext();
+                    NotifyGeneratedLevelIfNeeded(true);
+                }
+                else
+                {
+                    hasPreparedInitialLevel = true;
+                }
+
                 onComplete?.Invoke(true);
                 yield break;
             }
@@ -187,6 +233,7 @@ public class LevelLoader : MonoBehaviour
             + ". No stale level will be loaded."
         );
         ClearPendingLLMPlanContext();
+        hasPreparedInitialLevel = false;
         onComplete?.Invoke(false);
     }
 

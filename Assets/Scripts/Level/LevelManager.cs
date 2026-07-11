@@ -33,6 +33,12 @@ public class LevelManager : MonoBehaviour
     public float fadeTime = 1f;
     public float completeDelay = 1.5f;
 
+    [Header("Initial LLM Loading")]
+    public bool useInitialLLMLoadingTransition;
+    public Text initialLLMLoadingText;
+    public string initialLLMLoadingMessage = "LLM is generating...";
+    public string initialLLMFailureMessage = "LLM generation failed.";
+
     [Header("Complete Action")]
     public CompleteAction completeAction = CompleteAction.LoadNextScene;
     public string levelToLoad = "";
@@ -58,8 +64,64 @@ public class LevelManager : MonoBehaviour
         }
 
         StretchBlackPanelToFullscreen();
+
+        if (useInitialLLMLoadingTransition)
+        {
+            StartCoroutine(InitialLLMLoadingTransition());
+            return;
+        }
+
         ResetLevelState();
         StartCoroutine(Fade(1, 0));
+    }
+
+    private IEnumerator InitialLLMLoadingTransition()
+    {
+        isCompletingLevel = true;
+        SetPlayerInputEnabled(false);
+        SetBlackPanelAlpha(0);
+        SetInitialLLMLoadingText(true, initialLLMLoadingMessage);
+
+        if (levelLoader == null)
+        {
+            SetInitialLLMLoadingText(true, initialLLMFailureMessage);
+            yield break;
+        }
+
+        bool generatedLevel = false;
+        yield return levelLoader.PrepareInitialLevelWithLLMPlanRoutine(result => generatedLevel = result);
+
+        if (!generatedLevel)
+        {
+            SetBlackPanelAlpha(0);
+            SetInitialLLMLoadingText(true, initialLLMFailureMessage);
+            yield break;
+        }
+
+        SetInitialLLMLoadingText(false, initialLLMLoadingMessage);
+        yield return Fade(0, 1);
+
+        if (!levelLoader.CommitPreparedInitialLevel())
+        {
+            SetBlackPanelAlpha(0);
+            SetInitialLLMLoadingText(true, initialLLMFailureMessage);
+            yield break;
+        }
+
+        yield return Fade(1, 0);
+        isCompletingLevel = false;
+        SetPlayerInputEnabled(true);
+    }
+
+    private void SetInitialLLMLoadingText(bool visible, string message)
+    {
+        if (initialLLMLoadingText == null)
+        {
+            return;
+        }
+
+        initialLLMLoadingText.text = message;
+        initialLLMLoadingText.gameObject.SetActive(visible);
     }
 
     private void Update()
