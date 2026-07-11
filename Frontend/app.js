@@ -119,7 +119,7 @@ async function loadData(manual) {
         elements.dataSource.textContent = "API: " + state.apiBase;
     } catch (error) {
         setStatus("Could not load records: " + error.message);
-        elements.creativeIdeasBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load creative ideas.</td></tr>';
+        elements.creativeIdeasBody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load creative ideas.</td></tr>';
         elements.expansionChoicesBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load expansion choices.</td></tr>';
         elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
         elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
@@ -452,7 +452,7 @@ function renderCreativeIdeasTable() {
     if (ideas.length === 0) {
         const row = document.createElement("tr");
         const cell = document.createElement("td");
-        cell.colSpan = 5;
+        cell.colSpan = 4;
         cell.className = "empty-state";
         cell.textContent = "No creative workshop ideas yet.";
         row.appendChild(cell);
@@ -465,8 +465,7 @@ function renderCreativeIdeasTable() {
         const cells = [
             formatTimestamp(idea.serverReceivedAt || idea.timestamp),
             getCreativeIdeaHash(idea),
-            value(idea.ideaText),
-            formatSceneName(value(idea.sceneName))
+            value(idea.ideaText)
         ];
 
         cells.forEach((text, index) => {
@@ -527,8 +526,8 @@ function renderExpansionChoicesTable() {
         const row = document.createElement("tr");
         const cells = [
             formatTimestamp(choice.serverReceivedAt || choice.timestamp),
-            getExpansionChoiceLabel(choice),
             getExpansionChoiceIdeaHash(choice),
+            getExpansionChoiceLabel(choice),
             value(choice.selectedOptionDescription || choice.selectedOptionPromptText)
         ];
 
@@ -536,9 +535,9 @@ function renderExpansionChoicesTable() {
             const cell = document.createElement("td");
 
             if (index === 1) {
-                cell.className = "choice-cell";
-            } else if (index === 2) {
                 cell.className = "small";
+            } else if (index === 2) {
+                cell.className = "choice-cell";
             } else if (index === 3) {
                 cell.className = "prompt-cell";
             }
@@ -588,11 +587,11 @@ function renderLevelRow(level) {
     const cells = [
         value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex),
         getLevelIdeaHash(level),
+        value(structure.mapHash),
         status.label,
         value(end.moveCount),
-        value(end.pushCount),
         value(start.solutionSteps),
-        value(structure.mapHash)
+        value(end.pushCount)
     ];
 
     cells.forEach((text, index) => {
@@ -605,13 +604,13 @@ function renderLevelRow(level) {
             cell.className = "small";
             cell.textContent = text;
         } else if (index === 2) {
+            cell.className = "small";
+            cell.textContent = text;
+        } else if (index === 3) {
             const badge = document.createElement("span");
             badge.className = "badge " + status.className;
             badge.textContent = text;
             cell.appendChild(badge);
-        } else if (index === 6) {
-            cell.className = "small";
-            cell.textContent = text;
         } else {
             cell.textContent = text;
         }
@@ -811,12 +810,15 @@ function renderSurveyTable() {
         const row = document.createElement("tr");
         const cells = [
             formatTimestamp(response.serverReceivedAt || response.timestamp),
-            value(response.surveyTitle || response.surveyId),
+            getSurveyIdeaHash(response),
             value(response.playerNickname || response.playerName || response.nickname)
         ];
 
-        cells.forEach(text => {
+        cells.forEach((text, index) => {
             const cell = document.createElement("td");
+            if (index === 1) {
+                cell.className = "small";
+            }
             cell.textContent = text;
             row.appendChild(cell);
         });
@@ -1057,6 +1059,44 @@ function getExpansionChoiceIdeaHash(choice) {
         choice && choice.ideaId,
         choice && (choice.originalIdeaText || choice.finalIdeaText)
     );
+}
+
+function getSurveyIdeaHash(response) {
+    const directHash = normalizeCreativeIdeaText(
+        response && (response.ideaHash || response.creativeIdeaHash)
+    );
+
+    if (directHash) {
+        return directHash;
+    }
+
+    const directIdeaId = normalizeCreativeIdeaText(
+        response && (response.ideaId || response.creativeIdeaId)
+    );
+
+    if (directIdeaId) {
+        return getIdeaHash(directIdeaId, response.creativeIdeaText || response.ideaText);
+    }
+
+    const sessionId = normalizeCreativeIdeaText(response && response.sessionId);
+
+    if (!sessionId || !state.payload) {
+        return "-";
+    }
+
+    const idea = (state.payload.creativeIdeas || []).find(candidate =>
+        normalizeCreativeIdeaText(candidate && candidate.sessionId) === sessionId
+    );
+
+    if (idea) {
+        return getCreativeIdeaHash(idea);
+    }
+
+    const choice = (state.payload.creativeExpansionChoices || []).find(candidate =>
+        normalizeCreativeIdeaText(candidate && candidate.sessionId) === sessionId
+    );
+
+    return choice ? getExpansionChoiceIdeaHash(choice) : "-";
 }
 
 function getIdeaHash(primaryValue, fallbackValue) {

@@ -340,6 +340,7 @@ public class QuestionnaireController : MonoBehaviour
             surveyId = IsBlank(surveyId) ? "post_play_survey" : surveyId,
             surveyTitle = IsBlank(surveyTitle) ? "Questionnaire" : surveyTitle,
             sessionId = GetOrCreateSessionId(),
+            creativeIdeaId = GetCreativeIdeaId(),
             responseId = Guid.NewGuid().ToString("N"),
             playerName = PlayerNameValue,
             sceneName = SceneManager.GetActiveScene().name,
@@ -373,6 +374,13 @@ public class QuestionnaireController : MonoBehaviour
         return sessionId;
     }
 
+    private string GetCreativeIdeaId()
+    {
+        return !string.IsNullOrEmpty(CreativeWorkshopContext.IdeaId)
+            ? CreativeWorkshopContext.IdeaId
+            : PlayerPrefs.GetString(CreativeWorkshopContext.IdeaIdPrefsKey, "");
+    }
+
     private void SetStatus(string message)
     {
         if (statusText != null)
@@ -404,6 +412,7 @@ public class SurveyResponseRecord
     public string surveyId;
     public string surveyTitle;
     public string sessionId;
+    public string creativeIdeaId;
     public string responseId;
     public string playerName;
     public string sceneName;
