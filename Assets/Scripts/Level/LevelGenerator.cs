@@ -1517,17 +1517,31 @@ public class LevelGenerator : MonoBehaviour
             Shuffle(origins);
             origins.Sort((left, right) => GetWaterOriginScore(right, size).CompareTo(GetWaterOriginScore(left, size)));
 
-            Vector2Int origin = origins[0];
-
-            for (int y = origin.y; y < origin.y + size.y; y++)
+            for (int originIndex = 0; originIndex < origins.Count; originIndex++)
             {
-                for (int x = origin.x; x < origin.x + size.x; x++)
+                Vector2Int origin = origins[originIndex];
+
+                for (int y = origin.y; y < origin.y + size.y; y++)
                 {
-                    grid[x, y] = Water;
+                    for (int x = origin.x; x < origin.x + size.x; x++)
+                    {
+                        grid[x, y] = Water;
+                    }
+                }
+
+                if (AreGroundCellsConnected(grid))
+                {
+                    return true;
+                }
+
+                for (int y = origin.y; y < origin.y + size.y; y++)
+                {
+                    for (int x = origin.x; x < origin.x + size.x; x++)
+                    {
+                        grid[x, y] = Ground;
+                    }
                 }
             }
-
-            return true;
         }
 
         return false;
