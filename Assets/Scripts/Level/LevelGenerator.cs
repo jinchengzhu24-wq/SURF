@@ -88,12 +88,18 @@ public class LevelGenerator : MonoBehaviour
         public readonly string[] rows;
         public readonly int attempt;
         public readonly LevelQualityReport quality;
+        public readonly CorridorValidationResult corridorValidation;
 
-        public GeneratedCandidate(string[] rows, int attempt, LevelQualityReport quality)
+        public GeneratedCandidate(
+            string[] rows,
+            int attempt,
+            LevelQualityReport quality,
+            CorridorValidationResult corridorValidation)
         {
             this.rows = rows;
             this.attempt = attempt;
             this.quality = quality;
+            this.corridorValidation = corridorValidation;
         }
     }
 
@@ -128,6 +134,14 @@ public class LevelGenerator : MonoBehaviour
     private string currentObstacleStyle = DefaultObstacleStyle;
     private string currentWaterStyle = DefaultWaterStyle;
     private string currentDesignNote = "";
+    private string currentCorridorPlacement = "none";
+    private int currentCorridorWidth;
+    private string currentCorridorOrientation = "any";
+    private string currentCorridorRole = "visual_only";
+    private string currentCorridorPriority = "preferred";
+    private string candidateCorridorOrientation = "any";
+    private readonly HashSet<Vector2Int> candidateCorridorOpeningCells = new HashSet<Vector2Int>();
+    public CorridorValidationResult LastCorridorValidation { get; private set; }
     private bool activeLLMQualityGate;
 
     public static void BeginAlgorithmTemplateRound()
@@ -186,6 +200,13 @@ public class LevelGenerator : MonoBehaviour
         currentObstacleStyle = DefaultObstacleStyle;
         currentWaterStyle = DefaultWaterStyle;
         currentDesignNote = "";
+        currentCorridorPlacement = "none";
+        currentCorridorWidth = 0;
+        currentCorridorOrientation = "any";
+        currentCorridorRole = "visual_only";
+        currentCorridorPriority = "preferred";
+        candidateCorridorOpeningCells.Clear();
+        LastCorridorValidation = null;
         currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(DefaultArchetype);
     }
 
@@ -276,6 +297,25 @@ public class LevelGenerator : MonoBehaviour
             return true;
         }
 
+        if (HasRequiredCorridor())
+        {
+            RestoreGenerationRules(
+                originalMinSolutionSteps,
+                originalMaxSolutionSteps,
+                originalMinPushes,
+                originalMaxPushes,
+                originalMinWaterAreas,
+                originalMaxWaterAreas,
+                originalMinWallObstacleBlocks,
+                originalMaxWallObstacleBlocks,
+                originalMinReversePulls,
+                originalMaxReversePulls,
+                originalHasDesignBlueprint,
+                originalActiveLLMQualityGate
+            );
+            return false;
+        }
+
         hasDesignBlueprint = false;
         rules.minSolutionSteps = 10;
         rules.maxSolutionSteps = Mathf.Max(45, originalMaxSolutionSteps + 20);
@@ -356,6 +396,7 @@ public class LevelGenerator : MonoBehaviour
         int rejectedByRepeat = 0;
         int rejectedByQuality = 0;
         int rejectedByObstacleInfluence = 0;
+        int rejectedByCorridor = 0;
         int scoredCandidates = 0;
         int selectableCandidates = 0;
         int qualifiedCandidates = 0;
@@ -388,9 +429,47 @@ public class LevelGenerator : MonoBehaviour
                 continue;
             }
 
-            if (!levelSolver.CanSolve(out int searchedStates, out int solutionSteps, out int pushCount))
+            CorridorValidationResult corridorValidation = ValidateCorridorStructure(rows);
+            bool requiresBoxPassage = currentCorridorRole == "required_box_route";
+            bool solved;
+            int searchedStates;
+            int solutionSteps;
+            int pushCount;
+            bool boxPassedThrough = false;
+
+            if (requiresBoxPassage && candidateCorridorOpeningCells.Count > 0)
+            {
+                solved = levelSolver.CanSolveWithRequiredBoxCells(
+                    new HashSet<Vector2Int>(candidateCorridorOpeningCells),
+                    out searchedStates,
+                    out solutionSteps,
+                    out pushCount,
+                    out boxPassedThrough
+                );
+            }
+            else
+            {
+                solved = levelSolver.CanSolve(out searchedStates, out solutionSteps, out pushCount);
+            }
+
+            corridorValidation.playerCanPass = solved && corridorValidation.uniquePassage;
+            corridorValidation.boxPassedThrough = boxPassedThrough;
+            corridorValidation.verified = corridorValidation.uniquePassage
+                && corridorValidation.playerCanPass
+                && (!requiresBoxPassage || boxPassedThrough);
+            corridorValidation.message = corridorValidation.verified
+                ? "Requested corridor was generated and verified."
+                : GetCorridorFailureMessage(corridorValidation, requiresBoxPassage);
+
+            if (!solved)
             {
                 rejectedBySolve++;
+                continue;
+            }
+
+            if (HasRequiredCorridor() && !corridorValidation.verified)
+            {
+                rejectedByCorridor++;
                 continue;
             }
 
@@ -419,7 +498,12 @@ public class LevelGenerator : MonoBehaviour
                 continue;
             }
 
-            GeneratedCandidate candidate = new GeneratedCandidate(CloneRows(rows), attempt, quality);
+            GeneratedCandidate candidate = new GeneratedCandidate(
+                CloneRows(rows),
+                attempt,
+                quality,
+                corridorValidation.Copy()
+            );
             selectableCandidates++;
 
             if (bestCandidate == null || IsBetterCandidate(candidate, bestCandidate))
@@ -488,6 +572,7 @@ public class LevelGenerator : MonoBehaviour
                 + ", rejectedByRepeat=" + rejectedByRepeat
                 + ", rejectedByQuality=" + rejectedByQuality
                 + ", rejectedByObstacleInfluence=" + rejectedByObstacleInfluence
+                + ", rejectedByCorridor=" + rejectedByCorridor
                 + ", scoredCandidates=" + scoredCandidates
                 + ", selectableCandidates=" + selectableCandidates
                 + ", qualifiedCandidates=" + qualifiedCandidates
@@ -570,6 +655,9 @@ public class LevelGenerator : MonoBehaviour
         lastSearchedStates = candidate.quality.searchedStates;
         lastSolutionSteps = candidate.quality.solutionSteps;
         lastPushes = candidate.quality.pushes;
+        LastCorridorValidation = candidate.corridorValidation == null
+            ? null
+            : candidate.corridorValidation.Copy();
         RememberGeneratedLayout(levelData.rows);
 
         if (levelLoader != null)
@@ -732,6 +820,13 @@ public class LevelGenerator : MonoBehaviour
         currentObstacleStyle = NormalizeObstacleStyle(plan.obstacleStyle);
         currentWaterStyle = NormalizeWaterStyle(plan.waterStyle);
         currentDesignNote = string.IsNullOrEmpty(plan.designNote) ? "" : plan.designNote;
+        currentCorridorPlacement = NormalizeCorridorPlacement(plan.corridorPlacement);
+        currentCorridorWidth = currentCorridorPlacement == "none"
+            ? 0
+            : Mathf.Clamp(plan.corridorWidth, 1, 2);
+        currentCorridorOrientation = NormalizeCorridorOrientation(plan.corridorOrientation);
+        currentCorridorRole = NormalizeCorridorRole(plan.corridorRole);
+        currentCorridorPriority = NormalizeCorridorPriority(plan.corridorPriority);
         currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(currentArchetype);
         hasDesignBlueprint = true;
         activeLLMQualityGate = true;
@@ -759,6 +854,11 @@ public class LevelGenerator : MonoBehaviour
                 + ", waterStyle=" + currentWaterStyle
                 + ", style=" + plan.style
                 + ", designNote=" + currentDesignNote
+                + ", corridor=" + currentCorridorPlacement
+                + "/" + currentCorridorWidth
+                + "/" + currentCorridorOrientation
+                + "/" + currentCorridorRole
+                + "/" + currentCorridorPriority
             );
         }
     }
@@ -1119,13 +1219,206 @@ public class LevelGenerator : MonoBehaviour
 
     private bool TryCreateBaseGrid(out char[,] grid)
     {
-        grid = rules.enableIrregularOuterWalls
+        candidateCorridorOpeningCells.Clear();
+        bool needsHardCorridor = currentCorridorPlacement != "none";
+        grid = needsHardCorridor
+            ? CreateRectangularOuterShell()
+            : rules.enableIrregularOuterWalls
             ? CreateSupportedOuterShell()
             : CreateRectangularOuterShell();
+
+        if (needsHardCorridor && !TryApplyCorridorTemplate(grid))
+        {
+            return false;
+        }
 
         return HasEnoughGroundCells(grid)
             && AreGroundCellsConnected(grid)
             && ValidateWallTileRules(grid);
+    }
+
+    private bool TryApplyCorridorTemplate(char[,] grid)
+    {
+        if (grid == null || currentCorridorWidth < 1 || currentCorridorWidth > 2)
+        {
+            return false;
+        }
+
+        candidateCorridorOrientation = currentCorridorOrientation == "any"
+            ? (random.Next(2) == 0 ? "horizontal" : "vertical")
+            : currentCorridorOrientation;
+
+        if (candidateCorridorOrientation == "vertical")
+        {
+            int dividerX = currentCorridorPlacement == "center"
+                ? rules.width / 2
+                : (random.Next(2) == 0 ? 3 : rules.width - 4);
+            int openingStartY = rules.height / 2 - (currentCorridorWidth - 1) / 2;
+
+            for (int y = 1; y < rules.height - 1; y++)
+            {
+                Vector2Int position = new Vector2Int(dividerX, y);
+                bool opening = y >= openingStartY && y < openingStartY + currentCorridorWidth;
+                grid[dividerX, y] = opening ? Ground : Wall;
+
+                if (opening)
+                {
+                    candidateCorridorOpeningCells.Add(position);
+                }
+            }
+
+            int upperCapY = openingStartY - 1;
+            int lowerCapY = openingStartY + currentCorridorWidth;
+            grid[dividerX - 1, upperCapY] = Wall;
+            grid[dividerX - 1, lowerCapY] = Wall;
+        }
+        else if (candidateCorridorOrientation == "horizontal")
+        {
+            int dividerY = currentCorridorPlacement == "center"
+                ? rules.height / 2
+                : (random.Next(2) == 0 ? 3 : rules.height - 4);
+            int openingStartX = rules.width / 2 - (currentCorridorWidth - 1) / 2;
+
+            for (int x = 1; x < rules.width - 1; x++)
+            {
+                Vector2Int position = new Vector2Int(x, dividerY);
+                bool opening = x >= openingStartX && x < openingStartX + currentCorridorWidth;
+                grid[x, dividerY] = opening ? Ground : Wall;
+
+                if (opening)
+                {
+                    candidateCorridorOpeningCells.Add(position);
+                }
+            }
+
+            int leftCapX = openingStartX - 1;
+            int rightCapX = openingStartX + currentCorridorWidth;
+            grid[leftCapX, dividerY - 1] = Wall;
+            grid[rightCapX, dividerY - 1] = Wall;
+        }
+        else
+        {
+            return false;
+        }
+
+        return candidateCorridorOpeningCells.Count == currentCorridorWidth;
+    }
+
+    private CorridorValidationResult ValidateCorridorStructure(string[] rows)
+    {
+        CorridorValidationResult result = new CorridorValidationResult
+        {
+            requested = currentCorridorPlacement != "none",
+            placement = currentCorridorPlacement,
+            width = currentCorridorWidth,
+            orientation = candidateCorridorOrientation,
+            uniquePassage = currentCorridorPlacement == "none"
+        };
+
+        if (!result.requested || rows == null || candidateCorridorOpeningCells.Count == 0)
+        {
+            return result;
+        }
+
+        int passableCount = 0;
+        bool adjacentAreasOpen = true;
+
+        if (candidateCorridorOrientation == "vertical")
+        {
+            int dividerX = FirstCorridorOpening().x;
+
+            for (int y = 1; y < rules.height - 1; y++)
+            {
+                Vector2Int position = new Vector2Int(dividerX, y);
+                bool passable = IsCorridorPassable(rows, position);
+
+                if (passable)
+                {
+                    passableCount++;
+                }
+
+                if (candidateCorridorOpeningCells.Contains(position))
+                {
+                    adjacentAreasOpen &= IsCorridorPassable(rows, position + Vector2Int.left)
+                        && IsCorridorPassable(rows, position + Vector2Int.right);
+                }
+                else if (passable)
+                {
+                    adjacentAreasOpen = false;
+                }
+            }
+        }
+        else
+        {
+            int dividerY = FirstCorridorOpening().y;
+
+            for (int x = 1; x < rules.width - 1; x++)
+            {
+                Vector2Int position = new Vector2Int(x, dividerY);
+                bool passable = IsCorridorPassable(rows, position);
+
+                if (passable)
+                {
+                    passableCount++;
+                }
+
+                if (candidateCorridorOpeningCells.Contains(position))
+                {
+                    adjacentAreasOpen &= IsCorridorPassable(rows, position + Vector2Int.up)
+                        && IsCorridorPassable(rows, position + Vector2Int.down);
+                }
+                else if (passable)
+                {
+                    adjacentAreasOpen = false;
+                }
+            }
+        }
+
+        result.uniquePassage = adjacentAreasOpen && passableCount == currentCorridorWidth;
+        return result;
+    }
+
+    private Vector2Int FirstCorridorOpening()
+    {
+        foreach (Vector2Int position in candidateCorridorOpeningCells)
+        {
+            return position;
+        }
+
+        return Vector2Int.zero;
+    }
+
+    private bool IsCorridorPassable(string[] rows, Vector2Int position)
+    {
+        char tile = LevelData.GetMapTile(rows, position);
+        return tile == Ground || tile == Player || tile == Box || tile == Target;
+    }
+
+    private string GetCorridorFailureMessage(
+        CorridorValidationResult validation,
+        bool requiresBoxPassage)
+    {
+        if (!validation.uniquePassage)
+        {
+            return "The requested corridor position, width, or unique opening was not preserved.";
+        }
+
+        if (!validation.playerCanPass)
+        {
+            return "The requested corridor was not part of a solvable player route.";
+        }
+
+        if (requiresBoxPassage && !validation.boxPassedThrough)
+        {
+            return "No solved box route passed through the requested corridor.";
+        }
+
+        return "The requested corridor could not be verified.";
+    }
+
+    private bool HasRequiredCorridor()
+    {
+        return currentCorridorPlacement != "none" && currentCorridorPriority == "required";
     }
 
     private char[,] CreateSupportedOuterShell()
@@ -2925,6 +3218,35 @@ public class LevelGenerator : MonoBehaviour
         }
 
         return DefaultWaterStyle;
+    }
+
+    private string NormalizeCorridorPlacement(string value)
+    {
+        value = NormalizeBlueprintValue(value);
+        return value == "center" || value == "side" ? value : "none";
+    }
+
+    private string NormalizeCorridorOrientation(string value)
+    {
+        value = NormalizeBlueprintValue(value);
+        return value == "horizontal" || value == "vertical" ? value : "any";
+    }
+
+    private string NormalizeCorridorRole(string value)
+    {
+        value = NormalizeBlueprintValue(value);
+
+        if (value == "player_route" || value == "required_box_route")
+        {
+            return value;
+        }
+
+        return "visual_only";
+    }
+
+    private string NormalizeCorridorPriority(string value)
+    {
+        return NormalizeBlueprintValue(value) == "required" ? "required" : "preferred";
     }
 
     private string NormalizeBlueprintValue(string value)

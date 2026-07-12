@@ -175,6 +175,7 @@ public class LLMLevelDesignClient : MonoBehaviour
 
         if (plan != null)
         {
+            ApplyLatestAdjustmentConstraints(plan);
             Debug.Log(
                 "LLMLevelDesignClient received plan:"
                 + " responseCode=" + request.responseCode
@@ -194,6 +195,64 @@ public class LLMLevelDesignClient : MonoBehaviour
 
         CleanupRequest(request);
         onSuccess?.Invoke(plan);
+    }
+
+    private void ApplyLatestAdjustmentConstraints(LevelDesignPlan plan)
+    {
+        if (plan == null)
+        {
+            return;
+        }
+
+        string adjustment = PlayerPrefs.GetString(
+            CreativeWorkshopContext.LatestAdjustmentTextPrefsKey,
+            ""
+        ).ToLowerInvariant();
+        bool narrow = ContainsAny(
+            adjustment,
+            "narrow corridor",
+            "narrow passage",
+            "one-tile",
+            "single-tile",
+            "窄道",
+            "狭窄通道",
+            "单格通道",
+            "瓶颈"
+        );
+        bool center = ContainsAny(adjustment, "center", "central", "middle", "中心", "中央", "中间");
+
+        if (!narrow || !center)
+        {
+            return;
+        }
+
+        bool requiresBoxRoute = ContainsAny(adjustment, "box", "crate", "箱子")
+            && ContainsAny(adjustment, "must", "required", "pass through", "cross", "必须", "经过", "穿过");
+        bool horizontal = ContainsAny(adjustment, "horizontal", "横向", "水平");
+        bool vertical = ContainsAny(adjustment, "vertical", "纵向", "垂直");
+
+        plan.archetype = "bottleneck_corridor";
+        plan.obstacleStyle = "central_baffle";
+        plan.corridorPlacement = "center";
+        plan.corridorWidth = ContainsAny(adjustment, "two-tile", "two tile", "2-tile", "两格", "二格") ? 2 : 1;
+        plan.corridorOrientation = horizontal == vertical
+            ? "any"
+            : horizontal ? "horizontal" : "vertical";
+        plan.corridorRole = requiresBoxRoute ? "required_box_route" : "player_route";
+        plan.corridorPriority = "required";
+    }
+
+    private bool ContainsAny(string value, params string[] tokens)
+    {
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            if (value.Contains(tokens[i]))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void CleanupRequest(UnityWebRequest request)
@@ -223,7 +282,17 @@ public class LLMLevelDesignClient : MonoBehaviour
         requestUrl = AppendQueryParameter(requestUrl, "ideaId", PlayerPrefs.GetString(CreativeIdeaIdPrefsKey, ""));
         requestUrl = AppendQueryParameter(requestUrl, "sessionId", PlayerPrefs.GetString(CreativeIdeaSessionIdPrefsKey, ""));
         requestUrl = AppendQueryParameter(requestUrl, "sceneName", SceneManager.GetActiveScene().name);
+        requestUrl = AppendStructuredContext(requestUrl, "originalIdeaText", CreativeWorkshopContext.OriginalIdeaTextPrefsKey);
+        requestUrl = AppendStructuredContext(requestUrl, "selectedDirectionText", CreativeWorkshopContext.SelectedDirectionTextPrefsKey);
+        requestUrl = AppendStructuredContext(requestUrl, "refinementFeedbackText", CreativeWorkshopContext.RefinementFeedbackTextPrefsKey);
+        requestUrl = AppendStructuredContext(requestUrl, "adjustmentHistoryText", CreativeWorkshopContext.AdjustmentHistoryTextPrefsKey);
+        requestUrl = AppendStructuredContext(requestUrl, "latestAdjustmentText", CreativeWorkshopContext.LatestAdjustmentTextPrefsKey);
         return requestUrl;
+    }
+
+    private string AppendStructuredContext(string url, string parameterName, string prefsKey)
+    {
+        return AppendQueryParameter(url, parameterName, PlayerPrefs.GetString(prefsKey, ""));
     }
 
     private string GetCreativeIdeaText()

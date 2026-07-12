@@ -339,12 +339,64 @@ public class DesignInterpretationController : MonoBehaviour
     {
         StringBuilder builder = new StringBuilder();
 
-        AppendSection(builder, "Expanded Direction", GetExpandedDirectionText());
+        AppendSection(builder, "Requested Design", BuildRequestedDesignText(plan));
+        AppendSection(builder, "Applied and Verified", BuildAppliedDesignText(plan));
         AppendSection(builder, "Design Reasoning", GetDesignReasoning(plan));
         AppendSection(builder, "Map Blueprint", BuildBlueprintText(plan));
         AppendSection(builder, "Map Parameters", BuildParameterText(plan));
 
         return builder.ToString().TrimEnd();
+    }
+
+    private string BuildRequestedDesignText(LevelDesignPlan plan)
+    {
+        StringBuilder builder = new StringBuilder();
+        string latestAdjustment = CleanText(LevelDesignPlanContext.LatestAdjustmentText);
+
+        builder.Append("Latest adjustment: ");
+        builder.Append(string.IsNullOrEmpty(latestAdjustment) ? "None" : latestAdjustment);
+        builder.Append("\nExpanded direction: ");
+        builder.Append(GetExpandedDirectionText());
+        builder.Append("\nCorridor placement: ");
+        builder.Append(PrettyValue(plan.corridorPlacement));
+        builder.Append("\nCorridor width: ");
+        builder.Append(plan.corridorWidth > 0 ? plan.corridorWidth + " tile(s)" : "Not requested");
+        builder.Append("\nCorridor orientation: ");
+        builder.Append(PrettyValue(plan.corridorOrientation));
+        builder.Append("\nCorridor role: ");
+        builder.Append(PrettyValue(plan.corridorRole));
+        builder.Append("\nPriority: ");
+        builder.Append(PrettyValue(plan.corridorPriority));
+        return builder.ToString();
+    }
+
+    private string BuildAppliedDesignText(LevelDesignPlan plan)
+    {
+        if (string.IsNullOrEmpty(plan.corridorPlacement) || plan.corridorPlacement == "none")
+        {
+            return "No corridor feature was requested for this level.";
+        }
+
+        CorridorValidationResult validation = LevelDesignPlanContext.CorridorValidation;
+
+        if (validation == null)
+        {
+            return "No corridor verification result was stored for this level.";
+        }
+
+        return "Verified: " + YesNo(validation.verified) + "\n"
+            + "Actual placement: " + PrettyValue(validation.placement) + "\n"
+            + "Actual orientation: " + PrettyValue(validation.orientation) + "\n"
+            + "Actual width: " + validation.width + " tile(s)\n"
+            + "Unique passage: " + YesNo(validation.uniquePassage) + "\n"
+            + "Player can pass: " + YesNo(validation.playerCanPass) + "\n"
+            + "Box passed through: " + YesNo(validation.boxPassedThrough) + "\n"
+            + "Result: " + CleanText(validation.message);
+    }
+
+    private string YesNo(bool value)
+    {
+        return value ? "Yes" : "No";
     }
 
     private string GetExpandedDirectionText()

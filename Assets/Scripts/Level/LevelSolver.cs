@@ -138,9 +138,36 @@ public class LevelSolver : MonoBehaviour
 
     public bool CanSolve(out int searchedStates, out int solutionSteps, out int pushCount)
     {
+        return Solve(null, out searchedStates, out solutionSteps, out pushCount, out _);
+    }
+
+    public bool CanSolveWithRequiredBoxCells(
+        HashSet<Vector2Int> requiredBoxCells,
+        out int searchedStates,
+        out int solutionSteps,
+        out int pushCount,
+        out bool boxVisitedRequiredCell)
+    {
+        return Solve(
+            requiredBoxCells,
+            out searchedStates,
+            out solutionSteps,
+            out pushCount,
+            out boxVisitedRequiredCell
+        );
+    }
+
+    private bool Solve(
+        HashSet<Vector2Int> requiredBoxCells,
+        out int searchedStates,
+        out int solutionSteps,
+        out int pushCount,
+        out bool boxVisitedRequiredCell)
+    {
         searchedStates = 0;
         solutionSteps = -1;
         pushCount = -1;
+        boxVisitedRequiredCell = false;
 
         if (!CanStartSolving())
         {
@@ -148,12 +175,12 @@ public class LevelSolver : MonoBehaviour
         }
 
         List<Vector2Int> startBoxes = GetSortedBoxes(boxes);
-        SolverState startState = new SolverState(playerPos, startBoxes, 0, 0);
+        SolverState startState = new SolverState(playerPos, startBoxes, 0, 0, false);
         Queue<SolverState> openStates = new Queue<SolverState>();
         HashSet<string> visitedStates = new HashSet<string>();
 
         openStates.Enqueue(startState);
-        visitedStates.Add(GetStateKey(startState.player, startState.boxes));
+        visitedStates.Add(GetStateKey(startState.player, startState.boxes, false, requiredBoxCells != null));
 
         while (openStates.Count > 0 && searchedStates < maxSearchStates)
         {
@@ -162,14 +189,26 @@ public class LevelSolver : MonoBehaviour
 
             if (IsSolved(current.boxes))
             {
+                if (requiredBoxCells != null && !current.boxVisitedRequiredCell)
+                {
+                    continue;
+                }
+
                 solutionSteps = current.steps;
                 pushCount = current.pushes;
+                boxVisitedRequiredCell = current.boxVisitedRequiredCell;
                 return true;
             }
 
             for (int i = 0; i < directions.Length; i++)
             {
-                TryAddNextState(current, directions[i], openStates, visitedStates);
+                TryAddNextState(
+                    current,
+                    directions[i],
+                    requiredBoxCells,
+                    openStates,
+                    visitedStates
+                );
             }
         }
 
@@ -184,6 +223,7 @@ public class LevelSolver : MonoBehaviour
     private void TryAddNextState(
         SolverState current,
         Vector2Int direction,
+        HashSet<Vector2Int> requiredBoxCells,
         Queue<SolverState> openStates,
         HashSet<string> visitedStates)
     {
@@ -203,7 +243,18 @@ public class LevelSolver : MonoBehaviour
             nextBoxes[boxIndex] = nextBox;
             nextBoxes = GetSortedBoxes(nextBoxes);
 
-            AddState(nextPlayer, nextBoxes, current.steps + 1, current.pushes + 1, openStates, visitedStates);
+            bool visitedRequiredCell = current.boxVisitedRequiredCell
+                || (requiredBoxCells != null && requiredBoxCells.Contains(nextBox));
+            AddState(
+                nextPlayer,
+                nextBoxes,
+                current.steps + 1,
+                current.pushes + 1,
+                visitedRequiredCell,
+                requiredBoxCells != null,
+                openStates,
+                visitedStates
+            );
         }
         else
         {
@@ -212,7 +263,16 @@ public class LevelSolver : MonoBehaviour
                 return;
             }
 
-            AddState(nextPlayer, current.boxes, current.steps + 1, current.pushes, openStates, visitedStates);
+            AddState(
+                nextPlayer,
+                current.boxes,
+                current.steps + 1,
+                current.pushes,
+                current.boxVisitedRequiredCell,
+                requiredBoxCells != null,
+                openStates,
+                visitedStates
+            );
         }
     }
 
@@ -221,10 +281,12 @@ public class LevelSolver : MonoBehaviour
         List<Vector2Int> stateBoxes,
         int steps,
         int pushes,
+        bool boxVisitedRequiredCell,
+        bool includeRequiredState,
         Queue<SolverState> openStates,
         HashSet<string> visitedStates)
     {
-        string key = GetStateKey(player, stateBoxes);
+        string key = GetStateKey(player, stateBoxes, boxVisitedRequiredCell, includeRequiredState);
 
         if (visitedStates.Contains(key))
         {
@@ -232,7 +294,7 @@ public class LevelSolver : MonoBehaviour
         }
 
         visitedStates.Add(key);
-        openStates.Enqueue(new SolverState(player, stateBoxes, steps, pushes));
+        openStates.Enqueue(new SolverState(player, stateBoxes, steps, pushes, boxVisitedRequiredCell));
     }
 
     private bool CanStartSolving()
@@ -294,7 +356,11 @@ public class LevelSolver : MonoBehaviour
         return a.x.CompareTo(b.x);
     }
 
-    private string GetStateKey(Vector2Int player, List<Vector2Int> stateBoxes)
+    private string GetStateKey(
+        Vector2Int player,
+        List<Vector2Int> stateBoxes,
+        bool boxVisitedRequiredCell = false,
+        bool includeRequiredState = false)
     {
         StringBuilder builder = new StringBuilder();
         builder.Append(player.x);
@@ -308,6 +374,12 @@ public class LevelSolver : MonoBehaviour
             builder.Append(',');
             builder.Append(stateBoxes[i].y);
             builder.Append(';');
+        }
+
+        if (includeRequiredState)
+        {
+            builder.Append('|');
+            builder.Append(boxVisitedRequiredCell ? '1' : '0');
         }
 
         return builder.ToString();
@@ -393,13 +465,20 @@ public class LevelSolver : MonoBehaviour
         public readonly List<Vector2Int> boxes;
         public readonly int steps;
         public readonly int pushes;
+        public readonly bool boxVisitedRequiredCell;
 
-        public SolverState(Vector2Int player, List<Vector2Int> boxes, int steps, int pushes)
+        public SolverState(
+            Vector2Int player,
+            List<Vector2Int> boxes,
+            int steps,
+            int pushes,
+            bool boxVisitedRequiredCell)
         {
             this.player = player;
             this.boxes = boxes;
             this.steps = steps;
             this.pushes = pushes;
+            this.boxVisitedRequiredCell = boxVisitedRequiredCell;
         }
     }
 }

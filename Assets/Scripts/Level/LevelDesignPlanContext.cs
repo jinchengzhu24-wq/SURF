@@ -10,6 +10,8 @@ public static class LevelDesignPlanContext
     public static LevelDesignPlan Plan { get; private set; }
     public static string ExpandedIdeaText { get; private set; }
     public static string SceneName { get; private set; }
+    public static string LatestAdjustmentText { get; private set; }
+    public static CorridorValidationResult CorridorValidation { get; private set; }
 
     public static bool HasPlan
     {
@@ -20,10 +22,21 @@ public static class LevelDesignPlanContext
         }
     }
 
-    public static void SaveAppliedPlan(LevelDesignPlan plan)
+    public static void SaveAppliedPlan(
+        LevelDesignPlan plan,
+        CorridorValidationResult corridorValidation = null)
     {
         if (plan == null)
         {
+            Clear();
+            return;
+        }
+
+        if (plan.corridorPriority == "required"
+            && plan.corridorPlacement != "none"
+            && (corridorValidation == null || !corridorValidation.verified))
+        {
+            Debug.LogWarning("LevelDesignPlanContext refused to save an unverified required corridor.");
             Clear();
             return;
         }
@@ -32,12 +45,19 @@ public static class LevelDesignPlanContext
         Plan = CopyPlan(plan);
         ExpandedIdeaText = GetCreativeIdeaText();
         SceneName = SceneManager.GetActiveScene().name;
+        LatestAdjustmentText = PlayerPrefs.GetString(
+            CreativeWorkshopContext.LatestAdjustmentTextPrefsKey,
+            ""
+        );
+        CorridorValidation = corridorValidation == null ? null : corridorValidation.Copy();
 
         StoredLevelDesignPlan storedPlan = new StoredLevelDesignPlan
         {
             plan = Plan,
             expandedIdeaText = ExpandedIdeaText,
-            sceneName = SceneName
+            sceneName = SceneName,
+            latestAdjustmentText = LatestAdjustmentText,
+            corridorValidation = CorridorValidation
         };
 
         PlayerPrefs.SetString(PlanPrefsKey, JsonUtility.ToJson(storedPlan));
@@ -57,6 +77,8 @@ public static class LevelDesignPlanContext
         Plan = null;
         ExpandedIdeaText = "";
         SceneName = "";
+        LatestAdjustmentText = "";
+        CorridorValidation = null;
 
         PlayerPrefs.DeleteKey(PlanPrefsKey);
         PlayerPrefs.Save();
@@ -77,6 +99,8 @@ public static class LevelDesignPlanContext
             Plan = null;
             ExpandedIdeaText = "";
             SceneName = "";
+            LatestAdjustmentText = "";
+            CorridorValidation = null;
             return;
         }
 
@@ -89,12 +113,18 @@ public static class LevelDesignPlanContext
                 Plan = null;
                 ExpandedIdeaText = "";
                 SceneName = "";
+                LatestAdjustmentText = "";
+                CorridorValidation = null;
                 return;
             }
 
             Plan = CopyPlan(storedPlan.plan);
             ExpandedIdeaText = storedPlan.expandedIdeaText ?? "";
             SceneName = storedPlan.sceneName ?? "";
+            LatestAdjustmentText = storedPlan.latestAdjustmentText ?? "";
+            CorridorValidation = storedPlan.corridorValidation == null
+                ? null
+                : storedPlan.corridorValidation.Copy();
         }
         catch (System.Exception exception)
         {
@@ -102,6 +132,8 @@ public static class LevelDesignPlanContext
             Plan = null;
             ExpandedIdeaText = "";
             SceneName = "";
+            LatestAdjustmentText = "";
+            CorridorValidation = null;
         }
     }
 
@@ -136,7 +168,12 @@ public static class LevelDesignPlanContext
             targetLayout = source.targetLayout,
             obstacleStyle = source.obstacleStyle,
             waterStyle = source.waterStyle,
-            designNote = source.designNote
+            designNote = source.designNote,
+            corridorPlacement = source.corridorPlacement,
+            corridorWidth = source.corridorWidth,
+            corridorOrientation = source.corridorOrientation,
+            corridorRole = source.corridorRole,
+            corridorPriority = source.corridorPriority
         };
     }
 
@@ -146,5 +183,7 @@ public static class LevelDesignPlanContext
         public LevelDesignPlan plan;
         public string expandedIdeaText;
         public string sceneName;
+        public string latestAdjustmentText;
+        public CorridorValidationResult corridorValidation;
     }
 }

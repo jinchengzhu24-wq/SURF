@@ -29,13 +29,19 @@ BASE_USER_PROMPT = (
     "edge_cluster. Choose exactly one obstacleStyle from: "
     "central_baffle, side_choke, goal_guard. Choose exactly one "
     "waterStyle from: corner_pool, side_pool, route_divider. "
-    "Use a short style label and a short designNote. Return exactly "
+    "Choose corridorPlacement from: none, center, side. Choose corridorWidth "
+    "as 0 when corridorPlacement is none, otherwise 1 or 2. Choose "
+    "corridorOrientation from: horizontal, vertical, any. Choose corridorRole "
+    "from: visual_only, player_route, required_box_route. Choose "
+    "corridorPriority from: preferred, required. Use a short style label and "
+    "a short designNote. Return exactly "
     "these JSON keys: "
     "minSolutionSteps, maxSolutionSteps, minPushes, "
     "maxPushes, minWaterAreas, maxWaterAreas, minWallObstacleBlocks, "
     "maxWallObstacleBlocks, minReversePulls, maxReversePulls, "
     "style, archetype, targetLayout, obstacleStyle, waterStyle, "
-    "designNote. "
+    "designNote, corridorPlacement, corridorWidth, corridorOrientation, "
+    "corridorRole, corridorPriority. "
 )
 
 
@@ -43,9 +49,11 @@ def build_level_plan_messages(variation_seed, recent_blueprint_hint, creative_co
     creative_context = creative_context or {}
     user_prompt = (
         BASE_USER_PROMPT
-        + build_creative_idea_prompt(creative_context)
+        + build_prioritized_creative_context_prompt(creative_context)
         + f"Variation seed: {variation_seed}. "
-        + "Avoid these recent blueprint combinations if possible: "
+        + "Recent-blueprint diversity is optional and must never override the "
+        + "latest user adjustment or any required corridor field. Avoid these "
+        + "recent blueprint combinations only if possible: "
         + f"{recent_blueprint_hint}."
     )
 
@@ -241,6 +249,55 @@ def build_creative_idea_prompt(creative_context):
         "Respect the generator's supported schema and ranges even if the idea "
         "asks for details the generator cannot directly represent. "
     )
+
+
+def build_prioritized_creative_context_prompt(creative_context):
+    creative_context = creative_context or {}
+    idea_text = normalize_prompt_text(creative_context.get("ideaText"))
+    original_idea = normalize_prompt_text(creative_context.get("originalIdeaText"))
+    selected_direction = normalize_prompt_text(creative_context.get("selectedDirectionText"))
+    refinement_feedback = normalize_prompt_text(creative_context.get("refinementFeedbackText"))
+    adjustment_history = normalize_prompt_text(creative_context.get("adjustmentHistoryText"))
+    latest_adjustment = normalize_prompt_text(creative_context.get("latestAdjustmentText"))
+    parts = [
+        "Follow this priority order: solvability and supported Sokoban rules; "
+        "latest user adjustment; selected design direction; original user idea; "
+        "earlier adjustments and refinement feedback; general difficulty and "
+        "quality preferences; variation and recent-blueprint diversity. "
+    ]
+
+    if latest_adjustment:
+        parts.append(
+            f'Latest user adjustment (authoritative hard requirement): "{latest_adjustment}". '
+            "When it conflicts with earlier intent, follow the latest adjustment "
+            "while preserving as much earlier intent as possible. "
+        )
+
+    if selected_direction:
+        parts.append(f'Selected design direction: "{selected_direction}". ')
+
+    if original_idea:
+        parts.append(f'Original user idea: "{original_idea}". ')
+
+    if adjustment_history:
+        parts.append(f'Earlier adjustment history (context only): "{adjustment_history}". ')
+
+    if refinement_feedback:
+        parts.append(f'Refinement feedback (context only): "{refinement_feedback}". ')
+
+    if idea_text and not any((original_idea, selected_direction, latest_adjustment)):
+        parts.append(f'Legacy combined user idea: "{idea_text}". ')
+
+    parts.append(
+        "Do not satisfy a structural request only through style or designNote; "
+        "encode it in the corridor fields. A request for a narrow corridor in "
+        "the map center must use archetype=bottleneck_corridor, "
+        "obstacleStyle=central_baffle, corridorPlacement=center, "
+        "corridorPriority=required, and corridorWidth=1 unless another width is "
+        "explicitly requested. Use corridorRole=required_box_route only when the "
+        "user says a box must pass through it; otherwise use player_route. "
+    )
+    return "".join(parts)
 
 
 def normalize_prompt_text(value):

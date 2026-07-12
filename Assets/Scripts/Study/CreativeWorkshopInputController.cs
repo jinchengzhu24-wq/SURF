@@ -198,7 +198,7 @@ public class CreativeWorkshopInputController : MonoBehaviour
     private IEnumerator AcceptIdeaAndContinue(CreativeIdeaRecord record, string statusMessage, bool recordedRemotely)
     {
         SetStatus(statusMessage);
-        CreativeWorkshopContext.SetIdea(record.ideaId, record.sessionId, record.ideaText);
+        CreativeWorkshopContext.BeginIdea(record.ideaId, record.sessionId, record.ideaText);
         LevelStudyRecorder.BeginCustomRound(record.ideaId, record.ideaText);
 
         if (logIdeaEvents)

@@ -55,6 +55,11 @@ class LevelDesignPlan(BaseModel):
     obstacleStyle: str
     waterStyle: str
     designNote: str
+    corridorPlacement: str = "none"
+    corridorWidth: int = 0
+    corridorOrientation: str = "any"
+    corridorRole: str = "visual_only"
+    corridorPriority: str = "preferred"
 
 
 class CreativeIdeaExpansionRequest(BaseModel):
@@ -116,6 +121,11 @@ DEFAULT_PLAN = {
     "obstacleStyle": "side_choke",
     "waterStyle": "side_pool",
     "designNote": "Hard two-box route with a forced choke point and separated goals.",
+    "corridorPlacement": "none",
+    "corridorWidth": 0,
+    "corridorOrientation": "any",
+    "corridorRole": "visual_only",
+    "corridorPriority": "preferred",
 }
 
 FALLBACK_PLANS = [
@@ -137,6 +147,11 @@ FALLBACK_PLANS = [
         "obstacleStyle": "goal_guard",
         "waterStyle": "corner_pool",
         "designNote": "Compact goal room pressure with clustered targets and a guarded approach.",
+        "corridorPlacement": "none",
+        "corridorWidth": 0,
+        "corridorOrientation": "any",
+        "corridorRole": "visual_only",
+        "corridorPriority": "preferred",
     },
     {
         "minSolutionSteps": 24,
@@ -155,6 +170,11 @@ FALLBACK_PLANS = [
         "obstacleStyle": "central_baffle",
         "waterStyle": "route_divider",
         "designNote": "Separated goals and a central baffle encourage route planning.",
+        "corridorPlacement": "none",
+        "corridorWidth": 0,
+        "corridorOrientation": "any",
+        "corridorRole": "visual_only",
+        "corridorPriority": "preferred",
     },
 ]
 
@@ -182,6 +202,10 @@ ENUMS = {
     "targetLayout": {"clustered", "split_pair", "edge_cluster"},
     "obstacleStyle": {"central_baffle", "side_choke", "goal_guard"},
     "waterStyle": {"corner_pool", "side_pool", "route_divider"},
+    "corridorPlacement": {"none", "center", "side"},
+    "corridorOrientation": {"horizontal", "vertical", "any"},
+    "corridorRole": {"visual_only", "player_route", "required_box_route"},
+    "corridorPriority": {"preferred", "required"},
 }
 
 app = FastAPI()
@@ -599,6 +623,11 @@ def generate_level_plan(
     ideaId: str = "",
     sessionId: str = "",
     sceneName: str = "",
+    originalIdeaText: str = "",
+    selectedDirectionText: str = "",
+    refinementFeedbackText: str = "",
+    adjustmentHistoryText: str = "",
+    latestAdjustmentText: str = "",
 ):
     return create_level_plan(
         {
@@ -606,6 +635,11 @@ def generate_level_plan(
             "ideaId": ideaId,
             "sessionId": sessionId,
             "sceneName": sceneName,
+            "originalIdeaText": originalIdeaText,
+            "selectedDirectionText": selectedDirectionText,
+            "refinementFeedbackText": refinementFeedbackText,
+            "adjustmentHistoryText": adjustmentHistoryText,
+            "latestAdjustmentText": latestAdjustmentText,
         }
     )
 
@@ -1740,7 +1774,7 @@ def create_level_plan(creative_context=None):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
 
     if not api_key or api_key == "your_deepseek_api_key_here":
-        return fallback_plan("DEEPSEEK_API_KEY is missing")
+        return fallback_plan("DEEPSEEK_API_KEY is missing", creative_context)
 
     try:
         model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
@@ -1767,7 +1801,7 @@ def create_level_plan(creative_context=None):
         print(f"Generated level plan from DeepSeek using {model}: {plan}")
         return plan
     except Exception as exception:
-        return fallback_plan(f"DeepSeek request failed: {exception}")
+        return fallback_plan(f"DeepSeek request failed: {exception}", creative_context)
 
 
 def validate_plan(plan):
@@ -1808,6 +1842,23 @@ def validate_plan(plan):
 
         data[key] = value
 
+    corridor_width = data.get("corridorWidth", 0)
+
+    if isinstance(corridor_width, bool) or not isinstance(corridor_width, int):
+        raise ValueError("corridorWidth must be an integer")
+
+    if data["corridorPlacement"] == "none":
+        if corridor_width != 0:
+            raise ValueError("corridorWidth must be 0 when corridorPlacement is none")
+    elif corridor_width not in {1, 2}:
+        raise ValueError("corridorWidth must be 1 or 2 when a corridor is requested")
+
+    if data["corridorPriority"] == "required" and data["corridorPlacement"] == "none":
+        raise ValueError("required corridorPriority needs a corridor placement")
+
+    if data["corridorRole"] == "required_box_route" and data["corridorPlacement"] == "none":
+        raise ValueError("required_box_route needs a corridor placement")
+
     style = str(data.get("style", "")).strip()
     if not style:
         style = DEFAULT_PLAN["style"]
@@ -1833,6 +1884,11 @@ def validate_plan(plan):
         "obstacleStyle": data["obstacleStyle"],
         "waterStyle": data["waterStyle"],
         "designNote": design_note[:160],
+        "corridorPlacement": data["corridorPlacement"],
+        "corridorWidth": corridor_width,
+        "corridorOrientation": data["corridorOrientation"],
+        "corridorRole": data["corridorRole"],
+        "corridorPriority": data["corridorPriority"],
     }
 
 
@@ -2164,11 +2220,45 @@ def contains_cjk(text):
     return any("\u4e00" <= character <= "\u9fff" for character in text or "")
 
 
-def fallback_plan(reason):
+def fallback_plan(reason, creative_context=None):
     plan = get_next_fallback_plan()
+    apply_fallback_corridor_intent(plan, creative_context or {})
     remember_blueprint(plan)
     print(f"Generated level plan from fallback: {reason}")
     return plan
+
+
+def apply_fallback_corridor_intent(plan, creative_context):
+    latest_adjustment = str(creative_context.get("latestAdjustmentText") or "").strip()
+    normalized = latest_adjustment.lower()
+    requests_narrow_corridor = any(
+        token in normalized
+        for token in ("narrow corridor", "narrow passage", "one-tile", "single-tile", "窄道", "狭窄通道", "单格通道", "瓶颈")
+    )
+    requests_center = any(
+        token in normalized
+        for token in ("center", "central", "middle", "中心", "中央", "中间")
+    )
+
+    if not requests_narrow_corridor or not requests_center:
+        return
+
+    requires_box_route = (
+        any(token in normalized for token in ("box", "crate", "箱子"))
+        and any(token in normalized for token in ("must", "required", "pass through", "cross", "必须", "经过", "穿过"))
+    )
+    plan.update(
+        {
+            "archetype": "bottleneck_corridor",
+            "obstacleStyle": "central_baffle",
+            "corridorPlacement": "center",
+            "corridorWidth": 1,
+            "corridorOrientation": "any",
+            "corridorRole": "required_box_route" if requires_box_route else "player_route",
+            "corridorPriority": "required",
+            "designNote": "A required one-tile central corridor controls the main route.",
+        }
+    )
 
 
 def get_next_fallback_plan():

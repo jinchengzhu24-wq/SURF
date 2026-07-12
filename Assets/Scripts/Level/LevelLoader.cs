@@ -83,6 +83,7 @@ public class LevelLoader : MonoBehaviour
     private bool currentLoadUsedLLMPlan;
     private LevelDesignPlan pendingLLMPlan;
     private bool hasPreparedInitialLevel;
+    public string LastGenerationFailureMessage { get; private set; }
 
     public bool HasPreparedInitialLevel => hasPreparedInitialLevel;
 
@@ -94,6 +95,7 @@ public class LevelLoader : MonoBehaviour
         }
 
         ResolveGenerationReferences();
+        LastGenerationFailureMessage = "";
 
         if (deferInitialLLMLoad && generateBeforeLoad && useLLMPlan)
         {
@@ -198,6 +200,17 @@ public class LevelLoader : MonoBehaviour
             }
 
             yield return RequestAndApplyLLMPlan();
+
+            if (pendingLLMPlan == null && LatestAdjustmentRequiresCorridor())
+            {
+                Debug.LogWarning(
+                    "LevelLoader: Required corridor request has no LLM plan."
+                    + " Skipping local fallback generation."
+                );
+                ClearPendingLLMPlanContext();
+                continue;
+            }
+
             bool generatedLevel = GenerateLevel();
 
             if (generatedLevel)
@@ -232,6 +245,9 @@ public class LevelLoader : MonoBehaviour
             + " maxPlanAttempts=" + maxPlanAttempts
             + ". No stale level will be loaded."
         );
+        LastGenerationFailureMessage = LatestAdjustmentRequiresCorridor()
+            ? "Could not generate a level that satisfies the required corridor. Please retry."
+            : "LLM generation failed. Please retry.";
         ClearPendingLLMPlanContext();
         hasPreparedInitialLevel = false;
         onComplete?.Invoke(false);
@@ -391,11 +407,37 @@ public class LevelLoader : MonoBehaviour
         pendingLLMPlan = plan;
     }
 
+    private bool LatestAdjustmentRequiresCorridor()
+    {
+        string value = PlayerPrefs.GetString(
+            CreativeWorkshopContext.LatestAdjustmentTextPrefsKey,
+            ""
+        ).ToLowerInvariant();
+        bool narrow = value.Contains("narrow corridor")
+            || value.Contains("narrow passage")
+            || value.Contains("one-tile")
+            || value.Contains("single-tile")
+            || value.Contains("窄道")
+            || value.Contains("狭窄通道")
+            || value.Contains("单格通道")
+            || value.Contains("瓶颈");
+        bool center = value.Contains("center")
+            || value.Contains("central")
+            || value.Contains("middle")
+            || value.Contains("中心")
+            || value.Contains("中央")
+            || value.Contains("中间");
+        return narrow && center;
+    }
+
     private void SaveSuccessfulLLMPlanContext()
     {
         if (currentLoadUsedLLMPlan && pendingLLMPlan != null)
         {
-            LevelDesignPlanContext.SaveAppliedPlan(pendingLLMPlan);
+            LevelDesignPlanContext.SaveAppliedPlan(
+                pendingLLMPlan,
+                levelGenerator != null ? levelGenerator.LastCorridorValidation : null
+            );
         }
         else
         {

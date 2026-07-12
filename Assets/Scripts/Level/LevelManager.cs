@@ -36,8 +36,10 @@ public class LevelManager : MonoBehaviour
     [Header("Initial LLM Loading")]
     public bool useInitialLLMLoadingTransition;
     public Text initialLLMLoadingText;
+    public Button initialLLMRetryButton;
     public string initialLLMLoadingMessage = "LLM is generating...";
     public string initialLLMFailureMessage = "LLM generation failed.";
+    public string initialLLMRetryLabel = "Retry";
 
     [Header("Complete Action")]
     public CompleteAction completeAction = CompleteAction.LoadNextScene;
@@ -64,6 +66,7 @@ public class LevelManager : MonoBehaviour
         }
 
         StretchBlackPanelToFullscreen();
+        EnsureInitialLLMRetryButton();
 
         if (useInitialLLMLoadingTransition)
         {
@@ -81,10 +84,12 @@ public class LevelManager : MonoBehaviour
         SetPlayerInputEnabled(false);
         SetBlackPanelAlpha(0);
         SetInitialLLMLoadingText(true, initialLLMLoadingMessage);
+        SetInitialLLMRetryButtonVisible(false);
 
         if (levelLoader == null)
         {
-            SetInitialLLMLoadingText(true, initialLLMFailureMessage);
+            SetInitialLLMLoadingText(true, GetInitialLLMFailureMessage());
+            SetInitialLLMRetryButtonVisible(true);
             yield break;
         }
 
@@ -94,23 +99,120 @@ public class LevelManager : MonoBehaviour
         if (!generatedLevel)
         {
             SetBlackPanelAlpha(0);
-            SetInitialLLMLoadingText(true, initialLLMFailureMessage);
+            SetInitialLLMLoadingText(true, GetInitialLLMFailureMessage());
+            SetInitialLLMRetryButtonVisible(true);
             yield break;
         }
 
         SetInitialLLMLoadingText(false, initialLLMLoadingMessage);
+        SetInitialLLMRetryButtonVisible(false);
         yield return Fade(0, 1);
 
         if (!levelLoader.CommitPreparedInitialLevel())
         {
             SetBlackPanelAlpha(0);
-            SetInitialLLMLoadingText(true, initialLLMFailureMessage);
+            SetInitialLLMLoadingText(true, GetInitialLLMFailureMessage());
+            SetInitialLLMRetryButtonVisible(true);
             yield break;
         }
 
         yield return Fade(1, 0);
         isCompletingLevel = false;
         SetPlayerInputEnabled(true);
+    }
+
+    private void RetryInitialLLMGeneration()
+    {
+        if (!useInitialLLMLoadingTransition)
+        {
+            return;
+        }
+
+        SetInitialLLMRetryButtonVisible(false);
+        StartCoroutine(InitialLLMLoadingTransition());
+    }
+
+    private string GetInitialLLMFailureMessage()
+    {
+        return levelLoader != null && !string.IsNullOrEmpty(levelLoader.LastGenerationFailureMessage)
+            ? levelLoader.LastGenerationFailureMessage
+            : initialLLMFailureMessage;
+    }
+
+    private void EnsureInitialLLMRetryButton()
+    {
+        if (!useInitialLLMLoadingTransition)
+        {
+            return;
+        }
+
+        if (initialLLMRetryButton != null)
+        {
+            initialLLMRetryButton.onClick.RemoveListener(RetryInitialLLMGeneration);
+            initialLLMRetryButton.onClick.AddListener(RetryInitialLLMGeneration);
+            SetInitialLLMRetryButtonVisible(false);
+            return;
+        }
+
+        if (initialLLMLoadingText == null)
+        {
+            return;
+        }
+
+        GameObject buttonObject = new GameObject(
+            "InitialLLMRetryButton",
+            typeof(RectTransform),
+            typeof(Image),
+            typeof(Button)
+        );
+        RectTransform buttonRect = buttonObject.GetComponent<RectTransform>();
+        buttonRect.SetParent(initialLLMLoadingText.transform.parent, false);
+        buttonRect.anchorMin = new Vector2(0.5f, 0.5f);
+        buttonRect.anchorMax = new Vector2(0.5f, 0.5f);
+        buttonRect.pivot = new Vector2(0.5f, 0.5f);
+        buttonRect.anchoredPosition = initialLLMLoadingText.rectTransform.anchoredPosition
+            + new Vector2(0f, -90f);
+        buttonRect.sizeDelta = new Vector2(260f, 60f);
+
+        Image buttonImage = buttonObject.GetComponent<Image>();
+        buttonImage.color = new Color(0.1f, 0.35f, 0.75f, 1f);
+
+        initialLLMRetryButton = buttonObject.GetComponent<Button>();
+        initialLLMRetryButton.targetGraphic = buttonImage;
+        initialLLMRetryButton.onClick.AddListener(RetryInitialLLMGeneration);
+
+        GameObject labelObject = new GameObject(
+            "Text",
+            typeof(RectTransform),
+            typeof(CanvasRenderer),
+            typeof(Text)
+        );
+        RectTransform labelRect = labelObject.GetComponent<RectTransform>();
+        labelRect.SetParent(buttonRect, false);
+        labelRect.anchorMin = Vector2.zero;
+        labelRect.anchorMax = Vector2.one;
+        labelRect.offsetMin = Vector2.zero;
+        labelRect.offsetMax = Vector2.zero;
+
+        Text label = labelObject.GetComponent<Text>();
+        label.text = initialLLMRetryLabel;
+        label.font = initialLLMLoadingText.font;
+        label.fontSize = Mathf.Max(24, initialLLMLoadingText.fontSize);
+        label.fontStyle = FontStyle.Bold;
+        label.alignment = TextAnchor.MiddleCenter;
+        label.color = Color.white;
+        label.raycastTarget = false;
+
+        SetInitialLLMRetryButtonVisible(false);
+    }
+
+    private void SetInitialLLMRetryButtonVisible(bool visible)
+    {
+        if (initialLLMRetryButton != null)
+        {
+            initialLLMRetryButton.interactable = visible;
+            initialLLMRetryButton.gameObject.SetActive(visible);
+        }
     }
 
     private void SetInitialLLMLoadingText(bool visible, string message)

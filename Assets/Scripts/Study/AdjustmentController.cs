@@ -160,7 +160,12 @@ public class AdjustmentController : MonoBehaviour
         );
         string adjustedIdeaText = BuildAdjustedIdeaText(currentIdeaText, adjustmentText);
 
-        CreativeWorkshopContext.SetIdea(ideaId, sessionId, adjustedIdeaText);
+        CreativeWorkshopContext.AppendAdjustment(
+            ideaId,
+            sessionId,
+            adjustmentText,
+            adjustedIdeaText
+        );
         LevelStudyRecorder.UpdateCustomRoundIdea(ideaId, adjustedIdeaText);
 
         if (logAdjustmentEvents)

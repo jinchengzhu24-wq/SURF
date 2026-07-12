@@ -257,7 +257,12 @@ public class RefinementController : MonoBehaviour
         string ideaText = GetCreativeIdeaText();
         string refinedIdeaText = BuildRefinedIdeaText(ideaText, totalScore);
 
-        CreativeWorkshopContext.SetIdea(ideaId, sessionId, refinedIdeaText);
+        CreativeWorkshopContext.SetRefinementFeedback(
+            ideaId,
+            sessionId,
+            BuildRefinementFeedback(totalScore),
+            refinedIdeaText
+        );
         LevelStudyRecorder.UpdateCustomRoundIdea(ideaId, refinedIdeaText);
 
         if (logRefinementEvents)
@@ -273,8 +278,7 @@ public class RefinementController : MonoBehaviour
     private string BuildRefinedIdeaText(string ideaText, int totalScore)
     {
         string cleanIdeaText = CleanText(ideaText);
-        string cleanRetryPrompt = CleanText(retryPrompt);
-        string feedback = "Refinement score " + totalScore + ". " + cleanRetryPrompt;
+        string feedback = BuildRefinementFeedback(totalScore);
 
         if (string.IsNullOrEmpty(cleanIdeaText))
         {
@@ -282,6 +286,11 @@ public class RefinementController : MonoBehaviour
         }
 
         return cleanIdeaText + " " + feedback;
+    }
+
+    private string BuildRefinementFeedback(int totalScore)
+    {
+        return "Refinement score " + totalScore + ". " + CleanText(retryPrompt);
     }
 
     private string GetCreativeIdeaId()

@@ -536,7 +536,12 @@ public class CreativeIdeaExpansionController : MonoBehaviour
         string ideaId = GetIdeaId();
         string sessionId = GetSessionId();
 
-        CreativeWorkshopContext.SetIdea(ideaId, sessionId, finalIdeaText);
+        CreativeWorkshopContext.SetSelectedDirection(
+            ideaId,
+            sessionId,
+            BuildSelectedDirectionText(selectedOption),
+            finalIdeaText
+        );
         LevelStudyRecorder.UpdateCustomRoundIdea(ideaId, finalIdeaText);
 
         CreativeIdeaExpansionChoiceRecord record = new CreativeIdeaExpansionChoiceRecord
@@ -616,6 +621,18 @@ public class CreativeIdeaExpansionController : MonoBehaviour
             + " Original player idea to respect: \""
             + originalIdea
             + "\". Use the selected design direction as the primary generation intent, but do not drift away from the original idea.";
+    }
+
+    private string BuildSelectedDirectionText(CreativeIdeaExpansionOption option)
+    {
+        string selectedText = CleanText(option.promptText);
+
+        if (string.IsNullOrEmpty(selectedText))
+        {
+            selectedText = CleanText(option.description);
+        }
+
+        return CleanText(option.title) + ". " + selectedText;
     }
 
     private CreativeIdeaExpansionOption[] CopyOptionsForRequest(CreativeIdeaExpansionOption[] source)
