@@ -1220,12 +1220,15 @@ public class LevelGenerator : MonoBehaviour
     private bool TryCreateBaseGrid(out char[,] grid)
     {
         candidateCorridorOpeningCells.Clear();
+
+        if (rules.width != 12 || rules.height != 10)
+        {
+            grid = null;
+            return false;
+        }
+
         bool needsHardCorridor = currentCorridorPlacement != "none";
-        grid = needsHardCorridor
-            ? CreateRectangularOuterShell()
-            : rules.enableIrregularOuterWalls
-            ? CreateSupportedOuterShell()
-            : CreateRectangularOuterShell();
+        grid = CreateSupportedOuterShell();
 
         if (needsHardCorridor && !TryApplyCorridorTemplate(grid))
         {

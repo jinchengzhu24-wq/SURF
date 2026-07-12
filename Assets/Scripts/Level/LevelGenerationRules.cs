@@ -124,10 +124,7 @@ public class LevelGenerationRules : MonoBehaviour
 
     public bool IsValidWaterRectSize(int rectWidth, int rectHeight)
     {
-        bool tallEnough = rectWidth >= 2 && rectHeight >= 3;
-        bool wideEnough = rectWidth >= 3 && rectHeight >= 2;
-
-        return tallEnough || wideEnough;
+        return rectWidth >= 2 && rectHeight >= 2;
     }
 
     public bool IsValidWaterRect(Vector2Int origin, Vector2Int size)
