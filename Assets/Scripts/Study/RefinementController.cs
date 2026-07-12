@@ -18,7 +18,7 @@ public class RefinementController : MonoBehaviour
 
     [Header("Flow")]
     public string questionnaireSceneName = "Questionnaire";
-    public string retrySceneName = "Custom_Level";
+    public string retrySceneName = "Adjustment";
     public string designInterpretationSceneName = "Design interpretation";
 
     [Header("Retry Prompt")]
@@ -331,6 +331,7 @@ public class RefinementController : MonoBehaviour
 
     private void LoadDesignInterpretation()
     {
+        DesignInterpretationController.SetReturnScene(SceneManager.GetActiveScene().name);
         LoadScene(designInterpretationSceneName);
     }
 

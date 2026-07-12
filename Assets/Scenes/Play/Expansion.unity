@@ -2127,8 +2127,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 90.65039, y: 230}
-  m_SizeDelta: {x: 1579.3008, y: 147.0354}
+  m_AnchoredPosition: {x: 25.5, y: 230}
+  m_SizeDelta: {x: 1449, y: 147.0354}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1668752550
 MonoBehaviour:
@@ -2219,6 +2219,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   submitButton: {fileID: 2300000119}
+  regenerateButton: {fileID: 0}
   statusText: {fileID: 0}
   guidanceText: {fileID: 1668752550}
   originalIdeaText: {fileID: 2400000004}

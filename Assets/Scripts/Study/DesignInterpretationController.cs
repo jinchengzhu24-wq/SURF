@@ -6,6 +6,8 @@ using UnityEngine.UI;
 
 public class DesignInterpretationController : MonoBehaviour
 {
+    private static string requestedReturnSceneName = "";
+
     [Header("Scene UI")]
     public Text interpretationText;
     public Button backButton;
@@ -430,13 +432,23 @@ public class DesignInterpretationController : MonoBehaviour
 
     private void LoadRefinement()
     {
-        if (string.IsNullOrEmpty(refinementSceneName))
+        string returnSceneName = string.IsNullOrEmpty(requestedReturnSceneName)
+            ? refinementSceneName
+            : requestedReturnSceneName;
+        requestedReturnSceneName = "";
+
+        if (string.IsNullOrEmpty(returnSceneName))
         {
-            Debug.LogWarning("DesignInterpretationController: refinement scene name is empty.");
+            Debug.LogWarning("DesignInterpretationController: return scene name is empty.");
             return;
         }
 
-        SceneManager.LoadScene(refinementSceneName);
+        SceneManager.LoadScene(returnSceneName);
+    }
+
+    public static void SetReturnScene(string sceneName)
+    {
+        requestedReturnSceneName = string.IsNullOrEmpty(sceneName) ? "" : sceneName.Trim();
     }
 
     private string FormatRange(int min, int max)

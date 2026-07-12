@@ -33,6 +33,9 @@ EditorBuildSettings:
     path: Assets/Scenes/Play/Refinement.unity
     guid: b3543c85502fdad44b1700e770acd051
   - enabled: 1
+    path: Assets/Scenes/Play/Adjustment.unity
+    guid: 84849075c73631944a6fd1287b625ad2
+  - enabled: 1
     path: Assets/Scenes/Play/Design interpretation.unity
     guid: 8941c6b396fef4f40825a9cbc73096ff
   - enabled: 1
