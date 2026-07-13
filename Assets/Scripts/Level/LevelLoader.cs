@@ -752,6 +752,11 @@ public class LevelLoader : MonoBehaviour
             return WallTileKind.Surrounded;
         }
 
+        if (HasWallBelowAndOnBothSides(x, y))
+        {
+            return WallTileKind.Default;
+        }
+
         if (LevelData.HasNormalCornerWallShape(levelData != null ? levelData.rows : null, x, y))
         {
             return WallTileKind.NormalCorner;
@@ -768,6 +773,14 @@ public class LevelLoader : MonoBehaviour
         }
 
         return WallTileKind.Default;
+    }
+
+    private bool HasWallBelowAndOnBothSides(int x, int y)
+    {
+        string[] rows = levelData != null ? levelData.rows : null;
+        return LevelData.IsWall(rows, x, y + 1)
+            && LevelData.IsWall(rows, x - 1, y)
+            && LevelData.IsWall(rows, x + 1, y);
     }
 
     private TileBase GetSurroundedWallTile()
