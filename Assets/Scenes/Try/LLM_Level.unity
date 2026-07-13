@@ -403,7 +403,7 @@ PrefabInstance:
       objectReference: {fileID: 1798143834}
     - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: useCachedLLMPlan
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: cachedPlanWaitSeconds

@@ -48,7 +48,9 @@ public class LevelLoader : MonoBehaviour
     public bool generateBeforeLoad = true;
     public bool useLLMPlan;
     public bool deferInitialLLMLoad;
-    public bool useCachedLLMPlan = true;
+    // Legacy serialized fields are kept so existing scenes do not lose overrides.
+    // LLM level generation intentionally ignores the cache and always requests the remote service.
+    public bool useCachedLLMPlan = false;
     public float cachedPlanWaitSeconds = 1f;
 
     [Header("Prefabs")]
@@ -81,6 +83,7 @@ public class LevelLoader : MonoBehaviour
 
     private readonly List<GameObject> spawnedObjects = new List<GameObject>();
     private bool currentLoadUsedLLMPlan;
+    private bool currentLoadUsedAlgorithmFallbackAfterLLM;
     private LevelDesignPlan pendingLLMPlan;
     private bool hasPreparedInitialLevel;
     public string LastGenerationFailureMessage { get; private set; }
@@ -190,7 +193,16 @@ public class LevelLoader : MonoBehaviour
     {
         ResolveGenerationReferences();
         int maxPlanAttempts = GetLLMPlanAttemptCount();
+        bool receivedValidLLMPlan = false;
+        currentLoadUsedLLMPlan = false;
+        currentLoadUsedAlgorithmFallbackAfterLLM = false;
+        LastGenerationFailureMessage = "";
         ClearPendingLLMPlanContext();
+
+        if (levelGenerator != null)
+        {
+            levelGenerator.BeginLLMPlanAttempts();
+        }
 
         for (int attempt = 1; attempt <= maxPlanAttempts; attempt++)
         {
@@ -201,20 +213,32 @@ public class LevelLoader : MonoBehaviour
 
             yield return RequestAndApplyLLMPlan();
 
-            if (pendingLLMPlan == null && LatestAdjustmentRequiresCorridor())
+            if (pendingLLMPlan == null)
             {
                 Debug.LogWarning(
-                    "LevelLoader: Required corridor request has no LLM plan."
-                    + " Skipping local fallback generation."
+                    "LevelLoader: Remote LLM did not return a valid blueprint."
+                    + " attempt=" + attempt
+                    + ", maxPlanAttempts=" + maxPlanAttempts
+                    + ". Skipping local generation and retrying the real LLM."
                 );
                 ClearPendingLLMPlanContext();
+
+                if (levelGenerator != null)
+                {
+                    levelGenerator.ClearDesignPlan();
+                }
+
                 continue;
             }
 
+            receivedValidLLMPlan = true;
             bool generatedLevel = GenerateLevel();
 
             if (generatedLevel)
             {
+                currentLoadUsedLLMPlan = true;
+                currentLoadUsedAlgorithmFallbackAfterLLM = false;
+
                 if (loadOnSuccess)
                 {
                     LoadLevel();
@@ -232,23 +256,82 @@ public class LevelLoader : MonoBehaviour
 
             ClearPendingLLMPlanContext();
 
+            if (levelGenerator != null)
+            {
+                levelGenerator.ClearDesignPlan();
+            }
+
             Debug.LogWarning(
-                "LevelLoader: LLM generated level attempt failed."
+                "LevelLoader: Valid LLM blueprint could not be realized by the current templates."
                 + " attempt=" + attempt
                 + ", maxPlanAttempts=" + maxPlanAttempts
                 + ". No stale level will be loaded."
             );
         }
 
-        Debug.LogWarning(
-            "LevelLoader: LLM generated level failed after all plan attempts."
-            + " maxPlanAttempts=" + maxPlanAttempts
-            + ". No stale level will be loaded."
-        );
-        LastGenerationFailureMessage = LatestAdjustmentRequiresCorridor()
-            ? "Could not generate a level that satisfies the required corridor. Please retry."
-            : "LLM generation failed. Please retry.";
         ClearPendingLLMPlanContext();
+
+        if (receivedValidLLMPlan && levelGenerator != null)
+        {
+            Debug.LogWarning(
+                "LevelLoader: LLM succeeded, but the current templates could not realize any blueprint."
+                + " Clearing LLM constraints and running one algorithm fallback."
+            );
+
+            bool generatedFallback = levelGenerator.GenerateAlgorithmFallbackAfterLLM();
+
+            if (generatedFallback && levelGenerator.levelData != null)
+            {
+                levelData = levelGenerator.levelData;
+                currentLoadUsedLLMPlan = false;
+                currentLoadUsedAlgorithmFallbackAfterLLM = true;
+                ClearPendingLLMPlanContext();
+
+                Debug.LogWarning(
+                    "LevelLoader: LLM succeeded, template realization failed, and generation degraded"
+                    + " to LLMSuccessAlgorithmFallback. The final map does not claim the LLM blueprint."
+                );
+
+                if (loadOnSuccess)
+                {
+                    LoadLevel();
+                    SaveSuccessfulLLMPlanContext();
+                    NotifyGeneratedLevelIfNeeded(true);
+                }
+                else
+                {
+                    hasPreparedInitialLevel = true;
+                }
+
+                onComplete?.Invoke(true);
+                yield break;
+            }
+
+            LastGenerationFailureMessage =
+                "LLM returned a valid blueprint, but both template realization and the final algorithm fallback failed.";
+            Debug.LogWarning(
+                "LevelLoader: LLM succeeded, but template realization and the single algorithm fallback failed."
+                + " No stale level will be loaded."
+            );
+        }
+        else
+        {
+            LastGenerationFailureMessage =
+                "Remote LLM was unavailable or returned an invalid response after all attempts.";
+            Debug.LogWarning(
+                "LevelLoader: All real LLM requests failed or returned invalid blueprints."
+                + " Algorithm fallback is not allowed because no valid LLM blueprint was received."
+                + " No stale level will be loaded."
+            );
+        }
+
+        if (levelGenerator != null)
+        {
+            levelGenerator.ResetAfterLLMPlanAttempts();
+        }
+
+        currentLoadUsedLLMPlan = false;
+        currentLoadUsedAlgorithmFallbackAfterLLM = false;
         hasPreparedInitialLevel = false;
         onComplete?.Invoke(false);
     }
@@ -260,7 +343,7 @@ public class LevelLoader : MonoBehaviour
             return 2;
         }
 
-        return levelGenerator.GetLLMPlanRetryCount();
+        return Mathf.Clamp(levelGenerator.GetLLMPlanRetryCount(), 1, 2);
     }
 
     private void NotifyGeneratedLevelIfNeeded(bool generatedLevel)
@@ -293,6 +376,7 @@ public class LevelLoader : MonoBehaviour
         if (!useLLMPlan)
         {
             currentLoadUsedLLMPlan = false;
+            currentLoadUsedAlgorithmFallbackAfterLLM = false;
             ClearPendingLLMPlanContext();
             levelGenerator.ClearDesignPlan();
         }
@@ -316,29 +400,17 @@ public class LevelLoader : MonoBehaviour
     private IEnumerator RequestAndApplyLLMPlan()
     {
         ResolveGenerationReferences();
-        currentLoadUsedLLMPlan = false;
         pendingLLMPlan = null;
 
         LevelDesignPlan plan = null;
 
-        if (useCachedLLMPlan)
-        {
-            yield return RequestCachedLLMPlan(result => plan = result);
-        }
-
-        if (plan != null)
-        {
-            ApplyLLMPlan(plan);
-            yield break;
-        }
-
         if (llmClient == null)
         {
-            Debug.LogWarning("LevelLoader: LLM plan client is missing. Using local generation rules fallback.");
+            Debug.LogWarning("LevelLoader: LLM plan client is missing. No local generation will run for this attempt.");
             ClearPendingLLMPlanContext();
             if (levelGenerator != null)
             {
-                levelGenerator.ClearDesignPlan(true);
+                levelGenerator.ClearDesignPlan();
             }
             yield break;
         }
@@ -347,50 +419,16 @@ public class LevelLoader : MonoBehaviour
 
         if (plan == null)
         {
-            Debug.LogWarning("LevelLoader: LLM plan request failed. Using local generation rules fallback.");
+            Debug.LogWarning("LevelLoader: Real LLM plan request failed or returned an invalid blueprint.");
             ClearPendingLLMPlanContext();
             if (levelGenerator != null)
             {
-                levelGenerator.ClearDesignPlan(true);
+                levelGenerator.ClearDesignPlan();
             }
             yield break;
         }
 
         ApplyLLMPlan(plan);
-    }
-
-    private IEnumerator RequestCachedLLMPlan(System.Action<LevelDesignPlan> onComplete)
-    {
-        LLMLevelPlanCache cache = LLMLevelPlanCache.Instance;
-
-        if (cache == null)
-        {
-            Debug.Log("LevelLoader: LLM plan cache miss because cache is missing.");
-            onComplete?.Invoke(null);
-            yield break;
-        }
-
-        if (cache.TryTakePlan(out LevelDesignPlan plan))
-        {
-            onComplete?.Invoke(plan);
-            yield break;
-        }
-
-        cache.EnsurePlanBuffer();
-
-        if (cachedPlanWaitSeconds > 0f && cache.IsRequesting)
-        {
-            yield return cache.WaitForPlan(cachedPlanWaitSeconds, result => plan = result);
-
-            if (plan != null)
-            {
-                onComplete?.Invoke(plan);
-                yield break;
-            }
-        }
-
-        Debug.Log("LevelLoader: LLM plan cache miss. Requesting a plan directly.");
-        onComplete?.Invoke(null);
     }
 
     private void ApplyLLMPlan(LevelDesignPlan plan)
@@ -403,31 +441,7 @@ public class LevelLoader : MonoBehaviour
         }
 
         levelGenerator.ApplyPlan(plan);
-        currentLoadUsedLLMPlan = true;
         pendingLLMPlan = plan;
-    }
-
-    private bool LatestAdjustmentRequiresCorridor()
-    {
-        string value = PlayerPrefs.GetString(
-            CreativeWorkshopContext.LatestAdjustmentTextPrefsKey,
-            ""
-        ).ToLowerInvariant();
-        bool narrow = value.Contains("narrow corridor")
-            || value.Contains("narrow passage")
-            || value.Contains("one-tile")
-            || value.Contains("single-tile")
-            || value.Contains("窄道")
-            || value.Contains("狭窄通道")
-            || value.Contains("单格通道")
-            || value.Contains("瓶颈");
-        bool center = value.Contains("center")
-            || value.Contains("central")
-            || value.Contains("middle")
-            || value.Contains("中心")
-            || value.Contains("中央")
-            || value.Contains("中间");
-        return narrow && center;
     }
 
     private void SaveSuccessfulLLMPlanContext()
@@ -462,7 +476,17 @@ public class LevelLoader : MonoBehaviour
 
         if (useLLMPlan)
         {
-            return currentLoadUsedLLMPlan ? "LLMGuided" : "Fallback";
+            if (currentLoadUsedLLMPlan)
+            {
+                return "LLMGuided";
+            }
+
+            if (currentLoadUsedAlgorithmFallbackAfterLLM)
+            {
+                return "LLMSuccessAlgorithmFallback";
+            }
+
+            return "Unavailable";
         }
 
         return "Algorithm";

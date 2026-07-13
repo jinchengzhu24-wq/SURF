@@ -11,7 +11,7 @@
   ↓
 请求 LLM 生成高层蓝图 JSON
   ↓
-后端校验蓝图；失败时根据 idea 选择 contextual fallback
+后端校验蓝图；失败返回 502/503，不伪造蓝图
   ↓
 Unity 应用蓝图和本地强制约束
   ↓
@@ -22,6 +22,8 @@ Unity 应用蓝图和本地强制约束
 本地求解、走廊验证、难度筛选和质量筛选
   ↓
 从合格候选中选择质量最高的地图
+  ↓
+若本轮至少一份真实蓝图有效、但所有模板落实均失败，清除蓝图约束并运行一次算法降级
 ```
 
 ## 1. 请求上下文
@@ -47,7 +49,7 @@ LLM 请求可以携带以下内容：
 > 多样性要求
 ```
 
-Unity 默认优先读取缓存中的 LLM 方案；缓存不存在时直接请求后端。默认最多请求两份方案。
+LLM 关卡模式不读取方案缓存。每次尝试都会直接请求远程后端，以便确认本轮 LLM 确实可用。默认最多尝试两次真实远程请求。
 
 相关代码：
 
@@ -98,7 +100,7 @@ LLM 输出的是 `LevelDesignPlan`，不是地图行、坐标或 tile grid。
 
 `style` 和 `designNote` 只用于描述、记录和展示，不直接影响地图生成。
 
-## 3. 后端校验与 fallback
+## 3. 后端校验与错误返回
 
 后端收到 LLM JSON 后会检查：
 
@@ -109,28 +111,22 @@ LLM 输出的是 `LevelDesignPlan`，不是地图行、坐标或 tile grid。
 - `corridorPlacement` 与 `corridorWidth` 是否一致；
 - required corridor 是否具有有效 placement。
 
-如果模型调用失败、JSON 解析失败或方案校验失败，后端不再全局轮换固定方案，而是根据 idea 选择 fallback：
+关卡计划接口不再生成 contextual fallback：
 
 ```text
-水域、河流、水池相关        → split_route + route_divider
-迷宫、绕路、通道相关        → bottleneck_corridor
-紧凑、困难、死锁相关        → goal_room
-没有明显结构关键词          → open_workshop
+缺少 DEEPSEEK_API_KEY               → HTTP 503
+模型调用、JSON 解析或蓝图校验失败    → HTTP 502
+真实 LLM 蓝图通过校验               → HTTP 200 + LevelDesignPlan
 ```
 
-分类优先级为：
+503 或 502 在 Unity 中都算作真实 LLM 尝试失败。Unity 会继续下一次远程请求；如果本轮从未收到有效蓝图，则停止生成，不运行本地替代地图，也不加载旧地图。
 
-```text
-water > maze > compact > default
-```
-
-fallback 仍会使用合法的固定难度范围。当前响应没有向 Unity 暴露 `usedFallback`，因此 Unity 会把 contextual fallback 当作普通 LLM 方案继续生成。
+创意方向扩展接口仍保留自己的文案 fallback；它与关卡计划接口无关。
 
 相关代码：
 
 - `Backend/app.py::validate_plan`
-- `Backend/app.py::fallback_plan`
-- `Backend/app.py::get_contextual_fallback_plan`
+- `Backend/app.py::create_level_plan`
 
 ## 4. 中央一格宽通道
 
@@ -165,7 +161,7 @@ single-tile
 瓶颈
 ```
 
-这项约束同时存在于提示词、后端 fallback 和 Unity 客户端覆盖逻辑中。
+这项约束存在于提示词和 Unity 客户端覆盖逻辑中。后端不再为关卡计划构造 fallback 蓝图。
 
 ## 5. Unity 应用蓝图
 
@@ -278,11 +274,29 @@ strict 失败后进入 relaxed-blueprint 模式，主要调整：
 - required corridor；
 - LLM 质量门槛。
 
-如果 required corridor 仍然失败，系统不会取消该硬要求。
+单份蓝图的 relaxed 模式失败后不会立即进入 algorithm fallback。`LevelLoader` 会继续请求下一份真实蓝图；required corridor 失败也按“当前模板无法落实该蓝图”处理。
 
-如果走廊不是 required，放宽模式失败后可以进入本地 algorithm fallback。整份方案失败后，`LevelLoader` 会请求下一份 LLM 蓝图。默认两份蓝图均失败后停止生成，并且不会加载旧地图。
+所有远程尝试结束后：
 
-## 10. 失败日志解读
+- 如果本轮至少收到过一份通过后端校验的真实 LLM 蓝图，但所有有效蓝图都无法由模板落实，则清除 corridor、蓝图结构、LLM 质量门槛和蓝图数值，恢复算法基线，并运行一次现有算法 fallback；
+- 如果两次请求都失败或响应非法，则禁止算法 fallback，停止生成且不加载旧地图；
+- 第一份蓝图有效但落实失败、第二次远程请求失败时，因为本轮已经证明 LLM 成功过，仍允许最终算法 fallback。
+
+最终算法 fallback 可以放弃 required corridor。它生成的是明确标记的降级地图，不声称实现了 LLM 蓝图。
+
+## 10. 生成来源
+
+Console 与 `LevelStudyRecorder` 使用以下来源字符串：
+
+| 来源 | 触发条件 | 是否保存 applied-plan context |
+| --- | --- | --- |
+| `LLMGuided` | 有效 LLM 蓝图被 strict 或 relaxed 成功落实 | 是 |
+| `LLMSuccessAlgorithmFallback` | 本轮至少一份 LLM 蓝图有效，但所有蓝图落实失败，最终算法降级成功 | 否 |
+| `Algorithm` | 非 LLM 模式直接使用算法生成 | 否 |
+
+LLM 模式全部远程请求失败时不会生成地图，因此不会把失败结果记成 LLM 或 fallback 来源。
+
+## 11. 失败日志解读
 
 典型日志：
 
@@ -308,20 +322,18 @@ candidateFailures=BaseGrid=300
 | `rejectedByQuality` | 未达到 LLM 质量门槛 |
 | `rejectedByCorridor` | required corridor 验证失败 |
 
-## 11. 当前已知限制
+## 12. 当前已知限制
 
 - LLM 只能选择高层结构类别，不能指定具体地图坐标；
 - `style` 和 `designNote` 不影响生成；
 - obstacle 和 water style 是位置偏好，不是严格路线保证；
 - 当前提示词固定生成偏难关卡，无法忠实实现简单、无水或低障碍 idea；
-- fallback 尚未向 Unity 明确标记来源；
 - 第二次 LLM 方案请求尚未携带第一次本地生成的失败统计；
 - required corridor 的验证目前不能完整证明玩家或箱子确实从一侧穿越到另一侧；
 - 本地求解和候选生成是同步执行的，极端情况下可能造成明显卡帧。
 
-## 12. 修改后的生效方式
+## 13. 修改后的生效方式
 
 - 修改 Unity C# 后，Unity 编辑器会自动重新编译；
-- 修改 `Backend/prompt.py` 或 `Backend/app.py` 后，必须重启后端服务；
+- 修改 `Backend/prompt.py` 或 `Backend/app.py` 后，必须上传到部署服务器并重启后端服务；
 - 只修改模板或生成规则时，不需要修改 LLM JSON 协议。
-

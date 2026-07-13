@@ -128,59 +128,8 @@ DEFAULT_PLAN = {
     "corridorPriority": "preferred",
 }
 
-FALLBACK_PLANS = [
-    DEFAULT_PLAN,
-    {
-        "minSolutionSteps": 22,
-        "maxSolutionSteps": 40,
-        "minWaterAreas": 1,
-        "maxWaterAreas": 2,
-        "minWallObstacleBlocks": 2,
-        "maxWallObstacleBlocks": 3,
-        "minPushes": 10,
-        "maxPushes": 20,
-        "minReversePulls": 18,
-        "maxReversePulls": 32,
-        "style": "guarded goal room",
-        "archetype": "goal_room",
-        "targetLayout": "clustered",
-        "obstacleStyle": "goal_guard",
-        "waterStyle": "corner_pool",
-        "designNote": "Compact goal room pressure with clustered targets and a guarded approach.",
-        "corridorPlacement": "none",
-        "corridorWidth": 0,
-        "corridorOrientation": "any",
-        "corridorRole": "visual_only",
-        "corridorPriority": "preferred",
-    },
-    {
-        "minSolutionSteps": 24,
-        "maxSolutionSteps": 44,
-        "minWaterAreas": 1,
-        "maxWaterAreas": 2,
-        "minWallObstacleBlocks": 2,
-        "maxWallObstacleBlocks": 3,
-        "minPushes": 12,
-        "maxPushes": 22,
-        "minReversePulls": 18,
-        "maxReversePulls": 34,
-        "style": "split route pressure",
-        "archetype": "split_route",
-        "targetLayout": "split_pair",
-        "obstacleStyle": "central_baffle",
-        "waterStyle": "route_divider",
-        "designNote": "Separated goals and a central baffle encourage route planning.",
-        "corridorPlacement": "none",
-        "corridorWidth": 0,
-        "corridorOrientation": "any",
-        "corridorRole": "visual_only",
-        "corridorPriority": "preferred",
-    },
-]
-
 RECENT_BLUEPRINT_LIMIT = 3
 recent_blueprints = []
-fallback_plan_index = 0
 plan_history_lock = threading.Lock()
 study_record_lock = threading.Lock()
 
@@ -1774,7 +1723,10 @@ def create_level_plan(creative_context=None):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
 
     if not api_key or api_key == "your_deepseek_api_key_here":
-        return fallback_plan("DEEPSEEK_API_KEY is missing", creative_context)
+        raise HTTPException(
+            status_code=503,
+            detail="Remote LLM is unavailable because DEEPSEEK_API_KEY is missing",
+        )
 
     try:
         model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
@@ -1801,7 +1753,11 @@ def create_level_plan(creative_context=None):
         print(f"Generated level plan from DeepSeek using {model}: {plan}")
         return plan
     except Exception as exception:
-        return fallback_plan(f"DeepSeek request failed: {exception}", creative_context)
+        print(f"DeepSeek level-plan request failed: {exception}")
+        raise HTTPException(
+            status_code=502,
+            detail="Remote LLM request, response parsing, or blueprint validation failed",
+        ) from exception
 
 
 def validate_plan(plan):
@@ -2218,91 +2174,6 @@ def clean_expansion_text(value):
 
 def contains_cjk(text):
     return any("\u4e00" <= character <= "\u9fff" for character in text or "")
-
-
-def fallback_plan(reason, creative_context=None):
-    plan = get_contextual_fallback_plan(creative_context or {})
-    apply_fallback_corridor_intent(plan, creative_context or {})
-    remember_blueprint(plan)
-    print(f"Generated level plan from fallback: {reason}")
-    return plan
-
-
-def apply_fallback_corridor_intent(plan, creative_context):
-    latest_adjustment = str(creative_context.get("latestAdjustmentText") or "").strip()
-    normalized = latest_adjustment.lower()
-    requests_narrow_corridor = any(
-        token in normalized
-        for token in ("narrow corridor", "narrow passage", "one-tile", "single-tile", "窄道", "狭窄通道", "单格通道", "瓶颈")
-    )
-    requests_center = any(
-        token in normalized
-        for token in ("center", "central", "middle", "中心", "中央", "中间")
-    )
-
-    if not requests_narrow_corridor or not requests_center:
-        return
-
-    requires_box_route = (
-        any(token in normalized for token in ("box", "crate", "箱子"))
-        and any(token in normalized for token in ("must", "required", "pass through", "cross", "必须", "经过", "穿过"))
-    )
-    plan.update(
-        {
-            "archetype": "bottleneck_corridor",
-            "obstacleStyle": "central_baffle",
-            "corridorPlacement": "center",
-            "corridorWidth": 1,
-            "corridorOrientation": "any",
-            "corridorRole": "required_box_route" if requires_box_route else "player_route",
-            "corridorPriority": "required",
-            "designNote": "A required one-tile central corridor controls the main route.",
-        }
-    )
-
-
-def get_next_fallback_plan():
-    global fallback_plan_index
-
-    with plan_history_lock:
-        plan = FALLBACK_PLANS[fallback_plan_index % len(FALLBACK_PLANS)].copy()
-        fallback_plan_index += 1
-
-    return plan
-
-
-def get_contextual_fallback_plan(creative_context):
-    context_text = " ".join(
-        str(creative_context.get(key) or "")
-        for key in (
-            "ideaText",
-            "originalIdeaText",
-            "selectedDirectionText",
-            "latestAdjustmentText",
-        )
-    )
-    tags = classify_expansion_idea(context_text)
-
-    if "water" in tags:
-        return FALLBACK_PLANS[2].copy()
-
-    if "maze" in tags:
-        return FALLBACK_PLANS[0].copy()
-
-    if "compact" in tags:
-        return FALLBACK_PLANS[1].copy()
-
-    plan = DEFAULT_PLAN.copy()
-    plan.update(
-        {
-            "archetype": "open_workshop",
-            "targetLayout": "split_pair",
-            "obstacleStyle": "central_baffle",
-            "waterStyle": "side_pool",
-            "designNote": "A neutral open layout preserving room for maneuvering.",
-        }
-    )
-    return plan
 
 
 def remember_blueprint(plan):

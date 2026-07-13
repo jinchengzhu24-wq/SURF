@@ -143,6 +143,24 @@ public class LevelGenerator : MonoBehaviour
     private readonly HashSet<Vector2Int> candidateCorridorOpeningCells = new HashSet<Vector2Int>();
     public CorridorValidationResult LastCorridorValidation { get; private set; }
     private bool activeLLMQualityGate;
+    private GenerationRuleSnapshot algorithmRuleBaseline;
+
+    private sealed class GenerationRuleSnapshot
+    {
+        public int minSolutionSteps;
+        public int maxSolutionSteps;
+        public int minPushes;
+        public int maxPushes;
+        public int minWaterAreas;
+        public int maxWaterAreas;
+        public int minWallObstacleBlocks;
+        public int maxWallObstacleBlocks;
+        public int minReversePulls;
+        public int maxReversePulls;
+        public int maxGenerateAttempts;
+        public int maxReverseStepAttempts;
+        public int maxSearchStates;
+    }
 
     public static void BeginAlgorithmTemplateRound()
     {
@@ -153,6 +171,9 @@ public class LevelGenerator : MonoBehaviour
 
     private void Awake()
     {
+        ResolveReferences();
+        CaptureAlgorithmRuleBaseline();
+
         if (generateOnAwake)
         {
             Generate();
@@ -189,6 +210,20 @@ public class LevelGenerator : MonoBehaviour
     public void SetLLMQualityGateRequired(bool required)
     {
         activeLLMQualityGate = required;
+    }
+
+    public void BeginLLMPlanAttempts()
+    {
+        ResolveReferences();
+        CaptureAlgorithmRuleBaseline();
+        RestoreAlgorithmRuleBaseline();
+        ClearDesignPlan();
+    }
+
+    public void ResetAfterLLMPlanAttempts()
+    {
+        RestoreAlgorithmRuleBaseline();
+        ClearDesignPlan();
     }
 
     public void ClearDesignPlan(bool keepLLMQualityGate = false)
@@ -246,6 +281,79 @@ public class LevelGenerator : MonoBehaviour
         return false;
     }
 
+    public bool GenerateAlgorithmFallbackAfterLLM()
+    {
+        ResolveReferences();
+        CaptureAlgorithmRuleBaseline();
+        RestoreAlgorithmRuleBaseline();
+        ClearDesignPlan();
+
+        if (!CanGenerate())
+        {
+            return false;
+        }
+
+        int originalMinSolutionSteps = rules.minSolutionSteps;
+        int originalMaxSolutionSteps = rules.maxSolutionSteps;
+        int originalMinPushes = rules.minPushes;
+        int originalMaxPushes = rules.maxPushes;
+        int originalMinWaterAreas = rules.minWaterAreas;
+        int originalMaxWaterAreas = rules.maxWaterAreas;
+        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
+        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
+        int originalMinReversePulls = rules.minReversePulls;
+        int originalMaxReversePulls = rules.maxReversePulls;
+
+        rules.minSolutionSteps = 10;
+        rules.maxSolutionSteps = Mathf.Max(45, originalMaxSolutionSteps + 20);
+        rules.minPushes = 4;
+        rules.maxPushes = Mathf.Max(30, originalMaxPushes + 12);
+        rules.minWaterAreas = 1;
+        rules.maxWaterAreas = Mathf.Max(1, originalMaxWaterAreas);
+        rules.minWallObstacleBlocks = 1;
+        rules.maxWallObstacleBlocks = Mathf.Max(1, originalMaxWallObstacleBlocks);
+        rules.minReversePulls = Mathf.Max(4, originalMinReversePulls - 12);
+        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls + 12);
+
+        random = rules.useFixedSeed
+            ? new System.Random(rules.seed)
+            : new System.Random(GetRuntimeSeed());
+        ApplyAlgorithmDesignBlueprint();
+
+        Debug.LogWarning(
+            "LevelGenerator: LLM plans were valid, but templates could not realize them."
+            + " Running one cleared algorithm fallback:"
+            + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
+            + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
+            + ", waterAreas=" + rules.minWaterAreas + "-" + rules.maxWaterAreas
+            + ", wallObstacleBlocks=" + rules.minWallObstacleBlocks + "-" + rules.maxWallObstacleBlocks
+            + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
+        );
+
+        bool generated = TryGenerateWithCurrentRules(
+            "llm-success-algorithm-fallback",
+            rules.maxGenerateAttempts,
+            true
+        );
+
+        RestoreGenerationRules(
+            originalMinSolutionSteps,
+            originalMaxSolutionSteps,
+            originalMinPushes,
+            originalMaxPushes,
+            originalMinWaterAreas,
+            originalMaxWaterAreas,
+            originalMinWallObstacleBlocks,
+            originalMaxWallObstacleBlocks,
+            originalMinReversePulls,
+            originalMaxReversePulls,
+            hasDesignBlueprint,
+            false
+        );
+
+        return generated;
+    }
+
     private bool TryGenerateRelaxedBlueprint()
     {
         int originalMinSolutionSteps = rules.minSolutionSteps;
@@ -297,50 +405,6 @@ public class LevelGenerator : MonoBehaviour
             return true;
         }
 
-        if (HasRequiredCorridor())
-        {
-            RestoreGenerationRules(
-                originalMinSolutionSteps,
-                originalMaxSolutionSteps,
-                originalMinPushes,
-                originalMaxPushes,
-                originalMinWaterAreas,
-                originalMaxWaterAreas,
-                originalMinWallObstacleBlocks,
-                originalMaxWallObstacleBlocks,
-                originalMinReversePulls,
-                originalMaxReversePulls,
-                originalHasDesignBlueprint,
-                originalActiveLLMQualityGate
-            );
-            return false;
-        }
-
-        hasDesignBlueprint = false;
-        rules.minSolutionSteps = 10;
-        rules.maxSolutionSteps = Mathf.Max(45, originalMaxSolutionSteps + 20);
-        rules.minPushes = 4;
-        rules.maxPushes = Mathf.Max(30, originalMaxPushes + 12);
-        rules.minWaterAreas = activeLLMQualityGate ? 1 : 0;
-        rules.maxWaterAreas = Mathf.Max(1, originalMaxWaterAreas);
-        rules.minWallObstacleBlocks = activeLLMQualityGate ? 1 : 0;
-        rules.maxWallObstacleBlocks = Mathf.Max(1, originalMaxWallObstacleBlocks);
-        rules.minReversePulls = Mathf.Max(4, originalMinReversePulls - 12);
-        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls + 12);
-
-        if (logGenerationResult)
-        {
-            Debug.LogWarning(
-                "LevelGenerator: Relaxed blueprint failed. Retrying algorithm fallback:"
-                + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
-                + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
-                + ", waterAreas=" + rules.minWaterAreas + "-" + rules.maxWaterAreas
-                + ", wallObstacleBlocks=" + rules.minWallObstacleBlocks + "-" + rules.maxWallObstacleBlocks
-                + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
-            );
-        }
-
-        bool generatedFallback = TryGenerateWithCurrentRules("algorithm-fallback", rules.maxGenerateAttempts, true);
         RestoreGenerationRules(
             originalMinSolutionSteps,
             originalMaxSolutionSteps,
@@ -356,7 +420,58 @@ public class LevelGenerator : MonoBehaviour
             originalActiveLLMQualityGate
         );
 
-        return generatedFallback;
+        return false;
+    }
+
+    private void CaptureAlgorithmRuleBaseline()
+    {
+        if (algorithmRuleBaseline != null || rules == null)
+        {
+            return;
+        }
+
+        algorithmRuleBaseline = new GenerationRuleSnapshot
+        {
+            minSolutionSteps = rules.minSolutionSteps,
+            maxSolutionSteps = rules.maxSolutionSteps,
+            minPushes = rules.minPushes,
+            maxPushes = rules.maxPushes,
+            minWaterAreas = rules.minWaterAreas,
+            maxWaterAreas = rules.maxWaterAreas,
+            minWallObstacleBlocks = rules.minWallObstacleBlocks,
+            maxWallObstacleBlocks = rules.maxWallObstacleBlocks,
+            minReversePulls = rules.minReversePulls,
+            maxReversePulls = rules.maxReversePulls,
+            maxGenerateAttempts = rules.maxGenerateAttempts,
+            maxReverseStepAttempts = rules.maxReverseStepAttempts,
+            maxSearchStates = levelSolver != null ? levelSolver.maxSearchStates : 0
+        };
+    }
+
+    private void RestoreAlgorithmRuleBaseline()
+    {
+        if (algorithmRuleBaseline == null || rules == null)
+        {
+            return;
+        }
+
+        rules.minSolutionSteps = algorithmRuleBaseline.minSolutionSteps;
+        rules.maxSolutionSteps = algorithmRuleBaseline.maxSolutionSteps;
+        rules.minPushes = algorithmRuleBaseline.minPushes;
+        rules.maxPushes = algorithmRuleBaseline.maxPushes;
+        rules.minWaterAreas = algorithmRuleBaseline.minWaterAreas;
+        rules.maxWaterAreas = algorithmRuleBaseline.maxWaterAreas;
+        rules.minWallObstacleBlocks = algorithmRuleBaseline.minWallObstacleBlocks;
+        rules.maxWallObstacleBlocks = algorithmRuleBaseline.maxWallObstacleBlocks;
+        rules.minReversePulls = algorithmRuleBaseline.minReversePulls;
+        rules.maxReversePulls = algorithmRuleBaseline.maxReversePulls;
+        rules.maxGenerateAttempts = algorithmRuleBaseline.maxGenerateAttempts;
+        rules.maxReverseStepAttempts = algorithmRuleBaseline.maxReverseStepAttempts;
+
+        if (levelSolver != null && algorithmRuleBaseline.maxSearchStates > 0)
+        {
+            levelSolver.maxSearchStates = algorithmRuleBaseline.maxSearchStates;
+        }
     }
 
     private void RestoreGenerationRules(
