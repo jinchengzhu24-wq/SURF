@@ -44,6 +44,12 @@ public class LevelGenerationRules : MonoBehaviour
     public int llmMinimumWaterTiles = 4;
     public int llmMinimumSurroundedWalls = 1;
     public int llmMinimumBoxInteractionScore = 4;
+    public int llmRelaxedMinimumQualityScore = 170;
+    public int llmRelaxedMinimumWaterTiles = 2;
+    public int llmRelaxedMinimumSurroundedWalls = 0;
+    public int llmRelaxedMinimumBoxInteractionScore = 2;
+    [Range(0, 100)]
+    public int llmRelaxedStructureSimilarityThreshold = 94;
     public int llmMaxPlanRetries = 2;
     [Range(0, 100)]
     public int recentStructureSimilarityThreshold = 86;
@@ -92,6 +98,12 @@ public class LevelGenerationRules : MonoBehaviour
             && llmMinimumWaterTiles >= 0
             && llmMinimumSurroundedWalls >= 0
             && llmMinimumBoxInteractionScore >= 0
+            && llmRelaxedMinimumQualityScore >= 0
+            && llmRelaxedMinimumWaterTiles >= 0
+            && llmRelaxedMinimumSurroundedWalls >= 0
+            && llmRelaxedMinimumBoxInteractionScore >= 0
+            && llmRelaxedStructureSimilarityThreshold >= 0
+            && llmRelaxedStructureSimilarityThreshold <= 100
             && llmMaxPlanRetries > 0
             && recentStructureSimilarityThreshold >= 0
             && recentStructureSimilarityThreshold <= 100

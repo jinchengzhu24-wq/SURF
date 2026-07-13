@@ -143,6 +143,7 @@ public class LevelGenerator : MonoBehaviour
     private readonly HashSet<Vector2Int> candidateCorridorOpeningCells = new HashSet<Vector2Int>();
     public CorridorValidationResult LastCorridorValidation { get; private set; }
     private bool activeLLMQualityGate;
+    private bool activeRelaxedBlueprint;
     private GenerationRuleSnapshot algorithmRuleBaseline;
 
     private sealed class GenerationRuleSnapshot
@@ -230,6 +231,7 @@ public class LevelGenerator : MonoBehaviour
     {
         hasDesignBlueprint = false;
         activeLLMQualityGate = keepLLMQualityGate;
+        activeRelaxedBlueprint = false;
         currentArchetype = DefaultArchetype;
         currentTargetLayout = DefaultTargetLayout;
         currentObstacleStyle = DefaultObstacleStyle;
@@ -368,13 +370,15 @@ public class LevelGenerator : MonoBehaviour
         int originalMaxReversePulls = rules.maxReversePulls;
         bool originalHasDesignBlueprint = hasDesignBlueprint;
         bool originalActiveLLMQualityGate = activeLLMQualityGate;
+        bool originalActiveRelaxedBlueprint = activeRelaxedBlueprint;
 
-        rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 8);
-        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 12);
-        rules.minPushes = Mathf.Max(6, originalMinPushes - 4);
-        rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 8);
-        rules.minReversePulls = Mathf.Max(6, originalMinReversePulls - 8);
-        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls + 8);
+        activeRelaxedBlueprint = true;
+        rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 10);
+        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 20);
+        rules.minPushes = Mathf.Max(4, originalMinPushes - 6);
+        rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 10);
+        rules.minReversePulls = Mathf.Max(8, originalMinReversePulls - 10);
+        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls);
 
         if (logGenerationResult)
         {
@@ -383,6 +387,8 @@ public class LevelGenerator : MonoBehaviour
                 + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
                 + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
                 + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
+                + ", qualityScore>=" + rules.llmRelaxedMinimumQualityScore
+                + ", structureSimilarity<" + rules.llmRelaxedStructureSimilarityThreshold
             );
         }
 
@@ -402,6 +408,7 @@ public class LevelGenerator : MonoBehaviour
                 originalHasDesignBlueprint,
                 originalActiveLLMQualityGate
             );
+            activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
             return true;
         }
 
@@ -419,6 +426,7 @@ public class LevelGenerator : MonoBehaviour
             originalHasDesignBlueprint,
             originalActiveLLMQualityGate
         );
+        activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
 
         return false;
     }
@@ -744,11 +752,24 @@ public class LevelGenerator : MonoBehaviour
     {
         if (RequiresLLMQualityGate())
         {
-            return quality.waterTiles >= rules.llmMinimumWaterTiles
-                && quality.surroundedWallCount >= rules.llmMinimumSurroundedWalls
-                && quality.boxInteractionScore >= rules.llmMinimumBoxInteractionScore
-                && quality.structureSimilarity < rules.recentStructureSimilarityThreshold
-                && quality.score >= rules.llmMinimumQualityScore;
+            int minimumWaterTiles = activeRelaxedBlueprint
+                ? rules.llmRelaxedMinimumWaterTiles
+                : rules.llmMinimumWaterTiles;
+            int minimumSurroundedWalls = activeRelaxedBlueprint
+                ? rules.llmRelaxedMinimumSurroundedWalls
+                : rules.llmMinimumSurroundedWalls;
+            int minimumBoxInteractionScore = activeRelaxedBlueprint
+                ? rules.llmRelaxedMinimumBoxInteractionScore
+                : rules.llmMinimumBoxInteractionScore;
+            int minimumQualityScore = activeRelaxedBlueprint
+                ? rules.llmRelaxedMinimumQualityScore
+                : rules.llmMinimumQualityScore;
+
+            return quality.waterTiles >= minimumWaterTiles
+                && quality.surroundedWallCount >= minimumSurroundedWalls
+                && quality.boxInteractionScore >= minimumBoxInteractionScore
+                && quality.structureSimilarity < GetEffectiveStructureSimilarityThreshold()
+                && quality.score >= minimumQualityScore;
         }
 
         return MeetsRequiredObstacleInfluence(quality)
@@ -3534,7 +3555,7 @@ public class LevelGenerator : MonoBehaviour
 
         bool repeated = recentFullLevelLookup.Contains(fullSignature)
             || recentStructureLookup.Contains(structureSignature)
-            || (rejectSimilar && structureSimilarity >= rules.recentStructureSimilarityThreshold);
+            || (rejectSimilar && structureSimilarity >= GetEffectiveStructureSimilarityThreshold());
 
         if (repeated && logGenerationResult)
         {
@@ -3542,11 +3563,18 @@ public class LevelGenerator : MonoBehaviour
                 "LevelGenerator rejected repeated layout:"
                 + " recentGeneratedLayoutHistory=" + recentGeneratedLayoutHistory
                 + ", structureSimilarity=" + structureSimilarity
-                + ", threshold=" + rules.recentStructureSimilarityThreshold
+                + ", threshold=" + GetEffectiveStructureSimilarityThreshold()
             );
         }
 
         return repeated;
+    }
+
+    private int GetEffectiveStructureSimilarityThreshold()
+    {
+        return activeRelaxedBlueprint
+            ? rules.llmRelaxedStructureSimilarityThreshold
+            : rules.recentStructureSimilarityThreshold;
     }
 
     private void RememberGeneratedLayout(string[] rows)
