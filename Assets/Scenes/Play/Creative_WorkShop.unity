@@ -2654,8 +2654,8 @@ MonoBehaviour:
     m_VerticalOverflow: 0
     m_LineSpacing: 1
   m_Text: You can mention the style, difficulty, layout, obstacles, or any feeling
-    you want the level to have. After that, the LLM will generate levels based on
-    your preference
+    you want the level to have. After that, the LLM will try to generate levels based
+    on your preference
 --- !u!222 &1668752551
 CanvasRenderer:
   m_ObjectHideFlags: 0

@@ -10,8 +10,32 @@ SYSTEM_PROMPT = (
     "coordinates, tile grids, markdown, or explanations."
 )
 
+
+GENERATOR_CAPABILITY_CONTRACT = (
+    "Generator capability contract: the final level is always a static classic "
+    "12x10 Sokoban board with exactly 1 player, 2 boxes, and 2 targets. It can "
+    "use supported walls, 1-2 rectangular water areas, and at most one straight "
+    "horizontal or vertical corridor of width 1 or 2 placed at the center or "
+    "side. It cannot guarantee exact coordinates, exact box starting alignment, "
+    "literal T/L/S-shaped walls, multiple required corridors, diagonal corridors, "
+    "or a one-tile-wide water river. It does not support ice, teleporters, keys, "
+    "doors, switches, enemies, timers, moving parts, dynamic walls, or different "
+    "box types. Before expanding or encoding an idea, adapt unsupported requests "
+    "to the closest supported classic Sokoban pressure: convert any box/target "
+    "count to exactly 2 while preserving ordering or interaction intent; compress "
+    "other map sizes into 12x10; convert multiple, curved, diagonal, or wider "
+    "corridors into one width-1-or-2 axis-aligned main corridor; convert dynamic "
+    "mechanics into static wall, water, choke-point, detour, standing-position, "
+    "or box-order pressure; and convert exact geometry into a high-level layout "
+    "preference. If the user asks for no water, keep the required water area at "
+    "the side with minimal influence on the core idea. Never promise an unsupported "
+    "feature in player-visible text, style, designNote, or promptText. Preserve the "
+    "user's underlying planning intention after adaptation. "
+)
+
 BASE_USER_PROMPT = (
-    "Create a fresh, classic-inspired hard blueprint "
+    GENERATOR_CAPABILITY_CONTRACT
+    + "Create a fresh, classic-inspired hard blueprint "
     "for a 12x10 Sokoban level with exactly 2 boxes. The local "
     "algorithm will enforce solvability, wall templates, water "
     "placement, and tile rules. Pushes means box pushes, not "
@@ -117,7 +141,9 @@ def build_creative_idea_expansion_messages(creative_context):
         f"Original idea: \"{idea_text}\". "
         f"Context: {context_text}. "
         f"{regeneration_text}"
-        "All three options must clearly preserve the original idea. Do not use "
+        + GENERATOR_CAPABILITY_CONTRACT
+        + "All three options must clearly preserve the adapted, supported form of "
+        "the original idea. Do not use "
         "a fixed trio such as narrow detour, split goals, and compact precision "
         "unless those concepts are directly suggested by the player's words. "
         "Make the options differ by concrete design angle: route structure, "
