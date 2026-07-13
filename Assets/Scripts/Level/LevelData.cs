@@ -201,7 +201,19 @@ public class LevelData : MonoBehaviour
             || IsNormalCornerWallShape(up, left, right)
             || IsRightAndRightDownWallShape(right, rightDown)
             || IsVerticalWallShape(up, down, left, right)
-            || IsHorizontalWallShape(left, right);
+            || IsHorizontalWallShape(left, right)
+            || IsWallEndpointShape(up, down, left, right);
+    }
+
+    private static bool IsWallEndpointShape(bool up, bool down, bool left, bool right)
+    {
+        int connectedSides = 0;
+        connectedSides += up ? 1 : 0;
+        connectedSides += down ? 1 : 0;
+        connectedSides += left ? 1 : 0;
+        connectedSides += right ? 1 : 0;
+
+        return connectedSides == 1;
     }
 
     public static bool IsNormalCornerWallShape(bool up, bool left, bool right)
