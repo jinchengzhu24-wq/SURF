@@ -408,6 +408,12 @@ public class LevelGenerator : MonoBehaviour
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
+            if (activeLLMQualityGate && hasDesignBlueprint)
+            {
+                currentStructureTemplate =
+                    LevelGenerationTemplates.GetStructureTemplate(currentArchetype, random);
+            }
+
             if (!TryCreateCandidate(out string[] rows, out int reversePulls, out CandidateFailureReason failureReason))
             {
                 candidateFailures[(int)failureReason]++;
@@ -2043,12 +2049,12 @@ public class LevelGenerator : MonoBehaviour
             return false;
         }
 
-        if (hasDesignBlueprint && TryPlaceTargetsNearTemplateAnchors(candidates))
+        if (TryPlaceTargetsByLayout(candidates))
         {
             return true;
         }
 
-        if (TryPlaceTargetsByLayout(candidates))
+        if (hasDesignBlueprint && TryPlaceTargetsNearTemplateAnchors(candidates))
         {
             return true;
         }

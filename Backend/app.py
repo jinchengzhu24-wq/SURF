@@ -2221,7 +2221,7 @@ def contains_cjk(text):
 
 
 def fallback_plan(reason, creative_context=None):
-    plan = get_next_fallback_plan()
+    plan = get_contextual_fallback_plan(creative_context or {})
     apply_fallback_corridor_intent(plan, creative_context or {})
     remember_blueprint(plan)
     print(f"Generated level plan from fallback: {reason}")
@@ -2268,6 +2268,40 @@ def get_next_fallback_plan():
         plan = FALLBACK_PLANS[fallback_plan_index % len(FALLBACK_PLANS)].copy()
         fallback_plan_index += 1
 
+    return plan
+
+
+def get_contextual_fallback_plan(creative_context):
+    context_text = " ".join(
+        str(creative_context.get(key) or "")
+        for key in (
+            "ideaText",
+            "originalIdeaText",
+            "selectedDirectionText",
+            "latestAdjustmentText",
+        )
+    )
+    tags = classify_expansion_idea(context_text)
+
+    if "water" in tags:
+        return FALLBACK_PLANS[2].copy()
+
+    if "maze" in tags:
+        return FALLBACK_PLANS[0].copy()
+
+    if "compact" in tags:
+        return FALLBACK_PLANS[1].copy()
+
+    plan = DEFAULT_PLAN.copy()
+    plan.update(
+        {
+            "archetype": "open_workshop",
+            "targetLayout": "split_pair",
+            "obstacleStyle": "central_baffle",
+            "waterStyle": "side_pool",
+            "designNote": "A neutral open layout preserving room for maneuvering.",
+        }
+    )
     return plan
 
 
