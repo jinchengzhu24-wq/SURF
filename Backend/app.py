@@ -83,6 +83,11 @@ class RenameRoundRequest(BaseModel):
     displayName: str
 
 
+class RenameLevelRunRequest(BaseModel):
+    levelRunId: str
+    displayName: str
+
+
 class RoundRequest(BaseModel):
     roundId: str
 
@@ -346,6 +351,43 @@ def rename_round(request: RenameRoundRequest):
     return {
         "status": "ok",
         "roundId": round_id,
+        "displayName": display_name,
+        "updatedEventCount": matched_count,
+    }
+
+
+@app.post("/rename-level-run")
+def rename_level_run(request: RenameLevelRunRequest):
+    level_run_id = normalize_level_run_id(request.levelRunId)
+    display_name = normalize_level_display_name(request.displayName)
+
+    if not level_run_id:
+        raise HTTPException(status_code=400, detail="levelRunId is required")
+
+    if not display_name:
+        raise HTTPException(status_code=400, detail="displayName is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_level_record_events()
+        matched_count = 0
+
+        for record in records:
+            record_level_run_id = normalize_level_run_id(record.get("levelRunId"))
+
+            if record_level_run_id == level_run_id:
+                record["levelDisplayName"] = display_name
+                matched_count += 1
+
+        if matched_count == 0:
+            raise HTTPException(status_code=404, detail="Level run not found")
+
+        write_jsonl_records(STUDY_LOG_FILE, records)
+
+    return {
+        "status": "ok",
+        "levelRunId": level_run_id,
         "displayName": display_name,
         "updatedEventCount": matched_count,
     }
@@ -1540,6 +1582,13 @@ def normalize_round_display_name(value):
 
 
 def normalize_level_run_id(value):
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def normalize_level_display_name(value):
     if value is None:
         return ""
 

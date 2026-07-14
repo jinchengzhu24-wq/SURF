@@ -407,6 +407,7 @@ function levelMatchesFilters(level, round, search, status) {
         end.roundLevelIndex,
         start.levelIndex,
         end.levelIndex,
+        getLevelDisplayName(level),
         ideaHash,
         structure.mapHash
     ].join(" ").toLowerCase();
@@ -585,7 +586,7 @@ function renderLevelRow(level) {
     const structure = start.structure || {};
     const status = getStatus(level);
     const cells = [
-        value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex),
+        getLevelDisplayName(level),
         getLevelIdeaHash(level),
         value(structure.mapHash),
         status.label,
@@ -632,7 +633,7 @@ function renderLevelRow(level) {
 function renderLevelActionsCell(level) {
     const cell = document.createElement("td");
     const actions = document.createElement("div");
-    const round = getLevelRound(level);
+    const levelRunId = normalizeCreativeIdeaText(level.levelRunId);
 
     actions.className = "row-actions";
 
@@ -641,14 +642,14 @@ function renderLevelActionsCell(level) {
     renameButton.type = "button";
     renameButton.textContent = "Rename";
 
-    if (round.isLegacy) {
+    if (!levelRunId || levelRunId.startsWith("missing-run-")) {
         renameButton.disabled = true;
-        renameButton.title = "Legacy records cannot be renamed";
+        renameButton.title = "Records without a level run ID cannot be renamed";
     } else {
-        renameButton.title = "Rename record";
+        renameButton.title = "Rename level";
         renameButton.addEventListener("click", event => {
             event.stopPropagation();
-            renameRound(round);
+            renameLevelRun(level);
         });
     }
 
@@ -667,32 +668,17 @@ function renderLevelActionsCell(level) {
     return cell;
 }
 
-function getLevelRound(level) {
+function getLevelDisplayName(level) {
     const start = level.start || {};
     const end = level.end || {};
-    const roundId = level.roundId
-        || start.gameRoundId
-        || end.gameRoundId
-        || "legacy-round";
-    const displayName = level.roundDisplayName
-        || getRoundDisplayNameFromRecords(start, end)
-        || (roundId === "legacy-round" ? "Legacy Round" : "Record");
-
-    return {
-        roundId: roundId,
-        displayName: displayName,
-        isLegacy: roundId === "legacy-round",
-        levels: [level]
-    };
+    return normalizeCreativeIdeaText(end.levelDisplayName)
+        || normalizeCreativeIdeaText(start.levelDisplayName)
+        || value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex);
 }
 
-function getRoundDisplayNameFromRecords(start, end) {
-    return normalizeCreativeIdeaText(end.roundDisplayName)
-        || normalizeCreativeIdeaText(start.roundDisplayName);
-}
-
-async function renameRound(round) {
-    const nextName = window.prompt("Rename record", round.displayName);
+async function renameLevelRun(level) {
+    const levelRunId = normalizeCreativeIdeaText(level.levelRunId);
+    const nextName = window.prompt("Rename level", getLevelDisplayName(level));
 
     if (nextName === null) {
         return;
@@ -708,13 +694,13 @@ async function renameRound(round) {
     setStatus("Renaming record...");
 
     try {
-        const response = await fetch(apiUrl("/rename-round"), {
+        const response = await fetch(apiUrl("/rename-level-run"), {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                roundId: round.roundId,
+                levelRunId: levelRunId,
                 displayName: displayName
             })
         });
@@ -723,10 +709,10 @@ async function renameRound(round) {
             throw new Error(await getResponseError(response));
         }
 
-        showNotice("Record renamed.");
+        showNotice("Level renamed.");
         await loadData(true);
     } catch (error) {
-        setStatus("Could not rename record: " + error.message);
+        setStatus("Could not rename level: " + error.message);
     }
 }
 
@@ -734,7 +720,7 @@ async function deleteLevelRun(level) {
     const levelRunId = value(level.levelRunId);
     const start = level.start || {};
     const end = level.end || {};
-    const displayLevel = value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex);
+    const displayLevel = getLevelDisplayName(level);
 
     if (levelRunId === "-") {
         return;
@@ -1167,7 +1153,7 @@ function renderDetails(level) {
     const end = level.end || {};
     const structure = start.structure || {};
     const rows = Array.isArray(start.rows) ? start.rows : [];
-    const displayLevel = start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex;
+    const displayLevel = getLevelDisplayName(level);
     elements.selectedTitle.textContent = "Level " + value(displayLevel);
     renderMap(rows);
 
@@ -1175,6 +1161,7 @@ function renderDetails(level) {
         ["Round", value(level.roundDisplayName)],
         ["Run", shortId(level.levelRunId)],
         ["Idea hash", getLevelIdeaHash(level)],
+        ["Map hash", value(structure.mapHash)],
         ["Status", getStatus(level).label],
         ["Moves", value(end.moveCount)],
         ["Pushes", value(end.pushCount)],
