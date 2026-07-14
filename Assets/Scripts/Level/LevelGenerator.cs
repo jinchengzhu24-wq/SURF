@@ -32,6 +32,7 @@ public class LevelGenerator : MonoBehaviour
     private const char Player = 'p';
     private const char Box = 's';
     private const char Target = 't';
+    private const int LLMTopCandidatePoolSize = 3;
 
     private const string DefaultArchetype = "open_workshop";
     private const string DefaultTargetLayout = "split_pair";
@@ -528,6 +529,7 @@ public class LevelGenerator : MonoBehaviour
         int candidateSampleTarget = GetCandidateSampleTarget();
         GeneratedCandidate bestCandidate = null;
         GeneratedCandidate bestQualifiedCandidate = null;
+        List<GeneratedCandidate> topLLMQualifiedCandidates = new List<GeneratedCandidate>();
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
@@ -648,6 +650,15 @@ public class LevelGenerator : MonoBehaviour
                 {
                     bestQualifiedCandidate = candidate;
                 }
+
+                if (RequiresLLMQualityGate())
+                {
+                    AddToTopCandidatePool(
+                        topLLMQualifiedCandidates,
+                        candidate,
+                        LLMTopCandidatePoolSize
+                    );
+                }
             }
             else
             {
@@ -670,10 +681,24 @@ public class LevelGenerator : MonoBehaviour
         }
 
         GeneratedCandidate selectedCandidate = bestQualifiedCandidate;
+        string selectionMode = "best";
+        int selectionPoolSize = selectedCandidate == null ? 0 : 1;
+        int selectedRank = selectedCandidate == null ? 0 : 1;
+
+        if (RequiresLLMQualityGate() && topLLMQualifiedCandidates.Count > 0)
+        {
+            selectionPoolSize = topLLMQualifiedCandidates.Count;
+            int selectedIndex = random.Next(selectionPoolSize);
+            selectedCandidate = topLLMQualifiedCandidates[selectedIndex];
+            selectedRank = selectedIndex + 1;
+            selectionMode = "llm-top3-random";
+        }
 
         if (selectedCandidate == null && !RequiresLLMQualityGate())
         {
             selectedCandidate = bestCandidate;
+            selectionPoolSize = selectedCandidate == null ? 0 : 1;
+            selectedRank = selectedCandidate == null ? 0 : 1;
         }
 
         if (selectedCandidate != null)
@@ -684,7 +709,10 @@ public class LevelGenerator : MonoBehaviour
                 scoredCandidates,
                 selectableCandidates,
                 qualifiedCandidates,
-                GetElapsedMilliseconds(modeStartedAt)
+                GetElapsedMilliseconds(modeStartedAt),
+                selectionMode,
+                selectionPoolSize,
+                selectedRank
             );
             return true;
         }
@@ -748,6 +776,30 @@ public class LevelGenerator : MonoBehaviour
         return candidate.quality.pushes > currentBest.quality.pushes;
     }
 
+    private void AddToTopCandidatePool(
+        List<GeneratedCandidate> topCandidates,
+        GeneratedCandidate candidate,
+        int maxCount)
+    {
+        int insertIndex = topCandidates.Count;
+
+        for (int i = 0; i < topCandidates.Count; i++)
+        {
+            if (IsBetterCandidate(candidate, topCandidates[i]))
+            {
+                insertIndex = i;
+                break;
+            }
+        }
+
+        topCandidates.Insert(insertIndex, candidate);
+
+        if (topCandidates.Count > maxCount)
+        {
+            topCandidates.RemoveAt(topCandidates.Count - 1);
+        }
+    }
+
     private bool MeetsRequiredQuality(LevelQualityReport quality)
     {
         if (RequiresLLMQualityGate())
@@ -788,7 +840,10 @@ public class LevelGenerator : MonoBehaviour
         int scoredCandidates,
         int selectableCandidates,
         int qualifiedCandidates,
-        int elapsedMs)
+        int elapsedMs,
+        string selectionMode,
+        int selectionPoolSize,
+        int selectedRank)
     {
         levelData.rows = CloneRows(candidate.rows);
         levelSolver.levelData = levelData;
@@ -816,6 +871,9 @@ public class LevelGenerator : MonoBehaviour
                 + ", scoredCandidates=" + scoredCandidates
                 + ", selectableCandidates=" + selectableCandidates
                 + ", qualifiedCandidates=" + qualifiedCandidates
+                + ", selectionMode=" + selectionMode
+                + ", selectionPoolSize=" + selectionPoolSize
+                + ", selectedRank=" + selectedRank
                 + ", elapsedMs=" + elapsedMs
                 + ", " + candidate.quality.Summary()
             );
