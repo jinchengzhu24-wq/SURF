@@ -483,6 +483,18 @@ public class LevelGenerator : MonoBehaviour
         }
     }
 
+    private struct ReversePullAction
+    {
+        public readonly int boxIndex;
+        public readonly Vector2Int direction;
+
+        public ReversePullAction(int boxIndex, Vector2Int direction)
+        {
+            this.boxIndex = boxIndex;
+            this.direction = direction;
+        }
+    }
+
     private void RestoreGenerationRules(
         int minSolutionSteps,
         int maxSolutionSteps,
@@ -2519,18 +2531,38 @@ public class LevelGenerator : MonoBehaviour
     {
         reversePulls = 0;
         bool[] movedBoxes = new bool[boxes.Count];
+        List<ReversePullAction> legalPulls = new List<ReversePullAction>();
 
         for (int attempt = 0; attempt < rules.maxReverseStepAttempts && reversePulls < targetPulls; attempt++)
         {
-            int boxIndex = random.Next(boxes.Count);
-            Vector2Int direction = directions[random.Next(directions.Length)];
+            legalPulls.Clear();
 
-            if (!TryReversePull(grid, boxIndex, direction))
+            for (int boxIndex = 0; boxIndex < boxes.Count; boxIndex++)
+            {
+                for (int directionIndex = 0; directionIndex < directions.Length; directionIndex++)
+                {
+                    Vector2Int direction = directions[directionIndex];
+
+                    if (CanReversePull(grid, boxIndex, direction))
+                    {
+                        legalPulls.Add(new ReversePullAction(boxIndex, direction));
+                    }
+                }
+            }
+
+            if (legalPulls.Count == 0)
+            {
+                break;
+            }
+
+            ReversePullAction selectedPull = legalPulls[random.Next(legalPulls.Count)];
+
+            if (!TryReversePull(grid, selectedPull.boxIndex, selectedPull.direction))
             {
                 continue;
             }
 
-            movedBoxes[boxIndex] = true;
+            movedBoxes[selectedPull.boxIndex] = true;
             reversePulls++;
         }
 
@@ -2568,6 +2600,19 @@ public class LevelGenerator : MonoBehaviour
 
     private bool TryReversePull(char[,] grid, int boxIndex, Vector2Int direction)
     {
+        if (!CanReversePull(grid, boxIndex, direction))
+        {
+            return false;
+        }
+
+        Vector2Int boxPosition = boxes[boxIndex];
+        boxes[boxIndex] = boxPosition - direction;
+        playerPosition = boxPosition - new Vector2Int(direction.x * 2, direction.y * 2);
+        return true;
+    }
+
+    private bool CanReversePull(char[,] grid, int boxIndex, Vector2Int direction)
+    {
         Vector2Int boxPosition = boxes[boxIndex];
         Vector2Int nextBoxPosition = boxPosition - direction;
         Vector2Int nextPlayerPosition = boxPosition - new Vector2Int(direction.x * 2, direction.y * 2);
@@ -2593,8 +2638,6 @@ public class LevelGenerator : MonoBehaviour
             return false;
         }
 
-        boxes[boxIndex] = nextBoxPosition;
-        playerPosition = nextPlayerPosition;
         return true;
     }
 
