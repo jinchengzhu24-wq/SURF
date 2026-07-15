@@ -484,13 +484,13 @@ function renderCreativeIdeasTable() {
 
         const actionsCell = document.createElement("td");
         const deleteButton = document.createElement("button");
-        const ideaId = normalizeCreativeIdeaText(idea.ideaId);
+        const ideaId = getCreativeIdeaId(idea);
         deleteButton.className = "round-action round-action-danger";
         deleteButton.type = "button";
         deleteButton.textContent = "Delete";
 
         if (ideaId) {
-            deleteButton.title = "Delete creative idea";
+            deleteButton.title = "Delete all records for this idea";
             deleteButton.addEventListener("click", event => {
                 event.stopPropagation();
                 deleteCreativeIdea(idea);
@@ -549,20 +549,20 @@ function renderExpansionChoicesTable() {
 
         const actionsCell = document.createElement("td");
         const deleteButton = document.createElement("button");
-        const choiceId = normalizeCreativeIdeaText(choice.choiceId);
+        const ideaId = getExpansionChoiceIdeaId(choice);
         deleteButton.className = "round-action round-action-danger";
         deleteButton.type = "button";
         deleteButton.textContent = "Delete";
 
-        if (choiceId) {
-            deleteButton.title = "Delete expansion choice";
+        if (ideaId) {
+            deleteButton.title = "Delete all records for this idea";
             deleteButton.addEventListener("click", event => {
                 event.stopPropagation();
                 deleteExpansionChoice(choice);
             });
         } else {
             deleteButton.disabled = true;
-            deleteButton.title = "Cannot delete without choice ID";
+            deleteButton.title = "Cannot delete without idea ID";
         }
 
         actionsCell.appendChild(deleteButton);
@@ -634,6 +634,7 @@ function renderLevelActionsCell(level) {
     const cell = document.createElement("td");
     const actions = document.createElement("div");
     const levelRunId = normalizeCreativeIdeaText(level.levelRunId);
+    const ideaId = getLevelIdeaId(level);
 
     actions.className = "row-actions";
 
@@ -656,12 +657,18 @@ function renderLevelActionsCell(level) {
     const deleteButton = document.createElement("button");
     deleteButton.className = "round-action round-action-danger";
     deleteButton.type = "button";
-    deleteButton.title = "Delete record";
     deleteButton.textContent = "Delete";
-    deleteButton.addEventListener("click", event => {
-        event.stopPropagation();
-        deleteLevelRun(level);
-    });
+
+    if (ideaId) {
+        deleteButton.title = "Delete all records for this idea";
+        deleteButton.addEventListener("click", event => {
+            event.stopPropagation();
+            deleteLevelRun(level);
+        });
+    } else {
+        deleteButton.disabled = true;
+        deleteButton.title = "Cannot delete without idea ID";
+    }
 
     actions.append(renameButton, deleteButton);
     cell.appendChild(actions);
@@ -716,50 +723,8 @@ async function renameLevelRun(level) {
     }
 }
 
-async function deleteLevelRun(level) {
-    const levelRunId = value(level.levelRunId);
-    const start = level.start || {};
-    const end = level.end || {};
-    const displayLevel = getLevelDisplayName(level);
-
-    if (levelRunId === "-") {
-        return;
-    }
-
-    const confirmed = window.confirm(
-        "Delete level " + displayLevel + "? This permanently removes this level record."
-    );
-
-    if (!confirmed) {
-        return;
-    }
-
-    setStatus("Deleting level record...");
-
-    try {
-        const response = await fetch(apiUrl("/delete-level-run"), {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                levelRunId: levelRunId
-            })
-        });
-
-        if (!response.ok) {
-            throw new Error(await getResponseError(response));
-        }
-
-        if (level.levelRunId === state.selectedRunId) {
-            state.selectedRunId = null;
-        }
-
-        showNotice("Level record deleted.");
-        await loadData(true);
-    } catch (error) {
-        setStatus("Could not delete level record: " + error.message);
-    }
+function deleteLevelRun(level) {
+    return deleteIdeaRecords(getLevelIdeaId(level), getLevelIdeaHash(level));
 }
 
 async function getResponseError(response) {
@@ -816,20 +781,20 @@ function renderSurveyTable() {
 
         const actionsCell = document.createElement("td");
         const deleteButton = document.createElement("button");
-        const deletePayload = getSurveyDeletePayload(response);
+        const ideaId = getSurveyIdeaId(response);
         deleteButton.className = "round-action round-action-danger";
         deleteButton.type = "button";
         deleteButton.textContent = "Delete";
 
-        if (deletePayload) {
-            deleteButton.title = "Delete survey response";
+        if (ideaId) {
+            deleteButton.title = "Delete all records for this idea";
             deleteButton.addEventListener("click", event => {
                 event.stopPropagation();
                 deleteSurveyResponse(response);
             });
         } else {
             deleteButton.disabled = true;
-            deleteButton.title = "Cannot delete without response ID or nickname";
+            deleteButton.title = "Cannot delete without idea ID";
         }
 
         actionsCell.appendChild(deleteButton);
@@ -839,64 +804,40 @@ function renderSurveyTable() {
     });
 }
 
-async function deleteSurveyResponse(response) {
-    const deletePayload = getSurveyDeletePayload(response);
-
-    if (!deletePayload) {
-        return;
-    }
-
-    const label = getSurveyDeleteLabel(response);
-    const confirmed = window.confirm(
-        "Delete survey response from " + label + "? This permanently removes it."
-    );
-
-    if (!confirmed) {
-        return;
-    }
-
-    setStatus("Deleting survey response...");
-
-    try {
-        const apiResponse = await fetch(apiUrl("/delete-survey-response"), {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(deletePayload)
-        });
-
-        if (!apiResponse.ok) {
-            throw new Error(await getResponseError(apiResponse));
-        }
-
-        showNotice("Survey response deleted.");
-        await loadData(true);
-    } catch (error) {
-        setStatus("Could not delete survey response: " + error.message);
-    }
+function deleteSurveyResponse(response) {
+    return deleteIdeaRecords(getSurveyIdeaId(response), getSurveyIdeaHash(response));
 }
 
-async function deleteCreativeIdea(idea) {
-    const ideaId = normalizeCreativeIdeaText(idea.ideaId);
+function deleteCreativeIdea(idea) {
+    return deleteIdeaRecords(getCreativeIdeaId(idea), getCreativeIdeaHash(idea));
+}
 
+function deleteExpansionChoice(choice) {
+    return deleteIdeaRecords(
+        getExpansionChoiceIdeaId(choice),
+        getExpansionChoiceIdeaHash(choice)
+    );
+}
+
+async function deleteIdeaRecords(ideaId, ideaHash) {
     if (!ideaId) {
         return;
     }
 
-    const label = getCreativeIdeaDeleteLabel(idea);
     const confirmed = window.confirm(
-        "Delete creative idea \"" + label + "\"? This permanently removes it."
+        "Delete all records for Idea Hash " + ideaHash
+        + "? This permanently removes matching Level Runs, Creative Workshop Ideas, "
+        + "Expansion Choices, and Survey Responses."
     );
 
     if (!confirmed) {
         return;
     }
 
-    setStatus("Deleting creative idea...");
+    setStatus("Deleting idea records...");
 
     try {
-        const apiResponse = await fetch(apiUrl("/delete-creative-idea"), {
+        const apiResponse = await fetch(apiUrl("/delete-idea-records"), {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
@@ -910,50 +851,11 @@ async function deleteCreativeIdea(idea) {
             throw new Error(await getResponseError(apiResponse));
         }
 
-        showNotice("Creative idea deleted.");
+        state.selectedRunId = null;
+        showNotice("All records for Idea Hash " + ideaHash + " deleted.");
         await loadData(true);
     } catch (error) {
-        setStatus("Could not delete creative idea: " + error.message);
-    }
-}
-
-async function deleteExpansionChoice(choice) {
-    const choiceId = normalizeCreativeIdeaText(choice.choiceId);
-
-    if (!choiceId) {
-        return;
-    }
-
-    const label = getExpansionChoiceDeleteLabel(choice);
-    const confirmed = window.confirm(
-        "Delete expansion choice \"" + label + "\"? This permanently removes it."
-    );
-
-    if (!confirmed) {
-        return;
-    }
-
-    setStatus("Deleting expansion choice...");
-
-    try {
-        const apiResponse = await fetch(apiUrl("/delete-expansion-choice"), {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                choiceId: choiceId
-            })
-        });
-
-        if (!apiResponse.ok) {
-            throw new Error(await getResponseError(apiResponse));
-        }
-
-        showNotice("Expansion choice deleted.");
-        await loadData(true);
-    } catch (error) {
-        setStatus("Could not delete expansion choice: " + error.message);
+        setStatus("Could not delete idea records: " + error.message);
     }
 }
 
@@ -1015,6 +917,24 @@ function getLevelIdeaHash(level) {
         start.creativeIdeaId || end.creativeIdeaId,
         start.creativeIdeaText || end.creativeIdeaText
     );
+}
+
+function getLevelIdeaId(level) {
+    const start = (level && level.start) || {};
+    const end = (level && level.end) || {};
+    return normalizeCreativeIdeaText(start.creativeIdeaId || end.creativeIdeaId);
+}
+
+function getCreativeIdeaId(idea) {
+    return normalizeCreativeIdeaText(idea && idea.ideaId);
+}
+
+function getExpansionChoiceIdeaId(choice) {
+    return normalizeCreativeIdeaText(choice && choice.ideaId);
+}
+
+function getSurveyIdeaId(response) {
+    return normalizeCreativeIdeaText(response && response.creativeIdeaId);
 }
 
 function getCreativeIdeaHash(idea) {

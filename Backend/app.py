@@ -109,6 +109,10 @@ class DeleteExpansionChoiceRequest(BaseModel):
     choiceId: str | None = ""
 
 
+class DeleteIdeaRecordsRequest(BaseModel):
+    ideaId: str | None = ""
+
+
 DEFAULT_PLAN = {
     "minSolutionSteps": 22,
     "maxSolutionSteps": 42,
@@ -592,6 +596,70 @@ def delete_expansion_choice(request: DeleteExpansionChoiceRequest):
         "status": "ok",
         "choiceId": choice_id,
         "deletedChoiceCount": deleted_count,
+    }
+
+
+@app.post("/delete-idea-records")
+def delete_idea_records(request: DeleteIdeaRecordsRequest):
+    idea_id = normalize_creative_idea_identifier(request.ideaId)
+
+    if not idea_id:
+        raise HTTPException(status_code=400, detail="ideaId is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        level_records, _ = read_level_record_events()
+        idea_records, _ = read_creative_idea_events()
+        choice_records, _ = read_expansion_choice_events()
+        survey_records, _ = read_survey_response_events()
+
+        remaining_level_records = [
+            record for record in level_records
+            if normalize_creative_idea_identifier(record.get("creativeIdeaId")) != idea_id
+        ]
+        remaining_idea_records = [
+            record for record in idea_records
+            if normalize_creative_idea_identifier(record.get("ideaId")) != idea_id
+        ]
+        remaining_choice_records = [
+            record for record in choice_records
+            if normalize_creative_idea_identifier(record.get("ideaId")) != idea_id
+        ]
+        remaining_survey_records = [
+            record for record in survey_records
+            if normalize_creative_idea_identifier(record.get("creativeIdeaId")) != idea_id
+        ]
+
+        deleted_level_event_count = len(level_records) - len(remaining_level_records)
+        deleted_idea_count = len(idea_records) - len(remaining_idea_records)
+        deleted_choice_count = len(choice_records) - len(remaining_choice_records)
+        deleted_survey_count = len(survey_records) - len(remaining_survey_records)
+
+        if (
+            deleted_level_event_count
+            + deleted_idea_count
+            + deleted_choice_count
+            + deleted_survey_count
+            == 0
+        ):
+            raise HTTPException(status_code=404, detail="Idea records not found")
+
+        write_jsonl_records(STUDY_LOG_FILE, remaining_level_records)
+        write_jsonl_records(CREATIVE_IDEA_LOG_FILE, remaining_idea_records)
+        write_jsonl_records(
+            CREATIVE_EXPANSION_CHOICE_LOG_FILE,
+            remaining_choice_records,
+        )
+        write_jsonl_records(SURVEY_LOG_FILE, remaining_survey_records)
+
+    return {
+        "status": "ok",
+        "ideaId": idea_id,
+        "deletedLevelEventCount": deleted_level_event_count,
+        "deletedIdeaCount": deleted_idea_count,
+        "deletedChoiceCount": deleted_choice_count,
+        "deletedSurveyCount": deleted_survey_count,
     }
 
 
