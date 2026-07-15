@@ -767,7 +767,8 @@ public class LevelGenerator : MonoBehaviour
     {
         if (RequiresLLMQualityGate())
         {
-            return qualifiedCandidates > 0 && candidatesSinceFirstQualified > candidateSampleTarget;
+            return qualifiedCandidates >= LLMTopCandidatePoolSize
+                && candidatesSinceFirstQualified > candidateSampleTarget;
         }
 
         return selectableCandidates >= candidateSampleTarget;
@@ -2042,15 +2043,24 @@ public class LevelGenerator : MonoBehaviour
 
     private int GetWallObstacleRouteScore(Vector2Int center)
     {
-        if (targets.Count == 0)
+        IList<Vector2Int> routeTargets = targets;
+
+        if (routeTargets.Count == 0
+            && hasDesignBlueprint
+            && currentStructureTemplate.targetAnchors != null)
+        {
+            routeTargets = currentStructureTemplate.targetAnchors;
+        }
+
+        if (routeTargets.Count == 0)
         {
             return 0;
         }
 
-        int nearestTargetDistance = GetNearestDistance(center, targets);
+        int nearestTargetDistance = GetNearestDistance(center, routeTargets);
         int score = Mathf.Max(0, 72 - nearestTargetDistance * 16);
 
-        if (IsNearTargetCorridor(center))
+        if (IsNearTargetCorridor(center, routeTargets))
         {
             score += 45;
         }
@@ -2060,18 +2070,18 @@ public class LevelGenerator : MonoBehaviour
         return score;
     }
 
-    private bool IsNearTargetCorridor(Vector2Int position)
+    private bool IsNearTargetCorridor(Vector2Int position, IList<Vector2Int> routeTargets)
     {
-        if (targets.Count < 2)
+        if (routeTargets.Count < 2)
         {
             return false;
         }
 
-        for (int i = 0; i < targets.Count; i++)
+        for (int i = 0; i < routeTargets.Count; i++)
         {
-            for (int j = i + 1; j < targets.Count; j++)
+            for (int j = i + 1; j < routeTargets.Count; j++)
             {
-                if (IsNearAxisAlignedCorridor(position, targets[i], targets[j], 2))
+                if (IsNearAxisAlignedCorridor(position, routeTargets[i], routeTargets[j], 2))
                 {
                     return true;
                 }
@@ -3524,7 +3534,7 @@ public class LevelGenerator : MonoBehaviour
         return Mathf.Abs(first.x - second.x) + Mathf.Abs(first.y - second.y);
     }
 
-    private int GetNearestDistance(Vector2Int position, List<Vector2Int> positions)
+    private int GetNearestDistance(Vector2Int position, IList<Vector2Int> positions)
     {
         if (positions == null || positions.Count == 0)
         {
