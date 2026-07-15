@@ -7,6 +7,10 @@ using UnityEngine.UI;
 public class DesignInterpretationController : MonoBehaviour
 {
     private static string requestedReturnSceneName = "";
+    private const string SectionTitleColor = "#2457A6";
+    private const string VerifiedColor = "#27864A";
+    private const string NoteColor = "#A66300";
+    private const string MutedColor = "#667085";
 
     [Header("Scene UI")]
     public Text interpretationText;
@@ -252,6 +256,8 @@ public class DesignInterpretationController : MonoBehaviour
 
         interpretationText.horizontalOverflow = HorizontalWrapMode.Wrap;
         interpretationText.verticalOverflow = VerticalWrapMode.Overflow;
+        interpretationText.supportRichText = true;
+        interpretationText.lineSpacing = 1.1f;
 
         ContentSizeFitter sizeFitter = interpretationText.GetComponent<ContentSizeFitter>();
 
@@ -339,59 +345,104 @@ public class DesignInterpretationController : MonoBehaviour
     {
         StringBuilder builder = new StringBuilder();
 
-        AppendSection(builder, "Requested Design", BuildRequestedDesignText(plan));
-        AppendSection(builder, "Applied and Verified", BuildAppliedDesignText(plan));
-        AppendSection(builder, "Design Reasoning", GetDesignReasoning(plan));
-        AppendSection(builder, "Map Blueprint", BuildBlueprintText(plan));
-        AppendSection(builder, "Map Parameters", BuildParameterText(plan));
+        AppendSection(builder, "1  Idea Summary", BuildIdeaSummaryText());
+        AppendSection(builder, "2  How the Idea Became a Map", BuildIdeaTranslationText(plan));
+        AppendSection(builder, "3  Applied and Verified", BuildAppliedDesignText(plan));
+        AppendSection(builder, "4  Why This Design", GetDesignReasoning(plan));
+        AppendSection(builder, "5  Technical Details", BuildTechnicalDetailsText(plan));
 
         return builder.ToString().TrimEnd();
     }
 
-    private string BuildRequestedDesignText(LevelDesignPlan plan)
+    private string BuildIdeaSummaryText()
     {
         StringBuilder builder = new StringBuilder();
+        string originalIdea = GetStoredContextText(
+            CreativeWorkshopContext.OriginalIdeaText,
+            CreativeWorkshopContext.OriginalIdeaTextPrefsKey
+        );
+        string selectedDirection = GetStoredContextText(
+            CreativeWorkshopContext.SelectedDirectionText,
+            CreativeWorkshopContext.SelectedDirectionTextPrefsKey
+        );
         string latestAdjustment = CleanText(LevelDesignPlanContext.LatestAdjustmentText);
 
-        builder.Append("Latest adjustment: ");
-        builder.Append(string.IsNullOrEmpty(latestAdjustment) ? "None" : latestAdjustment);
-        builder.Append("\nExpanded direction: ");
-        builder.Append(GetExpandedDirectionText());
-        builder.Append("\nCorridor placement: ");
-        builder.Append(PrettyValue(plan.corridorPlacement));
-        builder.Append("\nCorridor width: ");
-        builder.Append(plan.corridorWidth > 0 ? plan.corridorWidth + " tile(s)" : "Not requested");
-        builder.Append("\nCorridor orientation: ");
-        builder.Append(PrettyValue(plan.corridorOrientation));
-        builder.Append("\nCorridor role: ");
-        builder.Append(PrettyValue(plan.corridorRole));
-        builder.Append("\nPriority: ");
-        builder.Append(PrettyValue(plan.corridorPriority));
+        builder.Append("<b>Original idea</b>\n");
+        builder.Append(string.IsNullOrEmpty(originalIdea)
+            ? "No original idea was stored."
+            : DisplayText(originalIdea));
+        builder.Append("\n\n<b>Selected expansion</b>\n");
+        builder.Append(string.IsNullOrEmpty(selectedDirection)
+            ? GetExpandedDirectionText()
+            : DisplayText(selectedDirection));
+
+        if (!string.IsNullOrEmpty(latestAdjustment))
+        {
+            builder.Append("\n\n<b>Latest adjustment</b>\n");
+            builder.Append(DisplayText(latestAdjustment));
+        }
+
+        return builder.ToString();
+    }
+
+    private string BuildIdeaTranslationText(LevelDesignPlan plan)
+    {
+        StringBuilder builder = new StringBuilder();
+        AppendFeature(builder, "Structure", GetArchetypeDescription(plan.archetype));
+        AppendFeature(builder, "Goals", GetTargetLayoutDescription(plan.targetLayout));
+        AppendFeature(builder, "Walls", GetObstacleStyleDescription(plan.obstacleStyle));
+        AppendFeature(builder, "Water", GetWaterStyleDescription(plan.waterStyle));
+        AppendFeature(builder, "Corridor", GetCorridorDescription(plan));
+        builder.Append("\n");
+        builder.Append(StatusTag("IMPLEMENTATION NOTE", NoteColor));
+        builder.Append(" Free-form shapes and wording are converted into supported walls, water, goals, and corridors. Exact geometry is only guaranteed when a feature is explicitly verified.");
         return builder.ToString();
     }
 
     private string BuildAppliedDesignText(LevelDesignPlan plan)
     {
+        StringBuilder builder = new StringBuilder();
+        builder.Append(StatusTag("APPLIED", VerifiedColor));
+        builder.Append(" The high-level blueprint was converted into a locally generated, solvable map.");
+
         if (string.IsNullOrEmpty(plan.corridorPlacement) || plan.corridorPlacement == "none")
         {
-            return "No corridor feature was requested for this level.";
+            builder.Append("\n");
+            builder.Append(StatusTag("NOT REQUESTED", MutedColor));
+            builder.Append(" No dedicated corridor feature was requested.");
+            return builder.ToString();
         }
 
         CorridorValidationResult validation = LevelDesignPlanContext.CorridorValidation;
 
         if (validation == null)
         {
-            return "No corridor verification result was stored for this level.";
+            builder.Append("\n");
+            builder.Append(StatusTag("NOT VERIFIED", NoteColor));
+            builder.Append(" No corridor verification result was stored for this level.");
+            return builder.ToString();
         }
 
-        return "Verified: " + YesNo(validation.verified) + "\n"
-            + "Actual placement: " + PrettyValue(validation.placement) + "\n"
-            + "Actual orientation: " + PrettyValue(validation.orientation) + "\n"
-            + "Actual width: " + validation.width + " tile(s)\n"
-            + "Unique passage: " + YesNo(validation.uniquePassage) + "\n"
-            + "Player can pass: " + YesNo(validation.playerCanPass) + "\n"
-            + "Box passed through: " + YesNo(validation.boxPassedThrough) + "\n"
-            + "Result: " + CleanText(validation.message);
+        builder.Append("\n");
+        builder.Append(validation.verified
+            ? StatusTag("CORRIDOR VERIFIED", VerifiedColor)
+            : StatusTag("CORRIDOR NEEDS REVIEW", NoteColor));
+        builder.Append(" ");
+        builder.Append(GetCorridorValidationSummary(validation));
+        builder.Append("\n  Placement: ");
+        builder.Append(PrettyValue(validation.placement));
+        builder.Append(" | Orientation: ");
+        builder.Append(PrettyValue(validation.orientation));
+        builder.Append(" | Width: ");
+        builder.Append(validation.width);
+        builder.Append(" tile(s)");
+        builder.Append("\n  Unique passage: ");
+        builder.Append(YesNo(validation.uniquePassage));
+        builder.Append(" | Player can pass: ");
+        builder.Append(YesNo(validation.playerCanPass));
+        builder.Append(" | Box passed through: ");
+        builder.Append(YesNo(validation.boxPassedThrough));
+        return builder.ToString();
     }
 
     private string YesNo(bool value)
@@ -408,7 +459,7 @@ public class DesignInterpretationController : MonoBehaviour
             return "No expanded direction text was stored for this level.";
         }
 
-        return expandedIdeaText;
+        return DisplayText(expandedIdeaText);
     }
 
     private string GetDesignReasoning(LevelDesignPlan plan)
@@ -417,28 +468,29 @@ public class DesignInterpretationController : MonoBehaviour
 
         if (!string.IsNullOrEmpty(designNote))
         {
-            return designNote;
+            return DisplayText(designNote);
         }
 
-        return "The generator used a " + PrettyValue(plan.archetype)
-            + " structure with a " + PrettyValue(plan.targetLayout)
-            + " layout, then shaped the internal walls as " + PrettyValue(plan.obstacleStyle)
-            + " and water as " + PrettyValue(plan.waterStyle)
-            + " to express the selected direction.";
+        return GetArchetypeDescription(plan.archetype) + " "
+            + GetTargetLayoutDescription(plan.targetLayout) + " "
+            + GetObstacleStyleDescription(plan.obstacleStyle) + " "
+            + GetWaterStyleDescription(plan.waterStyle);
     }
 
-    private string BuildBlueprintText(LevelDesignPlan plan)
+    private string BuildTechnicalDetailsText(LevelDesignPlan plan)
     {
-        return "Style: " + PrettyValue(plan.style) + "\n"
+        return "<b>Blueprint values</b>\n"
+            + "Style: " + DisplayText(PrettyValue(plan.style)) + "\n"
             + "Archetype: " + PrettyValue(plan.archetype) + "\n"
             + "Target layout: " + PrettyValue(plan.targetLayout) + "\n"
             + "Obstacle style: " + PrettyValue(plan.obstacleStyle) + "\n"
-            + "Water style: " + PrettyValue(plan.waterStyle);
-    }
-
-    private string BuildParameterText(LevelDesignPlan plan)
-    {
-        return "Solution steps: " + FormatRange(plan.minSolutionSteps, plan.maxSolutionSteps) + "\n"
+            + "Water style: " + PrettyValue(plan.waterStyle) + "\n"
+            + "Corridor: " + PrettyValue(plan.corridorPlacement)
+            + " / " + PrettyValue(plan.corridorOrientation)
+            + " / " + PrettyValue(plan.corridorRole)
+            + " / " + PrettyValue(plan.corridorPriority)
+            + "\n\n<b>Generation ranges</b>\n"
+            + "Solution steps: " + FormatRange(plan.minSolutionSteps, plan.maxSolutionSteps) + "\n"
             + "Pushes: " + FormatRange(plan.minPushes, plan.maxPushes) + "\n"
             + "Reverse pulls: " + FormatRange(plan.minReversePulls, plan.maxReversePulls) + "\n"
             + "Water areas: " + FormatRange(plan.minWaterAreas, plan.maxWaterAreas) + "\n"
@@ -452,10 +504,133 @@ public class DesignInterpretationController : MonoBehaviour
             builder.Append("\n\n");
         }
 
-        builder.Append("<b>");
+        builder.Append("<color=");
+        builder.Append(SectionTitleColor);
+        builder.Append("><b>");
         builder.Append(title);
-        builder.Append("</b>\n");
+        builder.Append("</b></color>\n");
         builder.Append(body);
+    }
+
+    private void AppendFeature(StringBuilder builder, string label, string description)
+    {
+        if (builder.Length > 0)
+        {
+            builder.Append("\n\n");
+        }
+
+        builder.Append("<b>");
+        builder.Append(label);
+        builder.Append("</b>\n");
+        builder.Append(description);
+    }
+
+    private string StatusTag(string label, string color)
+    {
+        return "<color=" + color + "><b>[" + label + "]</b></color>";
+    }
+
+    private string GetArchetypeDescription(string archetype)
+    {
+        switch (CleanText(archetype))
+        {
+            case "goal_room":
+                return "Goal-focused room - pressure is concentrated around the target area.";
+            case "bottleneck_corridor":
+                return "Bottleneck route - a narrow passage creates detours and ordering pressure.";
+            case "split_route":
+                return "Split routes - the two boxes are encouraged to use different paths.";
+            case "open_workshop":
+                return "Open workshop - wider movement space is shaped by a few important obstacles.";
+            default:
+                return "Structure preference: " + PrettyValue(archetype) + ".";
+        }
+    }
+
+    private string GetTargetLayoutDescription(string targetLayout)
+    {
+        switch (CleanText(targetLayout))
+        {
+            case "clustered":
+                return "Targets stay close together, concentrating pressure in one area.";
+            case "split_pair":
+                return "Targets are separated, creating a choice of box order and route.";
+            case "edge_cluster":
+                return "Targets are grouped near an edge, making final approach space important.";
+            default:
+                return "Goal placement preference: " + PrettyValue(targetLayout) + ".";
+        }
+    }
+
+    private string GetObstacleStyleDescription(string obstacleStyle)
+    {
+        switch (CleanText(obstacleStyle))
+        {
+            case "central_baffle":
+                return "Central walls interrupt direct movement and encourage a detour.";
+            case "side_choke":
+                return "Side-positioned walls tighten one route and create a choke point.";
+            case "goal_guard":
+                return "Walls add approach pressure near the target area.";
+            default:
+                return "Wall placement preference: " + PrettyValue(obstacleStyle) + ".";
+        }
+    }
+
+    private string GetWaterStyleDescription(string waterStyle)
+    {
+        switch (CleanText(waterStyle))
+        {
+            case "corner_pool":
+                return "Water stays near a corner and mostly shapes the outer movement space.";
+            case "side_pool":
+                return "Water occupies a side area and narrows nearby movement.";
+            case "route_divider":
+                return "Water acts as a route divider, encouraging movement around it.";
+            default:
+                return "Water placement preference: " + PrettyValue(waterStyle) + ".";
+        }
+    }
+
+    private string GetCorridorDescription(LevelDesignPlan plan)
+    {
+        if (string.IsNullOrEmpty(plan.corridorPlacement) || plan.corridorPlacement == "none")
+        {
+            return "No dedicated corridor was requested; routes come from the selected structure and obstacles.";
+        }
+
+        string priorityText = plan.corridorPriority == "required"
+            ? "This is a required feature."
+            : "This is a preferred feature.";
+        return "A " + plan.corridorWidth + "-tile " + PrettyValue(plan.corridorOrientation)
+            + " corridor is placed near the " + PrettyValue(plan.corridorPlacement)
+            + " for " + PrettyValue(plan.corridorRole) + ". " + priorityText;
+    }
+
+    private string GetCorridorValidationSummary(CorridorValidationResult validation)
+    {
+        string message = DisplayText(validation.message);
+
+        if (!string.IsNullOrEmpty(message))
+        {
+            return message;
+        }
+
+        return validation.verified
+            ? "The requested passage was found in the selected map."
+            : "The requested passage could not be fully verified.";
+    }
+
+    private string GetStoredContextText(string runtimeValue, string prefsKey)
+    {
+        string value = CleanText(runtimeValue);
+
+        if (!string.IsNullOrEmpty(value))
+        {
+            return value;
+        }
+
+        return CleanText(PlayerPrefs.GetString(prefsKey, ""));
     }
 
     private Button FindButtonByText(string text)
@@ -538,6 +713,13 @@ public class DesignInterpretationController : MonoBehaviour
         }
 
         return cleanValue.Replace("_", " ");
+    }
+
+    private string DisplayText(string value)
+    {
+        return CleanText(value)
+            .Replace("<", "＜")
+            .Replace(">", "＞");
     }
 
     private string CleanText(string value)
