@@ -3274,7 +3274,8 @@ public class LevelGenerator : MonoBehaviour
                     continue;
                 }
 
-                if (runLength >= 2)
+                if (runLength >= 2
+                    && !IsAllowedOuterShellWallJoin(grid, runStartX, y, runLength))
                 {
                     return RejectParallelWallRows(runStartX, y, runLength, logFailure);
                 }
@@ -3283,13 +3284,47 @@ public class LevelGenerator : MonoBehaviour
                 runLength = 0;
             }
 
-            if (runLength >= 2)
+            if (runLength >= 2
+                && !IsAllowedOuterShellWallJoin(grid, runStartX, y, runLength))
             {
                 return RejectParallelWallRows(runStartX, y, runLength, logFailure);
             }
         }
 
         return true;
+    }
+
+    private bool IsAllowedOuterShellWallJoin(
+        char[,] grid,
+        int startX,
+        int startY,
+        int length)
+    {
+        if (length != 2)
+        {
+            return false;
+        }
+
+        for (int y = startY; y <= startY + 1; y++)
+        {
+            for (int x = startX; x < startX + length; x++)
+            {
+                Vector2Int position = new Vector2Int(x, y);
+
+                for (int directionIndex = 0; directionIndex < directions.Length; directionIndex++)
+                {
+                    Vector2Int neighbor = position + directions[directionIndex];
+
+                    if (!rules.IsInsideMap(neighbor)
+                        || grid[neighbor.x, neighbor.y] == Empty)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     private bool RejectParallelWallRows(int startX, int y, int length, bool logFailure)
