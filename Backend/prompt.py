@@ -27,8 +27,8 @@ GENERATOR_CAPABILITY_CONTRACT = (
     "corridors into one width-1-or-2 axis-aligned main corridor; convert dynamic "
     "mechanics into static wall, water, choke-point, detour, standing-position, "
     "or box-order pressure; and convert exact geometry into a high-level layout "
-    "preference. If the user asks for no water, keep the required water area at "
-    "the side with minimal influence on the core idea. Never promise an unsupported "
+    "preference. A user-authored request for no water or no internal walls is "
+    "supported through explicit zero-value constraints. Never promise an unsupported "
     "feature in player-visible text, style, designNote, or promptText. Preserve the "
     "user's underlying planning intention after adaptation. "
 )
@@ -43,8 +43,6 @@ BASE_USER_PROMPT = (
     "inclusive ranges: "
     "minSolutionSteps 18-30, maxSolutionSteps 32-50, "
     "minPushes 8-16, maxPushes 14-28, "
-    "minWaterAreas 1-2, maxWaterAreas 1-2, "
-    "minWallObstacleBlocks exactly 2, maxWallObstacleBlocks 2-3. "
     "minReversePulls 14-24, maxReversePulls 24-40. "
     "Each max value must be greater than or equal to its min value. "
     "Choose exactly one archetype from: goal_room, "
@@ -77,11 +75,210 @@ BASE_USER_PROMPT = (
 )
 
 
-def build_level_plan_messages(variation_seed, recent_blueprint_hint, creative_context=None):
+ZERO_WATER_PHRASES = (
+    "no water",
+    "no-water",
+    "without water",
+    "without any water",
+    "water-free",
+    "water free",
+    "zero water",
+    "remove water",
+    "remove the water",
+    "don't use water",
+    "do not use water",
+    "不要水",
+    "不要有水",
+    "不要任何水",
+    "不需要水",
+    "不用水",
+    "不使用水",
+    "不放水",
+    "没有水",
+    "无水",
+    "零水",
+    "去掉水",
+    "移除水",
+    "删除水",
+)
+
+ZERO_INTERNAL_WALL_PHRASES = (
+    "no internal wall",
+    "no-internal-wall",
+    "without internal wall",
+    "without any internal wall",
+    "zero internal wall",
+    "no interior wall",
+    "without interior wall",
+    "no wall obstacle",
+    "without wall obstacle",
+    "without water or internal wall",
+    "without any water or any internal wall",
+    "no water or internal wall",
+    "no water and no internal wall",
+    "remove internal wall",
+    "remove interior wall",
+    "remove wall obstacle",
+    "don't use internal wall",
+    "do not use internal wall",
+    "不要内部墙",
+    "不要有内部墙",
+    "不要任何内部墙",
+    "不需要内部墙",
+    "不使用内部墙",
+    "不放内部墙",
+    "没有内部墙",
+    "无内部墙",
+    "零内部墙",
+    "不要墙障碍",
+    "无墙障碍",
+    "零墙障碍",
+    "无水域和内部墙",
+    "无水和内部墙",
+    "去掉内部墙",
+    "移除内部墙",
+    "删除内部墙",
+)
+
+WATER_FEATURE_TERMS = (
+    "water",
+    "river",
+    "pool",
+    "lake",
+    "pond",
+    "水",
+    "河",
+    "池",
+    "湖",
+)
+
+INTERNAL_WALL_FEATURE_TERMS = (
+    "wall",
+    "internal wall",
+    "interior wall",
+    "wall obstacle",
+    "墙",
+    "墙体",
+    "内部墙",
+    "墙障碍",
+)
+
+
+def resolve_zero_feature_constraints(creative_context=None):
+    snippets = build_user_constraint_snippets(creative_context or {})
+    return {
+        "noWater": resolve_feature_zero_request(
+            snippets,
+            ZERO_WATER_PHRASES,
+            WATER_FEATURE_TERMS,
+        ),
+        "noInternalWalls": resolve_feature_zero_request(
+            snippets,
+            ZERO_INTERNAL_WALL_PHRASES,
+            INTERNAL_WALL_FEATURE_TERMS,
+        ),
+    }
+
+
+def build_user_constraint_snippets(creative_context):
+    snippets = []
+    latest_adjustment = normalize_prompt_text(
+        creative_context.get("latestAdjustmentText")
+    )
+
+    if latest_adjustment:
+        snippets.append(latest_adjustment)
+
+    raw_history = creative_context.get("adjustmentHistoryText")
+
+    if raw_history is not None:
+        history_entries = [
+            normalize_prompt_text(entry)
+            for entry in str(raw_history).splitlines()
+            if normalize_prompt_text(entry)
+        ]
+        snippets.extend(reversed(history_entries))
+
+    original_idea = normalize_prompt_text(creative_context.get("originalIdeaText"))
+
+    if original_idea:
+        snippets.append(original_idea)
+    else:
+        legacy_idea = normalize_prompt_text(creative_context.get("ideaText"))
+
+        if legacy_idea:
+            snippets.append(legacy_idea)
+
+    return snippets
+
+
+def resolve_feature_zero_request(snippets, zero_phrases, feature_terms):
+    for snippet in snippets:
+        normalized = normalize_prompt_text(snippet).casefold()
+
+        if any(phrase in normalized for phrase in zero_phrases):
+            return True
+
+        if any(term in normalized for term in feature_terms):
+            return False
+
+    return False
+
+
+def build_feature_constraint_prompt(feature_constraints):
+    feature_constraints = feature_constraints or {}
+    no_water = bool(feature_constraints.get("noWater"))
+    no_internal_walls = bool(feature_constraints.get("noInternalWalls"))
+    parts = []
+
+    if no_water:
+        parts.append(
+            "The user explicitly requires no water. Set minWaterAreas=0 and "
+            "maxWaterAreas=0 exactly. Do not describe or imply any water feature. "
+        )
+    else:
+        parts.append(
+            "The user did not explicitly require no water. Choose minWaterAreas "
+            "and maxWaterAreas inside 1-2. "
+        )
+
+    if no_internal_walls:
+        parts.append(
+            "The user explicitly requires no internal walls. Set "
+            "minWallObstacleBlocks=0 and maxWallObstacleBlocks=0 exactly. This "
+            "requirement also forbids corridor divider walls, so set "
+            "corridorPlacement=none, corridorWidth=0, corridorOrientation=any, "
+            "corridorRole=visual_only, and corridorPriority=preferred. Only the "
+            "closed outer shell may use walls. Do not describe or imply internal "
+            "walls, choke walls, or corridors. "
+        )
+    else:
+        parts.append(
+            "The user did not explicitly require no internal walls. Set "
+            "minWallObstacleBlocks=2 exactly and choose maxWallObstacleBlocks "
+            "inside 2-3. "
+        )
+
+    return "".join(parts)
+
+
+def build_level_plan_messages(
+    variation_seed,
+    recent_blueprint_hint,
+    creative_context=None,
+    feature_constraints=None,
+):
     creative_context = creative_context or {}
+    feature_constraints = feature_constraints or resolve_zero_feature_constraints(
+        creative_context
+    )
     user_prompt = (
         BASE_USER_PROMPT
-        + build_prioritized_creative_context_prompt(creative_context)
+        + build_feature_constraint_prompt(feature_constraints)
+        + build_prioritized_creative_context_prompt(
+            creative_context,
+            feature_constraints,
+        )
         + f"Variation seed: {variation_seed}. "
         + "Recent-blueprint diversity is optional and must never override the "
         + "latest user adjustment or any required corridor field. Avoid these "
@@ -285,8 +482,12 @@ def build_creative_idea_prompt(creative_context):
     )
 
 
-def build_prioritized_creative_context_prompt(creative_context):
+def build_prioritized_creative_context_prompt(
+    creative_context,
+    feature_constraints=None,
+):
     creative_context = creative_context or {}
+    feature_constraints = feature_constraints or {}
     idea_text = normalize_prompt_text(creative_context.get("ideaText"))
     original_idea = normalize_prompt_text(creative_context.get("originalIdeaText"))
     selected_direction = normalize_prompt_text(creative_context.get("selectedDirectionText"))
@@ -322,15 +523,21 @@ def build_prioritized_creative_context_prompt(creative_context):
     if idea_text and not any((original_idea, selected_direction, latest_adjustment)):
         parts.append(f'Legacy combined user idea: "{idea_text}". ')
 
-    parts.append(
-        "Do not satisfy a structural request only through style or designNote; "
-        "encode it in the corridor fields. A request for a narrow corridor in "
-        "the map center must use archetype=bottleneck_corridor, "
-        "obstacleStyle=central_baffle, corridorPlacement=center, "
-        "corridorPriority=required, and corridorWidth=1 unless another width is "
-        "explicitly requested. Use corridorRole=required_box_route only when the "
-        "user says a box must pass through it; otherwise use player_route. "
-    )
+    if feature_constraints.get("noInternalWalls"):
+        parts.append(
+            "The explicit no-internal-walls requirement overrides every corridor "
+            "request in the user context. Keep all corridor fields disabled. "
+        )
+    else:
+        parts.append(
+            "Do not satisfy a structural request only through style or designNote; "
+            "encode it in the corridor fields. A request for a narrow corridor in "
+            "the map center must use archetype=bottleneck_corridor, "
+            "obstacleStyle=central_baffle, corridorPlacement=center, "
+            "corridorPriority=required, and corridorWidth=1 unless another width is "
+            "explicitly requested. Use corridorRole=required_box_route only when the "
+            "user says a box must pass through it; otherwise use player_route. "
+        )
     return "".join(parts)
 
 

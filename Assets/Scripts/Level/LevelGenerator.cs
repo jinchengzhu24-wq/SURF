@@ -145,6 +145,8 @@ public class LevelGenerator : MonoBehaviour
     public CorridorValidationResult LastCorridorValidation { get; private set; }
     private bool activeLLMQualityGate;
     private bool activeRelaxedBlueprint;
+    private bool preserveZeroWaterConstraint;
+    private bool preserveZeroInternalWallConstraint;
     private GenerationRuleSnapshot algorithmRuleBaseline;
 
     private sealed class GenerationRuleSnapshot
@@ -219,12 +221,16 @@ public class LevelGenerator : MonoBehaviour
         ResolveReferences();
         CaptureAlgorithmRuleBaseline();
         RestoreAlgorithmRuleBaseline();
+        preserveZeroWaterConstraint = false;
+        preserveZeroInternalWallConstraint = false;
         ClearDesignPlan();
     }
 
     public void ResetAfterLLMPlanAttempts()
     {
         RestoreAlgorithmRuleBaseline();
+        preserveZeroWaterConstraint = false;
+        preserveZeroInternalWallConstraint = false;
         ClearDesignPlan();
     }
 
@@ -311,10 +317,14 @@ public class LevelGenerator : MonoBehaviour
         rules.maxSolutionSteps = Mathf.Max(45, originalMaxSolutionSteps + 20);
         rules.minPushes = 4;
         rules.maxPushes = Mathf.Max(30, originalMaxPushes + 12);
-        rules.minWaterAreas = 1;
-        rules.maxWaterAreas = Mathf.Max(1, originalMaxWaterAreas);
-        rules.minWallObstacleBlocks = 1;
-        rules.maxWallObstacleBlocks = Mathf.Max(1, originalMaxWallObstacleBlocks);
+        rules.minWaterAreas = preserveZeroWaterConstraint ? 0 : 1;
+        rules.maxWaterAreas = preserveZeroWaterConstraint
+            ? 0
+            : Mathf.Max(1, originalMaxWaterAreas);
+        rules.minWallObstacleBlocks = preserveZeroInternalWallConstraint ? 0 : 1;
+        rules.maxWallObstacleBlocks = preserveZeroInternalWallConstraint
+            ? 0
+            : Mathf.Max(1, originalMaxWallObstacleBlocks);
         rules.minReversePulls = Mathf.Max(4, originalMinReversePulls - 12);
         rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls + 12);
 
@@ -830,6 +840,16 @@ public class LevelGenerator : MonoBehaviour
                 ? rules.llmRelaxedMinimumQualityScore
                 : rules.llmMinimumQualityScore;
 
+            if (rules.maxWaterAreas == 0)
+            {
+                minimumWaterTiles = 0;
+            }
+
+            if (rules.maxWallObstacleBlocks == 0 && currentCorridorPlacement == "none")
+            {
+                minimumSurroundedWalls = 0;
+            }
+
             return quality.waterTiles >= minimumWaterTiles
                 && quality.surroundedWallCount >= minimumSurroundedWalls
                 && quality.boxInteractionScore >= minimumBoxInteractionScore
@@ -1021,6 +1041,8 @@ public class LevelGenerator : MonoBehaviour
         rules.maxWaterAreas = Mathf.Max(rules.minWaterAreas, plan.maxWaterAreas);
         rules.minWallObstacleBlocks = Mathf.Max(0, plan.minWallObstacleBlocks);
         rules.maxWallObstacleBlocks = Mathf.Max(rules.minWallObstacleBlocks, plan.maxWallObstacleBlocks);
+        preserveZeroWaterConstraint = rules.maxWaterAreas == 0;
+        preserveZeroInternalWallConstraint = rules.maxWallObstacleBlocks == 0;
 
         if (plan.minReversePulls > 0 || plan.maxReversePulls > 0)
         {

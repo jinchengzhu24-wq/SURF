@@ -51,6 +51,8 @@ LLM 请求可以携带以下内容：
 
 LLM 关卡模式不读取方案缓存。每次尝试都会直接请求远程后端，以便确认本轮 LLM 确实可用。默认最多尝试两次真实远程请求。
 
+后端会从用户原始 idea、历史调整和最新调整中识别明确的“无水域”与“无内部墙”要求。判断按最新调整、历史调整倒序、原始 idea 的顺序进行；AI 生成的扩展方向和自动 refinement 文本不会触发零值约束。较新的水域或墙体要求可以覆盖旧要求。
+
 相关代码：
 
 - `Assets/Scripts/LLM/LLMLevelDesignClient.cs`
@@ -77,10 +79,10 @@ LLM 输出的是 `LevelDesignPlan`，不是地图行、坐标或 tile grid。
 | `maxSolutionSteps` | 32–50 | 最多玩家移动步数 |
 | `minPushes` | 8–16 | 最少推箱次数 |
 | `maxPushes` | 14–28 | 最多推箱次数 |
-| `minWaterAreas` | 1–2 | 最少水域放置数量 |
-| `maxWaterAreas` | 1–2 | 最多水域放置数量 |
-| `minWallObstacleBlocks` | 固定为 2 | 最少内部墙障碍数量 |
-| `maxWallObstacleBlocks` | 2–3 | 最多内部墙障碍数量 |
+| `minWaterAreas` | 明确要求无水时为 0，否则 1–2 | 最少水域放置数量 |
+| `maxWaterAreas` | 明确要求无水时为 0，否则 1–2 | 最多水域放置数量 |
+| `minWallObstacleBlocks` | 明确要求无内部墙时为 0，否则固定为 2 | 最少内部墙障碍数量 |
+| `maxWallObstacleBlocks` | 明确要求无内部墙时为 0，否则 2–3 | 最多内部墙障碍数量 |
 | `minReversePulls` | 14–24 | 反向构造的最少拉动次数 |
 | `maxReversePulls` | 24–40 | 反向构造的最多拉动次数 |
 
@@ -99,6 +101,8 @@ LLM 输出的是 `LevelDesignPlan`，不是地图行、坐标或 tile grid。
 | `corridorPriority` | `preferred`, `required` | 走廊是否为硬要求 |
 
 `style` 和 `designNote` 只用于描述、记录和展示，不直接影响地图生成。
+
+零值是用户硬约束而不是随机范围：明确要求无水时，水域范围固定为 `0–0`；明确要求无内部墙时，墙障碍范围固定为 `0–0`，同时关闭 corridor，只保留闭合外壳。如果没有明确要求，后端仍会拒绝 LLM 无故返回的零值。
 
 ## 3. 后端校验与错误返回
 
@@ -244,6 +248,8 @@ strict：水格数量 ≥ 4，surrounded wall ≥ 1，两箱交互分数 ≥ 4�
 relaxed：水格数量 ≥ 2，surrounded wall ≥ 0，两箱交互分数 ≥ 2，质量总分 ≥ 170，结构相似度 < 94
 ```
 
+明确的零水域蓝图不检查最低水格数量；明确的零内部墙且无 corridor 的蓝图不检查最低 surrounded wall 数量。质量总分、两箱交互、结构相似度和可解性门槛保持不变。
+
 质量分综合考虑：
 
 - 解法步数；
@@ -280,11 +286,11 @@ strict 失败后进入 relaxed-blueprint 模式，主要调整：
 
 所有远程尝试结束后：
 
-- 如果本轮至少收到过一份通过后端校验的真实 LLM 蓝图，但所有有效蓝图都无法由模板落实，则清除 corridor、蓝图结构、LLM 质量门槛和蓝图数值，恢复算法基线，并运行一次现有算法 fallback；
+- 如果本轮至少收到过一份通过后端校验的真实 LLM 蓝图，但所有有效蓝图都无法由模板落实，则清除 corridor、蓝图结构、LLM 质量门槛和普通蓝图数值，恢复算法基线，并运行一次现有算法 fallback；用户明确要求的零水域、零内部墙约束会继续保留；
 - 如果两次请求都失败或响应非法，则禁止算法 fallback，停止生成且不加载旧地图；
 - 第一份蓝图有效但落实失败、第二次远程请求失败时，因为本轮已经证明 LLM 成功过，仍允许最终算法 fallback。
 
-最终算法 fallback 可以放弃 required corridor。它生成的是明确标记的降级地图，不声称实现了 LLM 蓝图。
+最终算法 fallback 可以放弃 required corridor，但不能恢复用户明确禁止的水域或内部墙。它生成的是明确标记的降级地图，不声称实现了其余 LLM 蓝图。
 
 ## 10. 生成来源
 
@@ -329,7 +335,7 @@ candidateFailures=BaseGrid=300
 - LLM 只能选择高层结构类别，不能指定具体地图坐标；
 - `style` 和 `designNote` 不影响生成；
 - obstacle 和 water style 是位置偏好，不是严格路线保证；
-- 当前提示词固定生成偏难关卡，无法忠实实现简单、无水或低障碍 idea；
+- 当前提示词仍固定生成偏难关卡；除明确的零水域、零内部墙要求外，尚不能忠实实现其他简单或低障碍档位；
 - 第二次 LLM 方案请求尚未携带第一次本地生成的失败统计；
 - required corridor 的验证目前不能完整证明玩家或箱子确实从一侧穿越到另一侧；
 - 本地求解和候选生成是同步执行的，极端情况下可能造成明显卡帧。

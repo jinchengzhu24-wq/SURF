@@ -17,9 +17,17 @@ from openai import OpenAI
 from pydantic import BaseModel
 
 try:
-    from prompt import build_creative_idea_expansion_messages, build_level_plan_messages
+    from prompt import (
+        build_creative_idea_expansion_messages,
+        build_level_plan_messages,
+        resolve_zero_feature_constraints,
+    )
 except ImportError:
-    from .prompt import build_creative_idea_expansion_messages, build_level_plan_messages
+    from .prompt import (
+        build_creative_idea_expansion_messages,
+        build_level_plan_messages,
+        resolve_zero_feature_constraints,
+    )
 
 HOST = "127.0.0.1"
 PORT = 8000
@@ -145,10 +153,10 @@ study_record_lock = threading.Lock()
 LIMITS = {
     "minSolutionSteps": (18, 30),
     "maxSolutionSteps": (32, 50),
-    "minWaterAreas": (1, 2),
-    "maxWaterAreas": (1, 2),
-    "minWallObstacleBlocks": (2, 2),
-    "maxWallObstacleBlocks": (2, 3),
+    "minWaterAreas": (0, 2),
+    "maxWaterAreas": (0, 2),
+    "minWallObstacleBlocks": (0, 2),
+    "maxWallObstacleBlocks": (0, 3),
     "minPushes": (8, 16),
     "maxPushes": (14, 28),
     "minReversePulls": (14, 24),
@@ -1846,6 +1854,8 @@ def create_level_plan(creative_context=None):
         )
 
     try:
+        creative_context = creative_context or {}
+        feature_constraints = resolve_zero_feature_constraints(creative_context)
         model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
         base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
         temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
@@ -1858,6 +1868,7 @@ def create_level_plan(creative_context=None):
                 variation_seed,
                 get_recent_blueprint_hint(),
                 creative_context,
+                feature_constraints,
             ),
             response_format={"type": "json_object"},
             temperature=temperature,
@@ -1865,7 +1876,7 @@ def create_level_plan(creative_context=None):
         )
 
         content = response.choices[0].message.content
-        plan = validate_plan(json.loads(content))
+        plan = validate_plan(json.loads(content), feature_constraints)
         remember_blueprint(plan)
         print(f"Generated level plan from DeepSeek using {model}: {plan}")
         return plan
@@ -1877,11 +1888,27 @@ def create_level_plan(creative_context=None):
         ) from exception
 
 
-def validate_plan(plan):
+def validate_plan(plan, feature_constraints=None):
     if plan is None:
         raise ValueError("model returned no parsed plan")
 
     data = plan.model_dump() if isinstance(plan, LevelDesignPlan) else dict(plan)
+    feature_constraints = feature_constraints or {}
+    no_water = bool(feature_constraints.get("noWater"))
+    no_internal_walls = bool(feature_constraints.get("noInternalWalls"))
+
+    if no_water:
+        data["minWaterAreas"] = 0
+        data["maxWaterAreas"] = 0
+
+    if no_internal_walls:
+        data["minWallObstacleBlocks"] = 0
+        data["maxWallObstacleBlocks"] = 0
+        data["corridorPlacement"] = "none"
+        data["corridorWidth"] = 0
+        data["corridorOrientation"] = "any"
+        data["corridorRole"] = "visual_only"
+        data["corridorPriority"] = "preferred"
 
     for key, (minimum, maximum) in LIMITS.items():
         value = data.get(key)
@@ -1891,6 +1918,22 @@ def validate_plan(plan):
 
         if value < minimum or value > maximum:
             raise ValueError(f"{key}={value} is outside {minimum}-{maximum}")
+
+    if not no_water and (
+        data["minWaterAreas"] < 1 or data["maxWaterAreas"] < 1
+    ):
+        raise ValueError(
+            "water areas can be zero only when the user explicitly requests no water"
+        )
+
+    if not no_internal_walls and (
+        data["minWallObstacleBlocks"] != 2
+        or data["maxWallObstacleBlocks"] < 2
+    ):
+        raise ValueError(
+            "internal wall obstacles can be zero only when the user explicitly "
+            "requests no internal walls"
+        )
 
     if data["maxSolutionSteps"] < data["minSolutionSteps"]:
         raise ValueError("maxSolutionSteps must be >= minSolutionSteps")
