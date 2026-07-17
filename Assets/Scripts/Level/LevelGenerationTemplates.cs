@@ -232,6 +232,45 @@ public static class LevelGenerationTemplates
             " ##......## ",
             "  ########  "
         },
+        new string[]
+        {
+            " #########  ",
+            " #.......## ",
+            "##........# ",
+            "#.........##",
+            "#..........#",
+            "##.........#",
+            " #........##",
+            " #........# ",
+            " ##.......# ",
+            "  ######### "
+        },
+        new string[]
+        {
+            "  ########  ",
+            " ##......## ",
+            " #........# ",
+            " #.......## ",
+            "##.......#  ",
+            "#........## ",
+            "#.........# ",
+            "##........# ",
+            " ##......## ",
+            "  ########  "
+        },
+        new string[]
+        {
+            "   #######  ",
+            "  ##.....## ",
+            " ##.......##",
+            " #.........#",
+            " #.........#",
+            "##........##",
+            "#.........# ",
+            "#........## ",
+            "##......##  ",
+            " ########   "
+        },
     };
 
     public static readonly StructureTemplate[] StructureTemplates =
@@ -408,7 +447,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "open_workshop",
-            6,
+            8,
             new Vector2Int[]
             {
                 new Vector2Int(4, 3),
@@ -457,7 +496,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "goal_room",
-            4,
+            7,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),
@@ -505,7 +544,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "bottleneck_corridor",
-            6,
+            8,
             new Vector2Int[]
             {
                 new Vector2Int(4, 3),
@@ -517,7 +556,7 @@ public static class LevelGenerationTemplates
             new Vector2Int[]
             {
                 new Vector2Int(8, 2),
-                new Vector2Int(9, 3),
+                new Vector2Int(8, 3),
                 new Vector2Int(3, 7),
                 new Vector2Int(4, 8)
             },
@@ -553,7 +592,7 @@ public static class LevelGenerationTemplates
             }),
         new StructureTemplate(
             "split_route",
-            5,
+            9,
             new Vector2Int[]
             {
                 new Vector2Int(5, 4),

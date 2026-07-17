@@ -57,14 +57,12 @@ MonoBehaviour:
   waterTilemap: {fileID: 0}
   groundTile: {fileID: 11400000, guid: 03a640683c08b4a48ba0614e9905a22c, type: 2}
   groundRightWallTile: {fileID: 11400000, guid: c75dd86a0cb98584e91b88edcf182229, type: 2}
-  wallTile: {fileID: 11400000, guid: 1c56f3a11a854cc44addb02e69878f9f, type: 2}
-  wallVerticalTile: {fileID: 11400000, guid: 2ad7627673a8f39488f6592a5af6aa85, type: 2}
-  wallRightAndRightDownTile: {fileID: 11400000, guid: 84188c559cd7f5c46b1e2b4db55d7b1a, type: 2}
   wallSurroundedTile: {fileID: 11400000, guid: 371faf0e911c5954bac403a2b907ed8d, type: 2}
   waterTile: {fileID: 11400000, guid: 0545f61cdcba0474e994d20a16c7be10, type: 2}
   waterTopGroundTile: {fileID: 11400000, guid: 191cf975c468d98478420c33127afcd1, type: 2}
   waterRightWallTile: {fileID: 11400000, guid: f3b8c726c8f506048b41519b8b16c31f, type: 2}
   waterTopGroundRightWallTile: {fileID: 11400000, guid: f006b7f7892caf643bd9b9b12d223787, type: 2}
+  wallRuleTile: {fileID: 11400000, guid: d99debf1d0cc53940a2d8528bc832b17, type: 2}
   cellSize: 1
   levelRoot: {fileID: 0}
   clearTilemapsOnLoad: 1

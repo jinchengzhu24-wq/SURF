@@ -17,9 +17,7 @@ using UnityEngine.Tilemaps;
 // - groundRightWallTile：右侧是墙时使用的地面。
 //
 // 当前墙体瓦片类型：
-// - wallTile：普通墙。
-// - wallVerticalTile：上下都有墙，或下方有墙且左/右有墙时使用的墙。
-// - wallRightAndRightDownTile：右侧和右下都有墙时使用的墙。
+// - wallRuleTile：通过 Rule Tile 规则显示普通、右侧组合和纵向墙体。
 // - wallSurroundedTile：周围八个方向都有瓦片，且下方不是水时使用的特殊墙。
 //
 // 当前水面瓦片类型：
@@ -29,15 +27,6 @@ using UnityEngine.Tilemaps;
 // - waterTopGroundRightWallTile：上方是地面且右侧是墙时使用的水面。
 public class LevelLoader : MonoBehaviour
 {
-    private enum WallTileKind
-    {
-        Surrounded,
-        NormalCorner,
-        RightAndRightDown,
-        Vertical,
-        Default
-    }
-
     [Header("Level Data")]
     public LevelData levelData;
     public LevelManager levelManager;
@@ -65,14 +54,14 @@ public class LevelLoader : MonoBehaviour
     public Tilemap waterTilemap;
     public TileBase groundTile;
     public TileBase groundRightWallTile;
-    public TileBase wallTile;
-    public TileBase wallVerticalTile;
-    public TileBase wallRightAndRightDownTile;
-    public TileBase wallSurroundedTile;
     public TileBase waterTile;
     public TileBase waterTopGroundTile;
     public TileBase waterRightWallTile;
     public TileBase waterTopGroundRightWallTile;
+
+    [Header("Wall Rendering")]
+    public TileBase wallRuleTile;
+    public TileBase wallSurroundedTile;
 
     [Header("Settings")]
     public float cellSize = 1f;
@@ -517,6 +506,11 @@ public class LevelLoader : MonoBehaviour
             return;
         }
 
+        if (wallRuleTile == null)
+        {
+            Debug.LogError("LevelLoader: wallRuleTile is missing.", this);
+        }
+
         ClearSpawnedObjects();
 
         if (clearTilemapsOnLoad)
@@ -725,67 +719,17 @@ public class LevelLoader : MonoBehaviour
 
     private TileBase GetWallTile(int x, int y)
     {
-        WallTileKind tileKind = GetWallTileKind(x, y);
-
-        if (tileKind == WallTileKind.Surrounded)
+        if (IsSurroundedWall(x, y))
         {
             return GetSurroundedWallTile();
         }
 
-        if (tileKind == WallTileKind.RightAndRightDown)
-        {
-            return GetFallbackTile(wallRightAndRightDownTile, wallTile);
-        }
-
-        if (tileKind == WallTileKind.Vertical)
-        {
-            return GetFallbackTile(wallVerticalTile, wallTile);
-        }
-
-        return wallTile;
-    }
-
-    private WallTileKind GetWallTileKind(int x, int y)
-    {
-        if (IsSurroundedWall(x, y))
-        {
-            return WallTileKind.Surrounded;
-        }
-
-        if (HasWallBelowAndOnBothSides(x, y))
-        {
-            return WallTileKind.Default;
-        }
-
-        if (LevelData.HasNormalCornerWallShape(levelData != null ? levelData.rows : null, x, y))
-        {
-            return WallTileKind.NormalCorner;
-        }
-
-        if (LevelData.HasRightAndRightDownWallShape(levelData != null ? levelData.rows : null, x, y))
-        {
-            return WallTileKind.RightAndRightDown;
-        }
-
-        if (LevelData.HasVerticalWallShape(levelData != null ? levelData.rows : null, x, y))
-        {
-            return WallTileKind.Vertical;
-        }
-
-        return WallTileKind.Default;
-    }
-
-    private bool HasWallBelowAndOnBothSides(int x, int y)
-    {
-        string[] rows = levelData != null ? levelData.rows : null;
-        return LevelData.IsWall(rows, x, y + 1)
-            && LevelData.IsWall(rows, x - 1, y)
-            && LevelData.IsWall(rows, x + 1, y);
+        return wallRuleTile;
     }
 
     private TileBase GetSurroundedWallTile()
     {
-        return GetFallbackTile(wallSurroundedTile, wallTile);
+        return wallSurroundedTile;
     }
 
     private void ApplySurroundedWallTileCorrections(int mapWidth, int mapHeight)
@@ -830,7 +774,7 @@ public class LevelLoader : MonoBehaviour
 
         if (surroundedTile == null)
         {
-            Debug.LogWarning("LevelLoader: wallSurroundedTile and wallTile are both missing.");
+            Debug.LogWarning("LevelLoader: wallSurroundedTile is missing.");
             return;
         }
 
@@ -858,7 +802,6 @@ public class LevelLoader : MonoBehaviour
                     + " mapHash=" + GetLevelMapHash()
                     + ", grid=(" + x + "," + y + ")"
                     + ", cell=" + cellPosition
-                    + ", kind=" + GetWallTileKind(x, y)
                     + ", neighbors=" + GetTileNeighborhoodDebug(x, y)
                     + ", expected=" + GetTileName(surroundedTile)
                     + ", actual=" + GetTileName(actualTile)
