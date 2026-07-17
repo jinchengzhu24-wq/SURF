@@ -34,6 +34,10 @@ Backend/__pycache__/
 # Local essay/reference drafts
 /[Aa]ssets/[Ee]ssay[Bb]ase/
 
+# Local test scenes
+/[Aa]ssets/[Ss]cenes/[Tt]est_1.unity*
+/[Aa]ssets/[Ss]cenes/[Tt]est_2.unity*
+
 # Local font assets
 /[Aa]ssets/[Ff]ont/
 /[Aa]ssets/[Ff]ont.meta
