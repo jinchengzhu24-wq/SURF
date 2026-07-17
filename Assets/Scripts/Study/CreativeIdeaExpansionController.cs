@@ -12,6 +12,9 @@ public class CreativeIdeaExpansionController : MonoBehaviour
     private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
     private const string ExpansionPath = "/expand-creative-idea";
     private const string ExpansionChoicePath = "/record-expansion-choice";
+    private const float DescriptionScrollbarWidth = 10f;
+    private const float DescriptionScrollbarSpacing = 6f;
+    private const float DescriptionTextPadding = 4f;
 
     [Header("Scene UI")]
     public Button submitButton;
@@ -37,6 +40,7 @@ public class CreativeIdeaExpansionController : MonoBehaviour
     private readonly Color normalCardColor = new Color(0.95f, 0.97f, 1f, 1f);
     private readonly Color selectedCardColor = new Color(0.78f, 0.88f, 1f, 1f);
     private readonly Color disabledCardColor = new Color(0.86f, 0.86f, 0.86f, 1f);
+    private readonly ScrollRect[] optionDescriptionScrollRects = new ScrollRect[3];
 
     private CreativeIdeaExpansionOption[] options = new CreativeIdeaExpansionOption[0];
     private string originalIdea = "";
@@ -49,6 +53,7 @@ public class CreativeIdeaExpansionController : MonoBehaviour
     {
         EnsureUiArrays();
         ResolveSceneReferences();
+        EnsureScrollableOptionDescriptions();
         WireButtons();
         LoadOriginalIdea();
         RefreshStaticText();
@@ -202,6 +207,177 @@ public class CreativeIdeaExpansionController : MonoBehaviour
                 }
             }
         }
+    }
+
+    private void EnsureScrollableOptionDescriptions()
+    {
+        for (int i = 0; i < optionDescriptionTexts.Length; i++)
+        {
+            Text descriptionText = optionDescriptionTexts[i];
+
+            if (descriptionText == null)
+            {
+                continue;
+            }
+
+            ScrollRect existingScrollRect = descriptionText.GetComponentInParent<ScrollRect>();
+
+            if (existingScrollRect != null)
+            {
+                optionDescriptionScrollRects[i] = existingScrollRect;
+                continue;
+            }
+
+            optionDescriptionScrollRects[i] = CreateDescriptionScrollRect(descriptionText, i);
+        }
+    }
+
+    private ScrollRect CreateDescriptionScrollRect(Text descriptionText, int optionIndex)
+    {
+        RectTransform textRect = descriptionText.rectTransform;
+        RectTransform originalParent = textRect.parent as RectTransform;
+
+        if (originalParent == null)
+        {
+            return null;
+        }
+
+        int originalSiblingIndex = textRect.GetSiblingIndex();
+        GameObject scrollViewObject = new GameObject(
+            "DescriptionScrollView" + (optionIndex + 1),
+            typeof(RectTransform),
+            typeof(Image),
+            typeof(ScrollRect)
+        );
+        RectTransform scrollViewRect = scrollViewObject.GetComponent<RectTransform>();
+        scrollViewRect.SetParent(originalParent, false);
+        CopyRectTransformLayout(textRect, scrollViewRect);
+        scrollViewRect.SetSiblingIndex(originalSiblingIndex);
+
+        Image scrollViewImage = scrollViewObject.GetComponent<Image>();
+        scrollViewImage.color = Color.clear;
+        scrollViewImage.raycastTarget = true;
+
+        GameObject viewportObject = new GameObject(
+            "Viewport",
+            typeof(RectTransform),
+            typeof(Image),
+            typeof(RectMask2D)
+        );
+        RectTransform viewportRect = viewportObject.GetComponent<RectTransform>();
+        viewportRect.SetParent(scrollViewRect, false);
+        StretchToParent(viewportRect);
+        viewportRect.offsetMax = new Vector2(
+            -(DescriptionScrollbarWidth + DescriptionScrollbarSpacing),
+            0f
+        );
+
+        Image viewportImage = viewportObject.GetComponent<Image>();
+        viewportImage.color = Color.clear;
+        viewportImage.raycastTarget = true;
+
+        textRect.SetParent(viewportRect, false);
+        ConfigureDescriptionText(descriptionText);
+
+        Scrollbar verticalScrollbar = CreateDescriptionScrollbar(scrollViewRect);
+        ScrollRect scrollRect = scrollViewObject.GetComponent<ScrollRect>();
+        scrollRect.viewport = viewportRect;
+        scrollRect.content = textRect;
+        scrollRect.horizontal = false;
+        scrollRect.vertical = true;
+        scrollRect.movementType = ScrollRect.MovementType.Clamped;
+        scrollRect.inertia = true;
+        scrollRect.scrollSensitivity = 32f;
+        scrollRect.verticalScrollbar = verticalScrollbar;
+        scrollRect.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
+        scrollRect.horizontalScrollbar = null;
+
+        return scrollRect;
+    }
+
+    private void ConfigureDescriptionText(Text descriptionText)
+    {
+        RectTransform textRect = descriptionText.rectTransform;
+        textRect.anchorMin = new Vector2(0f, 1f);
+        textRect.anchorMax = new Vector2(1f, 1f);
+        textRect.pivot = new Vector2(0f, 1f);
+        textRect.anchoredPosition = new Vector2(DescriptionTextPadding, 0f);
+        textRect.sizeDelta = new Vector2(-DescriptionTextPadding * 2f, textRect.sizeDelta.y);
+
+        descriptionText.horizontalOverflow = HorizontalWrapMode.Wrap;
+        descriptionText.verticalOverflow = VerticalWrapMode.Overflow;
+
+        ContentSizeFitter sizeFitter = descriptionText.GetComponent<ContentSizeFitter>();
+
+        if (sizeFitter == null)
+        {
+            sizeFitter = descriptionText.gameObject.AddComponent<ContentSizeFitter>();
+        }
+
+        sizeFitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+        sizeFitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+    }
+
+    private Scrollbar CreateDescriptionScrollbar(RectTransform scrollViewRect)
+    {
+        GameObject scrollbarObject = new GameObject(
+            "VerticalScrollbar",
+            typeof(RectTransform),
+            typeof(Image),
+            typeof(Scrollbar)
+        );
+        RectTransform scrollbarRect = scrollbarObject.GetComponent<RectTransform>();
+        scrollbarRect.SetParent(scrollViewRect, false);
+        scrollbarRect.anchorMin = new Vector2(1f, 0f);
+        scrollbarRect.anchorMax = new Vector2(1f, 1f);
+        scrollbarRect.pivot = new Vector2(1f, 0.5f);
+        scrollbarRect.anchoredPosition = Vector2.zero;
+        scrollbarRect.sizeDelta = new Vector2(DescriptionScrollbarWidth, 0f);
+
+        Image trackImage = scrollbarObject.GetComponent<Image>();
+        trackImage.color = new Color(0.08f, 0.12f, 0.18f, 0.18f);
+        trackImage.raycastTarget = true;
+
+        GameObject handleObject = new GameObject(
+            "Handle",
+            typeof(RectTransform),
+            typeof(Image)
+        );
+        RectTransform handleRect = handleObject.GetComponent<RectTransform>();
+        handleRect.SetParent(scrollbarRect, false);
+        StretchToParent(handleRect);
+
+        Image handleImage = handleObject.GetComponent<Image>();
+        handleImage.color = new Color(0.1f, 0.35f, 0.75f, 0.85f);
+        handleImage.raycastTarget = true;
+
+        Scrollbar scrollbar = scrollbarObject.GetComponent<Scrollbar>();
+        scrollbar.direction = Scrollbar.Direction.BottomToTop;
+        scrollbar.targetGraphic = handleImage;
+        scrollbar.handleRect = handleRect;
+        scrollbar.size = 1f;
+
+        return scrollbar;
+    }
+
+    private void CopyRectTransformLayout(RectTransform source, RectTransform target)
+    {
+        target.anchorMin = source.anchorMin;
+        target.anchorMax = source.anchorMax;
+        target.pivot = source.pivot;
+        target.anchoredPosition = source.anchoredPosition;
+        target.sizeDelta = source.sizeDelta;
+        target.localRotation = source.localRotation;
+        target.localScale = source.localScale;
+    }
+
+    private void StretchToParent(RectTransform rectTransform)
+    {
+        rectTransform.anchorMin = Vector2.zero;
+        rectTransform.anchorMax = Vector2.one;
+        rectTransform.pivot = new Vector2(0.5f, 0.5f);
+        rectTransform.anchoredPosition = Vector2.zero;
+        rectTransform.sizeDelta = Vector2.zero;
     }
 
     private Text FindText(string objectName)
@@ -442,7 +618,32 @@ public class CreativeIdeaExpansionController : MonoBehaviour
             }
         }
 
+        ResetOptionDescriptionScrollPositions();
         UpdateOptionVisuals();
+    }
+
+    private void ResetOptionDescriptionScrollPositions()
+    {
+        for (int i = 0; i < optionDescriptionTexts.Length; i++)
+        {
+            if (optionDescriptionTexts[i] != null)
+            {
+                LayoutRebuilder.ForceRebuildLayoutImmediate(optionDescriptionTexts[i].rectTransform);
+            }
+        }
+
+        Canvas.ForceUpdateCanvases();
+
+        for (int i = 0; i < optionDescriptionScrollRects.Length; i++)
+        {
+            ScrollRect scrollRect = optionDescriptionScrollRects[i];
+
+            if (scrollRect != null)
+            {
+                scrollRect.verticalNormalizedPosition = 1f;
+                scrollRect.StopMovement();
+            }
+        }
     }
 
     private void SelectOption(int index)
