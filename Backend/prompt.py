@@ -302,9 +302,17 @@ EXPANSION_SYSTEM_PROMPT = (
     "You are a Sokoban design assistant. Expand a player's rough level idea "
     "into exactly three distinct, playable high-level design directions for a "
     "classic 12x10 Sokoban level with exactly 2 boxes. Every option must be "
-    "specific to the player's idea, not a generic template. Do not generate map "
-    "rows, tile grids, coordinates, markdown, or explanations outside JSON. "
-    "Return only valid JSON."
+    "specific to the player's idea, not a generic template. The expansion shown "
+    "to the player is a promise about the level that can actually be generated, "
+    "so describe only observable results supported by the current generator. "
+    "First identify the player's core desired experience internally. If the "
+    "literal idea uses unsupported mechanics, translate them into supported "
+    "classic Sokoban spatial pressure such as route choice, bottlenecks, wall "
+    "obstacles, rectangular water areas, target placement, standing-position "
+    "pressure, or box order. All three options must preserve that same core "
+    "experience while offering three different supported spatial implementations. "
+    "Do not output your analysis. Do not generate map rows, tile grids, coordinates, "
+    "markdown, or explanations outside JSON. Return only valid JSON."
 )
 
 
@@ -360,9 +368,20 @@ def build_creative_idea_expansion_messages(creative_context):
         "]}. "
         "title must be short and tailored to this idea. description must be one "
         "or two concrete player-facing sentences describing how the idea appears "
-        "in the level. promptText is hidden from the player and should be a "
-        "compact generation instruction that combines the original idea with "
-        "the option's specific route, obstacle, target, and difficulty intent."
+        "in the level, and may mention only features that can actually appear on "
+        "the generated board. When an unsupported part of the original idea was "
+        "adapted, end description with a separate localized sentence equivalent "
+        "to 'Adaptation: convert X into Y' (for Chinese, use '适配：将 X 转换为 Y'). "
+        "Omit that sentence when no adaptation is needed. promptText is hidden "
+        "from the player and is an implementation contract for the downstream "
+        "blueprint generator, not another creative-writing prompt. It must state "
+        "the intended archetype, target layout, obstacle pattern, water usage, "
+        "corridor usage, and box-order pressure concretely, using only supported "
+        "structure vocabulary from the capability contract. Do not reintroduce "
+        "an unsupported mechanic in promptText. Before returning JSON, silently "
+        "check that each title, description, and promptText describes the same "
+        "supported implementation and that all three retain the same core player "
+        "experience while differing in spatial realization."
     )
 
     return [
@@ -509,7 +528,17 @@ def build_prioritized_creative_context_prompt(
         )
 
     if selected_direction:
-        parts.append(f'Selected design direction: "{selected_direction}". ')
+        parts.append(
+            f'Selected design direction: "{selected_direction}". This direction '
+            "has already been shown to and selected by the user. Treat every "
+            "supported structural statement in it as an implementation requirement, "
+            "not as inspiration. Do not reinterpret, embellish, or replace it with "
+            "a different design direction. Only the latest user adjustment may "
+            "override it. Before returning JSON, silently verify that the archetype, "
+            "targetLayout, obstacleStyle, waterStyle, corridor fields, and box-order "
+            "pressure preserve the selected direction wherever the schema can "
+            "represent them. "
+        )
 
     if original_idea:
         parts.append(f'Original user idea: "{original_idea}". ')
