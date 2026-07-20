@@ -12,6 +12,7 @@ public class QuestionnaireController : MonoBehaviour
     private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
     private const string SurveyResponsePath = "/record-survey-response";
     private const string SessionPrefsKey = "SokobanSurveySessionId";
+    private const string PlayerNamePrefsKey = "SokobanSurveyPlayerName";
     private const int RequiredAnswerCount = 3;
 
     [Header("Survey")]
@@ -25,6 +26,8 @@ public class QuestionnaireController : MonoBehaviour
     public InputField playerNameInput;
 
     [Header("Player Name Input")]
+    public bool requirePlayerName = true;
+    public bool startsSurveyPair;
     public Font pixelFont;
     public string playerNamePlaceholder = "Enter your nickname";
     [Min(0)]
@@ -43,6 +46,11 @@ public class QuestionnaireController : MonoBehaviour
 
     private void Awake()
     {
+        if (startsSurveyPair)
+        {
+            BeginSurveyPair();
+        }
+
         startedAt = Time.realtimeSinceStartup;
     }
 
@@ -245,7 +253,7 @@ public class QuestionnaireController : MonoBehaviour
             return false;
         }
 
-        return !IsBlank(PlayerNameValue);
+        return !requirePlayerName || !IsBlank(PlayerNameValue);
     }
 
     private void OnPlayerNameChanged(string value)
@@ -260,6 +268,7 @@ public class QuestionnaireController : MonoBehaviour
             return;
         }
 
+        SavePlayerName();
         StartCoroutine(SubmitRoutine());
     }
 
@@ -374,6 +383,24 @@ public class QuestionnaireController : MonoBehaviour
         return sessionId;
     }
 
+    private void BeginSurveyPair()
+    {
+        PlayerPrefs.SetString(SessionPrefsKey, Guid.NewGuid().ToString("N"));
+        PlayerPrefs.DeleteKey(PlayerNamePrefsKey);
+        PlayerPrefs.Save();
+    }
+
+    private void SavePlayerName()
+    {
+        if (playerNameInput == null || IsBlank(playerNameInput.text))
+        {
+            return;
+        }
+
+        PlayerPrefs.SetString(PlayerNamePrefsKey, playerNameInput.text.Trim());
+        PlayerPrefs.Save();
+    }
+
     private string GetCreativeIdeaId()
     {
         return !string.IsNullOrEmpty(CreativeWorkshopContext.IdeaId)
@@ -393,9 +420,12 @@ public class QuestionnaireController : MonoBehaviour
     {
         get
         {
-            return playerNameInput != null && playerNameInput.text != null
-                ? playerNameInput.text.Trim()
-                : "";
+            if (playerNameInput != null && !IsBlank(playerNameInput.text))
+            {
+                return playerNameInput.text.Trim();
+            }
+
+            return PlayerPrefs.GetString(PlayerNamePrefsKey, "").Trim();
         }
     }
 

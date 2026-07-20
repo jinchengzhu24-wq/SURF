@@ -4,7 +4,7 @@ using UnityEngine.SceneManagement;
 public class MenuController : MonoBehaviour
 {
     public string targetSceneName = "Algorithm_Level";
-    public string creativeWorkshopSceneName = "Creative_WorkShop";
+    public string creativeWorkshopSceneName = "Questionnaire(Before)";
 
     public void StartGame()
     {

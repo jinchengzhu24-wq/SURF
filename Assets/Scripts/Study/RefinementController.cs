@@ -17,7 +17,7 @@ public class RefinementController : MonoBehaviour
     public int passScoreThreshold = 6;
 
     [Header("Flow")]
-    public string questionnaireSceneName = "Questionnaire";
+    public string questionnaireSceneName = "Questionnaire(After)";
     public string retrySceneName = "Adjustment";
     public string designInterpretationSceneName = "Design interpretation";
 
