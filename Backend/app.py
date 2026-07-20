@@ -621,6 +621,12 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         idea_records, _ = read_creative_idea_events()
         choice_records, _ = read_expansion_choice_events()
         survey_records, _ = read_survey_response_events()
+        paired_survey_session_ids = {
+            normalize_survey_identifier(record.get("sessionId"))
+            for record in survey_records
+            if normalize_creative_idea_identifier(record.get("creativeIdeaId")) == idea_id
+            and normalize_survey_identifier(record.get("sessionId"))
+        }
 
         remaining_level_records = [
             record for record in level_records
@@ -637,6 +643,8 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         remaining_survey_records = [
             record for record in survey_records
             if normalize_creative_idea_identifier(record.get("creativeIdeaId")) != idea_id
+            and normalize_survey_identifier(record.get("sessionId"))
+            not in paired_survey_session_ids
         ]
 
         deleted_level_event_count = len(level_records) - len(remaining_level_records)

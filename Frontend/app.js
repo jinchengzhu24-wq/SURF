@@ -742,7 +742,8 @@ async function getResponseError(response) {
 }
 
 function renderSurveyTable() {
-    const responses = (state.payload && state.payload.surveyResponses) || [];
+    const rawResponses = (state.payload && state.payload.surveyResponses) || [];
+    const responses = groupSurveyResponses(rawResponses);
     elements.surveyBody.textContent = "";
     elements.surveyCount.textContent = responses.length + " shown";
 
@@ -802,6 +803,76 @@ function renderSurveyTable() {
 
         elements.surveyBody.appendChild(row);
     });
+}
+
+function groupSurveyResponses(responses) {
+    const groups = new Map();
+
+    responses.forEach((response, index) => {
+        const sessionId = normalizeSurveyDeleteText(response && response.sessionId);
+        const responseId = normalizeSurveyDeleteText(response && response.responseId);
+        const key = sessionId
+            ? "session:" + sessionId
+            : "response:" + (responseId || String(index));
+
+        if (!groups.has(key)) {
+            groups.set(key, []);
+        }
+
+        groups.get(key).push(response);
+    });
+
+    return Array.from(groups.values())
+        .map(mergeSurveyResponseGroup)
+        .sort((left, right) => getSurveyResponseTimestamp(right)
+            .localeCompare(getSurveyResponseTimestamp(left)));
+}
+
+function mergeSurveyResponseGroup(responses) {
+    const ordered = responses.slice().sort((left, right) =>
+        getSurveyResponseTimestamp(left).localeCompare(getSurveyResponseTimestamp(right))
+    );
+    const merged = Object.assign({}, ...ordered);
+    const answersByQuestion = new Map();
+
+    ordered.forEach(response => {
+        const answers = response && Array.isArray(response.answerDetails)
+            ? response.answerDetails
+            : response && Array.isArray(response.answers)
+                ? response.answers
+                : [];
+
+        answers.forEach(answer => {
+            answersByQuestion.set(String(answer.questionIndex), answer);
+        });
+    });
+
+    merged.answerDetails = Array.from(answersByQuestion.values()).sort((left, right) =>
+        Number(left.questionIndex) - Number(right.questionIndex)
+    );
+    merged.answersSummary = "";
+
+    const responseWithIdea = ordered.slice().reverse().find(response =>
+        getSurveyIdeaId(response)
+    );
+
+    if (responseWithIdea) {
+        merged.creativeIdeaId = getSurveyIdeaId(responseWithIdea);
+        merged.ideaHash = responseWithIdea.ideaHash || responseWithIdea.creativeIdeaHash;
+    }
+
+    const nickname = ordered.map(getSurveyNickname).find(Boolean);
+
+    if (nickname) {
+        merged.playerNickname = nickname;
+        merged.playerName = nickname;
+    }
+
+    return merged;
+}
+
+function getSurveyResponseTimestamp(response) {
+    return String(response && (response.serverReceivedAt || response.timestamp) || "");
 }
 
 function deleteSurveyResponse(response) {
