@@ -18,7 +18,7 @@ public class RefinementController : MonoBehaviour
 
     [Header("Flow")]
     public string questionnaireSceneName = "Questionnaire(After)";
-    public string retrySceneName = "Adjustment";
+    public string retrySceneName = "Adjustment(AI)";
     public string designInterpretationSceneName = "Design interpretation";
 
     [Header("Retry Prompt")]

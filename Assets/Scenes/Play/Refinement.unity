@@ -2022,7 +2022,7 @@ MonoBehaviour:
   requiredQuestionCount: 3
   passScoreThreshold: 6
   questionnaireSceneName: Questionnaire(After)
-  retrySceneName: Adjustment
+  retrySceneName: Adjustment(AI)
   designInterpretationSceneName: Design interpretation
   retryPrompt: Refinement feedback - the previous level was not satisfactory; generate
     a stricter version that follows the selected direction and original idea more
