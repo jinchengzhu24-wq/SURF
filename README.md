@@ -26,9 +26,30 @@ LLM 模式从质量最高的三张合格候选中等概率随机选择一张
 若本轮至少一份真实蓝图有效、但所有模板落实均失败，清除蓝图约束并运行一次算法降级
 ```
 
-### 问卷流程
+### 场景游玩路线
 
-正式流程为 `Menu → Questionnaire(Before) → Creative_WorkShop → … → Refinement`。Refinement 分数达标后进入 `Questionnaire(After)`，否则返回 Adjustment。Before 要求输入昵称并记录 Q1–Q3；After 无昵称输入框，自动沿用 Before 的昵称并记录 Q4–Q6。两次提交在原始日志中保持独立，但前端 Survey Responses 会按相同 `sessionId` 合并为一行，并按 Q1–Q6 顺序展示。
+正式创作与研究流程：
+
+```text
+Menu → Questionnaire(Before) → Creative_WorkShop → Expansion → Custom_Level → Refinement
+```
+
+Refinement 分数达标后的路线：
+
+```text
+Refinement → Questionnaire(After) → Menu
+```
+
+Refinement 分数未达标时进入调整循环：
+
+```text
+Refinement → Adjustment → Custom_Level → Refinement
+```
+
+```text
+Refinement → Design interpretation → Refinement
+Adjustment → Design interpretation → Adjustment
+```
 
 ## 1. 请求上下文
 
