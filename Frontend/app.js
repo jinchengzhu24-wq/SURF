@@ -15,6 +15,7 @@ const DASHBOARD_LEVEL_SCENE_NAME = "Custom_Level";
 const state = {
     apiBase: resolveApiBase(),
     payload: null,
+    ideaHashQuery: "",
     filteredRounds: [],
     filteredLevels: [],
     selectedRunId: null
@@ -92,8 +93,21 @@ function wireLinks() {
 function wireEvents() {
     elements.refreshButton.addEventListener("click", () => loadData(true));
     elements.clearButton.addEventListener("click", clearRecords);
-    elements.searchInput.addEventListener("input", applyFilters);
+    elements.searchInput.addEventListener("input", handleIdeaHashInput);
     elements.statusFilter.addEventListener("change", applyFilters);
+}
+
+function handleIdeaHashInput() {
+    const nextQuery = elements.searchInput.value.trim().toLowerCase();
+
+    if (!/^[0-9a-f]{0,8}$/.test(nextQuery)) {
+        elements.searchInput.value = state.ideaHashQuery;
+        return;
+    }
+
+    state.ideaHashQuery = nextQuery;
+    elements.searchInput.value = nextQuery;
+    applyFilters();
 }
 
 async function loadData(manual) {
@@ -112,9 +126,6 @@ async function loadData(manual) {
 
         renderSummary(state.payload.summary || {});
         applyFilters();
-        renderCreativeIdeasTable();
-        renderExpansionChoicesTable();
-        renderSurveyTable();
         setStatus("Last loaded " + formatTimestamp(state.payload.generatedAt));
         elements.dataSource.textContent = "API: " + state.apiBase;
     } catch (error) {
@@ -276,16 +287,24 @@ function applyFilters() {
         return;
     }
 
-    const search = elements.searchInput.value.trim().toLowerCase();
+    const ideaHashQuery = state.ideaHashQuery;
     const status = elements.statusFilter.value;
     const allRounds = getAllRounds();
+    const creativeIdeas = (state.payload.creativeIdeas || []).filter(idea =>
+        ideaHashMatches(getCreativeIdeaHash(idea), ideaHashQuery)
+    );
+    const expansionChoices = (state.payload.creativeExpansionChoices || []).filter(choice =>
+        ideaHashMatches(getExpansionChoiceIdeaHash(choice), ideaHashQuery)
+    );
+    const surveyResponses = groupSurveyResponses(state.payload.surveyResponses || [])
+        .filter(response => ideaHashMatches(getSurveyIdeaHash(response), ideaHashQuery));
 
     state.filteredRounds = [];
     state.filteredLevels = [];
 
     allRounds.forEach(round => {
         const matchingLevels = (round.levels || []).filter(level => (
-            levelMatchesFilters(level, round, search, status)
+            levelMatchesFilters(level, ideaHashQuery, status)
         ));
 
         if (matchingLevels.length === 0) {
@@ -298,6 +317,9 @@ function applyFilters() {
     });
 
     renderTable();
+    renderCreativeIdeasTable(creativeIdeas);
+    renderExpansionChoicesTable(expansionChoices);
+    renderSurveyTable(surveyResponses);
     keepOrSelectFirst();
 }
 
@@ -389,34 +411,19 @@ function summarizeLevels(levels) {
     return summary;
 }
 
-function levelMatchesFilters(level, round, search, status) {
-    const start = level.start || {};
-    const end = level.end || {};
-    const structure = start.structure || {};
+function levelMatchesFilters(level, ideaHashQuery, status) {
     const rowStatus = getStatusKey(level);
-    const ideaHash = getLevelIdeaHash(level);
-    const haystack = [
-        round.roundId,
-        round.displayName,
-        round.shortId,
-        (round.sceneNames || []).join(" "),
-        level.levelRunId,
-        start.gameRoundId,
-        end.gameRoundId,
-        start.roundLevelIndex,
-        end.roundLevelIndex,
-        start.levelIndex,
-        end.levelIndex,
-        getLevelDisplayName(level),
-        ideaHash,
-        structure.mapHash
-    ].join(" ").toLowerCase();
 
     if (status !== "all" && rowStatus !== status) {
         return false;
     }
 
-    return !search || haystack.includes(search);
+    return ideaHashMatches(getLevelIdeaHash(level), ideaHashQuery);
+}
+
+function ideaHashMatches(ideaHash, ideaHashQuery) {
+    return !ideaHashQuery
+        || String(ideaHash || "").toLowerCase().startsWith(ideaHashQuery);
 }
 
 function renderTable() {
@@ -445,8 +452,7 @@ function renderTable() {
     });
 }
 
-function renderCreativeIdeasTable() {
-    const ideas = (state.payload && state.payload.creativeIdeas) || [];
+function renderCreativeIdeasTable(ideas) {
     elements.creativeIdeasBody.textContent = "";
     elements.creativeIdeaCount.textContent = ideas.length + " shown";
 
@@ -455,7 +461,7 @@ function renderCreativeIdeasTable() {
         const cell = document.createElement("td");
         cell.colSpan = 4;
         cell.className = "empty-state";
-        cell.textContent = "No creative workshop ideas yet.";
+        cell.textContent = "No matching creative workshop ideas.";
         row.appendChild(cell);
         elements.creativeIdeasBody.appendChild(row);
         return;
@@ -507,8 +513,7 @@ function renderCreativeIdeasTable() {
     });
 }
 
-function renderExpansionChoicesTable() {
-    const choices = (state.payload && state.payload.creativeExpansionChoices) || [];
+function renderExpansionChoicesTable(choices) {
     elements.expansionChoicesBody.textContent = "";
     elements.expansionChoiceCount.textContent = choices.length + " shown";
 
@@ -517,7 +522,7 @@ function renderExpansionChoicesTable() {
         const cell = document.createElement("td");
         cell.colSpan = 5;
         cell.className = "empty-state";
-        cell.textContent = "No expansion choices yet.";
+        cell.textContent = "No matching expansion choices.";
         row.appendChild(cell);
         elements.expansionChoicesBody.appendChild(row);
         return;
@@ -741,9 +746,7 @@ async function getResponseError(response) {
     return "HTTP " + response.status;
 }
 
-function renderSurveyTable() {
-    const rawResponses = (state.payload && state.payload.surveyResponses) || [];
-    const responses = groupSurveyResponses(rawResponses);
+function renderSurveyTable(responses) {
     elements.surveyBody.textContent = "";
     elements.surveyCount.textContent = responses.length + " shown";
 
@@ -752,7 +755,7 @@ function renderSurveyTable() {
         const cell = document.createElement("td");
         cell.colSpan = 5;
         cell.className = "empty-state";
-        cell.textContent = "No survey responses yet.";
+        cell.textContent = "No matching survey responses.";
         row.appendChild(cell);
         elements.surveyBody.appendChild(row);
         return;

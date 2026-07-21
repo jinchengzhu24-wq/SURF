@@ -70,7 +70,9 @@
 
             <section class="controls" aria-label="Filters">
                 <label class="field">
-                    <input id="searchInput" type="search" placeholder="Search round, level, idea hash, map hash">
+                    <input id="searchInput" type="search" maxlength="8" pattern="[0-9a-fA-F]{0,8}"
+                        autocomplete="off" spellcheck="false" aria-label="Filter by Idea Hash"
+                        placeholder="Filter by 8-character Idea Hash">
                 </label>
                 <label class="field">
                     <select id="statusFilter">
