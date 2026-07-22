@@ -284,10 +284,10 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 'For example:
+  m_Text: 'Hint:
 
-    Add a one-tile-wide central corridor, separate the two
-    goals, and require more pushes without adding more water.'
+    Add a one-tile-wide central corridor, separate the two goals,
+    and require more pushes without adding more water.'
 --- !u!222 &466074378
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2498,9 +2498,11 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Describe exactly what is wrong with the level and specify the changes you
-    want. You decide the revision direction; the AI will only translate your instructions
-    into a new level.
+  m_Text: 'Your description of the level is too vague. Please provide more details
+    about the aspects you have already described or include additional dimensions
+    in your description.
+
+'
 --- !u!222 &1668752551
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2637,14 +2639,14 @@ MonoBehaviour:
   submitButton: {fileID: 2300000119}
   detailButton: {fileID: 2300000204}
   statusText: {fileID: 0}
-  clarificationGuidanceText: {fileID: 0}
+  clarificationGuidanceText: {fileID: 1668752550}
   adjustmentPlaceholder: Describe how the level should be adjusted
   adjustmentCharacterLimit: 240
   customLevelSceneName: Custom_Level
   designInterpretationSceneName: Design interpretation
   revisionMode: human
   validateHumanClarity: 1
-  loadPendingHumanAdjustment: 0
+  loadPendingHumanAdjustment: 1
   clarificationSceneName: Clarification(Human)
   humanClarityEndpoint: http://111.231.136.4:8000/validate-human-adjustment
   clarityRequestTimeoutSeconds: 30
@@ -2905,7 +2907,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Adjustment(Human)
+  m_Text: Clarification(Human)
 --- !u!114 &2300000005
 MonoBehaviour:
   m_ObjectHideFlags: 0

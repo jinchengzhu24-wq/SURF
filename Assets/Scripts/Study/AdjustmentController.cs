@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using UnityEngine;
+using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
@@ -10,6 +12,7 @@ public class AdjustmentController : MonoBehaviour
     public Button submitButton;
     public Button detailButton;
     public Text statusText;
+    public Text clarificationGuidanceText;
 
     [Header("Input")]
     public string adjustmentPlaceholder = "Describe how the level should be adjusted";
@@ -19,12 +22,23 @@ public class AdjustmentController : MonoBehaviour
     [Header("Flow")]
     public string customLevelSceneName = "Custom_Level";
     public string designInterpretationSceneName = "Design interpretation";
+    public string revisionMode = "";
+    public bool validateHumanClarity;
+    public bool loadPendingHumanAdjustment;
+    public string clarificationSceneName = "Clarification(Human)";
+    public string humanClarityEndpoint = "http://111.231.136.4:8000/validate-human-adjustment";
+    public int clarityRequestTimeoutSeconds = 30;
     public bool logAdjustmentEvents = true;
+
+    private bool isSubmitting;
+    private UnityWebRequest activeClarityRequest;
 
     private void Start()
     {
         ResolveSceneReferences();
         ConfigureInput();
+        ConfigureRevisionMode();
+        RestorePendingHumanAdjustment();
         WireButtons();
         SetStatus("");
         UpdateSubmitState();
@@ -35,6 +49,13 @@ public class AdjustmentController : MonoBehaviour
         if (adjustmentInput != null)
         {
             adjustmentInput.onValueChanged.RemoveListener(OnAdjustmentChanged);
+        }
+
+        if (activeClarityRequest != null)
+        {
+            activeClarityRequest.Abort();
+            activeClarityRequest.Dispose();
+            activeClarityRequest = null;
         }
     }
 
@@ -101,6 +122,50 @@ public class AdjustmentController : MonoBehaviour
         }
     }
 
+    private void ConfigureRevisionMode()
+    {
+        if (string.IsNullOrWhiteSpace(revisionMode))
+        {
+            string sceneName = SceneManager.GetActiveScene().name.ToLowerInvariant();
+            revisionMode = sceneName.Contains("(human)")
+                ? "human"
+                : sceneName.Contains("(ai)") ? "ai"
+                : sceneName.Contains("(ha)") ? "ha" : "";
+        }
+
+        CreativeWorkshopContext.SetRevisionMode(revisionMode);
+    }
+
+    private void RestorePendingHumanAdjustment()
+    {
+        if (!loadPendingHumanAdjustment)
+        {
+            return;
+        }
+
+        string pendingText = PlayerPrefs.GetString(
+            CreativeWorkshopContext.PendingHumanAdjustmentPrefsKey,
+            ""
+        );
+
+        if (adjustmentInput != null && !string.IsNullOrWhiteSpace(pendingText))
+        {
+            adjustmentInput.text = pendingText;
+        }
+
+        string reason = PlayerPrefs.GetString(
+            CreativeWorkshopContext.HumanClarityReasonPrefsKey,
+            ""
+        );
+
+        if (clarificationGuidanceText != null && !string.IsNullOrWhiteSpace(reason))
+        {
+            clarificationGuidanceText.text = "Your revision needs clarification.\n\n"
+                + reason.Trim()
+                + "\n\nPlease state what should change, how it should change, and what should remain unchanged.";
+        }
+    }
+
     private void WireButtons()
     {
         if (submitButton != null)
@@ -133,7 +198,7 @@ public class AdjustmentController : MonoBehaviour
     {
         if (submitButton != null)
         {
-            submitButton.interactable = !string.IsNullOrEmpty(AdjustmentText);
+            submitButton.interactable = !isSubmitting && !string.IsNullOrEmpty(AdjustmentText);
         }
     }
 
@@ -145,6 +210,116 @@ public class AdjustmentController : MonoBehaviour
         {
             return;
         }
+
+        if (validateHumanClarity)
+        {
+            StartCoroutine(ValidateHumanAdjustmentRoutine(adjustmentText));
+            return;
+        }
+
+        AcceptAdjustmentAndContinue(adjustmentText);
+    }
+
+    private IEnumerator ValidateHumanAdjustmentRoutine(string adjustmentText)
+    {
+        isSubmitting = true;
+        UpdateSubmitState();
+        SetStatus("Checking whether the revision instruction is specific enough...");
+
+        string separator = humanClarityEndpoint.Contains("?") ? "&" : "?";
+        string url = humanClarityEndpoint
+            + separator
+            + "adjustmentText="
+            + Uri.EscapeDataString(adjustmentText);
+        activeClarityRequest = UnityWebRequest.Get(url);
+        activeClarityRequest.timeout = Mathf.Max(1, clarityRequestTimeoutSeconds);
+        yield return activeClarityRequest.SendWebRequest();
+
+        if (activeClarityRequest.result != UnityWebRequest.Result.Success)
+        {
+            Debug.LogWarning(
+                "AdjustmentController: Human clarity validation failed: "
+                + activeClarityRequest.error
+                + ", responseCode="
+                + activeClarityRequest.responseCode
+            );
+            activeClarityRequest.Dispose();
+            activeClarityRequest = null;
+            isSubmitting = false;
+            SetStatus("Clarity check failed. Please try again.");
+            UpdateSubmitState();
+            yield break;
+        }
+
+        HumanAdjustmentClarityResult result = null;
+
+        try
+        {
+            result = JsonUtility.FromJson<HumanAdjustmentClarityResult>(
+                activeClarityRequest.downloadHandler.text
+            );
+        }
+        catch (Exception exception)
+        {
+            Debug.LogWarning(
+                "AdjustmentController: Could not parse Human clarity result: "
+                + exception.Message
+            );
+        }
+
+        activeClarityRequest.Dispose();
+        activeClarityRequest = null;
+        isSubmitting = false;
+
+        if (result == null)
+        {
+            SetStatus("Clarity check returned an invalid response. Please try again.");
+            UpdateSubmitState();
+            yield break;
+        }
+
+        if (!result.isClear)
+        {
+            string clarificationFeedback = BuildClarificationFeedback(result);
+            CreativeWorkshopContext.SetPendingHumanAdjustment(
+                adjustmentText,
+                clarificationFeedback
+            );
+
+            if (logAdjustmentEvents)
+            {
+                Debug.Log(
+                    "Human adjustment needs clarification:"
+                    + " totalScore=" + result.totalScore + "/8"
+                    + ", targetScore=" + result.targetScore
+                    + ", directionScore=" + result.directionScore
+                );
+            }
+
+            LoadScene(clarificationSceneName);
+            yield break;
+        }
+
+        AcceptAdjustmentAndContinue(adjustmentText);
+    }
+
+    private string BuildClarificationFeedback(HumanAdjustmentClarityResult result)
+    {
+        return "Clarity score: " + result.totalScore + "/8"
+            + " (problem " + result.problemScore + "/2"
+            + ", target " + result.targetScore + "/2"
+            + ", direction " + result.directionScore + "/2"
+            + ", detail " + result.detailScore + "/2)."
+            + " Pass condition: total at least 4/8, target at least 1/2,"
+            + " and direction at least 1/2. "
+            + CleanText(result.reason);
+    }
+
+    private void AcceptAdjustmentAndContinue(string adjustmentText)
+    {
+        CreativeWorkshopContext.SetRevisionMode(revisionMode);
+        CapturePreviousLevelPlan();
+        CreativeWorkshopContext.ClearPendingHumanAdjustment();
 
         string ideaId = GetContextValue(
             CreativeWorkshopContext.IdeaId,
@@ -178,6 +353,20 @@ public class AdjustmentController : MonoBehaviour
         }
 
         LoadScene(customLevelSceneName);
+    }
+
+    private void CapturePreviousLevelPlan()
+    {
+        LevelDesignPlan previousPlan;
+
+        if (LevelDesignPlanContext.TryGetPlan(out previousPlan) && previousPlan != null)
+        {
+            CreativeWorkshopContext.SetPreviousLevelPlan(JsonUtility.ToJson(previousPlan));
+        }
+        else
+        {
+            CreativeWorkshopContext.SetPreviousLevelPlan("");
+        }
     }
 
     private string BuildAdjustedIdeaText(string currentIdeaText, string adjustmentText)
@@ -267,4 +456,16 @@ public class AdjustmentController : MonoBehaviour
                 : "";
         }
     }
+}
+
+[Serializable]
+public class HumanAdjustmentClarityResult
+{
+    public int problemScore;
+    public int targetScore;
+    public int directionScore;
+    public int detailScore;
+    public int totalScore;
+    public bool isClear;
+    public string reason;
 }

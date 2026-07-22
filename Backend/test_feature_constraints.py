@@ -1,7 +1,12 @@
 import unittest
 
-from Backend.app import DEFAULT_PLAN, validate_plan
+from Backend.app import (
+    DEFAULT_PLAN,
+    validate_human_adjustment_clarity_payload,
+    validate_plan,
+)
 from Backend.prompt import (
+    build_human_adjustment_clarity_messages,
     build_level_plan_messages,
     resolve_zero_feature_constraints,
 )
@@ -133,6 +138,61 @@ class FeatureConstraintTests(unittest.TestCase):
         self.assertIn("minWaterAreas=0", user_prompt)
         self.assertIn("minWallObstacleBlocks=0", user_prompt)
         self.assertIn("corridorPlacement=none", user_prompt)
+
+    def test_human_mode_uses_user_directed_minimum_change_prompt(self):
+        context = {
+            "revisionMode": "human",
+            "latestAdjustmentText": "Separate the goals and keep the water unchanged.",
+            "previousLevelPlan": '{"archetype":"goal_room"}',
+        }
+        messages = build_level_plan_messages(1, "none", context)
+        user_prompt = messages[1]["content"]
+
+        self.assertIn("Revision authority mode: HUMAN-led", user_prompt)
+        self.assertIn("constraint translator", user_prompt)
+        self.assertIn("minimum field changes", user_prompt)
+        self.assertIn("User-directed revision:", user_prompt)
+
+    def test_ai_mode_uses_feedback_and_diagnostic_context(self):
+        context = {
+            "revisionMode": "ai",
+            "latestAdjustmentText": "The level was too easy.",
+            "previousLevelPlan": '{"archetype":"open_workshop"}',
+            "previousLevelMetrics": '{"solverSolutionSteps":18,"restartCount":0}',
+        }
+        messages = build_level_plan_messages(1, "none", context)
+        user_prompt = messages[1]["content"]
+
+        self.assertIn("Revision authority mode: AI-led", user_prompt)
+        self.assertIn("diagnostic evidence", user_prompt)
+        self.assertIn("Previous level diagnostic metrics JSON", user_prompt)
+        self.assertIn("AI diagnosis:", user_prompt)
+
+    def test_human_clarity_score_is_recomputed_from_dimensions(self):
+        result = validate_human_adjustment_clarity_payload(
+            {
+                "problemScore": 2,
+                "targetScore": 0,
+                "directionScore": 0,
+                "detailScore": 0,
+                "totalScore": 8,
+                "isClear": True,
+                "reason": "Only an evaluation was supplied.",
+            }
+        )
+
+        self.assertEqual(result["totalScore"], 2)
+        self.assertFalse(result["isClear"])
+
+    def test_human_clarity_prompt_contains_fixed_rubric(self):
+        messages = build_human_adjustment_clarity_messages("Too easy")
+        system_prompt = messages[0]["content"]
+
+        self.assertIn("problemScore", system_prompt)
+        self.assertIn("targetScore", system_prompt)
+        self.assertIn("totalScore is the sum", system_prompt)
+        self.assertIn("at least 4", system_prompt)
+        self.assertIn("Clarification(Human)", system_prompt)
 
 
 if __name__ == "__main__":

@@ -204,6 +204,16 @@ public class LLMLevelDesignClient : MonoBehaviour
             return;
         }
 
+        string revisionMode = PlayerPrefs.GetString(
+            CreativeWorkshopContext.RevisionModePrefsKey,
+            ""
+        );
+
+        if (string.Equals(revisionMode, "ai", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         string adjustment = PlayerPrefs.GetString(
             CreativeWorkshopContext.LatestAdjustmentTextPrefsKey,
             ""
@@ -287,6 +297,9 @@ public class LLMLevelDesignClient : MonoBehaviour
         requestUrl = AppendStructuredContext(requestUrl, "refinementFeedbackText", CreativeWorkshopContext.RefinementFeedbackTextPrefsKey);
         requestUrl = AppendStructuredContext(requestUrl, "adjustmentHistoryText", CreativeWorkshopContext.AdjustmentHistoryTextPrefsKey);
         requestUrl = AppendStructuredContext(requestUrl, "latestAdjustmentText", CreativeWorkshopContext.LatestAdjustmentTextPrefsKey);
+        requestUrl = AppendStructuredContext(requestUrl, "revisionMode", CreativeWorkshopContext.RevisionModePrefsKey);
+        requestUrl = AppendStructuredContext(requestUrl, "previousLevelPlan", CreativeWorkshopContext.PreviousLevelPlanPrefsKey);
+        requestUrl = AppendStructuredContext(requestUrl, "previousLevelMetrics", CreativeWorkshopContext.PreviousLevelMetricsPrefsKey);
         return requestUrl;
     }
 

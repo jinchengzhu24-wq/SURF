@@ -44,9 +44,12 @@ Refinement 分数未达标时进入调整循环：
 
 ```text
 Refinement → Routing → Adjustment(AI) → Custom_Level → Refinement
-                     → Adjustment(Human) → Custom_Level → Refinement
+                     → Adjustment(Human) → [8 分制清晰度检查] → [通过] → Custom_Level → Refinement
+                                                                    → [未通过] → Clarification(Human) → [重新评分]
                      → Adjustment(HA) → Custom_Level → Refinement
 ```
+
+Human 模式使用 8 分制检查修改指令是否足够具体：问题描述、修改对象、修改方向、操作细节/保持项各 0–2 分。总分至少为 4，且修改对象和修改方向均至少为 1，才会进入关卡生成；否则进入 `Clarification(Human)`，保留原输入并要求用户补充，直到重新评分通过。
 
 ```text
 Refinement → Design interpretation → Refinement
@@ -65,6 +68,10 @@ LLM 请求可以携带以下内容：
 - 历史调整；
 - refinement 反馈；
 - idea、session 和场景标识。
+- revision mode（`ai`、`human` 或 `ha`）；
+- 上一版蓝图和上一关的求解、游玩诊断指标。
+
+修改阶段的提示词按决策权区分：Human 模式把最新输入视为用户决定的权威修改集合，只转换必要字段且不诊断额外问题；AI 模式把最新输入视为评价证据，结合上一版蓝图及玩家表现自行诊断并选择一组最小且连贯的修改，同时保留原始创意和已选方向的核心体验。两种模式共享相同的生成器能力、JSON 协议、可解性规则和质量门槛。
 
 提示词中的优先级为：
 

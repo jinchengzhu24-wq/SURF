@@ -10,6 +10,11 @@ public static class CreativeWorkshopContext
     public const string RefinementFeedbackTextPrefsKey = "SokobanCreativeWorkshopRefinementFeedbackText";
     public const string AdjustmentHistoryTextPrefsKey = "SokobanCreativeWorkshopAdjustmentHistoryText";
     public const string LatestAdjustmentTextPrefsKey = "SokobanCreativeWorkshopLatestAdjustmentText";
+    public const string RevisionModePrefsKey = "SokobanCreativeWorkshopRevisionMode";
+    public const string PreviousLevelPlanPrefsKey = "SokobanCreativeWorkshopPreviousLevelPlan";
+    public const string PreviousLevelMetricsPrefsKey = "SokobanCreativeWorkshopPreviousLevelMetrics";
+    public const string PendingHumanAdjustmentPrefsKey = "SokobanPendingHumanAdjustment";
+    public const string HumanClarityReasonPrefsKey = "SokobanHumanClarityReason";
 
     public static string IdeaId { get; private set; }
     public static string SessionId { get; private set; }
@@ -19,6 +24,7 @@ public static class CreativeWorkshopContext
     public static string RefinementFeedbackText { get; private set; }
     public static string AdjustmentHistoryText { get; private set; }
     public static string LatestAdjustmentText { get; private set; }
+    public static string RevisionMode { get; private set; }
 
     public static bool HasIdea
     {
@@ -44,6 +50,12 @@ public static class CreativeWorkshopContext
         RefinementFeedbackText = "";
         AdjustmentHistoryText = "";
         LatestAdjustmentText = "";
+        RevisionMode = "";
+        PlayerPrefs.DeleteKey(RevisionModePrefsKey);
+        PlayerPrefs.DeleteKey(PreviousLevelPlanPrefsKey);
+        PlayerPrefs.DeleteKey(PreviousLevelMetricsPrefsKey);
+        PlayerPrefs.DeleteKey(PendingHumanAdjustmentPrefsKey);
+        PlayerPrefs.DeleteKey(HumanClarityReasonPrefsKey);
         SaveStructuredContext();
         SetIdea(ideaId, sessionId, ideaText);
     }
@@ -93,6 +105,41 @@ public static class CreativeWorkshopContext
         SetIdea(ideaId, sessionId, combinedIdeaText);
     }
 
+    public static void SetRevisionMode(string revisionMode)
+    {
+        RevisionMode = string.IsNullOrWhiteSpace(revisionMode)
+            ? ""
+            : revisionMode.Trim().ToLowerInvariant();
+        PlayerPrefs.SetString(RevisionModePrefsKey, RevisionMode);
+        PlayerPrefs.Save();
+    }
+
+    public static void SetPreviousLevelPlan(string planJson)
+    {
+        PlayerPrefs.SetString(PreviousLevelPlanPrefsKey, planJson ?? "");
+        PlayerPrefs.Save();
+    }
+
+    public static void SetPreviousLevelMetrics(string metricsJson)
+    {
+        PlayerPrefs.SetString(PreviousLevelMetricsPrefsKey, metricsJson ?? "");
+        PlayerPrefs.Save();
+    }
+
+    public static void SetPendingHumanAdjustment(string adjustmentText, string clarityReason)
+    {
+        PlayerPrefs.SetString(PendingHumanAdjustmentPrefsKey, adjustmentText ?? "");
+        PlayerPrefs.SetString(HumanClarityReasonPrefsKey, clarityReason ?? "");
+        PlayerPrefs.Save();
+    }
+
+    public static void ClearPendingHumanAdjustment()
+    {
+        PlayerPrefs.DeleteKey(PendingHumanAdjustmentPrefsKey);
+        PlayerPrefs.DeleteKey(HumanClarityReasonPrefsKey);
+        PlayerPrefs.Save();
+    }
+
     public static void Clear()
     {
         IdeaId = "";
@@ -103,6 +150,7 @@ public static class CreativeWorkshopContext
         RefinementFeedbackText = "";
         AdjustmentHistoryText = "";
         LatestAdjustmentText = "";
+        RevisionMode = "";
 
         PlayerPrefs.DeleteKey(IdeaIdPrefsKey);
         PlayerPrefs.DeleteKey(SessionIdPrefsKey);
@@ -112,6 +160,11 @@ public static class CreativeWorkshopContext
         PlayerPrefs.DeleteKey(RefinementFeedbackTextPrefsKey);
         PlayerPrefs.DeleteKey(AdjustmentHistoryTextPrefsKey);
         PlayerPrefs.DeleteKey(LatestAdjustmentTextPrefsKey);
+        PlayerPrefs.DeleteKey(RevisionModePrefsKey);
+        PlayerPrefs.DeleteKey(PreviousLevelPlanPrefsKey);
+        PlayerPrefs.DeleteKey(PreviousLevelMetricsPrefsKey);
+        PlayerPrefs.DeleteKey(PendingHumanAdjustmentPrefsKey);
+        PlayerPrefs.DeleteKey(HumanClarityReasonPrefsKey);
         PlayerPrefs.Save();
     }
 

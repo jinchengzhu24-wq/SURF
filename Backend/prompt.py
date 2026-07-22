@@ -11,6 +11,32 @@ SYSTEM_PROMPT = (
 )
 
 
+HUMAN_ADJUSTMENT_CLARITY_SYSTEM_PROMPT = (
+    "You are a clarity gate for a HUMAN-led Sokoban revision workflow. "
+    "The user, not the AI, must diagnose the problem and choose the revision. "
+    "Score only how actionable the submitted revision instruction is. Do not "
+    "diagnose the level, propose a solution, rewrite the instruction, or add a "
+    "design idea. Use this exact rubric, with each dimension scored 0, 1, or 2: "
+    "problemScore: 0=no problem or goal stated, 1=general feeling or goal, "
+    "2=specific problem in the current level; targetScore: 0=no change target, "
+    "1=a broad dimension such as difficulty, 2=a supported target such as pushes, "
+    "goals, corridor, walls, water, route structure, or box order; directionScore: "
+    "0=no desired direction, 1=general more/less/easier/harder direction, "
+    "2=a concrete transformation such as add, remove, separate, cluster, narrow, "
+    "widen, preserve, or prohibit; detailScore: 0=no operational detail, "
+    "1=one placement, amount, relation, or preservation detail, 2=multiple such "
+    "details. totalScore is the sum. isClear is true only when totalScore is at "
+    "least 4, targetScore is at least 1, and directionScore is at least 1. "
+    "This is the routing gate: isClear=false sends the player to "
+    "Clarification(Human), while isClear=true allows level generation to continue. "
+    "A feeling alone, such as 'too easy', is not clear. 'Make it harder' is also "
+    "not clear because it does not choose a level feature to change. Return only "
+    "JSON with exactly these keys: problemScore, targetScore, directionScore, "
+    "detailScore, totalScore, isClear, reason. reason must be one short sentence "
+    "describing what information is missing without suggesting a revision."
+)
+
+
 GENERATOR_CAPABILITY_CONTRACT = (
     "Generator capability contract: the final level is always a static classic "
     "12x10 Sokoban board with exactly 1 player, 2 boxes, and 2 targets. It can "
@@ -593,41 +619,102 @@ def build_prioritized_creative_context_prompt(
     refinement_feedback = normalize_prompt_text(creative_context.get("refinementFeedbackText"))
     adjustment_history = normalize_prompt_text(creative_context.get("adjustmentHistoryText"))
     latest_adjustment = normalize_prompt_text(creative_context.get("latestAdjustmentText"))
-    parts = [
-        "Follow this priority order: solvability and supported Sokoban rules; "
-        "latest user adjustment; selected design direction; original user idea; "
-        "earlier adjustments and refinement feedback; general difficulty and "
-        "quality preferences; variation and recent-blueprint diversity. "
-    ]
+    revision_mode = normalize_prompt_text(
+        creative_context.get("revisionMode")
+    ).lower()
+    previous_plan = normalize_prompt_text(creative_context.get("previousLevelPlan"))
+    previous_metrics = normalize_prompt_text(
+        creative_context.get("previousLevelMetrics")
+    )
+    parts = []
+
+    if revision_mode == "human":
+        parts.append(
+            "Revision authority mode: HUMAN-led. The user owns the diagnosis, "
+            "revision proposal, and final decision. The model is only a constraint "
+            "translator. Follow this priority order: solvability and supported "
+            "Sokoban rules; the user's explicit latest revision instruction; every "
+            "unchanged field in the previous plan; selected design direction and "
+            "original idea; earlier context; diversity. Do not diagnose additional "
+            "problems, optimize unrelated qualities, compensate beyond the request, "
+            "or introduce an unrequested structural change. "
+        )
+    elif revision_mode == "ai":
+        parts.append(
+            "Revision authority mode: AI-led. The user supplies evaluative feedback, "
+            "while the model owns the diagnosis, revision proposal, and revision "
+            "decision. Follow this priority order: solvability, supported Sokoban "
+            "rules, and explicit user prohibitions; the original idea and the core "
+            "experience of the selected direction; the problem indicated by the "
+            "latest feedback; evidence from the previous plan and level metrics; a "
+            "small coherent set of causally relevant changes; diversity. Preserve "
+            "the creative core, but choose the concrete supported blueprint fields "
+            "without requiring the user to name them. Avoid arbitrary or unrelated "
+            "changes. "
+        )
+    else:
+        parts.append(
+            "Follow this priority order: solvability and supported Sokoban rules; "
+            "latest user adjustment; selected design direction; original user idea; "
+            "earlier adjustments and refinement feedback; general difficulty and "
+            "quality preferences; variation and recent-blueprint diversity. "
+        )
 
     if latest_adjustment:
+        if revision_mode == "ai":
+            parts.append(
+                f'Latest user evaluation (diagnostic evidence, not a field-level '
+                f'specification): "{latest_adjustment}". Infer the most likely '
+                "supported level-design cause, then change only the fields that "
+                "coherently address that diagnosis. "
+            )
+        else:
+            parts.append(
+                f'Latest user adjustment (authoritative hard requirement): "{latest_adjustment}". '
+                "When it conflicts with earlier intent, follow the latest adjustment "
+                "while preserving as much earlier intent as possible. "
+            )
+
+    if previous_plan and revision_mode in ("human", "ai"):
+        parts.append(f'Previous applied blueprint JSON: "{previous_plan}". ')
+
+    if previous_metrics and revision_mode == "ai":
         parts.append(
-            f'Latest user adjustment (authoritative hard requirement): "{latest_adjustment}". '
-            "When it conflicts with earlier intent, follow the latest adjustment "
-            "while preserving as much earlier intent as possible. "
+            f'Previous level diagnostic metrics JSON: "{previous_metrics}". Use '
+            "solver steps and pushes as structural difficulty evidence, and player "
+            "moves, pushes, restarts, and completion time as behavioral evidence. "
+            "Do not treat search cost or generation effort as player difficulty. "
         )
 
     if selected_direction:
-        parts.append(
-            f'Selected design direction: "{selected_direction}". This direction '
-            "has already been shown to and selected by the user. Treat every "
-            "supported structural statement in it as an implementation requirement, "
-            "not as inspiration. Do not reinterpret, embellish, or replace it with "
-            "a different design direction. Parse its compact key=value contract. "
-            "Copy archetype, targetLayout, obstacleStyle, and waterStyle into the "
-            "same-named JSON fields exactly, without synonyms. Parse corridor as "
-            "placement/width/orientation/role/priority and copy those five values "
-            "into the corresponding corridor JSON fields exactly. water=none means "
-            "minWaterAreas=0 and maxWaterAreas=0; walls=none means both wall-obstacle "
-            "counts are 0 and all corridor fields are disabled. Preserve core and "
-            "boxOrder through the supported structural fields and designNote rather "
-            "than inventing a new mechanic. Only the latest user adjustment or an "
-            "explicit zero-feature constraint may override the contract. If a latest "
-            "adjustment conflicts, change only the fields required by that adjustment "
-            "and preserve every other selected value. Before returning JSON, silently "
-            "compare every selected contract value with the final JSON and correct "
-            "any mismatch. "
-        )
+        if revision_mode == "ai":
+            parts.append(
+                f'Selected design direction: "{selected_direction}". Preserve its '
+                "core experience and all explicit user prohibitions. Exact structural "
+                "fields may change only when the diagnosis requires them; preserve "
+                "all unrelated fields from the previous plan. "
+            )
+        else:
+            parts.append(
+                f'Selected design direction: "{selected_direction}". This direction '
+                "has already been shown to and selected by the user. Treat every "
+                "supported structural statement in it as an implementation requirement, "
+                "not as inspiration. Do not reinterpret, embellish, or replace it with "
+                "a different design direction. Parse its compact key=value contract. "
+                "Copy archetype, targetLayout, obstacleStyle, and waterStyle into the "
+                "same-named JSON fields exactly, without synonyms. Parse corridor as "
+                "placement/width/orientation/role/priority and copy those five values "
+                "into the corresponding corridor JSON fields exactly. water=none means "
+                "minWaterAreas=0 and maxWaterAreas=0; walls=none means both wall-obstacle "
+                "counts are 0 and all corridor fields are disabled. Preserve core and "
+                "boxOrder through the supported structural fields and designNote rather "
+                "than inventing a new mechanic. Only the latest user adjustment or an "
+                "explicit zero-feature constraint may override the contract. If a latest "
+                "adjustment conflicts, change only the fields required by that adjustment "
+                "and preserve every other selected value. Before returning JSON, silently "
+                "compare every selected contract value with the final JSON and correct "
+                "any mismatch. "
+            )
 
     if original_idea:
         parts.append(f'Original user idea: "{original_idea}". ')
@@ -656,7 +743,37 @@ def build_prioritized_creative_context_prompt(
             "explicitly requested. Use corridorRole=required_box_route only when the "
             "user says a box must pass through it; otherwise use player_route. "
         )
+
+    if revision_mode == "human":
+        parts.append(
+            "Use the previous blueprint as the baseline and apply the minimum field "
+            "changes required by the user. designNote must begin with 'User-directed "
+            "revision:' and briefly state only the translated user decision. If an "
+            "evaluation-only message reaches this stage, do not invent a solution; "
+            "copy the previous plan and use 'Human clarification required' in designNote. "
+        )
+    elif revision_mode == "ai":
+        parts.append(
+            "Before returning JSON, form a concise evidence-based diagnosis and choose "
+            "one small coherent revision strategy. designNote must use the format "
+            "'AI diagnosis: <cause>; revision: <chosen changes>'. Do not merely restate "
+            "the user's evaluation. "
+        )
     return "".join(parts)
+
+
+def build_human_adjustment_clarity_messages(adjustment_text):
+    clean_text = normalize_prompt_text(adjustment_text)
+    return [
+        {
+            "role": "system",
+            "content": HUMAN_ADJUSTMENT_CLARITY_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": f'Evaluate this Human-led revision instruction: "{clean_text}"',
+        },
+    ]
 
 
 def normalize_prompt_text(value):

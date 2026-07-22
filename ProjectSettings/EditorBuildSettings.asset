@@ -45,6 +45,9 @@ EditorBuildSettings:
     path: Assets/Scenes/Human/Adjustment(Human).unity
     guid: 84849075c73631944a6fd1287b625ad2
   - enabled: 1
+    path: Assets/Scenes/Human/Clarification(Human).unity
+    guid: f87e18276db103b4f8ed7bddfbfcca27
+  - enabled: 1
     path: Assets/Scenes/HA/Adjustment(HA).unity
     guid: 76c8c7db86832344195f3898a9f020bb
   - enabled: 1

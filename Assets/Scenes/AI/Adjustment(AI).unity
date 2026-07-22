@@ -2637,10 +2637,17 @@ MonoBehaviour:
   submitButton: {fileID: 2300000119}
   detailButton: {fileID: 2300000204}
   statusText: {fileID: 0}
+  clarificationGuidanceText: {fileID: 0}
   adjustmentPlaceholder: Describe how the level should be adjusted
   adjustmentCharacterLimit: 240
   customLevelSceneName: Custom_Level
   designInterpretationSceneName: Design interpretation
+  revisionMode: ai
+  validateHumanClarity: 0
+  loadPendingHumanAdjustment: 0
+  clarificationSceneName: Clarification(Human)
+  humanClarityEndpoint: http://111.231.136.4:8000/validate-human-adjustment
+  clarityRequestTimeoutSeconds: 30
   logAdjustmentEvents: 1
 --- !u!1 &2200001001
 GameObject:

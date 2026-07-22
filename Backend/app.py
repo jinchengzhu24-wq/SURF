@@ -19,12 +19,14 @@ from pydantic import BaseModel
 try:
     from prompt import (
         build_creative_idea_expansion_messages,
+        build_human_adjustment_clarity_messages,
         build_level_plan_messages,
         resolve_zero_feature_constraints,
     )
 except ImportError:
     from .prompt import (
         build_creative_idea_expansion_messages,
+        build_human_adjustment_clarity_messages,
         build_level_plan_messages,
         resolve_zero_feature_constraints,
     )
@@ -229,6 +231,16 @@ def expand_creative_idea(request: CreativeIdeaExpansionRequest):
 
     data["ideaText"] = idea_text
     return create_creative_idea_expansion(data)
+
+
+@app.get("/validate-human-adjustment")
+def validate_human_adjustment(adjustmentText: str = ""):
+    adjustment_text = str(adjustmentText or "").strip()
+
+    if not adjustment_text:
+        return validate_human_adjustment_clarity_payload({})
+
+    return create_human_adjustment_clarity_check(adjustment_text)
 
 
 @app.get("/level-records", response_class=PlainTextResponse)
@@ -703,6 +715,9 @@ def generate_level_plan(
     refinementFeedbackText: str = "",
     adjustmentHistoryText: str = "",
     latestAdjustmentText: str = "",
+    revisionMode: str = "",
+    previousLevelPlan: str = "",
+    previousLevelMetrics: str = "",
 ):
     return create_level_plan(
         {
@@ -715,6 +730,9 @@ def generate_level_plan(
             "refinementFeedbackText": refinementFeedbackText,
             "adjustmentHistoryText": adjustmentHistoryText,
             "latestAdjustmentText": latestAdjustmentText,
+            "revisionMode": revisionMode,
+            "previousLevelPlan": previousLevelPlan,
+            "previousLevelMetrics": previousLevelMetrics,
         }
     )
 
@@ -1850,6 +1868,77 @@ def create_creative_idea_expansion(creative_context):
             creative_context,
             f"DeepSeek expansion request failed: {exception}",
         )
+
+
+def validate_human_adjustment_clarity_payload(payload):
+    payload = payload if isinstance(payload, dict) else {}
+
+    def score(name):
+        try:
+            return max(0, min(2, int(payload.get(name, 0))))
+        except (TypeError, ValueError):
+            return 0
+
+    problem_score = score("problemScore")
+    target_score = score("targetScore")
+    direction_score = score("directionScore")
+    detail_score = score("detailScore")
+    total_score = problem_score + target_score + direction_score + detail_score
+    is_clear = total_score >= 4 and target_score >= 1 and direction_score >= 1
+    reason = str(payload.get("reason") or "").strip()
+
+    if not reason:
+        reason = (
+            "State which level feature should change and the direction of that change."
+            if not is_clear
+            else "The instruction contains an actionable user-directed revision."
+        )
+
+    return {
+        "problemScore": problem_score,
+        "targetScore": target_score,
+        "directionScore": direction_score,
+        "detailScore": detail_score,
+        "totalScore": total_score,
+        "isClear": is_clear,
+        "reason": reason,
+    }
+
+
+def create_human_adjustment_clarity_check(adjustment_text):
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+
+    if not api_key or api_key == "your_deepseek_api_key_here":
+        raise HTTPException(
+            status_code=503,
+            detail="Remote LLM is unavailable because DEEPSEEK_API_KEY is missing",
+        )
+
+    try:
+        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
+        response = client.chat.completions.create(
+            model=model,
+            messages=build_human_adjustment_clarity_messages(adjustment_text),
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            stream=False,
+        )
+        content = response.choices[0].message.content
+        result = validate_human_adjustment_clarity_payload(json.loads(content))
+        print(
+            "Validated Human-led adjustment clarity:"
+            f" score={result['totalScore']}/8, clear={result['isClear']}"
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as exception:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Human adjustment clarity validation failed: {exception}",
+        ) from exception
 
 
 def create_level_plan(creative_context=None):

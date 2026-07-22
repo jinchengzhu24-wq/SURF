@@ -229,6 +229,8 @@ public class LevelStudyRecorder : MonoBehaviour
             timestamp = DateTime.UtcNow.ToString("o")
         };
 
+        SaveRevisionMetrics(record);
+
         SendRecord(LevelEndPath, record);
 
         if (logRecordEvents)
@@ -248,6 +250,35 @@ public class LevelStudyRecorder : MonoBehaviour
         }
 
         hasActiveLevel = false;
+    }
+
+    private void SaveRevisionMetrics(LevelEndRecord endRecord)
+    {
+        if (endRecord == null || currentLevelLoader == null)
+        {
+            return;
+        }
+
+        LevelGenerator generator = currentLevelLoader.levelGenerator;
+        string[] rows = currentLevelLoader.levelData != null
+            ? currentLevelLoader.levelData.rows
+            : null;
+        LevelStructureData structure = rows == null ? null : BuildStructureData(rows);
+        RevisionLevelMetrics metrics = new RevisionLevelMetrics
+        {
+            completed = endRecord.completed,
+            endReason = endRecord.endReason,
+            completionSeconds = endRecord.durationSeconds,
+            playerMoveCount = endRecord.moveCount,
+            playerPushCount = endRecord.pushCount,
+            restartCount = endRecord.restartCount,
+            solverSolutionSteps = generator != null ? generator.lastSolutionSteps : -1,
+            solverPushes = generator != null ? generator.lastPushes : -1,
+            waterCount = structure != null ? structure.waterCount : -1,
+            wallCount = structure != null ? structure.wallCount : -1
+        };
+
+        CreativeWorkshopContext.SetPreviousLevelMetrics(JsonUtility.ToJson(metrics));
     }
 
     private void RecordMove(bool pushedBox)
@@ -829,6 +860,21 @@ public class LevelEndRecord
     public int restartCount;
     public bool officialRound;
     public string timestamp;
+}
+
+[Serializable]
+public class RevisionLevelMetrics
+{
+    public bool completed;
+    public string endReason;
+    public float completionSeconds;
+    public int playerMoveCount;
+    public int playerPushCount;
+    public int restartCount;
+    public int solverSolutionSteps;
+    public int solverPushes;
+    public int waterCount;
+    public int wallCount;
 }
 
 [Serializable]
