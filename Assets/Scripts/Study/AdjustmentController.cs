@@ -280,7 +280,9 @@ public class AdjustmentController : MonoBehaviour
 
         if (!result.isClear)
         {
-            string clarificationFeedback = BuildClarificationFeedback(result);
+            string clarificationFeedback = loadPendingHumanAdjustment
+                ? BuildClarificationFeedback(result)
+                : "";
             CreativeWorkshopContext.SetPendingHumanAdjustment(
                 adjustmentText,
                 clarificationFeedback
