@@ -44,8 +44,8 @@ Refinement 分数未达标时进入调整循环：
 
 ```text
 Refinement → Routing → Adjustment(AI) → Custom_Level → Refinement
-                     → Adjustment(Human) → [8 分制清晰度检查] → [通过] → Custom_Level → Refinement
-                                                                    → [未通过] → Clarification(Human) → [重新评分]
+                     → Adjustment(Human) → [通过] → Custom_Level → Refinement
+                                         → [未通过] → Clarification(Human) → [重新评分]
                      → Adjustment(HA) → Custom_Level → Refinement
 ```
 
