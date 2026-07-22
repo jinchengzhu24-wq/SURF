@@ -286,8 +286,8 @@ MonoBehaviour:
     m_LineSpacing: 1
   m_Text: 'For example:
 
-    Make the level harder by adding a narrower route, but
-    keep the water obstacles.'
+    The level felt too easy and did not match my original
+    idea.'
 --- !u!222 &466074378
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2498,9 +2498,9 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 'It seems that you are not satisfied with the current generated level.
-    Describe how you would like the level to be improved. You can adjust the difficulty,
-    layout, routes, obstacles, water areas, or overall style. '
+  m_Text: Give a brief evaluation of the level, such as too easy, too difficult,
+    or not aligned with my idea. The AI will interpret your feedback and decide how
+    the next version should be adjusted.
 --- !u!222 &1668752551
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2898,7 +2898,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Adjustment
+  m_Text: Adjustment(AI)
 --- !u!114 &2300000005
 MonoBehaviour:
   m_ObjectHideFlags: 0

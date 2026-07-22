@@ -43,12 +43,16 @@ Refinement → Questionnaire(After) → Menu
 Refinement 分数未达标时进入调整循环：
 
 ```text
-Refinement → Adjustment(AI) → Custom_Level → Refinement
+Refinement → Routing → Adjustment(AI) → Custom_Level → Refinement
+                     → Adjustment(Human) → Custom_Level → Refinement
+                     → Adjustment(HA) → Custom_Level → Refinement
 ```
 
 ```text
 Refinement → Design interpretation → Refinement
 Adjustment(AI) → Design interpretation → Adjustment(AI)
+Adjustment(Human) → Design interpretation → Adjustment(Human)
+Adjustment(HA) → Design interpretation → Adjustment(HA)
 ```
 
 ## 1. 请求上下文
