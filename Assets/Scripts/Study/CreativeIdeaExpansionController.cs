@@ -1,7 +1,6 @@
 using System;
 using System.Collections;
 using System.Text;
-using TMPro;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
@@ -160,7 +159,6 @@ public class CreativeIdeaExpansionController : MonoBehaviour
         }
 
         ResolveOptionReferences();
-        SetTitleText();
     }
 
     private void ResolveOptionReferences()
@@ -226,30 +224,18 @@ public class CreativeIdeaExpansionController : MonoBehaviour
         return textObject != null ? textObject.GetComponent<Text>() : null;
     }
 
-    private void SetTitleText()
-    {
-        Text titleText = FindText("SurveyTitleText");
-
-        if (titleText != null)
-        {
-            titleText.text = "Choose a Direction";
-        }
-    }
-
     private void WireButtons()
     {
         if (submitButton != null)
         {
             submitButton.onClick.RemoveAllListeners();
             submitButton.onClick.AddListener(ContinueToLevel);
-            SetButtonLabel(submitButton, "Generate Level");
         }
 
         if (regenerateButton != null)
         {
             regenerateButton.onClick.RemoveAllListeners();
             regenerateButton.onClick.AddListener(RegenerateExpansion);
-            SetButtonLabel(regenerateButton, "Regenerate");
         }
 
         for (int i = 0; i < optionButtons.Length; i++)
@@ -790,29 +776,6 @@ public class CreativeIdeaExpansionController : MonoBehaviour
         if (statusText != null)
         {
             statusText.text = message;
-        }
-    }
-
-    private void SetButtonLabel(Button button, string label)
-    {
-        if (button == null)
-        {
-            return;
-        }
-
-        TMP_Text tmpText = button.GetComponentInChildren<TMP_Text>();
-
-        if (tmpText != null)
-        {
-            tmpText.text = label;
-            return;
-        }
-
-        Text text = button.GetComponentInChildren<Text>();
-
-        if (text != null)
-        {
-            text.text = label;
         }
     }
 

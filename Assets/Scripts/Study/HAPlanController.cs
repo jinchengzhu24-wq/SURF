@@ -160,13 +160,6 @@ public class HAPlanController : MonoBehaviour
         }
 
         ResolveOptionReferences();
-
-        Text titleText = FindText("SurveyTitleText");
-
-        if (titleText != null)
-        {
-            titleText.text = "Choose a Revision Plan";
-        }
     }
 
     private void ResolveOptionReferences()
@@ -224,14 +217,12 @@ public class HAPlanController : MonoBehaviour
         {
             submitButton.onClick.RemoveAllListeners();
             submitButton.onClick.AddListener(ConfirmSelection);
-            SetButtonLabel(submitButton, "Confirm");
         }
 
         if (regenerateButton != null)
         {
             regenerateButton.onClick.RemoveAllListeners();
             regenerateButton.onClick.AddListener(Regenerate);
-            SetButtonLabel(regenerateButton, "Regenerate");
         }
 
         for (int i = 0; i < optionButtons.Length; i++)
@@ -283,11 +274,6 @@ public class HAPlanController : MonoBehaviour
 
     private void RefreshStaticText()
     {
-        if (guidanceText != null)
-        {
-            guidanceText.text = "The AI has used your adjustment and the current level blueprint to propose three implementable revisions. Choose one to continue.";
-        }
-
         if (originalIdeaText != null)
         {
             originalIdeaText.text = string.IsNullOrEmpty(adjustmentText)
@@ -620,7 +606,6 @@ public class HAPlanController : MonoBehaviour
         if (regenerateButton != null)
         {
             regenerateButton.interactable = !isRequesting && !isContinuing;
-            SetButtonLabel(regenerateButton, requestFailed ? "Retry" : "Regenerate");
         }
 
         UpdateOptionVisuals();
@@ -731,29 +716,6 @@ public class HAPlanController : MonoBehaviour
         if (statusText != null)
         {
             statusText.text = message;
-        }
-    }
-
-    private void SetButtonLabel(Button button, string label)
-    {
-        if (button == null)
-        {
-            return;
-        }
-
-        TMP_Text tmpText = button.GetComponentInChildren<TMP_Text>();
-
-        if (tmpText != null)
-        {
-            tmpText.text = label;
-            return;
-        }
-
-        Text text = button.GetComponentInChildren<Text>();
-
-        if (text != null)
-        {
-            text.text = label;
         }
     }
 
