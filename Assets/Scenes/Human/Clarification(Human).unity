@@ -2640,6 +2640,16 @@ MonoBehaviour:
   detailButton: {fileID: 2300000204}
   statusText: {fileID: 0}
   clarificationGuidanceText: {fileID: 1668752550}
+  clarificationScoreText: {fileID: 1868337612}
+  clarificationConditionText: {fileID: 466074377}
+  clarificationHeading: 'Your revision still needs clarification.
+
+    Here are some
+    rules for your reference.'
+  clarityScoreTemplate: "Clarity score: \n{totalScore}/8 (problem {problemScore}/2,
+    target {targetScore}/2, direction {directionScore}/2, detail {detailScore}/2)."
+  clarityPassConditionText: "Pass condition: \ntotal at least 4/8, target at least
+    1/2, and direction at least 1/2."
   adjustmentPlaceholder: Describe how the level should be adjusted
   adjustmentCharacterLimit: 240
   customLevelSceneName: Custom_Level

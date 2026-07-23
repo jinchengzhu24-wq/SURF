@@ -13,6 +13,17 @@ public class AdjustmentController : MonoBehaviour
     public Button detailButton;
     public Text statusText;
     public Text clarificationGuidanceText;
+    public Text clarificationScoreText;
+    public Text clarificationConditionText;
+
+    [Header("Human Clarification Text")]
+    [TextArea(1, 3)]
+    public string clarificationHeading = "Your revision needs clarification.";
+    [TextArea(2, 5)]
+    [Tooltip("Available tokens: {totalScore}, {problemScore}, {targetScore}, {directionScore}, {detailScore}, {reason}")]
+    public string clarityScoreTemplate = "Clarity score: {totalScore}/8 (problem {problemScore}/2, target {targetScore}/2, direction {directionScore}/2, detail {detailScore}/2).";
+    [TextArea(1, 3)]
+    public string clarityPassConditionText = "Pass condition: total at least 4/8, target at least 1/2, and direction at least 1/2.";
 
     [Header("Input")]
     public string adjustmentPlaceholder = "Describe how the level should be adjusted";
@@ -158,11 +169,22 @@ public class AdjustmentController : MonoBehaviour
             ""
         );
 
-        if (clarificationGuidanceText != null && !string.IsNullOrWhiteSpace(reason))
+        if (!string.IsNullOrWhiteSpace(reason))
         {
-            clarificationGuidanceText.text = "Your revision needs clarification.\n\n"
-                + reason.Trim()
-                + "\n\nPlease state what should change, how it should change, and what should remain unchanged.";
+            if (clarificationGuidanceText != null)
+            {
+                clarificationGuidanceText.text = clarificationHeading;
+            }
+
+            if (clarificationScoreText != null)
+            {
+                clarificationScoreText.text = reason.Trim();
+            }
+
+            if (clarificationConditionText != null)
+            {
+                clarificationConditionText.text = clarityPassConditionText;
+            }
         }
     }
 
@@ -307,14 +329,15 @@ public class AdjustmentController : MonoBehaviour
 
     private string BuildClarificationFeedback(HumanAdjustmentClarityResult result)
     {
-        return "Clarity score: " + result.totalScore + "/8"
-            + " (problem " + result.problemScore + "/2"
-            + ", target " + result.targetScore + "/2"
-            + ", direction " + result.directionScore + "/2"
-            + ", detail " + result.detailScore + "/2)."
-            + " Pass condition: total at least 4/8, target at least 1/2,"
-            + " and direction at least 1/2. "
-            + CleanText(result.reason);
+        string scoreText = (clarityScoreTemplate ?? "")
+            .Replace("{totalScore}", result.totalScore.ToString())
+            .Replace("{problemScore}", result.problemScore.ToString())
+            .Replace("{targetScore}", result.targetScore.ToString())
+            .Replace("{directionScore}", result.directionScore.ToString())
+            .Replace("{detailScore}", result.detailScore.ToString())
+            .Replace("{reason}", CleanText(result.reason));
+
+        return scoreText;
     }
 
     private void AcceptAdjustmentAndContinue(string adjustmentText)
