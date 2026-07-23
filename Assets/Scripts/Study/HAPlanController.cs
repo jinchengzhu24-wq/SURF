@@ -363,6 +363,7 @@ public class HAPlanController : MonoBehaviour
                 Debug.LogWarning(
                     "HAPlanController request failed: error=" + request.error
                     + ", responseCode=" + request.responseCode
+                    + ", responseBody=" + request.downloadHandler.text
                 );
             }
         }

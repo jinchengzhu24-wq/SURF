@@ -2070,13 +2070,12 @@ def create_ha_revision_plans(context):
     try:
         model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
         base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-        temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
         response = client.chat.completions.create(
             model=model,
             messages=build_ha_revision_plan_messages(context),
             response_format={"type": "json_object"},
-            temperature=temperature,
+            temperature=0.2,
             stream=False,
         )
         content = response.choices[0].message.content
@@ -2096,7 +2095,10 @@ def create_ha_revision_plans(context):
         print(f"HA revision-plan request failed: {exception}")
         raise HTTPException(
             status_code=502,
-            detail="HA revision-plan generation or validation failed",
+            detail=(
+                "HA revision-plan generation or validation failed: "
+                f"{type(exception).__name__}: {exception}"
+            ),
         ) from exception
 
 
