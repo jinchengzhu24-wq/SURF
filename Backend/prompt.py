@@ -1,3 +1,6 @@
+import json
+
+
 SYSTEM_PROMPT = (
     "You are a classic Sokoban level design director. Your job is "
     "to create a high-level blueprint for an algorithmic Sokoban "
@@ -347,6 +350,83 @@ EXPANSION_SYSTEM_PROMPT = (
 )
 
 
+HA_REVISION_PLAN_SYSTEM_PROMPT = (
+    "You are the AI planning partner in a Human-AI Sokoban revision workflow. "
+    "The human has already identified what they want to improve. Use the supplied "
+    "previous LevelDesignPlan and corridor verification as the factual baseline. "
+    "Return exactly three distinct, implementable revision plans. Every plan must "
+    "honor the human's explicit adjustment and preserve every unlisted blueprint "
+    "field. You may change only the smallest coherent set of causally necessary "
+    "related fields. Do not diagnose an unrelated problem, add unsupported mechanics, "
+    "generate a tile map, or expose the hidden contract in the visible description. "
+    "Return only valid JSON."
+)
+
+
+def build_ha_revision_plan_messages(context):
+    context = context or {}
+    adjustment_text = normalize_prompt_text(context.get("adjustmentText"))
+    previous_plan = context.get("previousLevelPlan") or {}
+    corridor_validation = context.get("corridorValidation") or {}
+    regeneration_attempt = normalize_prompt_int(context.get("regenerationAttempt"))
+    previous_options = normalize_previous_expansion_options(
+        context.get("previousOptions")
+    )
+    previous_options_text = (
+        json.dumps(previous_options, ensure_ascii=False, separators=(",", ":"))
+        if previous_options
+        else "none"
+    )
+    user_prompt = (
+        f'Human adjustment: "{adjustment_text}". '
+        "Previous LevelDesignPlan JSON: "
+        + json.dumps(previous_plan, ensure_ascii=False, separators=(",", ":"))
+        + ". Corridor verification JSON: "
+        + json.dumps(corridor_validation, ensure_ascii=False, separators=(",", ":"))
+        + f". Regeneration attempt: {regeneration_attempt}. "
+        + f"Previously shown options: {previous_options_text}. "
+        "Create exactly three alternatives that implement the same human intent "
+        "through meaningfully different supported strategies. When regenerating, "
+        "do not repeat a previously shown contract or merely rename it. Each visible "
+        "description must state the concrete changes, what important structure stays "
+        "unchanged, and the expected gameplay tradeoff in two or three concise "
+        "sentences, using the same language as the human adjustment. "
+        "Each option must use this shape: "
+        '{"id":"A","title":"...","description":"...",'
+        '"promptText":"{\\"changes\\":{...},\\"preserveUnlisted\\":true}"}. '
+        "promptText is hidden from the player and must itself be a valid compact JSON "
+        "string. changes must be a non-empty object containing only LevelDesignPlan "
+        "fields that truly need to change. Allowed integer fields and ranges are: "
+        "minSolutionSteps 18-30, maxSolutionSteps 32-50, minWaterAreas 1-2 and "
+        "maxWaterAreas 1-2 unless explicit removal requires both 0, "
+        "minWallObstacleBlocks 2 and maxWallObstacleBlocks 2-3 unless explicit "
+        "removal requires both 0, "
+        "minPushes 8-16, maxPushes 14-28, minReversePulls 14-24, "
+        "maxReversePulls 24-40, corridorWidth 0-2. Allowed string fields are style, "
+        "archetype, targetLayout, obstacleStyle, waterStyle, corridorPlacement, "
+        "corridorOrientation, corridorRole, corridorPriority. archetype must be "
+        "goal_room, bottleneck_corridor, split_route, or open_workshop; targetLayout "
+        "must be clustered, split_pair, or edge_cluster; obstacleStyle must be "
+        "central_baffle, side_choke, or goal_guard; waterStyle must be corner_pool, "
+        "side_pool, or route_divider; corridorPlacement must be none, center, or side; "
+        "corridorOrientation must be horizontal, vertical, or any; corridorRole must "
+        "be visual_only, player_route, or required_box_route; corridorPriority must "
+        "be preferred or required. Never include designNote in changes. "
+        "preserveUnlisted must be true. Range minima must not exceed maxima. A none "
+        "corridor requires width 0, orientation any, role visual_only, and priority "
+        "preferred. When any corridor field changes, include every corridor field "
+        "needed to keep that tuple internally consistent. Only introduce zero water "
+        "or zero internal walls when the human "
+        "explicitly requests their removal; otherwise preserve existing zero values "
+        "but do not newly create them. Return exactly "
+        '{"options":[optionA,optionB,optionC]}.'
+    )
+    return [
+        {"role": "system", "content": HA_REVISION_PLAN_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
 def build_creative_idea_expansion_messages(creative_context):
     idea_text = normalize_prompt_text(creative_context.get("ideaText"))
     idea_id = normalize_prompt_text(creative_context.get("ideaId"))
@@ -626,6 +706,9 @@ def build_prioritized_creative_context_prompt(
     previous_metrics = normalize_prompt_text(
         creative_context.get("previousLevelMetrics")
     )
+    selected_ha_plan = normalize_prompt_text(
+        creative_context.get("selectedHAPlan")
+    )
     parts = []
 
     if revision_mode == "human":
@@ -652,6 +735,16 @@ def build_prioritized_creative_context_prompt(
             "without requiring the user to name them. Avoid arbitrary or unrelated "
             "changes. "
         )
+    elif revision_mode == "ha":
+        parts.append(
+            "Revision authority mode: HUMAN-AI collaborative. The human owns the "
+            "revision intent and the final choice; the AI proposed implementation "
+            "alternatives. Follow this priority order: solvability and supported "
+            "Sokoban rules; explicit human prohibitions and requested outcome; the "
+            "selected HA revision plan; preservation of every unlisted field in the "
+            "previous blueprint; the core experience of the original selected "
+            "direction. Do not add an unselected optimization. "
+        )
     else:
         parts.append(
             "Follow this priority order: solvability and supported Sokoban rules; "
@@ -675,7 +768,7 @@ def build_prioritized_creative_context_prompt(
                 "while preserving as much earlier intent as possible. "
             )
 
-    if previous_plan and revision_mode in ("human", "ai"):
+    if previous_plan and revision_mode in ("human", "ai", "ha"):
         parts.append(f'Previous applied blueprint JSON: "{previous_plan}". ')
 
     if previous_metrics and revision_mode == "ai":
@@ -687,7 +780,7 @@ def build_prioritized_creative_context_prompt(
         )
 
     if selected_direction:
-        if revision_mode == "ai":
+        if revision_mode in ("ai", "ha"):
             parts.append(
                 f'Selected design direction: "{selected_direction}". Preserve its '
                 "core experience and all explicit user prohibitions. Exact structural "
@@ -715,6 +808,13 @@ def build_prioritized_creative_context_prompt(
                 "compare every selected contract value with the final JSON and correct "
                 "any mismatch. "
             )
+
+    if selected_ha_plan and revision_mode == "ha":
+        parts.append(
+            f'Selected HA revision option JSON: "{selected_ha_plan}". Its hidden '
+            "changes contract is authoritative. Apply exactly those changed fields "
+            "to the previous blueprint and preserve every unlisted field. "
+        )
 
     if original_idea:
         parts.append(f'Original user idea: "{original_idea}". ')
@@ -758,6 +858,12 @@ def build_prioritized_creative_context_prompt(
             "one small coherent revision strategy. designNote must use the format "
             "'AI diagnosis: <cause>; revision: <chosen changes>'. Do not merely restate "
             "the user's evaluation. "
+        )
+    elif revision_mode == "ha":
+        parts.append(
+            "designNote must begin with 'Human-AI revision:' and summarize the "
+            "human request and the selected implementation plan. Do not substitute "
+            "one of the unselected alternatives. "
         )
     return "".join(parts)
 

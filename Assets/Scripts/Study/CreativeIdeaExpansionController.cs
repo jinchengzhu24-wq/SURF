@@ -274,11 +274,6 @@ public class CreativeIdeaExpansionController : MonoBehaviour
 
     private void RefreshStaticText()
     {
-        if (guidanceText != null)
-        {
-            guidanceText.text = "The LLM will turn your rough idea into three playable directions. Choose one to guide the generated level.";
-        }
-
         if (originalIdeaText != null)
         {
             originalIdeaText.text = string.IsNullOrEmpty(originalIdea)

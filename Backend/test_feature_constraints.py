@@ -1,11 +1,15 @@
+import json
 import unittest
 
 from Backend.app import (
     DEFAULT_PLAN,
+    apply_selected_ha_plan,
     validate_human_adjustment_clarity_payload,
+    validate_ha_revision_plan_options,
     validate_plan,
 )
 from Backend.prompt import (
+    build_ha_revision_plan_messages,
     build_human_adjustment_clarity_messages,
     build_level_plan_messages,
     resolve_zero_feature_constraints,
@@ -193,6 +197,141 @@ class FeatureConstraintTests(unittest.TestCase):
         self.assertIn("totalScore is the sum", system_prompt)
         self.assertIn("at least 4", system_prompt)
         self.assertIn("Clarification(Human)", system_prompt)
+
+    def test_ha_revision_options_validate_distinct_hidden_deltas(self):
+        previous_plan = self.make_plan()
+        payload = {
+            "options": [
+                {
+                    "id": "A",
+                    "title": "More pushes",
+                    "description": "Increase push pressure while preserving the existing layout.",
+                    "promptText": {
+                        "changes": {"minPushes": 12},
+                        "preserveUnlisted": True,
+                    },
+                },
+                {
+                    "id": "B",
+                    "title": "Split targets",
+                    "description": "Separate the targets while retaining the other obstacles.",
+                    "promptText": {
+                        "changes": {"targetLayout": "clustered"},
+                        "preserveUnlisted": True,
+                    },
+                },
+                {
+                    "id": "C",
+                    "title": "Open structure",
+                    "description": "Open the main structure while retaining the target layout.",
+                    "promptText": {
+                        "changes": {"archetype": "open_workshop"},
+                        "preserveUnlisted": True,
+                    },
+                },
+            ]
+        }
+
+        options = validate_ha_revision_plan_options(
+            payload,
+            previous_plan,
+            "Make the revision more deliberate.",
+        )
+
+        self.assertEqual(len(options), 3)
+        self.assertIn('"preserveUnlisted":true', options[0]["promptText"])
+
+    def test_ha_revision_contract_rejects_unknown_field(self):
+        previous_plan = self.make_plan()
+        payload = {
+            "options": [
+                {
+                    "id": option_id,
+                    "title": "Option " + option_id,
+                    "description": "A concrete supported revision.",
+                    "promptText": {
+                        "changes": {"teleporterCount": index + 1},
+                        "preserveUnlisted": True,
+                    },
+                }
+                for index, option_id in enumerate(("A", "B", "C"))
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            validate_ha_revision_plan_options(
+                payload,
+                previous_plan,
+                "Add teleporters.",
+            )
+
+    def test_selected_ha_delta_preserves_unlisted_previous_fields(self):
+        previous_plan = self.make_plan()
+        selected_option = {
+            "id": "A",
+            "title": "Split targets",
+            "description": "Separate the two goals and retain the other structure.",
+            "promptText": (
+                '{"changes":{"targetLayout":"clustered"},'
+                '"preserveUnlisted":true}'
+            ),
+        }
+        generated_plan = self.make_plan()
+        generated_plan["archetype"] = "open_workshop"
+        context = {
+            "revisionMode": "ha",
+            "latestAdjustmentText": "Change the goal layout.",
+            "previousLevelPlan": json.dumps(previous_plan),
+            "selectedHAPlan": json.dumps(selected_option),
+        }
+
+        result = apply_selected_ha_plan(
+            generated_plan,
+            context,
+            {"noWater": False, "noInternalWalls": False},
+        )
+
+        self.assertEqual(result["targetLayout"], "clustered")
+        self.assertEqual(result["archetype"], previous_plan["archetype"])
+        self.assertTrue(result["designNote"].startswith("Human-AI revision:"))
+
+    def test_ha_revision_prompt_uses_blueprint_and_regeneration_context(self):
+        context = {
+            "adjustmentText": "Separate the goals.",
+            "previousLevelPlan": self.make_plan(),
+            "corridorValidation": {"verified": True},
+            "regenerationAttempt": 2,
+            "previousOptions": [
+                {
+                    "id": "A",
+                    "title": "Old option",
+                    "description": "Previously shown.",
+                    "promptText": "{}",
+                }
+            ],
+        }
+        messages = build_ha_revision_plan_messages(context)
+        prompt = messages[1]["content"]
+
+        self.assertIn("Separate the goals", prompt)
+        self.assertIn("Previous LevelDesignPlan JSON", prompt)
+        self.assertIn("Corridor verification JSON", prompt)
+        self.assertIn("Regeneration attempt: 2", prompt)
+        self.assertIn("preserveUnlisted", prompt)
+
+    def test_ha_level_prompt_describes_collaborative_authority(self):
+        context = {
+            "revisionMode": "ha",
+            "latestAdjustmentText": "Separate the goals.",
+            "previousLevelPlan": '{"targetLayout":"split_pair"}',
+            "selectedHAPlan": '{"title":"Goal split","promptText":"{}"}',
+        }
+        messages = build_level_plan_messages(1, "none", context)
+        prompt = messages[1]["content"]
+
+        self.assertIn("HUMAN-AI collaborative", prompt)
+        self.assertIn("selected HA revision plan", prompt)
+        self.assertIn("Human-AI revision:", prompt)
 
 
 if __name__ == "__main__":

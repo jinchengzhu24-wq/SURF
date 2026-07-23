@@ -343,6 +343,7 @@ public class AdjustmentController : MonoBehaviour
     private void AcceptAdjustmentAndContinue(string adjustmentText)
     {
         CreativeWorkshopContext.SetRevisionMode(revisionMode);
+        CreativeWorkshopContext.ClearSelectedHAPlan();
         CapturePreviousLevelPlan();
         CreativeWorkshopContext.ClearPendingHumanAdjustment();
 

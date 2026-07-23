@@ -13,6 +13,7 @@ public static class CreativeWorkshopContext
     public const string RevisionModePrefsKey = "SokobanCreativeWorkshopRevisionMode";
     public const string PreviousLevelPlanPrefsKey = "SokobanCreativeWorkshopPreviousLevelPlan";
     public const string PreviousLevelMetricsPrefsKey = "SokobanCreativeWorkshopPreviousLevelMetrics";
+    public const string SelectedHAPlanPrefsKey = "SokobanCreativeWorkshopSelectedHAPlan";
     public const string PendingHumanAdjustmentPrefsKey = "SokobanPendingHumanAdjustment";
     public const string HumanClarityReasonPrefsKey = "SokobanHumanClarityReason";
 
@@ -54,6 +55,7 @@ public static class CreativeWorkshopContext
         PlayerPrefs.DeleteKey(RevisionModePrefsKey);
         PlayerPrefs.DeleteKey(PreviousLevelPlanPrefsKey);
         PlayerPrefs.DeleteKey(PreviousLevelMetricsPrefsKey);
+        PlayerPrefs.DeleteKey(SelectedHAPlanPrefsKey);
         PlayerPrefs.DeleteKey(PendingHumanAdjustmentPrefsKey);
         PlayerPrefs.DeleteKey(HumanClarityReasonPrefsKey);
         SaveStructuredContext();
@@ -126,6 +128,18 @@ public static class CreativeWorkshopContext
         PlayerPrefs.Save();
     }
 
+    public static void SetSelectedHAPlan(string selectedPlanJson)
+    {
+        PlayerPrefs.SetString(SelectedHAPlanPrefsKey, selectedPlanJson ?? "");
+        PlayerPrefs.Save();
+    }
+
+    public static void ClearSelectedHAPlan()
+    {
+        PlayerPrefs.DeleteKey(SelectedHAPlanPrefsKey);
+        PlayerPrefs.Save();
+    }
+
     public static void SetPendingHumanAdjustment(string adjustmentText, string clarityReason)
     {
         PlayerPrefs.SetString(PendingHumanAdjustmentPrefsKey, adjustmentText ?? "");
@@ -163,6 +177,7 @@ public static class CreativeWorkshopContext
         PlayerPrefs.DeleteKey(RevisionModePrefsKey);
         PlayerPrefs.DeleteKey(PreviousLevelPlanPrefsKey);
         PlayerPrefs.DeleteKey(PreviousLevelMetricsPrefsKey);
+        PlayerPrefs.DeleteKey(SelectedHAPlanPrefsKey);
         PlayerPrefs.DeleteKey(PendingHumanAdjustmentPrefsKey);
         PlayerPrefs.DeleteKey(HumanClarityReasonPrefsKey);
         PlayerPrefs.Save();

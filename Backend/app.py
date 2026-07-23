@@ -19,6 +19,7 @@ from pydantic import BaseModel
 try:
     from prompt import (
         build_creative_idea_expansion_messages,
+        build_ha_revision_plan_messages,
         build_human_adjustment_clarity_messages,
         build_level_plan_messages,
         resolve_zero_feature_constraints,
@@ -26,6 +27,7 @@ try:
 except ImportError:
     from .prompt import (
         build_creative_idea_expansion_messages,
+        build_ha_revision_plan_messages,
         build_human_adjustment_clarity_messages,
         build_level_plan_messages,
         resolve_zero_feature_constraints,
@@ -44,6 +46,7 @@ STUDY_LOG_FILE = STUDY_LOG_DIR / "level_records.jsonl"
 SURVEY_LOG_FILE = STUDY_LOG_DIR / "survey_responses.jsonl"
 CREATIVE_IDEA_LOG_FILE = STUDY_LOG_DIR / "creative_ideas.jsonl"
 CREATIVE_EXPANSION_CHOICE_LOG_FILE = STUDY_LOG_DIR / "creative_expansion_choices.jsonl"
+HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -86,6 +89,17 @@ class CreativeIdeaExpansionOption(BaseModel):
     title: str
     description: str
     promptText: str
+
+
+class HARevisionPlanRequest(BaseModel):
+    ideaId: str | None = ""
+    sessionId: str | None = ""
+    adjustmentText: str
+    sceneName: str | None = ""
+    previousLevelPlan: dict
+    corridorValidation: dict | None = None
+    regenerationAttempt: int | None = 0
+    previousOptions: list[dict] | None = None
 
 
 class RenameRoundRequest(BaseModel):
@@ -176,6 +190,8 @@ ENUMS = {
     "corridorPriority": {"preferred", "required"},
 }
 
+HA_CHANGE_FIELDS = set(LIMITS) | set(ENUMS) | {"corridorWidth", "style"}
+
 app = FastAPI()
 app.mount(
     "/frontend",
@@ -221,6 +237,11 @@ async def record_expansion_choice(request: Request):
     return await append_expansion_choice_record(request)
 
 
+@app.post("/record-ha-plan-choice")
+async def record_ha_plan_choice(request: Request):
+    return await append_ha_plan_event(request, "ha-plan-choice")
+
+
 @app.post("/expand-creative-idea")
 def expand_creative_idea(request: CreativeIdeaExpansionRequest):
     data = request.model_dump()
@@ -231,6 +252,33 @@ def expand_creative_idea(request: CreativeIdeaExpansionRequest):
 
     data["ideaText"] = idea_text
     return create_creative_idea_expansion(data)
+
+
+@app.post("/generate-ha-revision-plans")
+def generate_ha_revision_plans(request: HARevisionPlanRequest):
+    data = request.model_dump()
+    adjustment_text = str(data.get("adjustmentText") or "").strip()
+    previous_plan = data.get("previousLevelPlan")
+
+    if not adjustment_text:
+        raise HTTPException(status_code=400, detail="adjustmentText is required")
+
+    if not isinstance(previous_plan, dict) or not previous_plan:
+        raise HTTPException(status_code=400, detail="previousLevelPlan is required")
+
+    data["adjustmentText"] = adjustment_text
+
+    try:
+        result = create_ha_revision_plans(data)
+        append_ha_generation_event(data, result["options"])
+        return result
+    except HTTPException as exception:
+        append_ha_generation_event(
+            data,
+            [],
+            error=str(exception.detail),
+        )
+        raise
 
 
 @app.get("/validate-human-adjustment")
@@ -632,6 +680,7 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         level_records, _ = read_level_record_events()
         idea_records, _ = read_creative_idea_events()
         choice_records, _ = read_expansion_choice_events()
+        ha_plan_records, _ = read_ha_plan_events()
         survey_records, _ = read_survey_response_events()
         paired_survey_session_ids = {
             normalize_survey_identifier(record.get("sessionId"))
@@ -652,6 +701,10 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
             record for record in choice_records
             if normalize_creative_idea_identifier(record.get("ideaId")) != idea_id
         ]
+        remaining_ha_plan_records = [
+            record for record in ha_plan_records
+            if normalize_creative_idea_identifier(record.get("ideaId")) != idea_id
+        ]
         remaining_survey_records = [
             record for record in survey_records
             if normalize_creative_idea_identifier(record.get("creativeIdeaId")) != idea_id
@@ -662,12 +715,14 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         deleted_level_event_count = len(level_records) - len(remaining_level_records)
         deleted_idea_count = len(idea_records) - len(remaining_idea_records)
         deleted_choice_count = len(choice_records) - len(remaining_choice_records)
+        deleted_ha_plan_count = len(ha_plan_records) - len(remaining_ha_plan_records)
         deleted_survey_count = len(survey_records) - len(remaining_survey_records)
 
         if (
             deleted_level_event_count
             + deleted_idea_count
             + deleted_choice_count
+            + deleted_ha_plan_count
             + deleted_survey_count
             == 0
         ):
@@ -680,6 +735,7 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
             remaining_choice_records,
         )
         write_jsonl_records(SURVEY_LOG_FILE, remaining_survey_records)
+        write_jsonl_records(HA_PLAN_EVENT_LOG_FILE, remaining_ha_plan_records)
 
     return {
         "status": "ok",
@@ -687,6 +743,7 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         "deletedLevelEventCount": deleted_level_event_count,
         "deletedIdeaCount": deleted_idea_count,
         "deletedChoiceCount": deleted_choice_count,
+        "deletedHAPlanEventCount": deleted_ha_plan_count,
         "deletedSurveyCount": deleted_survey_count,
     }
 
@@ -700,6 +757,7 @@ def clear_level_records():
         SURVEY_LOG_FILE.write_text("", encoding="utf-8")
         CREATIVE_IDEA_LOG_FILE.write_text("", encoding="utf-8")
         CREATIVE_EXPANSION_CHOICE_LOG_FILE.write_text("", encoding="utf-8")
+        HA_PLAN_EVENT_LOG_FILE.write_text("", encoding="utf-8")
 
     return RedirectResponse("/level-records-view?cleared=1", status_code=303)
 
@@ -718,6 +776,7 @@ def generate_level_plan(
     revisionMode: str = "",
     previousLevelPlan: str = "",
     previousLevelMetrics: str = "",
+    selectedHAPlan: str = "",
 ):
     return create_level_plan(
         {
@@ -733,6 +792,7 @@ def generate_level_plan(
             "revisionMode": revisionMode,
             "previousLevelPlan": previousLevelPlan,
             "previousLevelMetrics": previousLevelMetrics,
+            "selectedHAPlan": selectedHAPlan,
         }
     )
 
@@ -851,6 +911,59 @@ async def append_expansion_choice_record(request: Request):
     }
 
 
+async def append_ha_plan_event(request: Request, default_event_type: str):
+    data = await request.json()
+
+    if not isinstance(data, dict):
+        data = {"payload": data}
+
+    idea_id = str(data.get("ideaId") or "").strip()
+    selected_title = str(data.get("selectedOptionTitle") or "").strip()
+
+    if not idea_id:
+        raise HTTPException(status_code=400, detail="ideaId is required")
+
+    if default_event_type == "ha-plan-choice" and not selected_title:
+        raise HTTPException(status_code=400, detail="selectedOptionTitle is required")
+
+    data.setdefault("eventType", default_event_type)
+    data["serverReceivedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    write_ha_plan_event(data)
+    return {
+        "status": "ok",
+        "eventType": data["eventType"],
+        "ideaId": idea_id,
+        "logFile": str(HA_PLAN_EVENT_LOG_FILE),
+    }
+
+
+def append_ha_generation_event(request_data, options, error=""):
+    data = {
+        "eventType": "ha-plan-generation",
+        "ideaId": str(request_data.get("ideaId") or "").strip(),
+        "sessionId": str(request_data.get("sessionId") or "").strip(),
+        "adjustmentText": str(request_data.get("adjustmentText") or "").strip(),
+        "sceneName": str(request_data.get("sceneName") or "").strip(),
+        "previousLevelPlan": request_data.get("previousLevelPlan"),
+        "corridorValidation": request_data.get("corridorValidation"),
+        "regenerationAttempt": int(request_data.get("regenerationAttempt") or 0),
+        "previousOptions": request_data.get("previousOptions"),
+        "options": options,
+        "error": str(error or ""),
+        "serverReceivedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    write_ha_plan_event(data)
+
+
+def write_ha_plan_event(data):
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        with HA_PLAN_EVENT_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(data, ensure_ascii=False))
+            log_file.write("\n")
+
+
 def read_level_record_events():
     return read_jsonl_records(STUDY_LOG_FILE)
 
@@ -865,6 +978,10 @@ def read_creative_idea_events():
 
 def read_expansion_choice_events():
     return read_jsonl_records(CREATIVE_EXPANSION_CHOICE_LOG_FILE)
+
+
+def read_ha_plan_events():
+    return read_jsonl_records(HA_PLAN_EVENT_LOG_FILE)
 
 
 def filter_frontend_records(records):
@@ -1941,6 +2058,284 @@ def create_human_adjustment_clarity_check(adjustment_text):
         ) from exception
 
 
+def create_ha_revision_plans(context):
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+
+    if not api_key or api_key == "your_deepseek_api_key_here":
+        raise HTTPException(
+            status_code=503,
+            detail="Remote LLM is unavailable because DEEPSEEK_API_KEY is missing",
+        )
+
+    try:
+        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+        temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
+        response = client.chat.completions.create(
+            model=model,
+            messages=build_ha_revision_plan_messages(context),
+            response_format={"type": "json_object"},
+            temperature=temperature,
+            stream=False,
+        )
+        content = response.choices[0].message.content
+        options = validate_ha_revision_plan_options(
+            json.loads(content),
+            context.get("previousLevelPlan"),
+            context.get("adjustmentText"),
+        )
+        print(
+            f"Generated HA revision plans from DeepSeek using {model}: "
+            f"{[option['title'] for option in options]}"
+        )
+        return {"options": options}
+    except HTTPException:
+        raise
+    except Exception as exception:
+        print(f"HA revision-plan request failed: {exception}")
+        raise HTTPException(
+            status_code=502,
+            detail="HA revision-plan generation or validation failed",
+        ) from exception
+
+
+def parse_ha_revision_contract(value):
+    if isinstance(value, str):
+        contract = json.loads(value)
+    elif isinstance(value, dict):
+        contract = dict(value)
+    else:
+        raise ValueError("HA promptText must contain a JSON object")
+
+    if contract.get("preserveUnlisted") is not True:
+        raise ValueError("HA contract preserveUnlisted must be true")
+
+    changes = contract.get("changes")
+
+    if not isinstance(changes, dict) or not changes:
+        raise ValueError("HA contract changes must be a non-empty object")
+
+    unknown_fields = set(changes) - HA_CHANGE_FIELDS
+
+    if unknown_fields:
+        raise ValueError(
+            "HA contract contains unsupported fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+
+    normalized_changes = {}
+
+    for field, value in changes.items():
+        if field in LIMITS:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"HA contract {field} must be an integer")
+
+            minimum, maximum = LIMITS[field]
+
+            if value < minimum or value > maximum:
+                raise ValueError(
+                    f"HA contract {field}={value} is outside {minimum}-{maximum}"
+                )
+
+            normalized_changes[field] = value
+        elif field == "corridorWidth":
+            if isinstance(value, bool) or not isinstance(value, int) or value not in {0, 1, 2}:
+                raise ValueError("HA contract corridorWidth must be 0, 1, or 2")
+
+            normalized_changes[field] = value
+        elif field in ENUMS:
+            clean_value = str(value or "").strip()
+
+            if clean_value not in ENUMS[field]:
+                raise ValueError(
+                    f"HA contract {field}={clean_value} is not supported"
+                )
+
+            normalized_changes[field] = clean_value
+        elif field == "style":
+            clean_value = str(value or "").strip()
+
+            if not clean_value:
+                raise ValueError("HA contract style cannot be empty")
+
+            normalized_changes[field] = clean_value[:80]
+
+    return {
+        "changes": normalized_changes,
+        "preserveUnlisted": True,
+    }
+
+
+def build_ha_contract_constraints(previous_plan, changes, adjustment_text):
+    constraints = resolve_zero_feature_constraints(
+        {"latestAdjustmentText": str(adjustment_text or "")}
+    )
+    previous_plan = previous_plan or {}
+    water_fields = {"minWaterAreas", "maxWaterAreas"}
+    wall_fields = {"minWallObstacleBlocks", "maxWallObstacleBlocks"}
+
+    if not water_fields.intersection(changes):
+        constraints["noWater"] = (
+            previous_plan.get("minWaterAreas") == 0
+            and previous_plan.get("maxWaterAreas") == 0
+        )
+
+    if not wall_fields.intersection(changes):
+        constraints["noInternalWalls"] = (
+            previous_plan.get("minWallObstacleBlocks") == 0
+            and previous_plan.get("maxWallObstacleBlocks") == 0
+        )
+
+    return constraints
+
+
+def validate_ha_revision_contract(contract, previous_plan, adjustment_text):
+    if not isinstance(previous_plan, dict) or not previous_plan:
+        raise ValueError("previous LevelDesignPlan is required")
+
+    parsed = parse_ha_revision_contract(contract)
+    candidate_wall_min = parsed["changes"].get(
+        "minWallObstacleBlocks",
+        previous_plan.get("minWallObstacleBlocks"),
+    )
+    candidate_wall_max = parsed["changes"].get(
+        "maxWallObstacleBlocks",
+        previous_plan.get("maxWallObstacleBlocks"),
+    )
+
+    if candidate_wall_min == 0 and candidate_wall_max == 0:
+        parsed["changes"].update(
+            {
+                "corridorPlacement": "none",
+                "corridorWidth": 0,
+                "corridorOrientation": "any",
+                "corridorRole": "visual_only",
+                "corridorPriority": "preferred",
+            }
+        )
+
+    candidate = dict(previous_plan)
+    candidate.update(parsed["changes"])
+    constraints = build_ha_contract_constraints(
+        previous_plan,
+        parsed["changes"],
+        adjustment_text,
+    )
+    validated_candidate = validate_plan(candidate, constraints)
+    parsed["changes"] = {
+        field: validated_candidate[field]
+        for field in parsed["changes"]
+    }
+    return parsed
+
+
+def validate_ha_revision_plan_options(payload, previous_plan, adjustment_text):
+    if payload is None:
+        raise ValueError("model returned no HA revision payload")
+
+    data = payload.model_dump() if hasattr(payload, "model_dump") else payload
+    raw_options = data if isinstance(data, list) else dict(data).get("options")
+
+    if not isinstance(raw_options, list) or len(raw_options) != 3:
+        raise ValueError("HA revision payload must contain exactly three options")
+
+    validated = []
+    canonical_contracts = set()
+
+    for index, raw_option in enumerate(raw_options):
+        option = (
+            raw_option.model_dump()
+            if hasattr(raw_option, "model_dump")
+            else dict(raw_option)
+        )
+        option_id = clean_expansion_text(option.get("id")) or "ABC"[index]
+        title = clean_expansion_text(option.get("title"))[:64]
+        description = clean_expansion_text(option.get("description"))[:420]
+        contract = validate_ha_revision_contract(
+            option.get("promptText"),
+            previous_plan,
+            adjustment_text,
+        )
+        prompt_text = json.dumps(
+            contract,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+        if not title:
+            raise ValueError(f"HA option {index + 1} title is required")
+
+        if not description:
+            raise ValueError(f"HA option {index + 1} description is required")
+
+        if prompt_text in canonical_contracts:
+            raise ValueError("HA revision options must use distinct change contracts")
+
+        canonical_contracts.add(prompt_text)
+        validated.append(
+            {
+                "id": option_id[:12],
+                "title": title,
+                "description": description,
+                "promptText": prompt_text,
+            }
+        )
+
+    return validated
+
+
+def apply_selected_ha_plan(generated_plan, creative_context, feature_constraints):
+    creative_context = creative_context or {}
+
+    if str(creative_context.get("revisionMode") or "").strip().lower() != "ha":
+        return validate_plan(generated_plan, feature_constraints)
+
+    selected_text = str(creative_context.get("selectedHAPlan") or "").strip()
+
+    if not selected_text:
+        return validate_plan(generated_plan, feature_constraints)
+
+    previous_value = creative_context.get("previousLevelPlan")
+    previous_plan = (
+        json.loads(previous_value)
+        if isinstance(previous_value, str)
+        else previous_value
+    )
+    selected_option = json.loads(selected_text)
+    contract = validate_ha_revision_contract(
+        selected_option.get("promptText"),
+        previous_plan,
+        creative_context.get("latestAdjustmentText"),
+    )
+    candidate = dict(previous_plan)
+    candidate.update(contract["changes"])
+    title = clean_expansion_text(selected_option.get("title"))
+    description = clean_expansion_text(selected_option.get("description"))
+    candidate["designNote"] = (
+        "Human-AI revision: "
+        + (title or "selected plan")
+        + ". "
+        + description
+    )[:160]
+    effective_constraints = dict(feature_constraints or {})
+
+    if (
+        candidate.get("minWaterAreas") == 0
+        and candidate.get("maxWaterAreas") == 0
+    ):
+        effective_constraints["noWater"] = True
+
+    if (
+        candidate.get("minWallObstacleBlocks") == 0
+        and candidate.get("maxWallObstacleBlocks") == 0
+    ):
+        effective_constraints["noInternalWalls"] = True
+
+    return validate_plan(candidate, effective_constraints)
+
+
 def create_level_plan(creative_context=None):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
 
@@ -1973,7 +2368,12 @@ def create_level_plan(creative_context=None):
         )
 
         content = response.choices[0].message.content
-        plan = validate_plan(json.loads(content), feature_constraints)
+        raw_plan = json.loads(content)
+        plan = apply_selected_ha_plan(
+            raw_plan,
+            creative_context,
+            feature_constraints,
+        )
         remember_blueprint(plan)
         print(f"Generated level plan from DeepSeek using {model}: {plan}")
         return plan

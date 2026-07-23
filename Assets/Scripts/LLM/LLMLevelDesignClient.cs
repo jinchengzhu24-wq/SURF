@@ -209,7 +209,8 @@ public class LLMLevelDesignClient : MonoBehaviour
             ""
         );
 
-        if (string.Equals(revisionMode, "ai", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(revisionMode, "ai", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(revisionMode, "ha", StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
@@ -300,6 +301,7 @@ public class LLMLevelDesignClient : MonoBehaviour
         requestUrl = AppendStructuredContext(requestUrl, "revisionMode", CreativeWorkshopContext.RevisionModePrefsKey);
         requestUrl = AppendStructuredContext(requestUrl, "previousLevelPlan", CreativeWorkshopContext.PreviousLevelPlanPrefsKey);
         requestUrl = AppendStructuredContext(requestUrl, "previousLevelMetrics", CreativeWorkshopContext.PreviousLevelMetricsPrefsKey);
+        requestUrl = AppendStructuredContext(requestUrl, "selectedHAPlan", CreativeWorkshopContext.SelectedHAPlanPrefsKey);
         return requestUrl;
     }
 
