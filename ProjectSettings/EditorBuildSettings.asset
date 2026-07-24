@@ -39,19 +39,19 @@ EditorBuildSettings:
     path: Assets/Scenes/Play/Routing.unity
     guid: 55c45f24b5f02be479bc7882e3c43f4e
   - enabled: 1
-    path: Assets/Scenes/AI/Adjustment(AI).unity
+    path: Assets/Scenes/Play/AI/Adjustment(AI).unity
     guid: fcdffbdd97005e94fa5e7db38e65cd17
   - enabled: 1
-    path: Assets/Scenes/Human/Adjustment(Human).unity
+    path: Assets/Scenes/Play/Human/Adjustment(Human).unity
     guid: 84849075c73631944a6fd1287b625ad2
   - enabled: 1
-    path: Assets/Scenes/Human/Clarification(Human).unity
+    path: Assets/Scenes/Play/Human/Clarification(Human).unity
     guid: f87e18276db103b4f8ed7bddfbfcca27
   - enabled: 1
-    path: Assets/Scenes/HA/Adjustment(HA).unity
+    path: Assets/Scenes/Play/HA/Adjustment(HA).unity
     guid: 76c8c7db86832344195f3898a9f020bb
   - enabled: 1
-    path: Assets/Scenes/HA/Plan.unity
+    path: Assets/Scenes/Play/HA/Plan.unity
     guid: f13ffed5fa951864b9a944dbc8018582
   - enabled: 1
     path: Assets/Scenes/Play/Design interpretation.unity
