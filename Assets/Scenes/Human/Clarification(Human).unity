@@ -284,10 +284,8 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 'Hint:
-
-    Add a one-tile-wide central corridor, separate the two goals,
-    and require more pushes without adding more water.'
+  m_Text: "After your second attempt, the system will show you the scoring criteria
+    required to pass.\r"
 --- !u!222 &466074378
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2581,8 +2579,9 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Click Detail to review the current design interpretation. After submitting,
-    the LLM will use your adjustment to generate a revised level.
+  m_Text: "In this mode, you are required to provide a sufficiently detailed solution.
+    The LLM will only execute your instructions and will not participate in or influence
+    the development of your ideas. \n"
 --- !u!222 &1868337613
 CanvasRenderer:
   m_ObjectHideFlags: 0
