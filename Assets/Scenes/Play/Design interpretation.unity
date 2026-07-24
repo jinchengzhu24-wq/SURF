@@ -1937,7 +1937,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   interpretationText: {fileID: 2300000303}
   backButton: {fileID: 2300000119}
-  refinementSceneName: Refinement
+  refinementSceneName: Review
   noPlanMessage: No LLM design plan is available for this level.
 --- !u!1 &2200001001
 GameObject:

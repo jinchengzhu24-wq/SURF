@@ -24,7 +24,7 @@ public class DesignInterpretationController : MonoBehaviour
     public float textHorizontalPadding = 16f;
 
     [Header("Flow")]
-    public string refinementSceneName = "Refinement";
+    public string refinementSceneName = "Review";
 
     [Header("Fallback")]
     public string noPlanMessage = "No LLM design plan is available for this level.";

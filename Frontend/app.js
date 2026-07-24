@@ -7,7 +7,8 @@ const SCENE_DISPLAY_NAMES = {
     "Custom_Level": "Custom Level",
     "Creative_WorkShop": "Creative Workshop",
     "Expansion": "Expansion",
-    "Refinement": "Refinement"
+    "Review": "Review",
+    "Refinement": "Review"
 };
 
 const DASHBOARD_LEVEL_SCENE_NAME = "Custom_Level";
