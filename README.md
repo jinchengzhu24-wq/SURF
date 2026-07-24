@@ -53,10 +53,12 @@ Human 模式使用 8 分制检查修改指令是否足够具体：问题描述�
 
 ```text
 Review → Design interpretation → Review
+
 Adjustment(AI) → Design interpretation → Adjustment(AI)
 Adjustment(Human) → Design interpretation → Adjustment(Human)
-Clarification(Human) → Design interpretation → Clarification(Human)
 Adjustment(HA) → Design interpretation → Adjustment(HA)
+
+Clarification(Human) → Design interpretation → Clarification(Human)
 ```
 
 ## 1. 请求上下文

@@ -45,10 +45,7 @@ public static class LevelDesignPlanContext
         Plan = CopyPlan(plan);
         ExpandedIdeaText = GetCreativeIdeaText();
         SceneName = SceneManager.GetActiveScene().name;
-        LatestAdjustmentText = PlayerPrefs.GetString(
-            CreativeWorkshopContext.LatestAdjustmentTextPrefsKey,
-            ""
-        );
+        LatestAdjustmentText = GetLatestAdjustmentText();
         CorridorValidation = corridorValidation == null ? null : corridorValidation.Copy();
 
         StoredLevelDesignPlan storedPlan = new StoredLevelDesignPlan
@@ -144,6 +141,49 @@ public static class LevelDesignPlanContext
             : PlayerPrefs.GetString(CreativeWorkshopContext.IdeaTextPrefsKey, "");
     }
 
+    private static string GetLatestAdjustmentText()
+    {
+        string revisionMode = PlayerPrefs.GetString(
+            CreativeWorkshopContext.RevisionModePrefsKey,
+            ""
+        );
+
+        if (!string.Equals(revisionMode, "ha", System.StringComparison.OrdinalIgnoreCase))
+        {
+            return PlayerPrefs.GetString(
+                CreativeWorkshopContext.LatestAdjustmentTextPrefsKey,
+                ""
+            );
+        }
+
+        string selectedPlanJson = PlayerPrefs.GetString(
+            CreativeWorkshopContext.SelectedHAPlanPrefsKey,
+            ""
+        );
+
+        if (string.IsNullOrWhiteSpace(selectedPlanJson))
+        {
+            return "";
+        }
+
+        try
+        {
+            SelectedHAPlanSummary selectedPlan =
+                JsonUtility.FromJson<SelectedHAPlanSummary>(selectedPlanJson);
+            return selectedPlan == null || string.IsNullOrWhiteSpace(selectedPlan.description)
+                ? ""
+                : selectedPlan.description.Trim();
+        }
+        catch (System.Exception exception)
+        {
+            Debug.LogWarning(
+                "LevelDesignPlanContext could not load the selected HA plan: "
+                + exception.Message
+            );
+            return "";
+        }
+    }
+
     private static LevelDesignPlan CopyPlan(LevelDesignPlan source)
     {
         if (source == null)
@@ -185,5 +225,11 @@ public static class LevelDesignPlanContext
         public string sceneName;
         public string latestAdjustmentText;
         public CorridorValidationResult corridorValidation;
+    }
+
+    [System.Serializable]
+    private class SelectedHAPlanSummary
+    {
+        public string description = "";
     }
 }
