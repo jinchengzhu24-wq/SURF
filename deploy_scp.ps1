@@ -31,7 +31,8 @@ $files = @(
     @{ Local = "Backend\prompt.py"; Remote = "Backend/prompt.py" },
     @{ Local = "Frontend\index.html"; Remote = "Frontend/index.html" },
     @{ Local = "Frontend\app.js"; Remote = "Frontend/app.js" },
-    @{ Local = "Frontend\styles.css"; Remote = "Frontend/styles.css" }
+    @{ Local = "Frontend\styles.css"; Remote = "Frontend/styles.css" },
+    @{ Local = "Frontend\Images"; Remote = "Frontend/"; Recursive = $true }
 )
 
 foreach ($file in $files) {
@@ -43,7 +44,15 @@ foreach ($file in $files) {
 
     $target = "$remoteBase/$($file.Remote)"
     Write-Host "Uploading $($file.Local) -> $target"
-    & $scpPath $localPath $target
+    $scpArguments = @()
+
+    if ($file.Recursive) {
+        $scpArguments += "-r"
+    }
+
+    $scpArguments += $localPath
+    $scpArguments += $target
+    & $scpPath @scpArguments
 
     if ($LASTEXITCODE -ne 0) {
         throw "scp failed for $($file.Local)"
