@@ -8,9 +8,12 @@ public class RoutingController : MonoBehaviour
     private const int AiOptionIndex = 0;
     private const int HumanOptionIndex = 1;
     private const int HaOptionIndex = 2;
+    private const string NavigationUrl =
+        "http://111.231.136.4:8000/frontend/Images/Routing.png";
 
     [Header("Scene UI")]
     public Button confirmButton;
+    public Button navigationButton;
 
     [Header("Target Scenes")]
     public string aiSceneName = "Adjustment(AI)";
@@ -34,21 +37,29 @@ public class RoutingController : MonoBehaviour
     {
         optionButtons = FindObjectsOfType<QuestionnaireOptionButton>();
 
-        if (confirmButton != null)
+        if (confirmButton == null)
         {
-            return;
+            GameObject confirmObject = GameObject.Find("ConfirmButton");
+
+            if (confirmObject == null)
+            {
+                confirmObject = GameObject.Find("SubmitButton");
+            }
+
+            if (confirmObject != null)
+            {
+                confirmButton = confirmObject.GetComponent<Button>();
+            }
         }
 
-        GameObject confirmObject = GameObject.Find("ConfirmButton");
-
-        if (confirmObject == null)
+        if (navigationButton == null)
         {
-            confirmObject = GameObject.Find("SubmitButton");
-        }
+            GameObject navigationObject = GameObject.Find("NavigationButton");
 
-        if (confirmObject != null)
-        {
-            confirmButton = confirmObject.GetComponent<Button>();
+            if (navigationObject != null)
+            {
+                navigationButton = navigationObject.GetComponent<Button>();
+            }
         }
     }
 
@@ -122,6 +133,22 @@ public class RoutingController : MonoBehaviour
         {
             Debug.LogWarning("RoutingController: Confirm button is missing.");
         }
+
+        if (navigationButton != null)
+        {
+            navigationButton.onClick.RemoveAllListeners();
+            navigationButton.onClick.AddListener(OpenNavigation);
+            navigationButton.interactable = true;
+        }
+        else
+        {
+            Debug.LogWarning("RoutingController: Navigation button is missing.");
+        }
+    }
+
+    private void OpenNavigation()
+    {
+        Application.OpenURL(NavigationUrl);
     }
 
     private void SelectOption(QuestionnaireOptionButton option)
