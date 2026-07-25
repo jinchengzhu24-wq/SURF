@@ -19,6 +19,7 @@ from pydantic import BaseModel
 try:
     from prompt import (
         build_creative_idea_expansion_messages,
+        build_ha_revision_plan_edit_messages,
         build_ha_revision_plan_messages,
         build_human_adjustment_clarity_messages,
         build_level_plan_messages,
@@ -27,6 +28,7 @@ try:
 except ImportError:
     from .prompt import (
         build_creative_idea_expansion_messages,
+        build_ha_revision_plan_edit_messages,
         build_ha_revision_plan_messages,
         build_human_adjustment_clarity_messages,
         build_level_plan_messages,
@@ -100,6 +102,17 @@ class HARevisionPlanRequest(BaseModel):
     corridorValidation: dict | None = None
     regenerationAttempt: int | None = 0
     previousOptions: list[dict] | None = None
+
+
+class HARevisionPlanEditRequest(BaseModel):
+    ideaId: str | None = ""
+    sessionId: str | None = ""
+    adjustmentText: str
+    sceneName: str | None = ""
+    previousLevelPlan: dict
+    corridorValidation: dict | None = None
+    originalOption: dict
+    editedDescription: str
 
 
 class RenameRoundRequest(BaseModel):
@@ -279,6 +292,26 @@ def generate_ha_revision_plans(request: HARevisionPlanRequest):
             error=str(exception.detail),
         )
         raise
+
+
+@app.post("/revise-ha-revision-plan")
+def revise_ha_revision_plan(request: HARevisionPlanEditRequest):
+    data = request.model_dump()
+    edited_description = str(data.get("editedDescription") or "").strip()
+    previous_plan = data.get("previousLevelPlan")
+    original_option = data.get("originalOption")
+
+    if not edited_description:
+        raise HTTPException(status_code=400, detail="editedDescription is required")
+
+    if not isinstance(previous_plan, dict) or not previous_plan:
+        raise HTTPException(status_code=400, detail="previousLevelPlan is required")
+
+    if not isinstance(original_option, dict) or not original_option:
+        raise HTTPException(status_code=400, detail="originalOption is required")
+
+    data["editedDescription"] = edited_description[:420]
+    return create_ha_revision_plan_edit(data)
 
 
 @app.get("/validate-human-adjustment")
@@ -2102,6 +2135,52 @@ def create_ha_revision_plans(context):
         ) from exception
 
 
+def create_ha_revision_plan_edit(context):
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+
+    if not api_key or api_key == "your_deepseek_api_key_here":
+        raise HTTPException(
+            status_code=503,
+            detail="Remote LLM is unavailable because DEEPSEEK_API_KEY is missing",
+        )
+
+    try:
+        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
+        response = client.chat.completions.create(
+            model=model,
+            messages=build_ha_revision_plan_edit_messages(context),
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            stream=False,
+        )
+        content = response.choices[0].message.content
+        option = validate_ha_revision_plan_edit(
+            json.loads(content),
+            context.get("originalOption"),
+            context.get("previousLevelPlan"),
+            context.get("adjustmentText"),
+            context.get("editedDescription"),
+        )
+        print(
+            f"Revised HA option from DeepSeek using {model}: "
+            f"{option['title']}"
+        )
+        return {"option": option}
+    except HTTPException:
+        raise
+    except Exception as exception:
+        print(f"HA revision-plan edit request failed: {exception}")
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "HA revision-plan edit or validation failed: "
+                f"{type(exception).__name__}: {exception}"
+            ),
+        ) from exception
+
+
 def parse_ha_revision_contract(value):
     if isinstance(value, str):
         contract = json.loads(value)
@@ -2286,6 +2365,66 @@ def validate_ha_revision_plan_options(payload, previous_plan, adjustment_text):
         )
 
     return validated
+
+
+def validate_ha_revision_plan_edit(
+    payload,
+    original_option,
+    previous_plan,
+    adjustment_text,
+    edited_description,
+):
+    if payload is None:
+        raise ValueError("model returned no HA revision-plan edit payload")
+
+    data = payload.model_dump() if hasattr(payload, "model_dump") else dict(payload)
+    original_option = dict(original_option or {})
+    option_id = clean_expansion_text(original_option.get("id"))[:12]
+    title = clean_expansion_text(original_option.get("title"))[:64]
+    description = clean_expansion_text(data.get("description"))[:420]
+    edit_intent = " ".join(
+        value
+        for value in (
+            clean_expansion_text(adjustment_text),
+            clean_expansion_text(edited_description),
+        )
+        if value
+    )
+    contract = validate_ha_revision_contract(
+        data.get("promptText"),
+        previous_plan,
+        edit_intent,
+    )
+    original_contract = validate_ha_revision_contract(
+        original_option.get("promptText"),
+        previous_plan,
+        adjustment_text,
+    )
+
+    if not option_id:
+        raise ValueError("original HA option id is required")
+
+    if not title:
+        raise ValueError("original HA option title is required")
+
+    if not description:
+        raise ValueError("edited HA option description is required")
+
+    if contract == original_contract:
+        raise ValueError("edited HA option must produce a different change contract")
+
+    prompt_text = json.dumps(
+        contract,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return {
+        "id": option_id,
+        "title": title,
+        "description": description,
+        "promptText": prompt_text,
+    }
 
 
 def apply_selected_ha_plan(generated_plan, creative_context, feature_constraints):

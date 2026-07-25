@@ -5,10 +5,12 @@ from Backend.app import (
     DEFAULT_PLAN,
     apply_selected_ha_plan,
     validate_human_adjustment_clarity_payload,
+    validate_ha_revision_plan_edit,
     validate_ha_revision_plan_options,
     validate_plan,
 )
 from Backend.prompt import (
+    build_ha_revision_plan_edit_messages,
     build_ha_revision_plan_messages,
     build_human_adjustment_clarity_messages,
     build_level_plan_messages,
@@ -241,6 +243,63 @@ class FeatureConstraintTests(unittest.TestCase):
         self.assertEqual(len(options), 3)
         self.assertIn('"preserveUnlisted":true', options[0]["promptText"])
 
+    def test_ha_revision_plan_edit_preserves_identity_and_rebuilds_contract(self):
+        previous_plan = self.make_plan()
+        original_option = {
+            "id": "A",
+            "title": "More pushes",
+            "description": "Increase push pressure.",
+            "promptText": {
+                "changes": {"minPushes": 12},
+                "preserveUnlisted": True,
+            },
+        }
+        payload = {
+            "description": "Cluster the goals while preserving the other structure.",
+            "promptText": {
+                "changes": {"targetLayout": "clustered"},
+                "preserveUnlisted": True,
+            },
+        }
+
+        option = validate_ha_revision_plan_edit(
+            payload,
+            original_option,
+            previous_plan,
+            "Increase push pressure.",
+            "Cluster the goals.",
+        )
+
+        self.assertEqual(option["id"], "A")
+        self.assertEqual(option["title"], "More pushes")
+        self.assertEqual(option["description"], payload["description"])
+        self.assertIn('"targetLayout":"clustered"', option["promptText"])
+
+    def test_ha_revision_plan_edit_rejects_unchanged_contract(self):
+        previous_plan = self.make_plan()
+        original_option = {
+            "id": "A",
+            "title": "More pushes",
+            "description": "Increase push pressure.",
+            "promptText": {
+                "changes": {"minPushes": 12},
+                "preserveUnlisted": True,
+            },
+        }
+        payload = {
+            "description": "Use different wording for the same push pressure.",
+            "promptText": original_option["promptText"],
+        }
+
+        with self.assertRaisesRegex(ValueError, "different change contract"):
+            validate_ha_revision_plan_edit(
+                payload,
+                original_option,
+                previous_plan,
+                "Increase push pressure.",
+                payload["description"],
+            )
+
     def test_ha_revision_contract_rejects_unknown_field(self):
         previous_plan = self.make_plan()
         payload = {
@@ -318,6 +377,27 @@ class FeatureConstraintTests(unittest.TestCase):
         self.assertIn("Corridor verification JSON", prompt)
         self.assertIn("Regeneration attempt: 2", prompt)
         self.assertIn("preserveUnlisted", prompt)
+
+    def test_ha_revision_plan_edit_prompt_contains_player_edit_and_contract(self):
+        context = {
+            "adjustmentText": "Increase push pressure.",
+            "editedDescription": "Cluster the goals and keep the water unchanged.",
+            "previousLevelPlan": self.make_plan(),
+            "corridorValidation": {"verified": True},
+            "originalOption": {
+                "id": "A",
+                "title": "More pushes",
+                "description": "Increase push pressure.",
+                "promptText": '{"changes":{"minPushes":12},"preserveUnlisted":true}',
+            },
+        }
+        messages = build_ha_revision_plan_edit_messages(context)
+        prompt = messages[1]["content"]
+
+        self.assertIn(context["editedDescription"], prompt)
+        self.assertIn("Previous LevelDesignPlan JSON", prompt)
+        self.assertIn("preserveUnlisted", prompt)
+        self.assertIn("must differ", prompt)
 
     def test_ha_level_prompt_describes_collaborative_authority(self):
         context = {

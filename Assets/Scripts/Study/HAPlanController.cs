@@ -11,7 +11,9 @@ public class HAPlanController : MonoBehaviour
 {
     private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
     private const string GeneratePath = "/generate-ha-revision-plans";
+    private const string EditPath = "/revise-ha-revision-plan";
     private const string ChoicePath = "/record-ha-plan-choice";
+    private const int MaxDescriptionLength = 420;
 
     [Header("Scene UI")]
     public Button submitButton;
@@ -38,6 +40,7 @@ public class HAPlanController : MonoBehaviour
     private readonly Color selectedCardColor = new Color(0.78f, 0.88f, 1f, 1f);
     private readonly Color disabledCardColor = new Color(0.86f, 0.86f, 0.86f, 1f);
     private readonly ScrollRect[] optionDescriptionScrollRects = new ScrollRect[3];
+    private readonly InputField[] optionDescriptionInputs = new InputField[3];
 
     private HARevisionPlanOption[] options = new HARevisionPlanOption[0];
     private HARevisionPlanOption[] lastSuccessfulOptions = new HARevisionPlanOption[0];
@@ -49,12 +52,14 @@ public class HAPlanController : MonoBehaviour
     private bool requestFailed;
     private int selectedOptionIndex = -1;
     private int regenerationAttempt;
+    private bool isUpdatingDescriptionTexts;
 
     private void Start()
     {
         EnsureUiArrays();
         ResolveSceneReferences();
         ResolveOptionDescriptionScrollRects();
+        ConfigureOptionDescriptionInputs();
         WireButtons();
         LoadContext();
         RefreshStaticText();
@@ -209,6 +214,70 @@ public class HAPlanController : MonoBehaviour
                 ? optionDescriptionTexts[i].GetComponentInParent<ScrollRect>()
                 : null;
         }
+    }
+
+    private void ConfigureOptionDescriptionInputs()
+    {
+        for (int i = 0; i < optionDescriptionTexts.Length; i++)
+        {
+            Text descriptionText = optionDescriptionTexts[i];
+
+            if (descriptionText == null)
+            {
+                continue;
+            }
+
+            int optionIndex = i;
+            InputField input = descriptionText.GetComponent<InputField>();
+
+            if (input == null)
+            {
+                input = descriptionText.gameObject.AddComponent<InputField>();
+            }
+
+            input.textComponent = descriptionText;
+            input.targetGraphic = descriptionText;
+            input.lineType = InputField.LineType.MultiLineNewline;
+            input.contentType = InputField.ContentType.Standard;
+            input.characterLimit = MaxDescriptionLength;
+            input.readOnly = false;
+            input.interactable = false;
+            input.customCaretColor = true;
+            input.caretColor = new Color(0.08f, 0.12f, 0.18f, 1f);
+            input.selectionColor = new Color(0.45f, 0.65f, 1f, 0.45f);
+            input.caretWidth = 2;
+            input.onValueChanged.AddListener(
+                value => OnOptionDescriptionChanged(optionIndex, value)
+            );
+            optionDescriptionInputs[i] = input;
+        }
+    }
+
+    private void OnOptionDescriptionChanged(int index, string value)
+    {
+        if (index >= 0
+            && index < optionDescriptionTexts.Length
+            && optionDescriptionTexts[index] != null)
+        {
+            LayoutRebuilder.ForceRebuildLayoutImmediate(
+                optionDescriptionTexts[index].rectTransform
+            );
+        }
+
+        if (isUpdatingDescriptionTexts
+            || isRequesting
+            || isContinuing
+            || requestFailed
+            || options == null
+            || index < 0
+            || index >= options.Length)
+        {
+            return;
+        }
+
+        selectedOptionIndex = index;
+        SetStatus("Selected: " + options[index].title);
+        UpdateButtonState();
     }
 
     private void WireButtons()
@@ -473,16 +542,120 @@ public class HAPlanController : MonoBehaviour
             return;
         }
 
-        StartCoroutine(RecordChoiceAndContinueRoutine());
+        string editedDescription = GetOptionDescription(selectedOptionIndex);
+
+        if (string.IsNullOrWhiteSpace(editedDescription))
+        {
+            SetStatus("The selected plan description cannot be empty.");
+            UpdateButtonState();
+            return;
+        }
+
+        HARevisionPlanOption selectedOption = options[selectedOptionIndex];
+
+        if (CleanText(editedDescription) == CleanText(selectedOption.description))
+        {
+            StartCoroutine(RecordChoiceAndContinueRoutine(selectedOption));
+            return;
+        }
+
+        StartCoroutine(
+            ReviseSelectedOptionAndContinueRoutine(selectedOption, editedDescription)
+        );
     }
 
-    private IEnumerator RecordChoiceAndContinueRoutine()
+    private IEnumerator ReviseSelectedOptionAndContinueRoutine(
+        HARevisionPlanOption originalOption,
+        string editedDescription)
+    {
+        isContinuing = true;
+        UpdateButtonState();
+        SetStatus("Validating the edited revision plan...");
+
+        HARevisionPlanEditRequest requestBody = new HARevisionPlanEditRequest
+        {
+            ideaId = GetContextValue(
+                CreativeWorkshopContext.IdeaId,
+                CreativeWorkshopContext.IdeaIdPrefsKey
+            ),
+            sessionId = GetContextValue(
+                CreativeWorkshopContext.SessionId,
+                CreativeWorkshopContext.SessionIdPrefsKey
+            ),
+            adjustmentText = adjustmentText,
+            sceneName = SceneManager.GetActiveScene().name,
+            previousLevelPlan = previousLevelPlan,
+            corridorValidation = corridorValidation,
+            originalOption = originalOption,
+            editedDescription = editedDescription
+        };
+
+        byte[] body = Encoding.UTF8.GetBytes(JsonUtility.ToJson(requestBody));
+        HARevisionPlanOption revisedOption = null;
+
+        using (UnityWebRequest request = new UnityWebRequest(GetBackendUrl(EditPath), "POST"))
+        {
+            request.uploadHandler = new UploadHandlerRaw(body);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.SetRequestHeader("Accept", "application/json");
+            request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+            yield return request.SendWebRequest();
+
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                HARevisionPlanEditResponse response = null;
+
+                try
+                {
+                    response = JsonUtility.FromJson<HARevisionPlanEditResponse>(
+                        request.downloadHandler.text
+                    );
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning(
+                        "HAPlanController could not parse edited plan response: "
+                        + exception.Message
+                    );
+                }
+
+                if (response != null
+                    && response.option != null
+                    && response.option.id == originalOption.id
+                    && response.option.title == originalOption.title
+                    && !string.IsNullOrWhiteSpace(response.option.description)
+                    && !string.IsNullOrWhiteSpace(response.option.promptText))
+                {
+                    revisedOption = response.option;
+                }
+            }
+
+            if (revisedOption == null)
+            {
+                isContinuing = false;
+                SetStatus(
+                    "The edited plan could not be validated. Adjust the description and retry."
+                );
+                UpdateButtonState();
+                Debug.LogWarning(
+                    "HAPlanController edited plan request failed: error=" + request.error
+                    + ", responseCode=" + request.responseCode
+                    + ", responseBody=" + request.downloadHandler.text
+                );
+                yield break;
+            }
+        }
+
+        yield return RecordChoiceAndContinueRoutine(revisedOption);
+    }
+
+    private IEnumerator RecordChoiceAndContinueRoutine(HARevisionPlanOption selectedOption)
     {
         isContinuing = true;
         UpdateButtonState();
         SetStatus("Recording selected revision plan...");
 
-        HARevisionPlanOption selectedOption = options[selectedOptionIndex];
         CreativeWorkshopContext.SetSelectedHAPlan(JsonUtility.ToJson(selectedOption));
 
         HARevisionPlanChoiceRecord record = new HARevisionPlanChoiceRecord
@@ -553,6 +726,8 @@ public class HAPlanController : MonoBehaviour
 
     private void SetOptionTexts(HARevisionPlanOption[] displayOptions)
     {
+        isUpdatingDescriptionTexts = true;
+
         for (int i = 0; i < 3; i++)
         {
             bool hasOption = displayOptions != null
@@ -566,17 +741,28 @@ public class HAPlanController : MonoBehaviour
                     : "Option " + (i + 1);
             }
 
+            string description = hasOption
+                ? displayOptions[i].description
+                : "";
+
+            if (optionDescriptionInputs[i] != null)
+            {
+                optionDescriptionInputs[i].text = description;
+            }
+            else if (optionDescriptionTexts[i] != null)
+            {
+                optionDescriptionTexts[i].text = description;
+            }
+
             if (optionDescriptionTexts[i] != null)
             {
-                optionDescriptionTexts[i].text = hasOption
-                    ? displayOptions[i].description
-                    : "";
                 LayoutRebuilder.ForceRebuildLayoutImmediate(
                     optionDescriptionTexts[i].rectTransform
                 );
             }
         }
 
+        isUpdatingDescriptionTexts = false;
         Canvas.ForceUpdateCanvases();
 
         for (int i = 0; i < optionDescriptionScrollRects.Length; i++)
@@ -594,6 +780,9 @@ public class HAPlanController : MonoBehaviour
     private void UpdateButtonState()
     {
         bool hasOptions = options != null && options.Length == 3 && !requestFailed;
+        bool hasSelectedDescription = selectedOptionIndex >= 0
+            && selectedOptionIndex < 3
+            && !string.IsNullOrWhiteSpace(GetOptionDescription(selectedOptionIndex));
 
         if (submitButton != null)
         {
@@ -601,7 +790,8 @@ public class HAPlanController : MonoBehaviour
                 && !isContinuing
                 && hasOptions
                 && selectedOptionIndex >= 0
-                && selectedOptionIndex < options.Length;
+                && selectedOptionIndex < options.Length
+                && hasSelectedDescription;
         }
 
         if (regenerateButton != null)
@@ -623,6 +813,12 @@ public class HAPlanController : MonoBehaviour
                 optionButtons[i].interactable = !isRequesting && !isContinuing && hasOptions;
             }
 
+            if (optionDescriptionInputs[i] != null)
+            {
+                optionDescriptionInputs[i].interactable =
+                    !isRequesting && !isContinuing && hasOptions;
+            }
+
             if (optionCardImages[i] != null)
             {
                 optionCardImages[i].color = !hasOptions || isRequesting || isContinuing
@@ -630,6 +826,23 @@ public class HAPlanController : MonoBehaviour
                     : i == selectedOptionIndex ? selectedCardColor : normalCardColor;
             }
         }
+    }
+
+    private string GetOptionDescription(int index)
+    {
+        if (index < 0 || index >= 3)
+        {
+            return "";
+        }
+
+        if (optionDescriptionInputs[index] != null)
+        {
+            return optionDescriptionInputs[index].text.Trim();
+        }
+
+        return options != null && index < options.Length && options[index] != null
+            ? (options[index].description ?? "").Trim()
+            : "";
     }
 
     private HARevisionPlanOption[] CopyOptions(HARevisionPlanOption[] source)
@@ -747,6 +960,25 @@ public class HAPlanController : MonoBehaviour
     public class HARevisionPlanResponse
     {
         public HARevisionPlanOption[] options;
+    }
+
+    [Serializable]
+    public class HARevisionPlanEditRequest
+    {
+        public string ideaId;
+        public string sessionId;
+        public string adjustmentText;
+        public string sceneName;
+        public LevelDesignPlan previousLevelPlan;
+        public CorridorValidationResult corridorValidation;
+        public HARevisionPlanOption originalOption;
+        public string editedDescription;
+    }
+
+    [Serializable]
+    public class HARevisionPlanEditResponse
+    {
+        public HARevisionPlanOption option;
     }
 
     [Serializable]

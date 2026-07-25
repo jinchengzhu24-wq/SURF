@@ -363,6 +363,15 @@ HA_REVISION_PLAN_SYSTEM_PROMPT = (
 )
 
 
+HA_REVISION_PLAN_EDIT_SYSTEM_PROMPT = (
+    "You revise one selected option in a Human-AI Sokoban workflow. The player "
+    "edited the visible option description, and that edit is authoritative. Convert "
+    "it into one supported, minimal LevelDesignPlan change contract using the "
+    "previous plan as the factual baseline. Preserve every unlisted field, do not "
+    "add unrelated improvements, and do not generate a map. Return only valid JSON."
+)
+
+
 def build_ha_revision_plan_messages(context):
     context = context or {}
     adjustment_text = normalize_prompt_text(context.get("adjustmentText"))
@@ -423,6 +432,58 @@ def build_ha_revision_plan_messages(context):
     )
     return [
         {"role": "system", "content": HA_REVISION_PLAN_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def build_ha_revision_plan_edit_messages(context):
+    context = context or {}
+    adjustment_text = normalize_prompt_text(context.get("adjustmentText"))
+    edited_description = normalize_prompt_text(context.get("editedDescription"))
+    previous_plan = context.get("previousLevelPlan") or {}
+    corridor_validation = context.get("corridorValidation") or {}
+    original_option = context.get("originalOption") or {}
+    user_prompt = (
+        f'Original human adjustment: "{adjustment_text}". '
+        f'Player-edited option description: "{edited_description}". '
+        "Previous LevelDesignPlan JSON: "
+        + json.dumps(previous_plan, ensure_ascii=False, separators=(",", ":"))
+        + ". Corridor verification JSON: "
+        + json.dumps(corridor_validation, ensure_ascii=False, separators=(",", ":"))
+        + ". Original selected option JSON: "
+        + json.dumps(original_option, ensure_ascii=False, separators=(",", ":"))
+        + ". Treat the edited description as the final revision intent. Return a "
+        "normalized player-facing description in the same language that preserves "
+        "the edit while expressing only supported observable Sokoban changes, plus "
+        "a hidden implementation contract. The new contract must differ from the "
+        "original option contract and change only the smallest coherent set of "
+        "necessary fields. Return exactly "
+        '{"description":"...","promptText":"{\\"changes\\":{...},'
+        '\\"preserveUnlisted\\":true}"}. '
+        "promptText must itself be valid compact JSON. changes must be non-empty and "
+        "may contain only these integer fields: minSolutionSteps 18-30, "
+        "maxSolutionSteps 32-50, minWaterAreas 1-2 and maxWaterAreas 1-2 unless the "
+        "player explicitly requests no water, minWallObstacleBlocks 2 and "
+        "maxWallObstacleBlocks 2-3 unless the player explicitly requests no internal "
+        "walls, minPushes 8-16, maxPushes 14-28, minReversePulls 14-24, "
+        "maxReversePulls 24-40, corridorWidth 0-2. Supported string fields are style, "
+        "archetype, targetLayout, obstacleStyle, waterStyle, corridorPlacement, "
+        "corridorOrientation, corridorRole, and corridorPriority. Never include "
+        "designNote. Supported enums are: archetype goal_room, bottleneck_corridor, "
+        "split_route, open_workshop; targetLayout clustered, split_pair, edge_cluster; "
+        "obstacleStyle central_baffle, side_choke, goal_guard; waterStyle corner_pool, "
+        "side_pool, route_divider; corridorPlacement none, center, side; "
+        "corridorOrientation horizontal, vertical, any; corridorRole visual_only, "
+        "player_route, required_box_route; corridorPriority preferred, required. "
+        "preserveUnlisted must be true. Range minima must not exceed maxima. A none "
+        "corridor requires width 0, orientation any, role visual_only, and priority "
+        "preferred. If any corridor field changes, include the complete consistent "
+        "corridor tuple. Do not introduce zero water or zero internal walls unless "
+        "the player's edit explicitly requests removal. Silently verify that the "
+        "normalized description and promptText describe the same implementation."
+    )
+    return [
+        {"role": "system", "content": HA_REVISION_PLAN_EDIT_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 
