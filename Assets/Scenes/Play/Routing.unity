@@ -156,8 +156,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 29.197, y: 226}
-  m_SizeDelta: {x: 1456.394, y: 152}
+  m_AnchoredPosition: {x: 29.197, y: 206}
+  m_SizeDelta: {x: 1456.394, y: 209.77}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &275452643
 MonoBehaviour:
@@ -192,9 +192,9 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 'Based on your selection, it seems that you are not satisfied with the
-    generated level. Three revision approaches are provided below, and you can choose
-    a revision direction based on their descriptions.
+  m_Text: 'For research purposes, you must experience the revision process the first
+    time you enter the Review scene. After that, the system will infer your intent
+    from your selection and decide whether to revise again or continue.
 
 '
 --- !u!222 &275452644
@@ -2219,6 +2219,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   confirmButton: {fileID: 2300000119}
+  navigationButton: {fileID: 0}
   aiSceneName: Adjustment(AI)
   humanSceneName: Adjustment(Human)
   haSceneName: Adjustment(HA)

@@ -16,6 +16,9 @@ public static class CreativeWorkshopContext
     public const string SelectedHAPlanPrefsKey = "SokobanCreativeWorkshopSelectedHAPlan";
     public const string PendingHumanAdjustmentPrefsKey = "SokobanPendingHumanAdjustment";
     public const string HumanClarityReasonPrefsKey = "SokobanHumanClarityReason";
+    public const string InitialReviewCompletedPrefsKey = "SokobanInitialReviewCompleted";
+    public const string InitialRoutingOptionTextPendingPrefsKey =
+        "SokobanInitialRoutingOptionTextPending";
 
     public static string IdeaId { get; private set; }
     public static string SessionId { get; private set; }
@@ -30,6 +33,16 @@ public static class CreativeWorkshopContext
     public static bool HasIdea
     {
         get { return !string.IsNullOrEmpty(IdeaText); }
+    }
+
+    public static bool HasCompletedInitialReview
+    {
+        get { return PlayerPrefs.GetInt(InitialReviewCompletedPrefsKey, 0) == 1; }
+    }
+
+    public static bool ShouldOverrideInitialRoutingOptionText
+    {
+        get { return PlayerPrefs.GetInt(InitialRoutingOptionTextPendingPrefsKey, 0) == 1; }
     }
 
     public static void SetIdea(string ideaId, string sessionId, string ideaText)
@@ -58,6 +71,8 @@ public static class CreativeWorkshopContext
         PlayerPrefs.DeleteKey(SelectedHAPlanPrefsKey);
         PlayerPrefs.DeleteKey(PendingHumanAdjustmentPrefsKey);
         PlayerPrefs.DeleteKey(HumanClarityReasonPrefsKey);
+        PlayerPrefs.DeleteKey(InitialReviewCompletedPrefsKey);
+        PlayerPrefs.DeleteKey(InitialRoutingOptionTextPendingPrefsKey);
         SaveStructuredContext();
         SetIdea(ideaId, sessionId, ideaText);
     }
@@ -154,6 +169,24 @@ public static class CreativeWorkshopContext
         PlayerPrefs.Save();
     }
 
+    public static void MarkInitialReviewCompleted()
+    {
+        PlayerPrefs.SetInt(InitialReviewCompletedPrefsKey, 1);
+        PlayerPrefs.Save();
+    }
+
+    public static void MarkInitialRoutingOptionTextPending()
+    {
+        PlayerPrefs.SetInt(InitialRoutingOptionTextPendingPrefsKey, 1);
+        PlayerPrefs.Save();
+    }
+
+    public static void ConsumeInitialRoutingOptionTextPending()
+    {
+        PlayerPrefs.DeleteKey(InitialRoutingOptionTextPendingPrefsKey);
+        PlayerPrefs.Save();
+    }
+
     public static void Clear()
     {
         IdeaId = "";
@@ -180,6 +213,8 @@ public static class CreativeWorkshopContext
         PlayerPrefs.DeleteKey(SelectedHAPlanPrefsKey);
         PlayerPrefs.DeleteKey(PendingHumanAdjustmentPrefsKey);
         PlayerPrefs.DeleteKey(HumanClarityReasonPrefsKey);
+        PlayerPrefs.DeleteKey(InitialReviewCompletedPrefsKey);
+        PlayerPrefs.DeleteKey(InitialRoutingOptionTextPendingPrefsKey);
         PlayerPrefs.Save();
     }
 

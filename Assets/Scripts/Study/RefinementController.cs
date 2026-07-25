@@ -193,6 +193,20 @@ public class RefinementController : MonoBehaviour
             );
         }
 
+        if (!CreativeWorkshopContext.HasCompletedInitialReview)
+        {
+            CreativeWorkshopContext.MarkInitialReviewCompleted();
+            CreativeWorkshopContext.MarkInitialRoutingOptionTextPending();
+
+            if (totalScore < passScoreThreshold)
+            {
+                ApplyRetryPrompt(totalScore);
+            }
+
+            LoadScene(retrySceneName);
+            return;
+        }
+
         if (totalScore >= passScoreThreshold)
         {
             LoadScene(questionnaireSceneName);

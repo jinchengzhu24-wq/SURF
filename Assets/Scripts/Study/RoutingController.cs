@@ -20,6 +20,14 @@ public class RoutingController : MonoBehaviour
     public string humanSceneName = "Adjustment(Human)";
     public string haSceneName = "Adjustment(HA)";
 
+    [Header("First Visit Option Text")]
+    [TextArea(2, 4)]
+    public string initialAiOptionText = "Let AI decide how to improve the level";
+    [TextArea(2, 4)]
+    public string initialHumanOptionText = "I will specify exactly what to change";
+    [TextArea(2, 4)]
+    public string initialHaOptionText = "Let AI suggest plans, then I will choose";
+
     private QuestionnaireOptionButton[] optionButtons = new QuestionnaireOptionButton[0];
     private int selectedOptionIndex = -1;
     private bool configurationValid;
@@ -27,6 +35,7 @@ public class RoutingController : MonoBehaviour
     private void Start()
     {
         ResolveSceneReferences();
+        ApplyInitialOptionTextOverrides();
         configurationValid = ValidateOptions();
         WireButtons();
         RefreshSelectionVisuals();
@@ -61,6 +70,54 @@ public class RoutingController : MonoBehaviour
                 navigationButton = navigationObject.GetComponent<Button>();
             }
         }
+    }
+
+    private void ApplyInitialOptionTextOverrides()
+    {
+        if (!CreativeWorkshopContext.ShouldOverrideInitialRoutingOptionText)
+        {
+            return;
+        }
+
+        for (int i = 0; i < optionButtons.Length; i++)
+        {
+            QuestionnaireOptionButton option = optionButtons[i];
+
+            if (option == null)
+            {
+                continue;
+            }
+
+            option.ResolveReferences();
+            string overrideText = GetInitialOptionText(option.optionIndex);
+
+            if (option.optionText != null && !string.IsNullOrWhiteSpace(overrideText))
+            {
+                option.optionText.text = overrideText.Trim();
+            }
+        }
+
+        CreativeWorkshopContext.ConsumeInitialRoutingOptionTextPending();
+    }
+
+    private string GetInitialOptionText(int optionIndex)
+    {
+        if (optionIndex == AiOptionIndex)
+        {
+            return initialAiOptionText;
+        }
+
+        if (optionIndex == HumanOptionIndex)
+        {
+            return initialHumanOptionText;
+        }
+
+        if (optionIndex == HaOptionIndex)
+        {
+            return initialHaOptionText;
+        }
+
+        return "";
     }
 
     private bool ValidateOptions()

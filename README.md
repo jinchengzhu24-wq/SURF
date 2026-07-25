@@ -34,19 +34,20 @@ LLM 模式从质量最高的三张合格候选中等概率随机选择一张
 Menu → Questionnaire(Before) → Creative_WorkShop → Expansion → Custom_Level → Review
 ```
 
-Review 分数达标后的路线：
+首次进入 Review 时，无论分数是否达标都必须进入一次调整流程：
 
 ```text
-Review → Questionnaire(After) → Menu
+首次 Review → Routing → Adjustment(AI) → Custom_Level → Review
+                       → Adjustment(Human) → [通过] → Custom_Level → Review
+                                           → [未通过] → Clarification(Human) → [重新评分]
+                       → Adjustment(HA) → Plan → Custom_Level → Review
 ```
 
-Review 分数未达标时进入调整循环：
+第二次及后续 Review 才根据分数分流：
 
 ```text
-Review → Routing → Adjustment(AI) → Custom_Level → Review
-                 → Adjustment(Human) → [通过] → Custom_Level → Review
-                                     → [未通过] → Clarification(Human) → [重新评分]
-                 → Adjustment(HA) → Plan → Custom_Level → Review
+分数达标：Review → Questionnaire(After) → Menu
+分数未达标：Review → Routing → 调整流程 → Custom_Level → Review
 ```
 
 Human 模式使用 8 分制检查修改指令是否足够具体：问题描述、修改对象、修改方向、操作细节/保持项各 0–2 分。总分至少为 4，且修改对象和修改方向均至少为 1，才会进入关卡生成；否则进入 `Clarification(Human)`，保留原输入并要求用户补充，直到重新评分通过。
