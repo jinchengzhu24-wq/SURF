@@ -2531,6 +2531,9 @@ def parse_ha_revision_contract(value):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(f"HA contract {field} must be an integer")
 
+            if field == "minWallObstacleBlocks" and value == 3:
+                value = 2
+
             minimum, maximum = LIMITS[field]
 
             if value < minimum or value > maximum:

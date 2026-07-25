@@ -4,6 +4,7 @@ import unittest
 from Backend.app import (
     DEFAULT_PLAN,
     apply_selected_ha_plan,
+    parse_ha_revision_contract,
     validate_human_adjustment_clarity_payload,
     validate_ha_revision_plan_edit,
     validate_ha_revision_plan_options,
@@ -21,6 +22,20 @@ from Backend.prompt import (
 class FeatureConstraintTests(unittest.TestCase):
     def make_plan(self):
         return dict(DEFAULT_PLAN)
+
+    def test_ha_contract_repairs_wall_minimum_copied_from_maximum(self):
+        contract = parse_ha_revision_contract(
+            {
+                "changes": {
+                    "minWallObstacleBlocks": 3,
+                    "maxWallObstacleBlocks": 3,
+                },
+                "preserveUnlisted": True,
+            }
+        )
+
+        self.assertEqual(contract["changes"]["minWallObstacleBlocks"], 2)
+        self.assertEqual(contract["changes"]["maxWallObstacleBlocks"], 3)
 
     def test_default_context_keeps_existing_ranges(self):
         constraints = resolve_zero_feature_constraints(
