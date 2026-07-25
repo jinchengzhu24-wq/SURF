@@ -1,7 +1,9 @@
+using System;
 using UnityEngine;
 
 public static class CreativeWorkshopContext
 {
+    public const string StudySessionIdPrefsKey = "SokobanStudySessionId";
     public const string IdeaIdPrefsKey = "SokobanCreativeWorkshopIdeaId";
     public const string SessionIdPrefsKey = "SokobanCreativeWorkshopIdeaSessionId";
     public const string IdeaTextPrefsKey = "SokobanCreativeWorkshopIdeaText";
@@ -43,6 +45,26 @@ public static class CreativeWorkshopContext
     public static bool ShouldOverrideInitialRoutingOptionText
     {
         get { return PlayerPrefs.GetInt(InitialRoutingOptionTextPendingPrefsKey, 0) == 1; }
+    }
+
+    public static string BeginStudySession()
+    {
+        string sessionId = Guid.NewGuid().ToString("N");
+        PlayerPrefs.SetString(StudySessionIdPrefsKey, sessionId);
+        PlayerPrefs.Save();
+        return sessionId;
+    }
+
+    public static string GetOrCreateStudySessionId()
+    {
+        string sessionId = PlayerPrefs.GetString(StudySessionIdPrefsKey, "");
+
+        if (string.IsNullOrEmpty(sessionId))
+        {
+            sessionId = BeginStudySession();
+        }
+
+        return sessionId;
     }
 
     public static void SetIdea(string ideaId, string sessionId, string ideaText)
@@ -201,6 +223,7 @@ public static class CreativeWorkshopContext
 
         PlayerPrefs.DeleteKey(IdeaIdPrefsKey);
         PlayerPrefs.DeleteKey(SessionIdPrefsKey);
+        PlayerPrefs.DeleteKey(StudySessionIdPrefsKey);
         PlayerPrefs.DeleteKey(IdeaTextPrefsKey);
         PlayerPrefs.DeleteKey(OriginalIdeaTextPrefsKey);
         PlayerPrefs.DeleteKey(SelectedDirectionTextPrefsKey);

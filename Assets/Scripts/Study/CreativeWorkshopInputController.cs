@@ -10,7 +10,6 @@ public class CreativeWorkshopInputController : MonoBehaviour
 {
     private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
     private const string CreativeIdeaPath = "/record-creative-idea";
-    private const string SessionPrefsKey = "SokobanCreativeWorkshopSessionId";
 
     [Header("Scene UI")]
     public InputField ideaInput;
@@ -243,16 +242,7 @@ public class CreativeWorkshopInputController : MonoBehaviour
 
     private string GetOrCreateSessionId()
     {
-        string sessionId = PlayerPrefs.GetString(SessionPrefsKey, "");
-
-        if (string.IsNullOrEmpty(sessionId))
-        {
-            sessionId = Guid.NewGuid().ToString("N");
-            PlayerPrefs.SetString(SessionPrefsKey, sessionId);
-            PlayerPrefs.Save();
-        }
-
-        return sessionId;
+        return CreativeWorkshopContext.GetOrCreateStudySessionId();
     }
 
     private void SetStatus(string message)

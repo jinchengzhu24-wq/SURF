@@ -616,10 +616,7 @@ public class LevelStudyRecorder : MonoBehaviour
 
     private void EnsureSessionId()
     {
-        if (string.IsNullOrEmpty(sessionId))
-        {
-            sessionId = Guid.NewGuid().ToString("N");
-        }
+        sessionId = CreativeWorkshopContext.GetOrCreateStudySessionId();
     }
 
     private void StartGameRound()

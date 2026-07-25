@@ -11,7 +11,6 @@ public class QuestionnaireController : MonoBehaviour
 {
     private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
     private const string SurveyResponsePath = "/record-survey-response";
-    private const string SessionPrefsKey = "SokobanSurveySessionId";
     private const string PlayerNamePrefsKey = "SokobanSurveyPlayerName";
     private const int RequiredAnswerCount = 3;
 
@@ -371,21 +370,12 @@ public class QuestionnaireController : MonoBehaviour
 
     private string GetOrCreateSessionId()
     {
-        string sessionId = PlayerPrefs.GetString(SessionPrefsKey, "");
-
-        if (string.IsNullOrEmpty(sessionId))
-        {
-            sessionId = Guid.NewGuid().ToString("N");
-            PlayerPrefs.SetString(SessionPrefsKey, sessionId);
-            PlayerPrefs.Save();
-        }
-
-        return sessionId;
+        return CreativeWorkshopContext.GetOrCreateStudySessionId();
     }
 
     private void BeginSurveyPair()
     {
-        PlayerPrefs.SetString(SessionPrefsKey, Guid.NewGuid().ToString("N"));
+        CreativeWorkshopContext.BeginStudySession();
         PlayerPrefs.DeleteKey(PlayerNamePrefsKey);
         PlayerPrefs.Save();
     }
