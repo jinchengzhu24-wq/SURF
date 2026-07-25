@@ -40,6 +40,7 @@ PORT = 8000
 START_URL = f"http://{HOST}:{PORT}/generate-level-plan"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
+HA_PLAN_LLM_TIMEOUT_SECONDS = 45.0
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 FRONTEND_DIR = PROJECT_DIR / "Frontend"
@@ -2103,7 +2104,12 @@ def create_ha_revision_plans(context):
     try:
         model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
         base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=HA_PLAN_LLM_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
         response = client.chat.completions.create(
             model=model,
             messages=build_ha_revision_plan_messages(context),
@@ -2147,7 +2153,12 @@ def create_ha_revision_plan_edit(context):
     try:
         model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
         base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=HA_PLAN_LLM_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
         response = client.chat.completions.create(
             model=model,
             messages=build_ha_revision_plan_edit_messages(context),
