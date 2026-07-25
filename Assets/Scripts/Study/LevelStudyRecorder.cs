@@ -11,6 +11,7 @@ public class LevelStudyRecorder : MonoBehaviour
     private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
     private const string LevelStartPath = "/record-level-start";
     private const string LevelEndPath = "/record-level-end";
+    private const string JourneyEventPath = "/record-journey-event";
     private const string MenuSceneName = "Menu";
 
     private static LevelStudyRecorder instance;
@@ -151,6 +152,16 @@ public class LevelStudyRecorder : MonoBehaviour
     public static void RecordPlayerMove(bool pushedBox)
     {
         Instance.RecordMove(pushedBox);
+    }
+
+    public static void RecordJourneyStage(
+        string phase,
+        string action,
+        string detailText,
+        string revisionMode = "",
+        int score = -1)
+    {
+        Instance.SendJourneyStageRecord(phase, action, detailText, revisionMode, score);
     }
 
     private void StartLevelRecord(LevelLoader levelLoader)
@@ -294,6 +305,44 @@ public class LevelStudyRecorder : MonoBehaviour
         {
             pushCount++;
         }
+    }
+
+    private void SendJourneyStageRecord(
+        string phase,
+        string action,
+        string detailText,
+        string revisionMode,
+        int score)
+    {
+        EnsureSessionId();
+        string ideaId = !string.IsNullOrEmpty(CreativeWorkshopContext.IdeaId)
+            ? CreativeWorkshopContext.IdeaId
+            : PlayerPrefs.GetString(CreativeWorkshopContext.IdeaIdPrefsKey, "");
+
+        if (string.IsNullOrWhiteSpace(ideaId) || string.IsNullOrWhiteSpace(phase))
+        {
+            LogSkippedRecord("journey event");
+            return;
+        }
+
+        JourneyStageRecord record = new JourneyStageRecord
+        {
+            eventType = "journey-event",
+            ideaId = ideaId,
+            sessionId = sessionId,
+            gameRoundId = gameRoundId,
+            gameRoundIndex = gameRoundIndex,
+            phase = phase ?? "",
+            action = action ?? "",
+            detailText = detailText ?? "",
+            revisionMode = revisionMode ?? "",
+            score = score,
+            sceneName = SceneManager.GetActiveScene().name,
+            officialRound = officialRoundFlow,
+            timestamp = DateTime.UtcNow.ToString("o")
+        };
+
+        SendRecord(JourneyEventPath, record);
     }
 
     private LevelStartRecord CreateLevelStartRecord(LevelLoader levelLoader)
@@ -855,6 +904,24 @@ public class LevelEndRecord
     public int moveCount;
     public int pushCount;
     public int restartCount;
+    public bool officialRound;
+    public string timestamp;
+}
+
+[Serializable]
+public class JourneyStageRecord
+{
+    public string eventType;
+    public string ideaId;
+    public string sessionId;
+    public string gameRoundId;
+    public int gameRoundIndex;
+    public string phase;
+    public string action;
+    public string detailText;
+    public string revisionMode;
+    public int score;
+    public string sceneName;
     public bool officialRound;
     public string timestamp;
 }

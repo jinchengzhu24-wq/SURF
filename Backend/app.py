@@ -50,6 +50,7 @@ SURVEY_LOG_FILE = STUDY_LOG_DIR / "survey_responses.jsonl"
 CREATIVE_IDEA_LOG_FILE = STUDY_LOG_DIR / "creative_ideas.jsonl"
 CREATIVE_EXPANSION_CHOICE_LOG_FILE = STUDY_LOG_DIR / "creative_expansion_choices.jsonl"
 HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
+JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -97,8 +98,11 @@ class CreativeIdeaExpansionOption(BaseModel):
 class HARevisionPlanRequest(BaseModel):
     ideaId: str | None = ""
     sessionId: str | None = ""
+    gameRoundId: str | None = ""
+    gameRoundIndex: int | None = 0
     adjustmentText: str
     sceneName: str | None = ""
+    officialRound: bool | None = False
     previousLevelPlan: dict
     corridorValidation: dict | None = None
     regenerationAttempt: int | None = 0
@@ -145,6 +149,14 @@ class DeleteCreativeIdeaRequest(BaseModel):
 
 class DeleteExpansionChoiceRequest(BaseModel):
     choiceId: str | None = ""
+
+
+class DeleteHAPlanEventRequest(BaseModel):
+    haEventId: str | None = ""
+
+
+class DeleteJourneyEventRequest(BaseModel):
+    journeyEventId: str | None = ""
 
 
 class DeleteIdeaRecordsRequest(BaseModel):
@@ -254,6 +266,11 @@ async def record_expansion_choice(request: Request):
 @app.post("/record-ha-plan-choice")
 async def record_ha_plan_choice(request: Request):
     return await append_ha_plan_event(request, "ha-plan-choice")
+
+
+@app.post("/record-journey-event")
+async def record_journey_event(request: Request):
+    return await append_journey_event(request)
 
 
 @app.post("/expand-creative-idea")
@@ -414,6 +431,24 @@ def get_level_records_data():
     payload["creativeExpansionChoiceSummary"] = expansion_payload["summary"]
     payload["creativeExpansionChoices"] = expansion_payload["choices"]
     payload["creativeExpansionChoiceMalformedCount"] = expansion_payload["malformedCount"]
+    ha_plan_events, ha_plan_malformed_count = read_ha_plan_events()
+    ha_plan_events = filter_frontend_ha_plan_records(ha_plan_events)
+    ha_plan_payload = build_ha_plan_events_payload(
+        ha_plan_events,
+        ha_plan_malformed_count,
+    )
+    payload["haPlanSummary"] = ha_plan_payload["summary"]
+    payload["haPlanEvents"] = ha_plan_payload["events"]
+    payload["haPlanMalformedCount"] = ha_plan_payload["malformedCount"]
+    journey_events, journey_malformed_count = read_journey_events()
+    journey_events = filter_frontend_records(journey_events)
+    journey_payload = build_journey_events_payload(
+        journey_events,
+        journey_malformed_count,
+    )
+    payload["journeyEventSummary"] = journey_payload["summary"]
+    payload["journeyEvents"] = journey_payload["events"]
+    payload["journeyEventMalformedCount"] = journey_payload["malformedCount"]
     return payload
 
 
@@ -701,6 +736,72 @@ def delete_expansion_choice(request: DeleteExpansionChoiceRequest):
     }
 
 
+@app.post("/delete-ha-plan-event")
+def delete_ha_plan_event(request: DeleteHAPlanEventRequest):
+    ha_event_id = normalize_expansion_choice_identifier(request.haEventId)
+
+    if not ha_event_id:
+        raise HTTPException(status_code=400, detail="haEventId is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_ha_plan_events()
+        remaining_records = []
+        deleted_count = 0
+
+        for record in records:
+            record_event_id = build_ha_plan_event_identifier(record)
+
+            if record_event_id == ha_event_id:
+                deleted_count += 1
+            else:
+                remaining_records.append(record)
+
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="HA plan event not found")
+
+        write_jsonl_records(HA_PLAN_EVENT_LOG_FILE, remaining_records)
+
+    return {
+        "status": "ok",
+        "haEventId": ha_event_id,
+        "deletedHAPlanEventCount": deleted_count,
+    }
+
+
+@app.post("/delete-journey-event")
+def delete_journey_event(request: DeleteJourneyEventRequest):
+    journey_event_id = normalize_expansion_choice_identifier(request.journeyEventId)
+
+    if not journey_event_id:
+        raise HTTPException(status_code=400, detail="journeyEventId is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        records, _ = read_journey_events()
+        remaining_records = []
+        deleted_count = 0
+
+        for record in records:
+            if build_journey_event_identifier(record) == journey_event_id:
+                deleted_count += 1
+            else:
+                remaining_records.append(record)
+
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Journey event not found")
+
+        write_jsonl_records(JOURNEY_EVENT_LOG_FILE, remaining_records)
+
+    return {
+        "status": "ok",
+        "journeyEventId": journey_event_id,
+        "deletedJourneyEventCount": deleted_count,
+    }
+
+
 @app.post("/delete-idea-records")
 def delete_idea_records(request: DeleteIdeaRecordsRequest):
     idea_id = normalize_creative_idea_identifier(request.ideaId)
@@ -715,6 +816,7 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         idea_records, _ = read_creative_idea_events()
         choice_records, _ = read_expansion_choice_events()
         ha_plan_records, _ = read_ha_plan_events()
+        journey_records, _ = read_journey_events()
         survey_records, _ = read_survey_response_events()
         paired_survey_session_ids = {
             normalize_survey_identifier(record.get("sessionId"))
@@ -739,6 +841,10 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
             record for record in ha_plan_records
             if normalize_creative_idea_identifier(record.get("ideaId")) != idea_id
         ]
+        remaining_journey_records = [
+            record for record in journey_records
+            if normalize_creative_idea_identifier(record.get("ideaId")) != idea_id
+        ]
         remaining_survey_records = [
             record for record in survey_records
             if normalize_creative_idea_identifier(record.get("creativeIdeaId")) != idea_id
@@ -750,6 +856,7 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         deleted_idea_count = len(idea_records) - len(remaining_idea_records)
         deleted_choice_count = len(choice_records) - len(remaining_choice_records)
         deleted_ha_plan_count = len(ha_plan_records) - len(remaining_ha_plan_records)
+        deleted_journey_event_count = len(journey_records) - len(remaining_journey_records)
         deleted_survey_count = len(survey_records) - len(remaining_survey_records)
 
         if (
@@ -757,6 +864,7 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
             + deleted_idea_count
             + deleted_choice_count
             + deleted_ha_plan_count
+            + deleted_journey_event_count
             + deleted_survey_count
             == 0
         ):
@@ -770,6 +878,7 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         )
         write_jsonl_records(SURVEY_LOG_FILE, remaining_survey_records)
         write_jsonl_records(HA_PLAN_EVENT_LOG_FILE, remaining_ha_plan_records)
+        write_jsonl_records(JOURNEY_EVENT_LOG_FILE, remaining_journey_records)
 
     return {
         "status": "ok",
@@ -778,6 +887,7 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         "deletedIdeaCount": deleted_idea_count,
         "deletedChoiceCount": deleted_choice_count,
         "deletedHAPlanEventCount": deleted_ha_plan_count,
+        "deletedJourneyEventCount": deleted_journey_event_count,
         "deletedSurveyCount": deleted_survey_count,
     }
 
@@ -792,6 +902,7 @@ def clear_level_records():
         CREATIVE_IDEA_LOG_FILE.write_text("", encoding="utf-8")
         CREATIVE_EXPANSION_CHOICE_LOG_FILE.write_text("", encoding="utf-8")
         HA_PLAN_EVENT_LOG_FILE.write_text("", encoding="utf-8")
+        JOURNEY_EVENT_LOG_FILE.write_text("", encoding="utf-8")
 
     return RedirectResponse("/level-records-view?cleared=1", status_code=303)
 
@@ -971,13 +1082,50 @@ async def append_ha_plan_event(request: Request, default_event_type: str):
     }
 
 
+async def append_journey_event(request: Request):
+    data = await request.json()
+
+    if not isinstance(data, dict):
+        data = {"payload": data}
+
+    idea_id = str(data.get("ideaId") or "").strip()
+    phase = str(data.get("phase") or "").strip()
+
+    if not idea_id:
+        raise HTTPException(status_code=400, detail="ideaId is required")
+
+    if not phase:
+        raise HTTPException(status_code=400, detail="phase is required")
+
+    data.setdefault("eventType", "journey-event")
+    data["serverReceivedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    data["journeyEventId"] = build_journey_event_identifier(data)
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        with JOURNEY_EVENT_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(data, ensure_ascii=False))
+            log_file.write("\n")
+
+    return {
+        "status": "ok",
+        "eventType": data["eventType"],
+        "journeyEventId": data["journeyEventId"],
+        "ideaId": idea_id,
+        "logFile": str(JOURNEY_EVENT_LOG_FILE),
+    }
+
+
 def append_ha_generation_event(request_data, options, error=""):
     data = {
         "eventType": "ha-plan-generation",
         "ideaId": str(request_data.get("ideaId") or "").strip(),
         "sessionId": str(request_data.get("sessionId") or "").strip(),
+        "gameRoundId": str(request_data.get("gameRoundId") or "").strip(),
+        "gameRoundIndex": int(request_data.get("gameRoundIndex") or 0),
         "adjustmentText": str(request_data.get("adjustmentText") or "").strip(),
         "sceneName": str(request_data.get("sceneName") or "").strip(),
+        "officialRound": request_data.get("officialRound") is True,
         "previousLevelPlan": request_data.get("previousLevelPlan"),
         "corridorValidation": request_data.get("corridorValidation"),
         "regenerationAttempt": int(request_data.get("regenerationAttempt") or 0),
@@ -1018,11 +1166,34 @@ def read_ha_plan_events():
     return read_jsonl_records(HA_PLAN_EVENT_LOG_FILE)
 
 
+def read_journey_events():
+    return read_jsonl_records(JOURNEY_EVENT_LOG_FILE)
+
+
 def filter_frontend_records(records):
     return [
         record
         for record in records
         if is_frontend_visible_record(record)
+    ]
+
+
+def filter_frontend_ha_plan_records(records):
+    official_idea_ids = {
+        normalize_creative_idea_identifier(record.get("ideaId"))
+        for record in records
+        if record.get("officialRound") is True
+    }
+
+    return [
+        record
+        for record in records
+        if record.get("officialRound") is True
+        or (
+            record.get("eventType") == "ha-plan-generation"
+            and normalize_creative_idea_identifier(record.get("ideaId"))
+            in official_idea_ids
+        )
     ]
 
 
@@ -1415,6 +1586,143 @@ def build_expansion_choices_payload(choices, malformed_count):
         "logFile": str(CREATIVE_EXPANSION_CHOICE_LOG_FILE),
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+
+def build_ha_plan_events_payload(events, malformed_count):
+    normalized_events = [
+        normalize_ha_plan_event(event)
+        for event in events
+    ]
+    sorted_events = sorted(
+        normalized_events,
+        key=lambda event: event.get("serverReceivedAt") or event.get("timestamp") or "",
+        reverse=True,
+    )
+    choice_count = sum(
+        1 for event in events
+        if event.get("eventType") == "ha-plan-choice"
+    )
+    generation_count = sum(
+        1 for event in events
+        if event.get("eventType") == "ha-plan-generation"
+    )
+
+    return {
+        "summary": {
+            "eventCount": len(events),
+            "generationCount": generation_count,
+            "choiceCount": choice_count,
+            "malformedCount": malformed_count,
+        },
+        "events": sorted_events,
+        "malformedCount": malformed_count,
+        "logFile": str(HA_PLAN_EVENT_LOG_FILE),
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def build_journey_events_payload(events, malformed_count):
+    normalized_events = [
+        normalize_journey_event(event)
+        for event in events
+    ]
+    sorted_events = sorted(
+        normalized_events,
+        key=lambda event: event.get("serverReceivedAt") or event.get("timestamp") or "",
+        reverse=True,
+    )
+    phase_counts = {}
+
+    for event in events:
+        phase = value_or_dash(event.get("phase"))
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+
+    return {
+        "summary": {
+            "eventCount": len(events),
+            "phaseCounts": phase_counts,
+            "malformedCount": malformed_count,
+        },
+        "events": sorted_events,
+        "malformedCount": malformed_count,
+        "logFile": str(JOURNEY_EVENT_LOG_FILE),
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def normalize_journey_event(event):
+    normalized = dict(event)
+    normalized["journeyEventId"] = build_journey_event_identifier(event)
+    normalized["ideaId"] = value_or_dash(event.get("ideaId"))
+    normalized["sessionId"] = value_or_dash(event.get("sessionId"))
+    normalized["gameRoundId"] = value_or_dash(event.get("gameRoundId"))
+    normalized["phase"] = value_or_dash(event.get("phase"))
+    normalized["action"] = value_or_dash(event.get("action"))
+    normalized["detailText"] = value_or_dash(event.get("detailText"))
+    normalized["revisionMode"] = value_or_dash(event.get("revisionMode"))
+    return normalized
+
+
+def build_journey_event_identifier(event):
+    existing = normalize_expansion_choice_identifier(event.get("journeyEventId"))
+
+    if existing:
+        return existing
+
+    identity = {
+        "eventType": event.get("eventType"),
+        "ideaId": event.get("ideaId"),
+        "sessionId": event.get("sessionId"),
+        "gameRoundId": event.get("gameRoundId"),
+        "phase": event.get("phase"),
+        "action": event.get("action"),
+        "timestamp": event.get("timestamp"),
+        "serverReceivedAt": event.get("serverReceivedAt"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return digest[:16]
+
+
+def normalize_ha_plan_event(event):
+    normalized = dict(event)
+    normalized["haEventId"] = build_ha_plan_event_identifier(event)
+    normalized["ideaId"] = value_or_dash(event.get("ideaId"))
+    normalized["sessionId"] = value_or_dash(event.get("sessionId"))
+    normalized["gameRoundId"] = value_or_dash(event.get("gameRoundId"))
+    normalized["adjustmentText"] = value_or_dash(event.get("adjustmentText"))
+    normalized["selectedOptionId"] = value_or_dash(event.get("selectedOptionId"))
+    normalized["selectedOptionTitle"] = value_or_dash(event.get("selectedOptionTitle"))
+    normalized["selectedOptionDescription"] = value_or_dash(
+        event.get("selectedOptionDescription")
+    )
+    normalized["selectedOptionPromptText"] = value_or_dash(
+        event.get("selectedOptionPromptText")
+    )
+    return normalized
+
+
+def build_ha_plan_event_identifier(event):
+    existing = normalize_expansion_choice_identifier(event.get("haEventId"))
+
+    if existing:
+        return existing
+
+    identity = {
+        "eventType": event.get("eventType"),
+        "ideaId": event.get("ideaId"),
+        "sessionId": event.get("sessionId"),
+        "serverReceivedAt": event.get("serverReceivedAt"),
+        "timestamp": event.get("timestamp"),
+        "regenerationAttempt": event.get("regenerationAttempt"),
+        "selectedOptionId": event.get("selectedOptionId"),
+        "selectedOptionTitle": event.get("selectedOptionTitle"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return digest[:16]
 
 
 def normalize_creative_idea(idea):

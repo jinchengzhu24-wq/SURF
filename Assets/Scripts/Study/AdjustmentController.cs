@@ -368,6 +368,12 @@ public class AdjustmentController : MonoBehaviour
             adjustedIdeaText
         );
         LevelStudyRecorder.UpdateCustomRoundIdea(ideaId, adjustedIdeaText);
+        LevelStudyRecorder.RecordJourneyStage(
+            "adjustment",
+            "submitted",
+            adjustmentText,
+            revisionMode
+        );
 
         if (logAdjustmentEvents)
         {

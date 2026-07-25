@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sokoban Records Dashboard</title>
+    <title>Sokoban Study Dashboard</title>
     <script>
         window.FRONTEND_ASSET_BASE = window.location.protocol === "file:"
             ? "."
@@ -14,12 +14,15 @@
 <body>
     <div class="app">
         <header class="topbar">
-            <div class="title">
-                <h1>Sokoban Records Dashboard</h1>
-                <div class="subtitle" id="dataSource">Loading records...</div>
+            <div class="brand">
+                <div class="brand-mark" aria-hidden="true">S</div>
+                <div>
+                    <h1>Sokoban Study Dashboard</h1>
+                    <div class="subtitle" id="dataSource">Loading study records...</div>
+                </div>
             </div>
             <div class="actions">
-                <button class="icon-button" id="refreshButton" type="button" title="Refresh" aria-label="Refresh">
+                <button class="icon-button" id="refreshButton" type="button" title="Refresh data" aria-label="Refresh data">
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M21 12a9 9 0 0 1-15 6.7"></path>
                         <path d="M3 12a9 9 0 0 1 15-6.7"></path>
@@ -27,180 +30,165 @@
                         <path d="M21 6v5h-5"></path>
                     </svg>
                 </button>
-                <a class="icon-button" id="rawLink" href="#" title="Raw JSONL" aria-label="Raw JSONL">
-                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                        <path d="M14 2v6h6"></path>
-                        <path d="M8 13h8"></path>
-                        <path d="M8 17h5"></path>
-                    </svg>
-                </a>
-                <a class="icon-button" id="legacyLink" href="#" title="Legacy table" aria-label="Legacy table">
-                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M3 5h18"></path>
-                        <path d="M3 12h18"></path>
-                        <path d="M3 19h18"></path>
-                        <path d="M8 5v14"></path>
-                    </svg>
-                </a>
-                <a class="icon-button" id="docsLink" href="#" title="API docs" aria-label="API docs">
-                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
-                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
-                    </svg>
-                </a>
-                <button class="text-button danger" id="clearButton" type="button">Clear</button>
+                <details class="tools-menu">
+                    <summary class="text-button">Developer tools</summary>
+                    <div class="tools-popover">
+                        <a id="rawLink" href="#">Raw level JSONL</a>
+                        <a id="legacyLink" href="#">Legacy table</a>
+                        <a id="docsLink" href="#">API documentation</a>
+                        <div class="menu-divider"></div>
+                        <button class="menu-danger" id="clearButton" type="button">Clear all study data</button>
+                    </div>
+                </details>
             </div>
         </header>
 
         <main>
-            <div class="notice" id="notice">Records cleared.</div>
+            <div class="notice" id="notice" role="status"></div>
             <div class="status-line" id="statusLine">Preparing dashboard...</div>
 
-            <section class="summary" aria-label="Summary">
-                <div class="stat"><strong id="statEvents">0</strong><span>events</span></div>
-                <div class="stat"><strong id="statLevels">0</strong><span>levels</span></div>
-                <div class="stat"><strong id="statSessions">0</strong><span>rounds</span></div>
-                <div class="stat"><strong id="statCompleted">0</strong><span>completed</span></div>
-                <div class="stat"><strong id="statMissing">0</strong><span>missing end</span></div>
-                <div class="stat"><strong id="statAvg">0s</strong><span>avg duration</span></div>
-                <div class="stat"><strong id="statSurveys">0</strong><span>surveys</span></div>
-                <div class="stat"><strong id="statSurveyAvg">0s</strong><span>survey avg</span></div>
+            <section class="summary" aria-label="Study summary">
+                <button class="stat" type="button" data-summary-filter="all">
+                    <span>Ideas</span><strong id="statIdeas">0</strong><small>official study journeys</small>
+                </button>
+                <button class="stat" type="button" data-summary-filter="completed">
+                    <span>Completed</span><strong id="statCompleted">0</strong><small id="statCompletionRate">0% completion rate</small>
+                </button>
+                <button class="stat" type="button" data-summary-filter="all">
+                    <span>Average play time</span><strong id="statAvg">-</strong><small>across ended levels</small>
+                </button>
+                <button class="stat stat-alert" type="button" data-summary-filter="anomaly">
+                    <span>Needs attention</span><strong id="statAnomalies">0</strong><small id="statDataHealth">no data issues</small>
+                </button>
             </section>
 
-            <section class="controls" aria-label="Filters">
-                <label class="field">
-                    <input id="searchInput" type="search" maxlength="8" pattern="[0-9a-fA-F]{0,8}"
-                        autocomplete="off" spellcheck="false" aria-label="Filter by Idea Hash"
-                        placeholder="Filter by 8-character Idea Hash">
+            <section class="controls" aria-label="Journey filters">
+                <label class="search-field">
+                    <svg class="search-icon icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="11" cy="11" r="7"></circle>
+                        <path d="m20 20-3.5-3.5"></path>
+                    </svg>
+                    <input id="searchInput" type="search" autocomplete="off" spellcheck="false"
+                        placeholder="Search idea hash, idea text, nickname, or session">
                 </label>
-                <label class="field">
+                <label class="select-field">
+                    <span>Status</span>
                     <select id="statusFilter">
-                        <option value="all">All statuses</option>
+                        <option value="all">All journeys</option>
                         <option value="completed">Completed</option>
-                        <option value="missing">Missing end</option>
-                        <option value="failed">Restarted or failed</option>
+                        <option value="progress">In progress</option>
+                        <option value="anomaly">Needs attention</option>
+                    </select>
+                </label>
+                <label class="select-field">
+                    <span>Revision</span>
+                    <select id="modeFilter">
+                        <option value="all">All modes</option>
+                        <option value="ha">HA involved</option>
+                        <option value="standard">Without HA</option>
                     </select>
                 </label>
             </section>
 
             <section class="workspace">
-                <div class="workspace-main">
-                    <div class="panel">
-                        <div class="panel-header">
-                            <h2>Level Runs</h2>
-                            <span class="hint" id="resultCount">0 shown</span>
-                        </div>
-                        <div class="table-wrap">
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Level</th>
-                                        <th>Idea Hash</th>
-                                        <th>Map Hash</th>
-                                        <th>Status</th>
-                                        <th>Moves</th>
-                                        <th>Solution</th>
-                                        <th>Pushes</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="recordsBody">
-                                    <tr><td colspan="8" class="empty-state">Loading...</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    <section class="panel creative-panel">
-                        <div class="panel-header">
-                            <h2>Creative Workshop Ideas</h2>
-                            <span class="hint" id="creativeIdeaCount">0 shown</span>
-                        </div>
-                        <div class="table-wrap creative-table-wrap">
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Time</th>
-                                        <th>Idea Hash</th>
-                                        <th>Idea</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="creativeIdeasBody">
-                                    <tr><td colspan="4" class="empty-state">Loading...</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
-
-                    <section class="panel expansion-panel">
-                        <div class="panel-header">
-                            <h2>Expansion Choices</h2>
-                            <span class="hint" id="expansionChoiceCount">0 shown</span>
-                        </div>
-                        <div class="table-wrap expansion-table-wrap">
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Time</th>
-                                        <th>Idea Hash</th>
-                                        <th>Choice</th>
-                                        <th>Option Details</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="expansionChoicesBody">
-                                    <tr><td colspan="5" class="empty-state">Loading...</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
-
-                    <section class="panel survey-panel">
-                        <div class="panel-header">
-                            <h2>Survey Responses</h2>
-                            <span class="hint" id="surveyCount">0 shown</span>
-                        </div>
-                        <div class="table-wrap survey-table-wrap">
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Time</th>
-                                        <th>Idea Hash</th>
-                                        <th>Nickname</th>
-                                        <th>Answers</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="surveyBody">
-                                    <tr><td colspan="5" class="empty-state">Loading...</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
-                </div>
-
-                <aside class="panel">
+                <aside class="panel idea-panel">
                     <div class="panel-header">
-                        <h2>Selected Map</h2>
-                        <span class="hint" id="selectedTitle">No selection</span>
+                        <div>
+                            <p class="eyebrow">Study journeys</p>
+                            <h2>Idea master list</h2>
+                        </div>
+                        <span class="count-pill" id="ideaCount">0 shown</span>
                     </div>
-                    <div class="details-body">
-                        <div class="map-frame">
-                            <div class="map-grid" id="mapGrid"></div>
-                        </div>
-                        <div class="legend">
-                            <span class="legend-item"><span class="legend-swatch tile-floor"></span>floor</span>
-                            <span class="legend-item"><span class="legend-swatch tile-wall"></span>wall</span>
-                            <span class="legend-item"><span class="legend-swatch tile-water"></span>water</span>
-                            <span class="legend-item"><span class="legend-swatch tile-player"></span>player</span>
-                            <span class="legend-item"><span class="legend-swatch tile-box"></span>box</span>
-                            <span class="legend-item"><span class="legend-swatch tile-target"></span>target</span>
-                        </div>
-                        <div class="metrics" id="detailMetrics"></div>
+                    <div class="idea-list" id="ideaList">
+                        <div class="empty-state">Loading ideas...</div>
                     </div>
                 </aside>
+
+                <section class="detail-shell">
+                    <div class="panel empty-detail" id="emptyDetail">
+                        <div class="empty-illustration" aria-hidden="true">↗</div>
+                        <h2>Select an idea journey</h2>
+                        <p>Choose an idea on the left to inspect its creative path, level versions, surveys, and HA decisions.</p>
+                    </div>
+
+                    <div id="journeyDetail" class="journey-detail" hidden>
+                        <section class="panel idea-overview">
+                            <div class="idea-heading">
+                                <div>
+                                    <div class="heading-line">
+                                        <h2 id="selectedIdeaTitle">Idea</h2>
+                                        <span class="status-chip" id="selectedIdeaStatus">In progress</span>
+                                    </div>
+                                    <p id="selectedIdeaText">-</p>
+                                    <div class="meta-line" id="selectedIdeaMeta"></div>
+                                </div>
+                                <button class="danger-button" id="deleteIdeaButton" type="button">Delete entire idea</button>
+                            </div>
+                        </section>
+
+                        <section class="panel timeline-panel">
+                            <div class="panel-header compact-header">
+                                <div>
+                                    <p class="eyebrow">End-to-end flow</p>
+                                    <h2>Journey timeline</h2>
+                                </div>
+                                <span class="hint">Select a stage to inspect it</span>
+                            </div>
+                            <div class="timeline-scroll">
+                                <div class="timeline" id="journeyTimeline"></div>
+                            </div>
+                        </section>
+
+                        <section class="detail-grid">
+                            <section class="panel level-panel">
+                                <div class="panel-header compact-header">
+                                    <div>
+                                        <p class="eyebrow">Generated artifact</p>
+                                        <h2>Level versions</h2>
+                                    </div>
+                                    <span class="count-pill" id="levelCount">0 versions</span>
+                                </div>
+                                <div class="level-tabs" id="levelTabs"></div>
+                                <div class="map-content">
+                                    <div class="map-frame">
+                                        <div class="map-grid" id="mapGrid"></div>
+                                    </div>
+                                    <div class="legend">
+                                        <span><i class="swatch tile-floor"></i>floor</span>
+                                        <span><i class="swatch tile-wall"></i>wall</span>
+                                        <span><i class="swatch tile-water"></i>water</span>
+                                        <span><i class="swatch tile-player"></i>player</span>
+                                        <span><i class="swatch tile-box"></i>box</span>
+                                        <span><i class="swatch tile-target"></i>target</span>
+                                    </div>
+                                    <div class="metrics" id="detailMetrics"></div>
+                                </div>
+                            </section>
+
+                            <aside class="panel inspector-panel">
+                                <div class="panel-header compact-header">
+                                    <div>
+                                        <p class="eyebrow">Selected stage</p>
+                                        <h2 id="inspectorTitle">Journey details</h2>
+                                    </div>
+                                    <button class="quiet-danger" id="deleteStageButton" type="button" hidden>Delete this record</button>
+                                </div>
+                                <div class="inspector-body" id="inspectorBody"></div>
+                            </aside>
+                        </section>
+
+                        <section class="panel compare-panel" id="comparePanel">
+                            <div class="panel-header compact-header">
+                                <div>
+                                    <p class="eyebrow">Version analysis</p>
+                                    <h2>Compare level versions</h2>
+                                </div>
+                                <span class="hint">Select exactly two versions above</span>
+                            </div>
+                            <div id="compareContent" class="compare-content"></div>
+                        </section>
+                    </div>
+                </section>
             </section>
         </main>
     </div>

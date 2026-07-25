@@ -1,57 +1,54 @@
 const DEFAULT_API_BASE = "http://111.231.136.4:8000";
-const SCENE_DISPLAY_NAMES = {
-    "Algorithm_Level": "Algorithm Level",
-    "Level_3(H)": "Algorithm Level",
-    "LLM_Level": "LLM Level",
-    "Level_4(A)": "LLM Level",
-    "Custom_Level": "Custom Level",
-    "Creative_WorkShop": "Creative Workshop",
-    "Expansion": "Expansion",
-    "Review": "Review",
-    "Refinement": "Review"
-};
-
-const DASHBOARD_LEVEL_SCENE_NAME = "Custom_Level";
+const DASHBOARD_LEVEL_SCENE = "Custom_Level";
 
 const state = {
     apiBase: resolveApiBase(),
     payload: null,
-    ideaHashQuery: "",
-    filteredRounds: [],
-    filteredLevels: [],
-    selectedRunId: null
+    journeys: [],
+    filteredJourneys: [],
+    selectedJourneyKey: "",
+    selectedStageKey: "",
+    selectedRunId: "",
+    compareRunIds: []
 };
 
 const elements = {
+    dataSource: document.getElementById("dataSource"),
     notice: document.getElementById("notice"),
     statusLine: document.getElementById("statusLine"),
-    dataSource: document.getElementById("dataSource"),
-    statEvents: document.getElementById("statEvents"),
-    statLevels: document.getElementById("statLevels"),
-    statSessions: document.getElementById("statSessions"),
-    statCompleted: document.getElementById("statCompleted"),
-    statMissing: document.getElementById("statMissing"),
-    statAvg: document.getElementById("statAvg"),
-    statSurveys: document.getElementById("statSurveys"),
-    statSurveyAvg: document.getElementById("statSurveyAvg"),
-    searchInput: document.getElementById("searchInput"),
-    statusFilter: document.getElementById("statusFilter"),
-    creativeIdeaCount: document.getElementById("creativeIdeaCount"),
-    creativeIdeasBody: document.getElementById("creativeIdeasBody"),
-    expansionChoiceCount: document.getElementById("expansionChoiceCount"),
-    expansionChoicesBody: document.getElementById("expansionChoicesBody"),
-    resultCount: document.getElementById("resultCount"),
-    recordsBody: document.getElementById("recordsBody"),
-    surveyCount: document.getElementById("surveyCount"),
-    surveyBody: document.getElementById("surveyBody"),
-    selectedTitle: document.getElementById("selectedTitle"),
-    mapGrid: document.getElementById("mapGrid"),
-    detailMetrics: document.getElementById("detailMetrics"),
     refreshButton: document.getElementById("refreshButton"),
     clearButton: document.getElementById("clearButton"),
     rawLink: document.getElementById("rawLink"),
     legacyLink: document.getElementById("legacyLink"),
-    docsLink: document.getElementById("docsLink")
+    docsLink: document.getElementById("docsLink"),
+    statIdeas: document.getElementById("statIdeas"),
+    statCompleted: document.getElementById("statCompleted"),
+    statCompletionRate: document.getElementById("statCompletionRate"),
+    statAvg: document.getElementById("statAvg"),
+    statAnomalies: document.getElementById("statAnomalies"),
+    statDataHealth: document.getElementById("statDataHealth"),
+    searchInput: document.getElementById("searchInput"),
+    statusFilter: document.getElementById("statusFilter"),
+    modeFilter: document.getElementById("modeFilter"),
+    ideaCount: document.getElementById("ideaCount"),
+    ideaList: document.getElementById("ideaList"),
+    emptyDetail: document.getElementById("emptyDetail"),
+    journeyDetail: document.getElementById("journeyDetail"),
+    selectedIdeaTitle: document.getElementById("selectedIdeaTitle"),
+    selectedIdeaStatus: document.getElementById("selectedIdeaStatus"),
+    selectedIdeaText: document.getElementById("selectedIdeaText"),
+    selectedIdeaMeta: document.getElementById("selectedIdeaMeta"),
+    deleteIdeaButton: document.getElementById("deleteIdeaButton"),
+    journeyTimeline: document.getElementById("journeyTimeline"),
+    levelCount: document.getElementById("levelCount"),
+    levelTabs: document.getElementById("levelTabs"),
+    mapGrid: document.getElementById("mapGrid"),
+    detailMetrics: document.getElementById("detailMetrics"),
+    inspectorTitle: document.getElementById("inspectorTitle"),
+    inspectorBody: document.getElementById("inspectorBody"),
+    deleteStageButton: document.getElementById("deleteStageButton"),
+    comparePanel: document.getElementById("comparePanel"),
+    compareContent: document.getElementById("compareContent")
 };
 
 init();
@@ -59,11 +56,6 @@ init();
 function init() {
     wireLinks();
     wireEvents();
-
-    if (new URLSearchParams(window.location.search).get("cleared") === "1") {
-        showNotice("Records cleared.");
-    }
-
     loadData(false);
 }
 
@@ -93,26 +85,23 @@ function wireLinks() {
 
 function wireEvents() {
     elements.refreshButton.addEventListener("click", () => loadData(true));
-    elements.clearButton.addEventListener("click", clearRecords);
-    elements.searchInput.addEventListener("input", handleIdeaHashInput);
+    elements.clearButton.addEventListener("click", clearAllRecords);
+    elements.searchInput.addEventListener("input", applyFilters);
     elements.statusFilter.addEventListener("change", applyFilters);
-}
+    elements.modeFilter.addEventListener("change", applyFilters);
+    elements.deleteIdeaButton.addEventListener("click", deleteSelectedIdea);
+    elements.deleteStageButton.addEventListener("click", deleteSelectedStage);
 
-function handleIdeaHashInput() {
-    const nextQuery = elements.searchInput.value.trim().toLowerCase();
-
-    if (!/^[0-9a-f]{0,8}$/.test(nextQuery)) {
-        elements.searchInput.value = state.ideaHashQuery;
-        return;
-    }
-
-    state.ideaHashQuery = nextQuery;
-    elements.searchInput.value = nextQuery;
-    applyFilters();
+    document.querySelectorAll("[data-summary-filter]").forEach(button => {
+        button.addEventListener("click", () => {
+            elements.statusFilter.value = button.dataset.summaryFilter || "all";
+            applyFilters();
+        });
+    });
 }
 
 async function loadData(manual) {
-    setStatus(manual ? "Refreshing records..." : "Loading records...");
+    setStatus(manual ? "Refreshing study journeys..." : "Loading study journeys...");
 
     try {
         const response = await fetch(apiUrl("/level-records-data"), { cache: "no-store" });
@@ -121,975 +110,1055 @@ async function loadData(manual) {
             throw new Error("HTTP " + response.status);
         }
 
-        const previousSelectedRunId = state.selectedRunId;
-        state.payload = buildDashboardPayload(await response.json());
-        state.selectedRunId = previousSelectedRunId;
-
-        renderSummary(state.payload.summary || {});
+        state.payload = await response.json();
+        state.journeys = buildIdeaJourneys(state.payload);
+        restoreSelectionFromUrl();
+        renderSummary();
         applyFilters();
-        setStatus("Last loaded " + formatTimestamp(state.payload.generatedAt));
         elements.dataSource.textContent = "API: " + state.apiBase;
+        setStatus("Last loaded " + formatTimestamp(state.payload.generatedAt));
     } catch (error) {
-        setStatus("Could not load records: " + error.message);
-        elements.creativeIdeasBody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load creative ideas.</td></tr>';
-        elements.expansionChoicesBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load expansion choices.</td></tr>';
-        elements.recordsBody.innerHTML = '<tr><td colspan="8" class="empty-state">Failed to load records.</td></tr>';
-        elements.surveyBody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load survey responses.</td></tr>';
+        setStatus("Could not load study records: " + error.message);
+        elements.ideaList.innerHTML = '<div class="empty-state">Failed to load study journeys.</div>';
+        showEmptyDetail();
     }
 }
 
-async function clearRecords() {
-    if (!window.confirm("Clear all records? This cannot be undone.")) {
-        return;
+function buildIdeaJourneys(payload) {
+    const journeys = new Map();
+    const sessionIndex = new Map();
+    let orphanIndex = 0;
+
+    function createJourney(ideaId, sessionId) {
+        const cleanIdeaId = clean(ideaId);
+        const cleanSessionId = clean(sessionId);
+        const key = cleanIdeaId
+            ? "idea:" + cleanIdeaId
+            : cleanSessionId
+                ? "session:" + cleanSessionId
+                : "orphan:" + (++orphanIndex);
+
+        if (!journeys.has(key)) {
+            journeys.set(key, {
+                key,
+                ideaId: cleanIdeaId,
+                ideaHash: "",
+                ideaText: "",
+                sessions: new Set(),
+                creativeIdeas: [],
+                expansions: [],
+                levels: [],
+                surveys: [],
+                haEvents: [],
+                journeyEvents: []
+            });
+        }
+
+        const journey = journeys.get(key);
+
+        if (cleanSessionId) {
+            journey.sessions.add(cleanSessionId);
+            if (!sessionIndex.has(cleanSessionId)) {
+                sessionIndex.set(cleanSessionId, journey);
+            }
+        }
+
+        return journey;
     }
 
-    setStatus("Clearing records...");
+    function findJourney(ideaId, sessionId) {
+        const cleanIdeaId = clean(ideaId);
+        const cleanSessionId = clean(sessionId);
+        const directKey = cleanIdeaId ? "idea:" + cleanIdeaId : "";
 
-    try {
-        const response = await fetch(apiUrl("/clear-level-records"), {
-            method: "POST"
+        if (directKey && journeys.has(directKey)) {
+            return createJourney(cleanIdeaId, cleanSessionId);
+        }
+
+        if (cleanSessionId && sessionIndex.has(cleanSessionId)) {
+            const journey = sessionIndex.get(cleanSessionId);
+            journey.sessions.add(cleanSessionId);
+
+            if (!journey.ideaId && cleanIdeaId) {
+                journey.ideaId = cleanIdeaId;
+            }
+
+            return journey;
+        }
+
+        return createJourney(cleanIdeaId, cleanSessionId);
+    }
+
+    safeArray(payload.creativeIdeas).forEach(record => {
+        findJourney(record.ideaId, record.sessionId).creativeIdeas.push(record);
+    });
+
+    safeArray(payload.creativeExpansionChoices).forEach(record => {
+        findJourney(record.ideaId, record.sessionId).expansions.push(record);
+    });
+
+    safeArray(payload.levels)
+        .filter(isDashboardLevel)
+        .forEach(level => {
+            const start = level.start || {};
+            const end = level.end || {};
+            findJourney(
+                start.creativeIdeaId || end.creativeIdeaId,
+                start.sessionId || end.sessionId
+            ).levels.push(level);
         });
 
-        if (!response.ok) {
-            throw new Error("HTTP " + response.status);
-        }
-
-        state.selectedRunId = null;
-        showNotice("Records cleared.");
-        await loadData(true);
-    } catch (error) {
-        setStatus("Could not clear records: " + error.message);
-    }
-}
-
-function renderSummary(summary) {
-    const surveySummary = (state.payload && state.payload.surveySummary) || {};
-    const roundCount = typeof summary.roundCount === "number"
-        ? summary.roundCount
-        : getAllRounds().length;
-    elements.statEvents.textContent = numberValue(summary.eventCount);
-    elements.statLevels.textContent = numberValue(summary.levelCount);
-    elements.statSessions.textContent = numberValue(roundCount);
-    elements.statCompleted.textContent = numberValue(summary.completedCount);
-    elements.statMissing.textContent = numberValue(summary.missingEndCount);
-    elements.statAvg.textContent = formatSeconds(summary.averageDurationSeconds);
-    elements.statSurveys.textContent = numberValue(surveySummary.responseCount);
-    elements.statSurveyAvg.textContent = formatSeconds(surveySummary.averageDurationSeconds);
-}
-
-function buildDashboardPayload(payload) {
-    const sourcePayload = payload || {};
-    const levels = Array.isArray(sourcePayload.levels)
-        ? sourcePayload.levels.filter(isDashboardLevel)
-        : [];
-    const rounds = Array.isArray(sourcePayload.rounds)
-        ? sourcePayload.rounds
-            .map(round => filterRoundForDashboard(round))
-            .filter(round => round !== null)
-        : [];
-
-    return Object.assign({}, sourcePayload, {
-        levels: levels,
-        rounds: rounds,
-        summary: buildDashboardSummary(levels, rounds, sourcePayload.summary || {})
-    });
-}
-
-function filterRoundForDashboard(round) {
-    const levels = Array.isArray(round.levels)
-        ? round.levels.filter(isDashboardLevel)
-        : [];
-
-    if (levels.length === 0) {
-        return null;
-    }
-
-    return Object.assign({}, round, {
-        levels: levels,
-        sceneNames: [DASHBOARD_LEVEL_SCENE_NAME]
-    });
-}
-
-function isDashboardLevel(level) {
-    const start = (level && level.start) || {};
-    const end = (level && level.end) || {};
-    return (start.sceneName || end.sceneName) === DASHBOARD_LEVEL_SCENE_NAME;
-}
-
-function buildDashboardSummary(levels, rounds, baseSummary) {
-    const sessionIds = new Set();
-    let eventCount = 0;
-    let completedCount = 0;
-    let missingEndCount = 0;
-    let restartedCount = 0;
-    let totalDurationSeconds = 0;
-    let endedLevelCount = 0;
-    let totalMoves = 0;
-    let totalPushes = 0;
-
-    levels.forEach(level => {
-        const start = level.start || {};
-        const end = level.end || null;
-        eventCount += Array.isArray(level.events)
-            ? level.events.length
-            : (level.start ? 1 : 0) + (level.end ? 1 : 0);
-
-        if (start.sessionId) {
-            sessionIds.add(start.sessionId);
-        } else if (end && end.sessionId) {
-            sessionIds.add(end.sessionId);
-        }
-
-        if (!end) {
-            missingEndCount++;
-            return;
-        }
-
-        if (end.completed) {
-            completedCount++;
-        }
-
-        if (end.endReason === "restarted") {
-            restartedCount++;
-        }
-
-        if (typeof end.durationSeconds === "number") {
-            totalDurationSeconds += end.durationSeconds;
-            endedLevelCount++;
-        }
-
-        if (typeof end.moveCount === "number") {
-            totalMoves += end.moveCount;
-        }
-
-        if (typeof end.pushCount === "number") {
-            totalPushes += end.pushCount;
-        }
+    safeArray(payload.haPlanEvents).forEach(record => {
+        findJourney(record.ideaId, record.sessionId).haEvents.push(record);
     });
 
-    return Object.assign({}, baseSummary, {
-        eventCount: eventCount,
-        levelCount: levels.length,
-        roundCount: rounds.length,
-        sessionCount: sessionIds.size,
-        completedCount: completedCount,
-        missingEndCount: missingEndCount,
-        restartedCount: restartedCount,
-        totalMoves: totalMoves,
-        totalPushes: totalPushes,
-        averageDurationSeconds: endedLevelCount > 0
-            ? Math.round((totalDurationSeconds / endedLevelCount) * 100) / 100
-            : 0
+    safeArray(payload.journeyEvents).forEach(record => {
+        findJourney(record.ideaId, record.sessionId).journeyEvents.push(record);
     });
+
+    safeArray(payload.surveyResponses).forEach(record => {
+        findJourney(
+            record.creativeIdeaId || record.ideaId,
+            record.sessionId
+        ).surveys.push(record);
+    });
+
+    return Array.from(journeys.values())
+        .map(finalizeJourney)
+        .filter(journey => journey.ideaId || journey.ideaText || journey.levels.length)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+function finalizeJourney(journey) {
+    const creative = journey.creativeIdeas[0] || {};
+    const expansion = journey.expansions[0] || {};
+    const firstLevel = journey.levels[0] || {};
+    const levelStart = firstLevel.start || {};
+    journey.ideaText = firstValue(
+        creative.ideaText,
+        expansion.originalIdeaText,
+        levelStart.creativeIdeaText,
+        expansion.finalIdeaText
+    );
+    journey.ideaId = firstValue(
+        journey.ideaId,
+        creative.ideaId,
+        expansion.ideaId,
+        levelStart.creativeIdeaId
+    );
+    journey.ideaHash = getIdeaHash(journey.ideaId, journey.ideaText);
+    journey.levels.sort((left, right) => getLevelTimestamp(left).localeCompare(getLevelTimestamp(right)));
+    journey.creativeIdeas.sort(sortByTimestamp);
+    journey.expansions.sort(sortByTimestamp);
+    journey.surveys.sort(sortByTimestamp);
+    journey.haEvents.sort(sortByTimestamp);
+    journey.journeyEvents.sort(sortByTimestamp);
+
+    const timestamps = []
+        .concat(journey.creativeIdeas, journey.expansions, journey.surveys, journey.haEvents, journey.journeyEvents)
+        .map(getRecordTimestamp)
+        .concat(journey.levels.map(getLevelTimestamp))
+        .filter(Boolean);
+    journey.updatedAt = timestamps.sort().pop() || "";
+    journey.hasMissingEnd = journey.levels.some(level => !level.end);
+    journey.completed = journey.levels.some(level => level.end && level.end.completed);
+    journey.status = journey.hasMissingEnd
+        ? "anomaly"
+        : journey.completed
+            ? "completed"
+            : "progress";
+    journey.hasHA = journey.haEvents.length > 0
+        || journey.journeyEvents.some(event => clean(event.revisionMode).toLowerCase() === "ha");
+    journey.nicknames = Array.from(new Set(
+        journey.surveys.map(getSurveyNickname).filter(Boolean)
+    ));
+    return journey;
 }
 
 function applyFilters() {
-    if (!state.payload) {
-        return;
-    }
-
-    const ideaHashQuery = state.ideaHashQuery;
+    const query = clean(elements.searchInput.value).toLowerCase();
     const status = elements.statusFilter.value;
-    const allRounds = getAllRounds();
-    const creativeIdeas = (state.payload.creativeIdeas || []).filter(idea =>
-        ideaHashMatches(getCreativeIdeaHash(idea), ideaHashQuery)
-    );
-    const expansionChoices = (state.payload.creativeExpansionChoices || []).filter(choice =>
-        ideaHashMatches(getExpansionChoiceIdeaHash(choice), ideaHashQuery)
-    );
-    const surveyResponses = groupSurveyResponses(state.payload.surveyResponses || [])
-        .filter(response => ideaHashMatches(getSurveyIdeaHash(response), ideaHashQuery));
+    const mode = elements.modeFilter.value;
 
-    state.filteredRounds = [];
-    state.filteredLevels = [];
-
-    allRounds.forEach(round => {
-        const matchingLevels = (round.levels || []).filter(level => (
-            levelMatchesFilters(level, ideaHashQuery, status)
-        ));
-
-        if (matchingLevels.length === 0) {
-            return;
+    state.filteredJourneys = state.journeys.filter(journey => {
+        if (status !== "all" && journey.status !== status) {
+            return false;
         }
 
-        const filteredRound = buildFilteredRound(round, matchingLevels);
-        state.filteredRounds.push(filteredRound);
-        state.filteredLevels.push(...matchingLevels);
-    });
-
-    renderTable();
-    renderCreativeIdeasTable(creativeIdeas);
-    renderExpansionChoicesTable(expansionChoices);
-    renderSurveyTable(surveyResponses);
-    keepOrSelectFirst();
-}
-
-function getAllRounds() {
-    const payload = state.payload || {};
-    const apiRounds = Array.isArray(payload.rounds) ? payload.rounds : [];
-
-    if (apiRounds.length > 0) {
-        return apiRounds.map(normalizeRound);
-    }
-
-    const levels = Array.isArray(payload.levels) ? payload.levels : [];
-
-    if (levels.length === 0) {
-        return [];
-    }
-
-    return [
-        normalizeRound({
-            roundId: "legacy-round",
-            displayName: "Legacy Round",
-            shortId: "legacy",
-            isLegacy: true,
-            isInferred: true,
-            levels: levels
-        }, 0)
-    ];
-}
-
-function normalizeRound(round, index) {
-    const roundId = String(round.roundId || "round-" + (index + 1));
-    const displayName = round.displayName
-        || (round.isLegacy ? "Legacy Round" : "Round " + (index + 1));
-    const shortRoundId = round.shortId || shortId(roundId);
-    const levels = Array.isArray(round.levels) ? round.levels : [];
-
-    levels.forEach(level => {
-        level.roundId = roundId;
-        level.roundDisplayName = displayName;
-        level.roundShortId = shortRoundId;
-    });
-
-    return Object.assign({}, round, {
-        roundId: roundId,
-        displayName: displayName,
-        shortId: shortRoundId,
-        levels: levels,
-        sceneNames: Array.isArray(round.sceneNames) ? round.sceneNames : []
-    });
-}
-
-function buildFilteredRound(round, levels) {
-    const summary = summarizeLevels(levels);
-
-    return Object.assign({}, round, summary, {
-        levels: levels,
-        levelCount: levels.length
-    });
-}
-
-function summarizeLevels(levels) {
-    const summary = {
-        completedCount: 0,
-        missingEndCount: 0,
-        failedCount: 0,
-        restartedCount: 0,
-        totalDurationSeconds: 0
-    };
-
-    levels.forEach(level => {
-        const end = level.end || null;
-
-        if (!end) {
-            summary.missingEndCount++;
-        } else if (end.completed) {
-            summary.completedCount++;
-        } else if (end.endReason === "restarted") {
-            summary.restartedCount++;
-        } else {
-            summary.failedCount++;
+        if (mode === "ha" && !journey.hasHA) {
+            return false;
         }
 
-        if (end && typeof end.durationSeconds === "number") {
-            summary.totalDurationSeconds += end.durationSeconds;
+        if (mode === "standard" && journey.hasHA) {
+            return false;
         }
+
+        if (!query) {
+            return true;
+        }
+
+        const haystack = [
+            journey.ideaHash,
+            journey.ideaId,
+            journey.ideaText,
+            ...journey.nicknames,
+            ...Array.from(journey.sessions)
+        ].join(" ").toLowerCase();
+        return haystack.includes(query);
     });
 
-    summary.totalDurationSeconds = Math.round(summary.totalDurationSeconds * 100) / 100;
-    return summary;
+    renderIdeaList();
+    keepOrSelectJourney();
 }
 
-function levelMatchesFilters(level, ideaHashQuery, status) {
-    const rowStatus = getStatusKey(level);
+function renderSummary() {
+    const completed = state.journeys.filter(journey => journey.completed).length;
+    const anomalies = state.journeys.filter(journey => journey.status === "anomaly").length;
+    const endedLevels = state.journeys
+        .flatMap(journey => journey.levels)
+        .filter(level => level.end && typeof level.end.durationSeconds === "number");
+    const averageDuration = endedLevels.length
+        ? endedLevels.reduce((sum, level) => sum + level.end.durationSeconds, 0) / endedLevels.length
+        : null;
+    const malformed = [
+        state.payload.malformedCount,
+        state.payload.surveyMalformedCount,
+        state.payload.creativeIdeaMalformedCount,
+        state.payload.creativeExpansionChoiceMalformedCount,
+        state.payload.haPlanMalformedCount,
+        state.payload.journeyEventMalformedCount
+    ].reduce((sum, count) => sum + numeric(count), 0);
+    const rate = state.journeys.length > 0
+        ? Math.round(completed / state.journeys.length * 100)
+        : 0;
 
-    if (status !== "all" && rowStatus !== status) {
-        return false;
-    }
-
-    return ideaHashMatches(getLevelIdeaHash(level), ideaHashQuery);
+    elements.statIdeas.textContent = state.journeys.length;
+    elements.statCompleted.textContent = completed;
+    elements.statCompletionRate.textContent = rate + "% completion rate";
+    elements.statAvg.textContent = formatSeconds(averageDuration);
+    elements.statAnomalies.textContent = anomalies;
+    elements.statDataHealth.textContent = malformed > 0
+        ? malformed + " malformed records"
+        : anomalies > 0
+            ? anomalies + " incomplete journeys"
+            : "no data issues";
 }
 
-function ideaHashMatches(ideaHash, ideaHashQuery) {
-    return !ideaHashQuery
-        || String(ideaHash || "").toLowerCase().startsWith(ideaHashQuery);
-}
+function renderIdeaList() {
+    elements.ideaList.textContent = "";
+    elements.ideaCount.textContent = state.filteredJourneys.length + " shown";
 
-function renderTable() {
-    elements.recordsBody.textContent = "";
-    elements.resultCount.textContent = formatShownCount(
-        state.filteredRounds.length,
-        state.filteredLevels.length
-    );
-
-    if (state.filteredLevels.length === 0) {
-        const row = document.createElement("tr");
-        const cell = document.createElement("td");
-        cell.colSpan = 8;
-        cell.className = "empty-state";
-        cell.textContent = "No matching level records.";
-        row.appendChild(cell);
-        elements.recordsBody.appendChild(row);
-        renderDetails(null);
+    if (state.filteredJourneys.length === 0) {
+        elements.ideaList.appendChild(emptyNode("No matching idea journeys."));
         return;
     }
 
-    state.filteredRounds.forEach(round => {
-        round.levels.forEach(level => {
-            elements.recordsBody.appendChild(renderLevelRow(level));
+    state.filteredJourneys.forEach(journey => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "idea-item";
+
+        if (journey.key === state.selectedJourneyKey) {
+            button.classList.add("selected");
+        }
+
+        const top = document.createElement("div");
+        top.className = "idea-item-top";
+        top.append(
+            textNode("span", journey.ideaHash, "idea-hash"),
+            textNode("span", formatShortDate(journey.updatedAt))
+        );
+        const snippet = textNode("p", journey.ideaText || "Idea text unavailable", "idea-snippet");
+        const bottom = document.createElement("div");
+        bottom.className = "idea-item-bottom";
+        const status = textNode("span", statusLabel(journey.status), "mini-status " + journey.status);
+        const counts = textNode(
+            "span",
+            plural(journey.levels.length, "version") + " · " + plural(journey.surveys.length, "survey")
+        );
+        bottom.append(status, counts);
+        button.append(top, snippet, bottom);
+        button.addEventListener("click", () => selectJourney(journey.key));
+        elements.ideaList.appendChild(button);
+    });
+}
+
+function keepOrSelectJourney() {
+    let journey = state.filteredJourneys.find(item => item.key === state.selectedJourneyKey);
+
+    if (!journey) {
+        journey = state.filteredJourneys[0] || null;
+        state.selectedJourneyKey = journey ? journey.key : "";
+        state.selectedStageKey = "";
+        state.selectedRunId = "";
+        state.compareRunIds = [];
+        renderIdeaList();
+    }
+
+    if (journey) {
+        renderJourney(journey);
+    } else {
+        showEmptyDetail();
+    }
+}
+
+function selectJourney(key) {
+    if (state.selectedJourneyKey !== key) {
+        state.selectedJourneyKey = key;
+        state.selectedStageKey = "";
+        state.selectedRunId = "";
+        state.compareRunIds = [];
+    }
+
+    renderIdeaList();
+    const journey = getSelectedJourney();
+
+    if (journey) {
+        renderJourney(journey);
+        updateUrlSelection(journey);
+    }
+}
+
+function renderJourney(journey) {
+    elements.emptyDetail.hidden = true;
+    elements.journeyDetail.hidden = false;
+    elements.selectedIdeaTitle.textContent = "Idea " + journey.ideaHash;
+    elements.selectedIdeaText.textContent = journey.ideaText || "Idea text unavailable.";
+    elements.selectedIdeaStatus.textContent = statusLabel(journey.status);
+    elements.selectedIdeaStatus.className = "status-chip " + journey.status;
+    elements.selectedIdeaMeta.textContent = "";
+    [
+        plural(journey.levels.length, "level version"),
+        plural(journey.expansions.length, "expansion choice"),
+        plural(journey.haEvents.length, "HA event"),
+        plural(journey.surveys.length, "survey"),
+        journey.nicknames.length ? "Participant: " + journey.nicknames.join(", ") : "",
+        journey.sessions.size ? "Session " + shortId(Array.from(journey.sessions)[0]) : ""
+    ].filter(Boolean).forEach(text => {
+        elements.selectedIdeaMeta.appendChild(textNode("span", text));
+    });
+
+    const stages = buildTimelineStages(journey);
+    const selectedExists = stages.some(stage => stage.key === state.selectedStageKey);
+
+    if (!selectedExists) {
+        state.selectedStageKey = stages.length ? stages[stages.length - 1].key : "";
+    }
+
+    if (!state.selectedRunId || !journey.levels.some(level => level.levelRunId === state.selectedRunId)) {
+        const latestLevel = journey.levels[journey.levels.length - 1];
+        state.selectedRunId = latestLevel ? latestLevel.levelRunId : "";
+    }
+
+    renderTimeline(stages);
+    renderLevelVersions(journey, stages);
+    renderSelectedLevel(journey);
+    renderInspector(stages.find(stage => stage.key === state.selectedStageKey) || null);
+    renderComparison(journey);
+}
+
+function buildTimelineStages(journey) {
+    const stages = [];
+
+    journey.creativeIdeas.forEach((record, index) => stages.push({
+        key: "creative:" + (clean(record.ideaId) || index),
+        type: "creative",
+        label: index === 0 ? "Original idea" : "Idea update",
+        timestamp: getRecordTimestamp(record),
+        record
+    }));
+
+    journey.expansions.forEach((record, index) => stages.push({
+        key: "expansion:" + (clean(record.choiceId) || index),
+        type: "expansion",
+        label: "Expansion",
+        timestamp: getRecordTimestamp(record),
+        record
+    }));
+
+    journey.levels.forEach((level, index) => stages.push({
+        key: "level:" + level.levelRunId,
+        type: "level",
+        label: "Level V" + (index + 1),
+        timestamp: getLevelTimestamp(level),
+        warning: !level.end,
+        level,
+        record: level
+    }));
+
+    journey.journeyEvents.forEach((record, index) => {
+        const phase = clean(record.phase).toLowerCase();
+        const labels = {
+            review: "Review",
+            routing: "Route choice",
+            adjustment: "Adjustment"
+        };
+        stages.push({
+            key: "journey:" + (clean(record.journeyEventId) || index),
+            type: "journey",
+            label: labels[phase] || titleCase(phase || "Journey event"),
+            timestamp: getRecordTimestamp(record),
+            record
         });
     });
+
+    journey.haEvents.forEach((record, index) => stages.push({
+        key: "ha:" + (clean(record.haEventId) || index),
+        type: "ha",
+        label: record.eventType === "ha-plan-choice" ? "HA choice" : "HA plans",
+        timestamp: getRecordTimestamp(record),
+        warning: Boolean(clean(record.error)),
+        record
+    }));
+
+    journey.surveys.forEach((record, index) => stages.push({
+        key: "survey:" + (clean(record.responseId) || index),
+        type: "survey",
+        label: surveyStageLabel(record, index),
+        timestamp: getRecordTimestamp(record),
+        record
+    }));
+
+    return stages.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
 }
 
-function renderCreativeIdeasTable(ideas) {
-    elements.creativeIdeasBody.textContent = "";
-    elements.creativeIdeaCount.textContent = ideas.length + " shown";
+function renderTimeline(stages) {
+    elements.journeyTimeline.textContent = "";
 
-    if (ideas.length === 0) {
-        const row = document.createElement("tr");
-        const cell = document.createElement("td");
-        cell.colSpan = 4;
-        cell.className = "empty-state";
-        cell.textContent = "No matching creative workshop ideas.";
-        row.appendChild(cell);
-        elements.creativeIdeasBody.appendChild(row);
+    if (stages.length === 0) {
+        elements.journeyTimeline.appendChild(emptyNode("No journey stages recorded."));
         return;
     }
 
-    ideas.forEach(idea => {
-        const row = document.createElement("tr");
-        const cells = [
-            formatTimestamp(idea.serverReceivedAt || idea.timestamp),
-            getCreativeIdeaHash(idea),
-            value(idea.ideaText)
-        ];
+    stages.forEach((stage, index) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "timeline-node";
 
-        cells.forEach((text, index) => {
-            const cell = document.createElement("td");
+        if (stage.key === state.selectedStageKey) {
+            button.classList.add("selected");
+        }
 
-            if (index === 1) {
-                cell.className = "small";
-            } else if (index === 2) {
-                cell.className = "idea-cell";
+        if (stage.warning) {
+            button.classList.add("warning");
+        }
+
+        button.append(
+            textNode("span", stage.warning ? "!" : String(index + 1), "timeline-dot"),
+            textNode("span", stage.label, "timeline-label"),
+            textNode("span", formatShortDate(stage.timestamp), "timeline-time")
+        );
+        button.addEventListener("click", () => {
+            state.selectedStageKey = stage.key;
+
+            if (stage.type === "level") {
+                state.selectedRunId = stage.level.levelRunId;
             }
 
-            cell.textContent = text;
-            row.appendChild(cell);
+            const journey = getSelectedJourney();
+            if (journey) renderJourney(journey);
         });
-
-        const actionsCell = document.createElement("td");
-        const deleteButton = document.createElement("button");
-        const ideaId = getCreativeIdeaId(idea);
-        deleteButton.className = "round-action round-action-danger";
-        deleteButton.type = "button";
-        deleteButton.textContent = "Delete";
-
-        if (ideaId) {
-            deleteButton.title = "Delete all records for this idea";
-            deleteButton.addEventListener("click", event => {
-                event.stopPropagation();
-                deleteCreativeIdea(idea);
-            });
-        } else {
-            deleteButton.disabled = true;
-            deleteButton.title = "Cannot delete without idea ID";
-        }
-
-        actionsCell.appendChild(deleteButton);
-        row.appendChild(actionsCell);
-
-        elements.creativeIdeasBody.appendChild(row);
+        elements.journeyTimeline.appendChild(button);
     });
 }
 
-function renderExpansionChoicesTable(choices) {
-    elements.expansionChoicesBody.textContent = "";
-    elements.expansionChoiceCount.textContent = choices.length + " shown";
+function renderLevelVersions(journey, stages) {
+    elements.levelTabs.textContent = "";
+    elements.levelCount.textContent = plural(journey.levels.length, "version");
 
-    if (choices.length === 0) {
-        const row = document.createElement("tr");
-        const cell = document.createElement("td");
-        cell.colSpan = 5;
-        cell.className = "empty-state";
-        cell.textContent = "No matching expansion choices.";
-        row.appendChild(cell);
-        elements.expansionChoicesBody.appendChild(row);
+    if (journey.levels.length === 0) {
+        elements.levelTabs.appendChild(emptyNode("No level versions recorded."));
         return;
     }
 
-    choices.forEach(choice => {
-        const row = document.createElement("tr");
-        const cells = [
-            formatTimestamp(choice.serverReceivedAt || choice.timestamp),
-            getExpansionChoiceIdeaHash(choice),
-            getExpansionChoiceLabel(choice),
-            value(choice.selectedOptionDescription || choice.selectedOptionPromptText)
-        ];
+    journey.levels.forEach((level, index) => {
+        const wrapper = document.createElement("button");
+        wrapper.type = "button";
+        wrapper.className = "level-tab";
 
-        cells.forEach((text, index) => {
-            const cell = document.createElement("td");
-
-            if (index === 1) {
-                cell.className = "small";
-            } else if (index === 2) {
-                cell.className = "choice-cell";
-            } else if (index === 3) {
-                cell.className = "prompt-cell";
-            }
-
-            cell.textContent = text;
-            row.appendChild(cell);
-        });
-
-        const actionsCell = document.createElement("td");
-        const deleteButton = document.createElement("button");
-        const ideaId = getExpansionChoiceIdeaId(choice);
-        deleteButton.className = "round-action round-action-danger";
-        deleteButton.type = "button";
-        deleteButton.textContent = "Delete";
-
-        if (ideaId) {
-            deleteButton.title = "Delete all records for this idea";
-            deleteButton.addEventListener("click", event => {
-                event.stopPropagation();
-                deleteExpansionChoice(choice);
-            });
-        } else {
-            deleteButton.disabled = true;
-            deleteButton.title = "Cannot delete without idea ID";
+        if (level.levelRunId === state.selectedRunId) {
+            wrapper.classList.add("selected");
         }
 
-        actionsCell.appendChild(deleteButton);
-        row.appendChild(actionsCell);
-
-        elements.expansionChoicesBody.appendChild(row);
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "compare-check";
+        checkbox.title = "Include this version in comparison";
+        checkbox.checked = state.compareRunIds.includes(level.levelRunId);
+        checkbox.addEventListener("click", event => {
+            event.stopPropagation();
+            toggleCompareRun(level.levelRunId);
+        });
+        wrapper.append(
+            checkbox,
+            textNode("span", "V" + (index + 1)),
+            textNode("span", getLevelStatus(level).short)
+        );
+        wrapper.addEventListener("click", () => {
+            state.selectedRunId = level.levelRunId;
+            const levelStage = stages.find(stage =>
+                stage.type === "level" && stage.level.levelRunId === level.levelRunId
+            );
+            state.selectedStageKey = levelStage ? levelStage.key : state.selectedStageKey;
+            renderJourney(journey);
+            updateUrlSelection(journey);
+        });
+        elements.levelTabs.appendChild(wrapper);
     });
 }
 
-function renderLevelRow(level) {
-    const row = document.createElement("tr");
-    row.className = "level-row";
-    row.dataset.runId = level.levelRunId;
+function toggleCompareRun(runId) {
+    const position = state.compareRunIds.indexOf(runId);
 
-    if (level.levelRunId === state.selectedRunId) {
-        row.classList.add("selected");
+    if (position >= 0) {
+        state.compareRunIds.splice(position, 1);
+    } else if (state.compareRunIds.length < 2) {
+        state.compareRunIds.push(runId);
+    } else {
+        state.compareRunIds.shift();
+        state.compareRunIds.push(runId);
+    }
+
+    const journey = getSelectedJourney();
+    if (journey) renderJourney(journey);
+}
+
+function renderSelectedLevel(journey) {
+    const level = journey.levels.find(item => item.levelRunId === state.selectedRunId) || null;
+    elements.mapGrid.textContent = "";
+    elements.detailMetrics.textContent = "";
+
+    if (!level) {
+        elements.mapGrid.textContent = "No level selected.";
+        elements.mapGrid.style.gridTemplateColumns = "";
+        return;
     }
 
     const start = level.start || {};
     const end = level.end || {};
     const structure = start.structure || {};
-    const status = getStatus(level);
-    const cells = [
-        getLevelDisplayName(level),
-        getLevelIdeaHash(level),
-        value(structure.mapHash),
-        status.label,
-        value(end.moveCount),
-        value(start.solutionSteps),
-        value(end.pushCount)
-    ];
+    renderMap(elements.mapGrid, safeArray(start.rows), false);
 
-    cells.forEach((text, index) => {
-        const cell = document.createElement("td");
-
-        if (index === 0) {
-            cell.className = "level-index-cell";
-            cell.textContent = text;
-        } else if (index === 1) {
-            cell.className = "small";
-            cell.textContent = text;
-        } else if (index === 2) {
-            cell.className = "small";
-            cell.textContent = text;
-        } else if (index === 3) {
-            const badge = document.createElement("span");
-            badge.className = "badge " + status.className;
-            badge.textContent = text;
-            cell.appendChild(badge);
-        } else {
-            cell.textContent = text;
-        }
-
-        row.appendChild(cell);
+    [
+        ["Status", getLevelStatus(level).label],
+        ["Play time", formatSeconds(end.durationSeconds)],
+        ["Moves", value(end.moveCount)],
+        ["Pushes", value(end.pushCount)],
+        ["Restarts", value(end.restartCount)],
+        ["Solver steps", value(start.solutionSteps)],
+        ["Solver pushes", value(start.solverPushes)],
+        ["Attempts", value(start.generationAttempts)],
+        ["Wall density", formatRatio(structure.wallDensity)],
+        ["Water density", formatRatio(structure.waterDensity)],
+        ["Reachable", formatPercent(structure.reachableAreaRatio)],
+        ["Dead-corner risk", formatRatio(structure.deadCornerRisk)]
+    ].forEach(([label, metricValue]) => {
+        const item = document.createElement("div");
+        item.className = "metric";
+        item.append(textNode("span", label), textNode("strong", metricValue));
+        elements.detailMetrics.appendChild(item);
     });
-
-    row.appendChild(renderLevelActionsCell(level));
-
-    row.addEventListener("click", () => {
-        state.selectedRunId = level.levelRunId;
-        renderTable();
-        renderDetails(level);
-    });
-
-    return row;
 }
 
-function renderLevelActionsCell(level) {
-    const cell = document.createElement("td");
-    const actions = document.createElement("div");
-    const levelRunId = normalizeCreativeIdeaText(level.levelRunId);
-    const ideaId = getLevelIdeaId(level);
+function renderInspector(stage) {
+    elements.inspectorBody.textContent = "";
+    elements.deleteStageButton.hidden = true;
+    elements.deleteStageButton.dataset.stageKey = "";
 
-    actions.className = "row-actions";
-
-    const renameButton = document.createElement("button");
-    renameButton.className = "round-action";
-    renameButton.type = "button";
-    renameButton.textContent = "Rename";
-
-    if (!levelRunId || levelRunId.startsWith("missing-run-")) {
-        renameButton.disabled = true;
-        renameButton.title = "Records without a level run ID cannot be renamed";
-    } else {
-        renameButton.title = "Rename level";
-        renameButton.addEventListener("click", event => {
-            event.stopPropagation();
-            renameLevelRun(level);
-        });
+    if (!stage) {
+        elements.inspectorTitle.textContent = "Journey details";
+        elements.inspectorBody.appendChild(emptyNode("Select a journey stage to inspect it."));
+        return;
     }
 
-    const deleteButton = document.createElement("button");
-    deleteButton.className = "round-action round-action-danger";
-    deleteButton.type = "button";
-    deleteButton.textContent = "Delete";
+    elements.inspectorTitle.textContent = stage.label;
+    const deleteConfig = getStageDeleteConfig(stage);
 
-    if (ideaId) {
-        deleteButton.title = "Delete all records for this idea";
-        deleteButton.addEventListener("click", event => {
-            event.stopPropagation();
-            deleteLevelRun(level);
-        });
-    } else {
-        deleteButton.disabled = true;
-        deleteButton.title = "Cannot delete without idea ID";
+    if (deleteConfig) {
+        elements.deleteStageButton.hidden = false;
+        elements.deleteStageButton.dataset.stageKey = stage.key;
     }
 
-    actions.append(renameButton, deleteButton);
-    cell.appendChild(actions);
-    return cell;
+    if (stage.type === "creative") renderCreativeInspector(stage.record);
+    if (stage.type === "expansion") renderExpansionInspector(stage.record);
+    if (stage.type === "level") renderLevelInspector(stage.level);
+    if (stage.type === "survey") renderSurveyInspector(stage.record);
+    if (stage.type === "ha") renderHAInspector(stage.record);
+    if (stage.type === "journey") renderJourneyEventInspector(stage.record);
 }
 
-function getLevelDisplayName(level) {
+function renderCreativeInspector(record) {
+    appendTextSection("Idea submitted", record.ideaText || record.idea || "-");
+    appendRecordGrid([
+        ["Idea ID", record.ideaId],
+        ["Session", record.sessionId],
+        ["Scene", record.sceneName],
+        ["Recorded", formatTimestamp(getRecordTimestamp(record))]
+    ]);
+}
+
+function renderExpansionInspector(record) {
+    appendTextSection("Original idea", record.originalIdeaText || "-");
+    appendTextSection(
+        "Selected direction",
+        [record.selectedOptionId, record.selectedOptionTitle].filter(Boolean).join(" · ") || "-"
+    );
+    appendTextSection("Option description", record.selectedOptionDescription || "-");
+    appendTextSection("Final idea", record.finalIdeaText || "-");
+}
+
+function renderLevelInspector(level) {
     const start = level.start || {};
     const end = level.end || {};
-    return normalizeCreativeIdeaText(end.levelDisplayName)
-        || normalizeCreativeIdeaText(start.levelDisplayName)
-        || value(start.roundLevelIndex || end.roundLevelIndex || start.levelIndex || end.levelIndex);
+    const structure = start.structure || {};
+    appendRecordGrid([
+        ["Level run", level.levelRunId],
+        ["Map hash", structure.mapHash],
+        ["Source", start.source],
+        ["Status", getLevelStatus(level).label],
+        ["Started", formatTimestamp(getLevelTimestamp(level))],
+        ["Ended", end.timestamp ? formatTimestamp(end.timestamp) : "Missing end record"],
+        ["Solution", value(start.solutionSteps) + " steps / " + value(start.solverPushes) + " pushes"],
+        ["Player", value(end.moveCount) + " moves / " + value(end.pushCount) + " pushes"]
+    ]);
+    appendTextSection("Idea context", start.creativeIdeaText || end.creativeIdeaText || "-");
 }
 
-async function renameLevelRun(level) {
-    const levelRunId = normalizeCreativeIdeaText(level.levelRunId);
-    const nextName = window.prompt("Rename level", getLevelDisplayName(level));
+function renderSurveyInspector(record) {
+    appendRecordGrid([
+        ["Survey", record.surveyTitle || record.surveyId],
+        ["Participant", getSurveyNickname(record) || "-"],
+        ["Duration", formatSeconds(record.durationSeconds)],
+        ["Scene", record.sceneName],
+        ["Recorded", formatTimestamp(getRecordTimestamp(record))]
+    ]);
+    const answers = safeArray(record.answerDetails).length
+        ? record.answerDetails
+        : safeArray(record.answers);
+    const section = createSection("Answers");
 
-    if (nextName === null) {
-        return;
-    }
-
-    const displayName = nextName.trim();
-
-    if (!displayName) {
-        window.alert("Record name cannot be empty.");
-        return;
-    }
-
-    setStatus("Renaming record...");
-
-    try {
-        const response = await fetch(apiUrl("/rename-level-run"), {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                levelRunId: levelRunId,
-                displayName: displayName
-            })
-        });
-
-        if (!response.ok) {
-            throw new Error(await getResponseError(response));
-        }
-
-        showNotice("Level renamed.");
-        await loadData(true);
-    } catch (error) {
-        setStatus("Could not rename level: " + error.message);
-    }
-}
-
-function deleteLevelRun(level) {
-    return deleteIdeaRecords(getLevelIdeaId(level), getLevelIdeaHash(level));
-}
-
-async function getResponseError(response) {
-    try {
-        const data = await response.json();
-
-        if (data && data.detail) {
-            return data.detail;
-        }
-    } catch (error) {
-        // Fall back to the HTTP status below.
-    }
-
-    return "HTTP " + response.status;
-}
-
-function renderSurveyTable(responses) {
-    elements.surveyBody.textContent = "";
-    elements.surveyCount.textContent = responses.length + " shown";
-
-    if (responses.length === 0) {
-        const row = document.createElement("tr");
-        const cell = document.createElement("td");
-        cell.colSpan = 5;
-        cell.className = "empty-state";
-        cell.textContent = "No matching survey responses.";
-        row.appendChild(cell);
-        elements.surveyBody.appendChild(row);
-        return;
-    }
-
-    responses.forEach(response => {
-        const row = document.createElement("tr");
-        const cells = [
-            formatTimestamp(response.serverReceivedAt || response.timestamp),
-            getSurveyIdeaHash(response),
-            value(response.playerNickname || response.playerName || response.nickname)
-        ];
-
-        cells.forEach((text, index) => {
-            const cell = document.createElement("td");
-            if (index === 1) {
-                cell.className = "small";
-            }
-            cell.textContent = text;
-            row.appendChild(cell);
-        });
-
-        const answersCell = document.createElement("td");
-        answersCell.className = "answers-cell";
-        renderSurveyAnswerLines(answersCell, response);
-        row.appendChild(answersCell);
-
-        const actionsCell = document.createElement("td");
-        const deleteButton = document.createElement("button");
-        const ideaId = getSurveyIdeaId(response);
-        deleteButton.className = "round-action round-action-danger";
-        deleteButton.type = "button";
-        deleteButton.textContent = "Delete";
-
-        if (ideaId) {
-            deleteButton.title = "Delete all records for this idea";
-            deleteButton.addEventListener("click", event => {
-                event.stopPropagation();
-                deleteSurveyResponse(response);
-            });
-        } else {
-            deleteButton.disabled = true;
-            deleteButton.title = "Cannot delete without idea ID";
-        }
-
-        actionsCell.appendChild(deleteButton);
-        row.appendChild(actionsCell);
-
-        elements.surveyBody.appendChild(row);
-    });
-}
-
-function groupSurveyResponses(responses) {
-    const groups = new Map();
-
-    responses.forEach((response, index) => {
-        const sessionId = normalizeSurveyDeleteText(response && response.sessionId);
-        const responseId = normalizeSurveyDeleteText(response && response.responseId);
-        const key = sessionId
-            ? "session:" + sessionId
-            : "response:" + (responseId || String(index));
-
-        if (!groups.has(key)) {
-            groups.set(key, []);
-        }
-
-        groups.get(key).push(response);
-    });
-
-    return Array.from(groups.values())
-        .map(mergeSurveyResponseGroup)
-        .sort((left, right) => getSurveyResponseTimestamp(right)
-            .localeCompare(getSurveyResponseTimestamp(left)));
-}
-
-function mergeSurveyResponseGroup(responses) {
-    const ordered = responses.slice().sort((left, right) =>
-        getSurveyResponseTimestamp(left).localeCompare(getSurveyResponseTimestamp(right))
-    );
-    const merged = Object.assign({}, ...ordered);
-    const answersByQuestion = new Map();
-
-    ordered.forEach(response => {
-        const answers = response && Array.isArray(response.answerDetails)
-            ? response.answerDetails
-            : response && Array.isArray(response.answers)
-                ? response.answers
-                : [];
-
+    if (answers.length === 0) {
+        section.appendChild(textNode("p", "No answers recorded."));
+    } else {
         answers.forEach(answer => {
-            answersByQuestion.set(String(answer.questionIndex), answer);
+            const card = document.createElement("div");
+            card.className = "answer-card";
+            card.append(
+                textNode("span", answer.questionText || answer.questionId || "Question " + value(answer.questionIndex)),
+                textNode("strong", answer.optionText || answer.optionLabel || answer.optionId || "-")
+            );
+            section.appendChild(card);
         });
-    });
-
-    merged.answerDetails = Array.from(answersByQuestion.values()).sort((left, right) =>
-        Number(left.questionIndex) - Number(right.questionIndex)
-    );
-    merged.answersSummary = "";
-
-    const responseWithIdea = ordered.slice().reverse().find(response =>
-        getSurveyIdeaId(response)
-    );
-
-    if (responseWithIdea) {
-        merged.creativeIdeaId = getSurveyIdeaId(responseWithIdea);
-        merged.ideaHash = responseWithIdea.ideaHash || responseWithIdea.creativeIdeaHash;
     }
 
-    const nickname = ordered.map(getSurveyNickname).find(Boolean);
+    elements.inspectorBody.appendChild(section);
+}
 
-    if (nickname) {
-        merged.playerNickname = nickname;
-        merged.playerName = nickname;
+function renderHAInspector(record) {
+    appendRecordGrid([
+        ["Event", record.eventType],
+        ["Attempt", value(record.regenerationAttempt)],
+        ["Selected", record.selectedOptionTitle || "-"],
+        ["Recorded", formatTimestamp(getRecordTimestamp(record))]
+    ]);
+    appendTextSection("Adjustment request", record.adjustmentText || "-");
+
+    if (record.selectedOptionDescription) {
+        appendTextSection("Selected plan", record.selectedOptionDescription);
     }
 
-    return merged;
+    const options = safeArray(record.options).length
+        ? record.options
+        : safeArray(record.presentedOptions);
+
+    if (options.length) {
+        const section = createSection("Presented options");
+        options.forEach(option => {
+            const card = document.createElement("div");
+            card.className = "option-card";
+
+            if (clean(option.id) === clean(record.selectedOptionId)) {
+                card.classList.add("selected");
+            }
+
+            card.append(
+                textNode("strong", [option.id, option.title].filter(Boolean).join(" · ")),
+                textNode("span", option.description || "-")
+            );
+            section.appendChild(card);
+        });
+        elements.inspectorBody.appendChild(section);
+    }
+
+    if (record.error) {
+        appendTextSection("Generation error", record.error);
+    }
 }
 
-function getSurveyResponseTimestamp(response) {
-    return String(response && (response.serverReceivedAt || response.timestamp) || "");
+function renderJourneyEventInspector(record) {
+    appendRecordGrid([
+        ["Phase", titleCase(record.phase)],
+        ["Action", titleCase(record.action)],
+        ["Revision mode", clean(record.revisionMode).toUpperCase() || "-"],
+        ["Score", numeric(record.score) >= 0 ? value(record.score) : "-"],
+        ["Scene", record.sceneName],
+        ["Recorded", formatTimestamp(getRecordTimestamp(record))]
+    ]);
+    appendTextSection("Details", record.detailText || "-");
 }
 
-function deleteSurveyResponse(response) {
-    return deleteIdeaRecords(getSurveyIdeaId(response), getSurveyIdeaHash(response));
-}
+function renderComparison(journey) {
+    elements.compareContent.textContent = "";
+    const levels = state.compareRunIds
+        .map(runId => journey.levels.find(level => level.levelRunId === runId))
+        .filter(Boolean);
 
-function deleteCreativeIdea(idea) {
-    return deleteIdeaRecords(getCreativeIdeaId(idea), getCreativeIdeaHash(idea));
-}
-
-function deleteExpansionChoice(choice) {
-    return deleteIdeaRecords(
-        getExpansionChoiceIdeaId(choice),
-        getExpansionChoiceIdeaHash(choice)
-    );
-}
-
-async function deleteIdeaRecords(ideaId, ideaHash) {
-    if (!ideaId) {
+    if (levels.length !== 2) {
+        elements.compareContent.appendChild(textNode(
+            "div",
+            "Select two version checkboxes to compare maps and player metrics.",
+            "compare-placeholder"
+        ));
         return;
     }
 
+    const grid = document.createElement("div");
+    grid.className = "compare-grid";
+    levels.forEach(level => grid.appendChild(renderCompareVersion(level, journey.levels.indexOf(level) + 1)));
+    elements.compareContent.appendChild(grid);
+}
+
+function renderCompareVersion(level, versionNumber) {
+    const start = level.start || {};
+    const end = level.end || {};
+    const card = document.createElement("article");
+    card.className = "compare-version";
+    card.appendChild(textNode("h3", "Level V" + versionNumber + " · " + getLevelStatus(level).label));
+    const frame = document.createElement("div");
+    frame.className = "mini-map-frame";
+    const map = document.createElement("div");
+    map.className = "mini-map";
+    renderMap(map, safeArray(start.rows), true);
+    frame.appendChild(map);
+    card.appendChild(frame);
+
+    const table = document.createElement("table");
+    table.className = "delta-table";
+    [
+        ["Play time", formatSeconds(end.durationSeconds)],
+        ["Moves", value(end.moveCount)],
+        ["Pushes", value(end.pushCount)],
+        ["Restarts", value(end.restartCount)],
+        ["Solver steps", value(start.solutionSteps)],
+        ["Solver pushes", value(start.solverPushes)]
+    ].forEach(([label, metricValue]) => {
+        const row = document.createElement("tr");
+        row.append(textNode("td", label), textNode("td", metricValue));
+        table.appendChild(row);
+    });
+    card.appendChild(table);
+    return card;
+}
+
+function renderMap(container, rows, mini) {
+    container.textContent = "";
+
+    if (!rows.length) {
+        container.textContent = "No map rows recorded.";
+        container.style.gridTemplateColumns = "";
+        return;
+    }
+
+    const width = rows.reduce((max, row) => Math.max(max, String(row || "").length), 0);
+    container.style.gridTemplateColumns = "repeat(" + width + ", " + (mini ? "18px" : "var(--tile-size)") + ")";
+
+    rows.forEach(rowText => {
+        const row = String(rowText || "");
+
+        for (let index = 0; index < width; index += 1) {
+            const tile = row[index] || " ";
+            const cell = document.createElement("div");
+            cell.className = "tile " + getTileClass(tile);
+            cell.title = getTileName(tile);
+            cell.textContent = getTileLabel(tile);
+            container.appendChild(cell);
+        }
+    });
+}
+
+async function deleteSelectedStage() {
+    const journey = getSelectedJourney();
+    const stage = journey
+        ? buildTimelineStages(journey).find(item => item.key === elements.deleteStageButton.dataset.stageKey)
+        : null;
+    const config = stage ? getStageDeleteConfig(stage) : null;
+
+    if (!config || !window.confirm("Delete only this " + config.label + "? Other records in this idea journey will be kept.")) {
+        return;
+    }
+
+    await postDelete(config.endpoint, config.payload, "Deleting " + config.label + "...");
+}
+
+function getStageDeleteConfig(stage) {
+    if (stage.type === "creative" && clean(stage.record.ideaId)) {
+        return {
+            endpoint: "/delete-creative-idea",
+            payload: { ideaId: clean(stage.record.ideaId) },
+            label: "creative idea record"
+        };
+    }
+
+    if (stage.type === "expansion" && clean(stage.record.choiceId)) {
+        return {
+            endpoint: "/delete-expansion-choice",
+            payload: { choiceId: clean(stage.record.choiceId) },
+            label: "expansion choice"
+        };
+    }
+
+    if (stage.type === "level" && clean(stage.level.levelRunId)) {
+        return {
+            endpoint: "/delete-level-run",
+            payload: { levelRunId: clean(stage.level.levelRunId) },
+            label: "level version"
+        };
+    }
+
+    if (stage.type === "survey") {
+        const surveyPayload = getSurveyDeletePayload(stage.record);
+        return surveyPayload ? {
+            endpoint: "/delete-survey-response",
+            payload: surveyPayload,
+            label: "survey response"
+        } : null;
+    }
+
+    if (stage.type === "ha" && clean(stage.record.haEventId)) {
+        return {
+            endpoint: "/delete-ha-plan-event",
+            payload: { haEventId: clean(stage.record.haEventId) },
+            label: "HA event"
+        };
+    }
+
+    if (stage.type === "journey" && clean(stage.record.journeyEventId)) {
+        return {
+            endpoint: "/delete-journey-event",
+            payload: { journeyEventId: clean(stage.record.journeyEventId) },
+            label: "journey event"
+        };
+    }
+
+    return null;
+}
+
+async function deleteSelectedIdea() {
+    const journey = getSelectedJourney();
+
+    if (!journey || !journey.ideaId) {
+        return;
+    }
+
+    const scope = [
+        plural(journey.creativeIdeas.length, "creative record"),
+        plural(journey.expansions.length, "expansion choice"),
+        plural(journey.levels.length, "level version"),
+        plural(journey.surveys.length, "survey"),
+        plural(journey.haEvents.length, "HA event"),
+        plural(journey.journeyEvents.length, "review/routing event")
+    ].join("\n");
     const confirmed = window.confirm(
-        "Delete all records for Idea Hash " + ideaHash
-        + "? This permanently removes matching Level Runs, Creative Workshop Ideas, "
-        + "Expansion Choices, and Survey Responses."
+        "Delete the entire Idea " + journey.ideaHash + "?\n\n"
+        + scope + "\n\nThis action cannot be undone."
     );
 
     if (!confirmed) {
         return;
     }
 
-    setStatus("Deleting idea records...");
+    state.selectedJourneyKey = "";
+    state.selectedStageKey = "";
+    state.selectedRunId = "";
+    state.compareRunIds = [];
+    await postDelete(
+        "/delete-idea-records",
+        { ideaId: journey.ideaId },
+        "Deleting the entire idea journey..."
+    );
+}
+
+async function postDelete(endpoint, payload, progressText) {
+    setStatus(progressText);
 
     try {
-        const apiResponse = await fetch(apiUrl("/delete-idea-records"), {
+        const response = await fetch(apiUrl(endpoint), {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                ideaId: ideaId
-            })
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
         });
 
-        if (!apiResponse.ok) {
-            throw new Error(await getResponseError(apiResponse));
+        if (!response.ok) {
+            throw new Error(await getResponseError(response));
         }
 
-        state.selectedRunId = null;
-        showNotice("All records for Idea Hash " + ideaHash + " deleted.");
+        showNotice("Record deleted successfully.");
         await loadData(true);
     } catch (error) {
-        setStatus("Could not delete idea records: " + error.message);
+        setStatus("Could not delete record: " + error.message);
     }
 }
 
-function getSurveyDeletePayload(response) {
-    const responseId = normalizeSurveyDeleteText(response.responseId);
-
-    if (responseId) {
-        return { responseId: responseId };
+async function clearAllRecords() {
+    if (!window.confirm(
+        "Clear every official study record, including ideas, levels, surveys, HA plans, and journey events? This cannot be undone."
+    )) {
+        return;
     }
 
-    const playerNickname = getSurveyNickname(response);
+    setStatus("Clearing all study data...");
 
-    if (playerNickname) {
-        return { playerNickname: playerNickname };
+    try {
+        const response = await fetch(apiUrl("/clear-level-records"), { method: "POST" });
+
+        if (!response.ok) {
+            throw new Error("HTTP " + response.status);
+        }
+
+        state.selectedJourneyKey = "";
+        state.selectedStageKey = "";
+        state.selectedRunId = "";
+        state.compareRunIds = [];
+        showNotice("All study data cleared.");
+        await loadData(true);
+    } catch (error) {
+        setStatus("Could not clear study data: " + error.message);
     }
-
-    return null;
 }
 
-function getCreativeIdeaDeleteLabel(idea) {
-    const ideaText = normalizeCreativeIdeaText(idea.ideaText);
-
-    if (!ideaText) {
-        return shortId(idea.ideaId);
+function getSurveyDeletePayload(record) {
+    if (clean(record.responseId)) {
+        return { responseId: clean(record.responseId) };
     }
 
-    return ideaText.length > 40 ? ideaText.slice(0, 40) + "..." : ideaText;
+    const nickname = getSurveyNickname(record);
+    return nickname ? { playerNickname: nickname } : null;
 }
 
-function getExpansionChoiceLabel(choice) {
-    const optionId = normalizeCreativeIdeaText(choice.selectedOptionId);
-    const optionTitle = normalizeCreativeIdeaText(choice.selectedOptionTitle);
+function showEmptyDetail() {
+    elements.emptyDetail.hidden = false;
+    elements.journeyDetail.hidden = true;
+}
 
-    if (optionId && optionTitle) {
-        return optionId + " - " + optionTitle;
+function getSelectedJourney() {
+    return state.journeys.find(journey => journey.key === state.selectedJourneyKey) || null;
+}
+
+function restoreSelectionFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const idea = clean(params.get("idea"));
+    const run = clean(params.get("run"));
+
+    if (idea && !state.selectedJourneyKey) {
+        const journey = state.journeys.find(item =>
+            item.ideaHash === idea || item.ideaId === idea
+        );
+        if (journey) state.selectedJourneyKey = journey.key;
     }
 
-    return optionTitle || optionId || "-";
+    if (run) {
+        state.selectedRunId = run;
+        state.selectedStageKey = "level:" + run;
+    }
 }
 
-function getExpansionChoiceDeleteLabel(choice) {
-    const choiceLabel = getExpansionChoiceLabel(choice);
-    const ideaHash = getExpansionChoiceIdeaHash(choice);
-    const label = [choiceLabel, ideaHash]
-        .filter(text => text && text !== "-")
-        .join(" / ");
-
-    if (!label) {
-        return shortId(choice.choiceId);
+function updateUrlSelection(journey) {
+    if (!window.history || window.location.protocol === "file:") {
+        return;
     }
 
-    return label.length > 48 ? label.slice(0, 48) + "..." : label;
+    const url = new URL(window.location.href);
+    url.searchParams.set("idea", journey.ideaHash);
+
+    if (state.selectedRunId) {
+        url.searchParams.set("run", state.selectedRunId);
+    } else {
+        url.searchParams.delete("run");
+    }
+
+    window.history.replaceState(null, "", url);
 }
 
-function getLevelIdeaHash(level) {
+function appendTextSection(title, text) {
+    const section = createSection(title);
+    section.appendChild(textNode("p", value(text)));
+    elements.inspectorBody.appendChild(section);
+}
+
+function appendRecordGrid(rows) {
+    const section = createSection("Record details");
+    const grid = document.createElement("div");
+    grid.className = "record-grid";
+    rows.forEach(([label, rowValue]) => {
+        const row = document.createElement("div");
+        row.className = "record-row";
+        row.append(textNode("span", label), textNode("strong", value(rowValue)));
+        grid.appendChild(row);
+    });
+    section.appendChild(grid);
+    elements.inspectorBody.appendChild(section);
+}
+
+function createSection(title) {
+    const section = document.createElement("section");
+    section.className = "record-section";
+    section.appendChild(textNode("h3", title));
+    return section;
+}
+
+function textNode(tag, text, className) {
+    const node = document.createElement(tag);
+    node.textContent = text === null || text === undefined ? "" : String(text);
+    if (className) node.className = className;
+    return node;
+}
+
+function emptyNode(text) {
+    return textNode("div", text, "empty-state");
+}
+
+function safeArray(value) {
+    return Array.isArray(value) ? value : [];
+}
+
+function firstValue(...values) {
+    return values.map(clean).find(Boolean) || "";
+}
+
+function clean(input) {
+    if (input === null || input === undefined) return "";
+    const text = String(input).trim();
+    return text === "-" ? "" : text;
+}
+
+function value(input) {
+    if (input === null || input === undefined || input === "") return "-";
+    return String(input);
+}
+
+function numeric(input) {
+    return typeof input === "number" && !Number.isNaN(input) ? input : 0;
+}
+
+function isDashboardLevel(level) {
     const start = (level && level.start) || {};
     const end = (level && level.end) || {};
-    return getIdeaHash(
-        start.creativeIdeaId || end.creativeIdeaId,
-        start.creativeIdeaText || end.creativeIdeaText
-    );
+    return (start.sceneName || end.sceneName) === DASHBOARD_LEVEL_SCENE;
 }
 
-function getLevelIdeaId(level) {
-    const start = (level && level.start) || {};
-    const end = (level && level.end) || {};
-    return normalizeCreativeIdeaText(start.creativeIdeaId || end.creativeIdeaId);
-}
-
-function getCreativeIdeaId(idea) {
-    return normalizeCreativeIdeaText(idea && idea.ideaId);
-}
-
-function getExpansionChoiceIdeaId(choice) {
-    return normalizeCreativeIdeaText(choice && choice.ideaId);
-}
-
-function getSurveyIdeaId(response) {
-    return normalizeCreativeIdeaText(response && response.creativeIdeaId);
-}
-
-function getCreativeIdeaHash(idea) {
-    const directHash = normalizeCreativeIdeaText(
-        idea && (idea.ideaHash || idea.creativeIdeaHash)
-    );
-
-    if (directHash) {
-        return directHash;
-    }
-
-    return getIdeaHash(
-        idea && idea.ideaId,
-        idea && idea.ideaText
-    );
-}
-
-function getExpansionChoiceIdeaHash(choice) {
-    const directHash = normalizeCreativeIdeaText(
-        choice && (choice.ideaHash || choice.creativeIdeaHash)
-    );
-
-    if (directHash) {
-        return directHash;
-    }
-
-    return getIdeaHash(
-        choice && choice.ideaId,
-        choice && (choice.originalIdeaText || choice.finalIdeaText)
-    );
-}
-
-function getSurveyIdeaHash(response) {
-    const directHash = normalizeCreativeIdeaText(
-        response && (response.ideaHash || response.creativeIdeaHash)
-    );
-
-    if (directHash) {
-        return directHash;
-    }
-
-    const directIdeaId = normalizeCreativeIdeaText(
-        response && (response.ideaId || response.creativeIdeaId)
-    );
-
-    if (directIdeaId) {
-        return getIdeaHash(directIdeaId, response.creativeIdeaText || response.ideaText);
-    }
-
-    const sessionId = normalizeCreativeIdeaText(response && response.sessionId);
-
-    if (!sessionId || !state.payload) {
-        return "-";
-    }
-
-    const idea = (state.payload.creativeIdeas || []).find(candidate =>
-        normalizeCreativeIdeaText(candidate && candidate.sessionId) === sessionId
-    );
-
-    if (idea) {
-        return getCreativeIdeaHash(idea);
-    }
-
-    const choice = (state.payload.creativeExpansionChoices || []).find(candidate =>
-        normalizeCreativeIdeaText(candidate && candidate.sessionId) === sessionId
-    );
-
-    return choice ? getExpansionChoiceIdeaHash(choice) : "-";
-}
-
-function getIdeaHash(primaryValue, fallbackValue) {
-    const primary = normalizeCreativeIdeaText(primaryValue);
-    const fallback = normalizeCreativeIdeaText(fallbackValue);
-    const source = primary || fallback;
-
-    if (!source) {
-        return "-";
-    }
-
-    return stableShortHash(source);
+function getIdeaHash(ideaId, ideaText) {
+    const source = clean(ideaId) || clean(ideaText);
+    return source ? stableShortHash(source) : "unknown";
 }
 
 function stableShortHash(input) {
@@ -1104,105 +1173,103 @@ function stableShortHash(input) {
     return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-function getSurveyDeleteLabel(response) {
-    return getSurveyNickname(response)
-        || normalizeSurveyDeleteText(response.surveyTitle || response.surveyId)
-        || "this player";
+function getRecordTimestamp(record) {
+    return clean(record && (record.serverReceivedAt || record.timestamp));
 }
 
-function getSurveyNickname(response) {
-    return normalizeSurveyDeleteText(response.playerName)
-        || normalizeSurveyDeleteText(response.playerNickname)
-        || normalizeSurveyDeleteText(response.nickname);
+function getLevelTimestamp(level) {
+    const start = (level && level.start) || {};
+    const end = (level && level.end) || {};
+    return clean(
+        start.timestamp
+        || start.serverReceivedAt
+        || start.gameRoundStartedAt
+        || end.timestamp
+        || end.serverReceivedAt
+    );
 }
 
-function keepOrSelectFirst() {
-    const selected = state.filteredLevels.find(level => level.levelRunId === state.selectedRunId);
-
-    if (selected) {
-        renderDetails(selected);
-        return;
-    }
-
-    if (state.filteredLevels.length > 0) {
-        state.selectedRunId = state.filteredLevels[0].levelRunId;
-        renderTable();
-        renderDetails(state.filteredLevels[0]);
-        return;
-    }
-
-    state.selectedRunId = null;
-    renderDetails(null);
+function sortByTimestamp(left, right) {
+    return getRecordTimestamp(left).localeCompare(getRecordTimestamp(right));
 }
 
-function renderDetails(level) {
-    elements.mapGrid.textContent = "";
-    elements.detailMetrics.textContent = "";
-
-    if (!level) {
-        elements.selectedTitle.textContent = "No selection";
-        return;
-    }
-
-    const start = level.start || {};
-    const end = level.end || {};
-    const structure = start.structure || {};
-    const rows = Array.isArray(start.rows) ? start.rows : [];
-    const displayLevel = getLevelDisplayName(level);
-    elements.selectedTitle.textContent = "Level " + value(displayLevel);
-    renderMap(rows);
-
-    [
-        ["Round", value(level.roundDisplayName)],
-        ["Run", shortId(level.levelRunId)],
-        ["Idea hash", getLevelIdeaHash(level)],
-        ["Map hash", value(structure.mapHash)],
-        ["Status", getStatus(level).label],
-        ["Moves", value(end.moveCount)],
-        ["Pushes", value(end.pushCount)],
-        ["Restarts", value(end.restartCount)],
-        ["Solver steps", value(start.solutionSteps)],
-        ["Solver pushes", value(start.solverPushes)],
-        ["Attempts", value(start.generationAttempts)],
-        ["Reverse pulls", value(start.reversePulls)],
-        ["Wall density", formatRatio(structure.wallDensity)],
-        ["Water density", formatRatio(structure.waterDensity)],
-        ["Reachable", formatPercent(structure.reachableAreaRatio)],
-        ["Dead corner risk", formatRatio(structure.deadCornerRisk)]
-    ].forEach(([label, metricValue]) => {
-        const item = document.createElement("div");
-        item.className = "metric";
-        const labelNode = document.createElement("span");
-        const valueNode = document.createElement("strong");
-        labelNode.textContent = label;
-        valueNode.textContent = metricValue;
-        item.append(labelNode, valueNode);
-        elements.detailMetrics.appendChild(item);
-    });
-
+function getSurveyNickname(record) {
+    return firstValue(record && record.playerName, record && record.playerNickname, record && record.nickname);
 }
 
-function renderMap(rows) {
-    if (!rows.length) {
-        elements.mapGrid.textContent = "No map rows.";
-        return;
+function surveyStageLabel(record, index) {
+    const text = (
+        clean(record.surveyId)
+        + " "
+        + clean(record.surveyTitle)
+        + " "
+        + clean(record.sceneName)
+    ).toLowerCase();
+
+    if (text.includes("before") || text.includes("pre")) return "Pre-survey";
+    if (text.includes("after") || text.includes("post")) return "Post-survey";
+    return "Survey " + (index + 1);
+}
+
+function getLevelStatus(level) {
+    const end = level.end || null;
+
+    if (!end) return { label: "Missing end", short: "missing" };
+    if (end.completed) return { label: "Completed", short: "done" };
+    return { label: titleCase(end.endReason || "Stopped"), short: "stopped" };
+}
+
+function statusLabel(status) {
+    if (status === "completed") return "Completed";
+    if (status === "anomaly") return "Needs attention";
+    return "In progress";
+}
+
+function titleCase(input) {
+    return clean(input)
+        .replace(/[-_]+/g, " ")
+        .replace(/\b\w/g, character => character.toUpperCase()) || "-";
+}
+
+function plural(count, singular) {
+    return count + " " + (count === 1 ? singular : singular + "s");
+}
+
+function shortId(input) {
+    const text = clean(input);
+    return text ? text.slice(0, 8) : "-";
+}
+
+function formatSeconds(input) {
+    if (typeof input !== "number" || Number.isNaN(input)) return "-";
+    return input.toFixed(1) + "s";
+}
+
+function formatRatio(input) {
+    if (typeof input !== "number" || Number.isNaN(input)) return "-";
+    return input.toFixed(3);
+}
+
+function formatPercent(input) {
+    if (typeof input !== "number" || Number.isNaN(input)) return "-";
+    return Math.round(input * 100) + "%";
+}
+
+function formatTimestamp(input) {
+    if (!input) return "-";
+    const date = new Date(input);
+    return Number.isNaN(date.getTime()) ? input : date.toLocaleString();
+}
+
+function formatShortDate(input) {
+    if (!input) return "No time";
+    const date = new Date(input);
+
+    if (Number.isNaN(date.getTime())) {
+        return input.slice(0, 10);
     }
 
-    const width = rows.reduce((max, row) => Math.max(max, String(row || "").length), 0);
-    elements.mapGrid.style.gridTemplateColumns = "repeat(" + width + ", var(--tile-size))";
-
-    rows.forEach(rowText => {
-        const row = String(rowText || "");
-
-        for (let index = 0; index < width; index += 1) {
-            const tile = row[index] || " ";
-            const cell = document.createElement("div");
-            cell.className = "tile " + getTileClass(tile);
-            cell.title = getTileName(tile);
-            cell.textContent = getTileLabel(tile);
-            elements.mapGrid.appendChild(cell);
-        }
-    });
+    return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function getTileClass(tile) {
@@ -1233,61 +1300,6 @@ function getTileLabel(tile) {
     return "";
 }
 
-function getStatus(level) {
-    const end = level.end || null;
-
-    if (!end) {
-        return { key: "missing", label: "missing end", className: "badge-missing" };
-    }
-
-    if (end.completed) {
-        return { key: "completed", label: "completed", className: "badge-completed" };
-    }
-
-    return { key: "failed", label: value(end.endReason), className: "badge-failed" };
-}
-
-function getStatusKey(level) {
-    return getStatus(level).key;
-}
-
-function getRoundCompletionText(round) {
-    const stoppedCount = (round.failedCount || 0) + (round.restartedCount || 0);
-    const parts = [
-        (round.completedCount || 0) + "/" + (round.levelCount || 0) + " completed"
-    ];
-
-    if (round.missingEndCount > 0) {
-        parts.push(round.missingEndCount + " missing");
-    }
-
-    if (stoppedCount > 0) {
-        parts.push(stoppedCount + " stopped");
-    }
-
-    return parts.join(", ");
-}
-
-function formatSceneNames(sceneNames) {
-    if (!Array.isArray(sceneNames) || sceneNames.length === 0) {
-        return "Scene -";
-    }
-
-    return "Scene " + sceneNames.map(formatSceneName).join(", ");
-}
-
-function formatSceneName(sceneName) {
-    return SCENE_DISPLAY_NAMES[sceneName] || sceneName;
-}
-
-function formatShownCount(roundCount, levelCount) {
-    return plural(roundCount, "round") + " / " + plural(levelCount, "level") + " shown";
-}
-
-function plural(count, singular) {
-    return count + " " + (count === 1 ? singular : singular + "s");
-}
-
 function setStatus(text) {
     elements.statusLine.textContent = text;
 }
@@ -1295,124 +1307,15 @@ function setStatus(text) {
 function showNotice(text) {
     elements.notice.textContent = text;
     elements.notice.classList.add("visible");
+    window.setTimeout(() => elements.notice.classList.remove("visible"), 4500);
 }
 
-function value(input) {
-    if (input === null || input === undefined || input === "") {
-        return "-";
+async function getResponseError(response) {
+    try {
+        const data = await response.json();
+        if (data && data.detail) return data.detail;
+    } catch (error) {
+        // Use the status fallback.
     }
-
-    return String(input);
-}
-
-function normalizeSurveyDeleteText(input) {
-    if (input === null || input === undefined) {
-        return "";
-    }
-
-    const text = String(input).trim();
-    return text === "-" ? "" : text;
-}
-
-function normalizeCreativeIdeaText(input) {
-    if (input === null || input === undefined) {
-        return "";
-    }
-
-    const text = String(input).trim();
-    return text === "-" ? "" : text;
-}
-
-function numberValue(input) {
-    return typeof input === "number" ? String(input) : "0";
-}
-
-function shortId(input) {
-    const text = value(input);
-    return text === "-" ? text : text.slice(0, 8);
-}
-
-function formatSeconds(input) {
-    if (typeof input !== "number" || Number.isNaN(input)) {
-        return "-";
-    }
-
-    return input.toFixed(1) + "s";
-}
-
-function formatRatio(input) {
-    if (typeof input !== "number" || Number.isNaN(input)) {
-        return "-";
-    }
-
-    return input.toFixed(3);
-}
-
-function formatPercent(input) {
-    if (typeof input !== "number" || Number.isNaN(input)) {
-        return "-";
-    }
-
-    return Math.round(input * 100) + "%";
-}
-
-function formatOptionalTimestamp(input) {
-    return input ? formatTimestamp(input) : "-";
-}
-
-function getSurveyAnswerLines(response) {
-    const answers = response && Array.isArray(response.answerDetails)
-        ? response.answerDetails
-        : response && response.answers;
-
-    if (!Array.isArray(answers) || answers.length === 0) {
-        if (response && response.answersSummary && response.answersSummary !== "-") {
-            return String(response.answersSummary).split(";").map(line => line.trim()).filter(Boolean);
-        }
-
-        return [];
-    }
-
-    return answers.map(answer => {
-        const index = value(answer.questionIndex);
-        const question = value(answer.questionText || answer.questionId);
-        const option = value(answer.optionLabel || answer.optionText || answer.optionId);
-        const label = index === "-" ? "Question" : "Q" + index;
-
-        if (question !== "-") {
-            return label + ": " + question + " -> " + option;
-        }
-
-        return label + ": " + option;
-    });
-}
-
-function renderSurveyAnswerLines(cell, response) {
-    const lines = getSurveyAnswerLines(response);
-
-    if (lines.length === 0) {
-        cell.textContent = "-";
-        return;
-    }
-
-    lines.forEach(line => {
-        const lineNode = document.createElement("div");
-        lineNode.className = "answer-line";
-        lineNode.textContent = line;
-        cell.appendChild(lineNode);
-    });
-}
-
-function formatTimestamp(input) {
-    if (!input) {
-        return "just now";
-    }
-
-    const date = new Date(input);
-
-    if (Number.isNaN(date.getTime())) {
-        return input;
-    }
-
-    return date.toLocaleString();
+    return "HTTP " + response.status;
 }

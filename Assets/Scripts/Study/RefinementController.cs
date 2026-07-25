@@ -183,6 +183,13 @@ public class RefinementController : MonoBehaviour
         }
 
         int totalScore = GetTotalScore();
+        LevelStudyRecorder.RecordJourneyStage(
+            "review",
+            totalScore >= passScoreThreshold ? "passed" : "retry",
+            "Review score " + totalScore + " / " + passScoreThreshold,
+            "",
+            totalScore
+        );
 
         if (logRefinementEvents)
         {

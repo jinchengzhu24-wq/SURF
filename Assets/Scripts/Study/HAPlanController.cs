@@ -399,8 +399,11 @@ public class HAPlanController : MonoBehaviour
                 CreativeWorkshopContext.SessionId,
                 CreativeWorkshopContext.SessionIdPrefsKey
             ),
+            gameRoundId = LevelStudyRecorder.CurrentGameRoundId,
+            gameRoundIndex = LevelStudyRecorder.CurrentGameRoundIndex,
             adjustmentText = adjustmentText,
             sceneName = SceneManager.GetActiveScene().name,
+            officialRound = LevelStudyRecorder.IsOfficialRoundFlow,
             previousLevelPlan = previousLevelPlan,
             corridorValidation = corridorValidation,
             regenerationAttempt = regenerationAttempt,
@@ -948,8 +951,11 @@ public class HAPlanController : MonoBehaviour
     {
         public string ideaId;
         public string sessionId;
+        public string gameRoundId;
+        public int gameRoundIndex;
         public string adjustmentText;
         public string sceneName;
+        public bool officialRound;
         public LevelDesignPlan previousLevelPlan;
         public CorridorValidationResult corridorValidation;
         public int regenerationAttempt;

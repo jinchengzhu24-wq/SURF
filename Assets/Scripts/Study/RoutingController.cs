@@ -251,6 +251,17 @@ public class RoutingController : MonoBehaviour
             return;
         }
 
+        string revisionMode = selectedOptionIndex == AiOptionIndex
+            ? "ai"
+            : selectedOptionIndex == HumanOptionIndex
+                ? "human"
+                : "ha";
+        LevelStudyRecorder.RecordJourneyStage(
+            "routing",
+            "selected",
+            "Selected " + revisionMode.ToUpperInvariant() + " revision route",
+            revisionMode
+        );
         SceneManager.LoadScene(sceneName);
     }
 
