@@ -2223,6 +2223,9 @@ MonoBehaviour:
   aiSceneName: Adjustment(AI)
   humanSceneName: Adjustment(Human)
   haSceneName: Adjustment(HA)
+  initialAiOptionText: AI-Decision Mode
+  initialHumanOptionText: Human-Decision Mode
+  initialHaOptionText: Human-AI-Collabration Mode
 --- !u!1 &2200001001
 GameObject:
   m_ObjectHideFlags: 0
