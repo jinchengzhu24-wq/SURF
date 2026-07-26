@@ -2647,7 +2647,7 @@ MonoBehaviour:
   loadPendingHumanAdjustment: 0
   clarificationSceneName: Clarification(Human)
   humanClarityEndpoint: http://111.231.136.4:8000/validate-human-adjustment
-  clarityRequestTimeoutSeconds: 30
+  clarityRequestTimeoutSeconds: 60
   logAdjustmentEvents: 1
 --- !u!1 &2200001001
 GameObject:
