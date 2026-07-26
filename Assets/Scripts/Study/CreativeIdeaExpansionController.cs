@@ -30,7 +30,7 @@ public class CreativeIdeaExpansionController : MonoBehaviour
 
     [Header("Backend")]
     public string backendBaseUrl = DefaultBackendBaseUrl;
-    public int requestTimeoutSeconds = 25;
+    public int requestTimeoutSeconds = 60;
     public bool logExpansionEvents = true;
 
     private readonly Color normalCardColor = new Color(0.95f, 0.97f, 1f, 1f);
@@ -310,10 +310,12 @@ public class CreativeIdeaExpansionController : MonoBehaviour
 
         using (UnityWebRequest request = new UnityWebRequest(GetBackendUrl(ExpansionPath), "POST"))
         {
+            string requestId = LLMBackendError.CreateRequestId();
             request.uploadHandler = new UploadHandlerRaw(body);
             request.downloadHandler = new DownloadHandlerBuffer();
             request.SetRequestHeader("Content-Type", "application/json");
             request.SetRequestHeader("Accept", "application/json");
+            request.SetRequestHeader("X-Request-ID", requestId);
             request.timeout = Mathf.Max(1, requestTimeoutSeconds);
 
             yield return request.SendWebRequest();
@@ -326,8 +328,7 @@ public class CreativeIdeaExpansionController : MonoBehaviour
             {
                 Debug.LogWarning(
                     "CreativeIdeaExpansionController request failed:"
-                    + " error=" + request.error
-                    + ", responseCode=" + request.responseCode
+                    + " " + LLMBackendError.BuildDiagnostic(request, requestId)
                 );
                 ApplyOptions(CreateLocalFallbackOptions(), true, "Using local backup directions.");
             }

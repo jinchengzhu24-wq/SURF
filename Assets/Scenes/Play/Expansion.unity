@@ -2243,7 +2243,7 @@ MonoBehaviour:
   - {fileID: 2400001104}
   nextSceneName: Custom_Level
   backendBaseUrl: http://111.231.136.4:8000
-  requestTimeoutSeconds: 25
+  requestTimeoutSeconds: 60
   logExpansionEvents: 1
 --- !u!1 &2200001001
 GameObject:

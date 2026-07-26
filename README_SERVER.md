@@ -89,6 +89,7 @@ cd /root/SURF
 适用情况：
 
 - 改了 `Backend/app.py`
+- 改了 `Backend/llm_runtime.py` 或 `Backend/requirements.txt`
 - GitHub 连接失败或不想依赖 GitHub
 - 想直接把本地文件覆盖到服务器
 
@@ -116,15 +117,20 @@ powershell -ExecutionPolicy Bypass -File .\deploy_scp.ps1
 
 ```text
 Backend/app.py
+Backend/llm_runtime.py
+Backend/prompt.py
+Backend/requirements.txt
 Frontend/index.html
 Frontend/app.js
 Frontend/styles.css
+Frontend/Images
 ```
 
 上传完成后，在服务器 OrcaTerm 里执行：
 
 ```bash
 cd /root/SURF
+python3 -m pip install -r Backend/requirements.txt
 ./deploy_scp
 ```
 
@@ -134,6 +140,9 @@ cd /root/SURF
 
 ```cmd
 scp D:\Sokoban_AI_Demo\Backend\app.py root@111.231.136.4:/root/SURF/Backend/app.py
+scp D:\Sokoban_AI_Demo\Backend\llm_runtime.py root@111.231.136.4:/root/SURF/Backend/llm_runtime.py
+scp D:\Sokoban_AI_Demo\Backend\prompt.py root@111.231.136.4:/root/SURF/Backend/prompt.py
+scp D:\Sokoban_AI_Demo\Backend\requirements.txt root@111.231.136.4:/root/SURF/Backend/requirements.txt
 ```
 
 如果同时改了前端，也一起上传：
@@ -158,6 +167,7 @@ cd /root/SURF
 需要运行 `deploy_github` 或 `deploy_scp`：
 
 - 改了 `Backend/app.py`
+- 改了 `Backend/llm_runtime.py`、`Backend/prompt.py` 或 `Backend/requirements.txt`
 - 改了后端启动方式
 - 后端接口没有响应
 - 想让服务器重新加载后端代码
@@ -191,3 +201,16 @@ chmod +x deploy_github deploy_scp
 bash deploy_github
 bash deploy_scp
 ```
+
+## 后端状态与运维日志
+
+重启后依次检查：
+
+```text
+http://111.231.136.4:8000/health
+http://111.231.136.4:8000/ready
+```
+
+`/health` 表示进程可访问；`/ready` 还会检查 API Key、模型配置和日志目录。运维日志位于 `Backend/logs/backend.log`，单文件 5 MB，保留 5 份轮转文件。当前后端只能使用一个 Uvicorn worker。
+
+完整错误码和排查方法见 `README_LLM_ERRORS.md`。

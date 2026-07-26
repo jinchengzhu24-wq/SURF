@@ -28,7 +28,9 @@ if (-not $scpPath -or -not (Test-Path -LiteralPath $scpPath)) {
 
 $files = @(
     @{ Local = "Backend\app.py"; Remote = "Backend/app.py" },
+    @{ Local = "Backend\llm_runtime.py"; Remote = "Backend/llm_runtime.py" },
     @{ Local = "Backend\prompt.py"; Remote = "Backend/prompt.py" },
+    @{ Local = "Backend\requirements.txt"; Remote = "Backend/requirements.txt" },
     @{ Local = "Frontend\index.html"; Remote = "Frontend/index.html" },
     @{ Local = "Frontend\app.js"; Remote = "Frontend/app.js" },
     @{ Local = "Frontend\styles.css"; Remote = "Frontend/styles.css" },
@@ -62,4 +64,4 @@ foreach ($file in $files) {
 Write-Host ""
 Write-Host "Upload complete."
 Write-Host "Next, run this on the server:"
-Write-Host "cd $RemoteRoot && ./deploy_scp"
+Write-Host "cd $RemoteRoot && python3 -m pip install -r Backend/requirements.txt && ./deploy_scp"

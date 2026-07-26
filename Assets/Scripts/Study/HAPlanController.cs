@@ -33,7 +33,7 @@ public class HAPlanController : MonoBehaviour
 
     [Header("Backend")]
     public string backendBaseUrl = DefaultBackendBaseUrl;
-    public int requestTimeoutSeconds = 30;
+    public int requestTimeoutSeconds = 100;
     public bool logPlanEvents = true;
 
     private readonly Color normalCardColor = new Color(0.95f, 0.97f, 1f, 1f);
@@ -415,10 +415,12 @@ public class HAPlanController : MonoBehaviour
 
         using (UnityWebRequest request = new UnityWebRequest(GetBackendUrl(GeneratePath), "POST"))
         {
+            string requestId = LLMBackendError.CreateRequestId();
             request.uploadHandler = new UploadHandlerRaw(body);
             request.downloadHandler = new DownloadHandlerBuffer();
             request.SetRequestHeader("Content-Type", "application/json");
             request.SetRequestHeader("Accept", "application/json");
+            request.SetRequestHeader("X-Request-ID", requestId);
             request.timeout = Mathf.Max(1, requestTimeoutSeconds);
             yield return request.SendWebRequest();
 
@@ -433,9 +435,8 @@ public class HAPlanController : MonoBehaviour
                 SetOptionTexts(null);
                 SetStatus("Revision plan request failed. Select Retry to try again.");
                 Debug.LogWarning(
-                    "HAPlanController request failed: error=" + request.error
-                    + ", responseCode=" + request.responseCode
-                    + ", responseBody=" + request.downloadHandler.text
+                    "HAPlanController request failed: "
+                    + LLMBackendError.BuildDiagnostic(request, requestId)
                 );
             }
         }
@@ -598,10 +599,12 @@ public class HAPlanController : MonoBehaviour
 
         using (UnityWebRequest request = new UnityWebRequest(GetBackendUrl(EditPath), "POST"))
         {
+            string requestId = LLMBackendError.CreateRequestId();
             request.uploadHandler = new UploadHandlerRaw(body);
             request.downloadHandler = new DownloadHandlerBuffer();
             request.SetRequestHeader("Content-Type", "application/json");
             request.SetRequestHeader("Accept", "application/json");
+            request.SetRequestHeader("X-Request-ID", requestId);
             request.timeout = Mathf.Max(1, requestTimeoutSeconds);
             yield return request.SendWebRequest();
 
@@ -642,9 +645,8 @@ public class HAPlanController : MonoBehaviour
                 );
                 UpdateButtonState();
                 Debug.LogWarning(
-                    "HAPlanController edited plan request failed: error=" + request.error
-                    + ", responseCode=" + request.responseCode
-                    + ", responseBody=" + request.downloadHandler.text
+                    "HAPlanController edited plan request failed: "
+                    + LLMBackendError.BuildDiagnostic(request, requestId)
                 );
                 yield break;
             }

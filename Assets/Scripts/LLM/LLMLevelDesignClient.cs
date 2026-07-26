@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
@@ -21,6 +22,10 @@ public class LLMLevelDesignClient : MonoBehaviour
 
     private readonly List<UnityWebRequest> activeRequests = new List<UnityWebRequest>();
     private bool isCancellingRequests;
+
+    public int LastAttemptsUsed { get; private set; }
+    public string LastRequestId { get; private set; }
+    public bool LastFailureRetryable { get; private set; }
 
 #if UNITY_EDITOR
     [InitializeOnLoadMethod]
@@ -84,8 +89,14 @@ public class LLMLevelDesignClient : MonoBehaviour
         }
     }
 
-    public IEnumerator RequestPlan(Action<LevelDesignPlan> onSuccess)
+    public IEnumerator RequestPlan(
+        Action<LevelDesignPlan> onSuccess,
+        int maxAttempts = 2)
     {
+        LastAttemptsUsed = 0;
+        LastRequestId = "";
+        LastFailureRetryable = true;
+
         if (!isActiveAndEnabled)
         {
             Debug.LogWarning(
@@ -100,21 +111,30 @@ public class LLMLevelDesignClient : MonoBehaviour
         }
 
         isCancellingRequests = false;
-        string requestUrl = GetRequestUrl();
+        int boundedMaxAttempts = Mathf.Clamp(maxAttempts, 1, 2);
         string ideaText = GetCreativeIdeaText();
+        string requestId = LLMBackendError.CreateRequestId();
+        string json = JsonUtility.ToJson(BuildRequestPayload(boundedMaxAttempts));
+        byte[] body = Encoding.UTF8.GetBytes(json);
 
         float startedAt = Time.realtimeSinceStartup;
         Debug.Log(
             "LLMLevelDesignClient request started:"
-            + " endpoint=" + requestUrl
+            + " endpoint=" + endpoint
             + ", timeoutSeconds=" + requestTimeoutSeconds
+            + ", maxAttempts=" + boundedMaxAttempts
+            + ", requestId=" + requestId
             + ", hasIdeaText=" + !string.IsNullOrEmpty(ideaText)
             + ", ideaTextLength=" + ideaText.Length
         );
 
-        UnityWebRequest request = UnityWebRequest.Get(requestUrl);
+        UnityWebRequest request = new UnityWebRequest(endpoint, "POST");
+        request.uploadHandler = new UploadHandlerRaw(body);
+        request.downloadHandler = new DownloadHandlerBuffer();
         request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+        request.SetRequestHeader("Content-Type", "application/json");
         request.SetRequestHeader("Accept", "application/json");
+        request.SetRequestHeader("X-Request-ID", requestId);
         activeRequests.Add(request);
 
         UnityWebRequestAsyncOperation operation = request.SendWebRequest();
@@ -142,12 +162,15 @@ public class LLMLevelDesignClient : MonoBehaviour
 
         if (request.result != UnityWebRequest.Result.Success)
         {
+            LastAttemptsUsed = LLMBackendError.GetAttemptsUsed(request);
+            LastRequestId = LLMBackendError.GetRequestId(request, requestId);
+            LastFailureRetryable = LLMBackendError.GetRetryable(request, true);
+
             if (!isCancellingRequests)
             {
                 Debug.LogWarning(
                     "LLMLevelDesignClient failed:"
-                    + " error=" + request.error
-                    + ", responseCode=" + request.responseCode
+                    + " " + LLMBackendError.BuildDiagnostic(request, requestId)
                     + ", elapsedSeconds=" + GetElapsedSeconds(startedAt)
                 );
             }
@@ -157,6 +180,8 @@ public class LLMLevelDesignClient : MonoBehaviour
             yield break;
         }
 
+        LastAttemptsUsed = Mathf.Max(1, LLMBackendError.GetAttemptsUsed(request));
+        LastRequestId = LLMBackendError.GetRequestId(request, requestId);
         LevelDesignPlan plan = null;
 
         try
@@ -175,10 +200,13 @@ public class LLMLevelDesignClient : MonoBehaviour
 
         if (plan != null)
         {
+            LastFailureRetryable = false;
             ApplyLatestAdjustmentConstraints(plan);
             Debug.Log(
                 "LLMLevelDesignClient received plan:"
                 + " responseCode=" + request.responseCode
+                + ", requestId=" + LastRequestId
+                + ", attemptsUsed=" + LastAttemptsUsed
                 + ", elapsedSeconds=" + GetElapsedSeconds(startedAt)
                 + ", solutionSteps=" + plan.minSolutionSteps + "-" + plan.maxSolutionSteps
                 + ", pushes=" + plan.minPushes + "-" + plan.maxPushes
@@ -279,35 +307,59 @@ public class LLMLevelDesignClient : MonoBehaviour
         }
     }
 
-    private string GetRequestUrl()
+    private LevelPlanRequest BuildRequestPayload(int maxAttempts)
     {
-        string requestUrl = endpoint;
         string ideaText = GetCreativeIdeaText();
+        bool hasContext = includeCreativeWorkshopIdea && !string.IsNullOrEmpty(ideaText);
 
-        if (!includeCreativeWorkshopIdea || string.IsNullOrEmpty(ideaText))
+        return new LevelPlanRequest
         {
-            return requestUrl;
-        }
-
-        requestUrl = AppendQueryParameter(requestUrl, "ideaText", ideaText);
-        requestUrl = AppendQueryParameter(requestUrl, "ideaId", PlayerPrefs.GetString(CreativeIdeaIdPrefsKey, ""));
-        requestUrl = AppendQueryParameter(requestUrl, "sessionId", PlayerPrefs.GetString(CreativeIdeaSessionIdPrefsKey, ""));
-        requestUrl = AppendQueryParameter(requestUrl, "sceneName", SceneManager.GetActiveScene().name);
-        requestUrl = AppendStructuredContext(requestUrl, "originalIdeaText", CreativeWorkshopContext.OriginalIdeaTextPrefsKey);
-        requestUrl = AppendStructuredContext(requestUrl, "selectedDirectionText", CreativeWorkshopContext.SelectedDirectionTextPrefsKey);
-        requestUrl = AppendStructuredContext(requestUrl, "refinementFeedbackText", CreativeWorkshopContext.RefinementFeedbackTextPrefsKey);
-        requestUrl = AppendStructuredContext(requestUrl, "adjustmentHistoryText", CreativeWorkshopContext.AdjustmentHistoryTextPrefsKey);
-        requestUrl = AppendStructuredContext(requestUrl, "latestAdjustmentText", CreativeWorkshopContext.LatestAdjustmentTextPrefsKey);
-        requestUrl = AppendStructuredContext(requestUrl, "revisionMode", CreativeWorkshopContext.RevisionModePrefsKey);
-        requestUrl = AppendStructuredContext(requestUrl, "previousLevelPlan", CreativeWorkshopContext.PreviousLevelPlanPrefsKey);
-        requestUrl = AppendStructuredContext(requestUrl, "previousLevelMetrics", CreativeWorkshopContext.PreviousLevelMetricsPrefsKey);
-        requestUrl = AppendStructuredContext(requestUrl, "selectedHAPlan", CreativeWorkshopContext.SelectedHAPlanPrefsKey);
-        return requestUrl;
-    }
-
-    private string AppendStructuredContext(string url, string parameterName, string prefsKey)
-    {
-        return AppendQueryParameter(url, parameterName, PlayerPrefs.GetString(prefsKey, ""));
+            ideaText = hasContext ? ideaText : "",
+            ideaId = hasContext
+                ? PlayerPrefs.GetString(CreativeIdeaIdPrefsKey, "")
+                : "",
+            sessionId = hasContext
+                ? PlayerPrefs.GetString(CreativeIdeaSessionIdPrefsKey, "")
+                : "",
+            sceneName = hasContext ? SceneManager.GetActiveScene().name : "",
+            originalIdeaText = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.OriginalIdeaTextPrefsKey
+            ),
+            selectedDirectionText = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.SelectedDirectionTextPrefsKey
+            ),
+            refinementFeedbackText = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.RefinementFeedbackTextPrefsKey
+            ),
+            adjustmentHistoryText = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.AdjustmentHistoryTextPrefsKey
+            ),
+            latestAdjustmentText = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.LatestAdjustmentTextPrefsKey
+            ),
+            revisionMode = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.RevisionModePrefsKey
+            ),
+            previousLevelPlan = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.PreviousLevelPlanPrefsKey
+            ),
+            previousLevelMetrics = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.PreviousLevelMetricsPrefsKey
+            ),
+            selectedHAPlan = GetContextValue(
+                hasContext,
+                CreativeWorkshopContext.SelectedHAPlanPrefsKey
+            ),
+            maxAttempts = maxAttempts
+        };
     }
 
     private string GetCreativeIdeaText()
@@ -317,19 +369,150 @@ public class LLMLevelDesignClient : MonoBehaviour
             : PlayerPrefs.GetString(CreativeIdeaTextPrefsKey, "");
     }
 
-    private string AppendQueryParameter(string url, string key, string value)
+    private string GetContextValue(bool hasContext, string prefsKey)
     {
-        if (string.IsNullOrEmpty(value))
-        {
-            return url;
-        }
-
-        string separator = url.Contains("?") ? "&" : "?";
-        return url + separator + key + "=" + Uri.EscapeDataString(value);
+        return hasContext ? PlayerPrefs.GetString(prefsKey, "") : "";
     }
 
     private float GetElapsedSeconds(float startedAt)
     {
         return Mathf.Round((Time.realtimeSinceStartup - startedAt) * 100f) / 100f;
+    }
+
+    [Serializable]
+    private class LevelPlanRequest
+    {
+        public string ideaText;
+        public string ideaId;
+        public string sessionId;
+        public string sceneName;
+        public string originalIdeaText;
+        public string selectedDirectionText;
+        public string refinementFeedbackText;
+        public string adjustmentHistoryText;
+        public string latestAdjustmentText;
+        public string revisionMode;
+        public string previousLevelPlan;
+        public string previousLevelMetrics;
+        public string selectedHAPlan;
+        public int maxAttempts;
+    }
+}
+
+public static class LLMBackendError
+{
+    [Serializable]
+    private sealed class ErrorEnvelope
+    {
+        public ErrorDetail detail = null;
+    }
+
+    [Serializable]
+    private sealed class ErrorDetail
+    {
+        public string code = "";
+        public string stage = "";
+        public string message = "";
+        public string requestId = "";
+        public bool retryable = false;
+        public int attemptsUsed = 0;
+    }
+
+    public static string CreateRequestId()
+    {
+        return Guid.NewGuid().ToString("N");
+    }
+
+    public static int GetAttemptsUsed(UnityWebRequest request)
+    {
+        if (request == null)
+        {
+            return 0;
+        }
+
+        string value = request.GetResponseHeader("X-LLM-Attempts-Used");
+        return int.TryParse(value, out int attempts) ? Mathf.Max(0, attempts) : 0;
+    }
+
+    public static string GetRequestId(
+        UnityWebRequest request,
+        string fallbackRequestId = ""
+    )
+    {
+        if (request == null)
+        {
+            return fallbackRequestId ?? string.Empty;
+        }
+
+        string responseRequestId = request.GetResponseHeader("X-Request-ID");
+        return string.IsNullOrWhiteSpace(responseRequestId)
+            ? fallbackRequestId ?? string.Empty
+            : responseRequestId;
+    }
+
+    public static string BuildDiagnostic(
+        UnityWebRequest request,
+        string fallbackRequestId = ""
+    )
+    {
+        string requestId = GetRequestId(request, fallbackRequestId);
+        int attemptsUsed = GetAttemptsUsed(request);
+        long responseCode = request != null ? request.responseCode : 0;
+        string transportError = request != null ? request.error : string.Empty;
+        string responseBody = request != null && request.downloadHandler != null
+            ? request.downloadHandler.text
+            : string.Empty;
+
+        ErrorDetail detail = ParseDetail(responseBody);
+
+        if (detail != null)
+        {
+            if (!string.IsNullOrWhiteSpace(detail.requestId))
+            {
+                requestId = detail.requestId;
+            }
+
+            if (detail.attemptsUsed > 0)
+            {
+                attemptsUsed = detail.attemptsUsed;
+            }
+
+            return $"error={transportError}, responseCode={responseCode}, code={detail.code}, " +
+                   $"stage={detail.stage}, requestId={requestId}, attemptsUsed={attemptsUsed}, " +
+                   $"retryable={detail.retryable}, detail={detail.message}";
+        }
+
+        return $"error={transportError}, responseCode={responseCode}, code=UNSTRUCTURED_ERROR, " +
+               $"stage=http_response, requestId={requestId}, attemptsUsed={attemptsUsed}";
+    }
+
+    public static bool GetRetryable(
+        UnityWebRequest request,
+        bool fallback = true
+    )
+    {
+        string responseBody = request != null && request.downloadHandler != null
+            ? request.downloadHandler.text
+            : string.Empty;
+        ErrorDetail detail = ParseDetail(responseBody);
+        return detail != null ? detail.retryable : fallback;
+    }
+
+    private static ErrorDetail ParseDetail(string responseBody)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody))
+        {
+            return null;
+        }
+
+        try
+        {
+            ErrorEnvelope envelope = JsonUtility.FromJson<ErrorEnvelope>(responseBody);
+            return envelope != null ? envelope.detail : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 }

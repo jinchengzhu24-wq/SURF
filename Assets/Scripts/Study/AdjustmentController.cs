@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
@@ -248,12 +249,19 @@ public class AdjustmentController : MonoBehaviour
         UpdateSubmitState();
         SetStatus("Checking whether the revision instruction is specific enough...");
 
-        string separator = humanClarityEndpoint.Contains("?") ? "&" : "?";
-        string url = humanClarityEndpoint
-            + separator
-            + "adjustmentText="
-            + Uri.EscapeDataString(adjustmentText);
-        activeClarityRequest = UnityWebRequest.Get(url);
+        HumanAdjustmentValidationRequest requestBody =
+            new HumanAdjustmentValidationRequest
+            {
+                adjustmentText = adjustmentText
+            };
+        byte[] body = Encoding.UTF8.GetBytes(JsonUtility.ToJson(requestBody));
+        string requestId = LLMBackendError.CreateRequestId();
+        activeClarityRequest = new UnityWebRequest(humanClarityEndpoint, "POST");
+        activeClarityRequest.uploadHandler = new UploadHandlerRaw(body);
+        activeClarityRequest.downloadHandler = new DownloadHandlerBuffer();
+        activeClarityRequest.SetRequestHeader("Content-Type", "application/json");
+        activeClarityRequest.SetRequestHeader("Accept", "application/json");
+        activeClarityRequest.SetRequestHeader("X-Request-ID", requestId);
         activeClarityRequest.timeout = Mathf.Max(1, clarityRequestTimeoutSeconds);
         yield return activeClarityRequest.SendWebRequest();
 
@@ -261,9 +269,7 @@ public class AdjustmentController : MonoBehaviour
         {
             Debug.LogWarning(
                 "AdjustmentController: Human clarity validation failed: "
-                + activeClarityRequest.error
-                + ", responseCode="
-                + activeClarityRequest.responseCode
+                + LLMBackendError.BuildDiagnostic(activeClarityRequest, requestId)
             );
             activeClarityRequest.Dispose();
             activeClarityRequest = null;
@@ -274,6 +280,10 @@ public class AdjustmentController : MonoBehaviour
         }
 
         HumanAdjustmentClarityResult result = null;
+        string completedRequestId = LLMBackendError.GetRequestId(
+            activeClarityRequest,
+            requestId
+        );
 
         try
         {
@@ -317,6 +327,7 @@ public class AdjustmentController : MonoBehaviour
                     + " totalScore=" + result.totalScore + "/8"
                     + ", targetScore=" + result.targetScore
                     + ", directionScore=" + result.directionScore
+                    + ", requestId=" + completedRequestId
                 );
             }
 
@@ -500,4 +511,10 @@ public class HumanAdjustmentClarityResult
     public int totalScore;
     public bool isClear;
     public string reason;
+}
+
+[Serializable]
+public class HumanAdjustmentValidationRequest
+{
+    public string adjustmentText;
 }

@@ -9,15 +9,28 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
-from openai import OpenAI
 from pydantic import BaseModel
 
-try:
-    from prompt import (
+if __package__:
+    from .llm_runtime import (
+        LLMExecutionResult,
+        LLMServiceError,
+        execute_json_request,
+        log_event,
+        new_request_id,
+        readiness_payload,
+        safe_log_text,
+    )
+    from .prompt import (
         build_creative_idea_expansion_messages,
         build_ha_revision_plan_edit_messages,
         build_ha_revision_plan_messages,
@@ -25,8 +38,17 @@ try:
         build_level_plan_messages,
         resolve_zero_feature_constraints,
     )
-except ImportError:
-    from .prompt import (
+else:
+    from llm_runtime import (
+        LLMExecutionResult,
+        LLMServiceError,
+        execute_json_request,
+        log_event,
+        new_request_id,
+        readiness_payload,
+        safe_log_text,
+    )
+    from prompt import (
         build_creative_idea_expansion_messages,
         build_ha_revision_plan_edit_messages,
         build_ha_revision_plan_messages,
@@ -38,10 +60,9 @@ except ImportError:
 HOST = "127.0.0.1"
 PORT = 8000
 START_URL = f"http://{HOST}:{PORT}/generate-level-plan"
-DEFAULT_MODEL = "deepseek-v4-flash"
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-HA_PLAN_LLM_TIMEOUT_SECONDS = 45.0
-HUMAN_CLARITY_LLM_TIMEOUT_SECONDS = 45.0
+SHORT_LLM_TIMEOUT_SECONDS = 25.0
+PLAN_LLM_TIMEOUT_SECONDS = 45.0
+DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 FRONTEND_DIR = PROJECT_DIR / "Frontend"
@@ -119,6 +140,27 @@ class HARevisionPlanEditRequest(BaseModel):
     corridorValidation: dict | None = None
     originalOption: dict
     editedDescription: str
+
+
+class HumanAdjustmentValidationRequest(BaseModel):
+    adjustmentText: str
+
+
+class LevelPlanRequest(BaseModel):
+    ideaText: str | None = ""
+    ideaId: str | None = ""
+    sessionId: str | None = ""
+    sceneName: str | None = ""
+    originalIdeaText: str | None = ""
+    selectedDirectionText: str | None = ""
+    refinementFeedbackText: str | None = ""
+    adjustmentHistoryText: str | None = ""
+    latestAdjustmentText: str | None = ""
+    revisionMode: str | None = ""
+    previousLevelPlan: str | None = ""
+    previousLevelMetrics: str | None = ""
+    selectedHAPlan: str | None = ""
+    maxAttempts: int | None = DEFAULT_LLM_MAX_ATTEMPTS
 
 
 class RenameRoundRequest(BaseModel):
@@ -234,9 +276,66 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def attach_request_context(request: Request, call_next):
+    request_id = new_request_id(request.headers.get("X-Request-ID", ""))
+    request.state.request_id = request_id
+    started_at = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception as exception:
+        log_event(
+            "ERROR",
+            "http_request_unhandled",
+            requestId=request_id,
+            method=request.method,
+            path=request.url.path,
+            exceptionType=type(exception).__name__,
+            errorMessage=safe_log_text(exception),
+        )
+        raise
+
+    response.headers["X-Request-ID"] = request_id
+    log_event(
+        "INFO",
+        "http_request_completed",
+        requestId=request_id,
+        method=request.method,
+        path=request.url.path,
+        statusCode=response.status_code,
+        elapsedMs=round((time.perf_counter() - started_at) * 1000),
+    )
+    return response
+
+
+@app.exception_handler(LLMServiceError)
+async def handle_llm_service_error(request: Request, exception: LLMServiceError):
+    request_id = getattr(request.state, "request_id", exception.request_id)
+    detail = exception.to_detail()
+    detail["requestId"] = request_id
+    return JSONResponse(
+        status_code=exception.status_code,
+        content={"detail": detail},
+        headers={
+            "X-Request-ID": request_id,
+            "X-LLM-Attempts-Used": str(exception.attempts_used),
+        },
+    )
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/ready")
+def ready():
+    payload = readiness_payload()
+    return JSONResponse(
+        status_code=200 if payload["status"] == "ready" else 503,
+        content=payload,
+    )
 
 
 @app.post("/record-level-start")
@@ -274,21 +373,39 @@ async def record_journey_event(request: Request):
     return await append_journey_event(request)
 
 
+def apply_llm_execution_headers(response, execution):
+    response.headers["X-Request-ID"] = execution.request_id
+    response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
+
+
 @app.post("/expand-creative-idea")
-def expand_creative_idea(request: CreativeIdeaExpansionRequest):
-    data = request.model_dump()
+def expand_creative_idea(
+    payload: CreativeIdeaExpansionRequest,
+    request: Request,
+    response: Response,
+):
+    data = payload.model_dump()
     idea_text = str(data.get("ideaText") or "").strip()
 
     if not idea_text:
         raise HTTPException(status_code=400, detail="ideaText is required")
 
     data["ideaText"] = idea_text
-    return create_creative_idea_expansion(data)
+    execution = create_creative_idea_expansion(
+        data,
+        request.state.request_id,
+    )
+    apply_llm_execution_headers(response, execution)
+    return execution.value
 
 
 @app.post("/generate-ha-revision-plans")
-def generate_ha_revision_plans(request: HARevisionPlanRequest):
-    data = request.model_dump()
+def generate_ha_revision_plans(
+    payload: HARevisionPlanRequest,
+    request: Request,
+    response: Response,
+):
+    data = payload.model_dump()
     adjustment_text = str(data.get("adjustmentText") or "").strip()
     previous_plan = data.get("previousLevelPlan")
 
@@ -301,21 +418,29 @@ def generate_ha_revision_plans(request: HARevisionPlanRequest):
     data["adjustmentText"] = adjustment_text
 
     try:
-        result = create_ha_revision_plans(data)
-        append_ha_generation_event(data, result["options"])
-        return result
-    except HTTPException as exception:
+        execution = create_ha_revision_plans(
+            data,
+            request.state.request_id,
+        )
+        append_ha_generation_event(data, execution.value["options"])
+        apply_llm_execution_headers(response, execution)
+        return execution.value
+    except LLMServiceError as exception:
         append_ha_generation_event(
             data,
             [],
-            error=str(exception.detail),
+            error=exception.safe_message,
         )
         raise
 
 
 @app.post("/revise-ha-revision-plan")
-def revise_ha_revision_plan(request: HARevisionPlanEditRequest):
-    data = request.model_dump()
+def revise_ha_revision_plan(
+    payload: HARevisionPlanEditRequest,
+    request: Request,
+    response: Response,
+):
+    data = payload.model_dump()
     edited_description = str(data.get("editedDescription") or "").strip()
     previous_plan = data.get("previousLevelPlan")
     original_option = data.get("originalOption")
@@ -330,17 +455,50 @@ def revise_ha_revision_plan(request: HARevisionPlanEditRequest):
         raise HTTPException(status_code=400, detail="originalOption is required")
 
     data["editedDescription"] = edited_description[:420]
-    return create_ha_revision_plan_edit(data)
+    execution = create_ha_revision_plan_edit(
+        data,
+        request.state.request_id,
+    )
+    apply_llm_execution_headers(response, execution)
+    return execution.value
 
 
 @app.get("/validate-human-adjustment")
-def validate_human_adjustment(adjustmentText: str = ""):
+def validate_human_adjustment_legacy(
+    request: Request,
+    response: Response,
+    adjustmentText: str = "",
+):
     adjustment_text = str(adjustmentText or "").strip()
 
     if not adjustment_text:
         return validate_human_adjustment_clarity_payload({})
 
-    return create_human_adjustment_clarity_check(adjustment_text)
+    execution = create_human_adjustment_clarity_check(
+        adjustment_text,
+        request.state.request_id,
+    )
+    apply_llm_execution_headers(response, execution)
+    return execution.value
+
+
+@app.post("/validate-human-adjustment")
+def validate_human_adjustment(
+    payload: HumanAdjustmentValidationRequest,
+    request: Request,
+    response: Response,
+):
+    adjustment_text = str(payload.adjustmentText or "").strip()
+
+    if not adjustment_text:
+        raise HTTPException(status_code=400, detail="adjustmentText is required")
+
+    execution = create_human_adjustment_clarity_check(
+        adjustment_text,
+        request.state.request_id,
+    )
+    apply_llm_execution_headers(response, execution)
+    return execution.value
 
 
 @app.get("/level-records", response_class=PlainTextResponse)
@@ -909,7 +1067,9 @@ def clear_level_records():
 
 
 @app.get("/generate-level-plan")
-def generate_level_plan(
+def generate_level_plan_legacy(
+    request: Request,
+    response: Response,
     ideaText: str = "",
     ideaId: str = "",
     sessionId: str = "",
@@ -923,24 +1083,53 @@ def generate_level_plan(
     previousLevelPlan: str = "",
     previousLevelMetrics: str = "",
     selectedHAPlan: str = "",
+    maxAttempts: int = DEFAULT_LLM_MAX_ATTEMPTS,
 ):
-    return create_level_plan(
-        {
-            "ideaText": ideaText,
-            "ideaId": ideaId,
-            "sessionId": sessionId,
-            "sceneName": sceneName,
-            "originalIdeaText": originalIdeaText,
-            "selectedDirectionText": selectedDirectionText,
-            "refinementFeedbackText": refinementFeedbackText,
-            "adjustmentHistoryText": adjustmentHistoryText,
-            "latestAdjustmentText": latestAdjustmentText,
-            "revisionMode": revisionMode,
-            "previousLevelPlan": previousLevelPlan,
-            "previousLevelMetrics": previousLevelMetrics,
-            "selectedHAPlan": selectedHAPlan,
-        }
+    payload = LevelPlanRequest(
+        ideaText=ideaText,
+        ideaId=ideaId,
+        sessionId=sessionId,
+        sceneName=sceneName,
+        originalIdeaText=originalIdeaText,
+        selectedDirectionText=selectedDirectionText,
+        refinementFeedbackText=refinementFeedbackText,
+        adjustmentHistoryText=adjustmentHistoryText,
+        latestAdjustmentText=latestAdjustmentText,
+        revisionMode=revisionMode,
+        previousLevelPlan=previousLevelPlan,
+        previousLevelMetrics=previousLevelMetrics,
+        selectedHAPlan=selectedHAPlan,
+        maxAttempts=maxAttempts,
     )
+    return execute_level_plan_request(payload, request, response)
+
+
+@app.post("/generate-level-plan")
+def generate_level_plan(
+    payload: LevelPlanRequest,
+    request: Request,
+    response: Response,
+):
+    return execute_level_plan_request(payload, request, response)
+
+
+def execute_level_plan_request(
+    payload: LevelPlanRequest,
+    request: Request,
+    response: Response,
+):
+    data = payload.model_dump(exclude={"maxAttempts"})
+    max_attempts = max(
+        1,
+        min(DEFAULT_LLM_MAX_ATTEMPTS, int(payload.maxAttempts or 1)),
+    )
+    execution = create_level_plan(
+        data,
+        request.state.request_id,
+        max_attempts,
+    )
+    apply_llm_execution_headers(response, execution)
+    return execution.value
 
 
 async def append_level_record(request: Request, default_event_type: str):
@@ -2295,38 +2484,45 @@ def escape_text(value):
     return html.escape(str(value), quote=True)
 
 
-def create_creative_idea_expansion(creative_context):
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+def create_creative_idea_expansion(
+    creative_context,
+    request_id="",
+    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
+):
+    request_id = new_request_id(request_id)
 
-    if not api_key or api_key == "your_deepseek_api_key_here":
-        return fallback_creative_idea_expansion(creative_context, "DEEPSEEK_API_KEY is missing")
-
-    try:
-        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-        temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=build_creative_idea_expansion_messages(creative_context),
-            response_format={"type": "json_object"},
-            temperature=temperature,
-            stream=False,
-        )
-
-        content = response.choices[0].message.content
-        options = validate_creative_idea_expansion(json.loads(content))
-        print(f"Generated creative idea expansion from DeepSeek using {model}: {options}")
+    def validate_expansion(payload):
         return {
-            "options": options,
+            "options": validate_creative_idea_expansion(payload),
             "usedFallback": False,
             "message": "",
         }
-    except Exception as exception:
-        return fallback_creative_idea_expansion(
+
+    try:
+        return execute_json_request(
+            task="creative_idea_expansion",
+            messages=build_creative_idea_expansion_messages(creative_context),
+            validator=validate_expansion,
+            temperature=float(
+                os.getenv(
+                    "DEEPSEEK_EXPANSION_TEMPERATURE",
+                    os.getenv("DEEPSEEK_TEMPERATURE", "0.9"),
+                )
+            ),
+            timeout_seconds=SHORT_LLM_TIMEOUT_SECONDS,
+            max_attempts=max_attempts,
+            request_id=request_id,
+            validation_stage="expansion_validation",
+        )
+    except LLMServiceError as exception:
+        fallback = fallback_creative_idea_expansion(
             creative_context,
-            f"DeepSeek expansion request failed: {exception}",
+            exception.safe_message,
+        )
+        return LLMExecutionResult(
+            fallback,
+            exception.attempts_used,
+            request_id,
         )
 
 
@@ -2365,145 +2561,95 @@ def validate_human_adjustment_clarity_payload(payload):
     }
 
 
-def create_human_adjustment_clarity_check(adjustment_text):
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+def create_human_adjustment_clarity_check(
+    adjustment_text,
+    request_id="",
+    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
+):
+    required_fields = {
+        "problemScore",
+        "targetScore",
+        "directionScore",
+        "detailScore",
+        "reason",
+    }
 
-    if not api_key or api_key == "your_deepseek_api_key_here":
-        raise HTTPException(
-            status_code=503,
-            detail="Remote LLM is unavailable because DEEPSEEK_API_KEY is missing",
-        )
+    def validate_clarity(payload):
+        if not isinstance(payload, dict):
+            raise ValueError("Human clarity response must be a JSON object")
 
-    try:
-        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=HUMAN_CLARITY_LLM_TIMEOUT_SECONDS,
-            max_retries=0,
-        )
-        response = client.chat.completions.create(
-            model=model,
-            messages=build_human_adjustment_clarity_messages(adjustment_text),
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            stream=False,
-        )
-        content = response.choices[0].message.content
-        result = validate_human_adjustment_clarity_payload(json.loads(content))
-        print(
-            "Validated Human-led adjustment clarity:"
-            f" score={result['totalScore']}/8, clear={result['isClear']}"
-        )
-        return result
-    except HTTPException:
-        raise
-    except Exception as exception:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Human adjustment clarity validation failed: {exception}",
-        ) from exception
+        missing_fields = sorted(required_fields - set(payload))
+
+        if missing_fields:
+            raise ValueError(
+                "Human clarity response is missing fields: "
+                + ", ".join(missing_fields)
+            )
+
+        return validate_human_adjustment_clarity_payload(payload)
+
+    return execute_json_request(
+        task="human_adjustment_clarity",
+        messages=build_human_adjustment_clarity_messages(adjustment_text),
+        validator=validate_clarity,
+        temperature=0.0,
+        timeout_seconds=SHORT_LLM_TIMEOUT_SECONDS,
+        max_attempts=max_attempts,
+        request_id=request_id,
+        validation_stage="clarity_validation",
+    )
 
 
-def create_ha_revision_plans(context):
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-
-    if not api_key or api_key == "your_deepseek_api_key_here":
-        raise HTTPException(
-            status_code=503,
-            detail="Remote LLM is unavailable because DEEPSEEK_API_KEY is missing",
-        )
-
-    try:
-        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=HA_PLAN_LLM_TIMEOUT_SECONDS,
-            max_retries=0,
-        )
-        response = client.chat.completions.create(
-            model=model,
-            messages=build_ha_revision_plan_messages(context),
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            stream=False,
-        )
-        content = response.choices[0].message.content
+def create_ha_revision_plans(
+    context,
+    request_id="",
+    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
+):
+    def validate_options(payload):
         options = validate_ha_revision_plan_options(
-            json.loads(content),
+            payload,
             context.get("previousLevelPlan"),
             context.get("adjustmentText"),
         )
-        print(
-            f"Generated HA revision plans from DeepSeek using {model}: "
-            f"{[option['title'] for option in options]}"
-        )
         return {"options": options}
-    except HTTPException:
-        raise
-    except Exception as exception:
-        print(f"HA revision-plan request failed: {exception}")
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "HA revision-plan generation or validation failed: "
-                f"{type(exception).__name__}: {exception}"
-            ),
-        ) from exception
+
+    return execute_json_request(
+        task="ha_revision_plans",
+        messages=build_ha_revision_plan_messages(context),
+        validator=validate_options,
+        temperature=0.2,
+        timeout_seconds=PLAN_LLM_TIMEOUT_SECONDS,
+        max_attempts=max_attempts,
+        request_id=request_id,
+        validation_stage="ha_plan_validation",
+    )
 
 
-def create_ha_revision_plan_edit(context):
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-
-    if not api_key or api_key == "your_deepseek_api_key_here":
-        raise HTTPException(
-            status_code=503,
-            detail="Remote LLM is unavailable because DEEPSEEK_API_KEY is missing",
-        )
-
-    try:
-        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=HA_PLAN_LLM_TIMEOUT_SECONDS,
-            max_retries=0,
-        )
-        response = client.chat.completions.create(
-            model=model,
-            messages=build_ha_revision_plan_edit_messages(context),
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            stream=False,
-        )
-        content = response.choices[0].message.content
+def create_ha_revision_plan_edit(
+    context,
+    request_id="",
+    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
+):
+    def validate_option(payload):
         option = validate_ha_revision_plan_edit(
-            json.loads(content),
+            payload,
             context.get("originalOption"),
             context.get("previousLevelPlan"),
             context.get("adjustmentText"),
             context.get("editedDescription"),
         )
-        print(
-            f"Revised HA option from DeepSeek using {model}: "
-            f"{option['title']}"
-        )
         return {"option": option}
-    except HTTPException:
-        raise
-    except Exception as exception:
-        print(f"HA revision-plan edit request failed: {exception}")
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "HA revision-plan edit or validation failed: "
-                f"{type(exception).__name__}: {exception}"
-            ),
-        ) from exception
+
+    return execute_json_request(
+        task="ha_revision_plan_edit",
+        messages=build_ha_revision_plan_edit_messages(context),
+        validator=validate_option,
+        temperature=0.1,
+        timeout_seconds=PLAN_LLM_TIMEOUT_SECONDS,
+        max_attempts=max_attempts,
+        request_id=request_id,
+        validation_stage="ha_plan_edit_validation",
+    )
 
 
 def parse_ha_revision_contract(value):
@@ -2805,53 +2951,39 @@ def apply_selected_ha_plan(generated_plan, creative_context, feature_constraints
     return validate_plan(candidate, effective_constraints)
 
 
-def create_level_plan(creative_context=None):
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+def create_level_plan(
+    creative_context=None,
+    request_id="",
+    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
+):
+    creative_context = creative_context or {}
+    feature_constraints = resolve_zero_feature_constraints(creative_context)
+    variation_seed = int(time.time() * 1000)
 
-    if not api_key or api_key == "your_deepseek_api_key_here":
-        raise HTTPException(
-            status_code=503,
-            detail="Remote LLM is unavailable because DEEPSEEK_API_KEY is missing",
-        )
-
-    try:
-        creative_context = creative_context or {}
-        feature_constraints = resolve_zero_feature_constraints(creative_context)
-        model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-        base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-        temperature = float(os.getenv("DEEPSEEK_TEMPERATURE", "0.9"))
-        variation_seed = int(time.time() * 1000)
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=20.0)
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=build_level_plan_messages(
-                variation_seed,
-                get_recent_blueprint_hint(),
-                creative_context,
-                feature_constraints,
-            ),
-            response_format={"type": "json_object"},
-            temperature=temperature,
-            stream=False,
-        )
-
-        content = response.choices[0].message.content
-        raw_plan = json.loads(content)
-        plan = apply_selected_ha_plan(
-            raw_plan,
+    def validate_level_plan(payload):
+        return apply_selected_ha_plan(
+            payload,
             creative_context,
             feature_constraints,
         )
-        remember_blueprint(plan)
-        print(f"Generated level plan from DeepSeek using {model}: {plan}")
-        return plan
-    except Exception as exception:
-        print(f"DeepSeek level-plan request failed: {exception}")
-        raise HTTPException(
-            status_code=502,
-            detail="Remote LLM request, response parsing, or blueprint validation failed",
-        ) from exception
+
+    execution = execute_json_request(
+        task="level_plan",
+        messages=build_level_plan_messages(
+            variation_seed,
+            get_recent_blueprint_hint(),
+            creative_context,
+            feature_constraints,
+        ),
+        validator=validate_level_plan,
+        temperature=float(os.getenv("DEEPSEEK_LEVEL_TEMPERATURE", "0.5")),
+        timeout_seconds=PLAN_LLM_TIMEOUT_SECONDS,
+        max_attempts=max_attempts,
+        request_id=request_id,
+        validation_stage="blueprint_validation",
+    )
+    remember_blueprint(execution.value)
+    return execution
 
 
 def validate_plan(plan, feature_constraints=None):
@@ -3024,7 +3156,11 @@ def fallback_creative_idea_expansion(creative_context, reason):
     chinese = contains_cjk(idea_text)
     options = build_contextual_expansion_fallback_options(idea_text, chinese)
 
-    print(f"Generated creative idea expansion from fallback: {reason}")
+    log_event(
+        "WARNING",
+        "creative_expansion_fallback",
+        reason=str(reason or "")[:1000],
+    )
     return {
         "options": options,
         "usedFallback": True,
@@ -3340,7 +3476,12 @@ def open_browser():
 
 
 if __name__ == "__main__":
-    print(f"Starting backend at http://{HOST}:{PORT}")
-    print(f"Opening {START_URL}")
+    log_event(
+        "INFO",
+        "backend_starting",
+        host=HOST,
+        port=PORT,
+        workers=1,
+    )
     threading.Thread(target=open_browser, daemon=True).start()
-    uvicorn.run(app, host=HOST, port=PORT)
+    uvicorn.run(app, host=HOST, port=PORT, workers=1)

@@ -182,6 +182,7 @@ public class LevelLoader : MonoBehaviour
     {
         ResolveGenerationReferences();
         int maxPlanAttempts = GetLLMPlanAttemptCount();
+        int remainingPlanAttempts = maxPlanAttempts;
         bool receivedValidLLMPlan = false;
         currentLoadUsedLLMPlan = false;
         currentLoadUsedAlgorithmFallbackAfterLLM = false;
@@ -193,22 +194,45 @@ public class LevelLoader : MonoBehaviour
             levelGenerator.BeginLLMPlanAttempts();
         }
 
-        for (int attempt = 1; attempt <= maxPlanAttempts; attempt++)
+        for (int attempt = 1;
+            attempt <= maxPlanAttempts && remainingPlanAttempts > 0;
+            attempt++)
         {
             if (levelGenerator != null)
             {
                 levelGenerator.SetLLMQualityGateRequired(true);
             }
 
-            yield return RequestAndApplyLLMPlan();
+            yield return RequestAndApplyLLMPlan(remainingPlanAttempts);
+            int attemptsUsed = llmClient != null
+                ? Mathf.Clamp(llmClient.LastAttemptsUsed, 1, remainingPlanAttempts)
+                : 1;
+            remainingPlanAttempts = Mathf.Max(
+                0,
+                remainingPlanAttempts - attemptsUsed
+            );
 
             if (pendingLLMPlan == null)
             {
+                bool retryable = llmClient == null || llmClient.LastFailureRetryable;
+
+                if (!retryable)
+                {
+                    remainingPlanAttempts = 0;
+                }
+
                 Debug.LogWarning(
                     "LevelLoader: Remote LLM did not return a valid blueprint."
                     + " attempt=" + attempt
                     + ", maxPlanAttempts=" + maxPlanAttempts
-                    + ". Skipping local generation and retrying the real LLM."
+                    + ", modelAttemptsUsed=" + attemptsUsed
+                    + ", remainingModelAttempts=" + remainingPlanAttempts
+                    + ", retryable=" + retryable
+                    + (
+                        remainingPlanAttempts > 0
+                            ? ". Retrying the real LLM with the remaining budget."
+                            : ". The real LLM attempt budget is exhausted."
+                    )
                 );
                 ClearPendingLLMPlanContext();
 
@@ -254,6 +278,8 @@ public class LevelLoader : MonoBehaviour
                 "LevelLoader: Valid LLM blueprint could not be realized by the current templates."
                 + " attempt=" + attempt
                 + ", maxPlanAttempts=" + maxPlanAttempts
+                + ", modelAttemptsUsed=" + attemptsUsed
+                + ", remainingModelAttempts=" + remainingPlanAttempts
                 + ". No stale level will be loaded."
             );
         }
@@ -386,7 +412,7 @@ public class LevelLoader : MonoBehaviour
         return false;
     }
 
-    private IEnumerator RequestAndApplyLLMPlan()
+    private IEnumerator RequestAndApplyLLMPlan(int maxAttempts)
     {
         ResolveGenerationReferences();
         pendingLLMPlan = null;
@@ -404,7 +430,10 @@ public class LevelLoader : MonoBehaviour
             yield break;
         }
 
-        yield return llmClient.RequestPlan(result => plan = result);
+        yield return llmClient.RequestPlan(
+            result => plan = result,
+            Mathf.Clamp(maxAttempts, 1, 2)
+        );
 
         if (plan == null)
         {
