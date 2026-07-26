@@ -267,8 +267,15 @@ function finalizeJourney(journey) {
         : journey.completed
             ? "completed"
             : "progress";
-    journey.hasHA = journey.haEvents.length > 0
-        || journey.journeyEvents.some(event => clean(event.revisionMode).toLowerCase() === "ha");
+    journey.revisionModes = new Set(
+        journey.journeyEvents
+            .map(event => clean(event.revisionMode).toLowerCase())
+            .filter(mode => ["ai", "human", "ha"].includes(mode))
+    );
+
+    if (journey.haEvents.length > 0) {
+        journey.revisionModes.add("ha");
+    }
     journey.nicknames = Array.from(new Set(
         journey.surveys.map(getSurveyNickname).filter(Boolean)
     ));
@@ -285,11 +292,7 @@ function applyFilters() {
             return false;
         }
 
-        if (mode === "ha" && !journey.hasHA) {
-            return false;
-        }
-
-        if (mode === "standard" && journey.hasHA) {
+        if (mode !== "all" && !journey.revisionModes.has(mode)) {
             return false;
         }
 
