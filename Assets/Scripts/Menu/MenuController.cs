@@ -5,6 +5,7 @@ public class MenuController : MonoBehaviour
 {
     public string targetSceneName = "Algorithm_Level";
     public string creativeWorkshopSceneName = "Questionnaire(Before)";
+    public string studyDashboardUrl = "http://111.231.136.4:8000/frontend/";
 
     public void StartGame()
     {
@@ -33,6 +34,28 @@ public class MenuController : MonoBehaviour
         }
 
         SceneManager.LoadScene(sceneName);
+    }
+
+    public void OpenStudyDashboard()
+    {
+        string dashboardUrl = studyDashboardUrl?.Trim();
+
+        if (string.IsNullOrEmpty(dashboardUrl))
+        {
+            Debug.LogWarning("MenuController: Study dashboard URL is empty.");
+            return;
+        }
+
+        if (!System.Uri.TryCreate(dashboardUrl, System.UriKind.Absolute, out System.Uri uri)
+            || (uri.Scheme != System.Uri.UriSchemeHttp
+                && uri.Scheme != System.Uri.UriSchemeHttps))
+        {
+            Debug.LogWarning("MenuController: Study dashboard URL is invalid: " + dashboardUrl);
+            return;
+        }
+
+        Debug.Log("MenuController: Opening study dashboard: " + uri.AbsoluteUri);
+        Application.OpenURL(uri.AbsoluteUri);
     }
 
     public void QuitGame()
