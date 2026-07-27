@@ -1,6 +1,7 @@
 import html
 import hashlib
 import json
+import mimetypes
 import os
 import secrets
 import threading
@@ -67,6 +68,7 @@ DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 FRONTEND_DIR = PROJECT_DIR / "Frontend"
+WEBGL_BUILD_DIR = PROJECT_DIR / "WebGLBuild"
 STUDY_LOG_DIR = BASE_DIR / "study_logs"
 STUDY_LOG_FILE = STUDY_LOG_DIR / "level_records.jsonl"
 SURVEY_LOG_FILE = STUDY_LOG_DIR / "survey_responses.jsonl"
@@ -277,11 +279,18 @@ ENUMS = {
 
 HA_CHANGE_FIELDS = set(LIMITS) | set(ENUMS) | {"corridorWidth", "style"}
 
+mimetypes.add_type("application/octet-stream", ".data")
+
 app = FastAPI()
 app.mount(
     "/frontend",
     StaticFiles(directory=FRONTEND_DIR, html=True, check_dir=False),
     name="frontend",
+)
+app.mount(
+    "/game",
+    StaticFiles(directory=WEBGL_BUILD_DIR, html=True, check_dir=False),
+    name="game",
 )
 
 app.add_middleware(

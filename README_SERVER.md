@@ -4,6 +4,7 @@
 
 ```text
 http://111.231.136.4:8000/frontend/
+http://111.231.136.4:8000/game/
 http://111.231.136.4:8000/frontend/Images/Routing.png
 ```
 

@@ -66,3 +66,6 @@ crashlytics-build.properties
 
 # Gradle cache
 .gradle/
+
+# Unity WebGL build output
+/WebGLBuild/

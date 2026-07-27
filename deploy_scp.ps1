@@ -34,7 +34,8 @@ $files = @(
     @{ Local = "Frontend\index.html"; Remote = "Frontend/index.html" },
     @{ Local = "Frontend\app.js"; Remote = "Frontend/app.js" },
     @{ Local = "Frontend\styles.css"; Remote = "Frontend/styles.css" },
-    @{ Local = "Frontend\Images"; Remote = "Frontend/"; Recursive = $true }
+    @{ Local = "Frontend\Images"; Remote = "Frontend/"; Recursive = $true },
+    @{ Local = "WebGLBuild"; Remote = "."; Recursive = $true }
 )
 
 foreach ($file in $files) {
