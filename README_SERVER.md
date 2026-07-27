@@ -1,6 +1,6 @@
 # Sokoban AI Demo 部署说明
 
-当前线上前端地址：
+当前线上地址：
 
 ```text
 http://111.231.136.4:8000/frontend/

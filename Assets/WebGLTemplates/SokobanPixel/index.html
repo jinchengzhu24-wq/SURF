@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#315a73">
+    <title>{{{ PRODUCT_NAME }}} | WebGL Quest</title>
+    <link rel="stylesheet" href="TemplateData/style.css">
+  </head>
+  <body>
+    <main class="adventure-shell">
+      <header class="wood-sign" aria-label="Game title">
+        <div class="sign-bolt" aria-hidden="true"></div>
+        <div>
+          <p class="sign-kicker">SOKOBAN · WEBGL QUEST</p>
+          <h1>{{{ PRODUCT_NAME }}}</h1>
+          <p class="sign-subtitle">AI 推箱子研究冒险</p>
+        </div>
+        <div class="sign-bolt" aria-hidden="true"></div>
+      </header>
+
+      <section class="stone-frame">
+        <div class="frame-heading">
+          <span class="frame-step">▶</span>
+          <span>GAME SESSION</span>
+          <span class="frame-status">WEBGL</span>
+        </div>
+
+        <div class="game-viewport">
+          <div id="unity-container" class="unity-desktop">
+            <canvas
+              id="unity-canvas"
+              width={{{ WIDTH }}}
+              height={{{ HEIGHT }}}
+              tabindex="-1"
+              aria-label="{{{ PRODUCT_NAME }}} game canvas"
+            ></canvas>
+
+            <div id="unity-loading-bar">
+              <div class="loading-card">
+                <div class="pixel-crate" aria-hidden="true"></div>
+                <p class="loading-kicker">PREPARING ADVENTURE</p>
+                <div id="unity-progress-bar-empty" role="progressbar" aria-label="Loading game">
+                  <div id="unity-progress-bar-full"></div>
+                </div>
+                <p id="unity-loading-percent">Loading 0%</p>
+              </div>
+            </div>
+
+            <div id="unity-warning" aria-live="polite"></div>
+          </div>
+        </div>
+
+        <footer id="unity-footer">
+          <div class="control-hint">
+            <span class="keycap">WASD</span>
+            <span>MOVE · PUSH · SOLVE</span>
+          </div>
+          <div class="footer-actions">
+            <a class="pixel-button secondary" href="/frontend/">DATA DASHBOARD</a>
+            <button id="unity-fullscreen-button" class="pixel-button" type="button">
+              FULLSCREEN
+            </button>
+          </div>
+        </footer>
+      </section>
+    </main>
+
+    <script>
+      var container = document.querySelector("#unity-container");
+      var canvas = document.querySelector("#unity-canvas");
+      var loadingBar = document.querySelector("#unity-loading-bar");
+      var progressBarEmpty = document.querySelector("#unity-progress-bar-empty");
+      var progressBarFull = document.querySelector("#unity-progress-bar-full");
+      var loadingPercent = document.querySelector("#unity-loading-percent");
+      var fullscreenButton = document.querySelector("#unity-fullscreen-button");
+      var warningBanner = document.querySelector("#unity-warning");
+
+      function unityShowBanner(message, type) {
+        function updateBannerVisibility() {
+          warningBanner.style.display = warningBanner.children.length ? "grid" : "none";
+        }
+
+        var banner = document.createElement("div");
+        banner.className = "unity-banner " + (type || "info");
+        banner.innerHTML = message;
+        warningBanner.appendChild(banner);
+
+        if (type !== "error") {
+          setTimeout(function () {
+            if (banner.parentNode) {
+              warningBanner.removeChild(banner);
+            }
+            updateBannerVisibility();
+          }, 5000);
+        }
+
+        updateBannerVisibility();
+      }
+
+      var buildUrl = "Build";
+      var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}";
+      var config = {
+        dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}",
+        frameworkUrl: buildUrl + "/{{{ FRAMEWORK_FILENAME }}}",
+#if USE_THREADS
+        workerUrl: buildUrl + "/{{{ WORKER_FILENAME }}}",
+#endif
+#if USE_WASM
+        codeUrl: buildUrl + "/{{{ CODE_FILENAME }}}",
+#endif
+#if MEMORY_FILENAME
+        memoryUrl: buildUrl + "/{{{ MEMORY_FILENAME }}}",
+#endif
+#if SYMBOLS_FILENAME
+        symbolsUrl: buildUrl + "/{{{ SYMBOLS_FILENAME }}}",
+#endif
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: {{{ JSON.stringify(COMPANY_NAME) }}},
+        productName: {{{ JSON.stringify(PRODUCT_NAME) }}},
+        productVersion: {{{ JSON.stringify(PRODUCT_VERSION) }}},
+        showBanner: unityShowBanner,
+      };
+
+      if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+        document.body.classList.add("mobile-game");
+        container.className = "unity-mobile";
+        canvas.className = "unity-mobile";
+        config.devicePixelRatio = 1;
+      }
+
+#if BACKGROUND_FILENAME
+      canvas.style.background = "url('" + buildUrl + "/{{{ BACKGROUND_FILENAME.replace(/'/g, '%27') }}}') center / cover";
+#endif
+
+      loadingBar.style.display = "grid";
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = function () {
+        createUnityInstance(canvas, config, function (progress) {
+          var percentage = Math.round(progress * 100);
+          progressBarFull.style.width = percentage + "%";
+          progressBarEmpty.setAttribute("aria-valuenow", percentage);
+          loadingPercent.textContent = "Loading " + percentage + "%";
+        }).then(function (unityInstance) {
+          loadingBar.style.display = "none";
+          fullscreenButton.onclick = function () {
+            unityInstance.SetFullscreen(1);
+          };
+        }).catch(function (message) {
+          loadingBar.style.display = "none";
+          unityShowBanner(message, "error");
+        });
+      };
+      script.onerror = function () {
+        loadingBar.style.display = "none";
+        unityShowBanner("Game loader could not be loaded.", "error");
+      };
+
+      document.body.appendChild(script);
+    </script>
+  </body>
+</html>
