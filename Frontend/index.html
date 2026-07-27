@@ -194,6 +194,35 @@
         </main>
     </div>
 
+    <dialog class="delete-dialog" id="deleteDialog" aria-labelledby="deleteDialogTitle"
+        aria-describedby="deleteDialogDescription">
+        <form class="delete-dialog-card" id="deleteDialogForm">
+            <div class="delete-dialog-header">
+                <div class="delete-dialog-icon" aria-hidden="true">!</div>
+                <div>
+                    <p class="eyebrow">Protected action</p>
+                    <h2 id="deleteDialogTitle">Confirm deletion</h2>
+                </div>
+            </div>
+            <div class="delete-dialog-body">
+                <p id="deleteDialogDescription">Enter the deletion password to continue.</p>
+                <div class="delete-dialog-scope" id="deleteDialogScope"></div>
+                <label class="delete-password-field" for="deletePasswordInput">
+                    <span>Deletion password</span>
+                    <input id="deletePasswordInput" type="password" inputmode="numeric"
+                        autocomplete="off" required aria-describedby="deleteDialogError">
+                </label>
+                <p class="delete-dialog-error" id="deleteDialogError" role="alert" aria-live="assertive"></p>
+            </div>
+            <div class="delete-dialog-actions">
+                <button class="dialog-cancel-button" id="deleteDialogCancel" type="button">Cancel</button>
+                <button class="danger-button dialog-confirm-button" id="deleteDialogConfirm" type="submit">
+                    Delete
+                </button>
+            </div>
+        </form>
+    </dialog>
+
     <script>
         const script = document.createElement("script");
         script.src = window.FRONTEND_ASSET_BASE + "/app.js";

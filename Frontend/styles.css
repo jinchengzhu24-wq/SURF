@@ -1710,3 +1710,218 @@ select:focus-visible {
         height: 3px;
     }
 }
+
+.delete-dialog {
+    width: min(520px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    padding: 0;
+    overflow: auto;
+    border: 4px solid var(--stone-dark);
+    border-radius: 4px;
+    color: var(--text);
+    background: #efe2c4;
+    box-shadow:
+        inset 0 0 0 2px var(--stone-light),
+        7px 7px 0 rgba(25, 29, 26, 0.58);
+}
+
+.delete-dialog::backdrop {
+    background-color: rgba(20, 29, 23, 0.72);
+    background-image:
+        linear-gradient(rgba(216, 228, 194, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(216, 228, 194, 0.04) 1px, transparent 1px);
+    background-size: 16px 16px;
+}
+
+.delete-dialog-card {
+    margin: 0;
+}
+
+.delete-dialog-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 18px;
+    border-bottom: 4px solid var(--wood-dark);
+    color: #fff5d1;
+    background-color: var(--wood);
+    background-image:
+        linear-gradient(rgba(255, 214, 140, 0.18) 2px, transparent 2px),
+        repeating-linear-gradient(
+            90deg,
+            transparent 0 72px,
+            rgba(67, 36, 18, 0.18) 72px 74px
+        );
+    box-shadow: inset 0 0 0 2px var(--wood-light);
+}
+
+.delete-dialog-header .eyebrow {
+    margin-bottom: 3px;
+    color: #f5cd79;
+}
+
+.delete-dialog-header h2 {
+    margin: 0;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 20px;
+    text-shadow: 2px 2px 0 #382318;
+}
+
+.delete-dialog-icon {
+    display: grid;
+    flex: 0 0 38px;
+    width: 38px;
+    height: 38px;
+    place-items: center;
+    border: 3px solid #67291f;
+    border-radius: 2px;
+    color: #fff3d1;
+    background: var(--red);
+    box-shadow:
+        inset 0 0 0 2px #d77f68,
+        3px 3px 0 #4f2b25;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 24px;
+    font-weight: 900;
+}
+
+.delete-dialog-body {
+    padding: 18px;
+    background:
+        repeating-linear-gradient(
+            0deg,
+            transparent 0 27px,
+            rgba(103, 65, 29, 0.055) 27px 29px
+        ),
+        #efe2c4;
+}
+
+.delete-dialog-body > p {
+    margin: 0 0 12px;
+}
+
+.delete-dialog-scope {
+    margin-bottom: 16px;
+    padding: 10px 12px;
+    border: 3px solid #6e392d;
+    border-radius: 2px;
+    color: #5a281f;
+    background: #efc2ae;
+    box-shadow:
+        inset 0 0 0 2px #f8dfcf,
+        2px 2px 0 rgba(79, 43, 37, 0.4);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.5;
+    white-space: pre-line;
+}
+
+.delete-password-field {
+    display: grid;
+    gap: 7px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.delete-password-field input {
+    width: 100%;
+    min-height: 44px;
+    padding: 9px 11px;
+    border: 3px solid var(--stone-dark);
+    border-radius: 2px;
+    color: #222b2d;
+    background: #f6f3e7;
+    box-shadow:
+        inset 0 0 0 2px #d0d1cb,
+        2px 2px 0 rgba(48, 57, 59, 0.34);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 18px;
+    letter-spacing: 3px;
+}
+
+.delete-password-field input:focus {
+    border-color: #a56a24;
+    box-shadow:
+        inset 0 0 0 2px #fff0b7,
+        3px 3px 0 #61452a;
+}
+
+.delete-dialog-error {
+    min-height: 20px;
+    margin: 8px 0 0 !important;
+    color: #7b281d;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.delete-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 13px 18px 17px;
+    border-top: 3px solid #8e673e;
+    background: #d2b583;
+    box-shadow: inset 0 2px 0 #ecd4aa;
+}
+
+.dialog-cancel-button {
+    min-width: 92px;
+    padding: 9px 14px;
+    border: 2px solid var(--stone-dark);
+    border-radius: 2px;
+    color: #283034;
+    background: var(--stone-light);
+    box-shadow:
+        inset 0 0 0 2px #e8e8df,
+        2px 2px 0 #4c4f4f;
+    font-family: Consolas, "Courier New", monospace;
+    font-weight: 800;
+}
+
+.dialog-cancel-button:hover {
+    transform: translate(-1px, -1px);
+    background: #dedfd8;
+    box-shadow:
+        inset 0 0 0 2px #f1f1e9,
+        3px 3px 0 #4c4f4f;
+}
+
+.dialog-confirm-button {
+    min-width: 132px;
+    padding: 9px 14px;
+}
+
+.delete-dialog-card[aria-busy="true"] button,
+.delete-dialog-card[aria-busy="true"] input {
+    cursor: wait;
+    opacity: 0.72;
+}
+
+@media (max-width: 520px) {
+    .delete-dialog {
+        width: calc(100vw - 20px);
+        max-height: calc(100vh - 20px);
+        box-shadow:
+            inset 0 0 0 2px var(--stone-light),
+            3px 3px 0 rgba(25, 29, 26, 0.52);
+    }
+
+    .delete-dialog-header,
+    .delete-dialog-body {
+        padding: 14px;
+    }
+
+    .delete-dialog-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        padding: 12px 14px 15px;
+    }
+
+    .dialog-cancel-button,
+    .dialog-confirm-button {
+        min-width: 0;
+    }
+}

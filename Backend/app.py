@@ -2,6 +2,7 @@ import html
 import hashlib
 import json
 import os
+import secrets
 import threading
 import time
 import webbrowser
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     HTMLResponse,
@@ -75,6 +76,21 @@ HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
 JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
 
 load_dotenv(BASE_DIR / ".env")
+
+
+def require_delete_password(request: Request):
+    configured_password = os.environ.get("DASHBOARD_DELETE_PASSWORD", "").strip()
+
+    if not configured_password:
+        raise HTTPException(
+            status_code=503,
+            detail="Delete password is not configured",
+        )
+
+    supplied_password = request.headers.get("X-Delete-Password", "")
+
+    if not secrets.compare_digest(supplied_password, configured_password):
+        raise HTTPException(status_code=401, detail="Incorrect delete password")
 
 
 class LevelDesignPlan(BaseModel):
@@ -693,7 +709,7 @@ def rename_level_run(request: RenameLevelRunRequest):
     }
 
 
-@app.post("/delete-round")
+@app.post("/delete-round", dependencies=[Depends(require_delete_password)])
 def delete_round(request: RoundRequest):
     round_id = normalize_round_id(request.roundId)
 
@@ -725,7 +741,7 @@ def delete_round(request: RoundRequest):
     }
 
 
-@app.post("/delete-level-run")
+@app.post("/delete-level-run", dependencies=[Depends(require_delete_password)])
 def delete_level_run(request: DeleteLevelRunRequest):
     level_run_id = normalize_level_run_id(request.levelRunId)
 
@@ -759,7 +775,10 @@ def delete_level_run(request: DeleteLevelRunRequest):
     }
 
 
-@app.post("/delete-survey-response")
+@app.post(
+    "/delete-survey-response",
+    dependencies=[Depends(require_delete_password)],
+)
 def delete_survey_response(request: DeleteSurveyResponseRequest):
     response_id = normalize_survey_identifier(request.responseId)
     player_nickname = normalize_survey_identifier(request.playerNickname)
@@ -821,7 +840,10 @@ def delete_survey_response(request: DeleteSurveyResponseRequest):
     }
 
 
-@app.post("/delete-creative-idea")
+@app.post(
+    "/delete-creative-idea",
+    dependencies=[Depends(require_delete_password)],
+)
 def delete_creative_idea(request: DeleteCreativeIdeaRequest):
     idea_id = normalize_creative_idea_identifier(request.ideaId)
 
@@ -858,7 +880,10 @@ def delete_creative_idea(request: DeleteCreativeIdeaRequest):
     }
 
 
-@app.post("/delete-expansion-choice")
+@app.post(
+    "/delete-expansion-choice",
+    dependencies=[Depends(require_delete_password)],
+)
 def delete_expansion_choice(request: DeleteExpansionChoiceRequest):
     choice_id = normalize_expansion_choice_identifier(request.choiceId)
 
@@ -895,7 +920,10 @@ def delete_expansion_choice(request: DeleteExpansionChoiceRequest):
     }
 
 
-@app.post("/delete-ha-plan-event")
+@app.post(
+    "/delete-ha-plan-event",
+    dependencies=[Depends(require_delete_password)],
+)
 def delete_ha_plan_event(request: DeleteHAPlanEventRequest):
     ha_event_id = normalize_expansion_choice_identifier(request.haEventId)
 
@@ -929,7 +957,10 @@ def delete_ha_plan_event(request: DeleteHAPlanEventRequest):
     }
 
 
-@app.post("/delete-journey-event")
+@app.post(
+    "/delete-journey-event",
+    dependencies=[Depends(require_delete_password)],
+)
 def delete_journey_event(request: DeleteJourneyEventRequest):
     journey_event_id = normalize_expansion_choice_identifier(request.journeyEventId)
 
@@ -961,7 +992,10 @@ def delete_journey_event(request: DeleteJourneyEventRequest):
     }
 
 
-@app.post("/delete-idea-records")
+@app.post(
+    "/delete-idea-records",
+    dependencies=[Depends(require_delete_password)],
+)
 def delete_idea_records(request: DeleteIdeaRecordsRequest):
     idea_id = normalize_creative_idea_identifier(request.ideaId)
 
@@ -1051,7 +1085,10 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
     }
 
 
-@app.post("/clear-level-records")
+@app.post(
+    "/clear-level-records",
+    dependencies=[Depends(require_delete_password)],
+)
 def clear_level_records():
     STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -2146,6 +2183,67 @@ def render_level_records_view(events, levels, malformed_count, cleared):
             text-align: center;
             color: #697586;
         }}
+        .delete-dialog {{
+            width: min(440px, calc(100vw - 28px));
+            padding: 0;
+            border: 4px solid #41494d;
+            border-radius: 4px;
+            background: #efe2c4;
+            box-shadow: inset 0 0 0 2px #c8c9c3, 6px 6px 0 rgba(25, 29, 26, 0.55);
+        }}
+        .delete-dialog::backdrop {{
+            background: rgba(20, 29, 23, 0.72);
+        }}
+        .delete-dialog h2 {{
+            margin: 0;
+            padding: 15px 18px;
+            border-bottom: 4px solid #4a2d1c;
+            color: #fff5d1;
+            background: #8b562c;
+            font-family: Consolas, "Courier New", monospace;
+            text-shadow: 2px 2px 0 #382318;
+        }}
+        .delete-dialog-body {{
+            padding: 18px;
+        }}
+        .delete-dialog label {{
+            display: grid;
+            gap: 7px;
+            font-family: Consolas, "Courier New", monospace;
+            font-weight: 700;
+        }}
+        .delete-dialog input {{
+            min-height: 40px;
+            padding: 7px 10px;
+            border: 3px solid #41494d;
+            border-radius: 2px;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 17px;
+            letter-spacing: 3px;
+        }}
+        .delete-error {{
+            min-height: 18px;
+            margin: 8px 0 0;
+            color: #7b281d;
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 13px;
+            font-weight: 700;
+        }}
+        .delete-dialog-actions {{
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            padding: 13px 18px 17px;
+            border-top: 3px solid #8e673e;
+            background: #d2b583;
+        }}
+        .cancel-button {{
+            padding: 7px 11px;
+            border: 2px solid #41494d;
+            border-radius: 2px;
+            background: #c8c9c3;
+            cursor: pointer;
+        }}
     </style>
 </head>
 <body>
@@ -2163,10 +2261,25 @@ def render_level_records_view(events, levels, malformed_count, cleared):
     <div class="toolbar">
         <a href="/level-records">Raw JSONL</a>
         <a href="/docs">API Docs</a>
-        <form method="post" action="/clear-level-records" onsubmit="return confirm('Clear all level records? This cannot be undone.');">
-            <button class="danger-button" type="submit">Clear Records</button>
-        </form>
+        <button class="danger-button" id="legacyClearButton" type="button">Clear Records</button>
     </div>
+    <dialog class="delete-dialog" id="legacyDeleteDialog">
+        <form id="legacyDeleteForm">
+            <h2>Clear all records?</h2>
+            <div class="delete-dialog-body">
+                <p>This cannot be undone. Enter the deletion password to continue.</p>
+                <label>
+                    Deletion password
+                    <input id="legacyDeletePassword" type="password" inputmode="numeric" autocomplete="off" required>
+                </label>
+                <p class="delete-error" id="legacyDeleteError" role="alert"></p>
+            </div>
+            <div class="delete-dialog-actions">
+                <button class="cancel-button" id="legacyDeleteCancel" type="button">Cancel</button>
+                <button class="danger-button" id="legacyDeleteConfirm" type="submit">Clear Records</button>
+            </div>
+        </form>
+    </dialog>
     <table>
         <thead>
             <tr>
@@ -2192,6 +2305,66 @@ def render_level_records_view(events, levels, malformed_count, cleared):
             {rows_html}
         </tbody>
     </table>
+    <script>
+        (() => {{
+            const dialog = document.getElementById("legacyDeleteDialog");
+            const form = document.getElementById("legacyDeleteForm");
+            const passwordInput = document.getElementById("legacyDeletePassword");
+            const errorText = document.getElementById("legacyDeleteError");
+            const cancelButton = document.getElementById("legacyDeleteCancel");
+            const confirmButton = document.getElementById("legacyDeleteConfirm");
+
+            document.getElementById("legacyClearButton").addEventListener("click", () => {{
+                passwordInput.value = "";
+                errorText.textContent = "";
+                dialog.showModal();
+                requestAnimationFrame(() => passwordInput.focus());
+            }});
+
+            cancelButton.addEventListener("click", () => dialog.close());
+
+            form.addEventListener("submit", async event => {{
+                event.preventDefault();
+                errorText.textContent = "";
+                passwordInput.disabled = true;
+                cancelButton.disabled = true;
+                confirmButton.disabled = true;
+                confirmButton.textContent = "Clearing...";
+
+                try {{
+                    const response = await fetch("/clear-level-records", {{
+                        method: "POST",
+                        headers: {{ "X-Delete-Password": passwordInput.value }}
+                    }});
+
+                    if (!response.ok) {{
+                        let message = "Could not clear records.";
+
+                        try {{
+                            const data = await response.json();
+                            message = data.detail || message;
+                        }} catch (error) {{
+                            message = "HTTP " + response.status;
+                        }}
+
+                        throw new Error(message);
+                    }}
+
+                    window.location.href = "/level-records-view?cleared=1";
+                }} catch (error) {{
+                    errorText.textContent = error.message === "Incorrect delete password"
+                        ? "Incorrect password. Please try again."
+                        : error.message;
+                    passwordInput.disabled = false;
+                    cancelButton.disabled = false;
+                    confirmButton.disabled = false;
+                    confirmButton.textContent = "Clear Records";
+                    passwordInput.focus();
+                    passwordInput.select();
+                }}
+            }});
+        }})();
+    </script>
 </body>
 </html>"""
 

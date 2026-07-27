@@ -9,7 +9,9 @@ const state = {
     selectedJourneyKey: "",
     selectedStageKey: "",
     selectedRunId: "",
-    compareRunIds: []
+    compareRunIds: [],
+    pendingDelete: null,
+    deleteDialogBusy: false
 };
 
 const elements = {
@@ -48,7 +50,16 @@ const elements = {
     inspectorBody: document.getElementById("inspectorBody"),
     deleteStageButton: document.getElementById("deleteStageButton"),
     comparePanel: document.getElementById("comparePanel"),
-    compareContent: document.getElementById("compareContent")
+    compareContent: document.getElementById("compareContent"),
+    deleteDialog: document.getElementById("deleteDialog"),
+    deleteDialogForm: document.getElementById("deleteDialogForm"),
+    deleteDialogTitle: document.getElementById("deleteDialogTitle"),
+    deleteDialogDescription: document.getElementById("deleteDialogDescription"),
+    deleteDialogScope: document.getElementById("deleteDialogScope"),
+    deletePasswordInput: document.getElementById("deletePasswordInput"),
+    deleteDialogError: document.getElementById("deleteDialogError"),
+    deleteDialogCancel: document.getElementById("deleteDialogCancel"),
+    deleteDialogConfirm: document.getElementById("deleteDialogConfirm")
 };
 
 init();
@@ -91,6 +102,15 @@ function wireEvents() {
     elements.modeFilter.addEventListener("change", applyFilters);
     elements.deleteIdeaButton.addEventListener("click", deleteSelectedIdea);
     elements.deleteStageButton.addEventListener("click", deleteSelectedStage);
+    elements.deleteDialogForm.addEventListener("submit", submitDeleteDialog);
+    elements.deleteDialogCancel.addEventListener("click", closeDeleteDialog);
+    elements.deleteDialog.addEventListener("cancel", event => {
+        event.preventDefault();
+
+        if (!state.deleteDialogBusy) {
+            closeDeleteDialog();
+        }
+    });
 
     document.querySelectorAll("[data-summary-filter]").forEach(button => {
         button.addEventListener("click", () => {
@@ -889,18 +909,26 @@ function renderMap(container, rows, mini) {
     });
 }
 
-async function deleteSelectedStage() {
+function deleteSelectedStage() {
     const journey = getSelectedJourney();
     const stage = journey
         ? buildTimelineStages(journey).find(item => item.key === elements.deleteStageButton.dataset.stageKey)
         : null;
     const config = stage ? getStageDeleteConfig(stage) : null;
 
-    if (!config || !window.confirm("Delete only this " + config.label + "? Other records in this idea journey will be kept.")) {
+    if (!config) {
         return;
     }
 
-    await postDelete(config.endpoint, config.payload, "Deleting " + config.label + "...");
+    openDeleteDialog({
+        title: "Delete selected record?",
+        description: "Enter the deletion password to remove only this stage.",
+        scope: config.label + "\nOther records in this Idea journey will be kept.",
+        confirmLabel: "Delete record",
+        endpoint: config.endpoint,
+        payload: config.payload,
+        progressText: "Deleting " + config.label + "..."
+    });
 }
 
 function getStageDeleteConfig(stage) {
@@ -956,7 +984,7 @@ function getStageDeleteConfig(stage) {
     return null;
 }
 
-async function deleteSelectedIdea() {
+function deleteSelectedIdea() {
     const journey = getSelectedJourney();
 
     if (!journey || !journey.ideaId) {
@@ -971,72 +999,152 @@ async function deleteSelectedIdea() {
         plural(journey.haEvents.length, "HA event"),
         plural(journey.journeyEvents.length, "review/routing event")
     ].join("\n");
-    const confirmed = window.confirm(
-        "Delete the entire Idea " + journey.ideaHash + "?\n\n"
-        + scope + "\n\nThis action cannot be undone."
-    );
+    openDeleteDialog({
+        title: "Delete entire Idea " + journey.ideaHash + "?",
+        description: "This removes the complete study journey and cannot be undone.",
+        scope: scope,
+        confirmLabel: "Delete entire Idea",
+        endpoint: "/delete-idea-records",
+        payload: { ideaId: journey.ideaId },
+        progressText: "Deleting the entire idea journey...",
+        afterSuccess: resetSelection
+    });
+}
 
-    if (!confirmed) {
+function openDeleteDialog(config) {
+    state.pendingDelete = config;
+    elements.deleteDialogTitle.textContent = config.title;
+    elements.deleteDialogDescription.textContent = config.description;
+    elements.deleteDialogScope.textContent = config.scope;
+    elements.deleteDialogConfirm.textContent = config.confirmLabel || "Delete";
+    elements.deletePasswordInput.value = "";
+    elements.deleteDialogError.textContent = "";
+    setDeleteDialogBusy(false);
+
+    if (!elements.deleteDialog.open) {
+        elements.deleteDialog.showModal();
+    }
+
+    window.requestAnimationFrame(() => elements.deletePasswordInput.focus());
+}
+
+function closeDeleteDialog() {
+    if (state.deleteDialogBusy) {
         return;
     }
 
+    if (elements.deleteDialog.open) {
+        elements.deleteDialog.close();
+    }
+
+    elements.deletePasswordInput.value = "";
+    elements.deleteDialogError.textContent = "";
+    state.pendingDelete = null;
+}
+
+function setDeleteDialogBusy(busy) {
+    state.deleteDialogBusy = busy;
+    elements.deleteDialogForm.setAttribute("aria-busy", busy ? "true" : "false");
+    elements.deletePasswordInput.disabled = busy;
+    elements.deleteDialogCancel.disabled = busy;
+    elements.deleteDialogConfirm.disabled = busy;
+
+    if (busy) {
+        elements.deleteDialogConfirm.textContent = "Deleting...";
+    } else if (state.pendingDelete) {
+        elements.deleteDialogConfirm.textContent = state.pendingDelete.confirmLabel || "Delete";
+    }
+}
+
+async function submitDeleteDialog(event) {
+    event.preventDefault();
+
+    const config = state.pendingDelete;
+    const password = elements.deletePasswordInput.value;
+
+    if (!config || state.deleteDialogBusy) {
+        return;
+    }
+
+    if (!password) {
+        elements.deleteDialogError.textContent = "Enter the deletion password.";
+        elements.deletePasswordInput.focus();
+        return;
+    }
+
+    elements.deleteDialogError.textContent = "";
+    setDeleteDialogBusy(true);
+    setStatus(config.progressText);
+
+    try {
+        await postDelete(config.endpoint, config.payload, password);
+
+        if (config.afterSuccess) {
+            config.afterSuccess();
+        }
+
+        setDeleteDialogBusy(false);
+        closeDeleteDialog();
+        showNotice(config.successText || "Record deleted successfully.");
+        await loadData(true);
+    } catch (error) {
+        const message = getDeleteDialogError(error);
+        elements.deleteDialogError.textContent = message;
+        setStatus("Could not delete record: " + message);
+        setDeleteDialogBusy(false);
+        elements.deletePasswordInput.focus();
+        elements.deletePasswordInput.select();
+    }
+}
+
+async function postDelete(endpoint, payload, password) {
+    const response = await fetch(apiUrl(endpoint), {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-Delete-Password": password
+        },
+        body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+        const error = new Error(await getResponseError(response));
+        error.status = response.status;
+        throw error;
+    }
+}
+
+function getDeleteDialogError(error) {
+    if (error.status === 401) {
+        return "Incorrect password. Please try again.";
+    }
+
+    if (error.status === 503) {
+        return "Deletion password is not configured on the server.";
+    }
+
+    return error.message || "Deletion failed. Please try again.";
+}
+
+function clearAllRecords() {
+    openDeleteDialog({
+        title: "Clear all study data?",
+        description: "This removes every official study record and cannot be undone.",
+        scope: "Ideas, levels, surveys, HA plans, and journey events",
+        confirmLabel: "Clear all records",
+        endpoint: "/clear-level-records",
+        payload: {},
+        progressText: "Clearing all study data...",
+        successText: "All study data cleared.",
+        afterSuccess: resetSelection
+    });
+}
+
+function resetSelection() {
     state.selectedJourneyKey = "";
     state.selectedStageKey = "";
     state.selectedRunId = "";
     state.compareRunIds = [];
-    await postDelete(
-        "/delete-idea-records",
-        { ideaId: journey.ideaId },
-        "Deleting the entire idea journey..."
-    );
-}
-
-async function postDelete(endpoint, payload, progressText) {
-    setStatus(progressText);
-
-    try {
-        const response = await fetch(apiUrl(endpoint), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            throw new Error(await getResponseError(response));
-        }
-
-        showNotice("Record deleted successfully.");
-        await loadData(true);
-    } catch (error) {
-        setStatus("Could not delete record: " + error.message);
-    }
-}
-
-async function clearAllRecords() {
-    if (!window.confirm(
-        "Clear every official study record, including ideas, levels, surveys, HA plans, and journey events? This cannot be undone."
-    )) {
-        return;
-    }
-
-    setStatus("Clearing all study data...");
-
-    try {
-        const response = await fetch(apiUrl("/clear-level-records"), { method: "POST" });
-
-        if (!response.ok) {
-            throw new Error("HTTP " + response.status);
-        }
-
-        state.selectedJourneyKey = "";
-        state.selectedStageKey = "";
-        state.selectedRunId = "";
-        state.compareRunIds = [];
-        showNotice("All study data cleared.");
-        await loadData(true);
-    } catch (error) {
-        setStatus("Could not clear study data: " + error.message);
-    }
 }
 
 function getSurveyDeletePayload(record) {
