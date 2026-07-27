@@ -59,6 +59,8 @@ public class Player : MonoBehaviour
             return;
         }
 
+        FaceHorizontalDirection(dir.x);
+
         Vector3 nextPos = transform.position + dir * moveDistance;
 
         if (IsBlocked(nextPos))
@@ -84,6 +86,25 @@ public class Player : MonoBehaviour
 
         transform.position = nextPos;
         LevelStudyRecorder.RecordPlayerMove(pushedBox);
+    }
+
+    private void FaceHorizontalDirection(float horizontalDirection)
+    {
+        if (Mathf.Approximately(horizontalDirection, 0f))
+        {
+            return;
+        }
+
+        Vector3 scale = transform.localScale;
+        float horizontalScale = Mathf.Abs(scale.x);
+
+        if (Mathf.Approximately(horizontalScale, 0f))
+        {
+            return;
+        }
+
+        scale.x = horizontalDirection < 0f ? -horizontalScale : horizontalScale;
+        transform.localScale = scale;
     }
 
     private bool IsBlocked(Vector3 position)
