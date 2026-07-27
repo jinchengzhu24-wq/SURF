@@ -22,13 +22,75 @@ D:\Sokoban_AI_Demo
 
 ## 更新方式总览
 
-现在主要分三种情况：
+现在主要分四种情况：
 
-1. 只改前端：用本地 Windows CMD 的 `scp` 上传前端文件，然后刷新浏览器。
+1. 只改数据前端：用本地 Windows CMD 的 `scp` 上传 `Frontend` 文件，然后刷新浏览器。
 2. 改了后端，并且服务器能连 GitHub：本地 push 后，在服务器运行 `deploy_github`。
 3. 改了后端，但 GitHub 不稳定或不想用 GitHub：本地用 `scp` 上传文件，然后在服务器运行 `deploy_scp`。
+4. 只改网页游戏：Unity 重新构建后上传整个 `WebGLBuild`，不需要上传 Unity 工程源码。
 
-## 情况一：只改前端
+## 网页游戏需要同步哪些文件
+
+本次首次部署网页游戏时，必须同步：
+
+| 本地文件或目录 | 服务器位置 | 作用 |
+| --- | --- | --- |
+| `Backend/app.py` | `/root/SURF/Backend/app.py` | 提供 `/game/` 静态路由和 WebGL MIME 类型 |
+| `WebGLBuild/` | `/root/SURF/WebGLBuild/` | Unity 生成的完整网页游戏 |
+
+如果同时修改了数据 Dashboard，还需要按实际改动同步：
+
+```text
+Frontend/index.html
+Frontend/app.js
+Frontend/styles.css
+Frontend/Images/
+```
+
+以下文件只参与本地 Unity 开发或构建，不需要上传服务器：
+
+```text
+Assets/WebGLTemplates/
+Assets/Scripts/
+Assets/Scenes/
+ProjectSettings/
+Packages/
+Library/
+Temp/
+deploy_scp.ps1
+```
+
+其中，`deploy_scp.ps1` 是在本地 Windows 上执行的上传脚本；服务器上的 `deploy_scp` 是另一个用于重启后端的 Linux 脚本。
+
+推荐先在 Unity 中重新构建：
+
+```text
+D:\Sokoban_AI_Demo\WebGLBuild
+```
+
+然后在本地 PowerShell 执行：
+
+```powershell
+cd D:\Sokoban_AI_Demo
+.\deploy_scp.ps1
+```
+
+该脚本会同步核心后端文件、数据前端和完整的 `WebGLBuild`。首次加入 `/game/` 路由后，还需要在服务器执行：
+
+```bash
+cd /root/SURF
+./deploy_scp
+```
+
+以后如果只更新了 Unity 游戏或 WebGL 页面模板，只需重新构建并上传 `WebGLBuild`，通常不需要重启后端。上传后访问：
+
+```text
+http://111.231.136.4:8000/game/
+```
+
+如仍显示旧版本，使用 `Ctrl + F5` 强制刷新。
+
+## 情况一：只改数据前端
 
 适用文件：
 
@@ -58,7 +120,7 @@ http://111.231.136.4:8000/frontend/
 Ctrl + F5
 ```
 
-只改前端时通常不需要重启后端，也不需要运行服务器脚本。
+只改数据前端时通常不需要重启后端，也不需要运行服务器脚本。
 
 ## 情况二：后端改动走 GitHub
 
@@ -125,6 +187,7 @@ Frontend/index.html
 Frontend/app.js
 Frontend/styles.css
 Frontend/Images
+WebGLBuild
 ```
 
 上传完成后，在服务器 OrcaTerm 里执行：
@@ -154,6 +217,12 @@ scp D:\Sokoban_AI_Demo\Frontend\app.js root@111.231.136.4:/root/SURF/Frontend/ap
 scp D:\Sokoban_AI_Demo\Frontend\styles.css root@111.231.136.4:/root/SURF/Frontend/styles.css
 ```
 
+如果同时更新了网页游戏，先在 Unity 中重新构建，然后上传完整目录：
+
+```cmd
+scp -r D:\Sokoban_AI_Demo\WebGLBuild root@111.231.136.4:/root/SURF/
+```
+
 然后在服务器 OrcaTerm 里执行：
 
 ```bash
@@ -178,8 +247,9 @@ cd /root/SURF
 - 只改了 `Frontend/index.html`
 - 只改了 `Frontend/app.js`
 - 只改了 `Frontend/styles.css`
+- 只重新构建并上传了 `WebGLBuild`
 
-前端文件由后端静态服务读取，上传覆盖后刷新浏览器即可。
+数据前端和 WebGL 构建文件都由后端静态服务直接读取，上传覆盖后刷新浏览器即可。
 
 ## 脚本权限
 
