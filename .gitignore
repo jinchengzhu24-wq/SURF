@@ -69,3 +69,7 @@ crashlytics-build.properties
 
 # Unity WebGL build output
 /WebGLBuild/
+
+# Local documentation
+/README_SERVER.md
+/README_LLM_ERRORS.md
