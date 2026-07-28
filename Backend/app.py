@@ -3335,8 +3335,7 @@ def validate_creative_idea_expansion(payload):
 
 def fallback_creative_idea_expansion(creative_context, reason):
     idea_text = clean_expansion_text((creative_context or {}).get("ideaText"))
-    chinese = contains_cjk(idea_text)
-    options = build_contextual_expansion_fallback_options(idea_text, chinese)
+    options = build_contextual_expansion_fallback_options(idea_text)
 
     log_event(
         "WARNING",
@@ -3350,19 +3349,19 @@ def fallback_creative_idea_expansion(creative_context, reason):
     }
 
 
-def build_contextual_expansion_fallback_options(idea_text, chinese):
+def build_contextual_expansion_fallback_options(idea_text):
     tags = classify_expansion_idea(idea_text)
 
     if "water" in tags:
-        return build_water_fallback_options(chinese, compact="compact" in tags)
+        return build_water_fallback_options(compact="compact" in tags)
 
     if "maze" in tags:
-        return build_maze_fallback_options(chinese)
+        return build_maze_fallback_options()
 
     if "compact" in tags:
-        return build_compact_fallback_options(chinese)
+        return build_compact_fallback_options()
 
-    return build_general_fallback_options(chinese)
+    return build_general_fallback_options()
 
 
 def classify_expansion_idea(idea_text):
@@ -3381,51 +3380,7 @@ def classify_expansion_idea(idea_text):
     return tags
 
 
-def build_water_fallback_options(chinese, compact=False):
-    if chinese:
-        if compact:
-            return [
-                {
-                    "id": "A",
-                    "title": "紧凑水域分割",
-                    "description": "在紧凑空间里把水障碍放在地图中部，让玩家必须从水边绕行并选择先处理哪只箱子。水会切断直线路径，同时压缩可站位空间。",
-                    "promptText": "围绕原始想法设计紧凑水域分割；用中部水障碍、少量站位、绕行和两箱顺序选择制造压力。",
-                },
-                {
-                    "id": "B",
-                    "title": "水边窄位目标",
-                    "description": "让目标区靠近水边，并把周围空间收紧。玩家需要在靠水的狭窄边缘调整箱子，避免把自己或箱子逼进死角。",
-                    "promptText": "围绕原始想法设计紧凑靠水目标区；用水边站位限制、目标区压力和死锁风险制造解谜重点。",
-                },
-                {
-                    "id": "C",
-                    "title": "双水池挤压",
-                    "description": "在小房间里用两块水域挤出一条弯折路线，让玩家在两个箱子之间来回切换。难点来自水障碍造成的绕行时机和紧凑空间里的站位取舍。",
-                    "promptText": "围绕原始想法设计双水池紧凑绕行；用两块水域、弯折路线、有限站位和箱子切换节奏形成玩法。",
-                },
-            ]
-
-        return [
-            {
-                "id": "A",
-                "title": "水域分割路线",
-                "description": "把水障碍放在地图中部，让玩家必须从水边绕行并选择先处理哪只箱子。水不是装饰，而是切断直线路径的核心压力。",
-                "promptText": "围绕原始想法设计水域分割路线；用中部水障碍制造绕行、顺序选择和两箱路线规划。",
-            },
-            {
-                "id": "B",
-                "title": "水边目标压力",
-                "description": "让目标区靠近水边，箱子推进时可站位空间更少。玩家需要在靠水的狭窄边缘调整箱子，避免把自己或箱子逼进死角。",
-                "promptText": "围绕原始想法设计靠水目标区；用水边站位限制、目标区压力和死锁风险制造解谜重点。",
-            },
-            {
-                "id": "C",
-                "title": "双水池绕行",
-                "description": "用两块小水域制造一条弯折路线，让玩家在两个箱子之间来回切换。难点来自绕水移动的时机，而不是单纯扩大地图。",
-                "promptText": "围绕原始想法设计双水池绕行；用两块水域、弯折路线和箱子切换节奏形成差异化玩法。",
-            },
-        ]
-
+def build_water_fallback_options(compact=False):
     if compact:
         return [
             {
@@ -3470,29 +3425,7 @@ def build_water_fallback_options(chinese, compact=False):
     ]
 
 
-def build_maze_fallback_options(chinese):
-    if chinese:
-        return [
-            {
-                "id": "A",
-                "title": "单通道回环",
-                "description": "把路线做成一条需要绕回来的通道，玩家先推开一个箱子打开站位，再回来处理另一个箱子。迷宫感来自回环路线和站位复用。",
-                "promptText": "围绕原始想法设计单通道回环；强调绕路、回到旧位置和两箱处理顺序。",
-            },
-            {
-                "id": "B",
-                "title": "错位走廊",
-                "description": "用错开的走廊让直线推进变得不可靠，玩家必须先把箱子推到中转点，再从另一侧接手。重点是路线切换而不是增加箱子数量。",
-                "promptText": "围绕原始想法设计错位走廊；用中转点、换边接手和路线切换制造迷宫感。",
-            },
-            {
-                "id": "C",
-                "title": "目标区绕入口",
-                "description": "让目标区入口不在正面，玩家需要绕到侧面才能把箱子送进去。难点是提前给第二只箱子留下通路。",
-                "promptText": "围绕原始想法设计侧向目标入口；用绕入口、保留通路和目标区推进顺序形成玩法。",
-            },
-        ]
-
+def build_maze_fallback_options():
     return [
         {
             "id": "A",
@@ -3515,29 +3448,7 @@ def build_maze_fallback_options(chinese):
     ]
 
 
-def build_compact_fallback_options(chinese):
-    if chinese:
-        return [
-            {
-                "id": "A",
-                "title": "一步失误压力",
-                "description": "空间保持紧凑，但每个箱子都有一个安全中转位。玩家必须判断哪一步会封住通道，避免过早把箱子推到边缘。",
-                "promptText": "围绕原始想法设计紧凑空间；用安全中转位、通道封锁风险和精确推动制造压力。",
-            },
-            {
-                "id": "B",
-                "title": "交叉站位",
-                "description": "两个箱子的路线在中部交叉，玩家需要先让出站位再推进。紧凑感来自互相占位，而不是单纯减少空地。",
-                "promptText": "围绕原始想法设计交叉站位；用两箱路线交叉、让位和推进顺序形成紧凑解谜。",
-            },
-            {
-                "id": "C",
-                "title": "边缘救回",
-                "description": "允许箱子接近边缘，但保留一条可以救回的路线。玩家要把箱子推到危险位置后再利用另一侧站位把它送回目标区。",
-                "promptText": "围绕原始想法设计边缘救回；用危险边缘、可救回路线和站位转换制造难度。",
-            },
-        ]
-
+def build_compact_fallback_options():
     return [
         {
             "id": "A",
@@ -3560,29 +3471,7 @@ def build_compact_fallback_options(chinese):
     ]
 
 
-def build_general_fallback_options(chinese):
-    if chinese:
-        return [
-            {
-                "id": "A",
-                "title": "顺序抉择",
-                "description": "把原始想法转成一个先后顺序清晰的两箱谜题：先处理一个箱子会打开站位，但也可能挡住另一个箱子的路线。",
-                "promptText": "围绕原始想法设计两箱顺序抉择；强调先后处理、站位打开和路线保留。",
-            },
-            {
-                "id": "B",
-                "title": "入口控制",
-                "description": "让关键区域只有一两个入口，玩家必须决定什么时候进入、什么时候把箱子推出入口。压力来自入口被箱子临时堵住。",
-                "promptText": "围绕原始想法设计入口控制；用少量入口、临时堵路和站位判断制造玩法。",
-            },
-            {
-                "id": "C",
-                "title": "目标区压缩",
-                "description": "目标区更集中，最后几步需要小心安排两个箱子的落点。玩家要提前避免第一个箱子挡住第二个箱子的收尾路线。",
-                "promptText": "围绕原始想法设计目标区压缩；用集中目标、收尾路线和两箱落点顺序形成解谜。",
-            },
-        ]
-
+def build_general_fallback_options():
     return [
         {
             "id": "A",
@@ -3614,10 +3503,6 @@ def clean_expansion_text(value):
         return ""
 
     return " ".join(str(value).strip().split())
-
-
-def contains_cjk(text):
-    return any("\u4e00" <= character <= "\u9fff" for character in text or "")
 
 
 def remember_blueprint(plan):

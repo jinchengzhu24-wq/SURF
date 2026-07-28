@@ -4,6 +4,7 @@ import unittest
 from Backend.app import (
     DEFAULT_PLAN,
     apply_selected_ha_plan,
+    build_contextual_expansion_fallback_options,
     parse_ha_revision_contract,
     validate_human_adjustment_clarity_payload,
     validate_ha_revision_plan_edit,
@@ -11,6 +12,7 @@ from Backend.app import (
     validate_plan,
 )
 from Backend.prompt import (
+    build_creative_idea_expansion_messages,
     build_ha_revision_plan_edit_messages,
     build_ha_revision_plan_messages,
     build_human_adjustment_clarity_messages,
@@ -214,6 +216,73 @@ class FeatureConstraintTests(unittest.TestCase):
         self.assertIn("totalScore is the sum", system_prompt)
         self.assertIn("at least 4", system_prompt)
         self.assertIn("Clarification(Human)", system_prompt)
+
+    def test_all_llm_prompts_require_english_ascii_output(self):
+        plan = self.make_plan()
+        message_sets = [
+            build_creative_idea_expansion_messages({"ideaText": "中央迷宫"}),
+            build_human_adjustment_clarity_messages("减少墙体"),
+            build_ha_revision_plan_messages(
+                {
+                    "adjustmentText": "增加推箱次数",
+                    "previousLevelPlan": plan,
+                }
+            ),
+            build_ha_revision_plan_edit_messages(
+                {
+                    "adjustmentText": "增加推箱次数",
+                    "editedDescription": "保留水域并分开目标",
+                    "previousLevelPlan": plan,
+                    "originalOption": {
+                        "id": "A",
+                        "title": "Push Pressure",
+                        "description": "Increase push pressure.",
+                        "promptText": (
+                            '{"changes":{"minPushes":12},'
+                            '"preserveUnlisted":true}'
+                        ),
+                    },
+                }
+            ),
+            build_level_plan_messages(
+                1,
+                "none",
+                {"ideaText": "设计一个水上迷宫"},
+            ),
+        ]
+
+        for messages in message_sets:
+            with self.subTest(system_prompt=messages[0]["content"][:60]):
+                self.assertIn(
+                    "every JSON string value in English using ASCII characters only",
+                    messages[0]["content"],
+                )
+                self.assertIn(
+                    "Never echo, quote, or preserve non-English user text",
+                    messages[0]["content"],
+                )
+
+    def test_chinese_fallback_inputs_produce_ascii_english_options(self):
+        ideas = [
+            "紧凑水域障碍",
+            "设计一个迷宫和绕路",
+            "困难紧凑的关卡",
+            "一个有趣的关卡",
+        ]
+
+        for idea in ideas:
+            with self.subTest(idea=idea):
+                options = build_contextual_expansion_fallback_options(idea)
+                self.assertEqual(len(options), 3)
+
+                for option in options:
+                    for field in ("id", "title", "description", "promptText"):
+                        value = option[field]
+                        self.assertTrue(value)
+                        self.assertTrue(
+                            value.isascii(),
+                            f"{field} was not ASCII for input {idea!r}: {value!r}",
+                        )
 
     def test_ha_revision_options_validate_distinct_hidden_deltas(self):
         previous_plan = self.make_plan()

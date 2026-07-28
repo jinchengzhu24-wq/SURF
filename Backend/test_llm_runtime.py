@@ -88,6 +88,38 @@ class LLMRuntimeTests(unittest.TestCase):
         repair_message = client.completions.calls[1]["messages"][-1]["content"]
         self.assertIn("minPushes=18 is outside 8-16", repair_message)
 
+    def test_non_english_string_is_repaired_once(self):
+        client = FakeClient(
+            [
+                '{"title":"Central Maze","nested":{"promptText":"使用迷宫路线"}}',
+                '{"title":"Central Maze","nested":{"promptText":"Use a maze route"}}',
+            ]
+        )
+
+        result = self.execute(client)
+
+        self.assertEqual(result.value["nested"]["promptText"], "Use a maze route")
+        self.assertEqual(result.attempts_used, 2)
+        repair_message = client.completions.calls[1]["messages"][-1]["content"]
+        self.assertIn("English ASCII text only", repair_message)
+        self.assertIn("$.nested.promptText", repair_message)
+
+    def test_repeated_non_english_strings_are_rejected(self):
+        client = FakeClient(
+            [
+                '{"title":"中央迷宫"}',
+                '{"title":"迷宫路线"}',
+            ]
+        )
+
+        with self.assertRaises(runtime.LLMServiceError) as raised:
+            self.execute(client)
+
+        self.assertEqual(raised.exception.code, "MODEL_VALIDATION_FAILED")
+        self.assertEqual(raised.exception.attempts_used, 2)
+        self.assertIn("English ASCII text only", raised.exception.safe_message)
+        self.assertEqual(len(client.completions.calls), 2)
+
     def test_model_budget_never_exceeds_requested_single_attempt(self):
         client = FakeClient(["not-json", '{"value": 7}'])
 

@@ -158,6 +158,36 @@ class LLMServiceError(Exception):
         }
 
 
+def validate_english_only_payload(value, path="$"):
+    if isinstance(value, str):
+        invalid_character = next(
+            (
+                character
+                for character in value
+                if ord(character) > 127
+                or (ord(character) < 32 and character not in {"\t", "\n", "\r"})
+            ),
+            None,
+        )
+
+        if invalid_character is not None:
+            raise ValueError(
+                "Every LLM JSON string value must use English ASCII text only; "
+                f"non-English or unsupported characters were found at {path}"
+            )
+
+        return
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            validate_english_only_payload(child, f"{path}.{key}")
+        return
+
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            validate_english_only_payload(child, f"{path}[{index}]")
+
+
 def execute_json_request(
     *,
     task,
@@ -224,6 +254,7 @@ def execute_json_request(
             )
             content = str(response.choices[0].message.content or "")
             parsed = json.loads(content)
+            validate_english_only_payload(parsed)
             value = validator(parsed)
             elapsed_ms = round((time.perf_counter() - overall_started) * 1000)
             usage = getattr(response, "usage", None)

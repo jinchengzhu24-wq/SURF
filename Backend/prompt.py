@@ -1,8 +1,18 @@
 import json
 
 
+ENGLISH_ONLY_OUTPUT_RULE = (
+    "Understand user input written in any language, but translate its meaning "
+    "internally and write every JSON string value in English using ASCII "
+    "characters only. Never echo, quote, or preserve non-English user text in "
+    "the response. This rule applies to visible text, hidden contracts, style, "
+    "notes, reasons, identifiers, and every other string value. "
+)
+
+
 SYSTEM_PROMPT = (
-    "You are a classic Sokoban level design director. Your job is "
+    ENGLISH_ONLY_OUTPUT_RULE
+    + "You are a classic Sokoban level design director. Your job is "
     "to create a high-level blueprint for an algorithmic Sokoban "
     "level generator. Use classic design principles: compact rooms, "
     "corridors, choke points, goal-room pressure, route planning, "
@@ -15,7 +25,8 @@ SYSTEM_PROMPT = (
 
 
 HUMAN_ADJUSTMENT_CLARITY_SYSTEM_PROMPT = (
-    "You are a clarity gate for a HUMAN-led Sokoban revision workflow. "
+    ENGLISH_ONLY_OUTPUT_RULE
+    + "You are a clarity gate for a HUMAN-led Sokoban revision workflow. "
     "The user, not the AI, must diagnose the problem and choose the revision. "
     "Score only how actionable the submitted revision instruction is. Do not "
     "diagnose the level, propose a solution, rewrite the instruction, or add a "
@@ -333,7 +344,8 @@ def build_level_plan_messages(
 
 
 EXPANSION_SYSTEM_PROMPT = (
-    "You are a Sokoban design assistant. Expand a player's rough level idea "
+    ENGLISH_ONLY_OUTPUT_RULE
+    + "You are a Sokoban design assistant. Expand a player's rough level idea "
     "into exactly three distinct, playable high-level design directions for a "
     "classic 12x10 Sokoban level with exactly 2 boxes. Every option must be "
     "specific to the player's idea, not a generic template. The expansion shown "
@@ -351,7 +363,8 @@ EXPANSION_SYSTEM_PROMPT = (
 
 
 HA_REVISION_PLAN_SYSTEM_PROMPT = (
-    "You are the AI planning partner in a Human-AI Sokoban revision workflow. "
+    ENGLISH_ONLY_OUTPUT_RULE
+    + "You are the AI planning partner in a Human-AI Sokoban revision workflow. "
     "The human has already identified what they want to improve. Use the supplied "
     "previous LevelDesignPlan and corridor verification as the factual baseline. "
     "Return exactly three distinct, implementable revision plans. Every plan must "
@@ -364,7 +377,8 @@ HA_REVISION_PLAN_SYSTEM_PROMPT = (
 
 
 HA_REVISION_PLAN_EDIT_SYSTEM_PROMPT = (
-    "You revise one selected option in a Human-AI Sokoban workflow. The player "
+    ENGLISH_ONLY_OUTPUT_RULE
+    + "You revise one selected option in a Human-AI Sokoban workflow. The player "
     "edited the visible option description, and that edit is authoritative. Convert "
     "it into one supported, minimal LevelDesignPlan change contract using the "
     "previous plan as the factual baseline. Preserve every unlisted field, do not "
@@ -399,7 +413,7 @@ def build_ha_revision_plan_messages(context):
         "do not repeat a previously shown contract or merely rename it. Each visible "
         "description must state the concrete changes, what important structure stays "
         "unchanged, and the expected gameplay tradeoff in two or three concise "
-        "sentences, using the same language as the human adjustment. "
+        "English sentences, regardless of the human adjustment's language. "
         "Each option must use this shape: "
         '{"id":"A","title":"...","description":"...",'
         '"promptText":"{\\"changes\\":{...},\\"preserveUnlisted\\":true}"}. '
@@ -453,7 +467,7 @@ def build_ha_revision_plan_edit_messages(context):
         + ". Original selected option JSON: "
         + json.dumps(original_option, ensure_ascii=False, separators=(",", ":"))
         + ". Treat the edited description as the final revision intent. Return a "
-        "normalized player-facing description in the same language that preserves "
+        "normalized English player-facing description that preserves "
         "the edit while expressing only supported observable Sokoban changes, plus "
         "a hidden implementation contract. The new contract must differ from the "
         "original option contract and change only the smallest coherent set of "
@@ -531,8 +545,9 @@ def build_creative_idea_expansion_messages(creative_context):
         "high-level intent for difficulty, route shape, target layout, wall "
         "obstacles, water obstacles, choke points, and planning pressure. "
         "Do not promise unsupported mechanics, story elements, enemies, keys, "
-        "timers, moving parts, or visual-only themes. Keep language consistent "
-        "with the player's input language. Return exactly this JSON shape: "
+        "timers, moving parts, or visual-only themes. Write all returned text in "
+        "English even when the player's input uses another language. Return exactly "
+        "this JSON shape: "
         "{\"options\":["
         "{\"id\":\"A\",\"title\":\"...\",\"description\":\"...\",\"promptText\":\"...\"},"
         "{\"id\":\"B\",\"title\":\"...\",\"description\":\"...\",\"promptText\":\"...\"},"
@@ -544,8 +559,8 @@ def build_creative_idea_expansion_messages(creative_context):
         "features that can actually appear on the generated board. Whenever any "
         "literal part of the original idea is removed, replaced, simplified, or "
         "represented indirectly, the FIRST sentence of description is mandatory "
-        "and must be a localized statement equivalent to 'Adaptation: convert X "
-        "into Y' (for Chinese, use '适配：将 X 转换为 Y'). This first sentence must "
+        "and must use the English format 'Adaptation: convert X into Y'. This first "
+        "sentence must "
         "name both the changed source element and its supported replacement. The "
         "source side may name the unsupported mechanic, but the replacement side "
         "must name only static supported pressure; it must not claim that the "
@@ -564,8 +579,8 @@ def build_creative_idea_expansion_messages(creative_context):
         "for the downstream blueprint generator, not another creative-writing "
         "prompt. Keep promptText below 380 characters and use exactly this compact "
         "semicolon-separated format, preserving the ASCII keys, ASCII equals signs, "
-        "ASCII semicolons, ASCII slashes, and enum tokens even when the prose is "
-        "Chinese or another language: "
+        "ASCII semicolons, ASCII slashes, and enum tokens. All prose values must also "
+        "be English ASCII text: "
         "core=<shared core experience>; archetype=<value>; targetLayout=<value>; "
         "obstacleStyle=<value>; waterStyle=<value>; water=<default|none>; "
         "walls=<default|none>; corridor=<placement>/<width>/<orientation>/<role>/"
@@ -623,7 +638,7 @@ def build_creative_idea_expansion_messages(creative_context):
         "or a literal T-, L-, or S-shaped wall; corridor placement is not none but "
         "description does not explicitly state its center-or-side placement, width, "
         "and horizontal-or-vertical orientation; corridor placement is none but "
-        "description claims a corridor, passage, or hallway (including 通道 or 走廊); "
+        "description claims a corridor, passage, or hallway; "
         "waterStyle or targetLayout contradicts the visible placement description; "
         "any target, obstacle, water, corridor, or box-order contract choice is not "
         "represented in the visible description; "
