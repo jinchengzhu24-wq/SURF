@@ -15,6 +15,12 @@ EditorBuildSettings:
     path: Assets/Scenes/Menu.unity
     guid: be0e6a71c51902f4fb1e0c4f98786718
   - enabled: 1
+    path: Assets/Scenes/Matchmaking/Competition_Mode.unity
+    guid: 446c7b219a0554642bea0236fc8e6030
+  - enabled: 1
+    path: Assets/Scenes/Matchmaking/AI_Asistant_Mode.unity
+    guid: 6a14a51acd3717e4e9c404b891d83d93
+  - enabled: 1
     path: Assets/Scenes/Try/Algorithm_Level.unity
     guid: 8095dc561be14d7468f413afcf36b85a
   - enabled: 1
