@@ -439,6 +439,13 @@ public class LevelManager : MonoBehaviour
         {
             player.SetInputEnabled(enabled);
         }
+
+        Player2 player2 = FindObjectOfType<Player2>();
+
+        if (player2 != null)
+        {
+            player2.SetInputEnabled(enabled);
+        }
     }
 
     private void SetBlackPanelAlpha(float alpha)
