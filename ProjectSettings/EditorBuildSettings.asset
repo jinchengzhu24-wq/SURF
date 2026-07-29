@@ -27,6 +27,9 @@ EditorBuildSettings:
     path: Assets/Scenes/Matchmaking/DG.unity
     guid: 5e1cf2b6852d40543a16d8c267acea8e
   - enabled: 1
+    path: Assets/Scenes/Matchmaking/DG_Level.unity
+    guid: f7e72024c7b36b442924de7927bca1a0
+  - enabled: 1
     path: Assets/Scenes/Try/Algorithm_Level.unity
     guid: 8095dc561be14d7468f413afcf36b85a
   - enabled: 1

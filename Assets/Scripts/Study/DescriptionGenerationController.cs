@@ -12,7 +12,7 @@ public class DescriptionGenerationController : MonoBehaviour
 
     [Header("Navigation")]
     [Tooltip("Leave empty until the dedicated result scene is ready.")]
-    public string nextSceneName = "LLM_Level";
+    public string nextSceneName = "DG_Level";
 
     [Header("Initial Values")]
     [Tooltip(
