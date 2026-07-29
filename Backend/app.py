@@ -66,6 +66,8 @@ PORT = 8000
 START_URL = f"http://{HOST}:{PORT}/generate-level-plan"
 SHORT_LLM_TIMEOUT_SECONDS = 25.0
 PLAN_LLM_TIMEOUT_SECONDS = 45.0
+PC_LEVEL_LLM_TIMEOUT_SECONDS = 60.0
+PC_LEVEL_MAX_OUTPUT_TOKENS = 300
 DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -3445,8 +3447,14 @@ def create_pc_level_candidate(
         messages=build_pc_level_generation_messages(context),
         validator=validate_candidate,
         temperature=float(os.getenv("DEEPSEEK_PC_LEVEL_TEMPERATURE", "0.45")),
-        timeout_seconds=PLAN_LLM_TIMEOUT_SECONDS,
-        max_attempts=max_attempts,
+        timeout_seconds=float(
+            os.getenv(
+                "DEEPSEEK_PC_LEVEL_TIMEOUT_SECONDS",
+                str(PC_LEVEL_LLM_TIMEOUT_SECONDS),
+            )
+        ),
+        max_attempts=1,
+        max_tokens=PC_LEVEL_MAX_OUTPUT_TOKENS,
         request_id=request_id,
         validation_stage="pc_level_validation",
     )

@@ -173,6 +173,35 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertIn("previousCandidateRows", prompt_text)
         self.assertIn("Unity solver found no solution.", prompt_text)
 
+    def test_pc_model_call_uses_single_attempt_and_small_output_limit(self):
+        captured = {}
+
+        def execute_json_request(**kwargs):
+            captured.update(kwargs)
+            value = kwargs["validator"]({"rows": make_candidate()})
+            return LLMExecutionResult(value, 1, kwargs["request_id"])
+
+        with (
+            patch.dict(
+                backend.os.environ,
+                {"DEEPSEEK_PC_LEVEL_TIMEOUT_SECONDS": "60"},
+            ),
+            patch.object(
+                backend,
+                "execute_json_request",
+                side_effect=execute_json_request,
+            ),
+        ):
+            backend.create_pc_level_candidate(
+                self.context,
+                request_id="pc-budget-test",
+                max_attempts=2,
+            )
+
+        self.assertEqual(captured["max_attempts"], 1)
+        self.assertEqual(captured["max_tokens"], 300)
+        self.assertEqual(captured["timeout_seconds"], 60.0)
+
 
 if __name__ == "__main__":
     unittest.main()

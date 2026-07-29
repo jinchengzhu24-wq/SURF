@@ -40,7 +40,7 @@ public class PCLevelExpansionClient : MonoBehaviour
             yield break;
         }
 
-        int boundedMaxAttempts = Mathf.Clamp(maxAttempts, 1, 2);
+        int boundedMaxAttempts = 1;
         string requestId = LLMBackendError.CreateRequestId();
         string json;
 

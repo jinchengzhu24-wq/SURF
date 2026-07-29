@@ -120,14 +120,7 @@ public class PCLevelExpansionController : MonoBehaviour
                 failureMessage = string.IsNullOrEmpty(expansionClient.LastFailureMessage)
                     ? "The PC generation service did not return a candidate."
                     : expansionClient.LastFailureMessage;
-
-                if (!expansionClient.LastFailureRetryable)
-                {
-                    break;
-                }
-
-                rejectionReason = failureMessage;
-                continue;
+                break;
             }
 
             previousCandidateRows = CloneRows(response.rows);

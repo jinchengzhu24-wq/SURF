@@ -196,6 +196,7 @@ def execute_json_request(
     temperature,
     timeout_seconds,
     max_attempts=2,
+    max_tokens=None,
     request_id="",
     validation_stage="model_validation",
 ):
@@ -245,13 +246,18 @@ def execute_json_request(
                 maxAttempts=max_attempts,
                 timeoutSeconds=timeout_seconds,
             )
-            response = client.chat.completions.create(
-                model=model,
-                messages=current_messages,
-                response_format={"type": "json_object"},
-                temperature=temperature,
-                stream=False,
-            )
+            request_options = {
+                "model": model,
+                "messages": current_messages,
+                "response_format": {"type": "json_object"},
+                "temperature": temperature,
+                "stream": False,
+            }
+
+            if max_tokens is not None:
+                request_options["max_tokens"] = max(1, int(max_tokens))
+
+            response = client.chat.completions.create(**request_options)
             content = str(response.choices[0].message.content or "")
             parsed = json.loads(content)
             validate_english_only_payload(parsed)
