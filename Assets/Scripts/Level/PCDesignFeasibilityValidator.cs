@@ -28,6 +28,117 @@ public static class PCDesignFeasibilityValidator
         );
     }
 
+    public static bool TryValidateFeatureCapacity(
+        string[] sketchRows,
+        int requiredInternalWallTiles,
+        int minimumRemainingActivityArea,
+        out string message)
+    {
+        if (!TryGetDimensions(sketchRows, out int width, out int height))
+        {
+            message = "The PC design has invalid dimensions.";
+            return false;
+        }
+
+        bool[,] enclosedArea = FindEnclosedArea(
+            sketchRows,
+            width,
+            height
+        );
+        HashSet<Vector2Int> enclosedCells =
+            new HashSet<Vector2Int>();
+        List<Vector2Int> wallCandidates =
+            new List<Vector2Int>();
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                if (!enclosedArea[x, y])
+                {
+                    continue;
+                }
+
+                Vector2Int position = new Vector2Int(x, y);
+                enclosedCells.Add(position);
+
+                if (sketchRows[y][x] == LevelData.Empty
+                    && !IsNextToBoxStart(
+                        position,
+                        sketchRows,
+                        width,
+                        height))
+                {
+                    wallCandidates.Add(position);
+                }
+            }
+        }
+
+        for (int y = 0; y < height - 1; y++)
+        {
+            for (int x = 0; x < width - 1; x++)
+            {
+                HashSet<Vector2Int> waterCells =
+                    new HashSet<Vector2Int>
+                    {
+                        new Vector2Int(x, y),
+                        new Vector2Int(x + 1, y),
+                        new Vector2Int(x, y + 1),
+                        new Vector2Int(x + 1, y + 1)
+                    };
+
+                if (!CanUseAsWaterArea(
+                        waterCells,
+                        sketchRows,
+                        enclosedArea))
+                {
+                    continue;
+                }
+
+                HashSet<Vector2Int> remainingWalkable =
+                    new HashSet<Vector2Int>(enclosedCells);
+                remainingWalkable.ExceptWith(waterCells);
+                List<Vector2Int> availableWalls =
+                    new List<Vector2Int>();
+
+                for (int candidate = 0;
+                    candidate < wallCandidates.Count;
+                    candidate++)
+                {
+                    if (!waterCells.Contains(wallCandidates[candidate]))
+                    {
+                        availableWalls.Add(wallCandidates[candidate]);
+                    }
+                }
+
+                if (remainingWalkable.Count - requiredInternalWallTiles
+                        < minimumRemainingActivityArea
+                    || availableWalls.Count < requiredInternalWallTiles)
+                {
+                    continue;
+                }
+
+                if (TryChooseConnectedWalls(
+                        availableWalls,
+                        0,
+                        requiredInternalWallTiles,
+                        minimumRemainingActivityArea,
+                        remainingWalkable))
+                {
+                    message = "The PC design has room for required generated features.";
+                    return true;
+                }
+            }
+        }
+
+        message = "Leave room for one 2x2 water area and "
+            + requiredInternalWallTiles
+            + " internal wall tiles while retaining "
+            + minimumRemainingActivityArea
+            + " connected activity cells.";
+        return false;
+    }
+
     public static bool TryValidateStartClearance(
         string[] rows,
         out string message)
@@ -328,6 +439,115 @@ public static class PCDesignFeasibilityValidator
         }
 
         return enclosed;
+    }
+
+    private static bool CanUseAsWaterArea(
+        HashSet<Vector2Int> waterCells,
+        string[] sketchRows,
+        bool[,] enclosedArea)
+    {
+        foreach (Vector2Int position in waterCells)
+        {
+            if (!enclosedArea[position.x, position.y]
+                || sketchRows[position.y][position.x] != LevelData.Empty)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsNextToBoxStart(
+        Vector2Int position,
+        string[] sketchRows,
+        int width,
+        int height)
+    {
+        for (int direction = 0; direction < directions.Length; direction++)
+        {
+            Vector2Int neighbor = position + directions[direction];
+
+            if (IsInside(neighbor, width, height)
+                && sketchRows[neighbor.y][neighbor.x] == LevelData.Box)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryChooseConnectedWalls(
+        List<Vector2Int> wallCandidates,
+        int startIndex,
+        int wallsRemaining,
+        int minimumRemainingActivityArea,
+        HashSet<Vector2Int> remainingWalkable)
+    {
+        if (wallsRemaining == 0)
+        {
+            return remainingWalkable.Count >= minimumRemainingActivityArea
+                && IsSingleConnectedArea(remainingWalkable);
+        }
+
+        int finalStart = wallCandidates.Count - wallsRemaining;
+
+        for (int index = startIndex; index <= finalStart; index++)
+        {
+            Vector2Int wall = wallCandidates[index];
+
+            if (!remainingWalkable.Remove(wall))
+            {
+                continue;
+            }
+
+            if (TryChooseConnectedWalls(
+                    wallCandidates,
+                    index + 1,
+                    wallsRemaining - 1,
+                    minimumRemainingActivityArea,
+                    remainingWalkable))
+            {
+                return true;
+            }
+
+            remainingWalkable.Add(wall);
+        }
+
+        return false;
+    }
+
+    private static bool IsSingleConnectedArea(
+        HashSet<Vector2Int> cells)
+    {
+        if (cells.Count == 0)
+        {
+            return false;
+        }
+
+        Vector2Int start = GetFirstPosition(cells);
+        HashSet<Vector2Int> visited =
+            new HashSet<Vector2Int> { start };
+        Queue<Vector2Int> open = new Queue<Vector2Int>();
+        open.Enqueue(start);
+
+        while (open.Count > 0)
+        {
+            Vector2Int current = open.Dequeue();
+
+            for (int direction = 0; direction < directions.Length; direction++)
+            {
+                Vector2Int neighbor = current + directions[direction];
+
+                if (cells.Contains(neighbor) && visited.Add(neighbor))
+                {
+                    open.Enqueue(neighbor);
+                }
+            }
+        }
+
+        return visited.Count == cells.Count;
     }
 
     private static void EnqueueOutside(

@@ -18,6 +18,8 @@ public class PCLevelExpansionController : MonoBehaviour
 
     [Header("Candidate Rules")]
     [SerializeField] private int minimumActivityArea = 48;
+    [SerializeField] private int minimumInternalWallTiles = 2;
+    [SerializeField] private int minimumWaterAreas = 1;
     [SerializeField] private int minimumWaterWidth = 2;
     [SerializeField] private int minimumWaterHeight = 2;
     [SerializeField] private int maximumWaterWidth = 4;
@@ -130,6 +132,8 @@ public class PCLevelExpansionController : MonoBehaviour
                     sketch,
                     response.rows,
                     minimumActivityArea,
+                    minimumInternalWallTiles,
+                    minimumWaterAreas,
                     minimumWaterWidth,
                     minimumWaterHeight,
                     maximumWaterWidth,

@@ -15,6 +15,8 @@ public static class PCLevelCandidateValidator
         PCDesignSketchData sketch,
         string[] candidateRows,
         int minimumActivityArea,
+        int minimumInternalWallTiles,
+        int minimumWaterAreas,
         int minimumWaterWidth,
         int minimumWaterHeight,
         int maximumWaterWidth,
@@ -32,6 +34,7 @@ public static class PCLevelCandidateValidator
         int candidateBoxCount = 0;
         int candidateTargetCount = 0;
         int playerCount = 0;
+        int internalWallTileCount = 0;
 
         for (int y = 0; y < sketch.height; y++)
         {
@@ -88,6 +91,12 @@ public static class PCLevelCandidateValidator
                     ref playerCount,
                     true
                 );
+
+                if (candidate == LevelData.Wall
+                    && source != LevelData.Wall)
+                {
+                    internalWallTileCount++;
+                }
             }
         }
 
@@ -119,8 +128,25 @@ public static class PCLevelCandidateValidator
                 minimumWaterHeight,
                 maximumWaterWidth,
                 maximumWaterHeight,
+                out int waterAreaCount,
                 out message))
         {
+            return false;
+        }
+
+        if (internalWallTileCount < minimumInternalWallTiles)
+        {
+            message = "Candidate needs at least "
+                + minimumInternalWallTiles
+                + " generated internal wall tiles.";
+            return false;
+        }
+
+        if (waterAreaCount < minimumWaterAreas)
+        {
+            message = "Candidate needs at least "
+                + minimumWaterAreas
+                + " water area.";
             return false;
         }
 
@@ -259,8 +285,10 @@ public static class PCLevelCandidateValidator
         int minimumHeight,
         int maximumWidth,
         int maximumHeight,
+        out int waterAreaCount,
         out string message)
     {
+        waterAreaCount = 0;
         bool[,] visited = new bool[width, height];
 
         for (int y = 0; y < height; y++)
@@ -272,6 +300,7 @@ public static class PCLevelCandidateValidator
                     continue;
                 }
 
+                waterAreaCount++;
                 Queue<Vector2Int> open = new Queue<Vector2Int>();
                 open.Enqueue(new Vector2Int(x, y));
                 visited[x, y] = true;

@@ -32,8 +32,9 @@ PC_LEVEL_GENERATION_SYSTEM_PROMPT = (
     "player must be an object containing integer x and y. internalWalls must "
     "be an array of objects that each contain integer x and y. waterAreaIds "
     "must be an array of integer IDs copied exactly from allowedWaterAreas. "
-    "Use an empty array when no internal wall or water area is needed. Do not "
-    "return map rows or individual ground "
+    "Select at least four valid internal wall coordinates and at least one "
+    "valid water area ID. Never return an empty internalWalls or waterAreaIds "
+    "array. Do not return map rows or individual ground "
     "tiles because the server fills all remaining enclosed cells with ground. "
     "Copy the player coordinate exactly from editableCoordinates. Copy every "
     "internalWalls coordinate exactly from allowedWallCoordinates. Select water "
@@ -61,6 +62,9 @@ def build_pc_level_generation_messages(context):
             context.get("allowedWallCoordinates") or []
         ),
         "allowedWaterAreas": list(context.get("allowedWaterAreas") or []),
+        "preferredMinimumInternalWalls": 4,
+        "fallbackMinimumInternalWalls": 2,
+        "minimumWaterAreas": 1,
     }
 
     if previous_rows:

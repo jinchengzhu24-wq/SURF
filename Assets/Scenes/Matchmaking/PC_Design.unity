@@ -1897,7 +1897,7 @@ MonoBehaviour:
   bottomLeftCell: {x: -6, y: -4, z: 0}
   maximumStartCount: 2
   maximumTargetCount: 2
-  minimumActivityArea: 48
+  minimumActivityArea: 56
 --- !u!1 &100000200
 GameObject:
   m_ObjectHideFlags: 0
@@ -3091,7 +3091,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 'Starts: 0/2    Targets: 0/2    Area: 0 (min 48)'
+  m_Text: 'Starts: 0/2    Targets: 0/2    Area: 0 (min 56)'
 --- !u!1 &100000280
 GameObject:
   m_ObjectHideFlags: 0
@@ -3851,6 +3851,9 @@ MonoBehaviour:
 
     9. Box spawn points can not be placed
     next to the wall.
+
+    10. The enclosed activity area needs at least 56 cells and must leave room
+    for four internal wall tiles and one 2x2 water area.
 
 '
 --- !u!222 &1017660036

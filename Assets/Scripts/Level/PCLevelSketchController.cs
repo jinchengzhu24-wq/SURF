@@ -7,6 +7,9 @@ using UnityEngine.UI;
 
 public class PCLevelSketchController : MonoBehaviour
 {
+    private const int RequiredGeneratedInternalWallTiles = 4;
+    private const int MinimumGeneratedActivityArea = 48;
+
     public enum SketchBrush
     {
         Wall,
@@ -41,7 +44,7 @@ public class PCLevelSketchController : MonoBehaviour
     [SerializeField] private Vector3Int bottomLeftCell = new Vector3Int(-6, -4, 0);
     [SerializeField] private int maximumStartCount = 2;
     [SerializeField] private int maximumTargetCount = 2;
-    [SerializeField] private int minimumActivityArea = 48;
+    [SerializeField] private int minimumActivityArea = 56;
 
     private char[,] sketchCells;
     private SketchBrush selectedBrush = SketchBrush.Wall;
@@ -246,8 +249,19 @@ public class PCLevelSketchController : MonoBehaviour
             return false;
         }
 
+        string[] sketchRows = GetSketchRows();
+
+        if (!PCDesignFeasibilityValidator.TryValidateFeatureCapacity(
+                sketchRows,
+                RequiredGeneratedInternalWallTiles,
+                MinimumGeneratedActivityArea,
+                out message))
+        {
+            return false;
+        }
+
         if (!PCDesignFeasibilityValidator.TryValidate(
-                GetSketchRows(),
+                sketchRows,
                 out message))
         {
             return false;

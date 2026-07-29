@@ -8,6 +8,7 @@ import threading
 import time
 import webbrowser
 from collections import deque
+from itertools import combinations
 from pathlib import Path
 
 import uvicorn
@@ -69,6 +70,10 @@ SHORT_LLM_TIMEOUT_SECONDS = 25.0
 PLAN_LLM_TIMEOUT_SECONDS = 45.0
 PC_LEVEL_LLM_TIMEOUT_SECONDS = 60.0
 PC_FEASIBILITY_MAX_SEARCH_STATES = 120000
+PC_DESIGN_MIN_ACTIVITY_AREA = 56
+PC_PRIMARY_MIN_INTERNAL_WALLS = 4
+PC_FALLBACK_MIN_INTERNAL_WALLS = 2
+PC_MIN_WATER_AREAS = 1
 DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -3439,9 +3444,24 @@ def create_pc_level_candidate(
     max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
 ):
     context = normalize_pc_level_request(context)
+    structurally_valid_candidate_count = 0
 
     def validate_candidate(payload):
-        return build_pc_level_candidate(payload, context, request_id=request_id)
+        nonlocal structurally_valid_candidate_count
+        parse_pc_coordinate_layout(payload)
+        structurally_valid_candidate_count += 1
+        minimum_internal_walls = (
+            PC_PRIMARY_MIN_INTERNAL_WALLS
+            if structurally_valid_candidate_count == 1
+            else PC_FALLBACK_MIN_INTERNAL_WALLS
+        )
+        return build_pc_level_candidate(
+            payload,
+            context,
+            request_id=request_id,
+            minimum_internal_walls=minimum_internal_walls,
+            minimum_water_areas=PC_MIN_WATER_AREAS,
+        )
 
     return execute_json_request(
         task="pc_level_generation",
@@ -3465,26 +3485,14 @@ def create_pc_level_candidate(
     )
 
 
-def build_pc_level_candidate(layout, context, request_id=""):
-    if layout is None or not isinstance(layout, dict):
-        raise ValueError("model returned no PC coordinate layout")
-
-    required_fields = {"player", "internalWalls", "waterAreaIds"}
-
-    if set(layout) != required_fields:
-        raise ValueError(
-            "PC coordinate layout must contain only player, internalWalls, "
-            "and waterAreaIds"
-        )
-
-    internal_walls = layout.get("internalWalls")
-    water_area_ids = layout.get("waterAreaIds")
-
-    if not isinstance(internal_walls, list):
-        raise ValueError("internalWalls must be an array")
-
-    if not isinstance(water_area_ids, list):
-        raise ValueError("waterAreaIds must be an array")
+def build_pc_level_candidate(
+    layout,
+    context,
+    request_id="",
+    minimum_internal_walls=0,
+    minimum_water_areas=0,
+):
+    player, internal_walls, water_area_ids = parse_pc_coordinate_layout(layout)
 
     width = context["width"]
     height = context["height"]
@@ -3498,7 +3506,6 @@ def build_pc_level_candidate(layout, context, request_id=""):
         for y in range(height)
     ]
 
-    player = parse_pc_position(layout.get("player"), "player")
     player_x, player_y = player
 
     if (
@@ -3679,12 +3686,45 @@ def build_pc_level_candidate(layout, context, request_id=""):
         {"rows": ["".join(row) for row in rows]},
         context,
     )
+    validate_pc_required_features(
+        candidate["rows"],
+        sketch_rows,
+        width,
+        height,
+        minimum_internal_walls,
+        minimum_water_areas,
+    )
     validate_pc_completed_level_solvability(
         candidate["rows"],
         width,
         height,
     )
     return candidate
+
+
+def parse_pc_coordinate_layout(layout):
+    if layout is None or not isinstance(layout, dict):
+        raise ValueError("model returned no PC coordinate layout")
+
+    required_fields = {"player", "internalWalls", "waterAreaIds"}
+
+    if set(layout) != required_fields:
+        raise ValueError(
+            "PC coordinate layout must contain only player, internalWalls, "
+            "and waterAreaIds"
+        )
+
+    internal_walls = layout.get("internalWalls")
+    water_area_ids = layout.get("waterAreaIds")
+
+    if not isinstance(internal_walls, list):
+        raise ValueError("internalWalls must be an array")
+
+    if not isinstance(water_area_ids, list):
+        raise ValueError("waterAreaIds must be an array")
+
+    player = parse_pc_position(layout.get("player"), "player")
+    return player, internal_walls, water_area_ids
 
 
 def log_pc_dropped_item(request_id, item_type, item_index, reason):
@@ -3741,8 +3781,11 @@ def normalize_pc_level_request(context):
         if enclosed[y][x]
     }
 
-    if len(enclosed_cells) < 48:
-        raise ValueError("PC sketch enclosed activity area must contain at least 48 cells")
+    if len(enclosed_cells) < PC_DESIGN_MIN_ACTIVITY_AREA:
+        raise ValueError(
+            "PC sketch enclosed activity area must contain at least "
+            f"{PC_DESIGN_MIN_ACTIVITY_AREA} cells"
+        )
 
     if any(
         rows[y][x] in {"s", "t"} and (x, y) not in enclosed_cells
@@ -3818,6 +3861,18 @@ def normalize_pc_level_request(context):
         width,
         height,
     )
+
+    if not has_pc_required_feature_capacity(
+        enclosed_cells,
+        allowed_wall_coordinates,
+        allowed_water_areas,
+        PC_PRIMARY_MIN_INTERNAL_WALLS,
+        48,
+    ):
+        raise ValueError(
+            "PC sketch must leave room for one water area and four internal "
+            "wall tiles while retaining 48 connected walkable cells"
+        )
 
     return {
         "width": width,
@@ -3914,6 +3969,39 @@ def validate_pc_candidate_activity(rows, width, height):
         raise ValueError("candidate walkable cells must form one connected component")
 
 
+def validate_pc_required_features(
+    rows,
+    sketch_rows,
+    width,
+    height,
+    minimum_internal_walls,
+    minimum_water_areas,
+):
+    internal_wall_count = sum(
+        1
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "#" and sketch_rows[y][x] != "#"
+    )
+    water_area_count = validate_pc_water_rectangles(rows, width, height)
+
+    if internal_wall_count < minimum_internal_walls:
+        raise ValueError(
+            "candidate retained "
+            f"{internal_wall_count} internal wall tiles; at least "
+            f"{minimum_internal_walls} are required"
+        )
+
+    if water_area_count < minimum_water_areas:
+        raise ValueError(
+            "candidate retained "
+            f"{water_area_count} water areas; at least "
+            f"{minimum_water_areas} are required"
+        )
+
+    return internal_wall_count, water_area_count
+
+
 def enumerate_pc_allowed_water_areas(
     sketch_rows,
     enclosed_cells,
@@ -3960,6 +4048,50 @@ def enumerate_pc_allowed_water_areas(
                     )
 
     return allowed_areas
+
+
+def has_pc_required_feature_capacity(
+    enclosed_cells,
+    allowed_wall_coordinates,
+    allowed_water_areas,
+    required_internal_walls,
+    minimum_walkable_cells,
+):
+    allowed_wall_cells = {
+        tuple(coordinate)
+        for coordinate in allowed_wall_coordinates
+    }
+
+    for area in allowed_water_areas:
+        water_cells = {
+            (cell_x, cell_y)
+            for cell_y in range(area["y"], area["y"] + area["height"])
+            for cell_x in range(area["x"], area["x"] + area["width"])
+        }
+        wall_candidates = sorted(
+            allowed_wall_cells - water_cells,
+            key=lambda position: (position[1], position[0]),
+        )
+
+        if (
+            len(enclosed_cells)
+            - len(water_cells)
+            - required_internal_walls
+            < minimum_walkable_cells
+            or len(wall_candidates) < required_internal_walls
+        ):
+            continue
+
+        for walls in combinations(wall_candidates, required_internal_walls):
+            remaining_walkable = enclosed_cells - water_cells - set(walls)
+
+            if (
+                len(remaining_walkable) >= minimum_walkable_cells
+                and count_pc_components(remaining_walkable) == 1
+            ):
+                return True
+
+    return False
 
 
 def validate_pc_rows(rows, width, height, allowed_tiles, field_name):
@@ -4297,8 +4429,10 @@ def validate_pc_water_rectangles(rows, width, height):
         for x in range(width)
         if rows[y][x] == "@"
     }
+    water_area_count = 0
 
     while remaining:
+        water_area_count += 1
         start = remaining.pop()
         component = {start}
         open_cells = [start]
@@ -4325,6 +4459,8 @@ def validate_pc_water_rectangles(rows, width, height):
             or len(component) != area_width * area_height
         ):
             raise ValueError("every water area must be a complete 2-4 by 2-4 rectangle")
+
+    return water_area_count
 
 
 def validate_plan(

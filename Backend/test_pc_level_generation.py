@@ -64,6 +64,24 @@ def find_water_area_id(context, x, y, width, height):
     )
 
 
+def make_required_layout(context, wall_count=4, include_water=True):
+    layout = {
+        "player": {"x": 3, "y": 2},
+        "internalWalls": [
+            {"x": x, "y": y}
+            for x, y in ((2, 2), (6, 2), (7, 2), (8, 2))[:wall_count]
+        ],
+        "waterAreaIds": [],
+    }
+
+    if include_water:
+        layout["waterAreaIds"] = [
+            find_water_area_id(context, 4, 2, 2, 2),
+        ]
+
+    return layout
+
+
 class PCLevelGenerationTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(backend.app)
@@ -116,6 +134,71 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         self.assertEqual(result["rows"][2], " #p.@@#...# ")
         self.assertEqual(result["rows"][3], " #.s@@..t.# ")
+
+    def test_first_candidate_accepts_four_walls_and_one_water_area(self):
+        context = backend.normalize_pc_level_request(self.context)
+
+        result = backend.build_pc_level_candidate(
+            make_required_layout(context),
+            context,
+            minimum_internal_walls=4,
+            minimum_water_areas=1,
+        )
+
+        wall_count, water_count = backend.validate_pc_required_features(
+            result["rows"],
+            context["sketchRows"],
+            12,
+            10,
+            4,
+            1,
+        )
+        self.assertEqual(wall_count, 4)
+        self.assertEqual(water_count, 1)
+
+    def test_filtered_first_candidate_fails_below_four_walls(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_required_layout(context)
+        layout["internalWalls"][-1] = {"x": 3, "y": 2}
+
+        with self.assertRaisesRegex(ValueError, "at least 4"):
+            backend.build_pc_level_candidate(
+                layout,
+                context,
+                minimum_internal_walls=4,
+                minimum_water_areas=1,
+            )
+
+    def test_fallback_candidate_requires_two_walls_and_one_water_area(self):
+        context = backend.normalize_pc_level_request(self.context)
+
+        accepted = backend.build_pc_level_candidate(
+            make_required_layout(context, wall_count=2),
+            context,
+            minimum_internal_walls=2,
+            minimum_water_areas=1,
+        )
+        self.assertIsNotNone(accepted)
+
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            backend.build_pc_level_candidate(
+                make_required_layout(context, wall_count=1),
+                context,
+                minimum_internal_walls=2,
+                minimum_water_areas=1,
+            )
+
+        with self.assertRaisesRegex(ValueError, "at least 1"):
+            backend.build_pc_level_candidate(
+                make_required_layout(
+                    context,
+                    wall_count=2,
+                    include_water=False,
+                ),
+                context,
+                minimum_internal_walls=2,
+                minimum_water_areas=1,
+            )
 
     def test_coordinate_layout_rejects_out_of_bounds_player(self):
         layout = make_layout()
@@ -373,7 +456,8 @@ class PCLevelGenerationTests(unittest.TestCase):
 
     def test_api_returns_rows_after_internal_coordinate_generation(self):
         def execute_json_request(**kwargs):
-            value = kwargs["validator"](make_layout())
+            context = backend.normalize_pc_level_request(self.context)
+            value = kwargs["validator"](make_required_layout(context))
             return LLMExecutionResult(value, 1, kwargs["request_id"])
 
         with patch.object(
@@ -387,8 +471,56 @@ class PCLevelGenerationTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"rows": make_candidate()})
+        rows = response.json()["rows"]
+        self.assertEqual(
+            backend.validate_pc_water_rectangles(rows, 12, 10),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                1
+                for y in range(10)
+                for x in range(12)
+                if rows[y][x] == "#" and make_sketch()[y][x] != "#"
+            ),
+            4,
+        )
         self.assertEqual(response.headers["X-LLM-Attempts-Used"], "1")
+
+    def test_second_structural_candidate_uses_two_wall_fallback(self):
+        def execute_json_request(**kwargs):
+            normalized = backend.normalize_pc_level_request(self.context)
+            fallback_layout = make_required_layout(
+                normalized,
+                wall_count=2,
+            )
+
+            with self.assertRaisesRegex(ValueError, "at least 4"):
+                kwargs["validator"](fallback_layout)
+
+            value = kwargs["validator"](fallback_layout)
+            return LLMExecutionResult(value, 2, kwargs["request_id"])
+
+        with patch.object(
+            backend,
+            "execute_json_request",
+            side_effect=execute_json_request,
+        ):
+            execution = backend.create_pc_level_candidate(
+                self.context,
+                request_id="pc-fallback-test",
+                max_attempts=2,
+            )
+
+        self.assertEqual(execution.attempts_used, 2)
+        backend.validate_pc_required_features(
+            execution.value["rows"],
+            make_sketch(),
+            12,
+            10,
+            2,
+            1,
+        )
 
     def test_invalid_sketch_is_rejected_before_llm(self):
         payload = copy.deepcopy(self.context)
@@ -408,6 +540,44 @@ class PCLevelGenerationTests(unittest.TestCase):
         normalized = backend.normalize_pc_level_request(payload)
 
         self.assertIsNone(normalized["previousCandidateRows"])
+
+    def test_sketch_requires_at_least_56_enclosed_cells(self):
+        payload = copy.deepcopy(self.context)
+        row = list(payload["sketchRows"][8])
+        row[9] = "#"
+        payload["sketchRows"][8] = "".join(row)
+
+        with self.assertRaisesRegex(ValueError, "at least 56"):
+            backend.normalize_pc_level_request(payload)
+
+    def test_sketch_requires_capacity_for_four_walls_and_water(self):
+        normalized = backend.normalize_pc_level_request(self.context)
+        enclosed = backend.find_pc_enclosed_cells(make_sketch(), 12, 10)
+        enclosed_cells = {
+            (x, y)
+            for y in range(10)
+            for x in range(12)
+            if enclosed[y][x]
+        }
+
+        self.assertTrue(
+            backend.has_pc_required_feature_capacity(
+                enclosed_cells,
+                normalized["allowedWallCoordinates"],
+                normalized["allowedWaterAreas"],
+                4,
+                48,
+            )
+        )
+        self.assertFalse(
+            backend.has_pc_required_feature_capacity(
+                enclosed_cells,
+                normalized["allowedWallCoordinates"],
+                [],
+                4,
+                48,
+            )
+        )
 
     def test_prompt_guidance_lists_only_legal_wall_coordinates(self):
         normalized = backend.normalize_pc_level_request(self.context)
@@ -547,7 +717,8 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         def execute_json_request(**kwargs):
             captured_messages.extend(kwargs["messages"])
-            value = kwargs["validator"](make_layout())
+            normalized = backend.normalize_pc_level_request(self.context)
+            value = kwargs["validator"](make_required_layout(normalized))
             return LLMExecutionResult(value, 1, kwargs["request_id"])
 
         with patch.object(
@@ -570,6 +741,9 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertIn("allowedWallCoordinates", prompt_text)
         self.assertIn("allowedWaterAreas", prompt_text)
         self.assertIn("waterAreaIds", prompt_text)
+        self.assertIn("at least four", prompt_text)
+        self.assertIn("fallbackMinimumInternalWalls", prompt_text)
+        self.assertNotIn("Use an empty array", prompt_text)
         self.assertNotIn('"player":{"x":2,"y":2}', prompt_text)
 
     def test_pc_model_call_retries_only_model_output_failures(self):
@@ -577,7 +751,8 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         def execute_json_request(**kwargs):
             captured.update(kwargs)
-            value = kwargs["validator"](make_layout())
+            normalized = backend.normalize_pc_level_request(self.context)
+            value = kwargs["validator"](make_required_layout(normalized))
             return LLMExecutionResult(value, 1, kwargs["request_id"])
 
         with (
