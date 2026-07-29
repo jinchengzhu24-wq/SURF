@@ -17,7 +17,7 @@ def make_sketch():
         "            ",
         " ########## ",
         " #        # ",
-        " #s      t# ",
+        " # s    t # ",
         " #        # ",
         " #        # ",
         " #        # ",
@@ -32,7 +32,7 @@ def make_candidate():
         "            ",
         " ########## ",
         " #p.......# ",
-        " #s......t# ",
+        " #.s....t.# ",
         " #........# ",
         " #........# ",
         " #........# ",
@@ -105,9 +105,45 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         self.assertIsNone(normalized["previousCandidateRows"])
 
+    def test_box_start_touching_wall_is_rejected(self):
+        payload = copy.deepcopy(self.context)
+        payload["sketchRows"][3] = " #s     t # "
+
+        with self.assertRaisesRegex(ValueError, "cannot touch a wall"):
+            backend.normalize_pc_level_request(payload)
+
+    def test_unsolvable_open_sketch_is_rejected(self):
+        rows = [
+            "   #######  ",
+            "####   s #  ",
+            "#        ###",
+            "#          #",
+            "#s         #",
+            "#         t#",
+            "##         #",
+            " #         #",
+            " #   t   ###",
+            " #########  ",
+        ]
+        enclosed = backend.find_pc_enclosed_cells(rows, 12, 10)
+        enclosed_cells = {
+            (x, y)
+            for y in range(10)
+            for x in range(12)
+            if enclosed[y][x]
+        }
+
+        with self.assertRaisesRegex(ValueError, "no solvable open completion"):
+            backend.validate_pc_open_sketch_feasibility(
+                rows,
+                enclosed_cells,
+                12,
+                10,
+            )
+
     def test_moving_fixed_tile_is_rejected(self):
         candidate = make_candidate()
-        candidate[3] = " #.s.....t# "
+        candidate[3] = " #..s...t.# "
 
         with self.assertRaisesRegex(ValueError, "fixed tile"):
             backend.validate_pc_level_candidate(
@@ -145,6 +181,16 @@ class PCLevelGenerationTests(unittest.TestCase):
                 backend.normalize_pc_level_request(self.context),
             )
 
+    def test_candidate_cannot_add_wall_next_to_box_start(self):
+        candidate = make_candidate()
+        candidate[3] = " ##s....t.# "
+
+        with self.assertRaisesRegex(ValueError, "cannot touch a wall"):
+            backend.validate_pc_level_candidate(
+                {"rows": candidate},
+                backend.normalize_pc_level_request(self.context),
+            )
+
     def test_previous_rejection_is_added_to_prompt(self):
         context = {
             **self.context,
@@ -173,7 +219,7 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertIn("previousCandidateRows", prompt_text)
         self.assertIn("Unity solver found no solution.", prompt_text)
 
-    def test_pc_model_call_uses_single_attempt_and_small_output_limit(self):
+    def test_pc_model_call_uses_single_attempt_and_dedicated_timeout(self):
         captured = {}
 
         def execute_json_request(**kwargs):
@@ -199,8 +245,8 @@ class PCLevelGenerationTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["max_attempts"], 1)
-        self.assertEqual(captured["max_tokens"], 1024)
         self.assertEqual(captured["timeout_seconds"], 60.0)
+        self.assertEqual(captured["thinking_mode"], "disabled")
 
 
 if __name__ == "__main__":

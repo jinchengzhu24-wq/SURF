@@ -104,6 +104,13 @@ public static class PCLevelCandidateValidator
             return false;
         }
 
+        if (!PCDesignFeasibilityValidator.TryValidateStartClearance(
+                candidateRows,
+                out message))
+        {
+            return false;
+        }
+
         if (!TryValidateWaterAreas(
                 candidateRows,
                 sketch.width,

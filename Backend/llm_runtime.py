@@ -196,7 +196,7 @@ def execute_json_request(
     temperature,
     timeout_seconds,
     max_attempts=2,
-    max_tokens=None,
+    thinking_mode=None,
     request_id="",
     validation_stage="model_validation",
 ):
@@ -254,8 +254,10 @@ def execute_json_request(
                 "stream": False,
             }
 
-            if max_tokens is not None:
-                request_options["max_tokens"] = max(1, int(max_tokens))
+            if thinking_mode in {"enabled", "disabled"}:
+                request_options["extra_body"] = {
+                    "thinking": {"type": thinking_mode}
+                }
 
             response = client.chat.completions.create(**request_options)
             content = str(response.choices[0].message.content or "")

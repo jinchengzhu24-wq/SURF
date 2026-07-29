@@ -7,6 +7,7 @@ import secrets
 import threading
 import time
 import webbrowser
+from collections import deque
 from pathlib import Path
 
 import uvicorn
@@ -67,7 +68,7 @@ START_URL = f"http://{HOST}:{PORT}/generate-level-plan"
 SHORT_LLM_TIMEOUT_SECONDS = 25.0
 PLAN_LLM_TIMEOUT_SECONDS = 45.0
 PC_LEVEL_LLM_TIMEOUT_SECONDS = 60.0
-PC_LEVEL_MAX_OUTPUT_TOKENS = 1024
+PC_FEASIBILITY_MAX_SEARCH_STATES = 120000
 DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -3454,7 +3455,7 @@ def create_pc_level_candidate(
             )
         ),
         max_attempts=1,
-        max_tokens=PC_LEVEL_MAX_OUTPUT_TOKENS,
+        thinking_mode="disabled",
         request_id=request_id,
         validation_stage="pc_level_validation",
     )
@@ -3496,6 +3497,14 @@ def normalize_pc_level_request(context):
 
     if count_pc_components(enclosed_cells) != 1:
         raise ValueError("PC sketch must contain exactly one enclosed activity area")
+
+    validate_pc_start_clearance(rows, width, height)
+    validate_pc_open_sketch_feasibility(
+        rows,
+        enclosed_cells,
+        width,
+        height,
+    )
 
     previous_rows = context.get("previousCandidateRows")
 
@@ -3570,6 +3579,7 @@ def validate_pc_level_candidate(payload, context):
     if sum(row.count("p") for row in rows) != 1:
         raise ValueError("candidate must contain exactly one p")
 
+    validate_pc_start_clearance(rows, width, height)
     validate_pc_water_rectangles(rows, width, height)
     walkable = {
         (x, y)
@@ -3662,6 +3672,192 @@ def count_pc_components(cells):
                     open_cells.append(neighbor)
 
     return component_count
+
+
+def validate_pc_start_clearance(rows, width, height):
+    for y in range(height):
+        for x in range(width):
+            if rows[y][x] != "s":
+                continue
+
+            for neighbor_x, neighbor_y in (
+                (x + 1, y),
+                (x - 1, y),
+                (x, y + 1),
+                (x, y - 1),
+            ):
+                if (
+                    0 <= neighbor_x < width
+                    and 0 <= neighbor_y < height
+                    and rows[neighbor_y][neighbor_x] == "#"
+                ):
+                    raise ValueError(
+                        "box start at row "
+                        f"{y + 1}, column {x + 1} cannot touch a wall"
+                    )
+
+
+def validate_pc_open_sketch_feasibility(
+    rows,
+    enclosed_cells,
+    width,
+    height,
+    maximum_search_states=PC_FEASIBILITY_MAX_SEARCH_STATES,
+):
+    walkable = set(enclosed_cells)
+    start_boxes = tuple(
+        sorted(
+            (x, y)
+            for y in range(height)
+            for x in range(width)
+            if rows[y][x] == "s"
+        )
+    )
+    targets = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "t"
+    }
+    initial_regions = find_pc_region_representatives(
+        walkable,
+        set(start_boxes),
+    )
+
+    if not initial_regions:
+        raise ValueError("PC sketch has no possible player start")
+
+    open_states = deque()
+    visited_states = set()
+
+    for player in initial_regions:
+        key = build_pc_push_state_key(player, start_boxes, walkable)
+
+        if key not in visited_states:
+            visited_states.add(key)
+            open_states.append((player, start_boxes))
+
+    searched_states = 0
+    search_limit = max(1, int(maximum_search_states))
+
+    while open_states and searched_states < search_limit:
+        player, boxes = open_states.popleft()
+        searched_states += 1
+
+        if set(boxes) == targets:
+            return
+
+        box_set = set(boxes)
+        reachable = find_pc_reachable_cells(player, walkable, box_set)
+
+        for box_index, box in enumerate(boxes):
+            for direction_x, direction_y in (
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+            ):
+                standing_cell = (
+                    box[0] - direction_x,
+                    box[1] - direction_y,
+                )
+                destination = (
+                    box[0] + direction_x,
+                    box[1] + direction_y,
+                )
+
+                if (
+                    standing_cell not in reachable
+                    or destination not in walkable
+                    or destination in box_set
+                ):
+                    continue
+
+                next_boxes = list(boxes)
+                next_boxes[box_index] = destination
+                next_boxes = tuple(sorted(next_boxes))
+                next_player = box
+                key = build_pc_push_state_key(
+                    next_player,
+                    next_boxes,
+                    walkable,
+                )
+
+                if key not in visited_states:
+                    visited_states.add(key)
+                    open_states.append((next_player, next_boxes))
+
+    if searched_states >= search_limit:
+        raise ValueError(
+            "PC sketch open-map solvability check exceeded its search budget"
+        )
+
+    raise ValueError(
+        "PC sketch has no solvable open completion; "
+        "move box starts, targets, or walls"
+    )
+
+
+def find_pc_region_representatives(walkable, boxes):
+    remaining = set(walkable) - set(boxes)
+    representatives = []
+
+    while remaining:
+        representative = min(remaining, key=lambda position: (position[1], position[0]))
+        representatives.append(representative)
+        open_cells = [representative]
+        remaining.remove(representative)
+
+        while open_cells:
+            x, y = open_cells.pop()
+
+            for neighbor in (
+                (x + 1, y),
+                (x - 1, y),
+                (x, y + 1),
+                (x, y - 1),
+            ):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    open_cells.append(neighbor)
+
+    return representatives
+
+
+def find_pc_reachable_cells(player, walkable, boxes):
+    if player not in walkable or player in boxes:
+        return set()
+
+    reachable = {player}
+    open_cells = [player]
+
+    while open_cells:
+        x, y = open_cells.pop()
+
+        for neighbor in (
+            (x + 1, y),
+            (x - 1, y),
+            (x, y + 1),
+            (x, y - 1),
+        ):
+            if (
+                neighbor in walkable
+                and neighbor not in boxes
+                and neighbor not in reachable
+            ):
+                reachable.add(neighbor)
+                open_cells.append(neighbor)
+
+    return reachable
+
+
+def build_pc_push_state_key(player, boxes, walkable):
+    reachable = find_pc_reachable_cells(player, walkable, set(boxes))
+    representative = min(
+        reachable,
+        key=lambda position: (position[1], position[0]),
+    )
+    return boxes, representative
 
 
 def validate_pc_water_rectangles(rows, width, height):

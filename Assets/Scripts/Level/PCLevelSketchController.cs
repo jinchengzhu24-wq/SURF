@@ -246,6 +246,13 @@ public class PCLevelSketchController : MonoBehaviour
             return false;
         }
 
+        if (!PCDesignFeasibilityValidator.TryValidate(
+                GetSketchRows(),
+                out message))
+        {
+            return false;
+        }
+
         message = "Sketch rules satisfied.";
         return true;
     }

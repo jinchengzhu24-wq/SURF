@@ -72,11 +72,18 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertIn("failed validation", repair_message)
         self.assertIn("valid JSON", repair_message)
 
-    def test_optional_max_tokens_is_forwarded_to_model(self):
+    def test_thinking_mode_is_forwarded_when_configured(self):
         client = FakeClient(['{"value": 7}'])
-        self.execute(client, max_attempts=1, max_tokens=300)
+        self.execute(
+            client,
+            max_attempts=1,
+            thinking_mode="disabled",
+        )
 
-        self.assertEqual(client.completions.calls[0]["max_tokens"], 300)
+        self.assertEqual(
+            client.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
 
     def test_validation_error_is_included_in_repair_request(self):
         client = FakeClient(['{"value": 18}', '{"value": 12}'])

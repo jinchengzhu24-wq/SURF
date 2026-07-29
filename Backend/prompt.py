@@ -33,6 +33,7 @@ PC_LEVEL_GENERATION_SYSTEM_PROMPT = (
     "single enclosed activity area are immutable spaces. Fill every undecided "
     "cell inside the activity area with ground '.', a new internal wall '#', "
     "water '@', or the single player start 'p'. Do not add or remove s or t. "
+    "No s cell may be orthogonally adjacent to a # wall in the completed map. "
     "There must be exactly one p. Every water component must be a complete "
     "rectangle between 2x2 and 4x4. All walkable cells (., p, s, t) must form "
     "one connected component containing at least 48 cells. Avoid obvious "
