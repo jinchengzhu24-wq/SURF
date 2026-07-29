@@ -19,6 +19,11 @@ public class LLMLevelDesignClient : MonoBehaviour
     public string endpoint = "http://111.231.136.4:8000/generate-level-plan";
     public int requestTimeoutSeconds = 180;
     public bool includeCreativeWorkshopIdea;
+    [Tooltip(
+        "Enable this on a dedicated Description-to-Level result scene to "
+        + "consume the settings saved by the DG scene."
+    )]
+    public bool includeDescriptionGenerationPreferences;
 
     private readonly List<UnityWebRequest> activeRequests = new List<UnityWebRequest>();
     private bool isCancellingRequests;
@@ -311,6 +316,12 @@ public class LLMLevelDesignClient : MonoBehaviour
     {
         string ideaText = GetCreativeIdeaText();
         bool hasContext = includeCreativeWorkshopIdea && !string.IsNullOrEmpty(ideaText);
+        DescriptionGenerationSettings descriptionSettings = null;
+        bool hasDescriptionSettings =
+            includeDescriptionGenerationPreferences
+            && DescriptionGenerationContext.TryLoad(
+                out descriptionSettings
+            );
 
         return new LevelPlanRequest
         {
@@ -358,6 +369,12 @@ public class LLMLevelDesignClient : MonoBehaviour
                 hasContext,
                 CreativeWorkshopContext.SelectedHAPlanPrefsKey
             ),
+            styleDescription = hasDescriptionSettings
+                ? descriptionSettings.styleDescription
+                : "",
+            generationPreferences = hasDescriptionSettings
+                ? descriptionSettings.preferences
+                : null,
             maxAttempts = maxAttempts
         };
     }
@@ -395,6 +412,8 @@ public class LLMLevelDesignClient : MonoBehaviour
         public string previousLevelPlan;
         public string previousLevelMetrics;
         public string selectedHAPlan;
+        public string styleDescription;
+        public LevelGenerationPreferences generationPreferences;
         public int maxAttempts;
     }
 }

@@ -134,6 +134,12 @@ ZERO_WATER_PHRASES = (
     "do not use water",
     "不要水",
     "不要有水",
+    "不使用水",
+    "没有水",
+    "无水",
+    "去掉水",
+    "不要水",
+    "不要有水",
     "不要任何水",
     "不需要水",
     "不用水",
@@ -167,6 +173,12 @@ ZERO_INTERNAL_WALL_PHRASES = (
     "don't use internal wall",
     "do not use internal wall",
     "不要内部墙",
+    "不使用内部墙",
+    "没有内部墙",
+    "无内部墙",
+    "不要墙障碍",
+    "去掉内部墙",
+    "不要内部墙",
     "不要有内部墙",
     "不要任何内部墙",
     "不需要内部墙",
@@ -193,6 +205,10 @@ WATER_FEATURE_TERMS = (
     "pond",
     "水",
     "河",
+    "湖",
+    "池",
+    "水",
+    "河",
     "池",
     "湖",
 )
@@ -202,6 +218,10 @@ INTERNAL_WALL_FEATURE_TERMS = (
     "internal wall",
     "interior wall",
     "wall obstacle",
+    "墙",
+    "墙体",
+    "内部墙",
+    "墙障碍",
     "墙",
     "墙体",
     "内部墙",
@@ -233,6 +253,13 @@ def build_user_constraint_snippets(creative_context):
 
     if latest_adjustment:
         snippets.append(latest_adjustment)
+
+    style_description = normalize_prompt_text(
+        creative_context.get("styleDescription")
+    )
+
+    if style_description:
+        snippets.append(style_description)
 
     raw_history = creative_context.get("adjustmentHistoryText")
 
@@ -320,6 +347,9 @@ def build_level_plan_messages(
     user_prompt = (
         BASE_USER_PROMPT
         + build_feature_constraint_prompt(feature_constraints)
+        + build_generation_preferences_prompt(
+            creative_context.get("generationPreferences")
+        )
         + build_prioritized_creative_context_prompt(
             creative_context,
             feature_constraints,
@@ -341,6 +371,54 @@ def build_level_plan_messages(
             "content": user_prompt,
         },
     ]
+
+
+def build_generation_preferences_prompt(generation_preferences=None):
+    preferences = generation_preferences or {}
+
+    if not preferences:
+        return ""
+
+    ordered_fields = (
+        "minSolutionSteps",
+        "maxSolutionSteps",
+        "minPushes",
+        "maxPushes",
+        "minWaterAreas",
+        "maxWaterAreas",
+        "minWallObstacleBlocks",
+        "maxWallObstacleBlocks",
+        "minReversePulls",
+        "maxReversePulls",
+        "archetype",
+        "targetLayout",
+        "obstacleStyle",
+        "waterStyle",
+        "corridorPlacement",
+        "corridorWidth",
+        "corridorOrientation",
+        "corridorRole",
+        "corridorPriority",
+    )
+    assignments = [
+        f"{field}={preferences[field]}"
+        for field in ordered_fields
+        if field in preferences
+    ]
+
+    if not assignments:
+        return ""
+
+    return (
+        "The player explicitly selected these Description-to-Level generation "
+        "parameters: "
+        + "; ".join(assignments)
+        + ". These values are authoritative hard constraints and override "
+        "general defaults, recent-blueprint diversity, and any conflicting "
+        "wording in the style description. Copy every listed value into the "
+        "same-named JSON field exactly. Unlisted fields remain available for "
+        "design interpretation. "
+    )
 
 
 EXPANSION_SYSTEM_PROMPT = (
@@ -785,6 +863,9 @@ def build_prioritized_creative_context_prompt(
     selected_ha_plan = normalize_prompt_text(
         creative_context.get("selectedHAPlan")
     )
+    style_description = normalize_prompt_text(
+        creative_context.get("styleDescription")
+    )
     parts = []
 
     if revision_mode == "human":
@@ -827,6 +908,16 @@ def build_prioritized_creative_context_prompt(
             "latest user adjustment; selected design direction; original user idea; "
             "earlier adjustments and refinement feedback; general difficulty and "
             "quality preferences; variation and recent-blueprint diversity. "
+        )
+
+    if style_description:
+        parts.append(
+            f'Description-to-Level style request: "{style_description[:420]}". '
+            "Use it to shape the observable spatial experience and descriptive "
+            "style while respecting every explicit generation parameter. "
+            "Translate unsupported or purely visual ideas into supported Sokoban "
+            "route pressure, target placement, wall obstacles, water placement, "
+            "standing-space pressure, or box order. "
         )
 
     if latest_adjustment:

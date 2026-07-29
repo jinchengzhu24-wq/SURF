@@ -164,6 +164,28 @@ class HumanAdjustmentValidationRequest(BaseModel):
     adjustmentText: str
 
 
+class GenerationPreferences(BaseModel):
+    minSolutionSteps: int | None = None
+    maxSolutionSteps: int | None = None
+    minWaterAreas: int | None = None
+    maxWaterAreas: int | None = None
+    minWallObstacleBlocks: int | None = None
+    maxWallObstacleBlocks: int | None = None
+    minPushes: int | None = None
+    maxPushes: int | None = None
+    minReversePulls: int | None = None
+    maxReversePulls: int | None = None
+    archetype: str | None = ""
+    targetLayout: str | None = ""
+    obstacleStyle: str | None = ""
+    waterStyle: str | None = ""
+    corridorPlacement: str | None = ""
+    corridorWidth: int | None = None
+    corridorOrientation: str | None = ""
+    corridorRole: str | None = ""
+    corridorPriority: str | None = ""
+
+
 class LevelPlanRequest(BaseModel):
     ideaText: str | None = ""
     ideaId: str | None = ""
@@ -178,6 +200,8 @@ class LevelPlanRequest(BaseModel):
     previousLevelPlan: str | None = ""
     previousLevelMetrics: str | None = ""
     selectedHAPlan: str | None = ""
+    styleDescription: str | None = ""
+    generationPreferences: GenerationPreferences | None = None
     maxAttempts: int | None = DEFAULT_LLM_MAX_ATTEMPTS
 
 
@@ -1165,6 +1189,14 @@ def execute_level_plan_request(
     response: Response,
 ):
     data = payload.model_dump(exclude={"maxAttempts"})
+
+    try:
+        data["generationPreferences"] = normalize_generation_preferences(
+            data.get("generationPreferences")
+        )
+    except ValueError as exception:
+        raise HTTPException(status_code=400, detail=str(exception)) from exception
+
     max_attempts = max(
         1,
         min(DEFAULT_LLM_MAX_ATTEMPTS, int(payload.maxAttempts or 1)),
@@ -3083,16 +3115,180 @@ def validate_ha_revision_plan_edit(
     }
 
 
-def apply_selected_ha_plan(generated_plan, creative_context, feature_constraints):
+def normalize_generation_preferences(raw_preferences):
+    if raw_preferences is None:
+        return {}
+
+    data = (
+        raw_preferences.model_dump()
+        if hasattr(raw_preferences, "model_dump")
+        else dict(raw_preferences)
+    )
+    normalized = {}
+
+    for key, (minimum, maximum) in LIMITS.items():
+        value = data.get(key)
+
+        if value is None or value == -1:
+            continue
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"generationPreferences.{key} must be an integer")
+
+        if value < minimum or value > maximum:
+            raise ValueError(
+                f"generationPreferences.{key}={value} is outside "
+                f"{minimum}-{maximum}"
+            )
+
+        normalized[key] = value
+
+    range_pairs = (
+        ("minSolutionSteps", "maxSolutionSteps"),
+        ("minPushes", "maxPushes"),
+        ("minWaterAreas", "maxWaterAreas"),
+        ("minWallObstacleBlocks", "maxWallObstacleBlocks"),
+        ("minReversePulls", "maxReversePulls"),
+    )
+
+    for minimum_key, maximum_key in range_pairs:
+        has_minimum = minimum_key in normalized
+        has_maximum = maximum_key in normalized
+
+        if has_minimum != has_maximum:
+            raise ValueError(
+                "generationPreferences must provide both "
+                f"{minimum_key} and {maximum_key}"
+            )
+
+        if has_minimum and normalized[maximum_key] < normalized[minimum_key]:
+            raise ValueError(
+                f"generationPreferences.{maximum_key} must be >= "
+                f"{minimum_key}"
+            )
+
+    for key, allowed_values in ENUMS.items():
+        value = str(data.get(key) or "").strip()
+
+        if not value:
+            continue
+
+        if value not in allowed_values:
+            raise ValueError(
+                f"generationPreferences.{key}={value} is not supported"
+            )
+
+        normalized[key] = value
+
+    corridor_width = data.get("corridorWidth")
+
+    if corridor_width not in (None, -1):
+        if isinstance(corridor_width, bool) or not isinstance(
+            corridor_width,
+            int,
+        ):
+            raise ValueError(
+                "generationPreferences.corridorWidth must be an integer"
+            )
+
+        normalized["corridorWidth"] = corridor_width
+
+    corridor_placement = normalized.get("corridorPlacement")
+
+    if corridor_placement:
+        if corridor_placement == "none":
+            if normalized.get("corridorWidth", 0) != 0:
+                raise ValueError(
+                    "generationPreferences.corridorWidth must be 0 when "
+                    "corridorPlacement is none"
+                )
+
+            normalized["corridorWidth"] = 0
+            normalized.setdefault("corridorOrientation", "any")
+            normalized.setdefault("corridorRole", "visual_only")
+            normalized.setdefault("corridorPriority", "preferred")
+        else:
+            if normalized.get("corridorWidth") not in {1, 2}:
+                raise ValueError(
+                    "generationPreferences.corridorWidth must be 1 or 2 "
+                    "when a corridor is requested"
+                )
+
+            normalized.setdefault("corridorOrientation", "any")
+            normalized.setdefault("corridorRole", "player_route")
+            normalized.setdefault("corridorPriority", "preferred")
+    elif "corridorWidth" in normalized:
+        raise ValueError(
+            "generationPreferences.corridorPlacement is required when "
+            "corridorWidth is provided"
+        )
+
+    if (
+        normalized.get("maxWallObstacleBlocks") == 0
+        and normalized.get("corridorPlacement") not in (None, "none")
+    ):
+        raise ValueError(
+            "generationPreferences cannot request a corridor with zero "
+            "internal wall obstacles"
+        )
+
+    return normalized
+
+
+def apply_generation_preferences(plan, generation_preferences):
+    data = plan.model_dump() if isinstance(plan, LevelDesignPlan) else dict(plan)
+
+    for key, value in (generation_preferences or {}).items():
+        data[key] = value
+
+    return data
+
+
+def apply_selected_ha_plan(
+    generated_plan,
+    creative_context,
+    feature_constraints,
+    generation_preferences=None,
+):
     creative_context = creative_context or {}
 
     if str(creative_context.get("revisionMode") or "").strip().lower() != "ha":
-        return validate_plan(generated_plan, feature_constraints)
+        candidate = apply_generation_preferences(
+            generated_plan,
+            generation_preferences,
+        )
+        effective_constraints = dict(feature_constraints or {})
+
+        if (
+            candidate.get("minWaterAreas") == 0
+            and candidate.get("maxWaterAreas") == 0
+        ):
+            effective_constraints["noWater"] = True
+
+        if (
+            candidate.get("minWallObstacleBlocks") == 0
+            and candidate.get("maxWallObstacleBlocks") == 0
+        ):
+            effective_constraints["noInternalWalls"] = True
+
+        return validate_plan(
+            candidate,
+            effective_constraints,
+            generation_preferences,
+        )
 
     selected_text = str(creative_context.get("selectedHAPlan") or "").strip()
 
     if not selected_text:
-        return validate_plan(generated_plan, feature_constraints)
+        candidate = apply_generation_preferences(
+            generated_plan,
+            generation_preferences,
+        )
+        return validate_plan(
+            candidate,
+            feature_constraints,
+            generation_preferences,
+        )
 
     previous_value = creative_context.get("previousLevelPlan")
     previous_plan = (
@@ -3116,6 +3312,10 @@ def apply_selected_ha_plan(generated_plan, creative_context, feature_constraints
         + ". "
         + description
     )[:160]
+    candidate = apply_generation_preferences(
+        candidate,
+        generation_preferences,
+    )
     effective_constraints = dict(feature_constraints or {})
 
     if (
@@ -3130,7 +3330,11 @@ def apply_selected_ha_plan(generated_plan, creative_context, feature_constraints
     ):
         effective_constraints["noInternalWalls"] = True
 
-    return validate_plan(candidate, effective_constraints)
+    return validate_plan(
+        candidate,
+        effective_constraints,
+        generation_preferences,
+    )
 
 
 def create_level_plan(
@@ -3138,8 +3342,28 @@ def create_level_plan(
     request_id="",
     max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
 ):
-    creative_context = creative_context or {}
+    creative_context = dict(creative_context or {})
+    creative_context["styleDescription"] = str(
+        creative_context.get("styleDescription") or ""
+    ).strip()[:420]
+    generation_preferences = normalize_generation_preferences(
+        creative_context.get("generationPreferences")
+    )
+    creative_context["generationPreferences"] = generation_preferences
     feature_constraints = resolve_zero_feature_constraints(creative_context)
+
+    if "minWaterAreas" in generation_preferences:
+        feature_constraints["noWater"] = (
+            generation_preferences["minWaterAreas"] == 0
+            and generation_preferences["maxWaterAreas"] == 0
+        )
+
+    if "minWallObstacleBlocks" in generation_preferences:
+        feature_constraints["noInternalWalls"] = (
+            generation_preferences["minWallObstacleBlocks"] == 0
+            and generation_preferences["maxWallObstacleBlocks"] == 0
+        )
+
     variation_seed = int(time.time() * 1000)
 
     def validate_level_plan(payload):
@@ -3147,6 +3371,7 @@ def create_level_plan(
             payload,
             creative_context,
             feature_constraints,
+            generation_preferences,
         )
 
     execution = execute_json_request(
@@ -3168,14 +3393,21 @@ def create_level_plan(
     return execution
 
 
-def validate_plan(plan, feature_constraints=None):
+def validate_plan(
+    plan,
+    feature_constraints=None,
+    generation_preferences=None,
+):
     if plan is None:
         raise ValueError("model returned no parsed plan")
 
     data = plan.model_dump() if isinstance(plan, LevelDesignPlan) else dict(plan)
     feature_constraints = feature_constraints or {}
+    generation_preferences = generation_preferences or {}
     no_water = bool(feature_constraints.get("noWater"))
     no_internal_walls = bool(feature_constraints.get("noInternalWalls"))
+    has_custom_water = "minWaterAreas" in generation_preferences
+    has_custom_walls = "minWallObstacleBlocks" in generation_preferences
 
     if no_water:
         data["minWaterAreas"] = 0
@@ -3199,14 +3431,14 @@ def validate_plan(plan, feature_constraints=None):
         if value < minimum or value > maximum:
             raise ValueError(f"{key}={value} is outside {minimum}-{maximum}")
 
-    if not no_water and (
+    if not no_water and not has_custom_water and (
         data["minWaterAreas"] < 1 or data["maxWaterAreas"] < 1
     ):
         raise ValueError(
             "water areas can be zero only when the user explicitly requests no water"
         )
 
-    if not no_internal_walls and (
+    if not no_internal_walls and not has_custom_walls and (
         data["minWallObstacleBlocks"] != 2
         or data["maxWallObstacleBlocks"] < 2
     ):

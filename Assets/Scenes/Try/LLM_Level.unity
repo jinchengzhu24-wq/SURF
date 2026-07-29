@@ -568,6 +568,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   endpoint: http://111.231.136.4:8000/generate-level-plan
   requestTimeoutSeconds: 180
+  includeCreativeWorkshopIdea: 0
+  includeDescriptionGenerationPreferences: 1
 --- !u!4 &1726369420
 Transform:
   m_ObjectHideFlags: 0
