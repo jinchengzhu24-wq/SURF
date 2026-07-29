@@ -421,6 +421,12 @@ public class LLMLevelDesignClient : MonoBehaviour
 public static class LLMBackendError
 {
     [Serializable]
+    private sealed class PlainErrorEnvelope
+    {
+        public string detail = "";
+    }
+
+    [Serializable]
     private sealed class ErrorEnvelope
     {
         public ErrorDetail detail = null;
@@ -522,6 +528,29 @@ public static class LLMBackendError
         if (string.IsNullOrWhiteSpace(responseBody))
         {
             return null;
+        }
+
+        try
+        {
+            PlainErrorEnvelope plainEnvelope =
+                JsonUtility.FromJson<PlainErrorEnvelope>(responseBody);
+
+            if (plainEnvelope != null
+                && !string.IsNullOrWhiteSpace(plainEnvelope.detail))
+            {
+                return new ErrorDetail
+                {
+                    code = "REQUEST_VALIDATION_ERROR",
+                    stage = "request_validation",
+                    message = plainEnvelope.detail,
+                    retryable = false
+                };
+            }
+        }
+        catch (Exception)
+        {
+            // Structured LLM errors store detail as an object, so parsing that
+            // response with the plain-string envelope can legitimately fail.
         }
 
         try

@@ -3491,6 +3491,12 @@ def normalize_pc_level_request(context):
 
     previous_rows = context.get("previousCandidateRows")
 
+    # Unity JsonUtility serializes a null string array as an empty array in the
+    # first request. Treat that representation as the optional field being
+    # absent; non-empty retry candidates must still be complete 12x10 maps.
+    if previous_rows == []:
+        previous_rows = None
+
     if previous_rows is not None:
         validate_pc_rows(
             previous_rows,

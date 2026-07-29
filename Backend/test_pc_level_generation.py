@@ -96,6 +96,15 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         create_candidate.assert_not_called()
 
+    def test_empty_previous_candidate_is_treated_as_first_attempt(self):
+        payload = {
+            **self.context,
+            "previousCandidateRows": [],
+        }
+        normalized = backend.normalize_pc_level_request(payload)
+
+        self.assertIsNone(normalized["previousCandidateRows"])
+
     def test_moving_fixed_tile_is_rejected(self):
         candidate = make_candidate()
         candidate[3] = " #.s.....t# "
