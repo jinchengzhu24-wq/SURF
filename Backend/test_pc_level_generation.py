@@ -199,7 +199,7 @@ class PCLevelGenerationTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["max_attempts"], 1)
-        self.assertEqual(captured["max_tokens"], 300)
+        self.assertEqual(captured["max_tokens"], 1024)
         self.assertEqual(captured["timeout_seconds"], 60.0)
 
 
