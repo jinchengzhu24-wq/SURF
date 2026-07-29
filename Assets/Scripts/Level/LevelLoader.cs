@@ -37,6 +37,7 @@ public class LevelLoader : MonoBehaviour
     public bool generateBeforeLoad = true;
     public bool useLLMPlan;
     public bool deferInitialLLMLoad;
+    public bool deferLoadToExternalController;
     // Legacy serialized fields are kept so existing scenes do not lose overrides.
     // LLM level generation intentionally ignores the cache and always requests the remote service.
     public bool useCachedLLMPlan = false;
@@ -88,6 +89,11 @@ public class LevelLoader : MonoBehaviour
 
         ResolveGenerationReferences();
         LastGenerationFailureMessage = "";
+
+        if (deferLoadToExternalController)
+        {
+            return;
+        }
 
         if (deferInitialLLMLoad && generateBeforeLoad && useLLMPlan)
         {

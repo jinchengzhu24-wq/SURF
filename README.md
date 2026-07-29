@@ -11,6 +11,13 @@ Competition_Mode
   → 选择 Competitive Mode 或 Supportive Mode
   → 点击 Confirm
 AI_Asistant_Mode
+  → 选择 Partial Completion
+PC
+  → 点击 Confirm
+PC_Design
+  → 绘制并通过 Check
+  → 点击 Submit
+PC_Level
 ```
 
 场景文件：
@@ -18,6 +25,9 @@ AI_Asistant_Mode
 - `Assets/Scenes/Menu.unity`
 - `Assets/Scenes/Matchmaking/Competition_Mode.unity`
 - `Assets/Scenes/Matchmaking/AI_Asistant_Mode.unity`
+- `Assets/Scenes/Matchmaking/PC.unity`
+- `Assets/Scenes/Matchmaking/PC_Design.unity`
+- `Assets/Scenes/Matchmaking/PC_Level.unity`
 
 注意：项目当前场景文件名采用 `AI_Asistant_Mode`，其中 `Asistant` 保留现有拼写。代码和 Build Settings 必须使用相同名称。
 
@@ -27,6 +37,12 @@ AI_Asistant_Mode
 - `CompetitionModeController` 管理 Competition Mode 的单选与 Confirm。
 - Confirm 只有在选择一个模式后才可点击。
 - Confirm 后将模式写入 PlayerPrefs，再加载 `AI_Asistant_Mode`。
+- AI-Asistant Mode 选择 Partial Completion 后加载 `PC`。
+- `PC` 的 Confirm 加载 `PC_Design`。
+- `PC_Design` 的 Submit 会重新校验并保存固定 `12×10` 草图，然后加载 `PC_Level`。
+- `PC_Level` 只读取 PC 草图上下文，通过 `/generate-pc-level` 请求完整候选地图，再使用 Unity `LevelSolver` 验证可解性。
+- PC 候选不得删除或移动玩家绘制的墙 `#`、箱子起点 `s` 和终点 `t`。
+- 生成失败时可 Retry，或返回 `PC_Design` 并恢复上次提交的草图。
 
 当前选择保存键：
 
@@ -49,6 +65,9 @@ supportive
 Assets/Scenes/Menu.unity
 Assets/Scenes/Matchmaking/Competition_Mode.unity
 Assets/Scenes/Matchmaking/AI_Asistant_Mode.unity
+Assets/Scenes/Matchmaking/PC.unity
+Assets/Scenes/Matchmaking/PC_Design.unity
+Assets/Scenes/Matchmaking/PC_Level.unity
 ```
 
 ## 手动验证
@@ -58,3 +77,8 @@ Assets/Scenes/Matchmaking/AI_Asistant_Mode.unity
 3. 选择任一模式后，选中样式应更新，Confirm 应启用。
 4. 点击 Confirm，确认进入 AI-Asistant Mode。
 5. 返回后选择另一模式，确认 PlayerPrefs 中保存的值随选择更新。
+6. 在 AI-Asistant Mode 选择 Partial Completion，确认进入 `PC`。
+7. 从 `PC` Confirm 后进入 `PC_Design`，零组或数量不匹配的 `s`/`t` 不得通过 Check。
+8. 合法草图 Submit 后进入 `PC_Level`，确认请求中不包含 DG 或 Creative Workshop 参数。
+9. 合法且可解的候选应被加载；无解或格式错误候选不得覆盖当前关卡。
+10. 生成失败后点击 Back to Design，确认原草图完整恢复。

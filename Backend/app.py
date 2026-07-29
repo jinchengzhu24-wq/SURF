@@ -38,6 +38,7 @@ if __package__:
         build_ha_revision_plan_messages,
         build_human_adjustment_clarity_messages,
         build_level_plan_messages,
+        build_pc_level_generation_messages,
         resolve_zero_feature_constraints,
     )
 else:
@@ -56,6 +57,7 @@ else:
         build_ha_revision_plan_messages,
         build_human_adjustment_clarity_messages,
         build_level_plan_messages,
+        build_pc_level_generation_messages,
         resolve_zero_feature_constraints,
     )
 
@@ -202,6 +204,15 @@ class LevelPlanRequest(BaseModel):
     selectedHAPlan: str | None = ""
     styleDescription: str | None = ""
     generationPreferences: GenerationPreferences | None = None
+    maxAttempts: int | None = DEFAULT_LLM_MAX_ATTEMPTS
+
+
+class PCLevelGenerationRequest(BaseModel):
+    width: int
+    height: int
+    sketchRows: list[str]
+    previousCandidateRows: list[str] | None = None
+    rejectionReason: str | None = ""
     maxAttempts: int | None = DEFAULT_LLM_MAX_ATTEMPTS
 
 
@@ -1181,6 +1192,32 @@ def generate_level_plan(
     response: Response,
 ):
     return execute_level_plan_request(payload, request, response)
+
+
+@app.post("/generate-pc-level")
+def generate_pc_level(
+    payload: PCLevelGenerationRequest,
+    request: Request,
+    response: Response,
+):
+    data = payload.model_dump(exclude={"maxAttempts"})
+
+    try:
+        data = normalize_pc_level_request(data)
+    except ValueError as exception:
+        raise HTTPException(status_code=400, detail=str(exception)) from exception
+
+    max_attempts = max(
+        1,
+        min(DEFAULT_LLM_MAX_ATTEMPTS, int(payload.maxAttempts or 1)),
+    )
+    execution = create_pc_level_candidate(
+        data,
+        request.state.request_id,
+        max_attempts,
+    )
+    apply_llm_execution_headers(response, execution)
+    return execution.value
 
 
 def execute_level_plan_request(
@@ -3391,6 +3428,263 @@ def create_level_plan(
     )
     remember_blueprint(execution.value)
     return execution
+
+
+def create_pc_level_candidate(
+    context,
+    request_id="",
+    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
+):
+    context = normalize_pc_level_request(context)
+
+    def validate_candidate(payload):
+        return validate_pc_level_candidate(payload, context)
+
+    return execute_json_request(
+        task="pc_level_generation",
+        messages=build_pc_level_generation_messages(context),
+        validator=validate_candidate,
+        temperature=float(os.getenv("DEEPSEEK_PC_LEVEL_TEMPERATURE", "0.45")),
+        timeout_seconds=PLAN_LLM_TIMEOUT_SECONDS,
+        max_attempts=max_attempts,
+        request_id=request_id,
+        validation_stage="pc_level_validation",
+    )
+
+
+def normalize_pc_level_request(context):
+    context = dict(context or {})
+    width = context.get("width")
+    height = context.get("height")
+    rows = context.get("sketchRows")
+
+    if width != 12 or height != 10:
+        raise ValueError("PC sketch size must be exactly 12x10")
+
+    validate_pc_rows(rows, width, height, {" ", "#", "s", "t"}, "sketchRows")
+    box_count = sum(row.count("s") for row in rows)
+    target_count = sum(row.count("t") for row in rows)
+
+    if box_count < 1 or box_count > 2 or box_count != target_count:
+        raise ValueError("PC sketch must contain one or two matching s/t pairs")
+
+    enclosed = find_pc_enclosed_cells(rows, width, height)
+    enclosed_cells = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if enclosed[y][x]
+    }
+
+    if len(enclosed_cells) < 48:
+        raise ValueError("PC sketch enclosed activity area must contain at least 48 cells")
+
+    if any(
+        rows[y][x] in {"s", "t"} and (x, y) not in enclosed_cells
+        for y in range(height)
+        for x in range(width)
+    ):
+        raise ValueError("Every s and t must be inside the enclosed activity area")
+
+    if count_pc_components(enclosed_cells) != 1:
+        raise ValueError("PC sketch must contain exactly one enclosed activity area")
+
+    previous_rows = context.get("previousCandidateRows")
+
+    if previous_rows is not None:
+        validate_pc_rows(
+            previous_rows,
+            width,
+            height,
+            {" ", "#", ".", "@", "p", "s", "t"},
+            "previousCandidateRows",
+        )
+
+    return {
+        "width": width,
+        "height": height,
+        "sketchRows": list(rows),
+        "previousCandidateRows": (
+            list(previous_rows) if previous_rows is not None else None
+        ),
+        "rejectionReason": str(context.get("rejectionReason") or "").strip()[:500],
+    }
+
+
+def validate_pc_level_candidate(payload, context):
+    if payload is None or not isinstance(payload, dict):
+        raise ValueError("model returned no PC level candidate")
+
+    if set(payload) != {"rows"}:
+        raise ValueError("PC level response must contain only rows")
+
+    width = context["width"]
+    height = context["height"]
+    sketch_rows = context["sketchRows"]
+    rows = payload.get("rows")
+    validate_pc_rows(
+        rows,
+        width,
+        height,
+        {" ", "#", ".", "@", "p", "s", "t"},
+        "rows",
+    )
+    enclosed = find_pc_enclosed_cells(sketch_rows, width, height)
+
+    for y in range(height):
+        for x in range(width):
+            source = sketch_rows[y][x]
+            candidate = rows[y][x]
+
+            if source in {"#", "s", "t"} and candidate != source:
+                raise ValueError(f"candidate changed fixed tile at ({x},{y})")
+
+            if not enclosed[y][x] and candidate != source:
+                raise ValueError(
+                    f"candidate changed a tile outside the activity area at ({x},{y})"
+                )
+
+            if enclosed[y][x] and source == " " and candidate not in {".", "#", "@", "p"}:
+                raise ValueError(f"candidate left incomplete tile at ({x},{y})")
+
+    for tile, label in (("s", "box starts"), ("t", "targets")):
+        if sum(row.count(tile) for row in rows) != sum(
+            row.count(tile) for row in sketch_rows
+        ):
+            raise ValueError(f"candidate changed the number of {label}")
+
+    if sum(row.count("p") for row in rows) != 1:
+        raise ValueError("candidate must contain exactly one p")
+
+    validate_pc_water_rectangles(rows, width, height)
+    walkable = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] in {".", "p", "s", "t"}
+    }
+
+    if len(walkable) < 48:
+        raise ValueError("candidate must retain at least 48 walkable cells")
+
+    if count_pc_components(walkable) != 1:
+        raise ValueError("candidate walkable cells must form one connected component")
+
+    return {"rows": list(rows)}
+
+
+def validate_pc_rows(rows, width, height, allowed_tiles, field_name):
+    if not isinstance(rows, list) or len(rows) != height:
+        raise ValueError(f"{field_name} must contain exactly {height} rows")
+
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, str) or len(row) != width:
+            raise ValueError(
+                f"{field_name}[{row_index}] must contain exactly {width} characters"
+            )
+
+        invalid = next((tile for tile in row if tile not in allowed_tiles), None)
+
+        if invalid is not None:
+            raise ValueError(f"{field_name} contains unsupported tile {invalid!r}")
+
+
+def find_pc_enclosed_cells(rows, width, height):
+    outside = [[False for _ in range(width)] for _ in range(height)]
+    open_cells = []
+
+    def enqueue(x, y):
+        if (
+            x < 0
+            or x >= width
+            or y < 0
+            or y >= height
+            or outside[y][x]
+            or rows[y][x] == "#"
+        ):
+            return
+
+        outside[y][x] = True
+        open_cells.append((x, y))
+
+    for x in range(width):
+        enqueue(x, 0)
+        enqueue(x, height - 1)
+
+    for y in range(height):
+        enqueue(0, y)
+        enqueue(width - 1, y)
+
+    index = 0
+
+    while index < len(open_cells):
+        x, y = open_cells[index]
+        index += 1
+        enqueue(x + 1, y)
+        enqueue(x - 1, y)
+        enqueue(x, y + 1)
+        enqueue(x, y - 1)
+
+    return [
+        [rows[y][x] != "#" and not outside[y][x] for x in range(width)]
+        for y in range(height)
+    ]
+
+
+def count_pc_components(cells):
+    remaining = set(cells)
+    component_count = 0
+
+    while remaining:
+        component_count += 1
+        open_cells = [remaining.pop()]
+
+        while open_cells:
+            x, y = open_cells.pop()
+
+            for neighbor in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    open_cells.append(neighbor)
+
+    return component_count
+
+
+def validate_pc_water_rectangles(rows, width, height):
+    remaining = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "@"
+    }
+
+    while remaining:
+        start = remaining.pop()
+        component = {start}
+        open_cells = [start]
+
+        while open_cells:
+            x, y = open_cells.pop()
+
+            for neighbor in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    component.add(neighbor)
+                    open_cells.append(neighbor)
+
+        xs = [position[0] for position in component]
+        ys = [position[1] for position in component]
+        area_width = max(xs) - min(xs) + 1
+        area_height = max(ys) - min(ys) + 1
+
+        if (
+            area_width < 2
+            or area_width > 4
+            or area_height < 2
+            or area_height > 4
+            or len(component) != area_width * area_height
+        ):
+            raise ValueError("every water area must be a complete 2-4 by 2-4 rectangle")
 
 
 def validate_plan(

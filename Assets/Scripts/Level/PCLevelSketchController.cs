@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.SceneManagement;
 using UnityEngine.Tilemaps;
 using UnityEngine.UI;
 
@@ -33,6 +34,7 @@ public class PCLevelSketchController : MonoBehaviour
     [SerializeField] private Button checkButton;
     [SerializeField] private Button submitButton;
     [SerializeField] private Text warningText;
+    [SerializeField] private string nextSceneName = "PC_Level";
 
     [Header("Editable Area")]
     [SerializeField] private Vector2Int mapSize = new Vector2Int(12, 10);
@@ -66,6 +68,7 @@ public class PCLevelSketchController : MonoBehaviour
     {
         sketchCells = new char[mapSize.x, mapSize.y];
         ClearEditableTilemaps();
+        RestoreSavedSketchIfRequested();
         UpdateCountText();
         SetStatus("Wall selected.");
         SetSubmitInteractable(false);
@@ -180,28 +183,56 @@ public class PCLevelSketchController : MonoBehaviour
             return;
         }
 
+        if (!PCDesignContext.Save(GetSketchRows(), mapSize.x, mapSize.y))
+        {
+            ShowWarning(
+                "The PC design could not be saved.",
+                new Color(0.82f, 0.08f, 0.12f, 1f)
+            );
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(nextSceneName)
+            || !Application.CanStreamedLevelBeLoaded(nextSceneName))
+        {
+            ShowWarning(
+                "PC_Level is not available in Build Settings.",
+                new Color(0.82f, 0.08f, 0.12f, 1f)
+            );
+            return;
+        }
+
         ShowWarning("Pass", new Color(0.12f, 0.72f, 0.25f, 1f));
+        SceneManager.LoadScene(nextSceneName);
     }
 
     public bool TryValidateSketch(out string message)
     {
+        if (startCount < 1 || targetCount < 1)
+        {
+            message = "Add at least one box start and one target.";
+            return false;
+        }
+
         if (startCount != targetCount)
         {
             message = "Box start and target counts must match.";
             return false;
         }
 
-        if (!AreMapEdgesClosed())
+        if (!AreAllMarkersInsideEnclosedArea())
         {
-            message = "Every map edge cell must be a wall.";
+            message = "All box starts and targets must be inside the enclosed activity area.";
             return false;
         }
 
-        int activityArea = CountLargestEnclosedGroundArea();
+        int enclosedRegionCount = CountEnclosedGroundRegions(
+            out int activityArea
+        );
 
-        if (!AreAllGroundCellsSingleConnectedRegion())
+        if (enclosedRegionCount != 1)
         {
-            message = "Walls must enclose one connected activity area.";
+            message = "Walls must enclose exactly one connected activity area.";
             return false;
         }
 
@@ -367,39 +398,58 @@ public class PCLevelSketchController : MonoBehaviour
         markerTilemap?.ClearAllTiles();
     }
 
-    private bool AreMapEdgesClosed()
+    private void RestoreSavedSketchIfRequested()
     {
-        if (mapSize.x < 2 || mapSize.y < 2)
+        if (!PCDesignContext.ConsumeDesignRestoreRequest()
+            || !PCDesignContext.TryLoad(out PCDesignSketchData data)
+            || data.width != mapSize.x
+            || data.height != mapSize.y)
         {
-            return false;
+            return;
         }
 
-        int rightEdge = mapSize.x - 1;
-        int topEdge = mapSize.y - 1;
+        startCount = 0;
+        targetCount = 0;
 
-        for (int x = 0; x < mapSize.x; x++)
+        for (int row = 0; row < data.rows.Length; row++)
         {
-            if (sketchCells[x, 0] != LevelData.Wall
-                || sketchCells[x, topEdge] != LevelData.Wall)
+            int localY = mapSize.y - 1 - row;
+
+            for (int x = 0; x < mapSize.x; x++)
             {
-                return false;
+                char tile = data.rows[row][x];
+
+                if (tile != LevelData.Wall
+                    && tile != LevelData.Box
+                    && tile != LevelData.Target)
+                {
+                    tile = LevelData.Empty;
+                }
+
+                sketchCells[x, localY] = tile;
+                AddToCounts(tile);
+                ApplyVisualTile(
+                    new Vector3Int(
+                        bottomLeftCell.x + x,
+                        bottomLeftCell.y + localY,
+                        bottomLeftCell.z
+                    ),
+                    tile
+                );
             }
         }
-
-        for (int y = 0; y < mapSize.y; y++)
-        {
-            if (sketchCells[0, y] != LevelData.Wall
-                || sketchCells[rightEdge, y] != LevelData.Wall)
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private int CountLargestEnclosedGroundArea()
     {
+        CountEnclosedGroundRegions(out int largestArea);
+        return largestArea;
+    }
+
+    private int CountEnclosedGroundRegions(out int largestArea)
+    {
+        largestArea = 0;
+
         if (sketchCells == null)
         {
             return 0;
@@ -407,7 +457,7 @@ public class PCLevelSketchController : MonoBehaviour
 
         bool[,] outsideGround = FindGroundConnectedToMapEdge();
         bool[,] visitedGround = new bool[mapSize.x, mapSize.y];
-        int largestArea = 0;
+        int regionCount = 0;
 
         for (int y = 0; y < mapSize.y; y++)
         {
@@ -420,6 +470,7 @@ public class PCLevelSketchController : MonoBehaviour
                     continue;
                 }
 
+                regionCount++;
                 int area = VisitGroundRegion(
                     new Vector2Int(x, y),
                     outsideGround,
@@ -429,7 +480,7 @@ public class PCLevelSketchController : MonoBehaviour
             }
         }
 
-        return largestArea;
+        return regionCount;
     }
 
     private bool[,] FindGroundConnectedToMapEdge()
@@ -472,6 +523,27 @@ public class PCLevelSketchController : MonoBehaviour
         }
 
         return outsideGround;
+    }
+
+    private bool AreAllMarkersInsideEnclosedArea()
+    {
+        bool[,] outsideGround = FindGroundConnectedToMapEdge();
+
+        for (int y = 0; y < mapSize.y; y++)
+        {
+            for (int x = 0; x < mapSize.x; x++)
+            {
+                char tile = sketchCells[x, y];
+
+                if ((tile == LevelData.Box || tile == LevelData.Target)
+                    && outsideGround[x, y])
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private void EnqueueGroundCell(
@@ -523,47 +595,6 @@ public class PCLevelSketchController : MonoBehaviour
         }
 
         return area;
-    }
-
-    private bool AreAllGroundCellsSingleConnectedRegion()
-    {
-        Vector2Int firstGroundCell = Vector2Int.zero;
-        bool foundGroundCell = false;
-        int totalGroundCells = 0;
-
-        for (int y = 0; y < mapSize.y; y++)
-        {
-            for (int x = 0; x < mapSize.x; x++)
-            {
-                if (!IsGroundCell(x, y))
-                {
-                    continue;
-                }
-
-                totalGroundCells++;
-
-                if (!foundGroundCell)
-                {
-                    firstGroundCell = new Vector2Int(x, y);
-                    foundGroundCell = true;
-                }
-            }
-        }
-
-        if (!foundGroundCell)
-        {
-            return false;
-        }
-
-        bool[,] visitedGround = new bool[mapSize.x, mapSize.y];
-        bool[,] noBlockedGround = new bool[mapSize.x, mapSize.y];
-        int connectedGroundCells = VisitGroundRegion(
-            firstGroundCell,
-            noBlockedGround,
-            visitedGround
-        );
-
-        return connectedGroundCells == totalGroundCells;
     }
 
     private bool IsInsideMap(Vector2Int position)
