@@ -46,8 +46,22 @@ def make_layout():
     return {
         "player": {"x": 2, "y": 2},
         "internalWalls": [],
-        "waterAreas": [],
+        "waterAreaIds": [],
     }
+
+
+def find_water_area_id(context, x, y, width, height):
+    return next(
+        area["id"]
+        for area in context["allowedWaterAreas"]
+        if (
+            area["x"],
+            area["y"],
+            area["width"],
+            area["height"],
+        )
+        == (x, y, width, height)
+    )
 
 
 class PCLevelGenerationTests(unittest.TestCase):
@@ -88,15 +102,16 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertTrue(all(len(row) == 12 for row in result["rows"]))
 
     def test_coordinate_layout_builds_valid_wall_and_water(self):
+        context = backend.normalize_pc_level_request(self.context)
         layout = make_layout()
         layout["internalWalls"] = [{"x": 6, "y": 2}]
-        layout["waterAreas"] = [
-            {"x": 4, "y": 2, "width": 2, "height": 2},
+        layout["waterAreaIds"] = [
+            find_water_area_id(context, 4, 2, 2, 2),
         ]
 
         result = backend.build_pc_level_candidate(
             layout,
-            backend.normalize_pc_level_request(self.context),
+            context,
         )
 
         self.assertEqual(result["rows"][2], " #p.@@#...# ")
@@ -122,87 +137,212 @@ class PCLevelGenerationTests(unittest.TestCase):
                 backend.normalize_pc_level_request(self.context),
             )
 
-    def test_coordinate_layout_rejects_element_overlap(self):
+    def test_coordinate_layout_drops_wall_overlapping_player(self):
         layout = make_layout()
         layout["internalWalls"] = [{"x": 2, "y": 2}]
 
-        with self.assertRaisesRegex(ValueError, "overlaps"):
-            backend.build_pc_level_candidate(
+        with patch.object(backend, "log_event") as log_event:
+            result = backend.build_pc_level_candidate(
                 layout,
                 backend.normalize_pc_level_request(self.context),
             )
 
-    def test_coordinate_layout_rejects_duplicate_wall(self):
+        self.assertEqual(result, {"rows": make_candidate()})
+        self.assertTrue(
+            any("overlaps player" in str(call) for call in log_event.call_args_list)
+        )
+
+    def test_coordinate_layout_drops_duplicate_wall(self):
         layout = make_layout()
         layout["internalWalls"] = [
             {"x": 5, "y": 5},
             {"x": 5, "y": 5},
         ]
 
-        with self.assertRaisesRegex(ValueError, "overlaps"):
-            backend.build_pc_level_candidate(
+        with patch.object(backend, "log_event") as log_event:
+            result = backend.build_pc_level_candidate(
                 layout,
                 backend.normalize_pc_level_request(self.context),
             )
 
-    def test_coordinate_layout_rejects_invalid_water_size(self):
+        self.assertEqual(result["rows"][5][5], "#")
+        self.assertTrue(
+            any("overlaps" in str(call) for call in log_event.call_args_list)
+        )
+
+    def test_coordinate_layout_drops_malformed_optional_wall(self):
         layout = make_layout()
-        layout["waterAreas"] = [
-            {"x": 5, "y": 5, "width": 1, "height": 2},
-        ]
+        layout["internalWalls"] = [{"x": "5", "y": 5}]
 
-        with self.assertRaisesRegex(ValueError, "2-4 by 2-4"):
-            backend.build_pc_level_candidate(
+        with patch.object(backend, "log_event") as log_event:
+            result = backend.build_pc_level_candidate(
                 layout,
                 backend.normalize_pc_level_request(self.context),
             )
 
-    def test_coordinate_layout_rejects_water_over_fixed_tile(self):
+        self.assertEqual(result, {"rows": make_candidate()})
+        self.assertTrue(
+            any("must be an integer" in str(call) for call in log_event.call_args_list)
+        )
+
+    def test_coordinate_layout_drops_unknown_and_duplicate_water_ids(self):
+        context = backend.normalize_pc_level_request(self.context)
+        water_id = find_water_area_id(context, 4, 5, 2, 2)
         layout = make_layout()
-        layout["waterAreas"] = [
-            {"x": 2, "y": 2, "width": 2, "height": 2},
-        ]
+        layout["waterAreaIds"] = [999999, water_id, water_id]
 
-        with self.assertRaisesRegex(ValueError, "fixed sketch tile"):
-            backend.build_pc_level_candidate(
+        with patch.object(backend, "log_event") as log_event:
+            result = backend.build_pc_level_candidate(
                 layout,
-                backend.normalize_pc_level_request(self.context),
+                context,
             )
 
-    def test_coordinate_layout_rejects_new_wall_touching_box_start(self):
+        self.assertEqual(result["rows"][5][4:6], "@@")
+        self.assertEqual(result["rows"][6][4:6], "@@")
+        self.assertGreaterEqual(log_event.call_count, 2)
+
+    def test_coordinate_layout_drops_wall_overlapping_accepted_water(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_layout()
+        layout["waterAreaIds"] = [
+            find_water_area_id(context, 4, 5, 2, 2),
+        ]
+        layout["internalWalls"] = [{"x": 4, "y": 5}]
+
+        with patch.object(backend, "log_event") as log_event:
+            result = backend.build_pc_level_candidate(
+                layout,
+                context,
+            )
+
+        self.assertEqual(result["rows"][5][4], "@")
+        self.assertTrue(
+            any("overlaps water" in str(call) for call in log_event.call_args_list)
+        )
+
+    def test_coordinate_layout_drops_new_wall_touching_box_start(self):
         layout = make_layout()
         layout["internalWalls"] = [{"x": 2, "y": 3}]
 
-        with self.assertRaisesRegex(ValueError, "cannot touch a wall"):
-            backend.build_pc_level_candidate(
+        with patch.object(backend, "log_event") as log_event:
+            result = backend.build_pc_level_candidate(
                 layout,
                 backend.normalize_pc_level_request(self.context),
             )
 
-    def test_coordinate_layout_rejects_disconnected_walkable_area(self):
+        self.assertEqual(result, {"rows": make_candidate()})
+        self.assertTrue(
+            any("is not allowed" in str(call) for call in log_event.call_args_list)
+        )
+
+    def test_coordinate_layout_drops_wall_that_disconnects_activity_area(self):
         layout = make_layout()
         layout["internalWalls"] = [
             {"x": 6, "y": y}
             for y in range(2, 9)
         ]
 
-        with self.assertRaisesRegex(ValueError, "connected component"):
-            backend.build_pc_level_candidate(
+        with (
+            patch.object(backend, "log_event") as log_event,
+            patch.object(
+                backend,
+                "validate_pc_completed_level_solvability",
+            ),
+        ):
+            result = backend.build_pc_level_candidate(
                 layout,
                 backend.normalize_pc_level_request(self.context),
             )
 
-    def test_coordinate_layout_rejects_activity_area_below_48(self):
+        self.assertEqual(result["rows"][8][6], ".")
+        self.assertTrue(
+            any(
+                "connected component" in str(call)
+                for call in log_event.call_args_list
+            )
+        )
+
+    def test_coordinate_layout_drops_water_that_merges_into_invalid_shape(self):
+        context = backend.normalize_pc_level_request(self.context)
         layout = make_layout()
-        layout["waterAreas"] = [
-            {"x": 4, "y": 5, "width": 3, "height": 3},
+        layout["waterAreaIds"] = [
+            find_water_area_id(context, 2, 5, 2, 2),
+            find_water_area_id(context, 4, 5, 2, 2),
+            find_water_area_id(context, 6, 5, 2, 2),
         ]
 
-        with self.assertRaisesRegex(ValueError, "at least 48"):
-            backend.build_pc_level_candidate(
+        with patch.object(backend, "log_event") as log_event:
+            result = backend.build_pc_level_candidate(
                 layout,
-                backend.normalize_pc_level_request(self.context),
+                context,
             )
+
+        self.assertEqual(result["rows"][5][2:6], "@@@@")
+        self.assertEqual(result["rows"][5][6:8], "..")
+        self.assertTrue(
+            any("water area ID" in str(call) for call in log_event.call_args_list)
+        )
+
+    def test_allowed_water_areas_are_stable_and_individually_safe(self):
+        normalized = backend.normalize_pc_level_request(self.context)
+        normalized_again = backend.normalize_pc_level_request(self.context)
+        enclosed = backend.find_pc_enclosed_cells(make_sketch(), 12, 10)
+        enclosed_cells = {
+            (x, y)
+            for y in range(10)
+            for x in range(12)
+            if enclosed[y][x]
+        }
+
+        self.assertEqual(
+            [area["id"] for area in normalized["allowedWaterAreas"]],
+            list(range(len(normalized["allowedWaterAreas"]))),
+        )
+        self.assertEqual(
+            normalized["allowedWaterAreas"],
+            normalized_again["allowedWaterAreas"],
+        )
+
+        for area in normalized["allowedWaterAreas"]:
+            positions = {
+                (x, y)
+                for y in range(area["y"], area["y"] + area["height"])
+                for x in range(area["x"], area["x"] + area["width"])
+            }
+            self.assertTrue(
+                all(make_sketch()[y][x] == " " for x, y in positions)
+            )
+            remaining = enclosed_cells - positions
+            self.assertGreaterEqual(len(remaining), 48)
+            self.assertEqual(backend.count_pc_components(remaining), 1)
+
+        self.assertFalse(
+            any(
+                area["x"] == 2
+                and area["y"] == 2
+                and area["width"] == 2
+                and area["height"] == 2
+                for area in normalized["allowedWaterAreas"]
+            )
+        )
+        self.assertFalse(
+            any(
+                area["width"] == 3 and area["height"] == 3
+                for area in normalized["allowedWaterAreas"]
+            )
+        )
+
+    def test_filtered_candidate_still_requires_backend_solver(self):
+        with patch.object(
+            backend,
+            "validate_pc_completed_level_solvability",
+            side_effect=ValueError("candidate has no Sokoban solution"),
+        ):
+            with self.assertRaisesRegex(ValueError, "no Sokoban solution"):
+                backend.build_pc_level_candidate(
+                    make_layout(),
+                    backend.normalize_pc_level_request(self.context),
+                )
 
     def test_api_uses_only_pc_fields(self):
         captured = {}
@@ -268,6 +408,16 @@ class PCLevelGenerationTests(unittest.TestCase):
         normalized = backend.normalize_pc_level_request(payload)
 
         self.assertIsNone(normalized["previousCandidateRows"])
+
+    def test_prompt_guidance_lists_only_legal_wall_coordinates(self):
+        normalized = backend.normalize_pc_level_request(self.context)
+
+        self.assertIn([2, 2], normalized["editableCoordinates"])
+        self.assertNotIn([3, 3], normalized["editableCoordinates"])
+
+        for coordinate in ([2, 3], [4, 3], [3, 2], [3, 4]):
+            self.assertIn(coordinate, normalized["editableCoordinates"])
+            self.assertNotIn(coordinate, normalized["allowedWallCoordinates"])
 
     def test_box_start_touching_wall_is_rejected(self):
         payload = copy.deepcopy(self.context)
@@ -416,6 +566,11 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertIn("Unity solver found no solution.", prompt_text)
         self.assertIn("internalWalls", prompt_text)
         self.assertIn("Do not return map rows", prompt_text)
+        self.assertIn("editableCoordinates", prompt_text)
+        self.assertIn("allowedWallCoordinates", prompt_text)
+        self.assertIn("allowedWaterAreas", prompt_text)
+        self.assertIn("waterAreaIds", prompt_text)
+        self.assertNotIn('"player":{"x":2,"y":2}', prompt_text)
 
     def test_pc_model_call_retries_only_model_output_failures(self):
         captured = {}
@@ -428,7 +583,10 @@ class PCLevelGenerationTests(unittest.TestCase):
         with (
             patch.dict(
                 backend.os.environ,
-                {"DEEPSEEK_PC_LEVEL_TIMEOUT_SECONDS": "60"},
+                {
+                    "DEEPSEEK_PC_LEVEL_TIMEOUT_SECONDS": "60",
+                    "DEEPSEEK_PC_LEVEL_TEMPERATURE": "0.15",
+                },
             ),
             patch.object(
                 backend,
@@ -444,6 +602,7 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         self.assertEqual(captured["max_attempts"], 2)
         self.assertEqual(captured["timeout_seconds"], 60.0)
+        self.assertEqual(captured["temperature"], 0.15)
         self.assertEqual(captured["thinking_mode"], "disabled")
         self.assertEqual(
             captured["retry_error_codes"],

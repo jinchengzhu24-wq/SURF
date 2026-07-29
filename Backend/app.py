@@ -3441,13 +3441,13 @@ def create_pc_level_candidate(
     context = normalize_pc_level_request(context)
 
     def validate_candidate(payload):
-        return build_pc_level_candidate(payload, context)
+        return build_pc_level_candidate(payload, context, request_id=request_id)
 
     return execute_json_request(
         task="pc_level_generation",
         messages=build_pc_level_generation_messages(context),
         validator=validate_candidate,
-        temperature=float(os.getenv("DEEPSEEK_PC_LEVEL_TEMPERATURE", "0.45")),
+        temperature=float(os.getenv("DEEPSEEK_PC_LEVEL_TEMPERATURE", "0.15")),
         timeout_seconds=float(
             os.getenv(
                 "DEEPSEEK_PC_LEVEL_TIMEOUT_SECONDS",
@@ -3465,26 +3465,26 @@ def create_pc_level_candidate(
     )
 
 
-def build_pc_level_candidate(layout, context):
+def build_pc_level_candidate(layout, context, request_id=""):
     if layout is None or not isinstance(layout, dict):
         raise ValueError("model returned no PC coordinate layout")
 
-    required_fields = {"player", "internalWalls", "waterAreas"}
+    required_fields = {"player", "internalWalls", "waterAreaIds"}
 
     if set(layout) != required_fields:
         raise ValueError(
             "PC coordinate layout must contain only player, internalWalls, "
-            "and waterAreas"
+            "and waterAreaIds"
         )
 
     internal_walls = layout.get("internalWalls")
-    water_areas = layout.get("waterAreas")
+    water_area_ids = layout.get("waterAreaIds")
 
     if not isinstance(internal_walls, list):
         raise ValueError("internalWalls must be an array")
 
-    if not isinstance(water_areas, list):
-        raise ValueError("waterAreas must be an array")
+    if not isinstance(water_area_ids, list):
+        raise ValueError("waterAreaIds must be an array")
 
     width = context["width"]
     height = context["height"]
@@ -3497,80 +3497,184 @@ def build_pc_level_candidate(layout, context):
         ]
         for y in range(height)
     ]
-    claimed_cells = {}
 
-    def claim_editable_cell(position, label):
-        x, y = position
+    player = parse_pc_position(layout.get("player"), "player")
+    player_x, player_y = player
 
-        if x < 0 or x >= width or y < 0 or y >= height:
-            raise ValueError(f"{label} coordinate ({x},{y}) is outside the map")
+    if (
+        player_x < 0
+        or player_x >= width
+        or player_y < 0
+        or player_y >= height
+    ):
+        raise ValueError(
+            f"player coordinate ({player_x},{player_y}) is outside the map"
+        )
 
-        if sketch_rows[y][x] != " ":
-            raise ValueError(
-                f"{label} coordinate ({x},{y}) cannot cover a fixed sketch tile"
+    if sketch_rows[player_y][player_x] != " ":
+        raise ValueError(
+            f"player coordinate ({player_x},{player_y}) "
+            "cannot cover a fixed sketch tile"
+        )
+
+    if not enclosed[player_y][player_x]:
+        raise ValueError(
+            f"player coordinate ({player_x},{player_y}) "
+            "is outside the activity area"
+        )
+
+    rows[player_y][player_x] = "p"
+    claimed_cells = {player: "player"}
+    allowed_water_areas = {
+        area["id"]: area
+        for area in context.get("allowedWaterAreas", [])
+    }
+    seen_water_area_ids = set()
+
+    for index, value in enumerate(water_area_ids):
+        label = f"waterAreaIds[{index}]"
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            log_pc_dropped_item(
+                request_id,
+                "water",
+                index,
+                f"{label} must be an integer",
             )
+            continue
 
-        if not enclosed[y][x]:
-            raise ValueError(
-                f"{label} coordinate ({x},{y}) is outside the activity area"
+        if value in seen_water_area_ids:
+            log_pc_dropped_item(
+                request_id,
+                "water",
+                index,
+                f"water area ID {value} was selected more than once",
             )
+            continue
 
-        if position in claimed_cells:
-            raise ValueError(
-                f"{label} coordinate ({x},{y}) overlaps "
-                f"{claimed_cells[position]}"
+        seen_water_area_ids.add(value)
+        area = allowed_water_areas.get(value)
+
+        if area is None:
+            log_pc_dropped_item(
+                request_id,
+                "water",
+                index,
+                f"water area ID {value} is not in allowedWaterAreas",
             )
-
-        claimed_cells[position] = label
-
-    for index, value in enumerate(internal_walls):
-        position = parse_pc_position(value, f"internalWalls[{index}]")
-        claim_editable_cell(position, f"internalWalls[{index}]")
-        x, y = position
-        rows[y][x] = "#"
-
-    for index, value in enumerate(water_areas):
-        label = f"waterAreas[{index}]"
-
-        if not isinstance(value, dict) or set(value) != {
-            "x",
-            "y",
-            "width",
-            "height",
-        }:
-            raise ValueError(
-                f"{label} must contain only x, y, width, and height"
-            )
-
-        x = parse_pc_integer(value.get("x"), f"{label}.x")
-        y = parse_pc_integer(value.get("y"), f"{label}.y")
-        area_width = parse_pc_integer(value.get("width"), f"{label}.width")
-        area_height = parse_pc_integer(value.get("height"), f"{label}.height")
-
-        if (
-            area_width < 2
-            or area_width > 4
-            or area_height < 2
-            or area_height > 4
-        ):
-            raise ValueError(f"{label} must be a 2-4 by 2-4 rectangle")
+            continue
 
         positions = [
             (cell_x, cell_y)
-            for cell_y in range(y, y + area_height)
-            for cell_x in range(x, x + area_width)
+            for cell_y in range(area["y"], area["y"] + area["height"])
+            for cell_x in range(area["x"], area["x"] + area["width"])
         ]
+        overlap = next(
+            (
+                (position, claimed_cells[position])
+                for position in positions
+                if position in claimed_cells
+            ),
+            None,
+        )
 
-        for position in positions:
-            claim_editable_cell(position, label)
+        if overlap is not None:
+            position, owner = overlap
+            log_pc_dropped_item(
+                request_id,
+                "water",
+                index,
+                f"water area ID {value} overlaps {owner} at {position}",
+            )
+            continue
+
+        tentative_rows = [list(row) for row in rows]
 
         for cell_x, cell_y in positions:
-            rows[cell_y][cell_x] = "@"
+            tentative_rows[cell_y][cell_x] = "@"
 
-    player = parse_pc_position(layout.get("player"), "player")
-    claim_editable_cell(player, "player")
-    player_x, player_y = player
-    rows[player_y][player_x] = "p"
+        try:
+            validate_pc_candidate_activity(
+                ["".join(row) for row in tentative_rows],
+                width,
+                height,
+            )
+        except ValueError as exception:
+            log_pc_dropped_item(
+                request_id,
+                "water",
+                index,
+                f"water area ID {value} was rejected: {exception}",
+            )
+            continue
+
+        rows = tentative_rows
+
+        for position in positions:
+            claimed_cells[position] = f"water area ID {value}"
+
+    allowed_wall_coordinates = {
+        tuple(coordinate)
+        for coordinate in context.get("allowedWallCoordinates", [])
+    }
+
+    for index, value in enumerate(internal_walls):
+        label = f"internalWalls[{index}]"
+
+        try:
+            position = parse_pc_position(value, label)
+        except ValueError as exception:
+            log_pc_dropped_item(
+                request_id,
+                "wall",
+                index,
+                str(exception),
+            )
+            continue
+
+        if position not in allowed_wall_coordinates:
+            log_pc_dropped_item(
+                request_id,
+                "wall",
+                index,
+                f"{label} coordinate {position} is not allowed",
+            )
+            continue
+
+        if position in claimed_cells:
+            log_pc_dropped_item(
+                request_id,
+                "wall",
+                index,
+                f"{label} coordinate {position} overlaps "
+                f"{claimed_cells[position]}",
+            )
+            continue
+
+        wall_x, wall_y = position
+        tentative_rows = [list(row) for row in rows]
+        tentative_rows[wall_y][wall_x] = "#"
+        tentative_strings = ["".join(row) for row in tentative_rows]
+
+        try:
+            validate_pc_start_clearance(tentative_strings, width, height)
+            validate_pc_candidate_activity(
+                tentative_strings,
+                width,
+                height,
+            )
+        except ValueError as exception:
+            log_pc_dropped_item(
+                request_id,
+                "wall",
+                index,
+                f"{label} coordinate {position} was rejected: {exception}",
+            )
+            continue
+
+        rows = tentative_rows
+        claimed_cells[position] = label
+
     candidate = validate_pc_level_candidate(
         {"rows": ["".join(row) for row in rows]},
         context,
@@ -3581,6 +3685,19 @@ def build_pc_level_candidate(layout, context):
         height,
     )
     return candidate
+
+
+def log_pc_dropped_item(request_id, item_type, item_index, reason):
+    fields = {
+        "itemType": item_type,
+        "itemIndex": item_index,
+        "reason": safe_log_text(reason),
+    }
+
+    if request_id:
+        fields["requestId"] = request_id
+
+    log_event("INFO", "pc_layout_item_dropped", **fields)
 
 
 def parse_pc_position(value, label):
@@ -3662,10 +3779,55 @@ def normalize_pc_level_request(context):
             "previousCandidateRows",
         )
 
+    box_starts = [
+        [x, y]
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "s"
+    ]
+    targets = [
+        [x, y]
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "t"
+    ]
+    editable_coordinates = [
+        [x, y]
+        for y in range(height)
+        for x in range(width)
+        if enclosed[y][x] and rows[y][x] == " "
+    ]
+    cells_next_to_box_starts = {
+        (neighbor_x, neighbor_y)
+        for start_x, start_y in box_starts
+        for neighbor_x, neighbor_y in (
+            (start_x + 1, start_y),
+            (start_x - 1, start_y),
+            (start_x, start_y + 1),
+            (start_x, start_y - 1),
+        )
+    }
+    allowed_wall_coordinates = [
+        coordinate
+        for coordinate in editable_coordinates
+        if tuple(coordinate) not in cells_next_to_box_starts
+    ]
+    allowed_water_areas = enumerate_pc_allowed_water_areas(
+        rows,
+        enclosed_cells,
+        width,
+        height,
+    )
+
     return {
         "width": width,
         "height": height,
         "sketchRows": list(rows),
+        "boxStarts": box_starts,
+        "targets": targets,
+        "editableCoordinates": editable_coordinates,
+        "allowedWallCoordinates": allowed_wall_coordinates,
+        "allowedWaterAreas": allowed_water_areas,
         "previousCandidateRows": (
             list(previous_rows) if previous_rows is not None else None
         ),
@@ -3731,6 +3893,12 @@ def validate_pc_level_candidate(payload, context):
         raise ValueError("candidate must contain exactly one p")
 
     validate_pc_start_clearance(rows, width, height)
+    validate_pc_candidate_activity(rows, width, height)
+
+    return {"rows": list(rows)}
+
+
+def validate_pc_candidate_activity(rows, width, height):
     validate_pc_water_rectangles(rows, width, height)
     walkable = {
         (x, y)
@@ -3745,7 +3913,53 @@ def validate_pc_level_candidate(payload, context):
     if count_pc_components(walkable) != 1:
         raise ValueError("candidate walkable cells must form one connected component")
 
-    return {"rows": list(rows)}
+
+def enumerate_pc_allowed_water_areas(
+    sketch_rows,
+    enclosed_cells,
+    width,
+    height,
+):
+    editable_cells = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if sketch_rows[y][x] == " " and (x, y) in enclosed_cells
+    }
+    allowed_areas = []
+
+    for y in range(height):
+        for x in range(width):
+            for area_height in range(2, 5):
+                for area_width in range(2, 5):
+                    positions = {
+                        (cell_x, cell_y)
+                        for cell_y in range(y, y + area_height)
+                        for cell_x in range(x, x + area_width)
+                    }
+
+                    if not positions.issubset(editable_cells):
+                        continue
+
+                    remaining_walkable = enclosed_cells - positions
+
+                    if (
+                        len(remaining_walkable) < 48
+                        or count_pc_components(remaining_walkable) != 1
+                    ):
+                        continue
+
+                    allowed_areas.append(
+                        {
+                            "id": len(allowed_areas),
+                            "x": x,
+                            "y": y,
+                            "width": area_width,
+                            "height": area_height,
+                        }
+                    )
+
+    return allowed_areas
 
 
 def validate_pc_rows(rows, width, height, allowed_tiles, field_name):

@@ -28,20 +28,21 @@ PC_LEVEL_GENERATION_SYSTEM_PROMPT = (
     "You complete a partially designed 12 by 10 Sokoban map by selecting only "
     "coordinate-based additions. Coordinates are zero-based: x runs left to "
     "right from 0 to 11 and y runs top to bottom from 0 to 9. Return only valid "
-    "JSON with exactly three fields: player, internalWalls, and waterAreas. "
+    "JSON with exactly three fields: player, internalWalls, and waterAreaIds. "
     "player must be an object containing integer x and y. internalWalls must "
-    "be an array of objects that each contain integer x and y. waterAreas must "
-    "be an array of objects that each contain integer x, y, width, and height, "
-    "where x and y are the top-left corner. Use an empty array when no internal "
-    "wall or water area is needed. Do not return map rows or individual ground "
+    "be an array of objects that each contain integer x and y. waterAreaIds "
+    "must be an array of integer IDs copied exactly from allowedWaterAreas. "
+    "Use an empty array when no internal wall or water area is needed. Do not "
+    "return map rows or individual ground "
     "tiles because the server fills all remaining enclosed cells with ground. "
-    "Every selected coordinate must be an undecided space inside the enclosed "
-    "activity area and must not overlap another addition or any existing #, s, "
-    "or t tile. Every water rectangle must be between 2x2 and 4x4. New walls "
-    "must not be orthogonally adjacent to an s tile. Preserve at least 48 "
-    "connected walkable cells and choose a layout likely to be solvable from "
-    "the selected player position. Do not return markdown, map strings, "
-    "comments, explanations, or extra fields."
+    "Copy the player coordinate exactly from editableCoordinates. Copy every "
+    "internalWalls coordinate exactly from allowedWallCoordinates. Select water "
+    "only by its allowedWaterAreas ID; do not invent water coordinates or IDs. "
+    "Additions should not overlap each other. Preserve at least 48 connected "
+    "walkable cells and choose a layout likely to be solvable from the selected "
+    "player position. The output field structure is a player coordinate object, "
+    "an internalWalls coordinate array, and a waterAreaIds integer array. Do not "
+    "return markdown, map strings, comments, explanations, or extra fields."
 )
 
 
@@ -53,6 +54,13 @@ def build_pc_level_generation_messages(context):
         "width": int(context.get("width") or 0),
         "height": int(context.get("height") or 0),
         "sketchRows": sketch_rows,
+        "boxStarts": list(context.get("boxStarts") or []),
+        "targets": list(context.get("targets") or []),
+        "editableCoordinates": list(context.get("editableCoordinates") or []),
+        "allowedWallCoordinates": list(
+            context.get("allowedWallCoordinates") or []
+        ),
+        "allowedWaterAreas": list(context.get("allowedWaterAreas") or []),
     }
 
     if previous_rows:
