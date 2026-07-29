@@ -168,6 +168,43 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertEqual(result.attempts_used, 2)
         self.assertEqual(len(client.completions.calls), 2)
 
+    def test_restricted_retry_codes_do_not_repeat_timeout(self):
+        request = httpx.Request("POST", "https://example.invalid/chat")
+        client = FakeClient(
+            [
+                APITimeoutError(request),
+                '{"value": 7}',
+            ]
+        )
+
+        with self.assertRaises(runtime.LLMServiceError) as raised:
+            self.execute(
+                client,
+                retry_error_codes={
+                    "MODEL_JSON_INVALID",
+                    "MODEL_VALIDATION_FAILED",
+                },
+            )
+
+        self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
+        self.assertEqual(raised.exception.attempts_used, 1)
+        self.assertEqual(len(client.completions.calls), 1)
+
+    def test_restricted_retry_codes_still_repair_invalid_json(self):
+        client = FakeClient(["not-json", '{"value": 7}'])
+
+        result = self.execute(
+            client,
+            retry_error_codes={
+                "MODEL_JSON_INVALID",
+                "MODEL_VALIDATION_FAILED",
+            },
+        )
+
+        self.assertEqual(result.value, {"value": 7})
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(len(client.completions.calls), 2)
+
     def test_missing_api_key_is_configuration_error(self):
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}):
             with self.assertRaises(runtime.LLMServiceError) as raised:

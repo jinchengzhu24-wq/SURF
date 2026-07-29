@@ -59,6 +59,17 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         self.assertEqual(result["rows"], make_candidate())
 
+    def test_incomplete_inner_space_is_normalized_to_ground(self):
+        candidate = make_candidate()
+        candidate[2] = " #p... ...# "
+
+        result = backend.validate_pc_level_candidate(
+            {"rows": candidate},
+            backend.normalize_pc_level_request(self.context),
+        )
+
+        self.assertEqual(result["rows"][2], " #p.......# ")
+
     def test_api_uses_only_pc_fields(self):
         captured = {}
 
@@ -219,7 +230,7 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertIn("previousCandidateRows", prompt_text)
         self.assertIn("Unity solver found no solution.", prompt_text)
 
-    def test_pc_model_call_uses_single_attempt_and_dedicated_timeout(self):
+    def test_pc_model_call_retries_only_model_output_failures(self):
         captured = {}
 
         def execute_json_request(**kwargs):
@@ -244,9 +255,13 @@ class PCLevelGenerationTests(unittest.TestCase):
                 max_attempts=2,
             )
 
-        self.assertEqual(captured["max_attempts"], 1)
+        self.assertEqual(captured["max_attempts"], 2)
         self.assertEqual(captured["timeout_seconds"], 60.0)
         self.assertEqual(captured["thinking_mode"], "disabled")
+        self.assertEqual(
+            captured["retry_error_codes"],
+            {"MODEL_JSON_INVALID", "MODEL_VALIDATION_FAILED"},
+        )
 
 
 if __name__ == "__main__":

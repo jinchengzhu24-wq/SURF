@@ -3454,8 +3454,12 @@ def create_pc_level_candidate(
                 str(PC_LEVEL_LLM_TIMEOUT_SECONDS),
             )
         ),
-        max_attempts=1,
+        max_attempts=max_attempts,
         thinking_mode="disabled",
+        retry_error_codes={
+            "MODEL_JSON_INVALID",
+            "MODEL_VALIDATION_FAILED",
+        },
         request_id=request_id,
         validation_stage="pc_level_validation",
     )
@@ -3553,6 +3557,18 @@ def validate_pc_level_candidate(payload, context):
         "rows",
     )
     enclosed = find_pc_enclosed_cells(sketch_rows, width, height)
+    normalized_rows = [list(row) for row in rows]
+
+    for y in range(height):
+        for x in range(width):
+            if (
+                enclosed[y][x]
+                and sketch_rows[y][x] == " "
+                and normalized_rows[y][x] == " "
+            ):
+                normalized_rows[y][x] = "."
+
+    rows = ["".join(row) for row in normalized_rows]
 
     for y in range(height):
         for x in range(width):

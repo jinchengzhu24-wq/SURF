@@ -197,11 +197,15 @@ def execute_json_request(
     timeout_seconds,
     max_attempts=2,
     thinking_mode=None,
+    retry_error_codes=None,
     request_id="",
     validation_stage="model_validation",
 ):
     request_id = new_request_id(request_id)
     max_attempts = max(1, min(2, int(max_attempts or 1)))
+    allowed_retry_codes = (
+        None if retry_error_codes is None else set(retry_error_codes)
+    )
     model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
     base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
@@ -306,7 +310,16 @@ def execute_json_request(
                 traceback=safe_log_text(traceback.format_exc()[-4000:], 4000),
             )
 
-            if not error.retryable or attempt >= max_attempts:
+            retry_is_allowed = (
+                allowed_retry_codes is None
+                or error.code in allowed_retry_codes
+            )
+
+            if (
+                not error.retryable
+                or not retry_is_allowed
+                or attempt >= max_attempts
+            ):
                 raise error from exception
 
             if error.code in {"MODEL_JSON_INVALID", "MODEL_VALIDATION_FAILED"}:
