@@ -42,16 +42,35 @@ public class PCLevelExpansionClient : MonoBehaviour
 
         int boundedMaxAttempts = Mathf.Clamp(maxAttempts, 1, 2);
         string requestId = LLMBackendError.CreateRequestId();
-        PCLevelGenerationRequest payload = new PCLevelGenerationRequest
+        string json;
+
+        if (previousCandidateRows == null || previousCandidateRows.Length == 0)
         {
-            width = sketch.width,
-            height = sketch.height,
-            sketchRows = CloneRows(sketch.rows),
-            previousCandidateRows = CloneRows(previousCandidateRows),
-            rejectionReason = rejectionReason ?? "",
-            maxAttempts = boundedMaxAttempts
-        };
-        string json = JsonUtility.ToJson(payload);
+            PCLevelInitialGenerationRequest payload =
+                new PCLevelInitialGenerationRequest
+                {
+                    width = sketch.width,
+                    height = sketch.height,
+                    sketchRows = CloneRows(sketch.rows),
+                    rejectionReason = rejectionReason ?? "",
+                    maxAttempts = boundedMaxAttempts
+                };
+            json = JsonUtility.ToJson(payload);
+        }
+        else
+        {
+            PCLevelGenerationRequest payload = new PCLevelGenerationRequest
+            {
+                width = sketch.width,
+                height = sketch.height,
+                sketchRows = CloneRows(sketch.rows),
+                previousCandidateRows = CloneRows(previousCandidateRows),
+                rejectionReason = rejectionReason ?? "",
+                maxAttempts = boundedMaxAttempts
+            };
+            json = JsonUtility.ToJson(payload);
+        }
+
         byte[] body = Encoding.UTF8.GetBytes(json);
 
         using (UnityWebRequest request = new UnityWebRequest(endpoint, "POST"))
@@ -106,6 +125,16 @@ public class PCLevelExpansionClient : MonoBehaviour
             LastFailureRetryable = false;
             onComplete?.Invoke(response);
         }
+    }
+
+    [Serializable]
+    private class PCLevelInitialGenerationRequest
+    {
+        public int width;
+        public int height;
+        public string[] sketchRows;
+        public string rejectionReason;
+        public int maxAttempts;
     }
 
     [Serializable]
