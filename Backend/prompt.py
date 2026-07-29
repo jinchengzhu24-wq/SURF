@@ -25,20 +25,23 @@ SYSTEM_PROMPT = (
 
 
 PC_LEVEL_GENERATION_SYSTEM_PROMPT = (
-    "You complete a partially designed 12 by 10 Sokoban map. Return only valid "
-    "JSON with exactly one field named rows. rows must be an array of exactly "
-    "10 ASCII strings, and every string must contain exactly 12 characters. "
-    "The allowed map characters are space, #, ., @, p, s, and t. Existing #, "
-    "s, and t cells in the supplied sketch are immutable. Cells outside the "
-    "single enclosed activity area are immutable spaces. Fill every undecided "
-    "cell inside the activity area with ground '.', a new internal wall '#', "
-    "water '@', or the single player start 'p'. Do not add or remove s or t. "
-    "No s cell may be orthogonally adjacent to a # wall in the completed map. "
-    "There must be exactly one p. Every water component must be a complete "
-    "rectangle between 2x2 and 4x4. All walkable cells (., p, s, t) must form "
-    "one connected component containing at least 48 cells. Avoid obvious "
-    "Sokoban deadlocks and produce a layout likely to be solvable. Do not "
-    "return markdown, coordinates, comments, explanations, or extra fields."
+    "You complete a partially designed 12 by 10 Sokoban map by selecting only "
+    "coordinate-based additions. Coordinates are zero-based: x runs left to "
+    "right from 0 to 11 and y runs top to bottom from 0 to 9. Return only valid "
+    "JSON with exactly three fields: player, internalWalls, and waterAreas. "
+    "player must be an object containing integer x and y. internalWalls must "
+    "be an array of objects that each contain integer x and y. waterAreas must "
+    "be an array of objects that each contain integer x, y, width, and height, "
+    "where x and y are the top-left corner. Use an empty array when no internal "
+    "wall or water area is needed. Do not return map rows or individual ground "
+    "tiles because the server fills all remaining enclosed cells with ground. "
+    "Every selected coordinate must be an undecided space inside the enclosed "
+    "activity area and must not overlap another addition or any existing #, s, "
+    "or t tile. Every water rectangle must be between 2x2 and 4x4. New walls "
+    "must not be orthogonally adjacent to an s tile. Preserve at least 48 "
+    "connected walkable cells and choose a layout likely to be solvable from "
+    "the selected player position. Do not return markdown, map strings, "
+    "comments, explanations, or extra fields."
 )
 
 
@@ -66,9 +69,11 @@ def build_pc_level_generation_messages(context):
         {
             "role": "user",
             "content": (
-                "Complete this PC_Design sketch. Preserve every immutable cell "
-                "exactly and return a different corrected candidate when a "
-                "previous candidate and rejection reason are supplied.\n"
+                "Select coordinate additions for this PC_Design sketch. The "
+                "server preserves immutable cells and fills omitted interior "
+                "cells with ground. Return a different corrected coordinate "
+                "layout when a previous candidate and rejection reason are "
+                "supplied.\n"
                 + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
             ),
         },

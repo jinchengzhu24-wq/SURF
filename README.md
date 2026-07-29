@@ -41,7 +41,7 @@ PC_Level
 - `PC` 的 Confirm 加载 `PC_Design`。
 - `PC_Design` 的 Submit 会重新校验并保存固定 `12×10` 草图，然后加载 `PC_Level`。
 - 草图中的箱子起点 `s` 不得与墙上下左右相邻；Submit 前还会验证全开放版本至少存在一个可解玩家出生区域。
-- `PC_Level` 只读取 PC 草图上下文，通过 `/generate-pc-level` 请求完整候选地图，再使用 Unity `LevelSolver` 验证可解性。
+- `PC_Level` 只读取 PC 草图上下文。`/generate-pc-level` 让模型选择玩家、内部墙和水面的坐标，由后端确定性组装并预检完整候选地图；Unity `LevelSolver` 仍执行最终可解性验证。
 - PC 候选不得删除或移动玩家绘制的墙 `#`、箱子起点 `s` 和终点 `t`。
 - 生成失败时可 Retry，或返回 `PC_Design` 并恢复上次提交的草图。
 

@@ -3441,7 +3441,7 @@ def create_pc_level_candidate(
     context = normalize_pc_level_request(context)
 
     def validate_candidate(payload):
-        return validate_pc_level_candidate(payload, context)
+        return build_pc_level_candidate(payload, context)
 
     return execute_json_request(
         task="pc_level_generation",
@@ -3463,6 +3463,141 @@ def create_pc_level_candidate(
         request_id=request_id,
         validation_stage="pc_level_validation",
     )
+
+
+def build_pc_level_candidate(layout, context):
+    if layout is None or not isinstance(layout, dict):
+        raise ValueError("model returned no PC coordinate layout")
+
+    required_fields = {"player", "internalWalls", "waterAreas"}
+
+    if set(layout) != required_fields:
+        raise ValueError(
+            "PC coordinate layout must contain only player, internalWalls, "
+            "and waterAreas"
+        )
+
+    internal_walls = layout.get("internalWalls")
+    water_areas = layout.get("waterAreas")
+
+    if not isinstance(internal_walls, list):
+        raise ValueError("internalWalls must be an array")
+
+    if not isinstance(water_areas, list):
+        raise ValueError("waterAreas must be an array")
+
+    width = context["width"]
+    height = context["height"]
+    sketch_rows = context["sketchRows"]
+    enclosed = find_pc_enclosed_cells(sketch_rows, width, height)
+    rows = [
+        [
+            "." if enclosed[y][x] and sketch_rows[y][x] == " " else sketch_rows[y][x]
+            for x in range(width)
+        ]
+        for y in range(height)
+    ]
+    claimed_cells = {}
+
+    def claim_editable_cell(position, label):
+        x, y = position
+
+        if x < 0 or x >= width or y < 0 or y >= height:
+            raise ValueError(f"{label} coordinate ({x},{y}) is outside the map")
+
+        if sketch_rows[y][x] != " ":
+            raise ValueError(
+                f"{label} coordinate ({x},{y}) cannot cover a fixed sketch tile"
+            )
+
+        if not enclosed[y][x]:
+            raise ValueError(
+                f"{label} coordinate ({x},{y}) is outside the activity area"
+            )
+
+        if position in claimed_cells:
+            raise ValueError(
+                f"{label} coordinate ({x},{y}) overlaps "
+                f"{claimed_cells[position]}"
+            )
+
+        claimed_cells[position] = label
+
+    for index, value in enumerate(internal_walls):
+        position = parse_pc_position(value, f"internalWalls[{index}]")
+        claim_editable_cell(position, f"internalWalls[{index}]")
+        x, y = position
+        rows[y][x] = "#"
+
+    for index, value in enumerate(water_areas):
+        label = f"waterAreas[{index}]"
+
+        if not isinstance(value, dict) or set(value) != {
+            "x",
+            "y",
+            "width",
+            "height",
+        }:
+            raise ValueError(
+                f"{label} must contain only x, y, width, and height"
+            )
+
+        x = parse_pc_integer(value.get("x"), f"{label}.x")
+        y = parse_pc_integer(value.get("y"), f"{label}.y")
+        area_width = parse_pc_integer(value.get("width"), f"{label}.width")
+        area_height = parse_pc_integer(value.get("height"), f"{label}.height")
+
+        if (
+            area_width < 2
+            or area_width > 4
+            or area_height < 2
+            or area_height > 4
+        ):
+            raise ValueError(f"{label} must be a 2-4 by 2-4 rectangle")
+
+        positions = [
+            (cell_x, cell_y)
+            for cell_y in range(y, y + area_height)
+            for cell_x in range(x, x + area_width)
+        ]
+
+        for position in positions:
+            claim_editable_cell(position, label)
+
+        for cell_x, cell_y in positions:
+            rows[cell_y][cell_x] = "@"
+
+    player = parse_pc_position(layout.get("player"), "player")
+    claim_editable_cell(player, "player")
+    player_x, player_y = player
+    rows[player_y][player_x] = "p"
+    candidate = validate_pc_level_candidate(
+        {"rows": ["".join(row) for row in rows]},
+        context,
+    )
+    validate_pc_completed_level_solvability(
+        candidate["rows"],
+        width,
+        height,
+    )
+    return candidate
+
+
+def parse_pc_position(value, label):
+    if not isinstance(value, dict) or set(value) != {"x", "y"}:
+        raise ValueError(f"{label} must contain only x and y")
+
+    return (
+        parse_pc_integer(value.get("x"), f"{label}.x"),
+        parse_pc_integer(value.get("y"), f"{label}.y"),
+    )
+
+
+def parse_pc_integer(value, label):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer")
+
+    return value
 
 
 def normalize_pc_level_request(context):
@@ -3743,10 +3878,80 @@ def validate_pc_open_sketch_feasibility(
     if not initial_regions:
         raise ValueError("PC sketch has no possible player start")
 
+    return validate_pc_push_solvability(
+        walkable,
+        start_boxes,
+        targets,
+        initial_regions,
+        maximum_search_states,
+        "PC sketch open-map solvability check exceeded its search budget",
+        (
+            "PC sketch has no solvable open completion; "
+            "move box starts, targets, or walls"
+        ),
+    )
+
+
+def validate_pc_completed_level_solvability(
+    rows,
+    width,
+    height,
+    maximum_search_states=PC_FEASIBILITY_MAX_SEARCH_STATES,
+):
+    walkable = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] in {".", "p", "s", "t"}
+    }
+    start_boxes = tuple(
+        sorted(
+            (x, y)
+            for y in range(height)
+            for x in range(width)
+            if rows[y][x] == "s"
+        )
+    )
+    targets = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "t"
+    }
+    players = [
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "p"
+    ]
+
+    if len(players) != 1:
+        raise ValueError("candidate must contain exactly one player start")
+
+    return validate_pc_push_solvability(
+        walkable,
+        start_boxes,
+        targets,
+        players,
+        maximum_search_states,
+        "candidate solvability check exceeded its search budget",
+        "candidate has no Sokoban solution",
+    )
+
+
+def validate_pc_push_solvability(
+    walkable,
+    start_boxes,
+    targets,
+    initial_players,
+    maximum_search_states,
+    budget_error,
+    unsolvable_error,
+):
     open_states = deque()
     visited_states = set()
 
-    for player in initial_regions:
+    for player in initial_players:
         key = build_pc_push_state_key(player, start_boxes, walkable)
 
         if key not in visited_states:
@@ -3761,7 +3966,7 @@ def validate_pc_open_sketch_feasibility(
         searched_states += 1
 
         if set(boxes) == targets:
-            return
+            return searched_states
 
         box_set = set(boxes)
         reachable = find_pc_reachable_cells(player, walkable, box_set)
@@ -3804,14 +4009,9 @@ def validate_pc_open_sketch_feasibility(
                     open_states.append((next_player, next_boxes))
 
     if searched_states >= search_limit:
-        raise ValueError(
-            "PC sketch open-map solvability check exceeded its search budget"
-        )
+        raise ValueError(budget_error)
 
-    raise ValueError(
-        "PC sketch has no solvable open completion; "
-        "move box starts, targets, or walls"
-    )
+    raise ValueError(unsolvable_error)
 
 
 def find_pc_region_representatives(walkable, boxes):

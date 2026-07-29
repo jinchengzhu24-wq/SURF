@@ -42,6 +42,14 @@ def make_candidate():
     ]
 
 
+def make_layout():
+    return {
+        "player": {"x": 2, "y": 2},
+        "internalWalls": [],
+        "waterAreas": [],
+    }
+
+
 class PCLevelGenerationTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(backend.app)
@@ -70,6 +78,132 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         self.assertEqual(result["rows"][2], " #p.......# ")
 
+    def test_coordinate_layout_builds_complete_rows(self):
+        result = backend.build_pc_level_candidate(
+            make_layout(),
+            backend.normalize_pc_level_request(self.context),
+        )
+
+        self.assertEqual(result, {"rows": make_candidate()})
+        self.assertTrue(all(len(row) == 12 for row in result["rows"]))
+
+    def test_coordinate_layout_builds_valid_wall_and_water(self):
+        layout = make_layout()
+        layout["internalWalls"] = [{"x": 6, "y": 2}]
+        layout["waterAreas"] = [
+            {"x": 4, "y": 2, "width": 2, "height": 2},
+        ]
+
+        result = backend.build_pc_level_candidate(
+            layout,
+            backend.normalize_pc_level_request(self.context),
+        )
+
+        self.assertEqual(result["rows"][2], " #p.@@#...# ")
+        self.assertEqual(result["rows"][3], " #.s@@..t.# ")
+
+    def test_coordinate_layout_rejects_out_of_bounds_player(self):
+        layout = make_layout()
+        layout["player"] = {"x": 12, "y": 2}
+
+        with self.assertRaisesRegex(ValueError, "outside the map"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
+    def test_coordinate_layout_rejects_fixed_tile_overlap(self):
+        layout = make_layout()
+        layout["player"] = {"x": 3, "y": 3}
+
+        with self.assertRaisesRegex(ValueError, "fixed sketch tile"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
+    def test_coordinate_layout_rejects_element_overlap(self):
+        layout = make_layout()
+        layout["internalWalls"] = [{"x": 2, "y": 2}]
+
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
+    def test_coordinate_layout_rejects_duplicate_wall(self):
+        layout = make_layout()
+        layout["internalWalls"] = [
+            {"x": 5, "y": 5},
+            {"x": 5, "y": 5},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
+    def test_coordinate_layout_rejects_invalid_water_size(self):
+        layout = make_layout()
+        layout["waterAreas"] = [
+            {"x": 5, "y": 5, "width": 1, "height": 2},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "2-4 by 2-4"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
+    def test_coordinate_layout_rejects_water_over_fixed_tile(self):
+        layout = make_layout()
+        layout["waterAreas"] = [
+            {"x": 2, "y": 2, "width": 2, "height": 2},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "fixed sketch tile"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
+    def test_coordinate_layout_rejects_new_wall_touching_box_start(self):
+        layout = make_layout()
+        layout["internalWalls"] = [{"x": 2, "y": 3}]
+
+        with self.assertRaisesRegex(ValueError, "cannot touch a wall"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
+    def test_coordinate_layout_rejects_disconnected_walkable_area(self):
+        layout = make_layout()
+        layout["internalWalls"] = [
+            {"x": 6, "y": y}
+            for y in range(2, 9)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "connected component"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
+    def test_coordinate_layout_rejects_activity_area_below_48(self):
+        layout = make_layout()
+        layout["waterAreas"] = [
+            {"x": 4, "y": 5, "width": 3, "height": 3},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "at least 48"):
+            backend.build_pc_level_candidate(
+                layout,
+                backend.normalize_pc_level_request(self.context),
+            )
+
     def test_api_uses_only_pc_fields(self):
         captured = {}
 
@@ -95,6 +229,25 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertNotIn("styleDescription", captured)
         self.assertNotIn("ideaText", captured)
         self.assertEqual(captured["sketchRows"], make_sketch())
+        self.assertEqual(response.headers["X-LLM-Attempts-Used"], "1")
+
+    def test_api_returns_rows_after_internal_coordinate_generation(self):
+        def execute_json_request(**kwargs):
+            value = kwargs["validator"](make_layout())
+            return LLMExecutionResult(value, 1, kwargs["request_id"])
+
+        with patch.object(
+            backend,
+            "execute_json_request",
+            side_effect=execute_json_request,
+        ):
+            response = self.client.post(
+                "/generate-pc-level",
+                json={**self.context, "maxAttempts": 2},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"rows": make_candidate()})
         self.assertEqual(response.headers["X-LLM-Attempts-Used"], "1")
 
     def test_invalid_sketch_is_rejected_before_llm(self):
@@ -148,6 +301,38 @@ class PCLevelGenerationTests(unittest.TestCase):
             backend.validate_pc_open_sketch_feasibility(
                 rows,
                 enclosed_cells,
+                12,
+                10,
+            )
+
+    def test_completed_candidate_solver_uses_explicit_player(self):
+        rows = [
+            "   #######  ",
+            "####   s #  ",
+            "#        ###",
+            "#          #",
+            "#s         #",
+            "#         t#",
+            "##         #",
+            " #         #",
+            " #   t   ###",
+            " #########  ",
+        ]
+        enclosed = backend.find_pc_enclosed_cells(rows, 12, 10)
+        completed = [
+            "".join(
+                "." if enclosed[y][x] and rows[y][x] == " " else rows[y][x]
+                for x in range(12)
+            )
+            for y in range(10)
+        ]
+        player_row = list(completed[2])
+        player_row[1] = "p"
+        completed[2] = "".join(player_row)
+
+        with self.assertRaisesRegex(ValueError, "no Sokoban solution"):
+            backend.validate_pc_completed_level_solvability(
+                completed,
                 12,
                 10,
             )
@@ -212,7 +397,7 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         def execute_json_request(**kwargs):
             captured_messages.extend(kwargs["messages"])
-            value = kwargs["validator"]({"rows": make_candidate()})
+            value = kwargs["validator"](make_layout())
             return LLMExecutionResult(value, 1, kwargs["request_id"])
 
         with patch.object(
@@ -229,13 +414,15 @@ class PCLevelGenerationTests(unittest.TestCase):
         prompt_text = "\n".join(message["content"] for message in captured_messages)
         self.assertIn("previousCandidateRows", prompt_text)
         self.assertIn("Unity solver found no solution.", prompt_text)
+        self.assertIn("internalWalls", prompt_text)
+        self.assertIn("Do not return map rows", prompt_text)
 
     def test_pc_model_call_retries_only_model_output_failures(self):
         captured = {}
 
         def execute_json_request(**kwargs):
             captured.update(kwargs)
-            value = kwargs["validator"]({"rows": make_candidate()})
+            value = kwargs["validator"](make_layout())
             return LLMExecutionResult(value, 1, kwargs["request_id"])
 
         with (

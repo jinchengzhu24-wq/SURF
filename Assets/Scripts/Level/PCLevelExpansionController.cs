@@ -5,6 +5,9 @@ using UnityEngine.UI;
 
 public class PCLevelExpansionController : MonoBehaviour
 {
+    private const string GenerationFailureMessage =
+        "Generation failed. Retry or adjust the design.";
+
     [Header("Generation")]
     [SerializeField] private PCLevelExpansionClient expansionClient;
     [SerializeField] private LevelData levelData;
@@ -117,9 +120,7 @@ public class PCLevelExpansionController : MonoBehaviour
 
             if (response == null)
             {
-                failureMessage = string.IsNullOrEmpty(expansionClient.LastFailureMessage)
-                    ? "The PC generation service did not return a candidate."
-                    : expansionClient.LastFailureMessage;
+                failureMessage = GenerationFailureMessage;
                 break;
             }
 
@@ -135,7 +136,11 @@ public class PCLevelExpansionController : MonoBehaviour
                     maximumWaterHeight,
                     out rejectionReason))
             {
-                failureMessage = rejectionReason;
+                failureMessage = GenerationFailureMessage;
+                Debug.LogWarning(
+                    "PCLevelExpansionController rejected candidate: "
+                    + rejectionReason
+                );
                 continue;
             }
 
@@ -155,7 +160,7 @@ public class PCLevelExpansionController : MonoBehaviour
             if (!solvedLevel)
             {
                 rejectionReason = "Unity LevelSolver rejected the candidate as unsolvable.";
-                failureMessage = rejectionReason;
+                failureMessage = GenerationFailureMessage;
                 Debug.LogWarning(
                     "PCLevelExpansionController rejected candidate:"
                     + " searchedStates="
