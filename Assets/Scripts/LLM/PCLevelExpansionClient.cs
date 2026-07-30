@@ -13,7 +13,7 @@ public class PCLevelCandidateResponse
 public class PCLevelExpansionClient : MonoBehaviour
 {
     public string endpoint = "http://111.231.136.4:8000/generate-pc-level";
-    public int requestTimeoutSeconds = 180;
+    public int requestTimeoutSeconds = 30;
 
     public int LastAttemptsUsed { get; private set; }
     public bool LastFailureRetryable { get; private set; } = true;

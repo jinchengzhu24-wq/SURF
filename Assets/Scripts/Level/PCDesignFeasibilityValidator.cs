@@ -49,6 +49,11 @@ public static class PCDesignFeasibilityValidator
             new HashSet<Vector2Int>();
         List<Vector2Int> wallCandidates =
             new List<Vector2Int>();
+        HashSet<Vector2Int> outerShellCells = FindOuterShellCells(
+            sketchRows,
+            width,
+            height
+        );
 
         for (int y = 0; y < height; y++)
         {
@@ -67,7 +72,10 @@ public static class PCDesignFeasibilityValidator
                         position,
                         sketchRows,
                         width,
-                        height))
+                        height)
+                    && !IsNextToOuterShell(
+                        position,
+                        outerShellCells))
                 {
                     wallCandidates.Add(position);
                 }
@@ -133,7 +141,8 @@ public static class PCDesignFeasibilityValidator
 
         message = "Leave room for one 2x2 water area and "
             + requiredInternalWallTiles
-            + " internal wall tiles without dividing the activity area.";
+            + " internal wall tiles at least one cell away from the outer shell "
+            + "without dividing the activity area.";
         return false;
     }
 
@@ -474,6 +483,118 @@ public static class PCDesignFeasibilityValidator
         }
 
         return false;
+    }
+
+    private static bool IsNextToOuterShell(
+        Vector2Int position,
+        HashSet<Vector2Int> outerShellCells)
+    {
+        for (int direction = 0; direction < directions.Length; direction++)
+        {
+            if (outerShellCells.Contains(position + directions[direction]))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static HashSet<Vector2Int> FindOuterShellCells(
+        string[] rows,
+        int width,
+        int height)
+    {
+        bool[,] outside = new bool[width, height];
+        Queue<Vector2Int> open = new Queue<Vector2Int>();
+
+        for (int x = 0; x < width; x++)
+        {
+            EnqueueOutside(
+                new Vector2Int(x, 0),
+                rows,
+                width,
+                height,
+                outside,
+                open
+            );
+            EnqueueOutside(
+                new Vector2Int(x, height - 1),
+                rows,
+                width,
+                height,
+                outside,
+                open
+            );
+        }
+
+        for (int y = 0; y < height; y++)
+        {
+            EnqueueOutside(
+                new Vector2Int(0, y),
+                rows,
+                width,
+                height,
+                outside,
+                open
+            );
+            EnqueueOutside(
+                new Vector2Int(width - 1, y),
+                rows,
+                width,
+                height,
+                outside,
+                open
+            );
+        }
+
+        while (open.Count > 0)
+        {
+            Vector2Int current = open.Dequeue();
+
+            for (int direction = 0; direction < directions.Length; direction++)
+            {
+                EnqueueOutside(
+                    current + directions[direction],
+                    rows,
+                    width,
+                    height,
+                    outside,
+                    open
+                );
+            }
+        }
+
+        HashSet<Vector2Int> shell = new HashSet<Vector2Int>();
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                if (rows[y][x] != LevelData.Wall)
+                {
+                    continue;
+                }
+
+                Vector2Int wall = new Vector2Int(x, y);
+
+                for (int direction = 0;
+                    direction < directions.Length;
+                    direction++)
+                {
+                    Vector2Int neighbor = wall + directions[direction];
+
+                    if (!IsInside(neighbor, width, height)
+                        || outside[neighbor.x, neighbor.y])
+                    {
+                        shell.Add(wall);
+                        break;
+                    }
+                }
+            }
+        }
+
+        return shell;
     }
 
     private static bool TryChooseConnectedWalls(

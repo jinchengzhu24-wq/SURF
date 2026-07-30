@@ -25,60 +25,41 @@ SYSTEM_PROMPT = (
 
 
 PC_LEVEL_GENERATION_SYSTEM_PROMPT = (
-    "You complete a partially designed 12 by 10 Sokoban map by selecting only "
-    "server-provided IDs. Return only valid JSON with exactly three fields: "
-    "waterAreaId, playerCellId, and internalWallCellIds. waterAreaId and "
-    "playerCellId must each be one integer. internalWallCellIds must be an "
-    "array of unique integers. Copy every ID exactly from the supplied "
-    "editableCells and allowedWaterAreas. Select exactly one water area, one "
-    "player cell, and at least four wall cells on the first response. A repair "
-    "response may use the fallback minimum of two wall cells when validation "
-    "requires it, but it must change the water area, player cell, or wall ID "
-    "set from the rejected response. Follow the validation reason and replace "
-    "the implicated IDs instead of repeating the same layout. The selected "
-    "player and walls must not use any cellIds owned "
-    "by the selected water area. Every internalWallCellId must be copied from "
-    "the selected water area's compatibleWallCellIds list; do not use wall IDs "
-    "from another water option. More strictly, internalWallCellIds must exactly "
-    "match one internalWallCellIds array in the selected water area's "
-    "effectiveWallSets. Do not mix IDs from multiple wall sets. Select "
-    "playerCellId from that same wall set's compatiblePlayerCellIds. These wall "
-    "sets were already checked for connectivity, solvability, and at least one "
-    "additional minimum push. Walls must use cells whose canPlaceWall flag is "
-    "true, and the player must use a cell whose canPlacePlayer flag is true. "
-    "The final complete wall set must still measurably affect the optimal "
-    "solution. Decorative walls away from useful routes are invalid. "
-    "The player and walls must not overlap each other. Do not return map rows "
-    "or ground tiles because the server fills all remaining enclosed cells "
-    "with ground. Keep all walkable cells connected and choose a layout likely "
-    "to be solvable from the selected player position. Do not "
-    "invent IDs. Do not return coordinates, markdown, comments, explanations, "
-    "or extra fields."
+    "You choose one complete, server-validated layout for a partially designed "
+    "12 by 10 Sokoban map. Return only valid JSON with exactly one field: "
+    "layoutCandidateId. Its value must be an integer copied from the supplied "
+    "layoutCandidates list. Each candidate already fixes the water area, "
+    "player start, and internal walls and is guaranteed to preserve the user's "
+    "tiles, connectivity, and solvability. Prefer a four-wall candidate whose "
+    "wallStyle is bent, split, or dispersed. Use a two-wall candidate only when "
+    "its composition is aesthetically stronger. Do not invent an ID, combine "
+    "parts from different candidates, return map rows or coordinates, or add "
+    "markdown, comments, explanations, or extra fields."
 )
 
 
 def build_pc_level_generation_messages(context):
     sketch_rows = list(context.get("sketchRows") or [])
-    previous_rows = context.get("previousCandidateRows")
-    rejection_reason = str(context.get("rejectionReason") or "").strip()[:500]
     payload = {
         "width": int(context.get("width") or 0),
         "height": int(context.get("height") or 0),
         "sketchRows": sketch_rows,
         "boxStarts": list(context.get("boxStarts") or []),
         "targets": list(context.get("targets") or []),
-        "editableCells": list(context.get("editableCells") or []),
-        "allowedWaterAreas": list(context.get("allowedWaterAreas") or []),
-        "preferredMinimumInternalWalls": 4,
-        "fallbackMinimumInternalWalls": 2,
-        "requiredWaterAreas": 1,
+        "layoutCandidates": [
+            {
+                "id": candidate["id"],
+                "wallStyle": candidate["wallStyle"],
+                "waterArea": dict(candidate["waterArea"]),
+                "player": dict(candidate["player"]),
+                "internalWalls": [
+                    dict(position)
+                    for position in candidate["internalWalls"]
+                ],
+            }
+            for candidate in context.get("layoutCandidates", [])
+        ],
     }
-
-    if previous_rows:
-        payload["previousCandidateRows"] = list(previous_rows)
-
-    if rejection_reason:
-        payload["rejectionReason"] = rejection_reason
 
     return [
         {
@@ -88,11 +69,7 @@ def build_pc_level_generation_messages(context):
         {
             "role": "user",
             "content": (
-                "Select indexed additions for this PC_Design sketch. The "
-                "server preserves immutable cells and fills omitted interior "
-                "cells with ground. Return a different corrected indexed "
-                "layout when a previous candidate and rejection reason are "
-                "supplied.\n"
+                "Select one complete safe layout for this PC_Design sketch.\n"
                 + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
             ),
         },

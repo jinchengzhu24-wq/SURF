@@ -8,7 +8,6 @@ import threading
 import time
 import webbrowser
 from collections import deque
-from itertools import combinations
 from pathlib import Path
 
 import uvicorn
@@ -68,23 +67,16 @@ PORT = 8000
 START_URL = f"http://{HOST}:{PORT}/generate-level-plan"
 SHORT_LLM_TIMEOUT_SECONDS = 25.0
 PLAN_LLM_TIMEOUT_SECONDS = 45.0
-PC_LEVEL_LLM_TIMEOUT_SECONDS = 60.0
+PC_LEVEL_LLM_TIMEOUT_SECONDS = 15.0
 PC_FEASIBILITY_MAX_SEARCH_STATES = 120000
 PC_DESIGN_MIN_ACTIVITY_AREA = 56
 PC_PRIMARY_MIN_INTERNAL_WALLS = 4
 PC_FALLBACK_MIN_INTERNAL_WALLS = 2
-PC_MIN_WATER_AREAS = 1
 PC_MAX_WATER_AREA_CANDIDATES = 12
-PC_MAX_WATER_PREFILTER_CHECKS = 36
-PC_PREFILTER_MAX_SEARCH_STATES = 20000
-PC_WALL_IMPACT_MAX_SEARCH_STATES = 300000
-PC_WALL_IMPACT_MIN_STEP_DELTA = 4
-PC_WALL_IMPACT_MIN_PUSH_DELTA = 1
-PC_MAX_EFFECTIVE_WALL_SETS = 12
-PC_MAX_EFFECTIVE_WALL_SETS_PER_WATER = 2
-PC_EFFECTIVE_WALL_CANDIDATE_POOL_SIZE = 12
-PC_MAX_EFFECTIVE_WALL_COMBINATIONS_PER_WATER = 256
-PC_EFFECTIVE_WALL_PREFILTER_MAX_SEARCH_STATES = 30000
+PC_LAYOUT_MAX_WATER_CHECKS = 6
+PC_MAX_LAYOUT_CANDIDATES = 6
+PC_LAYOUT_PREFILTER_SECONDS = 3.0
+PC_LAYOUT_PREFILTER_MAX_SEARCH_STATES = 300000
 DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -99,14 +91,6 @@ HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
 JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
 
 class PCSolvabilityError(ValueError):
-    def __init__(self, reason_code, message, searched_states=0, details=None):
-        super().__init__(message)
-        self.reason_code = reason_code
-        self.searched_states = int(searched_states or 0)
-        self.details = dict(details or {})
-
-
-class PCWallImpactError(ValueError):
     def __init__(self, reason_code, message, searched_states=0, details=None):
         super().__init__(message)
         self.reason_code = reason_code
@@ -1250,6 +1234,7 @@ def generate_pc_level(
         data,
         request.state.request_id,
         max_attempts,
+        context_is_normalized=True,
     )
     apply_llm_execution_headers(response, execution)
     return execution.value
@@ -3469,82 +3454,87 @@ def create_pc_level_candidate(
     context,
     request_id="",
     max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
+    context_is_normalized=False,
 ):
-    context = normalize_pc_level_request(context)
-    structurally_valid_candidate_count = 0
-    previous_rejected_selection = None
-    wall_ids_rejected_for_low_impact = None
+    if not context_is_normalized:
+        context = normalize_pc_level_request(context)
 
     def validate_candidate(payload):
-        nonlocal structurally_valid_candidate_count
-        nonlocal previous_rejected_selection
-        nonlocal wall_ids_rejected_for_low_impact
-        water_area_id, player_cell_id, internal_wall_cell_ids = (
-            parse_pc_indexed_layout(payload)
-        )
-        wall_selection = tuple(sorted(internal_wall_cell_ids))
-        selection = (
-            water_area_id,
-            player_cell_id,
-            wall_selection,
+        layout_candidate_id = parse_pc_layout_candidate_selection(payload)
+        candidate = next(
+            (
+                item
+                for item in context.get("layoutCandidates", [])
+                if item["id"] == layout_candidate_id
+            ),
+            None,
         )
 
-        if previous_rejected_selection == selection:
+        if candidate is None:
             raise ValueError(
-                "The corrected layout must change waterAreaId, playerCellId, "
-                "or the internalWallCellIds set from the rejected layout"
+                f"layoutCandidateId {layout_candidate_id} is not available"
             )
 
-        if wall_ids_rejected_for_low_impact == wall_selection:
-            raise ValueError(
-                "The corrected layout must change internalWallCellIds because "
-                "the previous wall set had insufficient blocking impact"
-            )
+        return {
+            "rows": list(candidate["rows"]),
+        }
 
-        structurally_valid_candidate_count += 1
-        minimum_internal_walls = (
-            PC_PRIMARY_MIN_INTERNAL_WALLS
-            if structurally_valid_candidate_count == 1
-            else PC_FALLBACK_MIN_INTERNAL_WALLS
+    fallback_candidate = context["layoutCandidates"][0]
+
+    try:
+        return execute_json_request(
+            task="pc_level_generation",
+            messages=build_pc_level_generation_messages(context),
+            validator=validate_candidate,
+            temperature=float(
+                os.getenv("DEEPSEEK_PC_LEVEL_TEMPERATURE", "0.15")
+            ),
+            timeout_seconds=float(
+                os.getenv(
+                    "DEEPSEEK_PC_LEVEL_TIMEOUT_SECONDS",
+                    str(PC_LEVEL_LLM_TIMEOUT_SECONDS),
+                )
+            ),
+            max_attempts=1,
+            thinking_mode="disabled",
+            retry_error_codes=set(),
+            request_id=request_id,
+            validation_stage="pc_level_validation",
+        )
+    except LLMServiceError as exception:
+        log_event(
+            "INFO",
+            "pc_layout_fallback_used",
+            requestId=request_id or exception.request_id,
+            reasonCode=exception.code,
+            stage=exception.stage,
+            layoutCandidateId=fallback_candidate["id"],
+            internalWallCount=len(
+                fallback_candidate["internalWallCellIds"]
+            ),
+        )
+        return LLMExecutionResult(
+            {"rows": list(fallback_candidate["rows"])},
+            max(1, exception.attempts_used),
+            request_id or exception.request_id,
         )
 
-        try:
-            return build_pc_level_candidate(
-                payload,
-                context,
-                request_id=request_id,
-                minimum_internal_walls=minimum_internal_walls,
-                minimum_water_areas=PC_MIN_WATER_AREAS,
-                require_effective_wall_set=True,
-            )
-        except PCWallImpactError:
-            previous_rejected_selection = selection
-            wall_ids_rejected_for_low_impact = wall_selection
-            raise
-        except ValueError:
-            previous_rejected_selection = selection
-            raise
 
-    return execute_json_request(
-        task="pc_level_generation",
-        messages=build_pc_level_generation_messages(context),
-        validator=validate_candidate,
-        temperature=float(os.getenv("DEEPSEEK_PC_LEVEL_TEMPERATURE", "0.15")),
-        timeout_seconds=float(
-            os.getenv(
-                "DEEPSEEK_PC_LEVEL_TIMEOUT_SECONDS",
-                str(PC_LEVEL_LLM_TIMEOUT_SECONDS),
-            )
-        ),
-        max_attempts=max_attempts,
-        thinking_mode="disabled",
-        retry_error_codes={
-            "MODEL_JSON_INVALID",
-            "MODEL_VALIDATION_FAILED",
-        },
-        request_id=request_id,
-        validation_stage="pc_level_validation",
-    )
+def parse_pc_layout_candidate_selection(payload):
+    if not isinstance(payload, dict) or set(payload) != {"layoutCandidateId"}:
+        raise ValueError(
+            "PC layout selection must contain only layoutCandidateId"
+        )
+
+    layout_candidate_id = payload.get("layoutCandidateId")
+
+    if isinstance(layout_candidate_id, bool) or not isinstance(
+        layout_candidate_id,
+        int,
+    ):
+        raise ValueError("layoutCandidateId must be an integer")
+
+    return layout_candidate_id
 
 
 def build_pc_level_candidate(
@@ -3553,7 +3543,6 @@ def build_pc_level_candidate(
     request_id="",
     minimum_internal_walls=0,
     minimum_water_areas=0,
-    require_effective_wall_set=False,
 ):
     water_area_id, player_cell_id, internal_wall_cell_ids = (
         parse_pc_indexed_layout(layout)
@@ -3642,41 +3631,6 @@ def build_pc_level_candidate(
             + ",".join(str(value) for value in incompatible_wall_ids)
         )
 
-    if require_effective_wall_set:
-        if len(internal_wall_cell_ids) < minimum_internal_walls:
-            raise ValueError(
-                "candidate retained "
-                f"{len(internal_wall_cell_ids)} internal wall tiles; at least "
-                f"{minimum_internal_walls} are required"
-            )
-
-        selected_wall_ids = set(internal_wall_cell_ids)
-        effective_wall_set = next(
-            (
-                wall_set
-                for wall_set in water_area.get("effectiveWallSets", [])
-                if set(wall_set.get("internalWallCellIds") or [])
-                == selected_wall_ids
-            ),
-            None,
-        )
-
-        if effective_wall_set is None:
-            raise ValueError(
-                "internalWallCellIds must exactly match one effectiveWallSets "
-                f"entry for waterAreaId {water_area_id}"
-            )
-
-        compatible_player_ids = set(
-            effective_wall_set.get("compatiblePlayerCellIds") or []
-        )
-
-        if player_cell_id not in compatible_player_ids:
-            raise ValueError(
-                f"playerCellId {player_cell_id} is not compatible with the "
-                "selected effective wall set"
-            )
-
     for cell_id in water_cell_ids:
         cell = editable_cells.get(cell_id)
 
@@ -3731,19 +3685,6 @@ def build_pc_level_candidate(
 
         log_event("INFO", "pc_candidate_rejected", **fields)
         raise ValueError(feedback) from exception
-
-    if internal_wall_cell_ids:
-        validate_pc_internal_wall_impact(
-            candidate["rows"],
-            sketch_rows,
-            wall_cells,
-            width,
-            height,
-            request_id=request_id,
-            water_area_id=water_area_id,
-            player_cell_id=player_cell_id,
-            internal_wall_cell_ids=internal_wall_cell_ids,
-        )
 
     return candidate
 
@@ -3953,12 +3894,6 @@ def normalize_pc_level_request(context):
         raise ValueError("PC sketch must contain exactly one enclosed activity area")
 
     validate_pc_start_clearance(rows, width, height)
-    validate_pc_open_sketch_feasibility(
-        rows,
-        enclosed_cells,
-        width,
-        height,
-    )
 
     previous_rows = context.get("previousCandidateRows")
 
@@ -4005,10 +3940,28 @@ def normalize_pc_level_request(context):
             (start_x, start_y - 1),
         )
     }
+    outer_shell_cells = find_pc_outer_shell_cells(
+        rows,
+        width,
+        height,
+    )
+    cells_next_to_outer_shell = {
+        (wall_x + direction_x, wall_y + direction_y)
+        for wall_x, wall_y in outer_shell_cells
+        for direction_x, direction_y in (
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+        )
+    }
     allowed_wall_coordinates = [
         coordinate
         for coordinate in editable_coordinates
-        if tuple(coordinate) not in cells_next_to_box_starts
+        if (
+            tuple(coordinate) not in cells_next_to_box_starts
+            and tuple(coordinate) not in cells_next_to_outer_shell
+        )
     ]
     allowed_wall_coordinates = filter_pc_static_wall_coordinates(
         enclosed_cells,
@@ -4043,71 +3996,47 @@ def normalize_pc_level_request(context):
         width,
         height,
     )
-    capacity_water_area = find_pc_required_feature_capacity_area(
-        enclosed_cells,
-        allowed_wall_coordinates,
-        all_allowed_water_areas,
-        PC_PRIMARY_MIN_INTERNAL_WALLS,
-        0,
-    )
-
-    if capacity_water_area is None:
-        raise ValueError(
-            "PC sketch must leave room for one water area and four internal "
-            "wall tiles without disconnecting the activity area"
-        )
 
     ranked_water_areas = select_pc_water_area_candidates(
         all_allowed_water_areas,
         editable_cells,
         box_starts,
         targets,
-        capacity_water_area["id"],
-        PC_MAX_WATER_PREFILTER_CHECKS,
+        -1,
+        len(all_allowed_water_areas),
     )
-    allowed_water_areas = prefilter_pc_water_area_candidates(
-        rows,
-        enclosed_cells,
+    ranked_water_areas = attach_pc_compatible_wall_ids(
         ranked_water_areas,
-        width,
-        height,
-        PC_MAX_WATER_AREA_CANDIDATES,
-    )
-
-    if not allowed_water_areas:
-        raise ValueError(
-            "PC sketch has no water candidate that preserves open-map solvability"
-        )
-
-    if not has_pc_required_feature_capacity(
-        enclosed_cells,
-        allowed_wall_coordinates,
-        allowed_water_areas,
-        PC_PRIMARY_MIN_INTERNAL_WALLS,
-        0,
-    ):
-        raise ValueError(
-            "PC sketch has no prefiltered water candidate that leaves room for "
-            "four internal wall tiles without disconnecting the activity area"
-        )
-
-    allowed_water_areas = attach_pc_compatible_wall_ids(
-        allowed_water_areas,
         editable_cells,
     )
-    allowed_water_areas = attach_pc_effective_wall_sets(
-        allowed_water_areas,
-        editable_cells,
-        enclosed_cells,
-        box_starts,
-        targets,
+    layout_candidates, checked_water_areas, searched_states = (
+        build_pc_safe_layout_candidates(
+            rows,
+            enclosed_cells,
+            ranked_water_areas[:PC_LAYOUT_MAX_WATER_CHECKS],
+            editable_cells,
+            box_starts,
+            targets,
+            previous_rows,
+            width,
+            height,
+        )
     )
 
-    if not allowed_water_areas:
+    if not layout_candidates:
         raise ValueError(
-            "PC sketch has no prevalidated internal wall set that remains "
-            "solvable and measurably affects the solution"
+            "PC sketch has no safe completion with at least two internal "
+            "walls and one water area"
         )
+
+    log_event(
+        "INFO",
+        "pc_layout_prefilter_completed",
+        checkedWaterAreas=checked_water_areas,
+        layoutCandidateCount=len(layout_candidates),
+        searchedStates=searched_states,
+        preferredWallCount=len(layout_candidates[0]["internalWallCellIds"]),
+    )
 
     return {
         "width": width,
@@ -4118,7 +4047,15 @@ def normalize_pc_level_request(context):
         "editableCells": editable_cells,
         "editableCoordinates": editable_coordinates,
         "allowedWallCoordinates": allowed_wall_coordinates,
-        "allowedWaterAreas": allowed_water_areas,
+        "outerShellCells": [
+            [x, y]
+            for x, y in sorted(
+                outer_shell_cells,
+                key=lambda position: (position[1], position[0]),
+            )
+        ],
+        "allowedWaterAreas": ranked_water_areas,
+        "layoutCandidates": layout_candidates,
         "previousCandidateRows": (
             list(previous_rows) if previous_rows is not None else None
         ),
@@ -4383,75 +4320,6 @@ def filter_pc_static_wall_coordinates(
     return filtered
 
 
-def prefilter_pc_water_area_candidates(
-    sketch_rows,
-    enclosed_cells,
-    ranked_water_areas,
-    width,
-    height,
-    limit=PC_MAX_WATER_AREA_CANDIDATES,
-):
-    accepted = []
-    start_boxes = tuple(
-        sorted(
-            (x, y)
-            for y in range(height)
-            for x in range(width)
-            if sketch_rows[y][x] == "s"
-        )
-    )
-    targets = {
-        (x, y)
-        for y in range(height)
-        for x in range(width)
-        if sketch_rows[y][x] == "t"
-    }
-
-    for area in ranked_water_areas[:PC_MAX_WATER_PREFILTER_CHECKS]:
-        water_cells = {
-            (cell_x, cell_y)
-            for cell_y in range(area["y"], area["y"] + area["height"])
-            for cell_x in range(area["x"], area["x"] + area["width"])
-        }
-        remaining_walkable = set(enclosed_cells) - water_cells
-        diagnostic = diagnose_pc_static_solvability(
-            remaining_walkable,
-            start_boxes,
-            targets,
-        )
-
-        if diagnostic is not None:
-            continue
-
-        try:
-            validate_pc_open_sketch_feasibility(
-                sketch_rows,
-                remaining_walkable,
-                width,
-                height,
-                maximum_search_states=PC_PREFILTER_MAX_SEARCH_STATES,
-            )
-        except PCSolvabilityError as exception:
-            if exception.reason_code != "SEARCH_BUDGET_EXCEEDED":
-                continue
-
-        accepted.append(
-            {
-                "id": len(accepted),
-                "x": area["x"],
-                "y": area["y"],
-                "width": area["width"],
-                "height": area["height"],
-                "cellIds": list(area["cellIds"]),
-            }
-        )
-
-        if len(accepted) >= max(1, int(limit)):
-            break
-
-    return accepted
-
-
 def select_pc_water_area_candidates(
     allowed_water_areas,
     editable_cells,
@@ -4601,26 +4469,41 @@ def attach_pc_compatible_wall_ids(allowed_water_areas, editable_cells):
     return result
 
 
-def attach_pc_effective_wall_sets(
+def build_pc_safe_layout_candidates(
+    sketch_rows,
+    enclosed_cells,
     allowed_water_areas,
     editable_cells,
-    enclosed_cells,
     box_starts,
     targets,
+    previous_rows,
+    width,
+    height,
 ):
+    started = time.perf_counter()
+    budget = {
+        "deadline": started + PC_LAYOUT_PREFILTER_SECONDS,
+        "remainingStates": PC_LAYOUT_PREFILTER_MAX_SEARCH_STATES,
+        "searchedStates": 0,
+    }
     editable_by_id = {
         cell["id"]: cell
         for cell in editable_cells
     }
     start_boxes = tuple(sorted(tuple(position) for position in box_starts))
     target_cells = {tuple(position) for position in targets}
-    result = []
-    wall_set_count = 0
+    candidates = []
+    checked_water_areas = 0
 
-    for area in allowed_water_areas:
-        if wall_set_count >= PC_MAX_EFFECTIVE_WALL_SETS:
+    for area in allowed_water_areas[:PC_LAYOUT_MAX_WATER_CHECKS]:
+        if (
+            len(candidates) >= PC_MAX_LAYOUT_CANDIDATES
+            or time.perf_counter() >= budget["deadline"]
+            or budget["remainingStates"] <= 0
+        ):
             break
 
+        checked_water_areas += 1
         water_cell_ids = set(area.get("cellIds") or [])
         water_positions = {
             (
@@ -4628,226 +4511,468 @@ def attach_pc_effective_wall_sets(
                 editable_by_id[cell_id]["y"],
             )
             for cell_id in water_cell_ids
+            if cell_id in editable_by_id
         }
-        baseline_walkable = set(enclosed_cells) - water_positions
-        candidate_cells = sorted(
-            (
-                editable_by_id[cell_id]
-                for cell_id in area.get("compatibleWallCellIds", [])
-                if cell_id in editable_by_id
-            ),
-            key=lambda cell: (
-                -int(cell.get("wallImpactScore") or 0),
-                cell["id"],
-            ),
-        )[:PC_EFFECTIVE_WALL_CANDIDATE_POOL_SIZE]
-        effective_wall_sets = []
+        walkable = set(enclosed_cells) - water_positions
 
-        for required_wall_count in (
-            PC_PRIMARY_MIN_INTERNAL_WALLS,
-            PC_FALLBACK_MIN_INTERNAL_WALLS,
-        ):
-            checked_combinations = 0
+        if count_pc_components(walkable) != 1:
+            continue
 
-            for wall_cells in combinations(
-                candidate_cells,
-                required_wall_count,
-            ):
-                checked_combinations += 1
+        if diagnose_pc_static_solvability(
+            walkable,
+            start_boxes,
+            target_cells,
+        ) is not None:
+            continue
 
-                if (
-                    checked_combinations
-                    > PC_MAX_EFFECTIVE_WALL_COMBINATIONS_PER_WATER
-                ):
-                    break
+        player_and_trace = find_pc_safe_player_and_solution_trace(
+            walkable,
+            start_boxes,
+            target_cells,
+            editable_cells,
+            water_cell_ids,
+            budget,
+        )
 
-                wall_positions = {
-                    (cell["x"], cell["y"])
-                    for cell in wall_cells
-                }
-                walkable_with_walls = baseline_walkable - wall_positions
+        if player_and_trace is None:
+            continue
 
-                if count_pc_components(walkable_with_walls) != 1:
-                    continue
-
-                compatible_player_ids, minimum_push_delta = (
-                    find_pc_effective_wall_set_players(
-                        baseline_walkable,
-                        walkable_with_walls,
-                        start_boxes,
-                        target_cells,
-                        editable_cells,
-                        water_cell_ids,
-                        {
-                            cell["id"]
-                            for cell in wall_cells
-                        },
-                    )
-                )
-
-                if not compatible_player_ids:
-                    continue
-
-                effective_wall_sets.append(
-                    {
-                        "id": len(effective_wall_sets),
-                        "internalWallCellIds": sorted(
-                            cell["id"]
-                            for cell in wall_cells
-                        ),
-                        "compatiblePlayerCellIds": compatible_player_ids,
-                        "minimumPushDelta": minimum_push_delta,
-                    }
-                )
-                wall_set_count += 1
-                break
-
+        player_cell_id, protected_positions = player_and_trace
+        safe_wall_cells = [
+            cell
+            for cell in editable_cells
             if (
-                len(effective_wall_sets)
-                >= PC_MAX_EFFECTIVE_WALL_SETS_PER_WATER
-                or wall_set_count >= PC_MAX_EFFECTIVE_WALL_SETS
-            ):
+                cell.get("canPlaceWall")
+                and cell["id"] not in water_cell_ids
+                and cell["id"] != player_cell_id
+                and (cell["x"], cell["y"]) not in protected_positions
+            )
+        ]
+        wall_groups = build_pc_greedy_wall_groups(
+            safe_wall_cells,
+            walkable,
+        )
+
+        for wall_group in wall_groups:
+            if len(candidates) >= PC_MAX_LAYOUT_CANDIDATES:
                 break
 
-        if effective_wall_sets:
-            result.append(
+            rows = assemble_pc_layout_rows(
+                sketch_rows,
+                enclosed_cells,
+                editable_by_id,
+                water_cell_ids,
+                player_cell_id,
+                wall_group["internalWallCellIds"],
+                width,
+                height,
+            )
+            candidate = validate_pc_level_candidate(
+                {"rows": rows},
                 {
-                    **area,
-                    "id": len(result),
-                    "effectiveWallSets": effective_wall_sets,
+                    "width": width,
+                    "height": height,
+                    "sketchRows": sketch_rows,
+                },
+            )
+            player_cell = editable_by_id[player_cell_id]
+            wall_cells = [
+                editable_by_id[cell_id]
+                for cell_id in wall_group["internalWallCellIds"]
+            ]
+            candidates.append(
+                {
+                    "id": len(candidates),
+                    "waterAreaId": area["id"],
+                    "playerCellId": player_cell_id,
+                    "internalWallCellIds": list(
+                        wall_group["internalWallCellIds"]
+                    ),
+                    "wallStyle": wall_group["wallStyle"],
+                    "waterArea": {
+                        "x": area["x"],
+                        "y": area["y"],
+                        "width": area["width"],
+                        "height": area["height"],
+                    },
+                    "player": {
+                        "x": player_cell["x"],
+                        "y": player_cell["y"],
+                    },
+                    "internalWalls": [
+                        {"x": cell["x"], "y": cell["y"]}
+                        for cell in wall_cells
+                    ],
+                    "rows": list(candidate["rows"]),
                 }
             )
 
-    return result
+    if previous_rows:
+        different_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate["rows"] != list(previous_rows)
+        ]
+
+        if different_candidates:
+            candidates = different_candidates
+
+    style_rank = {
+        "bent": 0,
+        "split": 1,
+        "dispersed": 2,
+        "straight": 3,
+    }
+    candidates.sort(
+        key=lambda candidate: (
+            -len(candidate["internalWallCellIds"]),
+            style_rank.get(candidate["wallStyle"], 99),
+            candidate["waterAreaId"],
+            candidate["internalWallCellIds"],
+        )
+    )
+
+    for index, candidate in enumerate(candidates):
+        candidate["id"] = index
+
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
+    log_event(
+        "INFO",
+        "pc_layout_prefilter_timing",
+        elapsedMs=elapsed_ms,
+        checkedWaterAreas=checked_water_areas,
+        layoutCandidateCount=len(candidates),
+        searchedStates=budget["searchedStates"],
+        budgetExhausted=(
+            time.perf_counter() >= budget["deadline"]
+            or budget["remainingStates"] <= 0
+        ),
+    )
+    return candidates, checked_water_areas, budget["searchedStates"]
 
 
-def find_pc_effective_wall_set_players(
-    baseline_walkable,
-    walkable_with_walls,
+def find_pc_safe_player_and_solution_trace(
+    walkable,
     start_boxes,
     targets,
     editable_cells,
     water_cell_ids,
-    wall_cell_ids,
+    budget,
 ):
-    player_regions = find_pc_region_representatives(
-        walkable_with_walls,
-        set(start_boxes),
-    )
-    compatible_positions = set()
-    minimum_push_delta = None
-
-    for representative in player_regions:
-        try:
-            with_walls_pushes, _ = search_pc_minimum_pushes(
-                walkable_with_walls,
-                start_boxes,
-                targets,
-                [representative],
-                PC_EFFECTIVE_WALL_PREFILTER_MAX_SEARCH_STATES,
-                "effective wall-set search exceeded its state budget",
-                "effective wall-set candidate has no Sokoban solution",
-            )
-            without_walls_pushes, _ = search_pc_minimum_pushes(
-                baseline_walkable,
-                start_boxes,
-                targets,
-                [representative],
-                PC_EFFECTIVE_WALL_PREFILTER_MAX_SEARCH_STATES,
-                "effective wall-set baseline search exceeded its state budget",
-                "effective wall-set baseline has no Sokoban solution",
-            )
-        except PCSolvabilityError:
-            continue
-
-        push_delta = with_walls_pushes - without_walls_pushes
-
-        if push_delta < PC_WALL_IMPACT_MIN_PUSH_DELTA:
-            continue
-
-        compatible_positions.update(
-            find_pc_reachable_cells(
-                representative,
-                walkable_with_walls,
-                set(start_boxes),
-            )
-        )
-        minimum_push_delta = (
-            push_delta
-            if minimum_push_delta is None
-            else min(minimum_push_delta, push_delta)
-        )
-
-    compatible_player_ids = sorted(
+    box_set = set(start_boxes)
+    remaining_player_ids = {
         cell["id"]
         for cell in editable_cells
         if (
             cell["id"] not in water_cell_ids
-            and cell["id"] not in wall_cell_ids
-            and (cell["x"], cell["y"]) in compatible_positions
+            and (cell["x"], cell["y"]) in walkable
+            and (cell["x"], cell["y"]) not in box_set
         )
-    )
-    return compatible_player_ids, int(minimum_push_delta or 0)
-
-
-def find_pc_required_feature_capacity_area(
-    enclosed_cells,
-    allowed_wall_coordinates,
-    allowed_water_areas,
-    required_internal_walls,
-    minimum_walkable_cells,
-):
-    allowed_wall_cells = {
-        tuple(coordinate)
-        for coordinate in allowed_wall_coordinates
     }
 
-    for area in allowed_water_areas:
-        water_cells = {
-            (cell_x, cell_y)
-            for cell_y in range(area["y"], area["y"] + area["height"])
-            for cell_x in range(area["x"], area["x"] + area["width"])
-        }
-        wall_candidates = sorted(
-            allowed_wall_cells - water_cells,
-            key=lambda position: (position[1], position[0]),
+    for representative in find_pc_region_representatives(
+        walkable,
+        box_set,
+    ):
+        reachable = find_pc_reachable_cells(
+            representative,
+            walkable,
+            box_set,
+        )
+        region_player_cells = sorted(
+            (
+                cell
+                for cell in editable_cells
+                if (
+                    cell["id"] in remaining_player_ids
+                    and (cell["x"], cell["y"]) in reachable
+                )
+            ),
+            key=lambda cell: cell["id"],
         )
 
-        if (
-            len(enclosed_cells)
-            - len(water_cells)
-            - required_internal_walls
-            < minimum_walkable_cells
-            or len(wall_candidates) < required_internal_walls
-        ):
+        if not region_player_cells:
             continue
 
-        for walls in combinations(wall_candidates, required_internal_walls):
-            remaining_walkable = enclosed_cells - water_cells - set(walls)
+        player_cell = region_player_cells[0]
 
-            if (
-                len(remaining_walkable) >= minimum_walkable_cells
-                and count_pc_components(remaining_walkable) == 1
-            ):
-                return area
+        try:
+            protected_positions = search_pc_solution_trace(
+                walkable,
+                start_boxes,
+                targets,
+                (player_cell["x"], player_cell["y"]),
+                budget,
+            )
+        except PCSolvabilityError:
+            continue
+
+        return player_cell["id"], protected_positions
 
     return None
 
 
-def has_pc_required_feature_capacity(
-    enclosed_cells,
-    allowed_wall_coordinates,
-    allowed_water_areas,
-    required_internal_walls,
-    minimum_walkable_cells,
+def search_pc_solution_trace(
+    walkable,
+    start_boxes,
+    targets,
+    player,
+    budget,
 ):
-    return find_pc_required_feature_capacity_area(
-        enclosed_cells,
-        allowed_wall_coordinates,
-        allowed_water_areas,
-        required_internal_walls,
-        minimum_walkable_cells,
-    ) is not None
+    start_state = (player, tuple(sorted(start_boxes)))
+    open_states = deque([start_state])
+    parents = {start_state: None}
+
+    while open_states:
+        if (
+            budget["remainingStates"] <= 0
+            or time.perf_counter() >= budget["deadline"]
+        ):
+            raise PCSolvabilityError(
+                "SEARCH_BUDGET_EXCEEDED",
+                "PC safe-layout search exceeded its shared preprocessing budget",
+                searched_states=budget["searchedStates"],
+            )
+
+        current_player, boxes = open_states.popleft()
+        budget["remainingStates"] -= 1
+        budget["searchedStates"] += 1
+        state = (current_player, boxes)
+
+        if set(boxes) == targets:
+            protected = set()
+            current = state
+
+            while current is not None:
+                current_state_player, current_state_boxes = current
+                protected.add(current_state_player)
+                protected.update(current_state_boxes)
+                current = parents[current]
+
+            return protected
+
+        box_set = set(boxes)
+
+        for direction_x, direction_y in (
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+        ):
+            next_player = (
+                current_player[0] + direction_x,
+                current_player[1] + direction_y,
+            )
+
+            if next_player not in walkable:
+                continue
+
+            next_boxes = boxes
+
+            if next_player in box_set:
+                next_box = (
+                    next_player[0] + direction_x,
+                    next_player[1] + direction_y,
+                )
+
+                if next_box not in walkable or next_box in box_set:
+                    continue
+
+                moved_boxes = list(boxes)
+                moved_boxes[moved_boxes.index(next_player)] = next_box
+                next_boxes = tuple(sorted(moved_boxes))
+
+            next_state = (next_player, next_boxes)
+
+            if next_state not in parents:
+                parents[next_state] = state
+                open_states.append(next_state)
+
+    raise PCSolvabilityError(
+        "NO_SOLUTION_AFTER_SEARCH",
+        "PC water-only candidate has no Sokoban solution",
+        searched_states=budget["searchedStates"],
+    )
+
+
+def build_pc_greedy_wall_groups(safe_wall_cells, walkable):
+    groups = []
+
+    for required_count in (
+        PC_PRIMARY_MIN_INTERNAL_WALLS,
+        PC_FALLBACK_MIN_INTERNAL_WALLS,
+    ):
+        group = choose_pc_greedy_wall_group(
+            safe_wall_cells,
+            walkable,
+            required_count,
+        )
+
+        if group:
+            groups.append(group)
+
+    return groups
+
+
+def choose_pc_greedy_wall_group(
+    safe_wall_cells,
+    walkable,
+    required_count,
+):
+    if len(safe_wall_cells) < required_count:
+        return None
+
+    ordered_cells = sorted(
+        safe_wall_cells,
+        key=lambda cell: (
+            -int(cell.get("wallImpactScore") or 0),
+            cell["id"],
+        ),
+    )
+    variants = []
+
+    for seed in ordered_cells:
+        selected = [seed]
+
+        while len(selected) < required_count:
+            best_cell = None
+            best_score = None
+
+            for candidate in ordered_cells:
+                if candidate in selected:
+                    continue
+
+                proposed = selected + [candidate]
+                proposed_positions = {
+                    (cell["x"], cell["y"])
+                    for cell in proposed
+                }
+
+                if count_pc_components(
+                    set(walkable) - proposed_positions
+                ) != 1:
+                    continue
+
+                style = classify_pc_wall_style(proposed)
+                pair_distances = [
+                    abs(left["x"] - right["x"])
+                    + abs(left["y"] - right["y"])
+                    for index, left in enumerate(proposed)
+                    for right in proposed[index + 1:]
+                ]
+                adjacency_count = sum(
+                    distance == 1
+                    for distance in pair_distances
+                )
+                style_bonus = {
+                    "bent": 80,
+                    "split": 70,
+                    "dispersed": 60,
+                    "straight": 0,
+                }.get(style, 0)
+                score = (
+                    style_bonus,
+                    adjacency_count,
+                    min(pair_distances, default=0),
+                    int(candidate.get("wallImpactScore") or 0),
+                    -candidate["id"],
+                )
+
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_cell = candidate
+
+            if best_cell is None:
+                break
+
+            selected.append(best_cell)
+
+        if len(selected) != required_count:
+            continue
+
+        style = classify_pc_wall_style(selected)
+        variants.append(
+            {
+                "internalWallCellIds": sorted(
+                    cell["id"]
+                    for cell in selected
+                ),
+                "wallStyle": style,
+            }
+        )
+
+    if not variants:
+        return None
+
+    style_rank = {
+        "bent": 0,
+        "split": 1,
+        "dispersed": 2,
+        "straight": 3,
+    }
+    variants.sort(
+        key=lambda variant: (
+            style_rank.get(variant["wallStyle"], 99),
+            variant["internalWallCellIds"],
+        )
+    )
+    return variants[0]
+
+
+def classify_pc_wall_style(wall_cells):
+    positions = {
+        (cell["x"], cell["y"])
+        for cell in wall_cells
+    }
+
+    if len(positions) >= 3 and (
+        len({x for x, _ in positions}) == 1
+        or len({y for _, y in positions}) == 1
+    ):
+        return "straight"
+
+    component_count = count_pc_components(positions)
+
+    if component_count == 1:
+        return "bent"
+
+    if component_count == 2:
+        return "split"
+
+    return "dispersed"
+
+
+def assemble_pc_layout_rows(
+    sketch_rows,
+    enclosed_cells,
+    editable_by_id,
+    water_cell_ids,
+    player_cell_id,
+    internal_wall_cell_ids,
+    width,
+    height,
+):
+    rows = [
+        [
+            "." if (x, y) in enclosed_cells and sketch_rows[y][x] == " "
+            else sketch_rows[y][x]
+            for x in range(width)
+        ]
+        for y in range(height)
+    ]
+
+    for cell_id in water_cell_ids:
+        cell = editable_by_id[cell_id]
+        rows[cell["y"]][cell["x"]] = "@"
+
+    player_cell = editable_by_id[player_cell_id]
+    rows[player_cell["y"]][player_cell["x"]] = "p"
+
+    for cell_id in internal_wall_cell_ids:
+        cell = editable_by_id[cell_id]
+        rows[cell["y"]][cell["x"]] = "#"
+
+    return ["".join(row) for row in rows]
 
 
 def validate_pc_rows(rows, width, height, allowed_tiles, field_name):
@@ -4906,6 +5031,71 @@ def find_pc_enclosed_cells(rows, width, height):
         [rows[y][x] != "#" and not outside[y][x] for x in range(width)]
         for y in range(height)
     ]
+
+
+def find_pc_outer_shell_cells(rows, width, height):
+    outside = set()
+    open_cells = deque()
+
+    def enqueue(x, y):
+        position = (x, y)
+
+        if (
+            x < 0
+            or x >= width
+            or y < 0
+            or y >= height
+            or position in outside
+            or rows[y][x] == "#"
+        ):
+            return
+
+        outside.add(position)
+        open_cells.append(position)
+
+    for x in range(width):
+        enqueue(x, 0)
+        enqueue(x, height - 1)
+
+    for y in range(height):
+        enqueue(0, y)
+        enqueue(width - 1, y)
+
+    while open_cells:
+        x, y = open_cells.popleft()
+
+        for neighbor_x, neighbor_y in (
+            (x + 1, y),
+            (x - 1, y),
+            (x, y + 1),
+            (x, y - 1),
+        ):
+            enqueue(neighbor_x, neighbor_y)
+
+    shell_cells = set()
+
+    for y in range(height):
+        for x in range(width):
+            if rows[y][x] != "#":
+                continue
+
+            for neighbor_x, neighbor_y in (
+                (x + 1, y),
+                (x - 1, y),
+                (x, y + 1),
+                (x, y - 1),
+            ):
+                if (
+                    neighbor_x < 0
+                    or neighbor_x >= width
+                    or neighbor_y < 0
+                    or neighbor_y >= height
+                    or (neighbor_x, neighbor_y) in outside
+                ):
+                    shell_cells.add((x, y))
+                    break
+
+    return shell_cells
 
 
 def count_pc_components(cells):
@@ -5321,291 +5511,6 @@ def search_pc_minimum_pushes(
         "NO_SOLUTION_AFTER_SEARCH",
         unsolvable_error,
         searched_states=searched_states,
-    )
-
-
-def validate_pc_internal_wall_impact(
-    candidate_rows,
-    sketch_rows,
-    wall_cells,
-    width,
-    height,
-    request_id="",
-    water_area_id=None,
-    player_cell_id=None,
-    internal_wall_cell_ids=None,
-):
-    counterfactual_rows = [list(row) for row in candidate_rows]
-
-    for cell in wall_cells:
-        x = cell["x"]
-        y = cell["y"]
-
-        if sketch_rows[y][x] == "#" or counterfactual_rows[y][x] != "#":
-            raise ValueError(
-                f"internal wall counterfactual mismatch at ({x},{y})"
-            )
-
-        counterfactual_rows[y][x] = "."
-
-    counterfactual_rows = ["".join(row) for row in counterfactual_rows]
-    log_fields = {
-        "waterAreaId": water_area_id,
-        "playerCellId": player_cell_id,
-        "internalWallCellIds": list(internal_wall_cell_ids or []),
-    }
-
-    if request_id:
-        log_fields["requestId"] = request_id
-
-    try:
-        with_walls = calculate_pc_level_solution_metrics(
-            candidate_rows,
-            width,
-            height,
-            "withWalls",
-        )
-        without_walls = calculate_pc_level_solution_metrics(
-            counterfactual_rows,
-            width,
-            height,
-            "withoutWalls",
-        )
-    except PCWallImpactError as exception:
-        log_event(
-            "INFO",
-            "pc_wall_impact_rejected",
-            reasonCode=exception.reason_code,
-            searchedStates=exception.searched_states,
-            detail=safe_log_text(str(exception)),
-            **log_fields,
-        )
-        raise
-
-    step_delta = (
-        with_walls["shortestSteps"]
-        - without_walls["shortestSteps"]
-    )
-    push_delta = (
-        with_walls["minimumPushes"]
-        - without_walls["minimumPushes"]
-    )
-    metrics = {
-        "withWallsShortestSteps": with_walls["shortestSteps"],
-        "withoutWallsShortestSteps": without_walls["shortestSteps"],
-        "stepDelta": step_delta,
-        "withWallsMinimumPushes": with_walls["minimumPushes"],
-        "withoutWallsMinimumPushes": without_walls["minimumPushes"],
-        "pushDelta": push_delta,
-    }
-
-    if (
-        step_delta >= PC_WALL_IMPACT_MIN_STEP_DELTA
-        or push_delta >= PC_WALL_IMPACT_MIN_PUSH_DELTA
-    ):
-        log_event(
-            "INFO",
-            "pc_wall_impact_accepted",
-            **metrics,
-            **log_fields,
-        )
-        return {
-            **metrics,
-            "counterfactualRows": counterfactual_rows,
-        }
-
-    message = (
-        "internal walls have insufficient blocking impact; "
-        "reasonCode=WALL_IMPACT_TOO_LOW; "
-        f"withWallsShortestSteps={with_walls['shortestSteps']}; "
-        f"withoutWallsShortestSteps={without_walls['shortestSteps']}; "
-        f"stepDelta={step_delta}; "
-        f"withWallsMinimumPushes={with_walls['minimumPushes']}; "
-        f"withoutWallsMinimumPushes={without_walls['minimumPushes']}; "
-        f"pushDelta={push_delta}; "
-        f"requiredStepDelta>={PC_WALL_IMPACT_MIN_STEP_DELTA} or "
-        f"requiredPushDelta>={PC_WALL_IMPACT_MIN_PUSH_DELTA}; "
-        "correction=replace internalWallCellIds with higher "
-        "wallImpactScore IDs that obstruct direct routes"
-    )
-    log_event(
-        "INFO",
-        "pc_wall_impact_rejected",
-        reasonCode="WALL_IMPACT_TOO_LOW",
-        detail=safe_log_text(message),
-        **metrics,
-        **log_fields,
-    )
-    raise PCWallImpactError(
-        "WALL_IMPACT_TOO_LOW",
-        message,
-        details=metrics,
-    )
-
-
-def calculate_pc_level_solution_metrics(rows, width, height, variant):
-    walkable, start_boxes, targets, player = parse_pc_solver_level(
-        rows,
-        width,
-        height,
-    )
-
-    try:
-        minimum_pushes, push_searched_states = search_pc_minimum_pushes(
-            walkable,
-            start_boxes,
-            targets,
-            [player],
-            PC_WALL_IMPACT_MAX_SEARCH_STATES,
-            (
-                f"{variant} minimum-push search exceeded "
-                "the wall-impact state budget"
-            ),
-            f"{variant} wall-impact comparison map has no Sokoban solution",
-        )
-    except PCSolvabilityError as exception:
-        reason_code = (
-            "WALL_IMPACT_SEARCH_BUDGET_EXCEEDED"
-            if exception.reason_code == "SEARCH_BUDGET_EXCEEDED"
-            else "WALL_IMPACT_COMPARISON_UNSOLVABLE"
-        )
-        raise PCWallImpactError(
-            reason_code,
-            f"reasonCode={reason_code}; variant={variant}; detail={exception}",
-            searched_states=exception.searched_states,
-            details={"variant": variant},
-        ) from exception
-
-    shortest_steps, step_searched_states = search_pc_shortest_solution_steps(
-        walkable,
-        start_boxes,
-        targets,
-        player,
-        PC_WALL_IMPACT_MAX_SEARCH_STATES,
-        variant,
-    )
-    return {
-        "minimumPushes": minimum_pushes,
-        "shortestSteps": shortest_steps,
-        "pushSearchedStates": push_searched_states,
-        "stepSearchedStates": step_searched_states,
-    }
-
-
-def parse_pc_solver_level(rows, width, height):
-    walkable = {
-        (x, y)
-        for y in range(height)
-        for x in range(width)
-        if rows[y][x] in {".", "p", "s", "t"}
-    }
-    start_boxes = tuple(
-        sorted(
-            (x, y)
-            for y in range(height)
-            for x in range(width)
-            if rows[y][x] == "s"
-        )
-    )
-    targets = {
-        (x, y)
-        for y in range(height)
-        for x in range(width)
-        if rows[y][x] == "t"
-    }
-    players = [
-        (x, y)
-        for y in range(height)
-        for x in range(width)
-        if rows[y][x] == "p"
-    ]
-
-    if len(players) != 1:
-        raise ValueError("wall-impact map must contain exactly one player")
-
-    return walkable, start_boxes, targets, players[0]
-
-
-def search_pc_shortest_solution_steps(
-    walkable,
-    start_boxes,
-    targets,
-    player,
-    maximum_search_states,
-    variant,
-):
-    start_state = (player, tuple(sorted(start_boxes)))
-    open_states = deque([(start_state, 0)])
-    visited_states = {start_state}
-    searched_states = 0
-    search_limit = max(1, int(maximum_search_states))
-
-    while open_states and searched_states < search_limit:
-        (current_player, boxes), steps = open_states.popleft()
-        searched_states += 1
-
-        if set(boxes) == targets:
-            return steps, searched_states
-
-        box_set = set(boxes)
-
-        for direction_x, direction_y in (
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-        ):
-            next_player = (
-                current_player[0] + direction_x,
-                current_player[1] + direction_y,
-            )
-
-            if next_player not in walkable:
-                continue
-
-            next_boxes = boxes
-
-            if next_player in box_set:
-                next_box = (
-                    next_player[0] + direction_x,
-                    next_player[1] + direction_y,
-                )
-
-                if next_box not in walkable or next_box in box_set:
-                    continue
-
-                moved_boxes = list(boxes)
-                moved_boxes[moved_boxes.index(next_player)] = next_box
-                next_boxes = tuple(sorted(moved_boxes))
-
-            next_state = (next_player, next_boxes)
-
-            if next_state not in visited_states:
-                visited_states.add(next_state)
-                open_states.append((next_state, steps + 1))
-
-    if open_states:
-        reason_code = "WALL_IMPACT_SEARCH_BUDGET_EXCEEDED"
-        raise PCWallImpactError(
-            reason_code,
-            (
-                f"reasonCode={reason_code}; variant={variant}; "
-                "detail=shortest-step search exceeded the wall-impact "
-                f"state budget of {search_limit}"
-            ),
-            searched_states=searched_states,
-            details={"variant": variant},
-        )
-
-    reason_code = "WALL_IMPACT_COMPARISON_UNSOLVABLE"
-    raise PCWallImpactError(
-        reason_code,
-        (
-            f"reasonCode={reason_code}; variant={variant}; "
-            "detail=wall-impact comparison map has no Sokoban solution"
-        ),
-        searched_states=searched_states,
-        details={"variant": variant},
     )
 
 
