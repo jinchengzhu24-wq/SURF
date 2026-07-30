@@ -590,7 +590,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8373b09821f44815872f59b7c2376f83, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  endpoint: http://127.0.0.1:8000/generate-pc-level
+  endpoint: http://111.231.136.4:8000/generate-pc-level
   requestTimeoutSeconds: 180
 --- !u!4 &1726369420
 Transform:

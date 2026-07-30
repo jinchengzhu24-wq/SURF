@@ -75,6 +75,8 @@ PC_PRIMARY_MIN_INTERNAL_WALLS = 4
 PC_FALLBACK_MIN_INTERNAL_WALLS = 2
 PC_MIN_WATER_AREAS = 1
 PC_MAX_WATER_AREA_CANDIDATES = 12
+PC_MAX_WATER_PREFILTER_CHECKS = 36
+PC_PREFILTER_MAX_SEARCH_STATES = 20000
 DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -87,6 +89,14 @@ CREATIVE_IDEA_LOG_FILE = STUDY_LOG_DIR / "creative_ideas.jsonl"
 CREATIVE_EXPANSION_CHOICE_LOG_FILE = STUDY_LOG_DIR / "creative_expansion_choices.jsonl"
 HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
 JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
+
+class PCSolvabilityError(ValueError):
+    def __init__(self, reason_code, message, searched_states=0, details=None):
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.searched_states = int(searched_states or 0)
+        self.details = dict(details or {})
+
 
 load_dotenv(BASE_DIR / ".env")
 
@@ -3446,23 +3456,43 @@ def create_pc_level_candidate(
 ):
     context = normalize_pc_level_request(context)
     structurally_valid_candidate_count = 0
+    previous_rejected_selection = None
 
     def validate_candidate(payload):
-        nonlocal structurally_valid_candidate_count
-        parse_pc_indexed_layout(payload)
+        nonlocal structurally_valid_candidate_count, previous_rejected_selection
+        water_area_id, player_cell_id, internal_wall_cell_ids = (
+            parse_pc_indexed_layout(payload)
+        )
+        selection = (
+            water_area_id,
+            player_cell_id,
+            tuple(sorted(internal_wall_cell_ids)),
+        )
+
+        if previous_rejected_selection == selection:
+            raise ValueError(
+                "The corrected layout must change waterAreaId, playerCellId, "
+                "or the internalWallCellIds set from the rejected layout"
+            )
+
         structurally_valid_candidate_count += 1
         minimum_internal_walls = (
             PC_PRIMARY_MIN_INTERNAL_WALLS
             if structurally_valid_candidate_count == 1
             else PC_FALLBACK_MIN_INTERNAL_WALLS
         )
-        return build_pc_level_candidate(
-            payload,
-            context,
-            request_id=request_id,
-            minimum_internal_walls=minimum_internal_walls,
-            minimum_water_areas=PC_MIN_WATER_AREAS,
-        )
+
+        try:
+            return build_pc_level_candidate(
+                payload,
+                context,
+                request_id=request_id,
+                minimum_internal_walls=minimum_internal_walls,
+                minimum_water_areas=PC_MIN_WATER_AREAS,
+            )
+        except ValueError:
+            previous_rejected_selection = selection
+            raise
 
     return execute_json_request(
         task="pc_level_generation",
@@ -3593,12 +3623,161 @@ def build_pc_level_candidate(
         minimum_internal_walls,
         minimum_water_areas,
     )
-    validate_pc_completed_level_solvability(
-        candidate["rows"],
-        width,
-        height,
-    )
+    try:
+        validate_pc_completed_level_solvability(
+            candidate["rows"],
+            width,
+            height,
+        )
+    except PCSolvabilityError as exception:
+        feedback = build_pc_solvability_rejection_feedback(
+            layout,
+            context,
+            candidate["rows"],
+            exception,
+        )
+        fields = {
+            "reasonCode": exception.reason_code,
+            "waterAreaId": water_area_id,
+            "playerCellId": player_cell_id,
+            "internalWallCellIds": internal_wall_cell_ids,
+            "searchedStates": exception.searched_states,
+            "detail": safe_log_text(feedback),
+        }
+
+        if request_id:
+            fields["requestId"] = request_id
+
+        log_event("INFO", "pc_candidate_rejected", **fields)
+        raise ValueError(feedback) from exception
+
     return candidate
+
+
+def build_pc_solvability_rejection_feedback(
+    layout,
+    context,
+    rows,
+    exception,
+):
+    water_area_id, player_cell_id, internal_wall_cell_ids = (
+        parse_pc_indexed_layout(layout)
+    )
+    static_codes = {
+        "BOX_NO_TARGET_ROUTE",
+        "TARGET_MATCHING_IMPOSSIBLE",
+        "NO_LEGAL_INITIAL_PUSH",
+    }
+    blocking_wall_cell_ids = []
+    water_blocks_static_route = False
+
+    if exception.reason_code in static_codes:
+        walkable = {
+            (x, y)
+            for y in range(context["height"])
+            for x in range(context["width"])
+            if rows[y][x] in {".", "p", "s", "t"}
+        }
+        start_boxes = tuple(
+            sorted(
+                (x, y)
+                for y in range(context["height"])
+                for x in range(context["width"])
+                if rows[y][x] == "s"
+            )
+        )
+        targets = {
+            (x, y)
+            for y in range(context["height"])
+            for x in range(context["width"])
+            if rows[y][x] == "t"
+        }
+        players = [
+            (x, y)
+            for y in range(context["height"])
+            for x in range(context["width"])
+            if rows[y][x] == "p"
+        ]
+        editable_cells = {
+            cell["id"]: cell
+            for cell in context["editableCells"]
+        }
+
+        for cell_id in internal_wall_cell_ids:
+            cell = editable_cells[cell_id]
+            diagnostic = diagnose_pc_static_solvability(
+                walkable | {(cell["x"], cell["y"])},
+                start_boxes,
+                targets,
+                players,
+            )
+
+            if diagnostic is None:
+                blocking_wall_cell_ids.append(cell_id)
+
+        water_area = next(
+            area
+            for area in context["allowedWaterAreas"]
+            if area["id"] == water_area_id
+        )
+        water_cells = {
+            (
+                editable_cells[cell_id]["x"],
+                editable_cells[cell_id]["y"],
+            )
+            for cell_id in water_area["cellIds"]
+        }
+        water_blocks_static_route = diagnose_pc_static_solvability(
+            walkable | water_cells,
+            start_boxes,
+            targets,
+            players,
+        ) is None
+
+    detail = describe_pc_solvability_diagnostic(
+        {
+            "code": exception.reason_code,
+            **exception.details,
+        }
+    )
+
+    if water_blocks_static_route:
+        correction = "choose a different waterAreaId"
+    elif blocking_wall_cell_ids:
+        correction = "replace the listed blocking internal wall cell IDs"
+    elif exception.reason_code == "NO_LEGAL_INITIAL_PUSH":
+        correction = "change playerCellId or remove obstacles near a box"
+    elif exception.reason_code == "SEARCH_BUDGET_EXCEEDED":
+        correction = "choose a simpler water and wall arrangement"
+    else:
+        correction = "change waterAreaId, playerCellId, or internalWallCellIds"
+
+    parts = [
+        "candidate has no Sokoban solution",
+        f"reasonCode={exception.reason_code}",
+        f"waterAreaId={water_area_id}",
+        f"playerCellId={player_cell_id}",
+        "internalWallCellIds=["
+        + ",".join(str(value) for value in internal_wall_cell_ids)
+        + "]",
+        f"detail={detail}",
+    ]
+
+    if exception.searched_states:
+        parts.append(f"searchedStates={exception.searched_states}")
+
+    if blocking_wall_cell_ids:
+        parts.append(
+            "blockingWallCellIds=["
+            + ",".join(str(value) for value in blocking_wall_cell_ids)
+            + "]"
+        )
+
+    if water_blocks_static_route:
+        parts.append("selectedWaterBlocksStaticRoute=true")
+
+    parts.append(f"correction={correction}")
+    return "; ".join(parts)
 
 
 def parse_pc_indexed_layout(layout):
@@ -3737,6 +3916,12 @@ def normalize_pc_level_request(context):
         for coordinate in editable_coordinates
         if tuple(coordinate) not in cells_next_to_box_starts
     ]
+    allowed_wall_coordinates = filter_pc_static_wall_coordinates(
+        enclosed_cells,
+        box_starts,
+        targets,
+        allowed_wall_coordinates,
+    )
     allowed_wall_coordinate_set = {
         tuple(coordinate)
         for coordinate in allowed_wall_coordinates
@@ -3771,14 +3956,39 @@ def normalize_pc_level_request(context):
             "wall tiles while retaining 48 connected walkable cells"
         )
 
-    allowed_water_areas = select_pc_water_area_candidates(
+    ranked_water_areas = select_pc_water_area_candidates(
         all_allowed_water_areas,
         editable_cells,
         box_starts,
         targets,
         capacity_water_area["id"],
+        PC_MAX_WATER_PREFILTER_CHECKS,
+    )
+    allowed_water_areas = prefilter_pc_water_area_candidates(
+        rows,
+        enclosed_cells,
+        ranked_water_areas,
+        width,
+        height,
         PC_MAX_WATER_AREA_CANDIDATES,
     )
+
+    if not allowed_water_areas:
+        raise ValueError(
+            "PC sketch has no water candidate that preserves open-map solvability"
+        )
+
+    if not has_pc_required_feature_capacity(
+        enclosed_cells,
+        allowed_wall_coordinates,
+        allowed_water_areas,
+        PC_PRIMARY_MIN_INTERNAL_WALLS,
+        48,
+    ):
+        raise ValueError(
+            "PC sketch has no prefiltered water candidate that leaves room for "
+            "four internal wall tiles and 48 connected walkable cells"
+        )
 
     return {
         "width": width,
@@ -3955,6 +4165,104 @@ def enumerate_pc_allowed_water_areas(
                     )
 
     return allowed_areas
+
+
+def filter_pc_static_wall_coordinates(
+    enclosed_cells,
+    box_starts,
+    targets,
+    allowed_wall_coordinates,
+):
+    start_boxes = tuple(sorted(tuple(position) for position in box_starts))
+    target_set = {tuple(position) for position in targets}
+    filtered = []
+
+    for coordinate in allowed_wall_coordinates:
+        wall = tuple(coordinate)
+        remaining_walkable = set(enclosed_cells) - {wall}
+
+        if count_pc_components(remaining_walkable) != 1:
+            continue
+
+        diagnostic = diagnose_pc_static_solvability(
+            remaining_walkable,
+            start_boxes,
+            target_set,
+        )
+
+        if diagnostic is None:
+            filtered.append(list(coordinate))
+
+    return filtered
+
+
+def prefilter_pc_water_area_candidates(
+    sketch_rows,
+    enclosed_cells,
+    ranked_water_areas,
+    width,
+    height,
+    limit=PC_MAX_WATER_AREA_CANDIDATES,
+):
+    accepted = []
+    start_boxes = tuple(
+        sorted(
+            (x, y)
+            for y in range(height)
+            for x in range(width)
+            if sketch_rows[y][x] == "s"
+        )
+    )
+    targets = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if sketch_rows[y][x] == "t"
+    }
+
+    for area in ranked_water_areas[:PC_MAX_WATER_PREFILTER_CHECKS]:
+        water_cells = {
+            (cell_x, cell_y)
+            for cell_y in range(area["y"], area["y"] + area["height"])
+            for cell_x in range(area["x"], area["x"] + area["width"])
+        }
+        remaining_walkable = set(enclosed_cells) - water_cells
+        diagnostic = diagnose_pc_static_solvability(
+            remaining_walkable,
+            start_boxes,
+            targets,
+        )
+
+        if diagnostic is not None:
+            continue
+
+        try:
+            validate_pc_open_sketch_feasibility(
+                sketch_rows,
+                remaining_walkable,
+                width,
+                height,
+                maximum_search_states=PC_PREFILTER_MAX_SEARCH_STATES,
+            )
+        except PCSolvabilityError as exception:
+            if exception.reason_code != "SEARCH_BUDGET_EXCEEDED":
+                continue
+
+        accepted.append(
+            {
+                "id": len(accepted),
+                "x": area["x"],
+                "y": area["y"],
+                "width": area["width"],
+                "height": area["height"],
+                "cellIds": list(area["cellIds"]),
+            }
+        )
+
+        if len(accepted) >= max(1, int(limit)):
+            break
+
+    return accepted
 
 
 def select_pc_water_area_candidates(
@@ -4244,6 +4552,170 @@ def validate_pc_start_clearance(rows, width, height):
                     )
 
 
+def find_pc_reverse_box_reachable_cells(target, walkable):
+    reachable = {target}
+    open_cells = [target]
+
+    while open_cells:
+        current_x, current_y = open_cells.pop()
+
+        for direction_x, direction_y in (
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+        ):
+            previous = (
+                current_x - direction_x,
+                current_y - direction_y,
+            )
+            standing = (
+                previous[0] - direction_x,
+                previous[1] - direction_y,
+            )
+
+            if (
+                previous in walkable
+                and standing in walkable
+                and previous not in reachable
+            ):
+                reachable.add(previous)
+                open_cells.append(previous)
+
+    return reachable
+
+
+def has_pc_box_target_matching(box_target_options, box_index=0, used_targets=None):
+    if box_index >= len(box_target_options):
+        return True
+
+    used_targets = set(used_targets or ())
+
+    for target in box_target_options[box_index]:
+        if target in used_targets:
+            continue
+
+        if has_pc_box_target_matching(
+            box_target_options,
+            box_index + 1,
+            used_targets | {target},
+        ):
+            return True
+
+    return False
+
+
+def has_pc_legal_initial_push(walkable, start_boxes, initial_players):
+    box_set = set(start_boxes)
+
+    for player in initial_players:
+        reachable = find_pc_reachable_cells(player, walkable, box_set)
+
+        for box_x, box_y in start_boxes:
+            for direction_x, direction_y in (
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+            ):
+                standing = (
+                    box_x - direction_x,
+                    box_y - direction_y,
+                )
+                destination = (
+                    box_x + direction_x,
+                    box_y + direction_y,
+                )
+
+                if (
+                    standing in reachable
+                    and destination in walkable
+                    and destination not in box_set
+                ):
+                    return True
+
+    return False
+
+
+def diagnose_pc_static_solvability(
+    walkable,
+    start_boxes,
+    targets,
+    initial_players=None,
+):
+    walkable = set(walkable)
+    start_boxes = tuple(sorted(start_boxes))
+    targets = set(targets)
+    reverse_reachable = {
+        target: find_pc_reverse_box_reachable_cells(target, walkable)
+        for target in targets
+    }
+    box_target_options = []
+
+    for box in start_boxes:
+        options = sorted(
+            target
+            for target, reachable in reverse_reachable.items()
+            if box in reachable
+        )
+
+        if not options:
+            return {
+                "code": "BOX_NO_TARGET_ROUTE",
+                "box": box,
+            }
+
+        box_target_options.append(options)
+
+    if not has_pc_box_target_matching(box_target_options):
+        return {
+            "code": "TARGET_MATCHING_IMPOSSIBLE",
+            "boxTargetOptions": [
+                {
+                    "box": start_boxes[index],
+                    "targets": list(options),
+                }
+                for index, options in enumerate(box_target_options)
+            ],
+        }
+
+    if (
+        initial_players is not None
+        and set(start_boxes) != targets
+        and not has_pc_legal_initial_push(
+            walkable,
+            start_boxes,
+            initial_players,
+        )
+    ):
+        return {
+            "code": "NO_LEGAL_INITIAL_PUSH",
+        }
+
+    return None
+
+
+def describe_pc_solvability_diagnostic(diagnostic):
+    code = diagnostic.get("code", "NO_SOLUTION_AFTER_SEARCH")
+
+    if code == "BOX_NO_TARGET_ROUTE":
+        box_x, box_y = diagnostic["box"]
+        return (
+            f"box start ({box_x},{box_y}) has no static push route to any target"
+        )
+
+    if code == "TARGET_MATCHING_IMPOSSIBLE":
+        return "box-to-target routes cannot form a complete matching"
+
+    if code == "NO_LEGAL_INITIAL_PUSH":
+        return "the selected player position has no legal initial box push"
+
+    if code == "SEARCH_BUDGET_EXCEEDED":
+        return "candidate solvability search exceeded its state budget"
+
+    return "complete search found no Sokoban solution"
+
+
 def validate_pc_open_sketch_feasibility(
     rows,
     enclosed_cells,
@@ -4323,6 +4795,21 @@ def validate_pc_completed_level_solvability(
 
     if len(players) != 1:
         raise ValueError("candidate must contain exactly one player start")
+
+    diagnostic = diagnose_pc_static_solvability(
+        walkable,
+        start_boxes,
+        targets,
+        players,
+    )
+
+    if diagnostic is not None:
+        raise PCSolvabilityError(
+            diagnostic["code"],
+            "candidate has no Sokoban solution: "
+            + describe_pc_solvability_diagnostic(diagnostic),
+            details=diagnostic,
+        )
 
     return validate_pc_push_solvability(
         walkable,
@@ -4405,9 +4892,17 @@ def validate_pc_push_solvability(
                     open_states.append((next_player, next_boxes))
 
     if searched_states >= search_limit:
-        raise ValueError(budget_error)
+        raise PCSolvabilityError(
+            "SEARCH_BUDGET_EXCEEDED",
+            budget_error,
+            searched_states=searched_states,
+        )
 
-    raise ValueError(unsolvable_error)
+    raise PCSolvabilityError(
+        "NO_SOLUTION_AFTER_SEARCH",
+        unsolvable_error,
+        searched_states=searched_states,
+    )
 
 
 def find_pc_region_representatives(walkable, boxes):

@@ -361,6 +361,173 @@ class PCLevelGenerationTests(unittest.TestCase):
             self.assertGreaterEqual(len(remaining), 48)
             self.assertEqual(backend.count_pc_components(remaining), 1)
 
+    def test_static_diagnostic_reports_box_without_target_route(self):
+        diagnostic = backend.diagnose_pc_static_solvability(
+            {(0, 0), (1, 0), (0, 1), (1, 1)},
+            ((0, 0),),
+            {(1, 1)},
+        )
+
+        self.assertEqual(diagnostic["code"], "BOX_NO_TARGET_ROUTE")
+        self.assertEqual(diagnostic["box"], (0, 0))
+
+    def test_static_diagnostic_reports_impossible_target_matching(self):
+        diagnostic = backend.diagnose_pc_static_solvability(
+            {(x, 0) for x in range(5)} | {(10, 10)},
+            ((1, 0), (2, 0)),
+            {(4, 0), (10, 10)},
+        )
+
+        self.assertEqual(
+            diagnostic["code"],
+            "TARGET_MATCHING_IMPOSSIBLE",
+        )
+
+    def test_static_diagnostic_reports_no_legal_initial_push(self):
+        diagnostic = backend.diagnose_pc_static_solvability(
+            {(x, 0) for x in range(6)},
+            ((2, 0), (3, 0)),
+            {(4, 0), (5, 0)},
+            [(0, 0)],
+        )
+
+        self.assertEqual(diagnostic["code"], "NO_LEGAL_INITIAL_PUSH")
+
+    def test_wall_static_filter_removes_individually_blocking_wall(self):
+        filtered = backend.filter_pc_static_wall_coordinates(
+            {(x, y) for y in range(5) for x in range(5)},
+            [[0, 1]],
+            [[0, 0]],
+            [[0, 2], [4, 4]],
+        )
+
+        self.assertNotIn([0, 2], filtered)
+        self.assertIn([4, 4], filtered)
+
+    def test_water_prefilter_drops_proven_unsolvable_candidate(self):
+        normalized = backend.normalize_pc_level_request(self.context)
+        enclosed = backend.find_pc_enclosed_cells(make_sketch(), 12, 10)
+        enclosed_cells = {
+            (x, y)
+            for y in range(10)
+            for x in range(12)
+            if enclosed[y][x]
+        }
+        calls = 0
+
+        def validate(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+
+            if calls == 1:
+                raise backend.PCSolvabilityError(
+                    "NO_SOLUTION_AFTER_SEARCH",
+                    "no solution",
+                )
+
+            return 1
+
+        with patch.object(
+            backend,
+            "validate_pc_open_sketch_feasibility",
+            side_effect=validate,
+        ):
+            accepted = backend.prefilter_pc_water_area_candidates(
+                make_sketch(),
+                enclosed_cells,
+                normalized["allowedWaterAreas"],
+                12,
+                10,
+                12,
+            )
+
+        self.assertEqual(len(accepted), 11)
+        self.assertEqual(
+            [area["id"] for area in accepted],
+            list(range(11)),
+        )
+
+    def test_water_prefilter_keeps_search_budget_unknown(self):
+        normalized = backend.normalize_pc_level_request(self.context)
+        enclosed = backend.find_pc_enclosed_cells(make_sketch(), 12, 10)
+        enclosed_cells = {
+            (x, y)
+            for y in range(10)
+            for x in range(12)
+            if enclosed[y][x]
+        }
+
+        with patch.object(
+            backend,
+            "validate_pc_open_sketch_feasibility",
+            side_effect=backend.PCSolvabilityError(
+                "SEARCH_BUDGET_EXCEEDED",
+                "budget",
+                searched_states=20000,
+            ),
+        ):
+            accepted = backend.prefilter_pc_water_area_candidates(
+                make_sketch(),
+                enclosed_cells,
+                normalized["allowedWaterAreas"],
+                12,
+                10,
+                12,
+            )
+
+        self.assertEqual(len(accepted), 12)
+
+    def test_rejection_feedback_lists_blocking_wall_id(self):
+        rows = [
+            "t..@@",
+            "s..@@",
+            "#....",
+            ".....",
+            "....p",
+        ]
+        context = {
+            "width": 5,
+            "height": 5,
+            "editableCells": [
+                {"id": 1, "x": 0, "y": 2},
+                {"id": 2, "x": 3, "y": 0},
+                {"id": 3, "x": 4, "y": 0},
+                {"id": 4, "x": 3, "y": 1},
+                {"id": 5, "x": 4, "y": 1},
+                {"id": 6, "x": 4, "y": 4},
+            ],
+            "allowedWaterAreas": [
+                {
+                    "id": 0,
+                    "x": 3,
+                    "y": 0,
+                    "width": 2,
+                    "height": 2,
+                    "cellIds": [2, 3, 4, 5],
+                }
+            ],
+        }
+        layout = {
+            "waterAreaId": 0,
+            "playerCellId": 6,
+            "internalWallCellIds": [1],
+        }
+        exception = backend.PCSolvabilityError(
+            "BOX_NO_TARGET_ROUTE",
+            "no route",
+            details={"code": "BOX_NO_TARGET_ROUTE", "box": (0, 1)},
+        )
+
+        feedback = backend.build_pc_solvability_rejection_feedback(
+            layout,
+            context,
+            rows,
+            exception,
+        )
+
+        self.assertIn("reasonCode=BOX_NO_TARGET_ROUTE", feedback)
+        self.assertIn("blockingWallCellIds=[1]", feedback)
+
     def test_indexed_candidate_still_requires_backend_solver(self):
         context = backend.normalize_pc_level_request(self.context)
 
@@ -451,7 +618,12 @@ class PCLevelGenerationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at least 4"):
                 kwargs["validator"](fallback_layout)
 
-            value = kwargs["validator"](fallback_layout)
+            corrected_layout = make_layout(
+                normalized,
+                player=(3, 2),
+                walls=((7, 2), (8, 2)),
+            )
+            value = kwargs["validator"](corrected_layout)
             return LLMExecutionResult(value, 2, kwargs["request_id"])
 
         with patch.object(
@@ -473,6 +645,81 @@ class PCLevelGenerationTests(unittest.TestCase):
             10,
             2,
             1,
+        )
+
+    def test_corrected_candidate_must_change_the_rejected_selection(self):
+        def execute_json_request(**kwargs):
+            normalized = backend.normalize_pc_level_request(self.context)
+            rejected_layout = make_required_layout(
+                normalized,
+                wall_count=2,
+            )
+
+            with self.assertRaisesRegex(ValueError, "at least 4"):
+                kwargs["validator"](rejected_layout)
+
+            with self.assertRaisesRegex(ValueError, "must change waterAreaId"):
+                kwargs["validator"](rejected_layout)
+
+            corrected_layout = make_layout(
+                normalized,
+                player=(2, 2),
+                walls=((7, 2), (8, 2)),
+            )
+            value = kwargs["validator"](corrected_layout)
+            return LLMExecutionResult(value, 2, kwargs["request_id"])
+
+        with patch.object(
+            backend,
+            "execute_json_request",
+            side_effect=execute_json_request,
+        ):
+            execution = backend.create_pc_level_candidate(
+                self.context,
+                request_id="pc-change-selection-test",
+                max_attempts=2,
+            )
+
+        self.assertEqual(execution.attempts_used, 2)
+
+    def test_solver_failure_feedback_contains_selection_and_reason_code(self):
+        normalized = backend.normalize_pc_level_request(self.context)
+        layout = make_required_layout(normalized)
+        solver_error = backend.PCSolvabilityError(
+            "NO_SOLUTION_AFTER_SEARCH",
+            "candidate has no Sokoban solution",
+            searched_states=1234,
+        )
+
+        with patch.object(
+            backend,
+            "validate_pc_completed_level_solvability",
+            side_effect=solver_error,
+        ), patch.object(backend, "log_event") as mocked_log:
+            with self.assertRaises(ValueError) as raised:
+                backend.build_pc_level_candidate(
+                    layout,
+                    normalized,
+                    request_id="pc-feedback-test",
+                    minimum_internal_walls=4,
+                    minimum_water_areas=1,
+                )
+
+        detail = str(raised.exception)
+        self.assertIn("reasonCode=NO_SOLUTION_AFTER_SEARCH", detail)
+        self.assertIn(
+            f"waterAreaId={layout['waterAreaId']}",
+            detail,
+        )
+        self.assertIn(
+            f"playerCellId={layout['playerCellId']}",
+            detail,
+        )
+        self.assertIn("searchedStates=1234", detail)
+        self.assertTrue(mocked_log.called)
+        self.assertEqual(
+            mocked_log.call_args.kwargs["reasonCode"],
+            "NO_SOLUTION_AFTER_SEARCH",
         )
 
     def test_conflicting_first_candidate_is_rejected_before_correction(self):
