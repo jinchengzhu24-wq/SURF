@@ -20,7 +20,7 @@ Keep the existing scene spelling `AI_Asistant_Mode`; changing it requires coordi
 
 - The editable sketch is fixed at `12x10` and uses `#` for user walls, `s` for box starts, `t` for targets, and spaces for editable cells.
 - A valid submission contains one or two matching `s`/`t` pairs, one enclosed connected activity area of at least 56 cells, and no `s` orthogonally adjacent to a wall.
-- Check/Submit also requires room for at least one `2x2` water area and three generated internal wall cells. Generated wall cells must be at least one orthogonal cell away from the outer shell; diagonal contact is allowed.
+- Check/Submit also requires room for at least one `2x2` water area and three generated internal wall cells. No water tile may have a wall directly above it. Generated wall cells must be at least one orthogonal cell away from the outer shell; diagonal contact is allowed.
 - `PCDesignContext` persists the submitted sketch so Back from `PC_Level` restores it.
 - Relevant files are `Assets/Scripts/Level/PCLevelSketchController.cs`, `PCDesignFeasibilityValidator.cs`, and `PCDesignContext.cs`.
 
@@ -31,7 +31,7 @@ Keep the existing scene spelling `AI_Asistant_Mode`; changing it requires coordi
 - The backend normalizes the request once, enumerates legal `2x2` through `4x4` water rectangles, and checks at most six water choices.
 - For each checked water choice, the backend solves the no-new-wall map once and records a complete solution trace. Generated walls are selected only from cells never occupied by the player or boxes in that trace, so the recorded solution remains valid after the walls are added.
 - Cheap greedy scoring constructs at most six complete layouts. Five internal walls are preferred, four are retained as an intermediate fallback, and the guaranteed minimum is three internal walls plus one water area. Bent, split, or dispersed wall shapes rank above a straight line.
-- Generated walls may not cover fixed user tiles, touch a box start, divide the activity area, or sit orthogonally next to an outer-shell wall. There is currently no 48-cell post-generation activity-area minimum; the PC_Design submission minimum remains 56.
+- Generated walls may not cover fixed user tiles, touch a box start, divide the activity area, sit orthogonally next to an outer-shell wall, appear directly above water, or contain a complete `2x2` block made only from generated wall cells. User-authored wall blocks are not subject to the generated-wall `2x2` restriction. There is currently no 48-cell post-generation activity-area minimum; the PC_Design submission minimum remains 56.
 - The LLM receives complete layouts and returns only `{"layoutCandidateId": n}`. It cannot mix player, water, or wall IDs from different candidates.
 - PC generation makes one model call with a 15-second backend timeout. Invalid JSON, an unknown ID, timeout, connection failure, or other `LLMServiceError` immediately selects the highest-ranked safe candidate instead of making a second model call.
 - Do not restore the deleted wall-combination enumeration, counterfactual wall-impact search, or the requirement that walls increase shortest steps or pushes. Stability and guaranteed solvability are the current priority.

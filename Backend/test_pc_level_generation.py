@@ -68,7 +68,7 @@ def make_layout(
     context,
     player=(2, 2),
     walls=(),
-    water=(4, 2, 2, 2),
+    water=(5, 7, 2, 2),
 ):
     return {
         "waterAreaId": find_water_area_id(context, *water),
@@ -142,8 +142,8 @@ class PCLevelGenerationTests(unittest.TestCase):
         )
 
         self.assertEqual(result["rows"][2][2], "p")
-        self.assertEqual(result["rows"][2][4:6], "@@")
-        self.assertEqual(result["rows"][3][4:6], "@@")
+        self.assertEqual(result["rows"][7][5:7], "@@")
+        self.assertEqual(result["rows"][8][5:7], "@@")
         self.assertTrue(all(len(row) == 12 for row in result["rows"]))
 
     def test_indexed_layout_builds_valid_wall_and_water(self):
@@ -163,6 +163,100 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertEqual(result["rows"][3], " #.s..#.t.# ")
         self.assertEqual(result["rows"][7], " #...@@...# ")
         self.assertEqual(result["rows"][8], " #...@@...# ")
+
+    def test_water_area_directly_below_fixed_wall_is_not_enumerated(self):
+        context = backend.normalize_pc_level_request(self.context)
+        water_rectangles = {
+            (
+                area["x"],
+                area["y"],
+                area["width"],
+                area["height"],
+            )
+            for area in context["allowedWaterAreas"]
+        }
+
+        self.assertNotIn((4, 2, 2, 2), water_rectangles)
+        self.assertIn((5, 7, 2, 2), water_rectangles)
+
+    def test_indexed_layout_rejects_generated_wall_above_water(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_layout(
+            context,
+            walls=((5, 6),),
+            water=(5, 7, 2, 2),
+        )
+
+        with self.assertRaisesRegex(ValueError, "compatibleWallCellIds"):
+            backend.build_pc_level_candidate(layout, context)
+
+    def test_candidate_rejects_water_directly_below_wall(self):
+        candidate = [list(row) for row in make_candidate()]
+
+        for x, y in ((5, 2), (6, 2), (5, 3), (6, 3)):
+            candidate[y][x] = "@"
+
+        with self.assertRaisesRegex(ValueError, "wall directly above"):
+            backend.validate_pc_level_candidate(
+                {"rows": ["".join(row) for row in candidate]},
+                {
+                    "width": 12,
+                    "height": 10,
+                    "sketchRows": make_sketch(),
+                },
+            )
+
+    def test_candidate_rejects_generated_two_by_two_wall_block(self):
+        for extra_wall in (None, (6, 4)):
+            with self.subTest(extra_wall=extra_wall):
+                candidate = [list(row) for row in make_candidate()]
+                walls = [(4, 4), (5, 4), (4, 5), (5, 5)]
+
+                if extra_wall is not None:
+                    walls.append(extra_wall)
+
+                for x, y in walls:
+                    candidate[y][x] = "#"
+
+                with self.assertRaisesRegex(ValueError, "2x2 block"):
+                    backend.validate_pc_level_candidate(
+                        {"rows": ["".join(row) for row in candidate]},
+                        {
+                            "width": 12,
+                            "height": 10,
+                            "sketchRows": make_sketch(),
+                        },
+                    )
+
+    def test_candidate_allows_user_authored_two_by_two_wall_block(self):
+        sketch = [list(row) for row in make_sketch()]
+
+        for x, y in ((5, 5), (6, 5), (5, 6), (6, 6)):
+            sketch[y][x] = "#"
+
+        sketch_rows = ["".join(row) for row in sketch]
+        enclosed = backend.find_pc_enclosed_cells(sketch_rows, 12, 10)
+        candidate = [
+            [
+                "." if enclosed[y][x] and sketch_rows[y][x] == " "
+                else sketch_rows[y][x]
+                for x in range(12)
+            ]
+            for y in range(10)
+        ]
+        candidate[2][2] = "p"
+
+        result = backend.validate_pc_level_candidate(
+            {"rows": ["".join(row) for row in candidate]},
+            {
+                "width": 12,
+                "height": 10,
+                "sketchRows": sketch_rows,
+            },
+        )
+
+        self.assertEqual(result["rows"][5][5:7], "##")
+        self.assertEqual(result["rows"][6][5:7], "##")
 
     def test_first_candidate_accepts_five_walls_and_one_water_area(self):
         context = backend.normalize_pc_level_request(self.context)
@@ -424,6 +518,27 @@ class PCLevelGenerationTests(unittest.TestCase):
             )
             self.assertGreaterEqual(wall_count, 3)
             self.assertEqual(water_count, 1)
+            generated_walls = {
+                (x, y)
+                for y in range(10)
+                for x in range(12)
+                if (
+                    validated["rows"][y][x] == "#"
+                    and normalized["sketchRows"][y][x] != "#"
+                )
+            }
+            self.assertFalse(
+                backend.contains_pc_two_by_two_block(generated_walls)
+            )
+
+            for y in range(1, 10):
+                for x in range(12):
+                    if validated["rows"][y][x] == "@":
+                        self.assertNotEqual(
+                            validated["rows"][y - 1][x],
+                            "#",
+                        )
+
             backend.validate_pc_completed_level_solvability(
                 validated["rows"],
                 12,

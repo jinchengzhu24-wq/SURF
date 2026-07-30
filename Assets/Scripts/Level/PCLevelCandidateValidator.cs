@@ -35,6 +35,8 @@ public static class PCLevelCandidateValidator
         int candidateTargetCount = 0;
         int playerCount = 0;
         int internalWallTileCount = 0;
+        HashSet<Vector2Int> generatedInternalWalls =
+            new HashSet<Vector2Int>();
 
         for (int y = 0; y < sketch.height; y++)
         {
@@ -96,6 +98,7 @@ public static class PCLevelCandidateValidator
                     && source != LevelData.Wall)
                 {
                     internalWallTileCount++;
+                    generatedInternalWalls.Add(new Vector2Int(x, y));
                 }
             }
         }
@@ -110,6 +113,13 @@ public static class PCLevelCandidateValidator
         if (playerCount != 1)
         {
             message = "Candidate must contain exactly one player start.";
+            return false;
+        }
+
+        if (ContainsTwoByTwoBlock(generatedInternalWalls))
+        {
+            message = "Generated internal walls must not contain a complete "
+                + "2x2 block.";
             return false;
         }
 
@@ -295,7 +305,22 @@ public static class PCLevelCandidateValidator
         {
             for (int x = 0; x < width; x++)
             {
-                if (rows[y][x] != LevelData.Water || visited[x, y])
+                if (rows[y][x] != LevelData.Water)
+                {
+                    continue;
+                }
+
+                if (y > 0 && rows[y - 1][x] == LevelData.Wall)
+                {
+                    message = "Water at row "
+                        + (y + 1)
+                        + ", column "
+                        + (x + 1)
+                        + " cannot have a wall directly above it.";
+                    return false;
+                }
+
+                if (visited[x, y])
                 {
                     continue;
                 }
@@ -363,6 +388,25 @@ public static class PCLevelCandidateValidator
 
         message = "";
         return true;
+    }
+
+    private static bool ContainsTwoByTwoBlock(
+        HashSet<Vector2Int> positions)
+    {
+        foreach (Vector2Int position in positions)
+        {
+            if (positions.Contains(
+                    new Vector2Int(position.x + 1, position.y))
+                && positions.Contains(
+                    new Vector2Int(position.x, position.y + 1))
+                && positions.Contains(
+                    new Vector2Int(position.x + 1, position.y + 1)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool TryValidateConnectedActivityArea(

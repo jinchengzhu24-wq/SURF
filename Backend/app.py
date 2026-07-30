@@ -4121,10 +4121,46 @@ def validate_pc_level_candidate(payload, context):
     if sum(row.count("p") for row in rows) != 1:
         raise ValueError("candidate must contain exactly one p")
 
+    validate_pc_water_wall_clearance(rows, width, height)
+    validate_pc_generated_wall_shapes(
+        rows,
+        sketch_rows,
+        width,
+        height,
+    )
     validate_pc_start_clearance(rows, width, height)
     validate_pc_candidate_activity(rows, width, height)
 
     return {"rows": list(rows)}
+
+
+def validate_pc_water_wall_clearance(rows, width, height):
+    for y in range(1, height):
+        for x in range(width):
+            if rows[y][x] == "@" and rows[y - 1][x] == "#":
+                raise ValueError(
+                    "water tile at "
+                    f"({x},{y}) cannot have a wall directly above it"
+                )
+
+
+def validate_pc_generated_wall_shapes(
+    rows,
+    sketch_rows,
+    width,
+    height,
+):
+    generated_walls = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "#" and sketch_rows[y][x] != "#"
+    }
+
+    if contains_pc_two_by_two_block(generated_walls):
+        raise ValueError(
+            "generated internal walls must not contain a complete 2x2 block"
+        )
 
 
 def validate_pc_candidate_activity(rows, width, height):
@@ -4198,6 +4234,13 @@ def enumerate_pc_allowed_water_areas(
                     }
 
                     if not positions.issubset(editable_cells):
+                        continue
+
+                    if any(
+                        cell_y > 0
+                        and sketch_rows[cell_y - 1][cell_x] == "#"
+                        for cell_x, cell_y in positions
+                    ):
                         continue
 
                     remaining_walkable = enclosed_cells - positions
@@ -4454,15 +4497,31 @@ def attach_pc_compatible_wall_ids(allowed_water_areas, editable_cells):
         for cell in editable_cells
         if cell.get("canPlaceWall")
     }
+    editable_by_position = {
+        (cell["x"], cell["y"]): cell["id"]
+        for cell in editable_cells
+    }
     result = []
 
     for area in allowed_water_areas:
         water_cell_ids = set(area.get("cellIds") or [])
+        water_positions = {
+            (cell["x"], cell["y"])
+            for cell in editable_cells
+            if cell["id"] in water_cell_ids
+        }
+        wall_ids_above_water = {
+            editable_by_position[(water_x, water_y - 1)]
+            for water_x, water_y in water_positions
+            if (water_x, water_y - 1) in editable_by_position
+        }
         result.append(
             {
                 **area,
                 "compatibleWallCellIds": sorted(
-                    allowed_wall_ids - water_cell_ids
+                    allowed_wall_ids
+                    - water_cell_ids
+                    - wall_ids_above_water
                 ),
             }
         )
@@ -4539,11 +4598,15 @@ def build_pc_safe_layout_candidates(
             continue
 
         player_cell_id, protected_positions = player_and_trace
+        compatible_wall_cell_ids = set(
+            area.get("compatibleWallCellIds") or []
+        )
         safe_wall_cells = [
             cell
             for cell in editable_cells
             if (
                 cell.get("canPlaceWall")
+                and cell["id"] in compatible_wall_cell_ids
                 and cell["id"] not in water_cell_ids
                 and cell["id"] != player_cell_id
                 and (cell["x"], cell["y"]) not in protected_positions
@@ -4850,9 +4913,12 @@ def choose_pc_greedy_wall_group(
                     for cell in proposed
                 }
 
-                if count_pc_components(
-                    set(walkable) - proposed_positions
-                ) != 1:
+                if (
+                    contains_pc_two_by_two_block(proposed_positions)
+                    or count_pc_components(
+                        set(walkable) - proposed_positions
+                    ) != 1
+                ):
                     continue
 
                 style = classify_pc_wall_style(proposed)
@@ -4919,6 +4985,20 @@ def choose_pc_greedy_wall_group(
         )
     )
     return variants[0]
+
+
+def contains_pc_two_by_two_block(positions):
+    positions = set(positions)
+
+    return any(
+        {
+            (x, y),
+            (x + 1, y),
+            (x, y + 1),
+            (x + 1, y + 1),
+        }.issubset(positions)
+        for x, y in positions
+    )
 
 
 def classify_pc_wall_style(wall_cells):

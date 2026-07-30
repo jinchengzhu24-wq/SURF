@@ -113,9 +113,14 @@ public static class PCDesignFeasibilityValidator
                     candidate < wallCandidates.Count;
                     candidate++)
                 {
-                    if (!waterCells.Contains(wallCandidates[candidate]))
+                    Vector2Int wall = wallCandidates[candidate];
+                    Vector2Int cellBelowWall =
+                        new Vector2Int(wall.x, wall.y + 1);
+
+                    if (!waterCells.Contains(wall)
+                        && !waterCells.Contains(cellBelowWall))
                     {
-                        availableWalls.Add(wallCandidates[candidate]);
+                        availableWalls.Add(wall);
                     }
                 }
 
@@ -139,7 +144,8 @@ public static class PCDesignFeasibilityValidator
             }
         }
 
-        message = "Leave room for one 2x2 water area and "
+        message = "Leave room for one 2x2 water area with no wall directly "
+            + "above it and "
             + requiredInternalWallTiles
             + " internal wall tiles at least one cell away from the outer shell "
             + "without dividing the activity area.";
@@ -456,7 +462,10 @@ public static class PCDesignFeasibilityValidator
         foreach (Vector2Int position in waterCells)
         {
             if (!enclosedArea[position.x, position.y]
-                || sketchRows[position.y][position.x] != LevelData.Empty)
+                || sketchRows[position.y][position.x] != LevelData.Empty
+                || (position.y > 0
+                    && sketchRows[position.y - 1][position.x]
+                        == LevelData.Wall))
             {
                 return false;
             }
