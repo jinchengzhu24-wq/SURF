@@ -625,7 +625,7 @@ MonoBehaviour:
   levelManager: {fileID: 2075709008}
   levelSolver: {fileID: 1726369422}
   maximumModelAttempts: 2
-  minimumActivityArea: 48
+  minimumActivityArea: 0
   minimumInternalWallTiles: 2
   minimumWaterAreas: 1
   minimumWaterWidth: 2

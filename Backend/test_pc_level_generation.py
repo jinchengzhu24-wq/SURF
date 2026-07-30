@@ -282,7 +282,7 @@ class PCLevelGenerationTests(unittest.TestCase):
                 context,
             )
 
-    def test_indexed_layout_rejects_activity_area_below_48(self):
+    def test_indexed_layout_allows_connected_activity_area_below_48(self):
         context = backend.normalize_pc_level_request(self.context)
         layout = make_layout(context)
         water_ids = set(
@@ -296,17 +296,21 @@ class PCLevelGenerationTests(unittest.TestCase):
             and cell["id"] != layout["playerCellId"]
         ][:5]
 
-        with (
-            self.assertRaisesRegex(ValueError, "at least 48"),
-            patch.object(
-                backend,
-                "validate_pc_completed_level_solvability",
-            ),
+        with patch.object(
+            backend,
+            "validate_pc_completed_level_solvability",
         ):
-            backend.build_pc_level_candidate(
+            result = backend.build_pc_level_candidate(
                 layout,
                 context,
             )
+
+        walkable_count = sum(
+            tile in {".", "p", "s", "t"}
+            for row in result["rows"]
+            for tile in row
+        )
+        self.assertLess(walkable_count, 48)
 
     def test_water_candidates_are_limited_stable_and_diverse(self):
         normalized = backend.normalize_pc_level_request(self.context)
@@ -358,8 +362,14 @@ class PCLevelGenerationTests(unittest.TestCase):
                 for x in range(area["x"], area["x"] + area["width"])
             }
             remaining = enclosed_cells - positions
-            self.assertGreaterEqual(len(remaining), 48)
             self.assertEqual(backend.count_pc_components(remaining), 1)
+            backend.validate_pc_open_sketch_feasibility(
+                make_sketch(),
+                remaining,
+                12,
+                10,
+                maximum_search_states=backend.PC_PREFILTER_MAX_SEARCH_STATES,
+            )
 
     def test_static_diagnostic_reports_box_without_target_route(self):
         diagnostic = backend.diagnose_pc_static_solvability(
@@ -801,7 +811,7 @@ class PCLevelGenerationTests(unittest.TestCase):
                 normalized["allowedWallCoordinates"],
                 normalized["allowedWaterAreas"],
                 4,
-                48,
+                0,
             )
         )
         self.assertFalse(
@@ -810,7 +820,7 @@ class PCLevelGenerationTests(unittest.TestCase):
                 normalized["allowedWallCoordinates"],
                 [],
                 4,
-                48,
+                0,
             )
         )
 

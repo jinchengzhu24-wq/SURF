@@ -41,8 +41,8 @@ PC_LEVEL_GENERATION_SYSTEM_PROMPT = (
     "is true, and the player must use a cell whose canPlacePlayer flag is true. "
     "The player and walls must not overlap each other. Do not return map rows "
     "or ground tiles because the server fills all remaining enclosed cells "
-    "with ground. Preserve at least 48 connected walkable cells and choose a "
-    "layout likely to be solvable from the selected player position. Do not "
+    "with ground. Keep all walkable cells connected and choose a layout likely "
+    "to be solvable from the selected player position. Do not "
     "invent IDs. Do not return coordinates, markdown, comments, explanations, "
     "or extra fields."
 )

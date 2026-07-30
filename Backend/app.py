@@ -3947,13 +3947,13 @@ def normalize_pc_level_request(context):
         allowed_wall_coordinates,
         all_allowed_water_areas,
         PC_PRIMARY_MIN_INTERNAL_WALLS,
-        48,
+        0,
     )
 
     if capacity_water_area is None:
         raise ValueError(
             "PC sketch must leave room for one water area and four internal "
-            "wall tiles while retaining 48 connected walkable cells"
+            "wall tiles without disconnecting the activity area"
         )
 
     ranked_water_areas = select_pc_water_area_candidates(
@@ -3983,11 +3983,11 @@ def normalize_pc_level_request(context):
         allowed_wall_coordinates,
         allowed_water_areas,
         PC_PRIMARY_MIN_INTERNAL_WALLS,
-        48,
+        0,
     ):
         raise ValueError(
             "PC sketch has no prefiltered water candidate that leaves room for "
-            "four internal wall tiles and 48 connected walkable cells"
+            "four internal wall tiles without disconnecting the activity area"
         )
 
     return {
@@ -4079,9 +4079,6 @@ def validate_pc_candidate_activity(rows, width, height):
         if rows[y][x] in {".", "p", "s", "t"}
     }
 
-    if len(walkable) < 48:
-        raise ValueError("candidate must retain at least 48 walkable cells")
-
     if count_pc_components(walkable) != 1:
         raise ValueError("candidate walkable cells must form one connected component")
 
@@ -4148,10 +4145,7 @@ def enumerate_pc_allowed_water_areas(
 
                     remaining_walkable = enclosed_cells - positions
 
-                    if (
-                        len(remaining_walkable) < 48
-                        or count_pc_components(remaining_walkable) != 1
-                    ):
+                    if count_pc_components(remaining_walkable) != 1:
                         continue
 
                     allowed_areas.append(

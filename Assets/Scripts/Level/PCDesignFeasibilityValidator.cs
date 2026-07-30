@@ -133,9 +133,7 @@ public static class PCDesignFeasibilityValidator
 
         message = "Leave room for one 2x2 water area and "
             + requiredInternalWallTiles
-            + " internal wall tiles while retaining "
-            + minimumRemainingActivityArea
-            + " connected activity cells.";
+            + " internal wall tiles without dividing the activity area.";
         return false;
     }
 
