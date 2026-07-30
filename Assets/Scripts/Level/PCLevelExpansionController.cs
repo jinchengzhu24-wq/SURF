@@ -18,7 +18,7 @@ public class PCLevelExpansionController : MonoBehaviour
 
     [Header("Candidate Rules")]
     [SerializeField] private int minimumActivityArea = 0;
-    [SerializeField] private int minimumInternalWallTiles = 2;
+    [SerializeField] private int minimumInternalWallTiles = 3;
     [SerializeField] private int minimumWaterAreas = 1;
     [SerializeField] private int minimumWaterWidth = 2;
     [SerializeField] private int minimumWaterHeight = 2;

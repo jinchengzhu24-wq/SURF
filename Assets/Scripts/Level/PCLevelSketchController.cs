@@ -7,7 +7,7 @@ using UnityEngine.UI;
 
 public class PCLevelSketchController : MonoBehaviour
 {
-    private const int RequiredGeneratedInternalWallTiles = 2;
+    private const int RequiredGeneratedInternalWallTiles = 3;
     private const int MinimumGeneratedActivityArea = 0;
 
     public enum SketchBrush

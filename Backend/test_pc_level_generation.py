@@ -80,11 +80,11 @@ def make_layout(
     }
 
 
-def make_required_layout(context, wall_count=4, wall_set_index=0):
+def make_required_layout(context, wall_count=5, wall_set_index=0):
     requested_set_size = (
         wall_count
-        if wall_count in {2, 4}
-        else 4
+        if wall_count in {3, 4, 5}
+        else 3
     )
     matching_layouts = [
         {
@@ -164,13 +164,13 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertEqual(result["rows"][7], " #...@@...# ")
         self.assertEqual(result["rows"][8], " #...@@...# ")
 
-    def test_first_candidate_accepts_four_walls_and_one_water_area(self):
+    def test_first_candidate_accepts_five_walls_and_one_water_area(self):
         context = backend.normalize_pc_level_request(self.context)
 
         result = backend.build_pc_level_candidate(
             make_required_layout(context),
             context,
-            minimum_internal_walls=4,
+            minimum_internal_walls=5,
             minimum_water_areas=1,
         )
 
@@ -179,50 +179,70 @@ class PCLevelGenerationTests(unittest.TestCase):
             context["sketchRows"],
             12,
             10,
-            4,
+            5,
+            1,
+        )
+        self.assertEqual(wall_count, 5)
+        self.assertEqual(water_count, 1)
+
+    def test_first_candidate_fails_below_five_walls(self):
+        context = backend.normalize_pc_level_request(self.context)
+
+        with self.assertRaisesRegex(ValueError, "at least 5"):
+            backend.build_pc_level_candidate(
+                make_required_layout(context, wall_count=4),
+                context,
+                minimum_internal_walls=5,
+                minimum_water_areas=1,
+            )
+
+    def test_intermediate_candidate_retains_four_walls(self):
+        context = backend.normalize_pc_level_request(self.context)
+
+        accepted = backend.build_pc_level_candidate(
+            make_required_layout(context, wall_count=4),
+            context,
+            minimum_internal_walls=3,
+            minimum_water_areas=1,
+        )
+        wall_count, water_count = backend.validate_pc_required_features(
+            accepted["rows"],
+            context["sketchRows"],
+            12,
+            10,
+            3,
             1,
         )
         self.assertEqual(wall_count, 4)
         self.assertEqual(water_count, 1)
 
-    def test_first_candidate_fails_below_four_walls(self):
-        context = backend.normalize_pc_level_request(self.context)
-
-        with self.assertRaisesRegex(ValueError, "at least 4"):
-            backend.build_pc_level_candidate(
-                make_required_layout(context, wall_count=3),
-                context,
-                minimum_internal_walls=4,
-                minimum_water_areas=1,
-            )
-
-    def test_fallback_candidate_requires_two_walls_and_one_water_area(self):
+    def test_fallback_candidate_requires_three_walls_and_one_water_area(self):
         context = backend.normalize_pc_level_request(self.context)
 
         accepted = backend.build_pc_level_candidate(
-            make_required_layout(context, wall_count=2),
+            make_required_layout(context, wall_count=3),
             context,
-            minimum_internal_walls=2,
+            minimum_internal_walls=3,
             minimum_water_areas=1,
         )
         self.assertIsNotNone(accepted)
 
-        with self.assertRaisesRegex(ValueError, "at least 2"):
+        with self.assertRaisesRegex(ValueError, "at least 3"):
             backend.build_pc_level_candidate(
-                make_required_layout(context, wall_count=1),
+                make_required_layout(context, wall_count=2),
                 context,
-                minimum_internal_walls=2,
+                minimum_internal_walls=3,
                 minimum_water_areas=1,
             )
 
-        invalid_water = make_required_layout(context, wall_count=2)
+        invalid_water = make_required_layout(context, wall_count=3)
         invalid_water["waterAreaId"] = 999999
 
         with self.assertRaisesRegex(ValueError, "not an allowed water area"):
             backend.build_pc_level_candidate(
                 invalid_water,
                 context,
-                minimum_internal_walls=2,
+                minimum_internal_walls=3,
                 minimum_water_areas=1,
             )
 
@@ -336,7 +356,7 @@ class PCLevelGenerationTests(unittest.TestCase):
         )
         self.assertLess(walkable_count, 48)
 
-    def test_layout_candidates_are_limited_stable_and_prioritize_four_walls(self):
+    def test_layout_candidates_are_limited_stable_and_prioritize_five_walls(self):
         normalized = backend.normalize_pc_level_request(self.context)
         normalized_again = backend.normalize_pc_level_request(self.context)
         candidates = normalized["layoutCandidates"]
@@ -351,13 +371,14 @@ class PCLevelGenerationTests(unittest.TestCase):
             candidates,
             normalized_again["layoutCandidates"],
         )
-        self.assertEqual(len(candidates[0]["internalWallCellIds"]), 4)
-        self.assertIn(
-            2,
-            {
-                len(candidate["internalWallCellIds"])
-                for candidate in candidates
-            },
+        wall_counts = {
+            len(candidate["internalWallCellIds"])
+            for candidate in candidates
+        }
+        self.assertEqual(len(candidates[0]["internalWallCellIds"]), 5)
+        self.assertEqual(
+            wall_counts,
+            {3, 4, 5},
         )
 
     def test_layout_candidate_walls_keep_outer_shell_clearance(self):
@@ -378,11 +399,11 @@ class PCLevelGenerationTests(unittest.TestCase):
                     )
                     self.assertNotIn(neighbor, shell)
 
-    def test_four_wall_candidates_avoid_straight_lines_when_possible(self):
+    def test_five_wall_candidates_avoid_straight_lines_when_possible(self):
         normalized = backend.normalize_pc_level_request(self.context)
 
         for candidate in normalized["layoutCandidates"]:
-            if len(candidate["internalWallCellIds"]) == 4:
+            if len(candidate["internalWallCellIds"]) == 5:
                 self.assertNotEqual(candidate["wallStyle"], "straight")
 
     def test_every_layout_candidate_is_complete_and_solvable(self):
@@ -398,10 +419,10 @@ class PCLevelGenerationTests(unittest.TestCase):
                 normalized["sketchRows"],
                 12,
                 10,
-                2,
+                3,
                 1,
             )
-            self.assertGreaterEqual(wall_count, 2)
+            self.assertGreaterEqual(wall_count, 3)
             self.assertEqual(water_count, 1)
             backend.validate_pc_completed_level_solvability(
                 validated["rows"],
@@ -642,7 +663,7 @@ class PCLevelGenerationTests(unittest.TestCase):
                 for x in range(12)
                 if rows[y][x] == "#" and make_sketch()[y][x] != "#"
             ),
-            4,
+            5,
         )
         self.assertEqual(response.headers["X-LLM-Attempts-Used"], "1")
         self.assertEqual(model_call_count, 1)
@@ -735,7 +756,7 @@ class PCLevelGenerationTests(unittest.TestCase):
                 make_sketch(),
                 12,
                 10,
-                2,
+                3,
                 1,
             )
 
@@ -766,7 +787,7 @@ class PCLevelGenerationTests(unittest.TestCase):
             make_sketch(),
             12,
             10,
-            2,
+            3,
             1,
         )
 
@@ -789,7 +810,7 @@ class PCLevelGenerationTests(unittest.TestCase):
                     layout,
                     normalized,
                     request_id="pc-feedback-test",
-                    minimum_internal_walls=4,
+                    minimum_internal_walls=5,
                     minimum_water_areas=1,
                 )
 
@@ -838,13 +859,13 @@ class PCLevelGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "at least 56"):
             backend.normalize_pc_level_request(payload)
 
-    def test_sketch_requires_capacity_for_two_safe_walls_and_water(self):
+    def test_sketch_requires_capacity_for_three_safe_walls_and_water(self):
         normalized = backend.normalize_pc_level_request(self.context)
 
         self.assertTrue(normalized["layoutCandidates"])
         self.assertTrue(
             all(
-                len(candidate["internalWallCellIds"]) >= 2
+                len(candidate["internalWallCellIds"]) >= 3
                 for candidate in normalized["layoutCandidates"]
             )
         )
@@ -1018,6 +1039,9 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertIn("wallStyle", prompt_text)
         self.assertIn("internalWalls", prompt_text)
         self.assertIn("waterArea", prompt_text)
+        self.assertIn("five-wall candidate", prompt_text)
+        self.assertIn("four-wall candidate", prompt_text)
+        self.assertIn("three-wall candidate", prompt_text)
         self.assertNotIn("effectiveWallSets", prompt_text)
         self.assertNotIn("editableCells", prompt_text)
         self.assertNotIn("previousCandidateRows", prompt_text)

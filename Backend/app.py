@@ -70,8 +70,9 @@ PLAN_LLM_TIMEOUT_SECONDS = 45.0
 PC_LEVEL_LLM_TIMEOUT_SECONDS = 15.0
 PC_FEASIBILITY_MAX_SEARCH_STATES = 120000
 PC_DESIGN_MIN_ACTIVITY_AREA = 56
-PC_PRIMARY_MIN_INTERNAL_WALLS = 4
-PC_FALLBACK_MIN_INTERNAL_WALLS = 2
+PC_PRIMARY_INTERNAL_WALLS = 5
+PC_INTERMEDIATE_INTERNAL_WALLS = 4
+PC_FALLBACK_MIN_INTERNAL_WALLS = 3
 PC_MAX_WATER_AREA_CANDIDATES = 12
 PC_LAYOUT_MAX_WATER_CHECKS = 6
 PC_MAX_LAYOUT_CANDIDATES = 6
@@ -4025,7 +4026,7 @@ def normalize_pc_level_request(context):
 
     if not layout_candidates:
         raise ValueError(
-            "PC sketch has no safe completion with at least two internal "
+            "PC sketch has no safe completion with at least three internal "
             "walls and one water area"
         )
 
@@ -4799,7 +4800,8 @@ def build_pc_greedy_wall_groups(safe_wall_cells, walkable):
     groups = []
 
     for required_count in (
-        PC_PRIMARY_MIN_INTERNAL_WALLS,
+        PC_PRIMARY_INTERNAL_WALLS,
+        PC_INTERMEDIATE_INTERNAL_WALLS,
         PC_FALLBACK_MIN_INTERNAL_WALLS,
     ):
         group = choose_pc_greedy_wall_group(
