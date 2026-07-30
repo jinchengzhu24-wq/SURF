@@ -77,6 +77,9 @@ PC_MIN_WATER_AREAS = 1
 PC_MAX_WATER_AREA_CANDIDATES = 12
 PC_MAX_WATER_PREFILTER_CHECKS = 36
 PC_PREFILTER_MAX_SEARCH_STATES = 20000
+PC_WALL_IMPACT_MAX_SEARCH_STATES = 300000
+PC_WALL_IMPACT_MIN_STEP_DELTA = 4
+PC_WALL_IMPACT_MIN_PUSH_DELTA = 1
 DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -91,6 +94,14 @@ HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
 JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
 
 class PCSolvabilityError(ValueError):
+    def __init__(self, reason_code, message, searched_states=0, details=None):
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.searched_states = int(searched_states or 0)
+        self.details = dict(details or {})
+
+
+class PCWallImpactError(ValueError):
     def __init__(self, reason_code, message, searched_states=0, details=None):
         super().__init__(message)
         self.reason_code = reason_code
@@ -3457,22 +3468,32 @@ def create_pc_level_candidate(
     context = normalize_pc_level_request(context)
     structurally_valid_candidate_count = 0
     previous_rejected_selection = None
+    wall_ids_rejected_for_low_impact = None
 
     def validate_candidate(payload):
-        nonlocal structurally_valid_candidate_count, previous_rejected_selection
+        nonlocal structurally_valid_candidate_count
+        nonlocal previous_rejected_selection
+        nonlocal wall_ids_rejected_for_low_impact
         water_area_id, player_cell_id, internal_wall_cell_ids = (
             parse_pc_indexed_layout(payload)
         )
+        wall_selection = tuple(sorted(internal_wall_cell_ids))
         selection = (
             water_area_id,
             player_cell_id,
-            tuple(sorted(internal_wall_cell_ids)),
+            wall_selection,
         )
 
         if previous_rejected_selection == selection:
             raise ValueError(
                 "The corrected layout must change waterAreaId, playerCellId, "
                 "or the internalWallCellIds set from the rejected layout"
+            )
+
+        if wall_ids_rejected_for_low_impact == wall_selection:
+            raise ValueError(
+                "The corrected layout must change internalWallCellIds because "
+                "the previous wall set had insufficient blocking impact"
             )
 
         structurally_valid_candidate_count += 1
@@ -3490,6 +3511,10 @@ def create_pc_level_candidate(
                 minimum_internal_walls=minimum_internal_walls,
                 minimum_water_areas=PC_MIN_WATER_AREAS,
             )
+        except PCWallImpactError:
+            previous_rejected_selection = selection
+            wall_ids_rejected_for_low_impact = wall_selection
+            raise
         except ValueError:
             previous_rejected_selection = selection
             raise
@@ -3650,6 +3675,19 @@ def build_pc_level_candidate(
 
         log_event("INFO", "pc_candidate_rejected", **fields)
         raise ValueError(feedback) from exception
+
+    if internal_wall_cell_ids:
+        validate_pc_internal_wall_impact(
+            candidate["rows"],
+            sketch_rows,
+            wall_cells,
+            width,
+            height,
+            request_id=request_id,
+            water_area_id=water_area_id,
+            player_cell_id=player_cell_id,
+            internal_wall_cell_ids=internal_wall_cell_ids,
+        )
 
     return candidate
 
@@ -3926,6 +3964,12 @@ def normalize_pc_level_request(context):
         tuple(coordinate)
         for coordinate in allowed_wall_coordinates
     }
+    wall_impact_scores = calculate_pc_wall_impact_scores(
+        enclosed_cells,
+        box_starts,
+        targets,
+        allowed_wall_coordinates,
+    )
     editable_cells = [
         {
             "id": index,
@@ -3933,6 +3977,7 @@ def normalize_pc_level_request(context):
             "y": coordinate[1],
             "canPlacePlayer": True,
             "canPlaceWall": tuple(coordinate) in allowed_wall_coordinate_set,
+            "wallImpactScore": wall_impact_scores.get(tuple(coordinate), 0),
         }
         for index, coordinate in enumerate(editable_coordinates)
     ]
@@ -4159,6 +4204,80 @@ def enumerate_pc_allowed_water_areas(
                     )
 
     return allowed_areas
+
+
+def calculate_pc_wall_impact_scores(
+    enclosed_cells,
+    box_starts,
+    targets,
+    allowed_wall_coordinates,
+):
+    walkable = set(enclosed_cells)
+    starts = [tuple(position) for position in box_starts]
+    target_cells = [tuple(position) for position in targets]
+    baseline_distances = {
+        (start, target): find_pc_shortest_grid_distance(
+            start,
+            target,
+            walkable,
+        )
+        for start in starts
+        for target in target_cells
+    }
+    unreachable_penalty = max(1, len(walkable))
+    scores = {}
+
+    for coordinate in allowed_wall_coordinates:
+        wall = tuple(coordinate)
+        walkable_without_wall = walkable - {wall}
+        score = 0
+
+        for pair, baseline_distance in baseline_distances.items():
+            if baseline_distance is None:
+                continue
+
+            changed_distance = find_pc_shortest_grid_distance(
+                pair[0],
+                pair[1],
+                walkable_without_wall,
+            )
+
+            if changed_distance is None:
+                score += unreachable_penalty
+            else:
+                score += max(0, changed_distance - baseline_distance)
+
+        scores[wall] = score
+
+    return scores
+
+
+def find_pc_shortest_grid_distance(start, target, walkable):
+    if start not in walkable or target not in walkable:
+        return None
+
+    open_cells = deque([(start, 0)])
+    visited = {start}
+
+    while open_cells:
+        current, distance = open_cells.popleft()
+
+        if current == target:
+            return distance
+
+        x, y = current
+
+        for neighbor in (
+            (x + 1, y),
+            (x - 1, y),
+            (x, y + 1),
+            (x, y - 1),
+        ):
+            if neighbor in walkable and neighbor not in visited:
+                visited.add(neighbor)
+                open_cells.append((neighbor, distance + 1))
+
+    return None
 
 
 def filter_pc_static_wall_coordinates(
@@ -4825,6 +4944,27 @@ def validate_pc_push_solvability(
     budget_error,
     unsolvable_error,
 ):
+    _, searched_states = search_pc_minimum_pushes(
+        walkable,
+        start_boxes,
+        targets,
+        initial_players,
+        maximum_search_states,
+        budget_error,
+        unsolvable_error,
+    )
+    return searched_states
+
+
+def search_pc_minimum_pushes(
+    walkable,
+    start_boxes,
+    targets,
+    initial_players,
+    maximum_search_states,
+    budget_error,
+    unsolvable_error,
+):
     open_states = deque()
     visited_states = set()
 
@@ -4833,17 +4973,17 @@ def validate_pc_push_solvability(
 
         if key not in visited_states:
             visited_states.add(key)
-            open_states.append((player, start_boxes))
+            open_states.append((player, start_boxes, 0))
 
     searched_states = 0
     search_limit = max(1, int(maximum_search_states))
 
     while open_states and searched_states < search_limit:
-        player, boxes = open_states.popleft()
+        player, boxes, pushes = open_states.popleft()
         searched_states += 1
 
         if set(boxes) == targets:
-            return searched_states
+            return pushes, searched_states
 
         box_set = set(boxes)
         reachable = find_pc_reachable_cells(player, walkable, box_set)
@@ -4883,9 +5023,9 @@ def validate_pc_push_solvability(
 
                 if key not in visited_states:
                     visited_states.add(key)
-                    open_states.append((next_player, next_boxes))
+                    open_states.append((next_player, next_boxes, pushes + 1))
 
-    if searched_states >= search_limit:
+    if open_states:
         raise PCSolvabilityError(
             "SEARCH_BUDGET_EXCEEDED",
             budget_error,
@@ -4896,6 +5036,291 @@ def validate_pc_push_solvability(
         "NO_SOLUTION_AFTER_SEARCH",
         unsolvable_error,
         searched_states=searched_states,
+    )
+
+
+def validate_pc_internal_wall_impact(
+    candidate_rows,
+    sketch_rows,
+    wall_cells,
+    width,
+    height,
+    request_id="",
+    water_area_id=None,
+    player_cell_id=None,
+    internal_wall_cell_ids=None,
+):
+    counterfactual_rows = [list(row) for row in candidate_rows]
+
+    for cell in wall_cells:
+        x = cell["x"]
+        y = cell["y"]
+
+        if sketch_rows[y][x] == "#" or counterfactual_rows[y][x] != "#":
+            raise ValueError(
+                f"internal wall counterfactual mismatch at ({x},{y})"
+            )
+
+        counterfactual_rows[y][x] = "."
+
+    counterfactual_rows = ["".join(row) for row in counterfactual_rows]
+    log_fields = {
+        "waterAreaId": water_area_id,
+        "playerCellId": player_cell_id,
+        "internalWallCellIds": list(internal_wall_cell_ids or []),
+    }
+
+    if request_id:
+        log_fields["requestId"] = request_id
+
+    try:
+        with_walls = calculate_pc_level_solution_metrics(
+            candidate_rows,
+            width,
+            height,
+            "withWalls",
+        )
+        without_walls = calculate_pc_level_solution_metrics(
+            counterfactual_rows,
+            width,
+            height,
+            "withoutWalls",
+        )
+    except PCWallImpactError as exception:
+        log_event(
+            "INFO",
+            "pc_wall_impact_rejected",
+            reasonCode=exception.reason_code,
+            searchedStates=exception.searched_states,
+            detail=safe_log_text(str(exception)),
+            **log_fields,
+        )
+        raise
+
+    step_delta = (
+        with_walls["shortestSteps"]
+        - without_walls["shortestSteps"]
+    )
+    push_delta = (
+        with_walls["minimumPushes"]
+        - without_walls["minimumPushes"]
+    )
+    metrics = {
+        "withWallsShortestSteps": with_walls["shortestSteps"],
+        "withoutWallsShortestSteps": without_walls["shortestSteps"],
+        "stepDelta": step_delta,
+        "withWallsMinimumPushes": with_walls["minimumPushes"],
+        "withoutWallsMinimumPushes": without_walls["minimumPushes"],
+        "pushDelta": push_delta,
+    }
+
+    if (
+        step_delta >= PC_WALL_IMPACT_MIN_STEP_DELTA
+        or push_delta >= PC_WALL_IMPACT_MIN_PUSH_DELTA
+    ):
+        log_event(
+            "INFO",
+            "pc_wall_impact_accepted",
+            **metrics,
+            **log_fields,
+        )
+        return {
+            **metrics,
+            "counterfactualRows": counterfactual_rows,
+        }
+
+    message = (
+        "internal walls have insufficient blocking impact; "
+        "reasonCode=WALL_IMPACT_TOO_LOW; "
+        f"withWallsShortestSteps={with_walls['shortestSteps']}; "
+        f"withoutWallsShortestSteps={without_walls['shortestSteps']}; "
+        f"stepDelta={step_delta}; "
+        f"withWallsMinimumPushes={with_walls['minimumPushes']}; "
+        f"withoutWallsMinimumPushes={without_walls['minimumPushes']}; "
+        f"pushDelta={push_delta}; "
+        f"requiredStepDelta>={PC_WALL_IMPACT_MIN_STEP_DELTA} or "
+        f"requiredPushDelta>={PC_WALL_IMPACT_MIN_PUSH_DELTA}; "
+        "correction=replace internalWallCellIds with higher "
+        "wallImpactScore IDs that obstruct direct routes"
+    )
+    log_event(
+        "INFO",
+        "pc_wall_impact_rejected",
+        reasonCode="WALL_IMPACT_TOO_LOW",
+        detail=safe_log_text(message),
+        **metrics,
+        **log_fields,
+    )
+    raise PCWallImpactError(
+        "WALL_IMPACT_TOO_LOW",
+        message,
+        details=metrics,
+    )
+
+
+def calculate_pc_level_solution_metrics(rows, width, height, variant):
+    walkable, start_boxes, targets, player = parse_pc_solver_level(
+        rows,
+        width,
+        height,
+    )
+
+    try:
+        minimum_pushes, push_searched_states = search_pc_minimum_pushes(
+            walkable,
+            start_boxes,
+            targets,
+            [player],
+            PC_WALL_IMPACT_MAX_SEARCH_STATES,
+            (
+                f"{variant} minimum-push search exceeded "
+                "the wall-impact state budget"
+            ),
+            f"{variant} wall-impact comparison map has no Sokoban solution",
+        )
+    except PCSolvabilityError as exception:
+        reason_code = (
+            "WALL_IMPACT_SEARCH_BUDGET_EXCEEDED"
+            if exception.reason_code == "SEARCH_BUDGET_EXCEEDED"
+            else "WALL_IMPACT_COMPARISON_UNSOLVABLE"
+        )
+        raise PCWallImpactError(
+            reason_code,
+            f"reasonCode={reason_code}; variant={variant}; detail={exception}",
+            searched_states=exception.searched_states,
+            details={"variant": variant},
+        ) from exception
+
+    shortest_steps, step_searched_states = search_pc_shortest_solution_steps(
+        walkable,
+        start_boxes,
+        targets,
+        player,
+        PC_WALL_IMPACT_MAX_SEARCH_STATES,
+        variant,
+    )
+    return {
+        "minimumPushes": minimum_pushes,
+        "shortestSteps": shortest_steps,
+        "pushSearchedStates": push_searched_states,
+        "stepSearchedStates": step_searched_states,
+    }
+
+
+def parse_pc_solver_level(rows, width, height):
+    walkable = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] in {".", "p", "s", "t"}
+    }
+    start_boxes = tuple(
+        sorted(
+            (x, y)
+            for y in range(height)
+            for x in range(width)
+            if rows[y][x] == "s"
+        )
+    )
+    targets = {
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "t"
+    }
+    players = [
+        (x, y)
+        for y in range(height)
+        for x in range(width)
+        if rows[y][x] == "p"
+    ]
+
+    if len(players) != 1:
+        raise ValueError("wall-impact map must contain exactly one player")
+
+    return walkable, start_boxes, targets, players[0]
+
+
+def search_pc_shortest_solution_steps(
+    walkable,
+    start_boxes,
+    targets,
+    player,
+    maximum_search_states,
+    variant,
+):
+    start_state = (player, tuple(sorted(start_boxes)))
+    open_states = deque([(start_state, 0)])
+    visited_states = {start_state}
+    searched_states = 0
+    search_limit = max(1, int(maximum_search_states))
+
+    while open_states and searched_states < search_limit:
+        (current_player, boxes), steps = open_states.popleft()
+        searched_states += 1
+
+        if set(boxes) == targets:
+            return steps, searched_states
+
+        box_set = set(boxes)
+
+        for direction_x, direction_y in (
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+        ):
+            next_player = (
+                current_player[0] + direction_x,
+                current_player[1] + direction_y,
+            )
+
+            if next_player not in walkable:
+                continue
+
+            next_boxes = boxes
+
+            if next_player in box_set:
+                next_box = (
+                    next_player[0] + direction_x,
+                    next_player[1] + direction_y,
+                )
+
+                if next_box not in walkable or next_box in box_set:
+                    continue
+
+                moved_boxes = list(boxes)
+                moved_boxes[moved_boxes.index(next_player)] = next_box
+                next_boxes = tuple(sorted(moved_boxes))
+
+            next_state = (next_player, next_boxes)
+
+            if next_state not in visited_states:
+                visited_states.add(next_state)
+                open_states.append((next_state, steps + 1))
+
+    if open_states:
+        reason_code = "WALL_IMPACT_SEARCH_BUDGET_EXCEEDED"
+        raise PCWallImpactError(
+            reason_code,
+            (
+                f"reasonCode={reason_code}; variant={variant}; "
+                "detail=shortest-step search exceeded the wall-impact "
+                f"state budget of {search_limit}"
+            ),
+            searched_states=searched_states,
+            details={"variant": variant},
+        )
+
+    reason_code = "WALL_IMPACT_COMPARISON_UNSOLVABLE"
+    raise PCWallImpactError(
+        reason_code,
+        (
+            f"reasonCode={reason_code}; variant={variant}; "
+            "detail=wall-impact comparison map has no Sokoban solution"
+        ),
+        searched_states=searched_states,
+        details={"variant": variant},
     )
 
 

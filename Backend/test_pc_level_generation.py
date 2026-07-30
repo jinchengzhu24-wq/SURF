@@ -83,9 +83,25 @@ def make_layout(
 def make_required_layout(context, wall_count=4):
     return make_layout(
         context,
-        player=(3, 2),
-        walls=((2, 2), (6, 2), (7, 2), (8, 2))[:wall_count],
+        player=(2, 2),
+        walls=((5, 3), (6, 3), (7, 3), (5, 4))[:wall_count],
+        water=(5, 7, 2, 2),
     )
+
+
+def build_candidate_for_wall_impact_test(context, layout):
+    with patch.object(backend, "validate_pc_internal_wall_impact"):
+        candidate = backend.build_pc_level_candidate(layout, context)
+
+    editable_cells = {
+        cell["id"]: cell
+        for cell in context["editableCells"]
+    }
+    wall_cells = [
+        editable_cells[cell_id]
+        for cell_id in layout["internalWallCellIds"]
+    ]
+    return candidate["rows"], wall_cells
 
 
 class PCLevelGenerationTests(unittest.TestCase):
@@ -130,15 +146,21 @@ class PCLevelGenerationTests(unittest.TestCase):
 
     def test_indexed_layout_builds_valid_wall_and_water(self):
         context = backend.normalize_pc_level_request(self.context)
-        layout = make_layout(context, walls=((6, 2),))
+        layout = make_layout(
+            context,
+            walls=((6, 3),),
+            water=(5, 7, 2, 2),
+        )
 
         result = backend.build_pc_level_candidate(
             layout,
             context,
         )
 
-        self.assertEqual(result["rows"][2], " #p.@@#...# ")
-        self.assertEqual(result["rows"][3], " #.s@@..t.# ")
+        self.assertEqual(result["rows"][2], " #p.......# ")
+        self.assertEqual(result["rows"][3], " #.s..#.t.# ")
+        self.assertEqual(result["rows"][7], " #...@@...# ")
+        self.assertEqual(result["rows"][8], " #...@@...# ")
 
     def test_first_candidate_accepts_four_walls_and_one_water_area(self):
         context = backend.normalize_pc_level_request(self.context)
@@ -299,6 +321,9 @@ class PCLevelGenerationTests(unittest.TestCase):
         with patch.object(
             backend,
             "validate_pc_completed_level_solvability",
+        ), patch.object(
+            backend,
+            "validate_pc_internal_wall_impact",
         ):
             result = backend.build_pc_level_candidate(
                 layout,
@@ -413,6 +438,187 @@ class PCLevelGenerationTests(unittest.TestCase):
 
         self.assertNotIn([0, 2], filtered)
         self.assertIn([4, 4], filtered)
+
+    def test_decorative_wall_set_is_rejected_for_low_impact(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_layout(
+            context,
+            player=(2, 2),
+            walls=((4, 4), (5, 4), (6, 4), (7, 4)),
+            water=(5, 7, 2, 2),
+        )
+
+        with self.assertRaises(backend.PCWallImpactError) as raised:
+            backend.build_pc_level_candidate(
+                layout,
+                context,
+                minimum_internal_walls=4,
+                minimum_water_areas=1,
+            )
+
+        self.assertEqual(
+            raised.exception.reason_code,
+            "WALL_IMPACT_TOO_LOW",
+        )
+        self.assertIn("stepDelta=0", str(raised.exception))
+        self.assertIn("pushDelta=0", str(raised.exception))
+
+    def test_wall_impact_accepts_four_extra_shortest_steps(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_required_layout(context, wall_count=2)
+        rows, wall_cells = build_candidate_for_wall_impact_test(
+            context,
+            layout,
+        )
+        metric_results = [
+            {
+                "shortestSteps": 14,
+                "minimumPushes": 5,
+                "pushSearchedStates": 10,
+                "stepSearchedStates": 20,
+            },
+            {
+                "shortestSteps": 10,
+                "minimumPushes": 5,
+                "pushSearchedStates": 10,
+                "stepSearchedStates": 20,
+            },
+        ]
+
+        with patch.object(
+            backend,
+            "calculate_pc_level_solution_metrics",
+            side_effect=metric_results,
+        ):
+            result = backend.validate_pc_internal_wall_impact(
+                rows,
+                context["sketchRows"],
+                wall_cells,
+                12,
+                10,
+                internal_wall_cell_ids=layout["internalWallCellIds"],
+            )
+
+        self.assertEqual(result["stepDelta"], 4)
+        self.assertEqual(result["pushDelta"], 0)
+
+    def test_wall_impact_accepts_one_extra_minimum_push(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_required_layout(context, wall_count=2)
+        rows, wall_cells = build_candidate_for_wall_impact_test(
+            context,
+            layout,
+        )
+        metric_results = [
+            {
+                "shortestSteps": 12,
+                "minimumPushes": 6,
+                "pushSearchedStates": 10,
+                "stepSearchedStates": 20,
+            },
+            {
+                "shortestSteps": 10,
+                "minimumPushes": 5,
+                "pushSearchedStates": 10,
+                "stepSearchedStates": 20,
+            },
+        ]
+
+        with patch.object(
+            backend,
+            "calculate_pc_level_solution_metrics",
+            side_effect=metric_results,
+        ):
+            result = backend.validate_pc_internal_wall_impact(
+                rows,
+                context["sketchRows"],
+                wall_cells,
+                12,
+                10,
+                internal_wall_cell_ids=layout["internalWallCellIds"],
+            )
+
+        self.assertEqual(result["stepDelta"], 2)
+        self.assertEqual(result["pushDelta"], 1)
+
+    def test_wall_counterfactual_removes_only_generated_walls(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_required_layout(context, wall_count=2)
+        rows, wall_cells = build_candidate_for_wall_impact_test(
+            context,
+            layout,
+        )
+
+        result = backend.validate_pc_internal_wall_impact(
+            rows,
+            context["sketchRows"],
+            wall_cells,
+            12,
+            10,
+            internal_wall_cell_ids=layout["internalWallCellIds"],
+        )
+        counterfactual = result["counterfactualRows"]
+        generated_wall_positions = {
+            (cell["x"], cell["y"])
+            for cell in wall_cells
+        }
+
+        for y in range(10):
+            for x in range(12):
+                if (x, y) in generated_wall_positions:
+                    self.assertEqual(counterfactual[y][x], ".")
+                else:
+                    self.assertEqual(counterfactual[y][x], rows[y][x])
+
+        self.assertEqual(counterfactual[1][1], "#")
+        self.assertEqual(counterfactual[7][5:7], "@@")
+        self.assertEqual(counterfactual[2][2], "p")
+        self.assertEqual(counterfactual[3][3], "s")
+        self.assertEqual(counterfactual[3][8], "t")
+
+    def test_wall_impact_score_prioritizes_route_obstruction(self):
+        normalized = backend.normalize_pc_level_request(self.context)
+        normalized_again = backend.normalize_pc_level_request(self.context)
+        scores = {
+            (cell["x"], cell["y"]): cell["wallImpactScore"]
+            for cell in normalized["editableCells"]
+        }
+        scores_again = {
+            (cell["x"], cell["y"]): cell["wallImpactScore"]
+            for cell in normalized_again["editableCells"]
+        }
+
+        self.assertEqual(scores, scores_again)
+        self.assertGreater(scores[(5, 3)], scores[(4, 4)])
+        self.assertEqual(scores[(2, 3)], 0)
+
+    def test_wall_impact_search_budget_has_explicit_reason(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_required_layout(context, wall_count=2)
+        rows, wall_cells = build_candidate_for_wall_impact_test(
+            context,
+            layout,
+        )
+
+        with patch.object(
+            backend,
+            "PC_WALL_IMPACT_MAX_SEARCH_STATES",
+            1,
+        ):
+            with self.assertRaises(backend.PCWallImpactError) as raised:
+                backend.validate_pc_internal_wall_impact(
+                    rows,
+                    context["sketchRows"],
+                    wall_cells,
+                    12,
+                    10,
+                    internal_wall_cell_ids=layout["internalWallCellIds"],
+                )
+
+        self.assertEqual(
+            raised.exception.reason_code,
+            "WALL_IMPACT_SEARCH_BUDGET_EXCEEDED",
+        )
 
     def test_water_prefilter_drops_proven_unsolvable_candidate(self):
         normalized = backend.normalize_pc_level_request(self.context)
@@ -630,8 +836,9 @@ class PCLevelGenerationTests(unittest.TestCase):
 
             corrected_layout = make_layout(
                 normalized,
-                player=(3, 2),
-                walls=((7, 2), (8, 2)),
+                player=(2, 2),
+                walls=((6, 3), (7, 3)),
+                water=(5, 7, 2, 2),
             )
             value = kwargs["validator"](corrected_layout)
             return LLMExecutionResult(value, 2, kwargs["request_id"])
@@ -674,7 +881,8 @@ class PCLevelGenerationTests(unittest.TestCase):
             corrected_layout = make_layout(
                 normalized,
                 player=(2, 2),
-                walls=((7, 2), (8, 2)),
+                walls=((6, 3), (7, 3)),
+                water=(5, 7, 2, 2),
             )
             value = kwargs["validator"](corrected_layout)
             return LLMExecutionResult(value, 2, kwargs["request_id"])
@@ -687,6 +895,54 @@ class PCLevelGenerationTests(unittest.TestCase):
             execution = backend.create_pc_level_candidate(
                 self.context,
                 request_id="pc-change-selection-test",
+                max_attempts=2,
+            )
+
+        self.assertEqual(execution.attempts_used, 2)
+
+    def test_low_impact_correction_must_change_wall_ids(self):
+        def execute_json_request(**kwargs):
+            normalized = backend.normalize_pc_level_request(self.context)
+            low_impact_layout = make_layout(
+                normalized,
+                player=(2, 2),
+                walls=((4, 4), (5, 4), (6, 4), (7, 4)),
+                water=(5, 7, 2, 2),
+            )
+
+            with self.assertRaises(backend.PCWallImpactError):
+                kwargs["validator"](low_impact_layout)
+
+            same_walls_new_player = make_layout(
+                normalized,
+                player=(3, 2),
+                walls=((4, 4), (5, 4), (6, 4), (7, 4)),
+                water=(5, 7, 2, 2),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "must change internalWallCellIds",
+            ):
+                kwargs["validator"](same_walls_new_player)
+
+            corrected_layout = make_layout(
+                normalized,
+                player=(2, 2),
+                walls=((6, 3), (7, 3)),
+                water=(5, 7, 2, 2),
+            )
+            value = kwargs["validator"](corrected_layout)
+            return LLMExecutionResult(value, 2, kwargs["request_id"])
+
+        with patch.object(
+            backend,
+            "execute_json_request",
+            side_effect=execute_json_request,
+        ):
+            execution = backend.create_pc_level_candidate(
+                self.context,
+                request_id="pc-wall-impact-correction-test",
                 max_attempts=2,
             )
 
@@ -993,6 +1249,8 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertIn("waterAreaId", prompt_text)
         self.assertIn("playerCellId", prompt_text)
         self.assertIn("cellIds", prompt_text)
+        self.assertIn("wallImpactScore", prompt_text)
+        self.assertIn("at least four shortest-path movement steps", prompt_text)
         self.assertIn("at least four", prompt_text)
         self.assertIn("fallbackMinimumInternalWalls", prompt_text)
         self.assertNotIn("editableCoordinates", prompt_text)
