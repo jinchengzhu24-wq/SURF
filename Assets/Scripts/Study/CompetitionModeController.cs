@@ -5,6 +5,8 @@ using UnityEngine.UI;
 public class CompetitionModeController : MonoBehaviour
 {
     public const string SelectedModePrefsKey = "SokobanMatchmakingCompetitionMode";
+    public const string CompetitiveModeId = "competitive";
+    public const string SupportiveModeId = "supportive";
 
     [Header("Navigation")]
     public string nextSceneName = "AI_Asistant_Mode";
@@ -15,6 +17,23 @@ public class CompetitionModeController : MonoBehaviour
     private QuestionnaireOptionButton[] optionButtons =
         new QuestionnaireOptionButton[0];
     private QuestionnaireOptionButton selectedOption;
+
+    public static string GetSelectedMode()
+    {
+        string selectedMode = PlayerPrefs.GetString(
+            SelectedModePrefsKey,
+            CompetitiveModeId
+        );
+
+        return IsValidMode(selectedMode)
+            ? selectedMode
+            : CompetitiveModeId;
+    }
+
+    public static bool IsValidMode(string mode)
+    {
+        return mode == CompetitiveModeId || mode == SupportiveModeId;
+    }
 
     private void Start()
     {

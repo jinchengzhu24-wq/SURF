@@ -162,6 +162,52 @@ class FeatureConstraintTests(unittest.TestCase):
         self.assertIn("minWallObstacleBlocks=0", user_prompt)
         self.assertIn("corridorPlacement=none", user_prompt)
 
+    def test_competitive_prompt_requires_dispersed_wall_groups(self):
+        messages = build_level_plan_messages(
+            1,
+            "none",
+            {"competitionMode": "competitive"},
+        )
+        user_prompt = messages[1]["content"]
+
+        self.assertIn("at most two tiles", user_prompt)
+        self.assertIn("corridorPlacement=none", user_prompt)
+
+    def test_supportive_prompt_requires_one_connected_wall_group(self):
+        messages = build_level_plan_messages(
+            1,
+            "none",
+            {"competitionMode": "supportive"},
+        )
+        user_prompt = messages[1]["content"]
+
+        self.assertIn("one orthogonally connected group", user_prompt)
+        self.assertIn("corridorPlacement=none", user_prompt)
+
+    def test_competition_mode_removes_incompatible_divider_corridor(self):
+        plan = self.make_plan()
+        plan.update(
+            {
+                "corridorPlacement": "center",
+                "corridorWidth": 1,
+                "corridorOrientation": "vertical",
+                "corridorRole": "player_route",
+                "corridorPriority": "required",
+            }
+        )
+
+        result = apply_selected_ha_plan(
+            plan,
+            {"competitionMode": "supportive"},
+            {"noWater": False, "noInternalWalls": False},
+        )
+
+        self.assertEqual(result["corridorPlacement"], "none")
+        self.assertEqual(result["corridorWidth"], 0)
+        self.assertEqual(result["corridorOrientation"], "any")
+        self.assertEqual(result["corridorRole"], "visual_only")
+        self.assertEqual(result["corridorPriority"], "preferred")
+
     def test_human_mode_uses_user_directed_minimum_change_prompt(self):
         context = {
             "revisionMode": "human",

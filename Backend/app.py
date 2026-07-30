@@ -73,6 +73,8 @@ PC_DESIGN_MIN_ACTIVITY_AREA = 56
 PC_PRIMARY_INTERNAL_WALLS = 5
 PC_INTERMEDIATE_INTERNAL_WALLS = 4
 PC_FALLBACK_MIN_INTERNAL_WALLS = 3
+PC_COMPETITIVE_MODE = "competitive"
+PC_SUPPORTIVE_MODE = "supportive"
 PC_MAX_WATER_AREA_CANDIDATES = 12
 PC_LAYOUT_MAX_WATER_CHECKS = 6
 PC_MAX_LAYOUT_CANDIDATES = 6
@@ -213,6 +215,7 @@ class LevelPlanRequest(BaseModel):
     ideaId: str | None = ""
     sessionId: str | None = ""
     sceneName: str | None = ""
+    competitionMode: str | None = ""
     originalIdeaText: str | None = ""
     selectedDirectionText: str | None = ""
     refinementFeedbackText: str | None = ""
@@ -231,6 +234,7 @@ class PCLevelGenerationRequest(BaseModel):
     width: int
     height: int
     sketchRows: list[str]
+    competitionMode: str | None = PC_COMPETITIVE_MODE
     previousCandidateRows: list[str] | None = None
     rejectionReason: str | None = ""
     maxAttempts: int | None = DEFAULT_LLM_MAX_ATTEMPTS
@@ -1249,6 +1253,20 @@ def execute_level_plan_request(
     data = payload.model_dump(exclude={"maxAttempts"})
 
     try:
+        competition_mode = str(
+            data.get("competitionMode") or ""
+        ).strip().lower()
+
+        if competition_mode not in {
+            "",
+            PC_COMPETITIVE_MODE,
+            PC_SUPPORTIVE_MODE,
+        }:
+            raise ValueError(
+                "competitionMode must be competitive or supportive"
+            )
+
+        data["competitionMode"] = competition_mode
         data["generationPreferences"] = normalize_generation_preferences(
             data.get("generationPreferences")
         )
@@ -3315,6 +3333,10 @@ def apply_selected_ha_plan(
             generated_plan,
             generation_preferences,
         )
+        candidate = apply_competition_wall_constraints(
+            candidate,
+            creative_context.get("competitionMode"),
+        )
         effective_constraints = dict(feature_constraints or {})
 
         if (
@@ -3341,6 +3363,10 @@ def apply_selected_ha_plan(
         candidate = apply_generation_preferences(
             generated_plan,
             generation_preferences,
+        )
+        candidate = apply_competition_wall_constraints(
+            candidate,
+            creative_context.get("competitionMode"),
         )
         return validate_plan(
             candidate,
@@ -3374,6 +3400,10 @@ def apply_selected_ha_plan(
         candidate,
         generation_preferences,
     )
+    candidate = apply_competition_wall_constraints(
+        candidate,
+        creative_context.get("competitionMode"),
+    )
     effective_constraints = dict(feature_constraints or {})
 
     if (
@@ -3393,6 +3423,23 @@ def apply_selected_ha_plan(
         effective_constraints,
         generation_preferences,
     )
+
+
+def apply_competition_wall_constraints(candidate, competition_mode):
+    candidate = dict(candidate or {})
+    mode = str(competition_mode or "").strip().lower()
+
+    if mode in {
+        PC_COMPETITIVE_MODE,
+        PC_SUPPORTIVE_MODE,
+    }:
+        candidate["corridorPlacement"] = "none"
+        candidate["corridorWidth"] = 0
+        candidate["corridorOrientation"] = "any"
+        candidate["corridorRole"] = "visual_only"
+        candidate["corridorPriority"] = "preferred"
+
+    return candidate
 
 
 def create_level_plan(
@@ -3859,6 +3906,17 @@ def normalize_pc_level_request(context):
     width = context.get("width")
     height = context.get("height")
     rows = context.get("sketchRows")
+    competition_mode = str(
+        context.get("competitionMode") or PC_COMPETITIVE_MODE
+    ).strip().lower()
+
+    if competition_mode not in {
+        PC_COMPETITIVE_MODE,
+        PC_SUPPORTIVE_MODE,
+    }:
+        raise ValueError(
+            "competitionMode must be competitive or supportive"
+        )
 
     if width != 12 or height != 10:
         raise ValueError("PC sketch size must be exactly 12x10")
@@ -4021,6 +4079,7 @@ def normalize_pc_level_request(context):
             previous_rows,
             width,
             height,
+            competition_mode,
         )
     )
 
@@ -4042,6 +4101,7 @@ def normalize_pc_level_request(context):
     return {
         "width": width,
         "height": height,
+        "competitionMode": competition_mode,
         "sketchRows": list(rows),
         "boxStarts": box_starts,
         "targets": targets,
@@ -4127,6 +4187,7 @@ def validate_pc_level_candidate(payload, context):
         sketch_rows,
         width,
         height,
+        context.get("competitionMode", PC_COMPETITIVE_MODE),
     )
     validate_pc_start_clearance(rows, width, height)
     validate_pc_candidate_activity(rows, width, height)
@@ -4149,7 +4210,16 @@ def validate_pc_generated_wall_shapes(
     sketch_rows,
     width,
     height,
+    competition_mode=PC_COMPETITIVE_MODE,
 ):
+    if competition_mode not in {
+        PC_COMPETITIVE_MODE,
+        PC_SUPPORTIVE_MODE,
+    }:
+        raise ValueError(
+            "competitionMode must be competitive or supportive"
+        )
+
     generated_walls = {
         (x, y)
         for y in range(height)
@@ -4160,6 +4230,26 @@ def validate_pc_generated_wall_shapes(
     if contains_pc_two_by_two_block(generated_walls):
         raise ValueError(
             "generated internal walls must not contain a complete 2x2 block"
+        )
+
+    component_sizes = get_pc_component_sizes(generated_walls)
+
+    if (
+        competition_mode == PC_COMPETITIVE_MODE
+        and any(size > 2 for size in component_sizes)
+    ):
+        raise ValueError(
+            "competitive mode requires every generated internal wall group "
+            "to contain at most two connected tiles"
+        )
+
+    if (
+        competition_mode == PC_SUPPORTIVE_MODE
+        and len(component_sizes) > 1
+    ):
+        raise ValueError(
+            "supportive mode requires all generated internal wall tiles "
+            "to be connected"
         )
 
 
@@ -4539,6 +4629,7 @@ def build_pc_safe_layout_candidates(
     previous_rows,
     width,
     height,
+    competition_mode=PC_COMPETITIVE_MODE,
 ):
     started = time.perf_counter()
     budget = {
@@ -4615,6 +4706,7 @@ def build_pc_safe_layout_candidates(
         wall_groups = build_pc_greedy_wall_groups(
             safe_wall_cells,
             walkable,
+            competition_mode,
         )
 
         for wall_group in wall_groups:
@@ -4637,6 +4729,7 @@ def build_pc_safe_layout_candidates(
                     "width": width,
                     "height": height,
                     "sketchRows": sketch_rows,
+                    "competitionMode": competition_mode,
                 },
             )
             player_cell = editable_by_id[player_cell_id]
@@ -4859,7 +4952,11 @@ def search_pc_solution_trace(
     )
 
 
-def build_pc_greedy_wall_groups(safe_wall_cells, walkable):
+def build_pc_greedy_wall_groups(
+    safe_wall_cells,
+    walkable,
+    competition_mode=PC_COMPETITIVE_MODE,
+):
     groups = []
 
     for required_count in (
@@ -4871,6 +4968,7 @@ def build_pc_greedy_wall_groups(safe_wall_cells, walkable):
             safe_wall_cells,
             walkable,
             required_count,
+            competition_mode,
         )
 
         if group:
@@ -4883,6 +4981,7 @@ def choose_pc_greedy_wall_group(
     safe_wall_cells,
     walkable,
     required_count,
+    competition_mode=PC_COMPETITIVE_MODE,
 ):
     if len(safe_wall_cells) < required_count:
         return None
@@ -4918,6 +5017,22 @@ def choose_pc_greedy_wall_group(
                     or count_pc_components(
                         set(walkable) - proposed_positions
                     ) != 1
+                ):
+                    continue
+
+                component_sizes = get_pc_component_sizes(
+                    proposed_positions
+                )
+
+                if (
+                    competition_mode == PC_COMPETITIVE_MODE
+                    and any(size > 2 for size in component_sizes)
+                ):
+                    continue
+
+                if (
+                    competition_mode == PC_SUPPORTIVE_MODE
+                    and len(component_sizes) > 1
                 ):
                     continue
 
@@ -4999,6 +5114,35 @@ def contains_pc_two_by_two_block(positions):
         }.issubset(positions)
         for x, y in positions
     )
+
+
+def get_pc_component_sizes(positions):
+    remaining = set(positions)
+    sizes = []
+
+    while remaining:
+        start = min(remaining)
+        remaining.remove(start)
+        open_cells = deque([start])
+        size = 0
+
+        while open_cells:
+            x, y = open_cells.popleft()
+            size += 1
+
+            for neighbor in (
+                (x + 1, y),
+                (x - 1, y),
+                (x, y + 1),
+                (x, y - 1),
+            ):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    open_cells.append(neighbor)
+
+        sizes.append(size)
+
+    return sizes
 
 
 def classify_pc_wall_style(wall_cells):

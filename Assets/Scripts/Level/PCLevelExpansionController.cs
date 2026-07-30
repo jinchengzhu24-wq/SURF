@@ -138,6 +138,7 @@ public class PCLevelExpansionController : MonoBehaviour
                     minimumWaterHeight,
                     maximumWaterWidth,
                     maximumWaterHeight,
+                    CompetitionModeController.GetSelectedMode(),
                     out rejectionReason))
             {
                 failureMessage = GenerationFailureMessage;

@@ -38,6 +38,14 @@ public class LevelGenerator : MonoBehaviour
     private const string DefaultTargetLayout = "split_pair";
     private const string DefaultObstacleStyle = "central_baffle";
     private const string DefaultWaterStyle = "side_pool";
+    private const string DGLevelSceneName = "DG_Level";
+
+    private static readonly string[][] competitiveWallObstacleShapes =
+    {
+        new string[] { "#" },
+        new string[] { "##" },
+        new string[] { "#", "#" }
+    };
 
     private enum CandidateFailureReason
     {
@@ -142,6 +150,9 @@ public class LevelGenerator : MonoBehaviour
     private string currentCorridorPriority = "preferred";
     private string candidateCorridorOrientation = "any";
     private readonly HashSet<Vector2Int> candidateCorridorOpeningCells = new HashSet<Vector2Int>();
+    private readonly HashSet<Vector2Int> candidateInternalWallCells =
+        new HashSet<Vector2Int>();
+    private string activeCompetitionMode = "";
     public CorridorValidationResult LastCorridorValidation { get; private set; }
     private bool activeLLMQualityGate;
     private bool activeRelaxedBlueprint;
@@ -1360,6 +1371,18 @@ public class LevelGenerator : MonoBehaviour
         rows = null;
         reversePulls = 0;
         failureReason = CandidateFailureReason.None;
+        activeCompetitionMode = gameObject.scene.name == DGLevelSceneName
+            ? CompetitionModeController.GetSelectedMode()
+            : "";
+
+        if (CompetitionModeController.IsValidMode(activeCompetitionMode))
+        {
+            currentCorridorPlacement = "none";
+            currentCorridorWidth = 0;
+            currentCorridorOrientation = "any";
+            currentCorridorRole = "visual_only";
+            currentCorridorPriority = "preferred";
+        }
 
         if (!TryCreateBaseGrid(out char[,] grid))
         {
@@ -1836,6 +1859,8 @@ public class LevelGenerator : MonoBehaviour
 
     private bool TryAddWallObstacleBlocks(char[,] grid)
     {
+        candidateInternalWallCells.Clear();
+
         if (!HasEnoughGroundCells(grid) || !AreGroundCellsConnected(grid) || !ValidateWallTileRules(grid))
         {
             return false;
@@ -1869,7 +1894,8 @@ public class LevelGenerator : MonoBehaviour
             }
         }
 
-        return placedObstacles >= obstacleCount;
+        return placedObstacles >= obstacleCount
+            && ValidateCompetitionWallRule(candidateInternalWallCells);
     }
 
     private bool TryAddSurroundedWallObstacleBlock(char[,] grid)
@@ -1898,7 +1924,11 @@ public class LevelGenerator : MonoBehaviour
 
     private bool TryAddWallObstacleBlock(char[,] grid)
     {
-        string[] shape = LevelGenerationTemplates.WallObstacleShapes[random.Next(LevelGenerationTemplates.WallObstacleShapes.Length)];
+        string[][] availableShapes =
+            activeCompetitionMode == CompetitionModeController.CompetitiveModeId
+                ? competitiveWallObstacleShapes
+                : LevelGenerationTemplates.WallObstacleShapes;
+        string[] shape = availableShapes[random.Next(availableShapes.Length)];
         Vector2Int size = GetWallObstacleShapeSize(shape);
         List<Vector2Int> origins = GetWallObstacleOriginCandidates(grid, shape, size);
 
@@ -1912,17 +1942,10 @@ public class LevelGenerator : MonoBehaviour
 
         for (int i = 0; i < origins.Count; i++)
         {
-            Vector2Int origin = origins[i];
-            SetWallObstacleShape(grid, origin, shape, Wall);
-
-            if (HasEnoughGroundCells(grid)
-                && AreGroundCellsConnected(grid)
-                && ValidateWallTileRules(grid))
+            if (TryCommitWallObstacleShape(grid, origins[i], shape))
             {
                 return true;
             }
-
-            SetWallObstacleShape(grid, origin, shape, Ground);
         }
 
         return false;
@@ -1930,6 +1953,48 @@ public class LevelGenerator : MonoBehaviour
 
     private bool TryAddTemplateWallObstacleBlock(char[,] grid)
     {
+        if (activeCompetitionMode
+            == CompetitionModeController.CompetitiveModeId)
+        {
+            List<int> competitiveShapeIndices = new List<int>();
+
+            for (int i = 0; i < competitiveWallObstacleShapes.Length; i++)
+            {
+                competitiveShapeIndices.Add(i);
+            }
+
+            Shuffle(competitiveShapeIndices);
+
+            for (int i = 0; i < competitiveShapeIndices.Count; i++)
+            {
+                string[] shape =
+                    competitiveWallObstacleShapes[competitiveShapeIndices[i]];
+                Vector2Int size = GetWallObstacleShapeSize(shape);
+                List<Vector2Int> origins =
+                    GetTemplateWallObstacleOrigins(size);
+                Shuffle(origins);
+                origins.Sort((left, right) =>
+                    GetWallObstacleOriginScore(right, size).CompareTo(
+                        GetWallObstacleOriginScore(left, size)
+                    ));
+
+                for (int originIndex = 0;
+                    originIndex < origins.Count;
+                    originIndex++)
+                {
+                    if (TryCommitWallObstacleShape(
+                            grid,
+                            origins[originIndex],
+                            shape))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         List<int> shapeIndices = new List<int>(currentStructureTemplate.wallShapeIndices);
         Shuffle(shapeIndices);
 
@@ -2030,6 +2095,11 @@ public class LevelGenerator : MonoBehaviour
             && AreGroundCellsConnected(grid)
             && ValidateWallTileRules(grid))
         {
+            AddWallObstacleShapeCells(
+                candidateInternalWallCells,
+                origin,
+                shape
+            );
             return true;
         }
 
@@ -2116,6 +2186,8 @@ public class LevelGenerator : MonoBehaviour
     private bool CanPlaceWallObstacleShape(char[,] grid, Vector2Int origin, string[] shape)
     {
         Vector2Int size = GetWallObstacleShapeSize(shape);
+        bool supportiveMode = activeCompetitionMode
+            == CompetitionModeController.SupportiveModeId;
 
         for (int y = origin.y - 1; y <= origin.y + size.y; y++)
         {
@@ -2123,12 +2195,22 @@ public class LevelGenerator : MonoBehaviour
             {
                 Vector2Int position = new Vector2Int(x, y);
 
-                if (!rules.IsInsidePlayableArea(position) || grid[x, y] != Ground)
+                if (!rules.IsInsidePlayableArea(position))
+                {
+                    return false;
+                }
+
+                if (grid[x, y] != Ground
+                    && (!supportiveMode
+                        || !candidateInternalWallCells.Contains(position)))
                 {
                     return false;
                 }
             }
         }
+
+        HashSet<Vector2Int> proposedInternalWalls =
+            new HashSet<Vector2Int>(candidateInternalWallCells);
 
         for (int y = origin.y; y < origin.y + size.y; y++)
         {
@@ -2141,14 +2223,106 @@ public class LevelGenerator : MonoBehaviour
 
                 Vector2Int position = new Vector2Int(x, y);
 
-                if (targetLookup.Contains(position) || HasWaterBelow(grid, position))
+                if (grid[x, y] != Ground
+                    || targetLookup.Contains(position)
+                    || HasWaterBelow(grid, position))
                 {
                     return false;
                 }
+
+                proposedInternalWalls.Add(position);
             }
         }
 
-        return true;
+        return ValidateCompetitionWallRule(proposedInternalWalls);
+    }
+
+    private void AddWallObstacleShapeCells(
+        HashSet<Vector2Int> positions,
+        Vector2Int origin,
+        string[] shape)
+    {
+        Vector2Int size = GetWallObstacleShapeSize(shape);
+
+        for (int y = origin.y; y < origin.y + size.y; y++)
+        {
+            for (int x = origin.x; x < origin.x + size.x; x++)
+            {
+                if (GetWallObstacleShapeTile(
+                        shape,
+                        x - origin.x,
+                        y - origin.y) == Wall)
+                {
+                    positions.Add(new Vector2Int(x, y));
+                }
+            }
+        }
+    }
+
+    private bool ValidateCompetitionWallRule(
+        HashSet<Vector2Int> positions)
+    {
+        if (!CompetitionModeController.IsValidMode(activeCompetitionMode)
+            || positions.Count == 0)
+        {
+            return true;
+        }
+
+        List<int> componentSizes = GetWallComponentSizes(positions);
+
+        if (activeCompetitionMode
+            == CompetitionModeController.CompetitiveModeId)
+        {
+            return !componentSizes.Exists(size => size > 2);
+        }
+
+        return componentSizes.Count == 1;
+    }
+
+    private List<int> GetWallComponentSizes(
+        HashSet<Vector2Int> positions)
+    {
+        List<int> sizes = new List<int>();
+        HashSet<Vector2Int> remaining =
+            new HashSet<Vector2Int>(positions);
+
+        while (remaining.Count > 0)
+        {
+            Vector2Int start = Vector2Int.zero;
+
+            foreach (Vector2Int position in remaining)
+            {
+                start = position;
+                break;
+            }
+
+            Queue<Vector2Int> open = new Queue<Vector2Int>();
+            open.Enqueue(start);
+            remaining.Remove(start);
+            int size = 0;
+
+            while (open.Count > 0)
+            {
+                Vector2Int current = open.Dequeue();
+                size++;
+
+                for (int direction = 0;
+                    direction < directions.Length;
+                    direction++)
+                {
+                    Vector2Int next = current + directions[direction];
+
+                    if (remaining.Remove(next))
+                    {
+                        open.Enqueue(next);
+                    }
+                }
+            }
+
+            sizes.Add(size);
+        }
+
+        return sizes;
     }
 
     private void SetWallObstacleShape(char[,] grid, Vector2Int origin, string[] shape, char tile)
