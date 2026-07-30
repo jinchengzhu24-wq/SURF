@@ -38,6 +38,7 @@ public class MatchBriefingController : MonoBehaviour
         client = gameObject.AddComponent<OnlineMatchClient>();
         ResolveUi();
         WireUi();
+        OnlineSceneUi.ConfigureRaycastTargets();
         UpdateUi(OnlineMatchContext.RoomState);
         StartCoroutine(PollRoom());
     }

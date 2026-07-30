@@ -26,6 +26,7 @@ public class OnlineLobbyController : MonoBehaviour
         client = gameObject.AddComponent<OnlineMatchClient>();
         ResolveUi();
         WireUi();
+        OnlineSceneUi.ConfigureRaycastTargets();
 
         if (OnlineMatchContext.HasMatch)
         {

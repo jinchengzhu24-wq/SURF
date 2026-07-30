@@ -91,4 +91,15 @@ public static class OnlineSceneUi
         GameObject target = GameObject.Find(objectName);
         return target != null ? target.GetComponent<Text>() : null;
     }
+
+    public static void ConfigureRaycastTargets()
+    {
+        Graphic[] graphics = Object.FindObjectsOfType<Graphic>();
+
+        for (int i = 0; i < graphics.Length; i++)
+        {
+            graphics[i].raycastTarget =
+                graphics[i].GetComponentInParent<Selectable>() != null;
+        }
+    }
 }
