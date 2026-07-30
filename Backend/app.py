@@ -80,6 +80,11 @@ PC_PREFILTER_MAX_SEARCH_STATES = 20000
 PC_WALL_IMPACT_MAX_SEARCH_STATES = 300000
 PC_WALL_IMPACT_MIN_STEP_DELTA = 4
 PC_WALL_IMPACT_MIN_PUSH_DELTA = 1
+PC_MAX_EFFECTIVE_WALL_SETS = 12
+PC_MAX_EFFECTIVE_WALL_SETS_PER_WATER = 2
+PC_EFFECTIVE_WALL_CANDIDATE_POOL_SIZE = 12
+PC_MAX_EFFECTIVE_WALL_COMBINATIONS_PER_WATER = 256
+PC_EFFECTIVE_WALL_PREFILTER_MAX_SEARCH_STATES = 30000
 DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -3510,6 +3515,7 @@ def create_pc_level_candidate(
                 request_id=request_id,
                 minimum_internal_walls=minimum_internal_walls,
                 minimum_water_areas=PC_MIN_WATER_AREAS,
+                require_effective_wall_set=True,
             )
         except PCWallImpactError:
             previous_rejected_selection = selection
@@ -3547,6 +3553,7 @@ def build_pc_level_candidate(
     request_id="",
     minimum_internal_walls=0,
     minimum_water_areas=0,
+    require_effective_wall_set=False,
 ):
     water_area_id, player_cell_id, internal_wall_cell_ids = (
         parse_pc_indexed_layout(layout)
@@ -3634,6 +3641,41 @@ def build_pc_level_candidate(
             f"waterAreaId {water_area_id}; incompatible IDs "
             + ",".join(str(value) for value in incompatible_wall_ids)
         )
+
+    if require_effective_wall_set:
+        if len(internal_wall_cell_ids) < minimum_internal_walls:
+            raise ValueError(
+                "candidate retained "
+                f"{len(internal_wall_cell_ids)} internal wall tiles; at least "
+                f"{minimum_internal_walls} are required"
+            )
+
+        selected_wall_ids = set(internal_wall_cell_ids)
+        effective_wall_set = next(
+            (
+                wall_set
+                for wall_set in water_area.get("effectiveWallSets", [])
+                if set(wall_set.get("internalWallCellIds") or [])
+                == selected_wall_ids
+            ),
+            None,
+        )
+
+        if effective_wall_set is None:
+            raise ValueError(
+                "internalWallCellIds must exactly match one effectiveWallSets "
+                f"entry for waterAreaId {water_area_id}"
+            )
+
+        compatible_player_ids = set(
+            effective_wall_set.get("compatiblePlayerCellIds") or []
+        )
+
+        if player_cell_id not in compatible_player_ids:
+            raise ValueError(
+                f"playerCellId {player_cell_id} is not compatible with the "
+                "selected effective wall set"
+            )
 
     for cell_id in water_cell_ids:
         cell = editable_cells.get(cell_id)
@@ -4053,6 +4095,19 @@ def normalize_pc_level_request(context):
         allowed_water_areas,
         editable_cells,
     )
+    allowed_water_areas = attach_pc_effective_wall_sets(
+        allowed_water_areas,
+        editable_cells,
+        enclosed_cells,
+        box_starts,
+        targets,
+    )
+
+    if not allowed_water_areas:
+        raise ValueError(
+            "PC sketch has no prevalidated internal wall set that remains "
+            "solvable and measurably affects the solution"
+        )
 
     return {
         "width": width,
@@ -4544,6 +4599,195 @@ def attach_pc_compatible_wall_ids(allowed_water_areas, editable_cells):
         )
 
     return result
+
+
+def attach_pc_effective_wall_sets(
+    allowed_water_areas,
+    editable_cells,
+    enclosed_cells,
+    box_starts,
+    targets,
+):
+    editable_by_id = {
+        cell["id"]: cell
+        for cell in editable_cells
+    }
+    start_boxes = tuple(sorted(tuple(position) for position in box_starts))
+    target_cells = {tuple(position) for position in targets}
+    result = []
+    wall_set_count = 0
+
+    for area in allowed_water_areas:
+        if wall_set_count >= PC_MAX_EFFECTIVE_WALL_SETS:
+            break
+
+        water_cell_ids = set(area.get("cellIds") or [])
+        water_positions = {
+            (
+                editable_by_id[cell_id]["x"],
+                editable_by_id[cell_id]["y"],
+            )
+            for cell_id in water_cell_ids
+        }
+        baseline_walkable = set(enclosed_cells) - water_positions
+        candidate_cells = sorted(
+            (
+                editable_by_id[cell_id]
+                for cell_id in area.get("compatibleWallCellIds", [])
+                if cell_id in editable_by_id
+            ),
+            key=lambda cell: (
+                -int(cell.get("wallImpactScore") or 0),
+                cell["id"],
+            ),
+        )[:PC_EFFECTIVE_WALL_CANDIDATE_POOL_SIZE]
+        effective_wall_sets = []
+
+        for required_wall_count in (
+            PC_PRIMARY_MIN_INTERNAL_WALLS,
+            PC_FALLBACK_MIN_INTERNAL_WALLS,
+        ):
+            checked_combinations = 0
+
+            for wall_cells in combinations(
+                candidate_cells,
+                required_wall_count,
+            ):
+                checked_combinations += 1
+
+                if (
+                    checked_combinations
+                    > PC_MAX_EFFECTIVE_WALL_COMBINATIONS_PER_WATER
+                ):
+                    break
+
+                wall_positions = {
+                    (cell["x"], cell["y"])
+                    for cell in wall_cells
+                }
+                walkable_with_walls = baseline_walkable - wall_positions
+
+                if count_pc_components(walkable_with_walls) != 1:
+                    continue
+
+                compatible_player_ids, minimum_push_delta = (
+                    find_pc_effective_wall_set_players(
+                        baseline_walkable,
+                        walkable_with_walls,
+                        start_boxes,
+                        target_cells,
+                        editable_cells,
+                        water_cell_ids,
+                        {
+                            cell["id"]
+                            for cell in wall_cells
+                        },
+                    )
+                )
+
+                if not compatible_player_ids:
+                    continue
+
+                effective_wall_sets.append(
+                    {
+                        "id": len(effective_wall_sets),
+                        "internalWallCellIds": sorted(
+                            cell["id"]
+                            for cell in wall_cells
+                        ),
+                        "compatiblePlayerCellIds": compatible_player_ids,
+                        "minimumPushDelta": minimum_push_delta,
+                    }
+                )
+                wall_set_count += 1
+                break
+
+            if (
+                len(effective_wall_sets)
+                >= PC_MAX_EFFECTIVE_WALL_SETS_PER_WATER
+                or wall_set_count >= PC_MAX_EFFECTIVE_WALL_SETS
+            ):
+                break
+
+        if effective_wall_sets:
+            result.append(
+                {
+                    **area,
+                    "id": len(result),
+                    "effectiveWallSets": effective_wall_sets,
+                }
+            )
+
+    return result
+
+
+def find_pc_effective_wall_set_players(
+    baseline_walkable,
+    walkable_with_walls,
+    start_boxes,
+    targets,
+    editable_cells,
+    water_cell_ids,
+    wall_cell_ids,
+):
+    player_regions = find_pc_region_representatives(
+        walkable_with_walls,
+        set(start_boxes),
+    )
+    compatible_positions = set()
+    minimum_push_delta = None
+
+    for representative in player_regions:
+        try:
+            with_walls_pushes, _ = search_pc_minimum_pushes(
+                walkable_with_walls,
+                start_boxes,
+                targets,
+                [representative],
+                PC_EFFECTIVE_WALL_PREFILTER_MAX_SEARCH_STATES,
+                "effective wall-set search exceeded its state budget",
+                "effective wall-set candidate has no Sokoban solution",
+            )
+            without_walls_pushes, _ = search_pc_minimum_pushes(
+                baseline_walkable,
+                start_boxes,
+                targets,
+                [representative],
+                PC_EFFECTIVE_WALL_PREFILTER_MAX_SEARCH_STATES,
+                "effective wall-set baseline search exceeded its state budget",
+                "effective wall-set baseline has no Sokoban solution",
+            )
+        except PCSolvabilityError:
+            continue
+
+        push_delta = with_walls_pushes - without_walls_pushes
+
+        if push_delta < PC_WALL_IMPACT_MIN_PUSH_DELTA:
+            continue
+
+        compatible_positions.update(
+            find_pc_reachable_cells(
+                representative,
+                walkable_with_walls,
+                set(start_boxes),
+            )
+        )
+        minimum_push_delta = (
+            push_delta
+            if minimum_push_delta is None
+            else min(minimum_push_delta, push_delta)
+        )
+
+    compatible_player_ids = sorted(
+        cell["id"]
+        for cell in editable_cells
+        if (
+            cell["id"] not in water_cell_ids
+            and cell["id"] not in wall_cell_ids
+            and (cell["x"], cell["y"]) in compatible_positions
+        )
+    )
+    return compatible_player_ids, int(minimum_push_delta or 0)
 
 
 def find_pc_required_feature_capacity_area(
