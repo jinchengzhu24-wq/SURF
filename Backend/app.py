@@ -3,9 +3,11 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import secrets
 import threading
 import time
+import uuid
 import webbrowser
 from collections import deque
 from pathlib import Path
@@ -92,6 +94,11 @@ CREATIVE_IDEA_LOG_FILE = STUDY_LOG_DIR / "creative_ideas.jsonl"
 CREATIVE_EXPANSION_CHOICE_LOG_FILE = STUDY_LOG_DIR / "creative_expansion_choices.jsonl"
 HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
 JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
+ONLINE_ROOM_TTL_SECONDS = 30 * 60
+ONLINE_ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+ONLINE_ROOM_CODE_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
+ONLINE_ROOMS = {}
+ONLINE_ROOMS_LOCK = threading.Lock()
 
 class PCSolvabilityError(ValueError):
     def __init__(self, reason_code, message, searched_states=0, details=None):
@@ -99,6 +106,14 @@ class PCSolvabilityError(ValueError):
         self.reason_code = reason_code
         self.searched_states = int(searched_states or 0)
         self.details = dict(details or {})
+
+
+class OnlineRoomJoinRequest(BaseModel):
+    roomCode: str | None = ""
+
+
+class OnlineReadyRequest(BaseModel):
+    ready: bool = True
 
 
 load_dotenv(BASE_DIR / ".env")
@@ -117,6 +132,91 @@ def require_delete_password(request: Request):
 
     if not secrets.compare_digest(supplied_password, configured_password):
         raise HTTPException(status_code=401, detail="Incorrect delete password")
+
+
+def normalize_online_room_code(room_code):
+    normalized = str(room_code or "").strip().upper()
+
+    if not ONLINE_ROOM_CODE_PATTERN.fullmatch(normalized):
+        raise HTTPException(
+            status_code=400,
+            detail="Room code must contain exactly 6 letters or digits",
+        )
+
+    return normalized
+
+
+def cleanup_expired_online_rooms(now=None):
+    current_time = time.time() if now is None else float(now)
+    expired_match_ids = [
+        match_id
+        for match_id, room in ONLINE_ROOMS.items()
+        if current_time - room["lastActivity"] >= ONLINE_ROOM_TTL_SECONDS
+    ]
+
+    for match_id in expired_match_ids:
+        del ONLINE_ROOMS[match_id]
+
+
+def create_unique_online_room_code():
+    for _ in range(100):
+        room_code = "".join(
+            secrets.choice(ONLINE_ROOM_CODE_ALPHABET) for _ in range(6)
+        )
+
+        if not any(
+            room["roomCode"] == room_code for room in ONLINE_ROOMS.values()
+        ):
+            return room_code
+
+    raise HTTPException(
+        status_code=503,
+        detail="Unable to allocate a room code",
+    )
+
+
+def require_online_room(match_id, player_token):
+    cleanup_expired_online_rooms()
+    room = ONLINE_ROOMS.get(str(match_id or "").strip())
+
+    if room is None:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    supplied_token = str(player_token or "").strip()
+    player = next(
+        (
+            item
+            for item in room["players"]
+            if secrets.compare_digest(item["token"], supplied_token)
+        ),
+        None,
+    )
+
+    if player is None:
+        raise HTTPException(status_code=401, detail="Invalid player token")
+
+    return room, player
+
+
+def serialize_online_room(room, player=None, include_token=False):
+    payload = {
+        "matchId": room["matchId"],
+        "roomCode": room["roomCode"],
+        "status": room["status"],
+        "playerNumber": player["playerNumber"] if player else 0,
+        "players": [
+            {
+                "playerNumber": item["playerNumber"],
+                "ready": bool(item["ready"]),
+            }
+            for item in room["players"]
+        ],
+    }
+
+    if include_token and player is not None:
+        payload["playerToken"] = player["token"]
+
+    return payload
 
 
 class LevelDesignPlan(BaseModel):
@@ -420,6 +520,116 @@ def ready():
         status_code=200 if payload["status"] == "ready" else 503,
         content=payload,
     )
+
+
+@app.post("/online/rooms")
+def create_online_room():
+    with ONLINE_ROOMS_LOCK:
+        cleanup_expired_online_rooms()
+        player = {
+            "playerNumber": 1,
+            "token": secrets.token_urlsafe(32),
+            "ready": False,
+        }
+        match_id = uuid.uuid4().hex
+        room = {
+            "matchId": match_id,
+            "roomCode": create_unique_online_room_code(),
+            "status": "waiting_for_opponent",
+            "players": [player],
+            "lastActivity": time.time(),
+        }
+        ONLINE_ROOMS[match_id] = room
+        return serialize_online_room(room, player, include_token=True)
+
+
+@app.post("/online/rooms/join")
+def join_online_room(payload: OnlineRoomJoinRequest):
+    room_code = normalize_online_room_code(payload.roomCode)
+
+    with ONLINE_ROOMS_LOCK:
+        cleanup_expired_online_rooms()
+        room = next(
+            (
+                item
+                for item in ONLINE_ROOMS.values()
+                if item["roomCode"] == room_code
+            ),
+            None,
+        )
+
+        if room is None:
+            raise HTTPException(status_code=404, detail="Room not found")
+
+        if room["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Room has been cancelled")
+
+        if len(room["players"]) >= 2:
+            raise HTTPException(status_code=409, detail="Room is full")
+
+        player = {
+            "playerNumber": 2,
+            "token": secrets.token_urlsafe(32),
+            "ready": False,
+        }
+        room["players"].append(player)
+        room["status"] = "briefing"
+        room["lastActivity"] = time.time()
+        return serialize_online_room(room, player, include_token=True)
+
+
+@app.get("/online/rooms/{match_id}")
+def get_online_room(match_id: str, request: Request):
+    with ONLINE_ROOMS_LOCK:
+        room, player = require_online_room(
+            match_id,
+            request.headers.get("X-Player-Token"),
+        )
+        room["lastActivity"] = time.time()
+        return serialize_online_room(room, player)
+
+
+@app.post("/online/rooms/{match_id}/ready")
+def set_online_ready(
+    match_id: str,
+    payload: OnlineReadyRequest,
+    request: Request,
+):
+    with ONLINE_ROOMS_LOCK:
+        room, player = require_online_room(
+            match_id,
+            request.headers.get("X-Player-Token"),
+        )
+
+        if room["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Room has been cancelled")
+
+        if len(room["players"]) < 2:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot become ready before an opponent joins",
+            )
+
+        player["ready"] = bool(payload.ready)
+        room["status"] = (
+            "choosing_mode"
+            if all(item["ready"] for item in room["players"])
+            else "briefing"
+        )
+        room["lastActivity"] = time.time()
+        return serialize_online_room(room, player)
+
+
+@app.post("/online/rooms/{match_id}/leave")
+def leave_online_room(match_id: str, request: Request):
+    with ONLINE_ROOMS_LOCK:
+        room, player = require_online_room(
+            match_id,
+            request.headers.get("X-Player-Token"),
+        )
+        room["status"] = "cancelled"
+        room["lastActivity"] = time.time()
+        return serialize_online_room(room, player)
 
 
 @app.post("/record-level-start")

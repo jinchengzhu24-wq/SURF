@@ -9,7 +9,7 @@ public class MenuController : MonoBehaviour
 {
     public string targetSceneName = "Algorithm_Level";
     public string creativeWorkshopSceneName = "Questionnaire(Before)";
-    public string matchmakingSceneName = "Competition_Mode";
+    public string matchmakingSceneName = "Online_Lobby";
     public string studyDashboardUrl = "http://111.231.136.4:8000/frontend/";
 
 #if UNITY_WEBGL && !UNITY_EDITOR

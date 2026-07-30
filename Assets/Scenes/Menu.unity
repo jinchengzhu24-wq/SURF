@@ -3581,7 +3581,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   targetSceneName: Algorithm_Level
   creativeWorkshopSceneName: Questionnaire(Before)
-  matchmakingSceneName: Competition_Mode
+  matchmakingSceneName: Online_Lobby
   studyDashboardUrl: http://111.231.136.4:8000/frontend/
 --- !u!1 &4100100002
 GameObject:
