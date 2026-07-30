@@ -57,6 +57,7 @@ public class LevelManager : MonoBehaviour
     public KeyCode restartKey = KeyCode.R;
 
     private bool isCompletingLevel;
+    private bool usesExternalInitialLoadingTransition;
 
     private void Start()
     {
@@ -68,6 +69,14 @@ public class LevelManager : MonoBehaviour
         StretchBlackPanelToFullscreen();
         EnsureInitialLLMRetryButton();
 
+        if (usesExternalInitialLoadingTransition)
+        {
+            isCompletingLevel = true;
+            SetPlayerInputEnabled(false);
+            SetBlackPanelAlpha(0);
+            return;
+        }
+
         if (useInitialLLMLoadingTransition)
         {
             StartCoroutine(InitialLLMLoadingTransition());
@@ -76,6 +85,35 @@ public class LevelManager : MonoBehaviour
 
         ResetLevelState();
         StartCoroutine(Fade(1, 0));
+    }
+
+    public void BeginExternalInitialLoadingTransition()
+    {
+        usesExternalInitialLoadingTransition = true;
+        isCompletingLevel = true;
+        StretchBlackPanelToFullscreen();
+        SetPlayerInputEnabled(false);
+        SetBlackPanelAlpha(0);
+    }
+
+    public IEnumerator FadeToBlackForExternalInitialLoad()
+    {
+        if (!usesExternalInitialLoadingTransition)
+        {
+            BeginExternalInitialLoadingTransition();
+        }
+
+        SetPlayerInputEnabled(false);
+        yield return Fade(GetBlackPanelAlpha(), 1);
+    }
+
+    public IEnumerator FadeFromBlackAfterExternalInitialLoad()
+    {
+        yield return Fade(GetBlackPanelAlpha(), 0);
+        usesExternalInitialLoadingTransition = false;
+        isCompletingLevel = false;
+        ResetLevelState();
+        SetPlayerInputEnabled(true);
     }
 
     private IEnumerator InitialLLMLoadingTransition()
@@ -458,6 +496,11 @@ public class LevelManager : MonoBehaviour
         Color color = blackPanel.color;
         color.a = alpha;
         blackPanel.color = color;
+    }
+
+    private float GetBlackPanelAlpha()
+    {
+        return blackPanel != null ? blackPanel.color.a : 0;
     }
 
     private void StretchBlackPanelToFullscreen()

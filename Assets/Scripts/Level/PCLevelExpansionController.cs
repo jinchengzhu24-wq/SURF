@@ -39,6 +39,11 @@ public class PCLevelExpansionController : MonoBehaviour
         SetButtonVisible(retryButton, false);
         SetButtonVisible(backButton, false);
         ValidateSceneReferences();
+
+        if (levelManager != null)
+        {
+            levelManager.BeginExternalInitialLoadingTransition();
+        }
     }
 
     private void Start()
@@ -178,15 +183,24 @@ public class PCLevelExpansionController : MonoBehaviour
                 continue;
             }
 
+            HideGenerationUi();
+
+            if (levelManager != null)
+            {
+                yield return levelManager
+                    .FadeToBlackForExternalInitialLoad();
+            }
+
             levelLoader.levelData = levelData;
             levelLoader.LoadLevel();
 
             if (levelManager != null)
             {
                 levelManager.RegisterGeneratedLevel();
+                yield return levelManager
+                    .FadeFromBlackAfterExternalInitialLoad();
             }
 
-            HideGenerationUi();
             generationRoutine = null;
             yield break;
         }
@@ -262,6 +276,7 @@ public class PCLevelExpansionController : MonoBehaviour
         if (expansionClient == null
             || levelData == null
             || levelLoader == null
+            || levelManager == null
             || levelSolver == null
             || statusText == null
             || retryButton == null
