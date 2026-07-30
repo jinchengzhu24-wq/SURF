@@ -74,6 +74,7 @@ PC_DESIGN_MIN_ACTIVITY_AREA = 56
 PC_PRIMARY_MIN_INTERNAL_WALLS = 4
 PC_FALLBACK_MIN_INTERNAL_WALLS = 2
 PC_MIN_WATER_AREAS = 1
+PC_MAX_WATER_AREA_CANDIDATES = 12
 DEFAULT_LLM_MAX_ATTEMPTS = 2
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -3448,7 +3449,7 @@ def create_pc_level_candidate(
 
     def validate_candidate(payload):
         nonlocal structurally_valid_candidate_count
-        parse_pc_coordinate_layout(payload)
+        parse_pc_indexed_layout(payload)
         structurally_valid_candidate_count += 1
         minimum_internal_walls = (
             PC_PRIMARY_MIN_INTERNAL_WALLS
@@ -3492,7 +3493,9 @@ def build_pc_level_candidate(
     minimum_internal_walls=0,
     minimum_water_areas=0,
 ):
-    player, internal_walls, water_area_ids = parse_pc_coordinate_layout(layout)
+    water_area_id, player_cell_id, internal_wall_cell_ids = (
+        parse_pc_indexed_layout(layout)
+    )
 
     width = context["width"]
     height = context["height"]
@@ -3505,182 +3508,78 @@ def build_pc_level_candidate(
         ]
         for y in range(height)
     ]
-
-    player_x, player_y = player
-
-    if (
-        player_x < 0
-        or player_x >= width
-        or player_y < 0
-        or player_y >= height
-    ):
-        raise ValueError(
-            f"player coordinate ({player_x},{player_y}) is outside the map"
-        )
-
-    if sketch_rows[player_y][player_x] != " ":
-        raise ValueError(
-            f"player coordinate ({player_x},{player_y}) "
-            "cannot cover a fixed sketch tile"
-        )
-
-    if not enclosed[player_y][player_x]:
-        raise ValueError(
-            f"player coordinate ({player_x},{player_y}) "
-            "is outside the activity area"
-        )
-
-    rows[player_y][player_x] = "p"
-    claimed_cells = {player: "player"}
+    editable_cells = {
+        cell["id"]: cell
+        for cell in context.get("editableCells", [])
+    }
     allowed_water_areas = {
         area["id"]: area
         for area in context.get("allowedWaterAreas", [])
     }
-    seen_water_area_ids = set()
+    water_area = allowed_water_areas.get(water_area_id)
 
-    for index, value in enumerate(water_area_ids):
-        label = f"waterAreaIds[{index}]"
-
-        if isinstance(value, bool) or not isinstance(value, int):
-            log_pc_dropped_item(
-                request_id,
-                "water",
-                index,
-                f"{label} must be an integer",
-            )
-            continue
-
-        if value in seen_water_area_ids:
-            log_pc_dropped_item(
-                request_id,
-                "water",
-                index,
-                f"water area ID {value} was selected more than once",
-            )
-            continue
-
-        seen_water_area_ids.add(value)
-        area = allowed_water_areas.get(value)
-
-        if area is None:
-            log_pc_dropped_item(
-                request_id,
-                "water",
-                index,
-                f"water area ID {value} is not in allowedWaterAreas",
-            )
-            continue
-
-        positions = [
-            (cell_x, cell_y)
-            for cell_y in range(area["y"], area["y"] + area["height"])
-            for cell_x in range(area["x"], area["x"] + area["width"])
-        ]
-        overlap = next(
-            (
-                (position, claimed_cells[position])
-                for position in positions
-                if position in claimed_cells
-            ),
-            None,
+    if water_area is None:
+        raise ValueError(
+            f"waterAreaId {water_area_id} is not an allowed water area ID"
         )
 
-        if overlap is not None:
-            position, owner = overlap
-            log_pc_dropped_item(
-                request_id,
-                "water",
-                index,
-                f"water area ID {value} overlaps {owner} at {position}",
+    water_cell_ids = set(water_area.get("cellIds") or [])
+    player_cell = editable_cells.get(player_cell_id)
+
+    if player_cell is None or not player_cell.get("canPlacePlayer"):
+        raise ValueError(
+            f"playerCellId {player_cell_id} is not an allowed player cell ID"
+        )
+
+    if player_cell_id in water_cell_ids:
+        raise ValueError(
+            f"playerCellId {player_cell_id} overlaps waterAreaId {water_area_id}"
+        )
+
+    if len(set(internal_wall_cell_ids)) != len(internal_wall_cell_ids):
+        raise ValueError("internalWallCellIds must not contain duplicate IDs")
+
+    if player_cell_id in internal_wall_cell_ids:
+        raise ValueError(
+            f"internalWallCellIds cannot contain playerCellId {player_cell_id}"
+        )
+
+    overlapping_water_ids = sorted(
+        set(internal_wall_cell_ids) & water_cell_ids
+    )
+
+    if overlapping_water_ids:
+        raise ValueError(
+            "internalWallCellIds overlap the selected water area at cell IDs "
+            + ",".join(str(value) for value in overlapping_water_ids)
+        )
+
+    wall_cells = []
+
+    for cell_id in internal_wall_cell_ids:
+        cell = editable_cells.get(cell_id)
+
+        if cell is None or not cell.get("canPlaceWall"):
+            raise ValueError(
+                f"internalWallCellId {cell_id} is not an allowed wall cell ID"
             )
-            continue
 
-        tentative_rows = [list(row) for row in rows]
+        wall_cells.append(cell)
 
-        for cell_x, cell_y in positions:
-            tentative_rows[cell_y][cell_x] = "@"
+    for cell_id in water_cell_ids:
+        cell = editable_cells.get(cell_id)
 
-        try:
-            validate_pc_candidate_activity(
-                ["".join(row) for row in tentative_rows],
-                width,
-                height,
+        if cell is None:
+            raise ValueError(
+                f"waterAreaId {water_area_id} references unknown cell ID {cell_id}"
             )
-        except ValueError as exception:
-            log_pc_dropped_item(
-                request_id,
-                "water",
-                index,
-                f"water area ID {value} was rejected: {exception}",
-            )
-            continue
 
-        rows = tentative_rows
+        rows[cell["y"]][cell["x"]] = "@"
 
-        for position in positions:
-            claimed_cells[position] = f"water area ID {value}"
+    rows[player_cell["y"]][player_cell["x"]] = "p"
 
-    allowed_wall_coordinates = {
-        tuple(coordinate)
-        for coordinate in context.get("allowedWallCoordinates", [])
-    }
-
-    for index, value in enumerate(internal_walls):
-        label = f"internalWalls[{index}]"
-
-        try:
-            position = parse_pc_position(value, label)
-        except ValueError as exception:
-            log_pc_dropped_item(
-                request_id,
-                "wall",
-                index,
-                str(exception),
-            )
-            continue
-
-        if position not in allowed_wall_coordinates:
-            log_pc_dropped_item(
-                request_id,
-                "wall",
-                index,
-                f"{label} coordinate {position} is not allowed",
-            )
-            continue
-
-        if position in claimed_cells:
-            log_pc_dropped_item(
-                request_id,
-                "wall",
-                index,
-                f"{label} coordinate {position} overlaps "
-                f"{claimed_cells[position]}",
-            )
-            continue
-
-        wall_x, wall_y = position
-        tentative_rows = [list(row) for row in rows]
-        tentative_rows[wall_y][wall_x] = "#"
-        tentative_strings = ["".join(row) for row in tentative_rows]
-
-        try:
-            validate_pc_start_clearance(tentative_strings, width, height)
-            validate_pc_candidate_activity(
-                tentative_strings,
-                width,
-                height,
-            )
-        except ValueError as exception:
-            log_pc_dropped_item(
-                request_id,
-                "wall",
-                index,
-                f"{label} coordinate {position} was rejected: {exception}",
-            )
-            continue
-
-        rows = tentative_rows
-        claimed_cells[position] = label
+    for cell in wall_cells:
+        rows[cell["y"]][cell["x"]] = "#"
 
     candidate = validate_pc_level_candidate(
         {"rows": ["".join(row) for row in rows]},
@@ -3702,51 +3601,34 @@ def build_pc_level_candidate(
     return candidate
 
 
-def parse_pc_coordinate_layout(layout):
+def parse_pc_indexed_layout(layout):
     if layout is None or not isinstance(layout, dict):
-        raise ValueError("model returned no PC coordinate layout")
+        raise ValueError("model returned no PC indexed layout")
 
-    required_fields = {"player", "internalWalls", "waterAreaIds"}
+    required_fields = {
+        "waterAreaId",
+        "playerCellId",
+        "internalWallCellIds",
+    }
 
     if set(layout) != required_fields:
         raise ValueError(
-            "PC coordinate layout must contain only player, internalWalls, "
-            "and waterAreaIds"
+            "PC indexed layout must contain only waterAreaId, playerCellId, "
+            "and internalWallCellIds"
         )
 
-    internal_walls = layout.get("internalWalls")
-    water_area_ids = layout.get("waterAreaIds")
+    internal_wall_cell_ids = layout.get("internalWallCellIds")
 
-    if not isinstance(internal_walls, list):
-        raise ValueError("internalWalls must be an array")
-
-    if not isinstance(water_area_ids, list):
-        raise ValueError("waterAreaIds must be an array")
-
-    player = parse_pc_position(layout.get("player"), "player")
-    return player, internal_walls, water_area_ids
-
-
-def log_pc_dropped_item(request_id, item_type, item_index, reason):
-    fields = {
-        "itemType": item_type,
-        "itemIndex": item_index,
-        "reason": safe_log_text(reason),
-    }
-
-    if request_id:
-        fields["requestId"] = request_id
-
-    log_event("INFO", "pc_layout_item_dropped", **fields)
-
-
-def parse_pc_position(value, label):
-    if not isinstance(value, dict) or set(value) != {"x", "y"}:
-        raise ValueError(f"{label} must contain only x and y")
+    if not isinstance(internal_wall_cell_ids, list):
+        raise ValueError("internalWallCellIds must be an array")
 
     return (
-        parse_pc_integer(value.get("x"), f"{label}.x"),
-        parse_pc_integer(value.get("y"), f"{label}.y"),
+        parse_pc_integer(layout.get("waterAreaId"), "waterAreaId"),
+        parse_pc_integer(layout.get("playerCellId"), "playerCellId"),
+        [
+            parse_pc_integer(value, f"internalWallCellIds[{index}]")
+            for index, value in enumerate(internal_wall_cell_ids)
+        ],
     )
 
 
@@ -3855,24 +3737,48 @@ def normalize_pc_level_request(context):
         for coordinate in editable_coordinates
         if tuple(coordinate) not in cells_next_to_box_starts
     ]
-    allowed_water_areas = enumerate_pc_allowed_water_areas(
+    allowed_wall_coordinate_set = {
+        tuple(coordinate)
+        for coordinate in allowed_wall_coordinates
+    }
+    editable_cells = [
+        {
+            "id": index,
+            "x": coordinate[0],
+            "y": coordinate[1],
+            "canPlacePlayer": True,
+            "canPlaceWall": tuple(coordinate) in allowed_wall_coordinate_set,
+        }
+        for index, coordinate in enumerate(editable_coordinates)
+    ]
+    all_allowed_water_areas = enumerate_pc_allowed_water_areas(
         rows,
         enclosed_cells,
         width,
         height,
     )
-
-    if not has_pc_required_feature_capacity(
+    capacity_water_area = find_pc_required_feature_capacity_area(
         enclosed_cells,
         allowed_wall_coordinates,
-        allowed_water_areas,
+        all_allowed_water_areas,
         PC_PRIMARY_MIN_INTERNAL_WALLS,
         48,
-    ):
+    )
+
+    if capacity_water_area is None:
         raise ValueError(
             "PC sketch must leave room for one water area and four internal "
             "wall tiles while retaining 48 connected walkable cells"
         )
+
+    allowed_water_areas = select_pc_water_area_candidates(
+        all_allowed_water_areas,
+        editable_cells,
+        box_starts,
+        targets,
+        capacity_water_area["id"],
+        PC_MAX_WATER_AREA_CANDIDATES,
+    )
 
     return {
         "width": width,
@@ -3880,6 +3786,7 @@ def normalize_pc_level_request(context):
         "sketchRows": list(rows),
         "boxStarts": box_starts,
         "targets": targets,
+        "editableCells": editable_cells,
         "editableCoordinates": editable_coordinates,
         "allowedWallCoordinates": allowed_wall_coordinates,
         "allowedWaterAreas": allowed_water_areas,
@@ -4050,7 +3957,134 @@ def enumerate_pc_allowed_water_areas(
     return allowed_areas
 
 
-def has_pc_required_feature_capacity(
+def select_pc_water_area_candidates(
+    allowed_water_areas,
+    editable_cells,
+    box_starts,
+    targets,
+    preferred_area_id,
+    limit=PC_MAX_WATER_AREA_CANDIDATES,
+):
+    limit = max(1, int(limit))
+    coordinate_to_cell_id = {
+        (cell["x"], cell["y"]): cell["id"]
+        for cell in editable_cells
+    }
+    wall_cell_ids = {
+        cell["id"]
+        for cell in editable_cells
+        if cell.get("canPlaceWall")
+    }
+    fixed_positions = [
+        tuple(position)
+        for position in list(box_starts) + list(targets)
+    ]
+    enriched_areas = []
+
+    for area in allowed_water_areas:
+        cell_ids = [
+            coordinate_to_cell_id[(cell_x, cell_y)]
+            for cell_y in range(area["y"], area["y"] + area["height"])
+            for cell_x in range(area["x"], area["x"] + area["width"])
+        ]
+        water_positions = [
+            (cell_x, cell_y)
+            for cell_y in range(area["y"], area["y"] + area["height"])
+            for cell_x in range(area["x"], area["x"] + area["width"])
+        ]
+        minimum_fixed_distance = min(
+            (
+                abs(cell_x - fixed_x) + abs(cell_y - fixed_y)
+                for cell_x, cell_y in water_positions
+                for fixed_x, fixed_y in fixed_positions
+            ),
+            default=999,
+        )
+        enriched_areas.append(
+            {
+                **area,
+                "cellIds": cell_ids,
+                "_areaSize": len(cell_ids),
+                "_minimumFixedDistance": minimum_fixed_distance,
+                "_remainingWallOptions": len(wall_cell_ids - set(cell_ids)),
+            }
+        )
+
+    groups = {}
+
+    for area in enriched_areas:
+        groups.setdefault(area["_areaSize"], []).append(area)
+
+    for group in groups.values():
+        group.sort(
+            key=lambda area: (
+                -area["_minimumFixedDistance"],
+                -area["_remainingWallOptions"],
+                area["y"],
+                area["x"],
+                area["height"],
+                area["width"],
+            )
+        )
+
+    selected = []
+    preferred_area = next(
+        (
+            area
+            for area in enriched_areas
+            if area["id"] == preferred_area_id
+        ),
+        None,
+    )
+
+    if preferred_area is not None:
+        selected.append(preferred_area)
+
+    group_offsets = {
+        area_size: 0
+        for area_size in groups
+    }
+    area_sizes = sorted(groups)
+
+    while len(selected) < min(limit, len(enriched_areas)):
+        added = False
+
+        for area_size in area_sizes:
+            group = groups[area_size]
+            offset = group_offsets[area_size]
+
+            while offset < len(group) and group[offset] in selected:
+                offset += 1
+
+            group_offsets[area_size] = offset
+
+            if offset >= len(group):
+                continue
+
+            selected.append(group[offset])
+            group_offsets[area_size] += 1
+            added = True
+
+            if len(selected) >= min(limit, len(enriched_areas)):
+                break
+
+        if not added:
+            break
+
+    return [
+        {
+            "id": index,
+            "x": area["x"],
+            "y": area["y"],
+            "width": area["width"],
+            "height": area["height"],
+            "cellIds": list(area["cellIds"]),
+        }
+        for index, area in enumerate(selected)
+    ]
+
+
+def find_pc_required_feature_capacity_area(
     enclosed_cells,
     allowed_wall_coordinates,
     allowed_water_areas,
@@ -4089,9 +4123,25 @@ def has_pc_required_feature_capacity(
                 len(remaining_walkable) >= minimum_walkable_cells
                 and count_pc_components(remaining_walkable) == 1
             ):
-                return True
+                return area
 
-    return False
+    return None
+
+
+def has_pc_required_feature_capacity(
+    enclosed_cells,
+    allowed_wall_coordinates,
+    allowed_water_areas,
+    required_internal_walls,
+    minimum_walkable_cells,
+):
+    return find_pc_required_feature_capacity_area(
+        enclosed_cells,
+        allowed_wall_coordinates,
+        allowed_water_areas,
+        required_internal_walls,
+        minimum_walkable_cells,
+    ) is not None
 
 
 def validate_pc_rows(rows, width, height, allowed_tiles, field_name):

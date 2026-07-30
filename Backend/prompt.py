@@ -26,24 +26,22 @@ SYSTEM_PROMPT = (
 
 PC_LEVEL_GENERATION_SYSTEM_PROMPT = (
     "You complete a partially designed 12 by 10 Sokoban map by selecting only "
-    "coordinate-based additions. Coordinates are zero-based: x runs left to "
-    "right from 0 to 11 and y runs top to bottom from 0 to 9. Return only valid "
-    "JSON with exactly three fields: player, internalWalls, and waterAreaIds. "
-    "player must be an object containing integer x and y. internalWalls must "
-    "be an array of objects that each contain integer x and y. waterAreaIds "
-    "must be an array of integer IDs copied exactly from allowedWaterAreas. "
-    "Select at least four valid internal wall coordinates and at least one "
-    "valid water area ID. Never return an empty internalWalls or waterAreaIds "
-    "array. Do not return map rows or individual ground "
-    "tiles because the server fills all remaining enclosed cells with ground. "
-    "Copy the player coordinate exactly from editableCoordinates. Copy every "
-    "internalWalls coordinate exactly from allowedWallCoordinates. Select water "
-    "only by its allowedWaterAreas ID; do not invent water coordinates or IDs. "
-    "Additions should not overlap each other. Preserve at least 48 connected "
-    "walkable cells and choose a layout likely to be solvable from the selected "
-    "player position. The output field structure is a player coordinate object, "
-    "an internalWalls coordinate array, and a waterAreaIds integer array. Do not "
-    "return markdown, map strings, comments, explanations, or extra fields."
+    "server-provided IDs. Return only valid JSON with exactly three fields: "
+    "waterAreaId, playerCellId, and internalWallCellIds. waterAreaId and "
+    "playerCellId must each be one integer. internalWallCellIds must be an "
+    "array of unique integers. Copy every ID exactly from the supplied "
+    "editableCells and allowedWaterAreas. Select exactly one water area, one "
+    "player cell, and at least four wall cells on the first response. A repair "
+    "response may use the fallback minimum of two wall cells when validation "
+    "requires it. The selected player and walls must not use any cellIds owned "
+    "by the selected water area. Walls must use cells whose canPlaceWall flag "
+    "is true, and the player must use a cell whose canPlacePlayer flag is true. "
+    "The player and walls must not overlap each other. Do not return map rows "
+    "or ground tiles because the server fills all remaining enclosed cells "
+    "with ground. Preserve at least 48 connected walkable cells and choose a "
+    "layout likely to be solvable from the selected player position. Do not "
+    "invent IDs. Do not return coordinates, markdown, comments, explanations, "
+    "or extra fields."
 )
 
 
@@ -57,14 +55,11 @@ def build_pc_level_generation_messages(context):
         "sketchRows": sketch_rows,
         "boxStarts": list(context.get("boxStarts") or []),
         "targets": list(context.get("targets") or []),
-        "editableCoordinates": list(context.get("editableCoordinates") or []),
-        "allowedWallCoordinates": list(
-            context.get("allowedWallCoordinates") or []
-        ),
+        "editableCells": list(context.get("editableCells") or []),
         "allowedWaterAreas": list(context.get("allowedWaterAreas") or []),
         "preferredMinimumInternalWalls": 4,
         "fallbackMinimumInternalWalls": 2,
-        "minimumWaterAreas": 1,
+        "requiredWaterAreas": 1,
     }
 
     if previous_rows:
@@ -81,9 +76,9 @@ def build_pc_level_generation_messages(context):
         {
             "role": "user",
             "content": (
-                "Select coordinate additions for this PC_Design sketch. The "
+                "Select indexed additions for this PC_Design sketch. The "
                 "server preserves immutable cells and fills omitted interior "
-                "cells with ground. Return a different corrected coordinate "
+                "cells with ground. Return a different corrected indexed "
                 "layout when a previous candidate and rejection reason are "
                 "supplied.\n"
                 + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
