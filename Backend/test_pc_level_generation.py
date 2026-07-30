@@ -357,6 +357,11 @@ class PCLevelGenerationTests(unittest.TestCase):
             cell["id"]: (cell["x"], cell["y"])
             for cell in normalized["editableCells"]
         }
+        allowed_wall_ids = {
+            cell["id"]
+            for cell in normalized["editableCells"]
+            if cell["canPlaceWall"]
+        }
 
         for area in areas:
             expected_positions = {
@@ -369,6 +374,32 @@ class PCLevelGenerationTests(unittest.TestCase):
                 for cell_id in area["cellIds"]
             }
             self.assertEqual(actual_positions, expected_positions)
+            self.assertEqual(
+                area["compatibleWallCellIds"],
+                sorted(allowed_wall_ids - set(area["cellIds"])),
+            )
+
+    def test_selected_walls_must_use_water_compatible_ids(self):
+        context = backend.normalize_pc_level_request(self.context)
+        layout = make_required_layout(context)
+        selected_area = next(
+            area
+            for area in context["allowedWaterAreas"]
+            if area["id"] == layout["waterAreaId"]
+        )
+        removed_id = layout["internalWallCellIds"][0]
+        selected_area["compatibleWallCellIds"].remove(removed_id)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "compatibleWallCellIds",
+        ):
+            backend.build_pc_level_candidate(
+                layout,
+                context,
+                minimum_internal_walls=4,
+                minimum_water_areas=1,
+            )
 
     def test_every_water_candidate_is_individually_safe(self):
         normalized = backend.normalize_pc_level_request(self.context)
@@ -1249,6 +1280,7 @@ class PCLevelGenerationTests(unittest.TestCase):
         self.assertIn("waterAreaId", prompt_text)
         self.assertIn("playerCellId", prompt_text)
         self.assertIn("cellIds", prompt_text)
+        self.assertIn("compatibleWallCellIds", prompt_text)
         self.assertIn("wallImpactScore", prompt_text)
         self.assertIn("at least four shortest-path movement steps", prompt_text)
         self.assertIn("at least four", prompt_text)

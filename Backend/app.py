@@ -3621,6 +3621,20 @@ def build_pc_level_candidate(
 
         wall_cells.append(cell)
 
+    compatible_wall_cell_ids = set(
+        water_area.get("compatibleWallCellIds") or []
+    )
+    incompatible_wall_ids = sorted(
+        set(internal_wall_cell_ids) - compatible_wall_cell_ids
+    )
+
+    if incompatible_wall_ids:
+        raise ValueError(
+            "internalWallCellIds must come from compatibleWallCellIds for "
+            f"waterAreaId {water_area_id}; incompatible IDs "
+            + ",".join(str(value) for value in incompatible_wall_ids)
+        )
+
     for cell_id in water_cell_ids:
         cell = editable_cells.get(cell_id)
 
@@ -4034,6 +4048,11 @@ def normalize_pc_level_request(context):
             "PC sketch has no prefiltered water candidate that leaves room for "
             "four internal wall tiles without disconnecting the activity area"
         )
+
+    allowed_water_areas = attach_pc_compatible_wall_ids(
+        allowed_water_areas,
+        editable_cells,
+    )
 
     return {
         "width": width,
@@ -4503,6 +4522,28 @@ def select_pc_water_area_candidates(
         }
         for index, area in enumerate(selected)
     ]
+
+
+def attach_pc_compatible_wall_ids(allowed_water_areas, editable_cells):
+    allowed_wall_ids = {
+        cell["id"]
+        for cell in editable_cells
+        if cell.get("canPlaceWall")
+    }
+    result = []
+
+    for area in allowed_water_areas:
+        water_cell_ids = set(area.get("cellIds") or [])
+        result.append(
+            {
+                **area,
+                "compatibleWallCellIds": sorted(
+                    allowed_wall_ids - water_cell_ids
+                ),
+            }
+        )
+
+    return result
 
 
 def find_pc_required_feature_capacity_area(
