@@ -180,6 +180,10 @@ public static class BuildOnlineChallengeScenes
             31
         );
         playButton.interactable = false;
+        ColorBlock playButtonColors = playButton.colors;
+        playButtonColors.disabledColor =
+            new Color(0.78f, 0.92f, 0.8f, 1f);
+        playButton.colors = playButtonColors;
         Button leaveButton = CreateButton(
             "LeaveMatchButton",
             root,
