@@ -273,6 +273,15 @@ public static class BuildOnlineChallengeScenes
         levelLoader.useLLMPlan = false;
         levelLoader.deferInitialLLMLoad = false;
         levelLoader.deferLoadToExternalController = true;
+        SerializedObject serializedLevelLoader =
+            new SerializedObject(levelLoader);
+        serializedLevelLoader
+            .FindProperty("playerPrefab")
+            .objectReferenceValue = AssetDatabase.LoadAssetAtPath<GameObject>(
+            "Assets/Prefebs/Player2.prefab"
+        );
+        serializedLevelLoader.ApplyModifiedPropertiesWithoutUndo();
+        PrefabUtility.RecordPrefabInstancePropertyModifications(levelLoader);
         levelLoader.levelRoot = generatedRootObject.transform;
         levelLoader.groundTilemap = tilemaps["Base"];
         levelLoader.wallTilemap = tilemaps["Wall"];
@@ -420,13 +429,13 @@ public static class BuildOnlineChallengeScenes
             new Vector2(850f, 80f),
             TextAnchor.MiddleCenter
         );
-        CreateText(
+        Text completeHintText = CreateText(
             "CompleteHint",
             completePanelImage.rectTransform,
-            "RESULT SYNC WILL BE ADDED IN THE NEXT STAGE.",
+            "SUBMITTING RESULT...",
             20,
             Blue,
-            new Vector2(0f, -55f),
+            new Vector2(0f, -75f),
             new Vector2(850f, 60f),
             TextAnchor.MiddleCenter
         );
@@ -462,6 +471,8 @@ public static class BuildOnlineChallengeScenes
             statusPanelImage.gameObject;
         serializedController.FindProperty("completePanel").objectReferenceValue =
             completePanelImage.gameObject;
+        serializedController.FindProperty("completeHintText").objectReferenceValue =
+            completeHintText;
         serializedController.FindProperty("leaveButton").objectReferenceValue =
             leaveButton;
         serializedController

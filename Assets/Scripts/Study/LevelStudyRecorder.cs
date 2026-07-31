@@ -40,6 +40,8 @@ public class LevelStudyRecorder : MonoBehaviour
     private bool officialRoundFlow;
     private LevelLoader currentLevelLoader;
 
+    public static event Action<bool> PlayerMoveRecorded;
+
     public static LevelStudyRecorder Instance
     {
         get
@@ -151,6 +153,7 @@ public class LevelStudyRecorder : MonoBehaviour
 
     public static void RecordPlayerMove(bool pushedBox)
     {
+        PlayerMoveRecorded?.Invoke(pushedBox);
         Instance.RecordMove(pushedBox);
     }
 

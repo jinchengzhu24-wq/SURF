@@ -7,6 +7,12 @@ public class AIAssistantModeController : MonoBehaviour
 {
     public const string SelectedModePrefsKey =
         "SokobanMatchmakingAIAssistantMode";
+    public const string DescriptionGenerationOptionId = "a";
+    public const string PartialCompletionOptionId = "b";
+    public const string DescriptionGenerationApiMode =
+        "description_generation";
+    public const string PartialCompletionApiMode =
+        "partial_completion";
 
     [Header("Navigation")]
     public string descriptionGenerationSceneName = "DG";
@@ -18,6 +24,22 @@ public class AIAssistantModeController : MonoBehaviour
     private QuestionnaireOptionButton[] optionButtons =
         new QuestionnaireOptionButton[0];
     private QuestionnaireOptionButton selectedOption;
+
+    public static string GetSelectedApiMode()
+    {
+        string selectedMode = PlayerPrefs.GetString(
+            SelectedModePrefsKey,
+            DescriptionGenerationOptionId
+        );
+
+        return string.Equals(
+            selectedMode,
+            PartialCompletionOptionId,
+            StringComparison.OrdinalIgnoreCase
+        )
+            ? PartialCompletionApiMode
+            : DescriptionGenerationApiMode;
+    }
 
     private void Start()
     {
@@ -107,12 +129,18 @@ public class AIAssistantModeController : MonoBehaviour
 
     private string ResolveTargetScene(string optionId)
     {
-        if (string.Equals(optionId, "a", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(
+                optionId,
+                DescriptionGenerationOptionId,
+                StringComparison.OrdinalIgnoreCase))
         {
             return descriptionGenerationSceneName;
         }
 
-        if (string.Equals(optionId, "b", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(
+                optionId,
+                PartialCompletionOptionId,
+                StringComparison.OrdinalIgnoreCase))
         {
             return partialCompletionSceneName;
         }

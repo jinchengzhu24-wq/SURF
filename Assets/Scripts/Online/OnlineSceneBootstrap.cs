@@ -44,6 +44,12 @@ public static class OnlineSceneBootstrap
             GameObject controller = new GameObject("OnlineLevelController");
             controller.AddComponent<OnlineLevelController>();
         }
+        else if (scene.name == "Match_Result"
+            && Object.FindObjectOfType<MatchResultController>() == null)
+        {
+            GameObject controller = new GameObject("MatchResultController");
+            controller.AddComponent<MatchResultController>();
+        }
 
         if ((scene.name == "PC_Level" || scene.name == "DG_Level")
             && Object.FindObjectOfType<OnlineChallengeCompletionRoute>() == null)

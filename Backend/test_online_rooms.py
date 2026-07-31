@@ -76,6 +76,7 @@ class OnlineRoomTests(unittest.TestCase):
                     "playerNumber": 1,
                     "ready": False,
                     "challengeSubmitted": False,
+                    "resultSubmitted": False,
                 }
             ],
         )
@@ -161,11 +162,13 @@ class OnlineRoomTests(unittest.TestCase):
                     "playerNumber": 1,
                     "ready": True,
                     "challengeSubmitted": False,
+                    "resultSubmitted": False,
                 },
                 {
                     "playerNumber": 2,
                     "ready": False,
                     "challengeSubmitted": False,
+                    "resultSubmitted": False,
                 },
             ],
         )
@@ -237,10 +240,39 @@ class OnlineRoomTests(unittest.TestCase):
         )
         return host, guest
 
-    def submit_challenge(self, match_id, player_token, rows):
+    def submit_challenge(
+        self,
+        match_id,
+        player_token,
+        rows,
+        competition_mode="competitive",
+        ai_assistant_mode="description_generation",
+    ):
         return self.client.post(
             "/online/rooms/" + match_id + "/challenge",
-            json={"rows": rows},
+            json={
+                "rows": rows,
+                "competitionMode": competition_mode,
+                "aiAssistantMode": ai_assistant_mode,
+            },
+            headers=self.auth_headers(player_token),
+        )
+
+    def submit_result(
+        self,
+        match_id,
+        player_token,
+        duration_seconds=42.37,
+        move_count=31,
+        minimum_moves=24,
+    ):
+        return self.client.post(
+            "/online/rooms/" + match_id + "/result",
+            json={
+                "durationSeconds": duration_seconds,
+                "moveCount": move_count,
+                "minimumMoves": minimum_moves,
+            },
             headers=self.auth_headers(player_token),
         )
 
@@ -283,6 +315,42 @@ class OnlineRoomTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 400)
 
+    def test_challenge_rejects_unknown_modes(self):
+        host, _ = self.ready_both_players()
+
+        bad_competition = self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+            competition_mode="unknown",
+        )
+        bad_assistant = self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+            ai_assistant_mode="unknown",
+        )
+
+        self.assertEqual(bad_competition.status_code, 400)
+        self.assertEqual(bad_assistant.status_code, 400)
+
+    def test_legacy_rows_only_challenge_uses_safe_mode_defaults(self):
+        host, _ = self.ready_both_players()
+        response = self.client.post(
+            "/online/rooms/" + host["matchId"] + "/challenge",
+            json={"rows": SOLVABLE_ROWS_A},
+            headers=self.auth_headers(host["playerToken"]),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["ownChallengeMetadata"],
+            {
+                "competitionMode": "competitive",
+                "aiAssistantMode": "description_generation",
+            },
+        )
+
     def test_challenge_submission_is_idempotent_and_frozen(self):
         host, _ = self.ready_both_players()
 
@@ -301,6 +369,12 @@ class OnlineRoomTests(unittest.TestCase):
             host["playerToken"],
             SOLVABLE_ROWS_B,
         )
+        changed_mode = self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+            competition_mode="supportive",
+        )
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json()["status"], "waiting_for_challenges")
@@ -308,6 +382,7 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertNotIn("opponentChallengeRows", first.json())
         self.assertEqual(repeated.status_code, 200)
         self.assertEqual(changed.status_code, 409)
+        self.assertEqual(changed_mode.status_code, 409)
 
     def test_both_challenges_are_exchanged_by_player_identity(self):
         host, guest = self.ready_both_players()
@@ -320,6 +395,8 @@ class OnlineRoomTests(unittest.TestCase):
             host["matchId"],
             guest["playerToken"],
             SOLVABLE_ROWS_B,
+            competition_mode="supportive",
+            ai_assistant_mode="partial_completion",
         )
         host_status = self.client.get(
             "/online/rooms/" + host["matchId"],
@@ -337,6 +414,171 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertNotEqual(
             host_status.json()["opponentChallengeRows"],
             SOLVABLE_ROWS_A,
+        )
+        self.assertEqual(
+            host_status.json()["ownChallengeMetadata"],
+            {
+                "competitionMode": "competitive",
+                "aiAssistantMode": "description_generation",
+            },
+        )
+        self.assertEqual(
+            host_status.json()["opponentChallengeMetadata"],
+            {
+                "competitionMode": "supportive",
+                "aiAssistantMode": "partial_completion",
+            },
+        )
+
+    def test_result_requires_both_challenges_and_valid_token(self):
+        host, guest = self.ready_both_players()
+        self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+
+        early = self.submit_result(
+            host["matchId"],
+            host["playerToken"],
+        )
+        wrong_token = self.submit_result(
+            host["matchId"],
+            "wrong-token",
+        )
+
+        self.assertEqual(early.status_code, 409)
+        self.assertEqual(wrong_token.status_code, 401)
+        self.assertFalse(guest["players"][0]["resultSubmitted"])
+
+    def test_result_rejects_invalid_metrics(self):
+        host, guest = self.ready_both_players()
+        self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+        self.submit_challenge(
+            host["matchId"],
+            guest["playerToken"],
+            SOLVABLE_ROWS_B,
+        )
+
+        invalid_cases = [
+            (-1, 31, 24),
+            (10, -1, 0),
+            (10, 3, -1),
+            (10, 10, 11),
+        ]
+
+        for duration, moves, minimum in invalid_cases:
+            with self.subTest(
+                duration=duration,
+                moves=moves,
+                minimum=minimum,
+            ):
+                response = self.submit_result(
+                    host["matchId"],
+                    host["playerToken"],
+                    duration,
+                    moves,
+                    minimum,
+                )
+                self.assertEqual(response.status_code, 400)
+
+    def test_result_submission_is_idempotent_and_frozen(self):
+        host, guest = self.ready_both_players()
+        self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+        self.submit_challenge(
+            host["matchId"],
+            guest["playerToken"],
+            SOLVABLE_ROWS_B,
+        )
+
+        first = self.submit_result(
+            host["matchId"],
+            host["playerToken"],
+        )
+        repeated = self.submit_result(
+            host["matchId"],
+            host["playerToken"],
+        )
+        changed = self.submit_result(
+            host["matchId"],
+            host["playerToken"],
+            duration_seconds=43,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["status"], "waiting_for_results")
+        self.assertTrue(first.json()["players"][0]["resultSubmitted"])
+        self.assertEqual(first.json()["ownResult"]["moveCount"], 31)
+        self.assertNotIn("opponentResult", first.json())
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(changed.status_code, 409)
+
+    def test_both_results_are_exchanged_by_player_identity(self):
+        host, guest = self.ready_both_players()
+        self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+        self.submit_challenge(
+            host["matchId"],
+            guest["playerToken"],
+            SOLVABLE_ROWS_B,
+            competition_mode="supportive",
+            ai_assistant_mode="partial_completion",
+        )
+        self.submit_result(
+            host["matchId"],
+            host["playerToken"],
+            duration_seconds=12.34,
+            move_count=20,
+            minimum_moves=18,
+        )
+        guest_result = self.submit_result(
+            host["matchId"],
+            guest["playerToken"],
+            duration_seconds=56.78,
+            move_count=40,
+            minimum_moves=30,
+        )
+        host_status = self.client.get(
+            "/online/rooms/" + host["matchId"],
+            headers=self.auth_headers(host["playerToken"]),
+        )
+
+        self.assertEqual(guest_result.status_code, 200)
+        self.assertEqual(guest_result.json()["status"], "results_ready")
+        self.assertEqual(
+            guest_result.json()["ownResult"],
+            {
+                "durationSeconds": 56.78,
+                "moveCount": 40,
+                "minimumMoves": 30,
+            },
+        )
+        self.assertEqual(
+            guest_result.json()["opponentResult"],
+            {
+                "durationSeconds": 12.34,
+                "moveCount": 20,
+                "minimumMoves": 18,
+            },
+        )
+        self.assertEqual(
+            host_status.json()["ownResult"],
+            guest_result.json()["opponentResult"],
+        )
+        self.assertEqual(
+            host_status.json()["opponentResult"],
+            guest_result.json()["ownResult"],
         )
 
 

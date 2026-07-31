@@ -61,6 +61,7 @@ public class LevelManager : MonoBehaviour
     private bool usesExternalInitialLoadingTransition;
     private bool completionTransitionHandled;
 
+    public event Action<LevelManager> LevelSolved;
     public event Action<LevelManager> CompletionTransitionRequested;
 
     private void Start()
@@ -348,6 +349,7 @@ public class LevelManager : MonoBehaviour
     {
         isCompletingLevel = true;
         SetPlayerInputEnabled(false);
+        LevelSolved?.Invoke(this);
         LevelStudyRecorder.RecordLevelCompleted();
 
         if (anim != null)

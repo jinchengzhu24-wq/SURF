@@ -527,7 +527,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 0, y: 480}
+  m_AnchoredPosition: {x: 0, y: 490}
   m_SizeDelta: {x: 1920, y: 115}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &808864925
@@ -954,6 +954,7 @@ MonoBehaviour:
   statusText: {fileID: 1779759502}
   statusPanel: {fileID: 2093731688}
   completePanel: {fileID: 1164948631}
+  completeHintText: {fileID: 1752335558}
   leaveButton: {fileID: 2098694274}
   completeLeaveButton: {fileID: 1836518672}
 --- !u!4 &1531120899
@@ -999,6 +1000,10 @@ PrefabInstance:
       propertyPath: levelManager
       value: 
       objectReference: {fileID: 892833490}
+    - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
+      propertyPath: playerPrefab
+      value: 
+      objectReference: {fileID: 2215580611126574733, guid: c00874df99cdc064ba33d9152f6b99b1, type: 3}
     - target: {fileID: 6475747495041295870, guid: af8fe91e0d54b2c42afe7c0272eda849, type: 3}
       propertyPath: waterTilemap
       value: 
@@ -1235,7 +1240,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &1699250584
 RectTransform:
   m_ObjectHideFlags: 0
@@ -1327,7 +1332,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 0, y: -55}
+  m_AnchoredPosition: {x: 0, y: -75}
   m_SizeDelta: {x: 850, y: 60}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1752335558
@@ -1363,7 +1368,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: RESULT SYNC WILL BE ADDED IN THE NEXT STAGE.
+  m_Text: SUBMITTING RESULT...
 --- !u!222 &1752335559
 CanvasRenderer:
   m_ObjectHideFlags: 0

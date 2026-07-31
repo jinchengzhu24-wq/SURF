@@ -83,11 +83,11 @@ Menu
   → Challenge_Waiting
   → 双方完成后确认游玩
   → Online_Level
-  → Challenge Complete
-  → Match_Result（后续）
+  → 提交耗时、移动数和理论最小移动数
+  → Match_Result
 ```
 
-一次对局中，玩家 A 和玩家 B 分别完成自己的 PC 或 DG 生成流程，并将最终确认的关卡提交给服务器。服务器冻结两份关卡后，将 A 的关卡交给 B、将 B 的关卡交给 A。双方各自在自己的浏览器中游玩对手关卡，完成后上传移动序列和结果，服务器负责复核并汇总比赛结果。
+一次对局中，玩家 A 和玩家 B 分别完成自己的 PC 或 DG 生成流程，并将最终确认的关卡和模式选择提交给服务器。服务器冻结两份关卡后，将 A 的关卡交给 B、将 B 的关卡交给 A。双方各自在自己的浏览器中游玩对手关卡，完成后上传耗时、移动数和本地求解器得到的理论最小移动数；结果页负责等待并汇总双方成绩。
 
 ### 联机场景
 
@@ -99,9 +99,8 @@ Menu
 当前交换与游玩阶段已经使用：
 
 - `Challenge_Waiting`：幂等提交己方 rows、轮询对手创作状态；双方完成后启用确认游玩按钮。
-- `Online_Level`：只加载服务器锁定的对手 rows，并在本地格式与可解性验证通过后开始游玩；不会再次调用 PC 或 DG 生成接口。
-
-后续仍需增加 `Match_Result`：等待双方完成，展示双方用时、步数、推动次数和胜负结果，并提供返回大厅或再次匹配入口。
+- `Online_Level`：只加载服务器锁定的对手 rows，使用 `Player2` 和方向键游玩，并在本地格式与可解性验证通过后开始累计用时和移动数；不会再次调用 PC 或 DG 生成接口。
+- `Match_Result`：先展示己方成绩并轮询对手状态；双方完成后展示各自耗时、实际移动数与理论最小移动数，以及双方选择的 Competition Mode 和 AI Assistant Mode。
 
 建议场景路径：
 
@@ -113,7 +112,7 @@ Assets/Scenes/Matchmaking/Online/Match_Result.unity
 Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
 ```
 
-`PC_Level` 和 `DG_Level` 继续负责生成、校验、预览并提交己方设计的关卡。`Online_Level` 单独负责游玩对手关卡，避免 PC/DG 的生成控制器在加载时覆盖服务器下发的固定布局。
+`PC_Level` 和 `DG_Level` 继续使用 `Player`（WASD），负责生成、校验、预览并提交己方设计的关卡。`Online_Level` 使用 `Player2`（方向键）单独游玩对手关卡，避免 PC/DG 的生成控制器在加载时覆盖服务器下发的固定布局。
 
 ### 浏览器与服务器的数据流
 
@@ -126,7 +125,7 @@ Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
                                   保存并冻结  ←── submit challenge ──
         ← opponent rows JSON ──  交换关卡  ── opponent rows JSON →
 本地游玩 B 的关卡                                          本地游玩 A 的关卡
-        ── moves/result ─────→  复演与校验  ←──── moves/result ──
+        ── time/moves/min ───→  保存并冻结  ←─── time/moves/min ──
         ←─────────────── 双方最终结果 ─────────────────────→
 ```
 
@@ -143,10 +142,23 @@ Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
 }
 ```
 
-挑战通过 `POST /online/rooms/{matchId}/challenge` 提交，使用
-`X-Player-Token` 识别玩家。同一玩家重复提交相同 rows 幂等成功，提交不同
-rows 会被拒绝；双方提交后，房间查询只向当前玩家返回对手的
-`opponentChallengeRows`。客户端完成后的移动序列与结果复核尚未接入。
+挑战通过 `POST /online/rooms/{matchId}/challenge` 提交，内容包含 `rows`、
+`competitionMode` 和 `aiAssistantMode`，使用 `X-Player-Token` 识别玩家。
+同一玩家重复提交完全相同的挑战幂等成功，修改 rows 或模式会被拒绝；双方
+提交后，房间查询按当前玩家返回 `opponentChallengeRows` 和双方模式元数据。
+
+通关结果通过 `POST /online/rooms/{matchId}/result` 提交：
+
+```json
+{
+  "durationSeconds": 42.37,
+  "moveCount": 31,
+  "minimumMoves": 24
+}
+```
+
+首位完成后房间进入 `waiting_for_results`，双方完成后进入 `results_ready`。
+结果提交同样幂等冻结；当前阶段不上传移动序列，也不做服务器复演或反作弊。
 
 ### 跨场景上下文
 
@@ -157,6 +169,7 @@ rows 会被拒绝；双方提交后，房间查询只向当前玩家返回对手
 - 等待提交的己方 `rows`。
 - 服务器下发的对手 `rows`。
 - 当前房间、Ready 和挑战提交状态。
+- 双方挑战模式元数据和已经提交的成绩。
 
 `OnlineMatchContext` 只保存运行时状态，不把对手关卡写成磁盘文件。当前版本刷新网页后不恢复比赛。
 
@@ -167,8 +180,9 @@ rows 会被拒绝；双方提交后，房间查询只向当前玩家返回对手
 - `PC_Level` 或 `DG_Level` 只有在玩家亲自通关生成结果后，才会暂存最终 rows 并进入 `Challenge_Waiting`。
 - `Challenge_Waiting` 自动幂等提交，并通过 HTTP 查询等待对手完成；不会自动跳过确认按钮。
 - `Online_Level` 仅从 `OnlineMatchContext` 加载对手 `rows`，关卡开始后不得编辑布局。
-- `Online_Level` 通关后停留在完成页；移动序列和比赛结果上传留待下一阶段。
-- `Match_Result` 以服务器确认结果为准；本地结果可以先显示为“等待验证”。
+- `Online_Level` 从首次可操作到通关累计耗时与有效移动；按 `R` 重开不会清零比赛统计。
+- `Online_Level` 通关后幂等提交结果并进入 `Match_Result`；网络失败时留在完成页自动重试。
+- `Match_Result` 在对手尚未完成时每秒轮询，双方完成后停止轮询；返回大厅会 Leave 并清理运行时上下文。
 - 生产环境的 WebGL 页面、HTTP API 和 WebSocket 应统一使用 HTTPS/WSS，避免浏览器阻止混合内容。
 
 上述场景完成后，需要将四个必需场景（以及采用时的 `Match_Briefing`）加入 Unity Build Settings；在场景尚未创建前，不应先写入无效的 Build Settings 条目。
@@ -186,6 +200,11 @@ Assets/Scenes/Matchmaking/AI_Asistant_Mode.unity
 Assets/Scenes/Matchmaking/PC.unity
 Assets/Scenes/Matchmaking/PC_Design.unity
 Assets/Scenes/Matchmaking/PC_Level.unity
+Assets/Scenes/Matchmaking/DG.unity
+Assets/Scenes/Matchmaking/DG_Level.unity
+Assets/Scenes/Matchmaking/Online/Challenge_Waiting.unity
+Assets/Scenes/Matchmaking/Online/Online_Level.unity
+Assets/Scenes/Matchmaking/Online/Match_Result.unity
 ```
 
 ## 手动验证
@@ -200,3 +219,6 @@ Assets/Scenes/Matchmaking/PC_Level.unity
 8. 合法草图 Submit 后进入 `PC_Level`，确认请求中不包含 DG 或 Creative Workshop 参数。
 9. 合法且可解的候选应被加载；无解或格式错误候选不得覆盖当前关卡。
 10. 生成失败后点击 Back to Design，确认原草图完整恢复。
+11. PC/DG 中确认生成的是 `Player` 且 WASD 有效；Online_Level 中确认生成的是 `Player2` 且方向键有效。
+12. 一方通关对手关卡后应进入 `Match_Result` 并显示己方成绩；按 `R` 重开前的耗时和移动数仍计入成绩。
+13. 第二方通关后，第一方结果页应在一次轮询后补齐对手成绩和双方模式；`BACK TO LOBBY` 应清理房间并返回联机大厅。

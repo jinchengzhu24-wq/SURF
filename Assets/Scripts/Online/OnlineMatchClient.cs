@@ -100,16 +100,43 @@ public class OnlineMatchClient : MonoBehaviour
 
     public IEnumerator SubmitChallenge(
         string[] rows,
+        string competitionMode,
+        string aiAssistantMode,
         Action<OnlineRoomState> onSuccess,
         Action<string> onFailure)
     {
         OnlineChallengePayload payload = new OnlineChallengePayload
         {
-            rows = CloneRows(rows)
+            rows = CloneRows(rows),
+            competitionMode = competitionMode,
+            aiAssistantMode = aiAssistantMode
         };
         return SendRoomRequest(
             UnityWebRequest.kHttpVerbPOST,
             BuildMatchPath("/challenge"),
+            JsonUtility.ToJson(payload),
+            true,
+            onSuccess,
+            onFailure
+        );
+    }
+
+    public IEnumerator SubmitResult(
+        float durationSeconds,
+        int moveCount,
+        int minimumMoves,
+        Action<OnlineRoomState> onSuccess,
+        Action<string> onFailure)
+    {
+        OnlineResultPayload payload = new OnlineResultPayload
+        {
+            durationSeconds = durationSeconds,
+            moveCount = moveCount,
+            minimumMoves = minimumMoves
+        };
+        return SendRoomRequest(
+            UnityWebRequest.kHttpVerbPOST,
+            BuildMatchPath("/result"),
             JsonUtility.ToJson(payload),
             true,
             onSuccess,
@@ -275,6 +302,16 @@ public class OnlineMatchClient : MonoBehaviour
     private class OnlineChallengePayload
     {
         public string[] rows;
+        public string competitionMode;
+        public string aiAssistantMode;
+    }
+
+    [Serializable]
+    private class OnlineResultPayload
+    {
+        public float durationSeconds;
+        public int moveCount;
+        public int minimumMoves;
     }
 
     [Serializable]

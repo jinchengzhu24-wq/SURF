@@ -1,6 +1,7 @@
 import html
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import re
@@ -97,6 +98,11 @@ JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
 ONLINE_ROOM_TTL_SECONDS = 30 * 60
 ONLINE_ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ONLINE_ROOM_CODE_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
+ONLINE_COMPETITION_MODES = {"competitive", "supportive"}
+ONLINE_AI_ASSISTANT_MODES = {
+    "description_generation",
+    "partial_completion",
+}
 ONLINE_ROOMS = {}
 ONLINE_ROOMS_LOCK = threading.Lock()
 
@@ -118,6 +124,14 @@ class OnlineReadyRequest(BaseModel):
 
 class OnlineChallengeRequest(BaseModel):
     rows: list[str]
+    competitionMode: str = "competitive"
+    aiAssistantMode: str = "description_generation"
+
+
+class OnlineResultRequest(BaseModel):
+    durationSeconds: float
+    moveCount: int
+    minimumMoves: int
 
 
 load_dotenv(BASE_DIR / ".env")
@@ -213,6 +227,7 @@ def serialize_online_room(room, player=None, include_token=False):
                 "playerNumber": item["playerNumber"],
                 "ready": bool(item["ready"]),
                 "challengeSubmitted": item.get("challengeRows") is not None,
+                "resultSubmitted": item.get("result") is not None,
             }
             for item in room["players"]
         ],
@@ -220,6 +235,15 @@ def serialize_online_room(room, player=None, include_token=False):
 
     if include_token and player is not None:
         payload["playerToken"] = player["token"]
+
+    if (
+        player is not None
+        and player.get("challengeRows") is not None
+    ):
+        payload["ownChallengeMetadata"] = {
+            "competitionMode": player["competitionMode"],
+            "aiAssistantMode": player["aiAssistantMode"],
+        }
 
     if (
         player is not None
@@ -232,6 +256,23 @@ def serialize_online_room(room, player=None, include_token=False):
             if item["playerNumber"] != player["playerNumber"]
         )
         payload["opponentChallengeRows"] = list(opponent["challengeRows"])
+        payload["opponentChallengeMetadata"] = {
+            "competitionMode": opponent["competitionMode"],
+            "aiAssistantMode": opponent["aiAssistantMode"],
+        }
+
+    if player is not None and player.get("result") is not None:
+        payload["ownResult"] = dict(player["result"])
+
+    if player is not None and len(room["players"]) == 2:
+        opponent = next(
+            item
+            for item in room["players"]
+            if item["playerNumber"] != player["playerNumber"]
+        )
+
+        if opponent.get("result") is not None:
+            payload["opponentResult"] = dict(opponent["result"])
 
     return payload
 
@@ -267,6 +308,43 @@ def validate_online_challenge_rows(rows):
         raise HTTPException(
             status_code=400,
             detail="Challenge box and target counts must match",
+        )
+
+
+def validate_online_challenge_modes(competition_mode, ai_assistant_mode):
+    if competition_mode not in ONLINE_COMPETITION_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown competition mode",
+        )
+
+    if ai_assistant_mode not in ONLINE_AI_ASSISTANT_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail="Unknown AI assistant mode",
+        )
+
+
+def validate_online_result(payload):
+    if (
+        not math.isfinite(payload.durationSeconds)
+        or payload.durationSeconds < 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Result duration must be a finite non-negative number",
+        )
+
+    if payload.moveCount < 0 or payload.minimumMoves < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Result move counts must be non-negative",
+        )
+
+    if payload.moveCount < payload.minimumMoves:
+        raise HTTPException(
+            status_code=400,
+            detail="Result move count cannot be lower than the theoretical minimum",
         )
 
 
@@ -582,6 +660,9 @@ def create_online_room():
             "token": secrets.token_urlsafe(32),
             "ready": False,
             "challengeRows": None,
+            "competitionMode": None,
+            "aiAssistantMode": None,
+            "result": None,
         }
         match_id = uuid.uuid4().hex
         room = {
@@ -624,6 +705,9 @@ def join_online_room(payload: OnlineRoomJoinRequest):
             "token": secrets.token_urlsafe(32),
             "ready": False,
             "challengeRows": None,
+            "competitionMode": None,
+            "aiAssistantMode": None,
+            "result": None,
         }
         room["players"].append(player)
         room["status"] = "briefing"
@@ -683,6 +767,10 @@ def submit_online_challenge(
         validate_online_challenge_rows(payload.rows)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    validate_online_challenge_modes(
+        payload.competitionMode,
+        payload.aiAssistantMode,
+    )
 
     submitted_rows = list(payload.rows)
 
@@ -705,13 +793,23 @@ def submit_online_challenge(
 
         existing_rows = player.get("challengeRows")
 
-        if existing_rows is not None and existing_rows != submitted_rows:
-            raise HTTPException(
-                status_code=409,
-                detail="Submitted challenge is already frozen",
-            )
+        if existing_rows is not None:
+            if (
+                existing_rows != submitted_rows
+                or player.get("competitionMode") != payload.competitionMode
+                or player.get("aiAssistantMode") != payload.aiAssistantMode
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Submitted challenge is already frozen",
+                )
+
+            room["lastActivity"] = time.time()
+            return serialize_online_room(room, player)
 
         player["challengeRows"] = submitted_rows
+        player["competitionMode"] = payload.competitionMode
+        player["aiAssistantMode"] = payload.aiAssistantMode
         both_submitted = all(
             item.get("challengeRows") is not None for item in room["players"]
         )
@@ -719,6 +817,61 @@ def submit_online_challenge(
             "challenges_ready"
             if both_submitted
             else "waiting_for_challenges"
+        )
+        room["lastActivity"] = time.time()
+        return serialize_online_room(room, player)
+
+
+@app.post("/online/rooms/{match_id}/result")
+def submit_online_result(
+    match_id: str,
+    payload: OnlineResultRequest,
+    request: Request,
+):
+    validate_online_result(payload)
+    submitted_result = {
+        "durationSeconds": round(float(payload.durationSeconds), 2),
+        "moveCount": int(payload.moveCount),
+        "minimumMoves": int(payload.minimumMoves),
+    }
+
+    with ONLINE_ROOMS_LOCK:
+        room, player = require_online_room(
+            match_id,
+            request.headers.get("X-Player-Token"),
+        )
+
+        if room["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Room has been cancelled")
+
+        if len(room["players"]) < 2 or not all(
+            item.get("challengeRows") is not None for item in room["players"]
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Both challenges must be ready before submitting a result",
+            )
+
+        existing_result = player.get("result")
+
+        if existing_result is not None:
+            if existing_result != submitted_result:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Submitted result is already frozen",
+                )
+
+            room["lastActivity"] = time.time()
+            return serialize_online_room(room, player)
+
+        player["result"] = submitted_result
+        both_finished = all(
+            item.get("result") is not None for item in room["players"]
+        )
+        room["status"] = (
+            "results_ready"
+            if both_finished
+            else "waiting_for_results"
         )
         room["lastActivity"] = time.time()
         return serialize_online_room(room, player)

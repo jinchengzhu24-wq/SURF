@@ -44,7 +44,11 @@ public class OnlineChallengeCompletionRoute : MonoBehaviour
             return;
         }
 
-        OnlineMatchContext.StageChallenge(levelData.rows);
+        OnlineMatchContext.StageChallenge(
+            levelData.rows,
+            CompetitionModeController.GetSelectedMode(),
+            AIAssistantModeController.GetSelectedApiMode()
+        );
         manager.MarkCompletionTransitionHandled();
         SceneManager.LoadScene(WaitingSceneName);
     }

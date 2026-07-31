@@ -119,6 +119,8 @@ public class ChallengeWaitingController : MonoBehaviour
 
         yield return client.SubmitChallenge(
             OnlineMatchContext.PendingChallengeRows,
+            OnlineMatchContext.PendingCompetitionMode,
+            OnlineMatchContext.PendingAiAssistantMode,
             state =>
             {
                 succeeded = true;
@@ -166,8 +168,12 @@ public class ChallengeWaitingController : MonoBehaviour
             return;
         }
 
-        if (state.status == "challenges_ready"
-            && OnlineMatchContext.HasOpponentChallenge)
+        if (OnlineMatchContext.HasOpponentChallenge
+            && (
+                state.status == "challenges_ready"
+                || state.status == "waiting_for_results"
+                || state.status == "results_ready"
+            ))
         {
             SetStatus("OPPONENT HAS FINISHED. READY TO PLAY.");
             SetPlayEnabled(true);

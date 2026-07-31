@@ -8,6 +8,8 @@ public static class OnlineMatchContext
     public static int PlayerNumber { get; private set; }
     public static OnlineRoomState RoomState { get; private set; }
     public static string[] PendingChallengeRows { get; private set; }
+    public static string PendingCompetitionMode { get; private set; } = "";
+    public static string PendingAiAssistantMode { get; private set; } = "";
     public static string[] OpponentChallengeRows { get; private set; }
 
     public static bool HasMatch =>
@@ -37,6 +39,8 @@ public static class OnlineMatchContext
         PlayerNumber = state.playerNumber;
         RoomState = state;
         PendingChallengeRows = null;
+        PendingCompetitionMode = "";
+        PendingAiAssistantMode = "";
         OpponentChallengeRows = CloneRows(state.opponentChallengeRows);
     }
 
@@ -58,7 +62,10 @@ public static class OnlineMatchContext
         }
     }
 
-    public static void StageChallenge(string[] rows)
+    public static void StageChallenge(
+        string[] rows,
+        string competitionMode,
+        string aiAssistantMode)
     {
         if (!HasMatch || rows == null || rows.Length == 0)
         {
@@ -68,11 +75,15 @@ public static class OnlineMatchContext
         }
 
         PendingChallengeRows = CloneRows(rows);
+        PendingCompetitionMode = competitionMode ?? "";
+        PendingAiAssistantMode = aiAssistantMode ?? "";
     }
 
     public static void ClearPendingChallenge()
     {
         PendingChallengeRows = null;
+        PendingCompetitionMode = "";
+        PendingAiAssistantMode = "";
     }
 
     public static void Clear()
@@ -83,6 +94,8 @@ public static class OnlineMatchContext
         PlayerNumber = 0;
         RoomState = null;
         PendingChallengeRows = null;
+        PendingCompetitionMode = "";
+        PendingAiAssistantMode = "";
         OpponentChallengeRows = null;
     }
 
@@ -114,6 +127,10 @@ public class OnlineRoomState
     public string status;
     public OnlinePlayerState[] players;
     public string[] opponentChallengeRows;
+    public OnlineChallengeMetadata ownChallengeMetadata;
+    public OnlineChallengeMetadata opponentChallengeMetadata;
+    public OnlineMatchResult ownResult;
+    public OnlineMatchResult opponentResult;
 
     public OnlinePlayerState FindPlayer(int number)
     {
@@ -140,4 +157,20 @@ public class OnlinePlayerState
     public int playerNumber;
     public bool ready;
     public bool challengeSubmitted;
+    public bool resultSubmitted;
+}
+
+[Serializable]
+public class OnlineChallengeMetadata
+{
+    public string competitionMode;
+    public string aiAssistantMode;
+}
+
+[Serializable]
+public class OnlineMatchResult
+{
+    public float durationSeconds;
+    public int moveCount;
+    public int minimumMoves;
 }

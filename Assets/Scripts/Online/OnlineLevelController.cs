@@ -7,6 +7,7 @@ using UnityEngine.UI;
 public class OnlineLevelController : MonoBehaviour
 {
     private const string LobbySceneName = "Online_Lobby";
+    private const string ResultSceneName = "Match_Result";
 
     [Header("Level")]
     [SerializeField] private LevelData levelData;
@@ -19,11 +20,20 @@ public class OnlineLevelController : MonoBehaviour
     [SerializeField] private Text statusText;
     [SerializeField] private GameObject statusPanel;
     [SerializeField] private GameObject completePanel;
+    [SerializeField] private Text completeHintText;
     [SerializeField] private Button leaveButton;
     [SerializeField] private Button completeLeaveButton;
 
     private OnlineMatchClient client;
     private bool leaving;
+    private bool transitioning;
+    private bool runStarted;
+    private bool runCompleted;
+    private bool resultSubmissionStarted;
+    private float runStartedAt;
+    private float runDurationSeconds;
+    private int runMoveCount;
+    private int minimumMoves = -1;
 
     private void Awake()
     {
@@ -37,8 +47,11 @@ public class OnlineLevelController : MonoBehaviour
         if (levelManager != null)
         {
             levelManager.BeginExternalInitialLoadingTransition();
+            levelManager.LevelSolved += HandleLevelSolved;
             levelManager.CompletionTransitionRequested += HandleLevelCompleted;
         }
+
+        LevelStudyRecorder.PlayerMoveRecorded += HandlePlayerMove;
     }
 
     private void Start()
@@ -76,8 +89,11 @@ public class OnlineLevelController : MonoBehaviour
     {
         if (levelManager != null)
         {
+            levelManager.LevelSolved -= HandleLevelSolved;
             levelManager.CompletionTransitionRequested -= HandleLevelCompleted;
         }
+
+        LevelStudyRecorder.PlayerMoveRecorded -= HandlePlayerMove;
     }
 
     private IEnumerator PrepareLevel()
@@ -105,6 +121,7 @@ public class OnlineLevelController : MonoBehaviour
             yield break;
         }
 
+        minimumMoves = solutionSteps;
         SetPanelVisible(statusPanel, false);
 
         if (levelManager != null)
@@ -119,6 +136,31 @@ public class OnlineLevelController : MonoBehaviour
         {
             yield return levelManager.FadeFromBlackAfterExternalInitialLoad();
         }
+
+        runMoveCount = 0;
+        runStartedAt = Time.realtimeSinceStartup;
+        runStarted = true;
+    }
+
+    private void HandleLevelSolved(LevelManager manager)
+    {
+        if (!runStarted || runCompleted)
+        {
+            return;
+        }
+
+        runCompleted = true;
+        runDurationSeconds = Mathf.Round(
+            Mathf.Max(0f, Time.realtimeSinceStartup - runStartedAt) * 100f
+        ) / 100f;
+    }
+
+    private void HandlePlayerMove(bool pushedBox)
+    {
+        if (runStarted && !runCompleted)
+        {
+            runMoveCount++;
+        }
     }
 
     private void HandleLevelCompleted(LevelManager manager)
@@ -126,11 +168,67 @@ public class OnlineLevelController : MonoBehaviour
         manager.MarkCompletionTransitionHandled();
         SetPanelVisible(completePanel, true);
         SetPanelVisible(statusPanel, false);
+
+        if (!runCompleted)
+        {
+            HandleLevelSolved(manager);
+        }
+
+        if (resultSubmissionStarted)
+        {
+            return;
+        }
+
+        resultSubmissionStarted = true;
+        StartCoroutine(SubmitResultUntilSuccessful());
+    }
+
+    private IEnumerator SubmitResultUntilSuccessful()
+    {
+        while (!leaving && !transitioning)
+        {
+            SetText(completeHintText, "SUBMITTING RESULT...");
+            bool succeeded = false;
+
+            yield return client.SubmitResult(
+                runDurationSeconds,
+                runMoveCount,
+                minimumMoves,
+                state =>
+                {
+                    succeeded = true;
+                    OnlineMatchContext.ApplyState(state);
+                },
+                error => SetText(
+                    completeHintText,
+                    "RESULT SUBMISSION FAILED. RETRYING...\n"
+                    + error.ToUpperInvariant()
+                )
+            );
+
+            if (succeeded)
+            {
+                if (!Application.CanStreamedLevelBeLoaded(ResultSceneName))
+                {
+                    SetText(
+                        completeHintText,
+                        "MATCH RESULT SCENE IS NOT AVAILABLE."
+                    );
+                    yield break;
+                }
+
+                transitioning = true;
+                SceneManager.LoadScene(ResultSceneName);
+                yield break;
+            }
+
+            yield return new WaitForSecondsRealtime(1f);
+        }
     }
 
     private void LeaveMatch()
     {
-        if (leaving)
+        if (leaving || transitioning)
         {
             return;
         }
@@ -198,6 +296,9 @@ public class OnlineLevelController : MonoBehaviour
         completePanel = completePanel != null
             ? completePanel
             : GameObject.Find("ChallengeCompletePanel");
+        completeHintText = completeHintText != null
+            ? completeHintText
+            : OnlineSceneUi.FindText("CompleteHint");
         leaveButton = leaveButton != null
             ? leaveButton
             : OnlineSceneUi.EnsureButton("LeaveMatchButton");
