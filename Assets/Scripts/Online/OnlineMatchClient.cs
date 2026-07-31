@@ -98,6 +98,25 @@ public class OnlineMatchClient : MonoBehaviour
         );
     }
 
+    public IEnumerator SubmitChallenge(
+        string[] rows,
+        Action<OnlineRoomState> onSuccess,
+        Action<string> onFailure)
+    {
+        OnlineChallengePayload payload = new OnlineChallengePayload
+        {
+            rows = CloneRows(rows)
+        };
+        return SendRoomRequest(
+            UnityWebRequest.kHttpVerbPOST,
+            BuildMatchPath("/challenge"),
+            JsonUtility.ToJson(payload),
+            true,
+            onSuccess,
+            onFailure
+        );
+    }
+
     private IEnumerator SendRoomRequest(
         string method,
         string path,
@@ -210,6 +229,23 @@ public class OnlineMatchClient : MonoBehaviour
             : request.error;
     }
 
+    private static string[] CloneRows(string[] rows)
+    {
+        if (rows == null)
+        {
+            return null;
+        }
+
+        string[] clone = new string[rows.Length];
+
+        for (int row = 0; row < rows.Length; row++)
+        {
+            clone[row] = rows[row] ?? "";
+        }
+
+        return clone;
+    }
+
     private void OnDestroy()
     {
         for (int i = 0; i < activeRequests.Count; i++)
@@ -233,6 +269,12 @@ public class OnlineMatchClient : MonoBehaviour
     private class OnlineReadyPayload
     {
         public bool ready;
+    }
+
+    [Serializable]
+    private class OnlineChallengePayload
+    {
+        public string[] rows;
     }
 
     [Serializable]

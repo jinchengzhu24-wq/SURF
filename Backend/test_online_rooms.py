@@ -6,6 +6,33 @@ from fastapi.testclient import TestClient
 import Backend.app as backend
 
 
+SOLVABLE_ROWS_A = [
+    "############",
+    "#..........#",
+    "#..........#",
+    "#..........#",
+    "#....p.....#",
+    "#....s.t...#",
+    "#..........#",
+    "#..........#",
+    "#..........#",
+    "############",
+]
+
+SOLVABLE_ROWS_B = [
+    "############",
+    "#..........#",
+    "#..........#",
+    "#..........#",
+    "#...p......#",
+    "#...s..t...#",
+    "#..........#",
+    "#..........#",
+    "#..........#",
+    "############",
+]
+
+
 class OnlineRoomTests(unittest.TestCase):
     def setUp(self):
         with backend.ONLINE_ROOMS_LOCK:
@@ -44,7 +71,13 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(room["status"], "waiting_for_opponent")
         self.assertEqual(
             room["players"],
-            [{"playerNumber": 1, "ready": False}],
+            [
+                {
+                    "playerNumber": 1,
+                    "ready": False,
+                    "challengeSubmitted": False,
+                }
+            ],
         )
 
     def test_join_normalizes_room_code_and_rejects_third_player(self):
@@ -124,8 +157,16 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(
             repeated_host_ready.json()["players"],
             [
-                {"playerNumber": 1, "ready": True},
-                {"playerNumber": 2, "ready": False},
+                {
+                    "playerNumber": 1,
+                    "ready": True,
+                    "challengeSubmitted": False,
+                },
+                {
+                    "playerNumber": 2,
+                    "ready": False,
+                    "challengeSubmitted": False,
+                },
             ],
         )
         self.assertEqual(guest_ready.status_code, 200)
@@ -179,6 +220,124 @@ class OnlineRoomTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertNotIn(host["matchId"], backend.ONLINE_ROOMS)
+
+    def ready_both_players(self):
+        host = self.create_room()
+        guest = self.join_room(host["roomCode"])
+        ready_url = "/online/rooms/" + host["matchId"] + "/ready"
+        self.client.post(
+            ready_url,
+            json={"ready": True},
+            headers=self.auth_headers(host["playerToken"]),
+        )
+        self.client.post(
+            ready_url,
+            json={"ready": True},
+            headers=self.auth_headers(guest["playerToken"]),
+        )
+        return host, guest
+
+    def submit_challenge(self, match_id, player_token, rows):
+        return self.client.post(
+            "/online/rooms/" + match_id + "/challenge",
+            json={"rows": rows},
+            headers=self.auth_headers(player_token),
+        )
+
+    def test_challenge_requires_ready_players_and_valid_token(self):
+        host = self.create_room()
+        guest = self.join_room(host["roomCode"])
+
+        early_response = self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+        wrong_token_response = self.submit_challenge(
+            host["matchId"],
+            "wrong-token",
+            SOLVABLE_ROWS_A,
+        )
+
+        self.assertEqual(early_response.status_code, 409)
+        self.assertEqual(wrong_token_response.status_code, 401)
+        self.assertFalse(guest["players"][0]["challengeSubmitted"])
+
+    def test_challenge_rejects_invalid_rows(self):
+        host, _ = self.ready_both_players()
+        invalid_cases = [
+            SOLVABLE_ROWS_A[:-1],
+            [row[:-1] for row in SOLVABLE_ROWS_A],
+            [row.replace("p", "x") for row in SOLVABLE_ROWS_A],
+            [row.replace("p", ".") for row in SOLVABLE_ROWS_A],
+            [row.replace("t", ".") for row in SOLVABLE_ROWS_A],
+            [row.replace("s", "ss")[:12] for row in SOLVABLE_ROWS_A],
+        ]
+
+        for rows in invalid_cases:
+            with self.subTest(rows=rows):
+                response = self.submit_challenge(
+                    host["matchId"],
+                    host["playerToken"],
+                    rows,
+                )
+                self.assertEqual(response.status_code, 400)
+
+    def test_challenge_submission_is_idempotent_and_frozen(self):
+        host, _ = self.ready_both_players()
+
+        first = self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+        repeated = self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+        changed = self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_B,
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["status"], "waiting_for_challenges")
+        self.assertTrue(first.json()["players"][0]["challengeSubmitted"])
+        self.assertNotIn("opponentChallengeRows", first.json())
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(changed.status_code, 409)
+
+    def test_both_challenges_are_exchanged_by_player_identity(self):
+        host, guest = self.ready_both_players()
+        self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+        second = self.submit_challenge(
+            host["matchId"],
+            guest["playerToken"],
+            SOLVABLE_ROWS_B,
+        )
+        host_status = self.client.get(
+            "/online/rooms/" + host["matchId"],
+            headers=self.auth_headers(host["playerToken"]),
+        )
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["status"], "challenges_ready")
+        self.assertEqual(second.json()["opponentChallengeRows"], SOLVABLE_ROWS_A)
+        self.assertEqual(host_status.status_code, 200)
+        self.assertEqual(
+            host_status.json()["opponentChallengeRows"],
+            SOLVABLE_ROWS_B,
+        )
+        self.assertNotEqual(
+            host_status.json()["opponentChallengeRows"],
+            SOLVABLE_ROWS_A,
+        )
 
 
 if __name__ == "__main__":

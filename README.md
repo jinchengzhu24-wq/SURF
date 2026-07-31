@@ -62,10 +62,10 @@ supportive
 
 联机采用“交换关卡并分别在本地游玩”的异步挑战模式。这里的“下载对手关卡”只表示浏览器从服务器接收一份很小的关卡 JSON 数据，不是下载文件、安装新客户端或重新下载 WebGL 游戏。
 
-当前已完成最小匹配链路：客户端统一连接
+当前已完成匹配、双方 Ready、关卡创作、关卡交换和本地游玩链路。客户端统一连接
 `http://111.231.136.4:8000`，使用六位房间码和每秒一次的 HTTP
-轮询完成创建、加入与双方 Ready。房间暂存于单进程服务器内存中，30
-分钟无活动后清理；刷新网页或服务器重启后不恢复房间。关卡交换、比赛过程和结果结算仍属于后续阶段。
+轮询同步状态。房间暂存于单进程服务器内存中，30 分钟无活动后清理；
+刷新网页或服务器重启后不恢复房间。比赛结果上传与结算仍属于后续阶段。
 
 目标路由：
 
@@ -79,11 +79,12 @@ Menu
       │    → PC → PC_Design → PC_Level
       └─ Direction Generation
            → DG → DG_Level
-  → 将最终关卡 rows 提交给服务器
+  → 通关己方关卡并提交最终 rows
   → Challenge_Waiting
-  → 收到对手的关卡 rows
+  → 双方完成后确认游玩
   → Online_Level
-  → Match_Result
+  → Challenge Complete
+  → Match_Result（后续）
 ```
 
 一次对局中，玩家 A 和玩家 B 分别完成自己的 PC 或 DG 生成流程，并将最终确认的关卡提交给服务器。服务器冻结两份关卡后，将 A 的关卡交给 B、将 B 的关卡交给 A。双方各自在自己的浏览器中游玩对手关卡，完成后上传移动序列和结果，服务器负责复核并汇总比赛结果。
@@ -95,11 +96,12 @@ Menu
 - `Online_Lobby`：创建或加入房间、匹配对手、显示双方准备状态，并保存服务器返回的 `matchId` 和当前玩家身份。
 - `Match_Briefing`：在匹配成功后展示双方 Ready 状态；双方准备完成后进入 Competition Mode。
 
-后续完整比赛流程还需要：
+当前交换与游玩阶段已经使用：
 
-- `Challenge_Waiting`：当前玩家提交关卡后等待对手；收到 `opponent_challenge_ready` 后保存对手关卡并进入 `Online_Level`。
-- `Online_Level`：只加载服务器锁定的对手关卡，记录移动序列和完成结果；不得再次调用 PC 或 DG 生成接口。
-- `Match_Result`：等待双方完成，展示双方用时、步数、推动次数和胜负结果，并提供返回大厅或再次匹配入口。
+- `Challenge_Waiting`：幂等提交己方 rows、轮询对手创作状态；双方完成后启用确认游玩按钮。
+- `Online_Level`：只加载服务器锁定的对手 rows，并在本地格式与可解性验证通过后开始游玩；不会再次调用 PC 或 DG 生成接口。
+
+后续仍需增加 `Match_Result`：等待双方完成，展示双方用时、步数、推动次数和胜负结果，并提供返回大厅或再次匹配入口。
 
 建议场景路径：
 
@@ -115,7 +117,7 @@ Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
 
 ### 浏览器与服务器的数据流
 
-推荐使用 WebSocket 推送匹配状态和对手关卡，HTTP 作为首次连接、提交关卡和断线恢复的基础接口：
+当前使用 HTTP 提交关卡，并通过每秒一次的房间查询取得对手关卡：
 
 ```text
 玩家 A 浏览器                     服务器                     玩家 B 浏览器
@@ -141,29 +143,31 @@ Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
 }
 ```
 
-实际联机消息还应携带 `matchId`、玩家凭证、关卡版本或哈希等元数据。服务器保存的关卡一经双方进入挑战阶段便不可由客户端修改。客户端完成后应上传 `U/D/L/R` 移动序列；服务器通过复演移动验证完成状态、步数和推动次数，不能只信任浏览器上报的分数。
+挑战通过 `POST /online/rooms/{matchId}/challenge` 提交，使用
+`X-Player-Token` 识别玩家。同一玩家重复提交相同 rows 幂等成功，提交不同
+rows 会被拒绝；双方提交后，房间查询只向当前玩家返回对手的
+`opponentChallengeRows`。客户端完成后的移动序列与结果复核尚未接入。
 
 ### 跨场景上下文
 
-计划新增一个常驻的 `OnlineMatchContext`，至少保存：
+常驻的 `OnlineMatchContext` 当前保存：
 
 - 当前 `matchId`、玩家身份和断线恢复凭证。
 - Competition Mode 与 AI Assistant Mode 的选择。
-- 己方已提交关卡的 ID 或哈希。
-- 服务器下发的对手 `rows`、关卡 ID 和版本。
-- 当前挑战状态以及进入 `Match_Result` 所需的结果数据。
+- 等待提交的己方 `rows`。
+- 服务器下发的对手 `rows`。
+- 当前房间、Ready 和挑战提交状态。
 
-`OnlineMatchContext` 只保存运行时状态，不把对手关卡写成磁盘文件。刷新网页或连接中断后，通过 `matchId` 和恢复凭证从服务器重新取得同一份 JSON。
+`OnlineMatchContext` 只保存运行时状态，不把对手关卡写成磁盘文件。当前版本刷新网页后不恢复比赛。
 
 ### 场景搭建约定
 
 - `Online_Lobby` 进入后建立联机连接；离开匹配流程时显式断开或切换为后台保活。
 - `Competition_Mode`、`AI_Asistant_Mode`、PC 和 DG 现有场景继续复用，不复制联机专用版本。
-- `PC_Level` 或 `DG_Level` 只有在生成结果通过本地可解性检查后才允许提交。
-- 提交成功后进入 `Challenge_Waiting`；重复点击提交必须使用同一个请求 ID，避免生成两份挑战。
-- `Challenge_Waiting` 同时支持 WebSocket 实时通知和 HTTP 查询恢复，刷新页面后仍能继续当前比赛。
+- `PC_Level` 或 `DG_Level` 只有在玩家亲自通关生成结果后，才会暂存最终 rows 并进入 `Challenge_Waiting`。
+- `Challenge_Waiting` 自动幂等提交，并通过 HTTP 查询等待对手完成；不会自动跳过确认按钮。
 - `Online_Level` 仅从 `OnlineMatchContext` 加载对手 `rows`，关卡开始后不得编辑布局。
-- `Online_Level` 需要记录完整移动序列，而不仅是最终步数和用时。
+- `Online_Level` 通关后停留在完成页；移动序列和比赛结果上传留待下一阶段。
 - `Match_Result` 以服务器确认结果为准；本地结果可以先显示为“等待验证”。
 - 生产环境的 WebGL 页面、HTTP API 和 WebSocket 应统一使用 HTTPS/WSS，避免浏览器阻止混合内容。
 

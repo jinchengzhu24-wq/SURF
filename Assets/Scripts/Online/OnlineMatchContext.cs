@@ -7,11 +7,19 @@ public static class OnlineMatchContext
     public static string PlayerToken { get; private set; } = "";
     public static int PlayerNumber { get; private set; }
     public static OnlineRoomState RoomState { get; private set; }
+    public static string[] PendingChallengeRows { get; private set; }
+    public static string[] OpponentChallengeRows { get; private set; }
 
     public static bool HasMatch =>
         !string.IsNullOrWhiteSpace(MatchId)
         && !string.IsNullOrWhiteSpace(PlayerToken)
         && (PlayerNumber == 1 || PlayerNumber == 2);
+
+    public static bool HasPendingChallenge =>
+        PendingChallengeRows != null && PendingChallengeRows.Length > 0;
+
+    public static bool HasOpponentChallenge =>
+        OpponentChallengeRows != null && OpponentChallengeRows.Length > 0;
 
     public static void Initialize(OnlineRoomState state)
     {
@@ -28,6 +36,8 @@ public static class OnlineMatchContext
         PlayerToken = state.playerToken;
         PlayerNumber = state.playerNumber;
         RoomState = state;
+        PendingChallengeRows = null;
+        OpponentChallengeRows = CloneRows(state.opponentChallengeRows);
     }
 
     public static void ApplyState(OnlineRoomState state)
@@ -41,6 +51,28 @@ public static class OnlineMatchContext
         state.playerNumber = PlayerNumber;
         RoomCode = state.roomCode ?? RoomCode;
         RoomState = state;
+
+        if (state.opponentChallengeRows != null)
+        {
+            OpponentChallengeRows = CloneRows(state.opponentChallengeRows);
+        }
+    }
+
+    public static void StageChallenge(string[] rows)
+    {
+        if (!HasMatch || rows == null || rows.Length == 0)
+        {
+            throw new ArgumentException(
+                "An active online room and challenge rows are required."
+            );
+        }
+
+        PendingChallengeRows = CloneRows(rows);
+    }
+
+    public static void ClearPendingChallenge()
+    {
+        PendingChallengeRows = null;
     }
 
     public static void Clear()
@@ -50,6 +82,25 @@ public static class OnlineMatchContext
         PlayerToken = "";
         PlayerNumber = 0;
         RoomState = null;
+        PendingChallengeRows = null;
+        OpponentChallengeRows = null;
+    }
+
+    private static string[] CloneRows(string[] rows)
+    {
+        if (rows == null)
+        {
+            return null;
+        }
+
+        string[] clone = new string[rows.Length];
+
+        for (int row = 0; row < rows.Length; row++)
+        {
+            clone[row] = rows[row] ?? "";
+        }
+
+        return clone;
     }
 }
 
@@ -62,6 +113,7 @@ public class OnlineRoomState
     public int playerNumber;
     public string status;
     public OnlinePlayerState[] players;
+    public string[] opponentChallengeRows;
 
     public OnlinePlayerState FindPlayer(int number)
     {
@@ -87,4 +139,5 @@ public class OnlinePlayerState
 {
     public int playerNumber;
     public bool ready;
+    public bool challengeSubmitted;
 }

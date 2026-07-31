@@ -32,6 +32,25 @@ public static class OnlineSceneBootstrap
             GameObject controller = new GameObject("MatchBriefingController");
             controller.AddComponent<MatchBriefingController>();
         }
+        else if (scene.name == "Challenge_Waiting"
+            && Object.FindObjectOfType<ChallengeWaitingController>() == null)
+        {
+            GameObject controller = new GameObject("ChallengeWaitingController");
+            controller.AddComponent<ChallengeWaitingController>();
+        }
+        else if (scene.name == "Online_Level"
+            && Object.FindObjectOfType<OnlineLevelController>() == null)
+        {
+            GameObject controller = new GameObject("OnlineLevelController");
+            controller.AddComponent<OnlineLevelController>();
+        }
+
+        if ((scene.name == "PC_Level" || scene.name == "DG_Level")
+            && Object.FindObjectOfType<OnlineChallengeCompletionRoute>() == null)
+        {
+            GameObject route = new GameObject("OnlineChallengeCompletionRoute");
+            route.AddComponent<OnlineChallengeCompletionRoute>();
+        }
     }
 }
 

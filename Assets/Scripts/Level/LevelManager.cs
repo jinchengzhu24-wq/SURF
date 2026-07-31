@@ -1,4 +1,5 @@
 using System.Collections;
+using System;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
@@ -58,6 +59,9 @@ public class LevelManager : MonoBehaviour
 
     private bool isCompletingLevel;
     private bool usesExternalInitialLoadingTransition;
+    private bool completionTransitionHandled;
+
+    public event Action<LevelManager> CompletionTransitionRequested;
 
     private void Start()
     {
@@ -355,6 +359,14 @@ public class LevelManager : MonoBehaviour
 
         yield return Fade(0, 1);
 
+        completionTransitionHandled = false;
+        CompletionTransitionRequested?.Invoke(this);
+
+        if (completionTransitionHandled)
+        {
+            yield break;
+        }
+
         if (completeAction == CompleteAction.LoadNextScene)
         {
             LoadNextScene();
@@ -391,6 +403,11 @@ public class LevelManager : MonoBehaviour
         }
 
         isCompletingLevel = false;
+    }
+
+    public void MarkCompletionTransitionHandled()
+    {
+        completionTransitionHandled = true;
     }
 
     private bool HasReachedGeneratedLevelLimit()

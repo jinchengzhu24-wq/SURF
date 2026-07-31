@@ -116,6 +116,10 @@ class OnlineReadyRequest(BaseModel):
     ready: bool = True
 
 
+class OnlineChallengeRequest(BaseModel):
+    rows: list[str]
+
+
 load_dotenv(BASE_DIR / ".env")
 
 
@@ -208,6 +212,7 @@ def serialize_online_room(room, player=None, include_token=False):
             {
                 "playerNumber": item["playerNumber"],
                 "ready": bool(item["ready"]),
+                "challengeSubmitted": item.get("challengeRows") is not None,
             }
             for item in room["players"]
         ],
@@ -216,7 +221,53 @@ def serialize_online_room(room, player=None, include_token=False):
     if include_token and player is not None:
         payload["playerToken"] = player["token"]
 
+    if (
+        player is not None
+        and len(room["players"]) == 2
+        and all(item.get("challengeRows") is not None for item in room["players"])
+    ):
+        opponent = next(
+            item
+            for item in room["players"]
+            if item["playerNumber"] != player["playerNumber"]
+        )
+        payload["opponentChallengeRows"] = list(opponent["challengeRows"])
+
     return payload
+
+
+def validate_online_challenge_rows(rows):
+    width = 12
+    height = 10
+    validate_pc_rows(
+        rows,
+        width,
+        height,
+        {" ", "#", ".", "@", "p", "s", "t"},
+        "rows",
+    )
+
+    player_count = sum(row.count("p") for row in rows)
+    box_count = sum(row.count("s") for row in rows)
+    target_count = sum(row.count("t") for row in rows)
+
+    if player_count != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Challenge must contain exactly one player start",
+        )
+
+    if box_count < 1 or box_count > 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Challenge must contain one or two box starts",
+        )
+
+    if target_count != box_count:
+        raise HTTPException(
+            status_code=400,
+            detail="Challenge box and target counts must match",
+        )
 
 
 class LevelDesignPlan(BaseModel):
@@ -530,6 +581,7 @@ def create_online_room():
             "playerNumber": 1,
             "token": secrets.token_urlsafe(32),
             "ready": False,
+            "challengeRows": None,
         }
         match_id = uuid.uuid4().hex
         room = {
@@ -571,6 +623,7 @@ def join_online_room(payload: OnlineRoomJoinRequest):
             "playerNumber": 2,
             "token": secrets.token_urlsafe(32),
             "ready": False,
+            "challengeRows": None,
         }
         room["players"].append(player)
         room["status"] = "briefing"
@@ -615,6 +668,57 @@ def set_online_ready(
             "choosing_mode"
             if all(item["ready"] for item in room["players"])
             else "briefing"
+        )
+        room["lastActivity"] = time.time()
+        return serialize_online_room(room, player)
+
+
+@app.post("/online/rooms/{match_id}/challenge")
+def submit_online_challenge(
+    match_id: str,
+    payload: OnlineChallengeRequest,
+    request: Request,
+):
+    try:
+        validate_online_challenge_rows(payload.rows)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    submitted_rows = list(payload.rows)
+
+    with ONLINE_ROOMS_LOCK:
+        room, player = require_online_room(
+            match_id,
+            request.headers.get("X-Player-Token"),
+        )
+
+        if room["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Room has been cancelled")
+
+        if len(room["players"]) < 2 or not all(
+            item["ready"] for item in room["players"]
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Both players must be ready before submitting challenges",
+            )
+
+        existing_rows = player.get("challengeRows")
+
+        if existing_rows is not None and existing_rows != submitted_rows:
+            raise HTTPException(
+                status_code=409,
+                detail="Submitted challenge is already frozen",
+            )
+
+        player["challengeRows"] = submitted_rows
+        both_submitted = all(
+            item.get("challengeRows") is not None for item in room["players"]
+        )
+        room["status"] = (
+            "challenges_ready"
+            if both_submitted
+            else "waiting_for_challenges"
         )
         room["lastActivity"] = time.time()
         return serialize_online_room(room, player)
