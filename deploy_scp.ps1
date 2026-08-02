@@ -31,10 +31,7 @@ $files = @(
     @{ Local = "Backend\llm_runtime.py"; Remote = "Backend/llm_runtime.py" },
     @{ Local = "Backend\prompt.py"; Remote = "Backend/prompt.py" },
     @{ Local = "Backend\requirements.txt"; Remote = "Backend/requirements.txt" },
-    @{ Local = "Frontend\index.html"; Remote = "Frontend/index.html" },
-    @{ Local = "Frontend\app.js"; Remote = "Frontend/app.js" },
-    @{ Local = "Frontend\styles.css"; Remote = "Frontend/styles.css" },
-    @{ Local = "Frontend\Images"; Remote = "Frontend/"; Recursive = $true },
+    @{ Local = "Frontend"; Remote = "."; Recursive = $true },
     @{ Local = "WebGLBuild"; Remote = "."; Recursive = $true }
 )
 
