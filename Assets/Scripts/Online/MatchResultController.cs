@@ -55,7 +55,7 @@ public class MatchResultController : MonoBehaviour
 
         RenderState(OnlineMatchContext.RoomState);
 
-        if (OnlineMatchContext.RoomState.opponentResult == null)
+        if (!HasOpponentSubmittedResult(OnlineMatchContext.RoomState))
         {
             StartCoroutine(PollUntilOpponentFinishes());
         }
@@ -84,7 +84,7 @@ public class MatchResultController : MonoBehaviour
             if (receivedState
                 && OnlineMatchContext.RoomState != null
                 && (
-                    OnlineMatchContext.RoomState.opponentResult != null
+                    HasOpponentSubmittedResult(OnlineMatchContext.RoomState)
                     || OnlineMatchContext.RoomState.status == "cancelled"
                 ))
             {
@@ -103,6 +103,8 @@ public class MatchResultController : MonoBehaviour
             return;
         }
 
+        bool opponentSubmittedResult = HasOpponentSubmittedResult(state);
+
         RenderMetadata(
             state.ownChallengeMetadata,
             ownChallengeCompetitionText,
@@ -119,12 +121,12 @@ public class MatchResultController : MonoBehaviour
             ownRunMovesText
         );
         RenderResult(
-            state.opponentResult,
+            opponentSubmittedResult ? state.opponentResult : null,
             opponentRunTimeText,
             opponentRunMovesText
         );
 
-        if (state.opponentResult != null)
+        if (opponentSubmittedResult)
         {
             SetText(statusText, "BOTH PLAYERS HAVE FINISHED.");
         }
@@ -136,6 +138,19 @@ public class MatchResultController : MonoBehaviour
         {
             SetText(statusText, "WAITING FOR OPPONENT TO FINISH...");
         }
+    }
+
+    private static bool HasOpponentSubmittedResult(OnlineRoomState state)
+    {
+        int playerNumber = state != null ? state.playerNumber : 0;
+
+        if (state == null || playerNumber < 1 || playerNumber > 2)
+        {
+            return false;
+        }
+
+        OnlinePlayerState opponent = state.FindPlayer(3 - playerNumber);
+        return opponent != null && opponent.resultSubmitted;
     }
 
     private static void RenderMetadata(
