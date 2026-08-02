@@ -6,13 +6,16 @@ This repository combines a Unity 2D Sokoban client with a Python service. Unity 
 
 `Backend/` contains the FastAPI application, LLM runtime and prompts, plus Python tests. `Frontend/` is the static study dashboard served at `/frontend/`. Unity package and editor settings live in `Packages/` and `ProjectSettings/`. Treat `Library/`, `Temp/`, `Logs/`, generated solution files, and `WebGLBuild/` as generated output.
 
-## Current Project Status (2026-07-30)
+## Current Project Status (2026-08-02)
 
 The active matchmaking route is:
 
 ```text
-Menu -> Competition_Mode -> AI_Asistant_Mode -> PC -> PC_Design -> PC_Level
-                                                -> DG -> DG_Level
+Menu -> Online_Lobby -> Match_Briefing -> Competition_Mode -> AI_Asistant_Mode
+                                                              -> PC -> PC_Design -> PC_Level
+                                                              -> DG -> DG_Level
+     -> complete the generated level -> Challenge_Waiting
+     -> Online_Level -> Match_Result
 ```
 
 Keep the existing scene spelling `AI_Asistant_Mode`; changing it requires coordinated scene, script, and Build Settings updates. The PC branch is separate from DG and Creative Workshop data. `PC_Level` reads only the sketch saved by `PC_Design`.
@@ -46,15 +49,28 @@ Keep the existing scene spelling `AI_Asistant_Mode`; changing it requires coordi
 - `LevelGenerator` applies the same orthogonal-adjacency rule locally in `DG_Level`: competitive wall shapes contain one or two tiles and separate blocks cannot join into a component larger than two; supportive blocks must attach to the already generated internal-wall component.
 - These DG restrictions apply to generated wall obstacles, not the closed or irregular outer shell.
 
+### Online matchmaking and challenge exchange
+
+- `MenuController.OpenMatchmaking()` loads `Online_Lobby`. Players create or join an anonymous two-player room, enter `Match_Briefing`, and move to `Competition_Mode` after both Ready flags are true.
+- The backend uses a single-process in-memory room store with six-character room codes, anonymous player tokens, one-second HTTP polling, lazy 30-minute expiry, and the states `waiting_for_opponent`, `briefing`, `choosing_mode`, `waiting_for_challenges`, `challenges_ready`, `waiting_for_results`, `results_ready`, and `cancelled`.
+- Room endpoints are `POST /online/rooms`, `POST /online/rooms/join`, `GET /online/rooms/{matchId}`, and the authenticated `/ready`, `/challenge`, `/result`, and `/leave` endpoints. Authenticated requests use `X-Player-Token`.
+- `OnlineMatchContext` is runtime-only. It stores the room identity, pending own rows and mode metadata, opponent rows, room state, and results. Refreshing WebGL or restarting the server does not restore a match.
+- In an online room, completing `PC_Level` or `DG_Level` stages the final rows and enters `Challenge_Waiting`. Without a valid online context, both scenes keep their original standalone completion behavior.
+- Challenge submissions include `rows`, `competitionMode`, and `aiAssistantMode`. Identical repeats are idempotent; changed rows or metadata are rejected after the first accepted submission. The server returns only the opponent rows to each authenticated player after both submissions.
+- `Online_Level` validates and solves the opponent rows locally before loading them. It uses `Player2` with arrow keys; PC/DG continue to use `Player` with WASD. Time and successful moves accumulate from first control until solve and are not reset by `R`.
+- Results include `durationSeconds`, `moveCount`, and `minimumMoves`. `Match_Result` displays each challenge's modes and both runs, polls while one result is missing, and leaves the room when returning to the lobby. The current stage does not rank players or upload a move sequence for server replay.
+- `ProjectSettings/ProjectSettings.asset` currently has `runInBackground: 0`. A background WebGL tab may pause polling; dual-browser tests must refocus the waiting result page and allow another polling interval before treating missing data as a role-mapping bug.
+- Online scene UI is serialized and statically visible in the editor. Relevant files are under `Assets/Scenes/Matchmaking/Online/` and `Assets/Scripts/Online/`. All five online scenes are enabled in `ProjectSettings/EditorBuildSettings.asset`.
+
 ### Deployment and verification state
 
-- The backend on `111.231.136.4` is running and `/ready` returns ready, but its inspected `/root/SURF/Backend/app.py` still has the former PC `4/2` wall thresholds. The local `5/4/3`, water-clearance, `2x2`, and competition-mode changes have not yet been deployed.
+- Last remote verification on 2026-08-02: `http://111.231.136.4:8000/ready` returned ready. The deployed backend contains the PC `5/4/3` thresholds, water-clearance and generated-wall `2x2` rules, competition-mode topology, challenge exchange, and result endpoints.
+- The remote WebGL at `http://111.231.136.4:8000/game/` contains the online scenes through `Match_Result`. Its current cache key is `online-20260731-5`; the deployed `WebGLBuild.data` was last uploaded on 2026-07-31.
 - A stale CPU-bound backend process from the former exhaustive search was force-terminated. Before killing any process in future work, identify the exact stale PID with `ps`; never broadly kill Python processes.
 - Backend-only deployment can be done by copying the changed backend files and then running `cd /root/SURF && ./deploy_scp` on the server. The local `deploy_scp.ps1` uploads a broader set including WebGL and frontend assets, so do not use it for a backend-only change without intending that scope.
-- Unity source changes are present locally but were not rebuilt or uploaded as a new WebGL build during this update.
-- Last verification: `python -m unittest discover -s Backend -p "test_*.py"` passed 121 tests. `dotnet build Assembly-CSharp.csproj --no-restore -v:minimal` completed with 0 errors.
-- The current PC implementation is committed at `f5a90a3` (`以可生成为优先`). Always inspect `git status` for newer user work before making further changes. That implementation touched the scene/client timeout, PC design validator and sketch controller, backend app and prompt, and PC backend tests.
-- The PC description in `README.md` still mentions direct coordinate selection and is stale. The complete-candidate-ID protocol described here and implemented in code is authoritative until that README section is updated.
+- Last local verification on 2026-08-02: `python -m unittest discover -s Backend -p "test_*.py"` passed 139 tests. `dotnet build Assembly-CSharp.csproj -v:minimal` completed with 0 errors and 25 warnings from Unity packages/analyzers. A future `--no-restore` build requires the generated `Temp/obj/.../project.assets.json` to exist first.
+- The last inspected code baseline before this documentation update was `1611a8f`. Do not treat a recorded commit as authoritative indefinitely; always inspect `git status` and recent history before editing, and preserve unrelated user changes.
+- `WebGLBuild/` is generated output and is not committed. For a WebGL update, rebuild with Unity 2022.3.62f2c1, bump the template cache key when stale browser assets are possible, upload `WebGLBuild/`, and verify the remote index plus the data/framework/wasm responses.
 
 ## Build, Test, and Development Commands
 
