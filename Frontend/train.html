@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sokoban MatchMaking Dashboard</title>
+    <title>Sokoban Train Dashboard</title>
     <script>
         window.FRONTEND_ASSET_BASE = window.location.protocol === "file:"
             ? "."
@@ -17,14 +17,14 @@
             <div class="brand">
                 <div class="brand-mark" aria-hidden="true">S</div>
                 <div>
-                    <h1>Sokoban MatchMaking Dashboard</h1>
-                    <div class="subtitle" id="dataSource">Loading MatchMaking records...</div>
+                    <h1>Sokoban Study Dashboard</h1>
+                    <div class="subtitle" id="dataSource">Loading study records...</div>
                 </div>
             </div>
             <div class="actions">
                 <nav class="flow-switch" aria-label="Dashboard flow">
-                    <a class="flow-switch-link active" href="./" aria-current="page">MatchMaking</a>
-                    <a class="flow-switch-link" href="./train.html">Train</a>
+                    <a class="flow-switch-link" href="./">MatchMaking</a>
+                    <a class="flow-switch-link active" href="./train.html" aria-current="page">Train</a>
                 </nav>
                 <button class="icon-button" id="refreshButton" type="button" title="Refresh data" aria-label="Refresh data">
                     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -37,11 +37,11 @@
                 <details class="tools-menu">
                     <summary class="text-button">Developer tools</summary>
                     <div class="tools-popover">
-                        <a id="rawLink" href="#">Raw MatchMaking JSONL</a>
-                        <a id="dataLink" href="#">MatchMaking data API</a>
+                        <a id="rawLink" href="#">Raw level JSONL</a>
+                        <a id="legacyLink" href="#">Legacy table</a>
                         <a id="docsLink" href="#">API documentation</a>
                         <div class="menu-divider"></div>
-                        <button class="menu-danger" id="clearButton" type="button">Clear MatchMaking data</button>
+                        <button class="menu-danger" id="clearButton" type="button">Clear all study data</button>
                     </div>
                 </details>
             </div>
@@ -51,49 +51,46 @@
             <div class="notice" id="notice" role="status"></div>
             <div class="status-line" id="statusLine">Preparing dashboard...</div>
 
-            <section class="summary" aria-label="MatchMaking summary">
+            <section class="summary" aria-label="Study summary">
                 <button class="stat" type="button" data-summary-filter="all">
-                    <span>Matches</span><strong id="statMatches">0</strong><small>recorded rooms</small>
+                    <span>Ideas</span><strong id="statIdeas">0</strong><small>official study journeys</small>
                 </button>
                 <button class="stat" type="button" data-summary-filter="completed">
                     <span>Completed</span><strong id="statCompleted">0</strong><small id="statCompletionRate">0% completion rate</small>
                 </button>
                 <button class="stat" type="button" data-summary-filter="all">
-                    <span>Average play time</span><strong id="statAvg">-</strong><small>across submitted runs</small>
+                    <span>Average play time</span><strong id="statAvg">-</strong><small>across ended levels</small>
                 </button>
-                <button class="stat stat-alert" type="button" data-summary-filter="attention">
-                    <span>Needs attention</span><strong id="statAttention">0</strong><small id="statDataHealth">no data issues</small>
+                <button class="stat stat-alert" type="button" data-summary-filter="anomaly">
+                    <span>Needs attention</span><strong id="statAnomalies">0</strong><small id="statDataHealth">no data issues</small>
                 </button>
             </section>
 
-            <section class="controls" aria-label="Match filters">
+            <section class="controls" aria-label="Journey filters">
                 <label class="search-field">
                     <svg class="search-icon icon" viewBox="0 0 24 24" aria-hidden="true">
                         <circle cx="11" cy="11" r="7"></circle>
                         <path d="m20 20-3.5-3.5"></path>
                     </svg>
                     <input id="searchInput" type="search" autocomplete="off" spellcheck="false"
-                        placeholder="Search room code or Match ID">
+                        placeholder="Search idea hash, idea text, nickname, or session">
                 </label>
                 <label class="select-field">
                     <span>Status</span>
                     <select id="statusFilter">
-                        <option value="all">All matches</option>
+                        <option value="all">All journeys</option>
                         <option value="completed">Completed</option>
-                        <option value="in_progress">In progress</option>
-                        <option value="cancelled">Cancelled</option>
-                        <option value="expired">Expired</option>
-                        <option value="attention">Needs attention</option>
+                        <option value="progress">In progress</option>
+                        <option value="anomaly">Needs attention</option>
                     </select>
                 </label>
                 <label class="select-field">
-                    <span>Mode</span>
+                    <span>Revision</span>
                     <select id="modeFilter">
                         <option value="all">All modes</option>
-                        <option value="competitive">Competitive</option>
-                        <option value="supportive">Supportive</option>
-                        <option value="description_generation">Description Generation</option>
-                        <option value="partial_completion">Partial Completion</option>
+                        <option value="ai">AI</option>
+                        <option value="human">Human</option>
+                        <option value="ha">HA</option>
                     </select>
                 </label>
             </section>
@@ -102,35 +99,35 @@
                 <aside class="panel idea-panel">
                     <div class="panel-header">
                         <div>
-                            <p class="eyebrow">MatchMaking flow</p>
-                            <h2>Match master list</h2>
+                            <p class="eyebrow">Study journeys</p>
+                            <h2>Idea master list</h2>
                         </div>
-                        <span class="count-pill" id="matchCount">0 shown</span>
+                        <span class="count-pill" id="ideaCount">0 shown</span>
                     </div>
-                    <div class="idea-list" id="matchList">
-                        <div class="empty-state">Loading matches...</div>
+                    <div class="idea-list" id="ideaList">
+                        <div class="empty-state">Loading ideas...</div>
                     </div>
                 </aside>
 
                 <section class="detail-shell">
                     <div class="panel empty-detail" id="emptyDetail">
-                        <div class="empty-illustration" aria-hidden="true">↔</div>
-                        <h2>Select a match</h2>
-                        <p>Choose a room on the left to inspect players, submitted challenges, results, and questionnaires.</p>
+                        <div class="empty-illustration" aria-hidden="true">↗</div>
+                        <h2>Select an idea journey</h2>
+                        <p>Choose an idea on the left to inspect its creative path, level versions, surveys, and HA decisions.</p>
                     </div>
 
-                    <div id="matchDetail" class="journey-detail" hidden>
+                    <div id="journeyDetail" class="journey-detail" hidden>
                         <section class="panel idea-overview">
                             <div class="idea-heading">
                                 <div>
                                     <div class="heading-line">
-                                        <h2 id="selectedMatchTitle">Match</h2>
-                                        <span class="status-chip" id="selectedMatchStatus">In progress</span>
+                                        <h2 id="selectedIdeaTitle">Idea</h2>
+                                        <span class="status-chip" id="selectedIdeaStatus">In progress</span>
                                     </div>
-                                    <p id="selectedMatchText">-</p>
-                                    <div class="meta-line" id="selectedMatchMeta"></div>
+                                    <p id="selectedIdeaText">-</p>
+                                    <div class="meta-line" id="selectedIdeaMeta"></div>
                                 </div>
-                                <button class="danger-button" id="deleteMatchButton" type="button">Delete match</button>
+                                <button class="danger-button" id="deleteIdeaButton" type="button">Delete entire idea</button>
                             </div>
                         </section>
 
@@ -138,12 +135,12 @@
                             <div class="panel-header compact-header">
                                 <div>
                                     <p class="eyebrow">End-to-end flow</p>
-                                    <h2>Match timeline</h2>
+                                    <h2>Journey timeline</h2>
                                 </div>
                                 <span class="hint">Select a stage to inspect it</span>
                             </div>
                             <div class="timeline-scroll">
-                                <div class="timeline" id="matchTimeline"></div>
+                                <div class="timeline" id="journeyTimeline"></div>
                             </div>
                         </section>
 
@@ -151,12 +148,12 @@
                             <section class="panel level-panel">
                                 <div class="panel-header compact-header">
                                     <div>
-                                        <p class="eyebrow">Generated artifacts</p>
-                                        <h2>Challenge maps</h2>
+                                        <p class="eyebrow">Generated artifact</p>
+                                        <h2>Level versions</h2>
                                     </div>
-                                    <span class="count-pill" id="challengeCount">0 challenges</span>
+                                    <span class="count-pill" id="levelCount">0 versions</span>
                                 </div>
-                                <div class="level-tabs" id="challengeTabs"></div>
+                                <div class="level-tabs" id="levelTabs"></div>
                                 <div class="map-content">
                                     <div class="map-frame">
                                         <div class="map-grid" id="mapGrid"></div>
@@ -177,20 +174,21 @@
                                 <div class="panel-header compact-header">
                                     <div>
                                         <p class="eyebrow">Selected stage</p>
-                                        <h2 id="inspectorTitle">Match details</h2>
+                                        <h2 id="inspectorTitle">Journey details</h2>
                                     </div>
+                                    <button class="quiet-danger" id="deleteStageButton" type="button" hidden>Delete this record</button>
                                 </div>
                                 <div class="inspector-body" id="inspectorBody"></div>
                             </aside>
                         </section>
 
-                        <section class="panel compare-panel">
+                        <section class="panel compare-panel" id="comparePanel">
                             <div class="panel-header compact-header">
                                 <div>
-                                    <p class="eyebrow">Challenge analysis</p>
-                                    <h2>Compare player challenges</h2>
+                                    <p class="eyebrow">Version analysis</p>
+                                    <h2>Compare level versions</h2>
                                 </div>
-                                <span class="hint">Both submitted maps appear side by side</span>
+                                <span class="hint">Select exactly two versions above</span>
                             </div>
                             <div id="compareContent" class="compare-content"></div>
                         </section>
@@ -222,14 +220,16 @@
             </div>
             <div class="delete-dialog-actions">
                 <button class="dialog-cancel-button" id="deleteDialogCancel" type="button">Cancel</button>
-                <button class="danger-button dialog-confirm-button" id="deleteDialogConfirm" type="submit">Delete</button>
+                <button class="danger-button dialog-confirm-button" id="deleteDialogConfirm" type="submit">
+                    Delete
+                </button>
             </div>
         </form>
     </dialog>
 
     <script>
         const script = document.createElement("script");
-        script.src = window.FRONTEND_ASSET_BASE + "/matchmaking.js";
+        script.src = window.FRONTEND_ASSET_BASE + "/app.js";
         document.body.appendChild(script);
     </script>
 </body>

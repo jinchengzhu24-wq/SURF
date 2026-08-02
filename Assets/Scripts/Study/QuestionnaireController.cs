@@ -323,6 +323,11 @@ public class QuestionnaireController : MonoBehaviour
         {
             SetStatus("Submitted.");
 
+            if (!IsBlank(record.matchId))
+            {
+                OnlineMatchContext.ClearPendingPostMatchSurvey();
+            }
+
             if (logSurveyEvents)
             {
                 Debug.Log("Questionnaire submitted: responseId=" + record.responseId + ", surveyId=" + record.surveyId);
@@ -411,6 +416,11 @@ public class QuestionnaireController : MonoBehaviour
     private SurveyResponseRecord CreateResponseRecord(
         SurveyAnswerRecord[] answers)
     {
+        bool isOnlinePostMatchSurvey = string.Equals(
+            surveyId,
+            "online_post_match_survey",
+            StringComparison.Ordinal
+        );
         return new SurveyResponseRecord
         {
             eventType = "survey-response",
@@ -422,6 +432,15 @@ public class QuestionnaireController : MonoBehaviour
             playerName = PlayerNameValue,
             sceneName = SceneManager.GetActiveScene().name,
             officialRound = LevelStudyRecorder.IsOfficialRoundFlow,
+            matchId = isOnlinePostMatchSurvey
+                ? OnlineMatchContext.PendingSurveyMatchId
+                : "",
+            roomCode = isOnlinePostMatchSurvey
+                ? OnlineMatchContext.PendingSurveyRoomCode
+                : "",
+            playerNumber = isOnlinePostMatchSurvey
+                ? OnlineMatchContext.PendingSurveyPlayerNumber
+                : 0,
             timestamp = DateTime.UtcNow.ToString("o"),
             durationSeconds = Mathf.Round((Time.realtimeSinceStartup - startedAt) * 100f) / 100f,
             answers = answers
@@ -506,6 +525,9 @@ public class SurveyResponseRecord
     public string playerName;
     public string sceneName;
     public bool officialRound;
+    public string matchId;
+    public string roomCode;
+    public int playerNumber;
     public string timestamp;
     public float durationSeconds;
     public SurveyAnswerRecord[] answers;

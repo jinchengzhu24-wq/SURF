@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -35,6 +37,24 @@ SOLVABLE_ROWS_B = [
 
 class OnlineRoomTests(unittest.TestCase):
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        log_dir = Path(self.temp_dir.name)
+        self.log_patchers = [
+            patch.object(
+                backend,
+                "ONLINE_MATCH_LOG_FILE",
+                log_dir / "online_match_events.jsonl",
+            ),
+            patch.object(
+                backend,
+                "SURVEY_LOG_FILE",
+                log_dir / "survey_responses.jsonl",
+            ),
+        ]
+
+        for patcher in self.log_patchers:
+            patcher.start()
+
         with backend.ONLINE_ROOMS_LOCK:
             backend.ONLINE_ROOMS.clear()
         self.client = TestClient(backend.app)
@@ -43,6 +63,11 @@ class OnlineRoomTests(unittest.TestCase):
         self.client.close()
         with backend.ONLINE_ROOMS_LOCK:
             backend.ONLINE_ROOMS.clear()
+
+        for patcher in reversed(self.log_patchers):
+            patcher.stop()
+
+        self.temp_dir.cleanup()
 
     @staticmethod
     def auth_headers(player_token):

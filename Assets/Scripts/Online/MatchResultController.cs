@@ -242,6 +242,7 @@ public class MatchResultController : MonoBehaviour
 
     private void FinishQuestionnaireTransition()
     {
+        OnlineMatchContext.StagePostMatchSurvey();
         OnlineMatchContext.Clear();
         SceneManager.LoadScene(QuestionnaireSceneName);
     }

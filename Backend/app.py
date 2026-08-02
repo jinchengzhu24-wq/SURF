@@ -95,6 +95,7 @@ CREATIVE_IDEA_LOG_FILE = STUDY_LOG_DIR / "creative_ideas.jsonl"
 CREATIVE_EXPANSION_CHOICE_LOG_FILE = STUDY_LOG_DIR / "creative_expansion_choices.jsonl"
 HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
 JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
+ONLINE_MATCH_LOG_FILE = STUDY_LOG_DIR / "online_match_events.jsonl"
 ONLINE_ROOM_TTL_SECONDS = 30 * 60
 ONLINE_ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ONLINE_ROOM_CODE_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
@@ -173,6 +174,11 @@ def cleanup_expired_online_rooms(now=None):
     ]
 
     for match_id in expired_match_ids:
+        append_online_match_event(
+            ONLINE_ROOMS[match_id],
+            "room_expired",
+            status_after="expired",
+        )
         del ONLINE_ROOMS[match_id]
 
 
@@ -191,6 +197,40 @@ def create_unique_online_room_code():
         status_code=503,
         detail="Unable to allocate a room code",
     )
+
+
+def append_online_match_event(
+    room,
+    event_type,
+    player_number=0,
+    status_after=None,
+    **details,
+):
+    event = {
+        "eventId": uuid.uuid4().hex,
+        "eventType": str(event_type or "").strip(),
+        "matchId": str(room.get("matchId") or "").strip(),
+        "roomCode": str(room.get("roomCode") or "").strip(),
+        "playerNumber": int(player_number or 0),
+        "statusAfter": str(
+            status_after
+            if status_after is not None
+            else room.get("status") or ""
+        ).strip(),
+        "serverReceivedAt": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(),
+        ),
+    }
+    event.update(details)
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        with ONLINE_MATCH_LOG_FILE.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(event, ensure_ascii=False))
+            log_file.write("\n")
+
+    return event
 
 
 def require_online_room(match_id, player_token):
@@ -512,6 +552,10 @@ class DeleteIdeaRecordsRequest(BaseModel):
     ideaId: str | None = ""
 
 
+class DeleteOnlineMatchRequest(BaseModel):
+    matchId: str | None = ""
+
+
 DEFAULT_PLAN = {
     "minSolutionSteps": 22,
     "maxSolutionSteps": 42,
@@ -673,6 +717,7 @@ def create_online_room():
             "lastActivity": time.time(),
         }
         ONLINE_ROOMS[match_id] = room
+        append_online_match_event(room, "room_created", player_number=1)
         return serialize_online_room(room, player, include_token=True)
 
 
@@ -712,6 +757,7 @@ def join_online_room(payload: OnlineRoomJoinRequest):
         room["players"].append(player)
         room["status"] = "briefing"
         room["lastActivity"] = time.time()
+        append_online_match_event(room, "player_joined", player_number=2)
         return serialize_online_room(room, player, include_token=True)
 
 
@@ -747,6 +793,7 @@ def set_online_ready(
                 detail="Cannot become ready before an opponent joins",
             )
 
+        previous_ready = bool(player["ready"])
         player["ready"] = bool(payload.ready)
         room["status"] = (
             "choosing_mode"
@@ -754,6 +801,15 @@ def set_online_ready(
             else "briefing"
         )
         room["lastActivity"] = time.time()
+
+        if previous_ready != player["ready"]:
+            append_online_match_event(
+                room,
+                "ready_changed",
+                player_number=player["playerNumber"],
+                ready=player["ready"],
+            )
+
         return serialize_online_room(room, player)
 
 
@@ -819,6 +875,14 @@ def submit_online_challenge(
             else "waiting_for_challenges"
         )
         room["lastActivity"] = time.time()
+        append_online_match_event(
+            room,
+            "challenge_submitted",
+            player_number=player["playerNumber"],
+            competitionMode=payload.competitionMode,
+            aiAssistantMode=payload.aiAssistantMode,
+            rows=submitted_rows,
+        )
         return serialize_online_room(room, player)
 
 
@@ -874,6 +938,12 @@ def submit_online_result(
             else "waiting_for_results"
         )
         room["lastActivity"] = time.time()
+        append_online_match_event(
+            room,
+            "result_submitted",
+            player_number=player["playerNumber"],
+            **submitted_result,
+        )
         return serialize_online_room(room, player)
 
 
@@ -884,8 +954,18 @@ def leave_online_room(match_id: str, request: Request):
             match_id,
             request.headers.get("X-Player-Token"),
         )
+        already_left = bool(player.get("left"))
+        player["left"] = True
         room["status"] = "cancelled"
         room["lastActivity"] = time.time()
+
+        if not already_left:
+            append_online_match_event(
+                room,
+                "player_left",
+                player_number=player["playerNumber"],
+            )
+
         return serialize_online_room(room, player)
 
 
@@ -1068,6 +1148,14 @@ def get_survey_records():
     return SURVEY_LOG_FILE.read_text(encoding="utf-8")
 
 
+@app.get("/matchmaking-records", response_class=PlainTextResponse)
+def get_matchmaking_records():
+    if not ONLINE_MATCH_LOG_FILE.exists():
+        return ""
+
+    return ONLINE_MATCH_LOG_FILE.read_text(encoding="utf-8")
+
+
 @app.get("/creative-ideas", response_class=PlainTextResponse)
 def get_creative_ideas():
     if not CREATIVE_IDEA_LOG_FILE.exists():
@@ -1080,6 +1168,25 @@ def get_creative_ideas():
 def get_survey_records_data():
     responses, malformed_count = read_survey_response_events()
     return build_survey_records_payload(responses, malformed_count)
+
+
+@app.get("/matchmaking-records-data")
+def get_matchmaking_records_data():
+    events, malformed_count = read_online_match_events()
+    survey_responses, survey_malformed_count = read_survey_response_events()
+    online_surveys = [
+        response
+        for response in survey_responses
+        if normalize_survey_identifier(response.get("matchId"))
+        and normalize_survey_identifier(response.get("surveyId"))
+        == "online_post_match_survey"
+    ]
+    return build_matchmaking_records_payload(
+        events,
+        malformed_count,
+        online_surveys,
+        survey_malformed_count,
+    )
 
 
 @app.get("/creative-ideas-data")
@@ -1621,6 +1728,71 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
 
 
 @app.post(
+    "/delete-online-match",
+    dependencies=[Depends(require_delete_password)],
+)
+def delete_online_match(request: DeleteOnlineMatchRequest):
+    match_id = normalize_survey_identifier(request.matchId)
+
+    if not match_id:
+        raise HTTPException(status_code=400, detail="matchId is required")
+
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        match_events, _ = read_online_match_events()
+        survey_records, _ = read_survey_response_events()
+        remaining_events = [
+            event
+            for event in match_events
+            if normalize_survey_identifier(event.get("matchId")) != match_id
+        ]
+        remaining_surveys = [
+            record
+            for record in survey_records
+            if normalize_survey_identifier(record.get("matchId")) != match_id
+        ]
+        deleted_event_count = len(match_events) - len(remaining_events)
+        deleted_survey_count = len(survey_records) - len(remaining_surveys)
+
+        if deleted_event_count + deleted_survey_count == 0:
+            raise HTTPException(status_code=404, detail="Online match not found")
+
+        write_jsonl_records(ONLINE_MATCH_LOG_FILE, remaining_events)
+        write_jsonl_records(SURVEY_LOG_FILE, remaining_surveys)
+
+    return {
+        "status": "ok",
+        "matchId": match_id,
+        "deletedEventCount": deleted_event_count,
+        "deletedSurveyCount": deleted_survey_count,
+    }
+
+
+@app.post(
+    "/clear-matchmaking-records",
+    dependencies=[Depends(require_delete_password)],
+)
+def clear_matchmaking_records():
+    STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        survey_records, _ = read_survey_response_events()
+        remaining_surveys = [
+            record
+            for record in survey_records
+            if not normalize_survey_identifier(record.get("matchId"))
+        ]
+        ONLINE_MATCH_LOG_FILE.write_text("", encoding="utf-8")
+        write_jsonl_records(SURVEY_LOG_FILE, remaining_surveys)
+
+    return {
+        "status": "ok",
+        "deletedSurveyCount": len(survey_records) - len(remaining_surveys),
+    }
+
+
+@app.post(
     "/clear-level-records",
     dependencies=[Depends(require_delete_password)],
 )
@@ -1979,6 +2151,273 @@ def read_ha_plan_events():
 
 def read_journey_events():
     return read_jsonl_records(JOURNEY_EVENT_LOG_FILE)
+
+
+def read_online_match_events():
+    return read_jsonl_records(ONLINE_MATCH_LOG_FILE)
+
+
+def build_matchmaking_records_payload(
+    events,
+    malformed_count,
+    survey_responses,
+    survey_malformed_count=0,
+):
+    matches = {}
+    allowed_event_fields = {
+        "eventId",
+        "eventType",
+        "matchId",
+        "roomCode",
+        "playerNumber",
+        "statusAfter",
+        "serverReceivedAt",
+        "ready",
+        "competitionMode",
+        "aiAssistantMode",
+        "rows",
+        "durationSeconds",
+        "moveCount",
+        "minimumMoves",
+    }
+
+    def create_player(player_number):
+        return {
+            "playerNumber": player_number,
+            "joinedAt": None,
+            "ready": False,
+            "readyAt": None,
+            "leftAt": None,
+            "challenge": None,
+            "result": None,
+            "survey": None,
+            "surveys": [],
+        }
+
+    def get_match(match_id, room_code=""):
+        if match_id not in matches:
+            matches[match_id] = {
+                "matchId": match_id,
+                "roomCode": room_code,
+                "status": "in_progress",
+                "createdAt": None,
+                "updatedAt": None,
+                "completedAt": None,
+                "endedAt": None,
+                "playerCount": 0,
+                "players": {
+                    1: create_player(1),
+                    2: create_player(2),
+                },
+                "events": [],
+            }
+        elif room_code and not matches[match_id]["roomCode"]:
+            matches[match_id]["roomCode"] = room_code
+
+        return matches[match_id]
+
+    ordered_events = sorted(
+        (event for event in events if isinstance(event, dict)),
+        key=lambda event: str(event.get("serverReceivedAt") or ""),
+    )
+
+    for event in ordered_events:
+        match_id = normalize_survey_identifier(event.get("matchId"))
+
+        if not match_id:
+            continue
+
+        room_code = normalize_survey_identifier(event.get("roomCode"))
+        match_record = get_match(match_id, room_code)
+        safe_event = {
+            key: value
+            for key, value in event.items()
+            if key in allowed_event_fields
+        }
+        safe_event["matchId"] = match_id
+        safe_event["roomCode"] = room_code or match_record["roomCode"]
+        match_record["events"].append(safe_event)
+        timestamp = normalize_survey_identifier(event.get("serverReceivedAt"))
+
+        if timestamp:
+            if not match_record["createdAt"]:
+                match_record["createdAt"] = timestamp
+            match_record["updatedAt"] = timestamp
+
+        try:
+            player_number = int(event.get("playerNumber") or 0)
+        except (TypeError, ValueError):
+            player_number = 0
+
+        player = match_record["players"].get(player_number)
+        event_type = normalize_survey_identifier(event.get("eventType"))
+
+        if event_type == "room_created":
+            match_record["createdAt"] = timestamp or match_record["createdAt"]
+            player = match_record["players"][1]
+            player["joinedAt"] = player["joinedAt"] or timestamp
+        elif event_type == "player_joined" and player is not None:
+            player["joinedAt"] = player["joinedAt"] or timestamp
+        elif event_type == "ready_changed" and player is not None:
+            player["ready"] = event.get("ready") is True
+            player["readyAt"] = timestamp
+        elif event_type == "challenge_submitted" and player is not None:
+            rows = event.get("rows")
+            player["challenge"] = {
+                "submittedAt": timestamp,
+                "competitionMode": normalize_survey_identifier(
+                    event.get("competitionMode")
+                ),
+                "aiAssistantMode": normalize_survey_identifier(
+                    event.get("aiAssistantMode")
+                ),
+                "rows": list(rows) if isinstance(rows, list) else [],
+            }
+        elif event_type == "result_submitted" and player is not None:
+            player["result"] = {
+                "submittedAt": timestamp,
+                "durationSeconds": event.get("durationSeconds"),
+                "moveCount": event.get("moveCount"),
+                "minimumMoves": event.get("minimumMoves"),
+            }
+        elif event_type == "player_left" and player is not None:
+            player["leftAt"] = timestamp
+
+    normalized_surveys = sorted(
+        (
+            normalize_survey_response(response)
+            for response in survey_responses
+            if isinstance(response, dict)
+        ),
+        key=lambda response: str(
+            response.get("serverReceivedAt") or response.get("timestamp") or ""
+        ),
+    )
+
+    for response in normalized_surveys:
+        match_id = normalize_survey_identifier(response.get("matchId"))
+
+        if not match_id:
+            continue
+
+        try:
+            player_number = int(response.get("playerNumber") or 0)
+        except (TypeError, ValueError):
+            player_number = 0
+
+        if player_number not in (1, 2):
+            continue
+
+        match_record = get_match(
+            match_id,
+            normalize_survey_identifier(response.get("roomCode")),
+        )
+        player = match_record["players"][player_number]
+        player["surveys"].append(response)
+        player["survey"] = response
+        timestamp = normalize_survey_identifier(
+            response.get("serverReceivedAt") or response.get("timestamp")
+        )
+
+        if timestamp and (
+            not match_record["updatedAt"]
+            or timestamp > match_record["updatedAt"]
+        ):
+            match_record["updatedAt"] = timestamp
+
+    result_records = []
+    total_duration = 0.0
+    duration_count = 0
+    completed_count = 0
+    cancelled_count = 0
+    expired_count = 0
+    questionnaire_count = 0
+
+    for match_record in matches.values():
+        players = match_record["players"]
+
+        for creator_number, creator in players.items():
+            if creator["challenge"] is not None:
+                opponent_number = 3 - creator_number
+                creator["challenge"]["createdByPlayerNumber"] = creator_number
+                creator["challenge"]["playedByPlayerNumber"] = opponent_number
+                opponent_result = players[opponent_number]["result"]
+                creator["challenge"]["runResult"] = (
+                    dict(opponent_result) if opponent_result is not None else None
+                )
+
+        completed = all(players[number]["result"] is not None for number in (1, 2))
+        event_types = {
+            event.get("eventType")
+            for event in match_record["events"]
+        }
+
+        if completed:
+            match_record["status"] = "completed"
+            completed_count += 1
+            result_times = [
+                players[number]["result"].get("submittedAt")
+                for number in (1, 2)
+                if players[number]["result"] is not None
+            ]
+            match_record["completedAt"] = max(
+                (value for value in result_times if value),
+                default=None,
+            )
+            match_record["endedAt"] = match_record["completedAt"]
+        elif "room_expired" in event_types:
+            match_record["status"] = "expired"
+            expired_count += 1
+            match_record["endedAt"] = match_record["updatedAt"]
+        elif "player_left" in event_types:
+            match_record["status"] = "cancelled"
+            cancelled_count += 1
+            match_record["endedAt"] = match_record["updatedAt"]
+
+        for player in players.values():
+            questionnaire_count += len(player["surveys"])
+            result = player["result"]
+
+            if result is not None and isinstance(
+                result.get("durationSeconds"),
+                (int, float),
+            ):
+                total_duration += float(result["durationSeconds"])
+                duration_count += 1
+
+        match_record["playerCount"] = sum(
+            1 for player in players.values() if player["joinedAt"]
+        )
+        match_record["players"] = [players[1], players[2]]
+        result_records.append(match_record)
+
+    result_records.sort(
+        key=lambda match_record: str(match_record.get("updatedAt") or ""),
+        reverse=True,
+    )
+    average_duration = total_duration / duration_count if duration_count else 0
+    return {
+        "summary": {
+            "matchCount": len(result_records),
+            "completedCount": completed_count,
+            "inProgressCount": (
+                len(result_records)
+                - completed_count
+                - cancelled_count
+                - expired_count
+            ),
+            "cancelledCount": cancelled_count,
+            "expiredCount": expired_count,
+            "averageRunDurationSeconds": round(average_duration, 2),
+            "questionnaireCount": questionnaire_count,
+            "malformedCount": int(malformed_count or 0),
+        },
+        "matches": result_records,
+        "malformedCount": int(malformed_count or 0),
+        "surveyMalformedCount": int(survey_malformed_count or 0),
+        "logFile": str(ONLINE_MATCH_LOG_FILE),
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
 
 def filter_frontend_records(records):

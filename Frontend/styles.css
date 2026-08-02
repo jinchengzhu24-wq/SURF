@@ -116,6 +116,39 @@ h1 {
     gap: 8px;
 }
 
+.flow-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    background: var(--surface-soft);
+}
+
+.flow-switch-link {
+    display: inline-flex;
+    min-height: 30px;
+    align-items: center;
+    justify-content: center;
+    padding: 0 10px;
+    border-radius: 5px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.flow-switch-link:hover {
+    color: var(--text);
+    background: var(--surface);
+}
+
+.flow-switch-link.active {
+    color: #fff;
+    background: var(--brand);
+}
+
 .icon-button,
 .text-button {
     display: inline-flex;
@@ -1105,6 +1138,10 @@ main {
 @media (max-width: 680px) {
     :root {
         --tile-size: 23px;
+    }
+
+    .flow-switch-link {
+        padding: 0 7px;
     }
 
     .topbar {

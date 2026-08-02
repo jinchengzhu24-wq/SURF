@@ -11,6 +11,9 @@ public static class OnlineMatchContext
     public static string PendingCompetitionMode { get; private set; } = "";
     public static string PendingAiAssistantMode { get; private set; } = "";
     public static string[] OpponentChallengeRows { get; private set; }
+    public static string PendingSurveyMatchId { get; private set; } = "";
+    public static string PendingSurveyRoomCode { get; private set; } = "";
+    public static int PendingSurveyPlayerNumber { get; private set; }
 
     public static bool HasMatch =>
         !string.IsNullOrWhiteSpace(MatchId)
@@ -22,6 +25,10 @@ public static class OnlineMatchContext
 
     public static bool HasOpponentChallenge =>
         OpponentChallengeRows != null && OpponentChallengeRows.Length > 0;
+
+    public static bool HasPendingPostMatchSurvey =>
+        !string.IsNullOrWhiteSpace(PendingSurveyMatchId)
+        && (PendingSurveyPlayerNumber == 1 || PendingSurveyPlayerNumber == 2);
 
     public static void Initialize(OnlineRoomState state)
     {
@@ -37,6 +44,7 @@ public static class OnlineMatchContext
         RoomCode = state.roomCode ?? "";
         PlayerToken = state.playerToken;
         PlayerNumber = state.playerNumber;
+        ClearPendingPostMatchSurvey();
         RoomState = state;
         PendingChallengeRows = null;
         PendingCompetitionMode = "";
@@ -84,6 +92,26 @@ public static class OnlineMatchContext
         PendingChallengeRows = null;
         PendingCompetitionMode = "";
         PendingAiAssistantMode = "";
+    }
+
+    public static void StagePostMatchSurvey()
+    {
+        if (!HasMatch)
+        {
+            ClearPendingPostMatchSurvey();
+            return;
+        }
+
+        PendingSurveyMatchId = MatchId;
+        PendingSurveyRoomCode = RoomCode;
+        PendingSurveyPlayerNumber = PlayerNumber;
+    }
+
+    public static void ClearPendingPostMatchSurvey()
+    {
+        PendingSurveyMatchId = "";
+        PendingSurveyRoomCode = "";
+        PendingSurveyPlayerNumber = 0;
     }
 
     public static void Clear()

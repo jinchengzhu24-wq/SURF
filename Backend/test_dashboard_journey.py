@@ -23,7 +23,9 @@ class DashboardJourneyTests(unittest.TestCase):
             ("/delete-ha-plan-event", {"haEventId": "ha-a"}),
             ("/delete-journey-event", {"journeyEventId": "journey-a"}),
             ("/delete-idea-records", {"ideaId": "idea-a"}),
+            ("/delete-online-match", {"matchId": "match-a"}),
             ("/clear-level-records", {}),
+            ("/clear-matchmaking-records", {}),
         ]
 
         with (
