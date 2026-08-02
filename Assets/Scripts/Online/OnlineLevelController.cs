@@ -30,6 +30,7 @@ public class OnlineLevelController : MonoBehaviour
     private bool runStarted;
     private bool runCompleted;
     private bool resultSubmissionStarted;
+    private bool resultSubmitted;
     private float runStartedAt;
     private float runDurationSeconds;
     private int runMoveCount;
@@ -64,6 +65,11 @@ public class OnlineLevelController : MonoBehaviour
         if (completePanel != null)
         {
             completePanel.SetActive(false);
+        }
+
+        if (completeLeaveButton != null)
+        {
+            completeLeaveButton.interactable = false;
         }
 
         SetText(roomCodeText, "ROOM " + OnlineMatchContext.RoomCode);
@@ -217,13 +223,50 @@ public class OnlineLevelController : MonoBehaviour
                     yield break;
                 }
 
-                transitioning = true;
-                SceneManager.LoadScene(ResultSceneName);
+                resultSubmitted = true;
+                SetText(
+                    completeHintText,
+                    "RESULT SUBMITTED.\nSELECT LEAVE TO VIEW MATCH RESULTS."
+                );
+
+                if (completeLeaveButton != null)
+                {
+                    completeLeaveButton.interactable = true;
+                }
+
                 yield break;
             }
 
             yield return new WaitForSecondsRealtime(1f);
         }
+    }
+
+    private void OpenMatchResult()
+    {
+        if (leaving || transitioning || !resultSubmitted)
+        {
+            return;
+        }
+
+        if (!Application.CanStreamedLevelBeLoaded(ResultSceneName))
+        {
+            SetText(completeHintText, "MATCH RESULT SCENE IS NOT AVAILABLE.");
+            return;
+        }
+
+        transitioning = true;
+
+        if (leaveButton != null)
+        {
+            leaveButton.interactable = false;
+        }
+
+        if (completeLeaveButton != null)
+        {
+            completeLeaveButton.interactable = false;
+        }
+
+        SceneManager.LoadScene(ResultSceneName);
     }
 
     private void LeaveMatch()
@@ -318,7 +361,8 @@ public class OnlineLevelController : MonoBehaviour
         if (completeLeaveButton != null)
         {
             completeLeaveButton.onClick.RemoveListener(LeaveMatch);
-            completeLeaveButton.onClick.AddListener(LeaveMatch);
+            completeLeaveButton.onClick.RemoveListener(OpenMatchResult);
+            completeLeaveButton.onClick.AddListener(OpenMatchResult);
         }
     }
 

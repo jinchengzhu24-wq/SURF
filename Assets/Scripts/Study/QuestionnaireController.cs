@@ -21,7 +21,6 @@ public class QuestionnaireController : MonoBehaviour
 
     [Header("Scene UI")]
     public Button submitButton;
-    public Text statusText;
     public InputField playerNameInput;
 
     [Header("Player Name Input")]
@@ -59,7 +58,6 @@ public class QuestionnaireController : MonoBehaviour
         ResolveSceneReferences();
         ConfigurePlayerNameInput();
         WireButtons();
-        SetStatus("");
         UpdateSubmitState();
     }
 
@@ -83,16 +81,6 @@ public class QuestionnaireController : MonoBehaviour
             if (submitObject != null)
             {
                 submitButton = submitObject.GetComponent<Button>();
-            }
-        }
-
-        if (statusText == null)
-        {
-            GameObject statusObject = GameObject.Find("StatusText");
-
-            if (statusObject != null)
-            {
-                statusText = statusObject.GetComponent<Text>();
             }
         }
 
@@ -304,7 +292,6 @@ public class QuestionnaireController : MonoBehaviour
     {
         isSubmitting = true;
         UpdateSubmitState();
-        SetStatus("Submitting...");
 
         SurveyResponseRecord record = CreateResponseRecord();
         string json = JsonUtility.ToJson(record);
@@ -321,8 +308,6 @@ public class QuestionnaireController : MonoBehaviour
 
         if (request.result == UnityWebRequest.Result.Success)
         {
-            SetStatus("Submitted.");
-
             if (!IsBlank(record.matchId))
             {
                 OnlineMatchContext.ClearPendingPostMatchSurvey();
@@ -341,7 +326,6 @@ public class QuestionnaireController : MonoBehaviour
         }
         else
         {
-            SetStatus("Submit failed: " + request.error);
             Debug.LogWarning(
                 "Questionnaire submit failed:"
                 + " url=" + url
@@ -484,14 +468,6 @@ public class QuestionnaireController : MonoBehaviour
         return !string.IsNullOrEmpty(CreativeWorkshopContext.IdeaId)
             ? CreativeWorkshopContext.IdeaId
             : PlayerPrefs.GetString(CreativeWorkshopContext.IdeaIdPrefsKey, "");
-    }
-
-    private void SetStatus(string message)
-    {
-        if (statusText != null)
-        {
-            statusText.text = message;
-        }
     }
 
     private string PlayerNameValue

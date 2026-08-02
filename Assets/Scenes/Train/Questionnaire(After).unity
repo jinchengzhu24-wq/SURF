@@ -2022,7 +2022,6 @@ MonoBehaviour:
   surveyTitle: Questionnaire
   nextSceneName: Menu
   submitButton: {fileID: 2300000119}
-  statusText: {fileID: 0}
   playerNameInput: {fileID: 0}
   requirePlayerName: 0
   startsSurveyPair: 0
