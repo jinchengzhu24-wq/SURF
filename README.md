@@ -26,6 +26,9 @@ Online_Level
   → 使用 Player2 游玩对手关卡并提交成绩
 Match_Result
   → 等待并显示双方结果
+Questionnaire(Online)
+  → 完成并成功提交在线赛后问卷
+Menu
 ```
 
 完整场景路径见本文末尾的 Build Settings。上述联机场景均已创建并启用。
@@ -50,7 +53,8 @@ Match_Result
 - 在线房间中，玩家亲自通关 `PC_Level` 或 `DG_Level` 后，最终 rows 和两种模式会暂存并进入 `Challenge_Waiting`；非联机调试继续执行原场景完成行为。
 - `Challenge_Waiting` 幂等提交关卡并等待对手；双方提交后由玩家确认进入 `Online_Level`。
 - `Online_Level` 使用 `Player2` 和方向键游玩对手 rows，累计耗时、有效移动数和理论最少移动数，通关后提交结果并进入 `Match_Result`。
-- `Match_Result` 先显示己方成绩，再轮询并补齐对手成绩；当前版本只展示对比，不判定胜负。
+- `Match_Result` 先显示己方成绩，再轮询并补齐对手成绩；点击 Continue 后 Leave 当前房间、清理联机上下文并进入 `Questionnaire(Online)`。
+- `Questionnaire(Online)` 使用三条带 1～5 数字刻度的离散滑杆，默认分数均为 3；`/record-survey-response` 提交成功后才加载 `Menu`，提交失败时留在当前场景重试。
 
 当前选择保存键：
 
@@ -92,6 +96,9 @@ Menu
   → Online_Level
   → 提交耗时、移动数和理论最小移动数
   → Match_Result
+  → Questionnaire(Online)
+  → 成功提交问卷
+  → Menu
 ```
 
 一次对局中，玩家 A 和玩家 B 分别完成自己的 PC 或 DG 生成流程，并将最终确认的关卡和模式选择提交给服务器。服务器冻结两份关卡后，将 A 的关卡交给 B、将 B 的关卡交给 A。双方各自在自己的浏览器中游玩对手关卡，完成后上传耗时、移动数和本地求解器得到的理论最小移动数；结果页负责等待并汇总双方成绩。
@@ -108,6 +115,7 @@ Menu
 - `Challenge_Waiting`：幂等提交己方 rows、轮询对手创作状态；双方完成后启用确认游玩按钮。
 - `Online_Level`：只加载服务器锁定的对手 rows，使用 `Player2` 和方向键游玩，并在本地格式与可解性验证通过后开始累计用时和移动数；不会再次调用 PC 或 DG 生成接口。
 - `Match_Result`：先展示己方成绩并轮询对手状态；双方完成后展示各自耗时、实际移动数与理论最小移动数，以及双方选择的 Competition Mode 和 AI Assistant Mode。
+- `Questionnaire(Online)`：通过三条 1～5 分离散滑杆记录在线赛后评分；圆形滑块只能停在整数刻度，右侧分数框实时显示当前数值，默认值为 3。提交成功后返回主菜单，失败时不跳转。
 
 当前场景路径：
 
@@ -117,6 +125,7 @@ Assets/Scenes/Matchmaking/Online/Challenge_Waiting.unity
 Assets/Scenes/Matchmaking/Online/Online_Level.unity
 Assets/Scenes/Matchmaking/Online/Match_Result.unity
 Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
+Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
 ```
 
 `PC_Level` 和 `DG_Level` 继续使用 `Player`（WASD），负责生成、校验、预览并提交己方设计的关卡。`Online_Level` 使用 `Player2`（方向键）单独游玩对手关卡，避免 PC/DG 的生成控制器在加载时覆盖服务器下发的固定布局。
@@ -189,7 +198,8 @@ Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
 - `Online_Level` 仅从 `OnlineMatchContext` 加载对手 `rows`，关卡开始后不得编辑布局。
 - `Online_Level` 从首次可操作到通关累计耗时与有效移动；按 `R` 重开不会清零比赛统计。
 - `Online_Level` 通关后幂等提交结果并进入 `Match_Result`；网络失败时留在完成页自动重试。
-- `Match_Result` 在对手尚未完成时每秒轮询，双方完成后停止轮询；返回大厅会 Leave 并清理运行时上下文。项目当前 `runInBackground` 为关闭状态，WebGL 标签页失去焦点时轮询可能暂停，重新聚焦后才会继续。
+- `Match_Result` 在对手尚未完成时每秒轮询，双方完成后停止轮询；Continue 会 Leave、清理运行时上下文并进入在线问卷。项目当前 `runInBackground` 为关闭状态，WebGL 标签页失去焦点时轮询可能暂停，重新聚焦后才会继续。
+- `Questionnaire(Online)` 使用独立的 `online_post_match_survey` ID；三个默认 3 分可直接提交，分数继续写入现有答案结构的 `optionIndex`、`optionId` 和 `optionText`。只有后端确认提交成功后才进入 `Menu`。
 - 生产环境的 WebGL 页面、HTTP API 和 WebSocket 应统一使用 HTTPS/WSS，避免浏览器阻止混合内容。
 
 上述联机场景已经创建并加入 Unity Build Settings。新增或改名场景时必须同步更新场景跳转常量和 Build Settings，保留现有 `AI_Asistant_Mode` 拼写。
@@ -212,6 +222,7 @@ Assets/Scenes/Matchmaking/DG_Level.unity
 Assets/Scenes/Matchmaking/Online/Challenge_Waiting.unity
 Assets/Scenes/Matchmaking/Online/Online_Level.unity
 Assets/Scenes/Matchmaking/Online/Match_Result.unity
+Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
 ```
 
 ## 手动验证
@@ -229,4 +240,5 @@ Assets/Scenes/Matchmaking/Online/Match_Result.unity
 11. PC/DG 中确认生成的是 `Player` 且 WASD 有效；Online_Level 中确认生成的是 `Player2` 且方向键有效。
 12. 一方通关对手关卡后应进入 `Match_Result` 并显示己方成绩；按 `R` 重开前的耗时和移动数仍计入成绩。
 13. 第二方通关后，第一方结果页应在一次轮询后补齐对手成绩和双方模式；测试两个浏览器时需重新聚焦第一方页面并等待至少一次轮询，因为后台 WebGL 当前会暂停运行。
-14. `BACK TO LOBBY` 应调用 Leave、清理房间上下文并返回联机大厅。
+14. `CONTINUE` 应调用 Leave、清理房间上下文并进入 `Questionnaire(Online)`，不能直接返回大厅。
+15. 在线问卷初始应显示三条五档滑杆和三个 `3` 分；拖动圆形滑块时只能落在整数刻度，右侧分数同步更新。默认值或调整后的分数只有在服务器返回成功后才进入 `Menu`，提交失败时不得离开。

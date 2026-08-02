@@ -15,7 +15,7 @@ Menu -> Online_Lobby -> Match_Briefing -> Competition_Mode -> AI_Asistant_Mode
                                                               -> PC -> PC_Design -> PC_Level
                                                               -> DG -> DG_Level
      -> complete the generated level -> Challenge_Waiting
-     -> Online_Level -> Match_Result
+     -> Online_Level -> Match_Result -> Questionnaire(Online) -> Menu
 ```
 
 Keep the existing scene spelling `AI_Asistant_Mode`; changing it requires coordinated scene, script, and Build Settings updates. The PC branch is separate from DG and Creative Workshop data. `PC_Level` reads only the sketch saved by `PC_Design`.
@@ -58,14 +58,15 @@ Keep the existing scene spelling `AI_Asistant_Mode`; changing it requires coordi
 - In an online room, completing `PC_Level` or `DG_Level` stages the final rows and enters `Challenge_Waiting`. Without a valid online context, both scenes keep their original standalone completion behavior.
 - Challenge submissions include `rows`, `competitionMode`, and `aiAssistantMode`. Identical repeats are idempotent; changed rows or metadata are rejected after the first accepted submission. The server returns only the opponent rows to each authenticated player after both submissions.
 - `Online_Level` validates and solves the opponent rows locally before loading them. It uses `Player2` with arrow keys; PC/DG continue to use `Player` with WASD. Time and successful moves accumulate from first control until solve and are not reset by `R`.
-- Results include `durationSeconds`, `moveCount`, and `minimumMoves`. `Match_Result` displays each challenge's modes and both runs, polls while one result is missing, and leaves the room when returning to the lobby. The current stage does not rank players or upload a move sequence for server replay.
+- Results include `durationSeconds`, `moveCount`, and `minimumMoves`. `Match_Result` displays each challenge's modes and both runs and polls while one result is missing. Continue leaves the room, clears `OnlineMatchContext`, and loads `Questionnaire(Online)`.
+- `Questionnaire(Online)` reuses `QuestionnaireController` with survey ID `online_post_match_survey`, does not require another nickname, and targets `Menu`. It uses three discrete 1-to-5 sliders with visible integer ticks, circular handles, live score boxes, and a valid default score of 3. Scores remain compatible with the existing answer envelope through `optionIndex`, `score_N` in `optionId`, and the numeric `optionText`. It must load Menu only after `/record-survey-response` succeeds; a failed submission remains on the questionnaire for retry.
 - `ProjectSettings/ProjectSettings.asset` currently has `runInBackground: 0`. A background WebGL tab may pause polling; dual-browser tests must refocus the waiting result page and allow another polling interval before treating missing data as a role-mapping bug.
-- Online scene UI is serialized and statically visible in the editor. Relevant files are under `Assets/Scenes/Matchmaking/Online/` and `Assets/Scripts/Online/`. All five online scenes are enabled in `ProjectSettings/EditorBuildSettings.asset`.
+- Online scene UI is serialized and statically visible in the editor. Relevant files are under `Assets/Scenes/Matchmaking/Online/`, `Assets/Scripts/Online/`, and `Assets/Scripts/Study/QuestionnaireController.cs`. All six online scenes are enabled in `ProjectSettings/EditorBuildSettings.asset`.
 
 ### Deployment and verification state
 
 - Last remote verification on 2026-08-02: `http://111.231.136.4:8000/ready` returned ready. The deployed backend contains the PC `5/4/3` thresholds, water-clearance and generated-wall `2x2` rules, competition-mode topology, challenge exchange, and result endpoints.
-- The remote WebGL at `http://111.231.136.4:8000/game/` contains the online scenes through `Match_Result`. Its current cache key is `online-20260731-5`; the deployed `WebGLBuild.data` was last uploaded on 2026-07-31.
+- The remote WebGL at `http://111.231.136.4:8000/game/` currently contains the online scenes through `Match_Result`. Its current cache key is `online-20260731-5`; the deployed `WebGLBuild.data` was last uploaded on 2026-07-31. The newly added `Questionnaire(Online)` route is local-only until the next WebGL build and upload.
 - A stale CPU-bound backend process from the former exhaustive search was force-terminated. Before killing any process in future work, identify the exact stale PID with `ps`; never broadly kill Python processes.
 - Backend-only deployment can be done by copying the changed backend files and then running `cd /root/SURF && ./deploy_scp` on the server. The local `deploy_scp.ps1` uploads a broader set including WebGL and frontend assets, so do not use it for a backend-only change without intending that scope.
 - Last local verification on 2026-08-02: `python -m unittest discover -s Backend -p "test_*.py"` passed 139 tests. `dotnet build Assembly-CSharp.csproj -v:minimal` completed with 0 errors and 25 warnings from Unity packages/analyzers. A future `--no-restore` build requires the generated `Temp/obj/.../project.assets.json` to exist first.

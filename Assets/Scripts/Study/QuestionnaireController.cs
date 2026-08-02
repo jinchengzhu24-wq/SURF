@@ -40,6 +40,7 @@ public class QuestionnaireController : MonoBehaviour
     private readonly Dictionary<int, QuestionnaireOptionButton> selectedOptions =
         new Dictionary<int, QuestionnaireOptionButton>();
     private QuestionnaireOptionButton[] optionButtons = new QuestionnaireOptionButton[0];
+    private QuestionnaireScoreSlider[] scoreSliders = new QuestionnaireScoreSlider[0];
     private float startedAt;
     private bool isSubmitting;
 
@@ -73,6 +74,7 @@ public class QuestionnaireController : MonoBehaviour
     private void ResolveSceneReferences()
     {
         optionButtons = FindObjectsOfType<QuestionnaireOptionButton>();
+        scoreSliders = FindObjectsOfType<QuestionnaireScoreSlider>();
 
         if (submitButton == null)
         {
@@ -112,6 +114,11 @@ public class QuestionnaireController : MonoBehaviour
 
     private void WireButtons()
     {
+        for (int i = 0; i < scoreSliders.Length; i++)
+        {
+            scoreSliders[i].Prepare();
+        }
+
         for (int i = 0; i < optionButtons.Length; i++)
         {
             QuestionnaireOptionButton option = optionButtons[i];
@@ -227,6 +234,28 @@ public class QuestionnaireController : MonoBehaviour
 
     private bool IsComplete()
     {
+        if (scoreSliders.Length > 0)
+        {
+            HashSet<int> scoreQuestionIndexes = new HashSet<int>();
+
+            for (int i = 0; i < scoreSliders.Length; i++)
+            {
+                QuestionnaireScoreSlider scoreSlider = scoreSliders[i];
+
+                if (!scoreSlider.HasValidScore)
+                {
+                    return false;
+                }
+
+                scoreQuestionIndexes.Add(scoreSlider.questionIndex);
+            }
+
+            bool allScoresPresent = scoreSliders.Length == RequiredAnswerCount
+                && scoreQuestionIndexes.Count == RequiredAnswerCount;
+            return allScoresPresent
+                && (!requirePlayerName || !IsBlank(PlayerNameValue));
+        }
+
         HashSet<int> questionIndexes = new HashSet<int>();
 
         for (int i = 0; i < optionButtons.Length; i++)
@@ -323,6 +352,11 @@ public class QuestionnaireController : MonoBehaviour
 
     private SurveyResponseRecord CreateResponseRecord()
     {
+        if (scoreSliders.Length > 0)
+        {
+            return CreateScoreResponseRecord();
+        }
+
         List<int> questionIndexes = new List<int>(selectedOptions.Keys);
         questionIndexes.Sort();
         SurveyAnswerRecord[] answers = new SurveyAnswerRecord[questionIndexes.Count];
@@ -342,6 +376,41 @@ public class QuestionnaireController : MonoBehaviour
             };
         }
 
+        return CreateResponseRecord(answers);
+    }
+
+    private SurveyResponseRecord CreateScoreResponseRecord()
+    {
+        List<QuestionnaireScoreSlider> orderedSliders =
+            new List<QuestionnaireScoreSlider>(scoreSliders);
+        orderedSliders.Sort(
+            (left, right) => left.questionIndex.CompareTo(right.questionIndex)
+        );
+        SurveyAnswerRecord[] answers =
+            new SurveyAnswerRecord[orderedSliders.Count];
+
+        for (int i = 0; i < orderedSliders.Count; i++)
+        {
+            QuestionnaireScoreSlider scoreSlider = orderedSliders[i];
+            scoreSlider.Prepare();
+            int score = scoreSlider.CurrentScore;
+            answers[i] = new SurveyAnswerRecord
+            {
+                questionIndex = scoreSlider.questionIndex,
+                questionId = scoreSlider.questionId,
+                questionText = scoreSlider.QuestionTextValue,
+                optionIndex = score,
+                optionId = "score_" + score,
+                optionText = score.ToString()
+            };
+        }
+
+        return CreateResponseRecord(answers);
+    }
+
+    private SurveyResponseRecord CreateResponseRecord(
+        SurveyAnswerRecord[] answers)
+    {
         return new SurveyResponseRecord
         {
             eventType = "survey-response",

@@ -280,7 +280,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   m_Material: {fileID: 0}
-  m_Color: {r: 0.70980394, g: 0.28235295, b: 0.24705882, a: 1}
+  m_Color: {r: 0.2627451, g: 0.60784316, b: 0.35686275, a: 1}
   m_RaycastTarget: 1
   m_RaycastPadding: {x: 0, y: 0, z: 0, w: 0}
   m_Maskable: 1
@@ -1372,7 +1372,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: BACK TO LOBBY
+  m_Text: CONTINUE
 --- !u!222 &1373246913
 CanvasRenderer:
   m_ObjectHideFlags: 0

@@ -5,7 +5,7 @@ using UnityEngine.UI;
 
 public class MatchResultController : MonoBehaviour
 {
-    private const string LobbySceneName = "Online_Lobby";
+    private const string QuestionnaireSceneName = "Questionnaire(Online)";
 
     [Header("Header")]
     [SerializeField] private Text roomCodeText;
@@ -212,7 +212,7 @@ public class MatchResultController : MonoBehaviour
             + hundredths.ToString("00");
     }
 
-    private void BackToLobby()
+    private void ContinueToQuestionnaire()
     {
         if (leaving)
         {
@@ -228,22 +228,22 @@ public class MatchResultController : MonoBehaviour
 
         if (client == null || !OnlineMatchContext.HasMatch)
         {
-            FinishLeaving();
+            FinishQuestionnaireTransition();
             return;
         }
 
         StartCoroutine(
             client.LeaveRoom(
-                state => FinishLeaving(),
-                error => FinishLeaving()
+                state => FinishQuestionnaireTransition(),
+                error => FinishQuestionnaireTransition()
             )
         );
     }
 
-    private void FinishLeaving()
+    private void FinishQuestionnaireTransition()
     {
         OnlineMatchContext.Clear();
-        SceneManager.LoadScene(LobbySceneName);
+        SceneManager.LoadScene(QuestionnaireSceneName);
     }
 
     private void ResolveUi()
@@ -285,8 +285,8 @@ public class MatchResultController : MonoBehaviour
     {
         if (backToLobbyButton != null)
         {
-            backToLobbyButton.onClick.RemoveListener(BackToLobby);
-            backToLobbyButton.onClick.AddListener(BackToLobby);
+            backToLobbyButton.onClick.RemoveListener(ContinueToQuestionnaire);
+            backToLobbyButton.onClick.AddListener(ContinueToQuestionnaire);
         }
     }
 

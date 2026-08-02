@@ -95,4 +95,7 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/Matchmaking/Online/Match_Result.unity
     guid: 5829e0909923a8c40ac5c41aab191c9f
+  - enabled: 1
+    path: Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
+    guid: ed7b57a496801e54e90f24ca465fbe9c
   m_configObjects: {}

@@ -13,12 +13,13 @@ public static class BuildOnlineMatchResultScene
         "Assets/Scenes/Matchmaking/Online/Match_Result.unity";
     private const string OnlineLevelScenePath =
         "Assets/Scenes/Matchmaking/Online/Online_Level.unity";
+    private const string QuestionnaireScenePath =
+        "Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity";
 
     private static readonly Color Ink = new Color32(52, 67, 70, 255);
     private static readonly Color Cream = new Color32(255, 240, 211, 248);
     private static readonly Color Orange = new Color32(224, 129, 56, 255);
     private static readonly Color Green = new Color32(67, 155, 91, 255);
-    private static readonly Color Red = new Color32(181, 72, 63, 255);
     private static readonly Color Blue = new Color32(82, 104, 177, 255);
 
     private static Font pixelFont;
@@ -262,8 +263,8 @@ public static class BuildOnlineMatchResultScene
             "BackToLobbyButton",
             root,
             "BackToLobbyButtonText",
-            "BACK TO LOBBY",
-            Red,
+            "CONTINUE",
+            Green,
             new Vector2(0f, -360f),
             new Vector2(430f, 78f),
             27
@@ -389,22 +390,28 @@ public static class BuildOnlineMatchResultScene
     {
         List<EditorBuildSettingsScene> scenes =
             new List<EditorBuildSettingsScene>(EditorBuildSettings.scenes);
+        AddOrEnableScene(scenes, ResultScenePath);
+        AddOrEnableScene(scenes, QuestionnaireScenePath);
+        EditorBuildSettings.scenes = scenes.ToArray();
+    }
 
+    private static void AddOrEnableScene(
+        List<EditorBuildSettingsScene> scenes,
+        string scenePath)
+    {
         for (int i = 0; i < scenes.Count; i++)
         {
-            if (scenes[i].path == ResultScenePath)
+            if (scenes[i].path == scenePath)
             {
                 scenes[i] = new EditorBuildSettingsScene(
-                    ResultScenePath,
+                    scenePath,
                     true
                 );
-                EditorBuildSettings.scenes = scenes.ToArray();
                 return;
             }
         }
 
-        scenes.Add(new EditorBuildSettingsScene(ResultScenePath, true));
-        EditorBuildSettings.scenes = scenes.ToArray();
+        scenes.Add(new EditorBuildSettingsScene(scenePath, true));
     }
 
     private static Canvas CreateCanvas(string name)
