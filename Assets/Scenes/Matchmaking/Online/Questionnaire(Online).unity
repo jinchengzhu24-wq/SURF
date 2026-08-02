@@ -4315,8 +4315,8 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: To what extent did you feel frustrated because you could not identify how
-    to progress, repeatedly became stuck, or had to restart the level?
+  m_Text: "Overall, how satisfied were you with the balance between the level\u2019s
+    challenge, fairness, and sense of achievement?"
 --- !u!222 &1053215772
 CanvasRenderer:
   m_ObjectHideFlags: 0
