@@ -140,12 +140,19 @@ public class OnlineLevelController : MonoBehaviour
 
         if (levelManager != null)
         {
-            yield return levelManager.FadeFromBlackAfterExternalInitialLoad();
+            yield return levelManager.FadeFromBlackAfterExternalInitialLoad(
+                false
+            );
         }
 
         runMoveCount = 0;
         runStartedAt = Time.realtimeSinceStartup;
         runStarted = true;
+
+        if (levelManager != null)
+        {
+            levelManager.SetExternalPlayerInputEnabled(true);
+        }
     }
 
     private void HandleLevelSolved(LevelManager manager)

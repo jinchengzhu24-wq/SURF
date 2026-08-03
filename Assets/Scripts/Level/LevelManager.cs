@@ -112,13 +112,20 @@ public class LevelManager : MonoBehaviour
         yield return Fade(GetBlackPanelAlpha(), 1);
     }
 
-    public IEnumerator FadeFromBlackAfterExternalInitialLoad()
+    public IEnumerator FadeFromBlackAfterExternalInitialLoad(
+        bool enablePlayerInput = true)
     {
+        SetPlayerInputEnabled(false);
         yield return Fade(GetBlackPanelAlpha(), 0);
         usesExternalInitialLoadingTransition = false;
-        isCompletingLevel = false;
         ResetLevelState();
-        SetPlayerInputEnabled(true);
+        isCompletingLevel = false;
+        SetPlayerInputEnabled(enablePlayerInput);
+    }
+
+    public void SetExternalPlayerInputEnabled(bool enabled)
+    {
+        SetPlayerInputEnabled(enabled);
     }
 
     private IEnumerator InitialLLMLoadingTransition()
