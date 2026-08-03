@@ -38,8 +38,7 @@ Menu
 ## 路由实现
 
 - `MenuController.OpenMatchmaking()` 加载 `Online_Lobby`。
-- `Online_Lobby` 创建或加入内存房间，匹配成功后双方
-进入 `Match_Briefing`。
+- `Online_Lobby` 创建或加入内存房间，匹配成功后双方进入 `Match_Briefing`。
 - `Match_Briefing` 每秒轮询 Ready 状态；双方 Ready 后进入 `Competition_Mode`。
 - `CompetitionModeController` 管理 Competition Mode 的单选与 Confirm。
 - Confirm 只有在选择一个模式后才可点击。
