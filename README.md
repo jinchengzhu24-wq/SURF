@@ -1,6 +1,6 @@
-# Matchmaking 路由说明
+# Matchmaking 与共创路由说明
 
-本文档单独记录双人匹配研究流程的入口和当前场景路由。
+本文档记录双人匹配研究流程的当前可运行场景路由，以及根据反馈整理的未来共创目标路由。
 
 ## 当前路由
 
@@ -34,6 +34,61 @@ Menu
 完整场景路径见本文末尾的 Build Settings。上述联机场景均已创建并启用。
 
 注意：项目当前场景文件名采用 `AI_Asistant_Mode`，其中 `Asistant` 保留现有拼写。代码和 Build Settings 必须使用相同名称。
+
+## 未来目标路由（规划中）
+
+以下流程根据现有场景、已完成的在线挑战交换能力和 feedback 中的调整策略整理。它描述的是下一阶段的产品方向，不代表这些概念都已经实现，也不要求每个步骤最终都对应一个独立 Unity 场景。上面的“当前路由”仍是现阶段可运行的基线。
+
+```text
+Menu
+  → Online_Lobby
+  → Match_Briefing
+  → Designer Goal / Study Condition
+      （只向设计者呈现，与发送给 LLM 的上下文分离）
+  → Initial Draft
+      ├─ Human-first：复用 PC → PC_Design 形成初始草图
+      └─ LLM-first：复用 DG 能力形成初始版本
+  → Co-Creation Workspace（与 Unity 游玩关卡分离）
+      → 加载当前 rows、对话上下文和版本记录
+      → 使用确定性校验器与求解器检查当前版本
+      → LLM 评价当前关卡，并询问设计者是否满意
+      → 设计者接受、拒绝或通过聊天提出修改建议
+      → 生成、校验并保存新版本
+      ↺ 重复“评价 → 反馈 → 修改”，始终围绕同一个关卡演进
+  → Final Confirmation
+      → 设计者明确确认最终 rows
+  → Challenge_Waiting
+      → 双方交换已经确认的最终关卡
+  → Online_Level
+      → 游玩对手的最终关卡并提交成绩
+  → Match_Result
+  → Post-Match Feedback
+      ├─ Designer：报告原始设计目的和人机共创体验
+      └─ Opponent：报告对关卡的理解、难度判断和实际感受
+  → Menu
+```
+
+### 现有功能如何迁移
+
+- 保留 `Online_Lobby`、`Match_Briefing`、`Challenge_Waiting`、`Online_Level`、`Match_Result`，并继续复用现有房间、挑战交换和成绩提交接口。
+- `Competition_Mode` 当前仍用于选择 Competitive 或 Supportive。未来它更适合作为“设计者目标 / 研究条件”的入口；该信息只用于引导设计者，不应自动把标签或研究者预设的模式解释注入 LLM。
+- `PC_Design` 可作为 Human-first 的初始草图入口，现有 DG 能力可作为 LLM-first 的初始版本入口。两者是否成为正式实验条件仍需结合后续研究设计决定。
+- 在初始版本与 `Challenge_Waiting` 之间增加独立共创工作台。聊天界面不承担关卡游玩，只负责查看当前地图、连续讨论、提出修改、比较版本和最终确认。
+- 每次地图变化都必须先通过格式校验、规则校验和求解器验证；LLM 可以评价和建议，但它的判断不能替代求解器，也不能在没有生成新版本时声称地图已经被修改。
+- 最终提交必须使用设计者明确确认的版本。提交之后再进入现有的对手游玩、成绩交换和结果展示流程。
+- 赛后反馈区分设计者和对手两个视角，并通过同一个 match/session 关联，以便比较“设计意图”和“实际体验”是否一致。
+
+### 独立最小测试版的位置
+
+当前 `CoCreationPrototype/` 已验证“LLM 对话与 Unity 游玩分离”的基本技术路径，服务器入口为 `http://111.231.136.4:8010/`。这个版本目前只支持围绕固定只读地图进行多轮讨论；接下来需要接入真实 `rows`、地图修改、确定性校验、版本历史和最终确认，才能进入上述完整路由。
+
+### 尚未固定的研究决策
+
+- 设计目标由系统随机分配、研究者指定，还是由玩家自行选择。
+- Human-first 与 LLM-first 是否作为正式对照条件，以及如何平衡分组。
+- 共创需要设置最少轮数、最多轮数，还是只保留明确的最终确认门槛。
+- 赛后问卷的具体题目、指标和最终研究问题。
+- `Designer Goal`、`Co-Creation Workspace`、`Final Confirmation` 和 `Post-Match Feedback` 最终采用 Unity 场景、独立网页还是混合实现。
 
 ## 路由实现
 
