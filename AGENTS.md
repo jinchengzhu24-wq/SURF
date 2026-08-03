@@ -8,6 +8,18 @@ This repository combines a Unity 2D Sokoban client with a Python service. Unity 
 
 ## Current Project Status (2026-08-02)
 
+### Supervisor feedback direction (2026-08-03)
+
+`Assets/EssayBase/8-3/SURF_Feedback.pdf` is the source record, and `Assets/EssayBase/8-3/Feedback_Action_Plan.md` is the working interpretation and implementation plan. The next prototype should shift the research focus from researcher-defined, one-shot Competitive/Supportive generation to a persistent, multi-turn human-LLM co-creation loop around the same evolving level.
+
+- Keep any designer goal or experimental condition separate from the LLM-visible prompt. Do not automatically inject researcher-authored Competitive/Supportive definitions unless a later confirmed study design explicitly requires it.
+- Do not end a co-creation session after the first valid level. The LLM must assess the current version, ask whether it is good enough, and support repeated feedback and revisions grounded in the actual current level and relevant conversation history.
+- Continue using deterministic validation, the solver, and gameplay evidence. Treat LLM solution or difficulty commentary as participant-facing opinion, not ground truth.
+- Preserve every chat turn, level version, modification, user accept/reject/revise decision, timing event, final level, and opponent outcome for later analysis.
+- Require explicit designer confirmation before sending a level to the opponent, then collect separate designer and opponent feedback that can be joined to the same match/design session.
+- Reuse the existing two-player, challenge-exchange, opponent-play, result, and questionnaire infrastructure where possible. Do not remove the current mode-specific PC/DG behavior until the replacement prototype path is agreed and implemented.
+- Human-first versus LLM-first, hidden-goal assignment, minimum round count, final questionnaires, measures, and research questions remain undecided. Do not encode them as fixed requirements before confirmation.
+
 The active matchmaking route is:
 
 ```text

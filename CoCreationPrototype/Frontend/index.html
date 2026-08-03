@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="A minimal Sokoban and LLM co-creation conversation prototype.">
+    <title>Sokoban Co-Creation Lab</title>
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <div class="app">
+        <header class="topbar">
+            <div class="brand">
+                <div class="brand-mark" aria-hidden="true">S</div>
+                <div>
+                    <h1>Sokoban Co-Creation Lab</h1>
+                    <p class="subtitle">Minimal LLM conversation prototype</p>
+                </div>
+            </div>
+            <div class="prototype-status" id="prototypeStatus">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span>Local prototype</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="notice" id="notice" role="alert" aria-live="assertive">
+                <span id="noticeMessage"></span>
+                <button class="notice-retry" id="retryButton" type="button" hidden>Retry</button>
+            </div>
+
+            <section class="workspace" aria-label="Co-creation workspace">
+                <section class="panel chat-panel" aria-labelledby="chatTitle">
+                    <header class="panel-header">
+                        <div>
+                            <p class="eyebrow">Co-creation conversation</p>
+                            <h2 id="chatTitle">Discuss the current level</h2>
+                        </div>
+                        <button class="secondary-button" id="restartButton" type="button">Restart chat</button>
+                    </header>
+
+                    <div class="chat-scroll" id="chatScroll">
+                        <div class="empty-chat" id="emptyChat">
+                            <div class="empty-mark" aria-hidden="true">AI</div>
+                            <h3>Start with your own intention</h3>
+                            <p>Ask the assistant what it notices, explain what you want the level to feel like, or discuss a possible improvement.</p>
+                        </div>
+                        <div class="message-list" id="messageList" aria-live="polite"></div>
+                        <div class="typing-row" id="typingRow" hidden aria-label="Assistant is responding">
+                            <span></span><span></span><span></span>
+                            <small>Assistant is considering the level...</small>
+                        </div>
+                    </div>
+
+                    <form class="composer" id="chatForm">
+                        <label class="sr-only" for="messageInput">Message the level design assistant</label>
+                        <textarea id="messageInput" rows="2" maxlength="2000"
+                            placeholder="Share your thoughts about this level..." required></textarea>
+                        <button class="primary-button" id="sendButton" type="submit">Send</button>
+                    </form>
+                    <div class="composer-meta">
+                        <span>Enter to send · Shift+Enter for a new line</span>
+                        <span id="characterCount">0 / 2000</span>
+                    </div>
+                </section>
+
+                <aside class="panel map-panel" aria-labelledby="mapTitle">
+                    <header class="panel-header">
+                        <div>
+                            <p class="eyebrow">Fixed design context</p>
+                            <h2 id="mapTitle">Current level</h2>
+                        </div>
+                        <span class="count-pill">12 × 10</span>
+                    </header>
+                    <div class="map-content">
+                        <div class="map-frame">
+                            <div class="map-grid" id="mapGrid" aria-label="Loading Sokoban map"></div>
+                        </div>
+                        <div class="legend" id="mapLegend" aria-label="Map legend"></div>
+                        <div class="context-note">
+                            <strong>Read-only prototype</strong>
+                            <p>The assistant can discuss this map but cannot change or play it.</p>
+                        </div>
+                    </div>
+                </aside>
+            </section>
+        </main>
+    </div>
+
+    <script src="./app.js"></script>
+</body>
+</html>
+
