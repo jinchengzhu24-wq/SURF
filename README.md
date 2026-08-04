@@ -43,8 +43,8 @@ Menu
 Menu
   → Online_Lobby
   → Match_Briefing
-  → Designer Goal / Study Condition
-      （只向设计者呈现，与发送给 LLM 的上下文分离）
+  → Neutral Design Brief
+      （只说明与 LLM 共同设计一个给对手游玩的关卡，不分配预设目的）
   → Initial Draft
       ├─ Human-first：复用 PC → PC_Design 形成初始草图
       └─ LLM-first：复用 DG 能力形成初始版本
@@ -57,13 +57,15 @@ Menu
       ↺ 重复“评价 → 反馈 → 修改”，始终围绕同一个关卡演进
   → Final Confirmation
       → 设计者明确确认最终 rows
+  → Designer Intention Report
+      → 在看到对手游玩结果前，记录设计者自然形成的目的和预期体验
   → Challenge_Waiting
       → 双方交换已经确认的最终关卡
   → Online_Level
       → 游玩对手的最终关卡并提交成绩
   → Match_Result
   → Post-Match Feedback
-      ├─ Designer：报告原始设计目的和人机共创体验
+      ├─ Designer：报告人机共创体验，并补充对最终结果的反思
       └─ Opponent：报告对关卡的理解、难度判断和实际感受
   → Menu
 ```
@@ -71,11 +73,12 @@ Menu
 ### 现有功能如何迁移
 
 - 保留 `Online_Lobby`、`Match_Briefing`、`Challenge_Waiting`、`Online_Level`、`Match_Result`，并继续复用现有房间、挑战交换和成绩提交接口。
-- `Competition_Mode` 当前仍用于选择 Competitive 或 Supportive。未来它更适合作为“设计者目标 / 研究条件”的入口；该信息只用于引导设计者，不应自动把标签或研究者预设的模式解释注入 LLM。
+- `Competition_Mode` 当前仍用于选择 Competitive 或 Supportive，在替代流程实现前继续保留。未来共创路径不在开场为设计者分配 Competitive、Supportive、困难、友好等预设目的，也不把研究者预设的模式解释注入 LLM。
+- 共创开始前只显示中性的设计说明，例如“请与 LLM 共同设计一个给对手游玩的关卡”。设计者在过程中自然形成目的，并可自行决定是否通过聊天表达具体想法。
 - `PC_Design` 可作为 Human-first 的初始草图入口，现有 DG 能力可作为 LLM-first 的初始版本入口。两者是否成为正式实验条件仍需结合后续研究设计决定。
 - 在初始版本与 `Challenge_Waiting` 之间增加独立共创工作台。聊天界面不承担关卡游玩，只负责查看当前地图、连续讨论、提出修改、比较版本和最终确认。
 - 每次地图变化都必须先通过格式校验、规则校验和求解器验证；LLM 可以评价和建议，但它的判断不能替代求解器，也不能在没有生成新版本时声称地图已经被修改。
-- 最终提交必须使用设计者明确确认的版本。提交之后再进入现有的对手游玩、成绩交换和结果展示流程。
+- 最终提交必须使用设计者明确确认的版本。确认后、看到对手游玩结果前，单独记录设计者原本想实现的目的和预期体验，再进入现有的关卡交换、对手游玩和结果展示流程。
 - 赛后反馈区分设计者和对手两个视角，并通过同一个 match/session 关联，以便比较“设计意图”和“实际体验”是否一致。
 
 ### 独立最小测试版的位置
@@ -84,11 +87,11 @@ Menu
 
 ### 尚未固定的研究决策
 
-- 设计目标由系统随机分配、研究者指定，还是由玩家自行选择。
 - Human-first 与 LLM-first 是否作为正式对照条件，以及如何平衡分组。
 - 共创需要设置最少轮数、最多轮数，还是只保留明确的最终确认门槛。
+- 中性说明和设计者意图报告采用哪些具体措辞，才能记录真实意图而不过早提示或限定玩家。
 - 赛后问卷的具体题目、指标和最终研究问题。
-- `Designer Goal`、`Co-Creation Workspace`、`Final Confirmation` 和 `Post-Match Feedback` 最终采用 Unity 场景、独立网页还是混合实现。
+- `Neutral Design Brief`、`Co-Creation Workspace`、`Final Confirmation`、`Designer Intention Report` 和 `Post-Match Feedback` 最终采用 Unity 场景、独立网页还是混合实现。
 
 ## 路由实现
 

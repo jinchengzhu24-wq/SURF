@@ -18,7 +18,8 @@ This repository combines a Unity 2D Sokoban client with a Python service. Unity 
 - Preserve every chat turn, level version, modification, user accept/reject/revise decision, timing event, final level, and opponent outcome for later analysis.
 - Require explicit designer confirmation before sending a level to the opponent, then collect separate designer and opponent feedback that can be joined to the same match/design session.
 - Reuse the existing two-player, challenge-exchange, opponent-play, result, and questionnaire infrastructure where possible. Do not remove the current mode-specific PC/DG behavior until the replacement prototype path is agreed and implemented.
-- Human-first versus LLM-first, hidden-goal assignment, minimum round count, final questionnaires, measures, and research questions remain undecided. Do not encode them as fixed requirements before confirmation.
+- The replacement co-creation path must begin with a neutral design brief and must not assign the designer a predefined Competitive, Supportive, difficult, friendly, or similar goal. Let the designer form and express an intention naturally. Record the designer's self-reported intention only after final level confirmation and before opponent results can influence that report.
+- Human-first versus LLM-first, any non-goal study condition, minimum round count, final questionnaires, measures, and research questions remain undecided. Do not encode them as fixed requirements before confirmation.
 
 ### Plan conflict guardrail
 
