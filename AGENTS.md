@@ -20,6 +20,13 @@ This repository combines a Unity 2D Sokoban client with a Python service. Unity 
 - Reuse the existing two-player, challenge-exchange, opponent-play, result, and questionnaire infrastructure where possible. Do not remove the current mode-specific PC/DG behavior until the replacement prototype path is agreed and implemented.
 - Human-first versus LLM-first, hidden-goal assignment, minimum round count, final questionnaires, measures, and research questions remain undecided. Do not encode them as fixed requirements before confirmation.
 
+### Plan conflict guardrail
+
+- Treat `Assets/EssayBase/8-3/SURF_Feedback.pdf`, `Assets/EssayBase/8-3/Feedback_Action_Plan.md`, and the confirmed future-route description in `README.md` as the current planning baseline.
+- If a later user suggestion or requested implementation conflicts with that baseline, do not implement it immediately. First identify the specific conflict, explain which confirmed direction it would violate, and stop before making related changes.
+- Resume only after the user explicitly confirms that the established plan should be revised or replaced. When that happens, update the relevant planning documentation before or together with the implementation so the repository does not retain contradictory instructions.
+- Do not treat an idea as conflicting merely because it is new, more detailed, or covers an undecided item. Compatible extensions may proceed normally; unresolved research decisions still require confirmation before being encoded as fixed behavior.
+
 The active matchmaking route is:
 
 ```text
