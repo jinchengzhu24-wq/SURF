@@ -96,13 +96,12 @@ class MatchmakingRecordTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
 
-    def submit_challenge(self, player, rows, competition, assistant):
+    def submit_challenge(self, player, rows, assistant):
         return self.client.post(
             "/online/rooms/" + player["matchId"] + "/challenge",
             headers=self.headers(player),
             json={
                 "rows": rows,
-                "competitionMode": competition,
                 "aiAssistantMode": assistant,
             },
         )
@@ -125,7 +124,6 @@ class MatchmakingRecordTests(unittest.TestCase):
             self.submit_challenge(
                 host,
                 SOLVABLE_ROWS_A,
-                "competitive",
                 "description_generation",
             ).status_code,
             200,
@@ -134,7 +132,6 @@ class MatchmakingRecordTests(unittest.TestCase):
             self.submit_challenge(
                 guest,
                 SOLVABLE_ROWS_B,
-                "supportive",
                 "partial_completion",
             ).status_code,
             200,
@@ -153,7 +150,6 @@ class MatchmakingRecordTests(unittest.TestCase):
         challenge_response = self.submit_challenge(
             host,
             SOLVABLE_ROWS_A,
-            "competitive",
             "description_generation",
         )
         self.assertEqual(challenge_response.status_code, 200)
@@ -161,7 +157,6 @@ class MatchmakingRecordTests(unittest.TestCase):
             self.submit_challenge(
                 host,
                 SOLVABLE_ROWS_A,
-                "competitive",
                 "description_generation",
             ).status_code,
             200,
@@ -203,6 +198,25 @@ class MatchmakingRecordTests(unittest.TestCase):
             20,
         )
         self.assertNotIn("playerToken", json.dumps(payload))
+        self.assertNotIn("competitionMode", json.dumps(payload))
+
+    def test_legacy_competition_field_remains_raw_but_is_not_exposed(self):
+        self.complete_match()
+        events, malformed = backend.read_online_match_events()
+        self.assertEqual(malformed, 0)
+        challenge_event = next(
+            event
+            for event in events
+            if event.get("eventType") == "challenge_submitted"
+        )
+        challenge_event["competitionMode"] = "competitive"
+        backend.write_jsonl_records(backend.ONLINE_MATCH_LOG_FILE, events)
+
+        raw_log = backend.ONLINE_MATCH_LOG_FILE.read_text(encoding="utf-8")
+        payload = self.client.get("/matchmaking-records-data").json()
+
+        self.assertIn("competitionMode", raw_log)
+        self.assertNotIn("competitionMode", json.dumps(payload))
 
     def test_online_questionnaire_is_joined_by_match_and_player(self):
         host, _ = self.complete_match()

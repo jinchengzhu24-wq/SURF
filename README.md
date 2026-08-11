@@ -11,10 +11,7 @@ Online_Lobby
   → 创建房间或输入六位房间码加入房间
 Match_Briefing
   → 双方 Ready
-Competition_Mode
-  → 选择 Competitive Mode 或 Supportive Mode
-  → 点击 Confirm
-AI_Asistant_Mode
+Draft
   ├─ Partial-Level Completion
   │    → PC → PC_Design → PC_Level
   └─ Description-to-Level Generation
@@ -33,7 +30,7 @@ Menu
 
 完整场景路径见本文末尾的 Build Settings。上述联机场景均已创建并启用。
 
-注意：项目当前场景文件名采用 `AI_Asistant_Mode`，其中 `Asistant` 保留现有拼写。代码和 Build Settings 必须使用相同名称。
+旧 `Competition_Mode` 和 `AI_Asistant_Mode` 场景已移除；初稿方式选择场景现统一命名为 `Draft`。
 
 ## 未来目标路由（规划中）
 
@@ -73,7 +70,7 @@ Menu
 ### 现有功能如何迁移
 
 - 保留 `Online_Lobby`、`Match_Briefing`、`Challenge_Waiting`、`Online_Level`、`Match_Result`，并继续复用现有房间、挑战交换和成绩提交接口。
-- `Competition_Mode` 当前仍用于选择 Competitive 或 Supportive，在替代流程实现前继续保留。未来共创路径不在开场为设计者分配 Competitive、Supportive、困难、友好等预设目的，也不把研究者预设的模式解释注入 LLM。
+- 已移除旧 `Competition_Mode`、对应 PlayerPrefs、联机字段和 PC/DG 墙体拓扑分支。当前与未来共创路径都不在开场为设计者分配预设目的，也不向 LLM 注入研究者定义的模式解释。
 - 共创开始前只显示中性的设计说明，例如“请与 LLM 共同设计一个给对手游玩的关卡”。设计者在过程中自然形成目的，并可自行决定是否通过聊天表达具体想法。
 - `PC_Design` 可作为 Human-first 的初始草图入口，现有 DG 能力可作为 LLM-first 的初始版本入口。两者是否成为正式实验条件仍需结合后续研究设计决定。
 - 在初始版本与 `Challenge_Waiting` 之间增加独立共创工作台。聊天界面不承担关卡游玩，只负责查看当前地图、连续讨论、提出修改、比较版本和最终确认。
@@ -97,35 +94,20 @@ Menu
 
 - `MenuController.OpenMatchmaking()` 加载 `Online_Lobby`。
 - `Online_Lobby` 创建或加入内存房间，匹配成功后双方进入 `Match_Briefing`。
-- `Match_Briefing` 每秒轮询 Ready 状态；双方 Ready 后进入 `Competition_Mode`。
-- `CompetitionModeController` 管理 Competition Mode 的单选与 Confirm。
-- Confirm 只有在选择一个模式后才可点击。
-- Confirm 后将模式写入 PlayerPrefs，再加载 `AI_Asistant_Mode`。
-- AI-Asistant Mode 选择 Partial-Level Completion 后加载 `PC`，选择 Description-to-Level Generation 后加载 `DG`。
+- `Match_Briefing` 每秒轮询 Ready 状态；双方 Ready 后直接进入 `Draft`。
+- `Draft` 选择 Partial-Level Completion 后加载 `PC`，选择 Description-to-Level Generation 后加载 `DG`。
 - `PC` 的 Confirm 加载 `PC_Design`。
 - `PC_Design` 的 Submit 会重新校验并保存固定 `12×10` 草图，然后加载 `PC_Level`。
 - 草图中的箱子起点 `s` 不得与墙上下左右相邻；Submit 前还会验证全开放版本至少存在一个可解玩家出生区域。
 - `PC_Level` 只读取 PC 草图上下文。后端先构造最多六个完整安全候选，按五墙、四墙、三墙降级；模型只返回 `layoutCandidateId`，不能跨候选混合坐标。Unity `LevelSolver` 仍执行最终可解性验证。
+- PC/DG 生成已中立化：不再按研究者预设模式限制墙体必须分散或全部连接；通用墙体、水域、连通、格式和可解性规则继续生效。
 - PC 候选不得删除或移动玩家绘制的墙 `#`、箱子起点 `s` 和终点 `t`。
 - 生成失败时可 Retry，或返回 `PC_Design` 并恢复上次提交的草图。
-- 在线房间中，玩家亲自通关 `PC_Level` 或 `DG_Level` 后，最终 rows 和两种模式会暂存并进入 `Challenge_Waiting`；非联机调试继续执行原场景完成行为。
+- 在线房间中，玩家亲自通关 `PC_Level` 或 `DG_Level` 后，最终 rows 和初稿方式会暂存并进入 `Challenge_Waiting`；非联机调试继续执行原场景完成行为。
 - `Challenge_Waiting` 幂等提交关卡并等待对手；双方提交后由玩家确认进入 `Online_Level`。
 - `Online_Level` 使用 `Player2` 和方向键游玩对手 rows，累计耗时、有效移动数和理论最少移动数，通关后提交结果并进入 `Match_Result`。
 - `Match_Result` 先显示己方成绩，再轮询并补齐对手成绩；点击 Continue 后 Leave 当前房间、清理联机上下文并进入 `Questionnaire(Online)`。
 - `Questionnaire(Online)` 使用三条带 1～5 数字刻度的离散滑杆，默认分数均为 3；`/record-survey-response` 提交成功后才加载 `Menu`，提交失败时留在当前场景重试。
-
-当前选择保存键：
-
-```text
-SokobanMatchmakingCompetitionMode
-```
-
-当前值：
-
-```text
-competitive
-supportive
-```
 
 ## 网页联机流程
 
@@ -142,8 +124,7 @@ supportive
 Menu
   → Online_Lobby
   → Match_Briefing
-  → Competition_Mode
-  → AI_Asistant_Mode
+  → Draft
       ├─ Partial Completion
       │    → PC → PC_Design → PC_Level
       └─ Description-to-Level Generation
@@ -159,20 +140,20 @@ Menu
   → Menu
 ```
 
-一次对局中，玩家 A 和玩家 B 分别完成自己的 PC 或 DG 生成流程，并将最终确认的关卡和模式选择提交给服务器。服务器冻结两份关卡后，将 A 的关卡交给 B、将 B 的关卡交给 A。双方各自在自己的浏览器中游玩对手关卡，完成后上传耗时、移动数和本地求解器得到的理论最小移动数；结果页负责等待并汇总双方成绩。
+一次对局中，玩家 A 和玩家 B 分别完成自己的 PC 或 DG 生成流程，并将最终确认的关卡和初稿方式提交给服务器。服务器冻结两份关卡后，将 A 的关卡交给 B、将 B 的关卡交给 A。双方各自在自己的浏览器中游玩对手关卡，完成后上传耗时、移动数和本地求解器得到的理论最小移动数；结果页负责等待并汇总双方成绩。
 
 ### 联机场景
 
 当前匹配阶段已经使用：
 
 - `Online_Lobby`：创建或加入房间、等待匹配对手，并保存服务器返回的 `matchId` 和当前玩家身份。
-- `Match_Briefing`：在匹配成功后展示双方 Ready 状态；双方准备完成后进入 Competition Mode。
+- `Match_Briefing`：在匹配成功后展示双方 Ready 状态；双方准备完成后直接进入 `Draft`。
 
 当前交换与游玩阶段已经使用：
 
 - `Challenge_Waiting`：幂等提交己方 rows、轮询对手创作状态；双方完成后启用确认游玩按钮。
 - `Online_Level`：只加载服务器锁定的对手 rows，使用 `Player2` 和方向键游玩，并在本地格式与可解性验证通过后开始累计用时和移动数；不会再次调用 PC 或 DG 生成接口。
-- `Match_Result`：先展示己方成绩并轮询对手状态；双方完成后展示各自耗时、实际移动数与理论最小移动数，以及双方选择的 Competition Mode 和 AI Assistant Mode。
+- `Match_Result`：先展示己方成绩并轮询对手状态；双方完成后展示各自耗时、实际移动数、理论最小移动数和 AI Assistant Mode。
 - `Questionnaire(Online)`：通过三条 1～5 分离散滑杆记录在线赛后评分；圆形滑块只能停在整数刻度，右侧分数框实时显示当前数值，默认值为 3。提交成功后返回主菜单，失败时不跳转。
 
 当前场景路径：
@@ -216,10 +197,11 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
 }
 ```
 
-挑战通过 `POST /online/rooms/{matchId}/challenge` 提交，内容包含 `rows`、
-`competitionMode` 和 `aiAssistantMode`，使用 `X-Player-Token` 识别玩家。
-同一玩家重复提交完全相同的挑战幂等成功，修改 rows 或模式会被拒绝；双方
-提交后，房间查询按当前玩家返回 `opponentChallengeRows` 和双方模式元数据。
+挑战通过 `POST /online/rooms/{matchId}/challenge` 提交，内容包含 `rows` 和
+`aiAssistantMode`，使用 `X-Player-Token` 识别玩家。旧客户端附带的
+`competitionMode` 会被兼容忽略，不会写入房间、事件日志或响应。
+同一玩家重复提交完全相同的挑战幂等成功，修改 rows 或 `aiAssistantMode` 会被拒绝；
+双方提交后，房间查询按当前玩家返回 `opponentChallengeRows` 和双方初稿方式元数据。
 
 通关结果通过 `POST /online/rooms/{matchId}/result` 提交：
 
@@ -239,18 +221,18 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
 常驻的 `OnlineMatchContext` 当前保存：
 
 - 当前 `matchId`、六位房间码、玩家 token 和玩家编号。
-- Competition Mode 与 AI Assistant Mode 的选择。
+- AI Assistant Mode（PC/DG 初稿方式）的选择。
 - 等待提交的己方 `rows`。
 - 服务器下发的对手 `rows`。
 - 当前房间、Ready 和挑战提交状态。
-- 双方挑战模式元数据和已经提交的成绩。
+- 双方初稿方式元数据和已经提交的成绩。
 
 `OnlineMatchContext` 只保存运行时状态，不把对手关卡写成磁盘文件。当前版本刷新网页后不恢复比赛。
 
 ### 场景搭建约定
 
 - `Online_Lobby` 进入后建立联机上下文；离开匹配流程时调用 Leave 并清理运行时状态。当前没有后台保活或刷新恢复。
-- `Competition_Mode`、`AI_Asistant_Mode`、PC 和 DG 现有场景继续复用，不复制联机专用版本。
+- `Draft`、PC 和 DG 场景继续复用，不复制联机专用版本；`CoCreation_Entry` 当前保持独立且不加入该路由。
 - `PC_Level` 或 `DG_Level` 只有在玩家亲自通关生成结果后，才会暂存最终 rows 并进入 `Challenge_Waiting`。
 - `Challenge_Waiting` 自动幂等提交，并通过 HTTP 查询等待对手完成；不会自动跳过确认按钮。
 - `Online_Level` 仅从 `OnlineMatchContext` 加载对手 `rows`，关卡开始后不得编辑布局。
@@ -260,7 +242,7 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
 - `Questionnaire(Online)` 使用独立的 `online_post_match_survey` ID；三个默认 3 分可直接提交，分数继续写入现有答案结构的 `optionIndex`、`optionId` 和 `optionText`。只有后端确认提交成功后才进入 `Menu`。
 - 生产环境的 WebGL 页面、HTTP API 和 WebSocket 应统一使用 HTTPS/WSS，避免浏览器阻止混合内容。
 
-上述联机场景已经创建并加入 Unity Build Settings。新增或改名场景时必须同步更新场景跳转常量和 Build Settings，保留现有 `AI_Asistant_Mode` 拼写。
+上述联机场景已经创建并加入 Unity Build Settings。新增或改名场景时必须同步更新场景跳转常量和 Build Settings。
 
 ## Build Settings
 
@@ -270,8 +252,7 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
 Assets/Scenes/Menu.unity
 Assets/Scenes/Matchmaking/Online/Online_Lobby.unity
 Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
-Assets/Scenes/Matchmaking/Competition_Mode.unity
-Assets/Scenes/Matchmaking/AI_Asistant_Mode.unity
+Assets/Scenes/Matchmaking/Draft.unity
 Assets/Scenes/Matchmaking/PC.unity
 Assets/Scenes/Matchmaking/PC_Design.unity
 Assets/Scenes/Matchmaking/PC_Level.unity
@@ -287,16 +268,14 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
 
 1. 用两个浏览器打开远程 `/game/`，从 Menu 点击黄色 `Matchmaking`，确认进入 `Online_Lobby`。
 2. 玩家 A 创建房间并显示六位房间码；玩家 B 输入该码后，双方均进入 `Match_Briefing`。
-3. 单方 Ready 时另一方应在一次轮询后看到状态；双方 Ready 后均进入 Competition Mode。
-4. 未选择模式时，Confirm 应保持禁用；选择任一模式后选中样式应更新，Confirm 应启用。
-5. 点击 Confirm，确认进入 AI-Asistant Mode；返回后选择另一模式，确认 PlayerPrefs 中保存的值随选择更新。
-6. 在 AI-Asistant Mode 分别覆盖两个分支：Partial-Level Completion 应进入 `PC`，Description-to-Level Generation 应进入 `DG`。
-7. 从 `PC` Confirm 后进入 `PC_Design`，零组或数量不匹配的 `s`/`t` 不得通过 Check。
-8. 合法草图 Submit 后进入 `PC_Level`，确认请求中不包含 DG 或 Creative Workshop 参数。
-9. 合法且可解的候选应被加载；无解或格式错误候选不得覆盖当前关卡。
-10. 生成失败后点击 Back to Design，确认原草图完整恢复。
-11. PC/DG 中确认生成的是 `Player` 且 WASD 有效；Online_Level 中确认生成的是 `Player2` 且方向键有效。
-12. 一方通关对手关卡后应进入 `Match_Result` 并显示己方成绩；按 `R` 重开前的耗时和移动数仍计入成绩。
-13. 第二方通关后，第一方结果页应在一次轮询后补齐对手成绩和双方模式；测试两个浏览器时需重新聚焦第一方页面并等待至少一次轮询，因为后台 WebGL 当前会暂停运行。
-14. `CONTINUE` 应调用 Leave、清理房间上下文并进入 `Questionnaire(Online)`，不能直接返回大厅。
-15. 在线问卷初始应显示三条五档滑杆和三个 `3` 分；拖动圆形滑块时只能落在整数刻度，右侧分数同步更新。默认值或调整后的分数只有在服务器返回成功后才进入 `Menu`，提交失败时不得离开。
+3. 单方 Ready 时另一方应在一次轮询后看到状态；双方 Ready 后均直接进入 `Draft`。
+4. 在 `Draft` 分别覆盖两个分支：Partial-Level Completion 应进入 `PC`，Description-to-Level Generation 应进入 `DG`。
+5. 从 `PC` Confirm 后进入 `PC_Design`，零组或数量不匹配的 `s`/`t` 不得通过 Check。
+6. 合法草图 Submit 后进入 `PC_Level`，确认请求中不包含 DG、Creative Workshop 或旧模式参数。
+7. 合法且可解的候选应被加载；无解或格式错误候选不得覆盖当前关卡。
+8. 生成失败后点击 Back to Design，确认原草图完整恢复。
+9. PC/DG 中确认生成的是 `Player` 且 WASD 有效；Online_Level 中确认生成的是 `Player2` 且方向键有效。
+10. 一方通关对手关卡后应进入 `Match_Result` 并显示己方成绩；按 `R` 重开前的耗时和移动数仍计入成绩。
+11. 第二方通关后，第一方结果页应在一次轮询后补齐对手成绩和双方初稿方式；测试两个浏览器时需重新聚焦第一方页面并等待至少一次轮询，因为后台 WebGL 当前会暂停运行。
+12. `CONTINUE` 应调用 Leave、清理房间上下文并进入 `Questionnaire(Online)`，不能直接返回大厅。
+13. 在线问卷初始应显示三条五档滑杆和三个 `3` 分；拖动圆形滑块时只能落在整数刻度，右侧分数同步更新。默认值或调整后的分数只有在服务器返回成功后才进入 `Menu`，提交失败时不得离开。

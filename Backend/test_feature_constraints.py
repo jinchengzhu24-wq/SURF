@@ -162,29 +162,19 @@ class FeatureConstraintTests(unittest.TestCase):
         self.assertIn("minWallObstacleBlocks=0", user_prompt)
         self.assertIn("corridorPlacement=none", user_prompt)
 
-    def test_competitive_prompt_requires_dispersed_wall_groups(self):
-        messages = build_level_plan_messages(
+    def test_legacy_competition_field_does_not_change_prompt(self):
+        neutral_messages = build_level_plan_messages(1, "none", {})
+        legacy_messages = build_level_plan_messages(
             1,
             "none",
             {"competitionMode": "competitive"},
         )
-        user_prompt = messages[1]["content"]
 
-        self.assertIn("at most two tiles", user_prompt)
-        self.assertIn("corridorPlacement=none", user_prompt)
+        self.assertEqual(legacy_messages, neutral_messages)
+        self.assertNotIn("competitive mode", legacy_messages[1]["content"])
+        self.assertNotIn("supportive mode", legacy_messages[1]["content"])
 
-    def test_supportive_prompt_requires_one_connected_wall_group(self):
-        messages = build_level_plan_messages(
-            1,
-            "none",
-            {"competitionMode": "supportive"},
-        )
-        user_prompt = messages[1]["content"]
-
-        self.assertIn("one orthogonally connected group", user_prompt)
-        self.assertIn("corridorPlacement=none", user_prompt)
-
-    def test_competition_mode_removes_incompatible_divider_corridor(self):
+    def test_legacy_competition_field_does_not_disable_corridor(self):
         plan = self.make_plan()
         plan.update(
             {
@@ -202,11 +192,11 @@ class FeatureConstraintTests(unittest.TestCase):
             {"noWater": False, "noInternalWalls": False},
         )
 
-        self.assertEqual(result["corridorPlacement"], "none")
-        self.assertEqual(result["corridorWidth"], 0)
-        self.assertEqual(result["corridorOrientation"], "any")
-        self.assertEqual(result["corridorRole"], "visual_only")
-        self.assertEqual(result["corridorPriority"], "preferred")
+        self.assertEqual(result["corridorPlacement"], "center")
+        self.assertEqual(result["corridorWidth"], 1)
+        self.assertEqual(result["corridorOrientation"], "vertical")
+        self.assertEqual(result["corridorRole"], "player_route")
+        self.assertEqual(result["corridorPriority"], "required")
 
     def test_human_mode_uses_user_directed_minimum_change_prompt(self):
         context = {

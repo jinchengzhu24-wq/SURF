@@ -143,23 +143,13 @@ public static class BuildOnlineMatchResultScene
             new Vector2(690f, 45f),
             TextAnchor.MiddleCenter
         );
-        Text ownCompetitionText = CreateText(
-            "OwnChallengeCompetitionText",
-            ownCard.rectTransform,
-            "BUILD MODE  COMPETITIVE",
-            24,
-            Ink,
-            new Vector2(0f, 50f),
-            new Vector2(690f, 48f),
-            TextAnchor.MiddleLeft
-        );
         Text ownAssistantText = CreateText(
             "OwnChallengeAssistantText",
             ownCard.rectTransform,
             "AI MODE  DESCRIPTION-TO-LEVEL",
             22,
             Ink,
-            new Vector2(0f, -5f),
+            new Vector2(0f, 35f),
             new Vector2(690f, 48f),
             TextAnchor.MiddleLeft
         );
@@ -169,7 +159,7 @@ public static class BuildOnlineMatchResultScene
             "TIME  --",
             29,
             Orange,
-            new Vector2(0f, -88f),
+            new Vector2(0f, -55f),
             new Vector2(690f, 55f),
             TextAnchor.MiddleLeft
         );
@@ -179,7 +169,7 @@ public static class BuildOnlineMatchResultScene
             "MOVES  -- / MIN --",
             29,
             Orange,
-            new Vector2(0f, -155f),
+            new Vector2(0f, -135f),
             new Vector2(690f, 55f),
             TextAnchor.MiddleLeft
         );
@@ -218,23 +208,13 @@ public static class BuildOnlineMatchResultScene
             new Vector2(690f, 45f),
             TextAnchor.MiddleCenter
         );
-        Text opponentCompetitionText = CreateText(
-            "OpponentChallengeCompetitionText",
-            opponentCard.rectTransform,
-            "BUILD MODE  SUPPORTIVE",
-            24,
-            Ink,
-            new Vector2(0f, 50f),
-            new Vector2(690f, 48f),
-            TextAnchor.MiddleLeft
-        );
         Text opponentAssistantText = CreateText(
             "OpponentChallengeAssistantText",
             opponentCard.rectTransform,
             "AI MODE  PARTIAL-LEVEL COMPLETION",
             22,
             Ink,
-            new Vector2(0f, -5f),
+            new Vector2(0f, 35f),
             new Vector2(690f, 48f),
             TextAnchor.MiddleLeft
         );
@@ -244,7 +224,7 @@ public static class BuildOnlineMatchResultScene
             "TIME  00:42.37",
             29,
             Green,
-            new Vector2(0f, -88f),
+            new Vector2(0f, -55f),
             new Vector2(690f, 55f),
             TextAnchor.MiddleLeft
         );
@@ -254,7 +234,7 @@ public static class BuildOnlineMatchResultScene
             "MOVES  31 / MIN 24",
             29,
             Green,
-            new Vector2(0f, -155f),
+            new Vector2(0f, -135f),
             new Vector2(690f, 55f),
             TextAnchor.MiddleLeft
         );
@@ -282,11 +262,6 @@ public static class BuildOnlineMatchResultScene
         SetReference(serializedController, "statusText", statusText);
         SetReference(
             serializedController,
-            "ownChallengeCompetitionText",
-            ownCompetitionText
-        );
-        SetReference(
-            serializedController,
             "ownChallengeAssistantText",
             ownAssistantText
         );
@@ -299,11 +274,6 @@ public static class BuildOnlineMatchResultScene
             serializedController,
             "opponentRunMovesText",
             opponentMovesText
-        );
-        SetReference(
-            serializedController,
-            "opponentChallengeCompetitionText",
-            opponentCompetitionText
         );
         SetReference(
             serializedController,

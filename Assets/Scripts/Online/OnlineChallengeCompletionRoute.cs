@@ -46,7 +46,6 @@ public class OnlineChallengeCompletionRoute : MonoBehaviour
 
         OnlineMatchContext.StageChallenge(
             levelData.rows,
-            CompetitionModeController.GetSelectedMode(),
             AIAssistantModeController.GetSelectedApiMode()
         );
         manager.MarkCompletionTransitionHandled();

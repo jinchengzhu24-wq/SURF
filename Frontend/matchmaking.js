@@ -156,7 +156,6 @@ function getMatchModes(match) {
     const modes = new Set();
     safeArray(match.players).forEach(player => {
         const challenge = player.challenge || {};
-        if (clean(challenge.competitionMode)) modes.add(challenge.competitionMode);
         if (clean(challenge.aiAssistantMode)) modes.add(challenge.aiAssistantMode);
     });
     return modes;
@@ -366,7 +365,6 @@ function renderSelectedChallenge(match) {
     [
         ["Created by", "Player " + challenge.createdByPlayerNumber],
         ["Played by", "Player " + challenge.playedByPlayerNumber],
-        ["Competition", formatMode(challenge.competitionMode)],
         ["AI assistant", formatMode(challenge.aiAssistantMode)],
         ["Play time", formatSeconds(result.durationSeconds)],
         ["Moves", value(result.moveCount)],
@@ -401,7 +399,6 @@ function renderInspector(stage) {
     ];
     if (record.eventType === "ready_changed") rows.push(["Ready", record.ready ? "Yes" : "No"]);
     if (record.eventType === "challenge_submitted") {
-        rows.push(["Competition", formatMode(record.competitionMode)]);
         rows.push(["AI assistant", formatMode(record.aiAssistantMode)]);
     }
     if (record.eventType === "result_submitted") {
@@ -469,7 +466,6 @@ function renderCompareChallenge(player) {
     const table = document.createElement("table");
     table.className = "delta-table";
     [
-        ["Competition", formatMode(challenge.competitionMode)],
         ["AI assistant", formatMode(challenge.aiAssistantMode)],
         ["Played by", "Player " + challenge.playedByPlayerNumber],
         ["Play time", formatSeconds(result.durationSeconds)],
@@ -719,8 +715,6 @@ function titleCase(input) {
 
 function formatMode(input) {
     const labels = {
-        competitive: "Competitive",
-        supportive: "Supportive",
         description_generation: "Description Generation",
         partial_completion: "Partial Completion"
     };

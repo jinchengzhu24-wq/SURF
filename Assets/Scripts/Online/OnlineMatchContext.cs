@@ -8,7 +8,6 @@ public static class OnlineMatchContext
     public static int PlayerNumber { get; private set; }
     public static OnlineRoomState RoomState { get; private set; }
     public static string[] PendingChallengeRows { get; private set; }
-    public static string PendingCompetitionMode { get; private set; } = "";
     public static string PendingAiAssistantMode { get; private set; } = "";
     public static string[] OpponentChallengeRows { get; private set; }
     public static string PendingSurveyMatchId { get; private set; } = "";
@@ -47,7 +46,6 @@ public static class OnlineMatchContext
         ClearPendingPostMatchSurvey();
         RoomState = state;
         PendingChallengeRows = null;
-        PendingCompetitionMode = "";
         PendingAiAssistantMode = "";
         OpponentChallengeRows = CloneRows(state.opponentChallengeRows);
     }
@@ -72,7 +70,6 @@ public static class OnlineMatchContext
 
     public static void StageChallenge(
         string[] rows,
-        string competitionMode,
         string aiAssistantMode)
     {
         if (!HasMatch || rows == null || rows.Length == 0)
@@ -83,14 +80,12 @@ public static class OnlineMatchContext
         }
 
         PendingChallengeRows = CloneRows(rows);
-        PendingCompetitionMode = competitionMode ?? "";
         PendingAiAssistantMode = aiAssistantMode ?? "";
     }
 
     public static void ClearPendingChallenge()
     {
         PendingChallengeRows = null;
-        PendingCompetitionMode = "";
         PendingAiAssistantMode = "";
     }
 
@@ -122,7 +117,6 @@ public static class OnlineMatchContext
         PlayerNumber = 0;
         RoomState = null;
         PendingChallengeRows = null;
-        PendingCompetitionMode = "";
         PendingAiAssistantMode = "";
         OpponentChallengeRows = null;
     }
@@ -191,7 +185,6 @@ public class OnlinePlayerState
 [Serializable]
 public class OnlineChallengeMetadata
 {
-    public string competitionMode;
     public string aiAssistantMode;
 }
 

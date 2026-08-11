@@ -358,9 +358,8 @@ MonoBehaviour:
     m_VerticalOverflow: 0
     m_LineSpacing: 1
   m_Text: In this multiplayer challenge, two players take turns designing and solving
-    Sokoban levels for each other. As the designer, your goal is to create a level
-    that suits the assigned competitive or supportive objective and challenges your
-    opponent.
+    Sokoban levels for each other. Create a level for your opponent, then play the
+    level they designed for you.
 --- !u!222 &81016762
 CanvasRenderer:
   m_ObjectHideFlags: 0

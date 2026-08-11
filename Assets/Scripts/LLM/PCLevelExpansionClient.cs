@@ -52,7 +52,6 @@ public class PCLevelExpansionClient : MonoBehaviour
                     width = sketch.width,
                     height = sketch.height,
                     sketchRows = CloneRows(sketch.rows),
-                    competitionMode = CompetitionModeController.GetSelectedMode(),
                     rejectionReason = rejectionReason ?? "",
                     maxAttempts = boundedMaxAttempts
                 };
@@ -65,7 +64,6 @@ public class PCLevelExpansionClient : MonoBehaviour
                 width = sketch.width,
                 height = sketch.height,
                 sketchRows = CloneRows(sketch.rows),
-                competitionMode = CompetitionModeController.GetSelectedMode(),
                 previousCandidateRows = CloneRows(previousCandidateRows),
                 rejectionReason = rejectionReason ?? "",
                 maxAttempts = boundedMaxAttempts
@@ -135,7 +133,6 @@ public class PCLevelExpansionClient : MonoBehaviour
         public int width;
         public int height;
         public string[] sketchRows;
-        public string competitionMode;
         public string rejectionReason;
         public int maxAttempts;
     }
@@ -146,7 +143,6 @@ public class PCLevelExpansionClient : MonoBehaviour
         public int width;
         public int height;
         public string[] sketchRows;
-        public string competitionMode;
         public string[] previousCandidateRows;
         public string rejectionReason;
         public int maxAttempts;

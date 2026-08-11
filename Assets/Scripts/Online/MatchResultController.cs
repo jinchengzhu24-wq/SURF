@@ -12,13 +12,11 @@ public class MatchResultController : MonoBehaviour
     [SerializeField] private Text statusText;
 
     [Header("Your Challenge / Opponent Run")]
-    [SerializeField] private Text ownChallengeCompetitionText;
     [SerializeField] private Text ownChallengeAssistantText;
     [SerializeField] private Text opponentRunTimeText;
     [SerializeField] private Text opponentRunMovesText;
 
     [Header("Opponent Challenge / Your Run")]
-    [SerializeField] private Text opponentChallengeCompetitionText;
     [SerializeField] private Text opponentChallengeAssistantText;
     [SerializeField] private Text ownRunTimeText;
     [SerializeField] private Text ownRunMovesText;
@@ -107,12 +105,10 @@ public class MatchResultController : MonoBehaviour
 
         RenderMetadata(
             state.ownChallengeMetadata,
-            ownChallengeCompetitionText,
             ownChallengeAssistantText
         );
         RenderMetadata(
             state.opponentChallengeMetadata,
-            opponentChallengeCompetitionText,
             opponentChallengeAssistantText
         );
         RenderResult(
@@ -155,20 +151,14 @@ public class MatchResultController : MonoBehaviour
 
     private static void RenderMetadata(
         OnlineChallengeMetadata metadata,
-        Text competitionText,
         Text assistantText)
     {
         if (metadata == null)
         {
-            SetText(competitionText, "BUILD MODE  --");
             SetText(assistantText, "AI MODE  --");
             return;
         }
 
-        SetText(
-            competitionText,
-            "BUILD MODE  " + FormatCompetitionMode(metadata.competitionMode)
-        );
         SetText(
             assistantText,
             "AI MODE  " + FormatAssistantMode(metadata.aiAssistantMode)
@@ -195,13 +185,6 @@ public class MatchResultController : MonoBehaviour
             + " / MIN "
             + result.minimumMoves
         );
-    }
-
-    private static string FormatCompetitionMode(string mode)
-    {
-        return mode == CompetitionModeController.SupportiveModeId
-            ? "SUPPORTIVE"
-            : "COMPETITIVE";
     }
 
     private static string FormatAssistantMode(string mode)
@@ -266,10 +249,6 @@ public class MatchResultController : MonoBehaviour
     {
         roomCodeText = ResolveText(roomCodeText, "RoomCodeText");
         statusText = ResolveText(statusText, "MatchResultStatusText");
-        ownChallengeCompetitionText = ResolveText(
-            ownChallengeCompetitionText,
-            "OwnChallengeCompetitionText"
-        );
         ownChallengeAssistantText = ResolveText(
             ownChallengeAssistantText,
             "OwnChallengeAssistantText"
@@ -281,10 +260,6 @@ public class MatchResultController : MonoBehaviour
         opponentRunMovesText = ResolveText(
             opponentRunMovesText,
             "OpponentRunMovesText"
-        );
-        opponentChallengeCompetitionText = ResolveText(
-            opponentChallengeCompetitionText,
-            "OpponentChallengeCompetitionText"
         );
         opponentChallengeAssistantText = ResolveText(
             opponentChallengeAssistantText,
@@ -310,12 +285,10 @@ public class MatchResultController : MonoBehaviour
     {
         RenderMetadata(
             null,
-            ownChallengeCompetitionText,
             ownChallengeAssistantText
         );
         RenderMetadata(
             null,
-            opponentChallengeCompetitionText,
             opponentChallengeAssistantText
         );
         RenderResult(null, opponentRunTimeText, opponentRunMovesText);

@@ -21,7 +21,6 @@ public static class PCLevelCandidateValidator
         int minimumWaterHeight,
         int maximumWaterWidth,
         int maximumWaterHeight,
-        string competitionMode,
         out string message)
     {
         if (!TryValidateDimensions(sketch, candidateRows, out message))
@@ -121,14 +120,6 @@ public static class PCLevelCandidateValidator
         {
             message = "Generated internal walls must not contain a complete "
                 + "2x2 block.";
-            return false;
-        }
-
-        if (!TryValidateCompetitionWallRule(
-                generatedInternalWalls,
-                competitionMode,
-                out message))
-        {
             return false;
         }
 
@@ -416,83 +407,6 @@ public static class PCLevelCandidateValidator
         }
 
         return false;
-    }
-
-    private static bool TryValidateCompetitionWallRule(
-        HashSet<Vector2Int> positions,
-        string competitionMode,
-        out string message)
-    {
-        if (!CompetitionModeController.IsValidMode(competitionMode))
-        {
-            message = "Competition mode is missing or unsupported.";
-            return false;
-        }
-
-        List<int> componentSizes = GetComponentSizes(positions);
-
-        if (competitionMode == CompetitionModeController.CompetitiveModeId
-            && componentSizes.Exists(size => size > 2))
-        {
-            message = "Competitive mode requires every generated internal wall "
-                + "group to contain at most two connected tiles.";
-            return false;
-        }
-
-        if (competitionMode == CompetitionModeController.SupportiveModeId
-            && componentSizes.Count > 1)
-        {
-            message = "Supportive mode requires all generated internal wall "
-                + "tiles to be connected.";
-            return false;
-        }
-
-        message = "";
-        return true;
-    }
-
-    private static List<int> GetComponentSizes(
-        HashSet<Vector2Int> positions)
-    {
-        List<int> sizes = new List<int>();
-        HashSet<Vector2Int> remaining =
-            new HashSet<Vector2Int>(positions);
-
-        while (remaining.Count > 0)
-        {
-            Vector2Int start = default(Vector2Int);
-
-            foreach (Vector2Int position in remaining)
-            {
-                start = position;
-                break;
-            }
-
-            Queue<Vector2Int> open = new Queue<Vector2Int>();
-            open.Enqueue(start);
-            remaining.Remove(start);
-            int size = 0;
-
-            while (open.Count > 0)
-            {
-                Vector2Int current = open.Dequeue();
-                size++;
-
-                for (int direction = 0; direction < directions.Length; direction++)
-                {
-                    Vector2Int next = current + directions[direction];
-
-                    if (remaining.Remove(next))
-                    {
-                        open.Enqueue(next);
-                    }
-                }
-            }
-
-            sizes.Add(size);
-        }
-
-        return sizes;
     }
 
     private static bool TryValidateConnectedActivityArea(

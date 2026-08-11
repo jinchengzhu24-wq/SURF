@@ -30,10 +30,7 @@ PC_LEVEL_GENERATION_SYSTEM_PROMPT = (
     "layoutCandidateId. Its value must be an integer copied from the supplied "
     "layoutCandidates list. Each candidate already fixes the water area, "
     "player start, and internal walls and is guaranteed to preserve the user's "
-    "tiles, connectivity, solvability, and competitionMode wall rule. In "
-    "competitive mode every internal-wall group contains at most two "
-    "orthogonally connected tiles; in supportive mode all internal-wall tiles "
-    "form one orthogonally connected group. Prefer a five-wall candidate whose "
+    "tiles, connectivity, and solvability. Prefer a five-wall candidate whose "
     "wallStyle is bent, split, or dispersed. Use a four-wall candidate only when "
     "five walls are unavailable or its composition is aesthetically stronger, "
     "and use a three-wall candidate only as the minimum fallback. Do not invent "
@@ -48,9 +45,6 @@ def build_pc_level_generation_messages(context):
     payload = {
         "width": int(context.get("width") or 0),
         "height": int(context.get("height") or 0),
-        "competitionMode": str(
-            context.get("competitionMode") or "competitive"
-        ),
         "sketchRows": sketch_rows,
         "boxStarts": list(context.get("boxStarts") or []),
         "targets": list(context.get("targets") or []),
@@ -407,9 +401,6 @@ def build_level_plan_messages(
     user_prompt = (
         BASE_USER_PROMPT
         + build_feature_constraint_prompt(feature_constraints)
-        + build_competition_mode_prompt(
-            creative_context.get("competitionMode")
-        )
         + build_generation_preferences_prompt(
             creative_context.get("generationPreferences")
         )
@@ -434,33 +425,6 @@ def build_level_plan_messages(
             "content": user_prompt,
         },
     ]
-
-
-def build_competition_mode_prompt(competition_mode=None):
-    mode = str(competition_mode or "").strip().lower()
-
-    if mode == "competitive":
-        return (
-            "Matchmaking competitive mode is a hard generation constraint: "
-            "each orthogonally connected internal-wall group may contain at "
-            "most two tiles. Set corridorPlacement=none, corridorWidth=0, "
-            "corridorOrientation=any, corridorRole=visual_only, and "
-            "corridorPriority=preferred because a divider corridor would "
-            "violate this wall topology. "
-        )
-
-    if mode == "supportive":
-        return (
-            "Matchmaking supportive mode is a hard generation constraint: "
-            "all internal-wall tiles must form one orthogonally connected "
-            "group. Set corridorPlacement=none, corridorWidth=0, "
-            "corridorOrientation=any, corridorRole=visual_only, and "
-            "corridorPriority=preferred because a split divider corridor "
-            "would violate this wall topology. "
-        )
-
-    return ""
-
 
 def build_generation_preferences_prompt(generation_preferences=None):
     preferences = generation_preferences or {}

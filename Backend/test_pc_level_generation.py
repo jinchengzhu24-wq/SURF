@@ -421,12 +421,7 @@ class PCLevelGenerationTests(unittest.TestCase):
             )
 
     def test_indexed_layout_allows_connected_activity_area_below_48(self):
-        context = backend.normalize_pc_level_request(
-            {
-                **self.context,
-                "competitionMode": "supportive",
-            }
-        )
+        context = backend.normalize_pc_level_request(self.context)
         layout = make_layout(context)
         water_ids = set(
             context["allowedWaterAreas"][layout["waterAreaId"]]["cellIds"]
@@ -480,90 +475,53 @@ class PCLevelGenerationTests(unittest.TestCase):
             {3, 4, 5},
         )
 
-    def test_competitive_layout_wall_groups_have_at_most_two_tiles(self):
-        normalized = backend.normalize_pc_level_request(
-            {
-                **self.context,
-                "competitionMode": "competitive",
-            }
-        )
-
-        for candidate in normalized["layoutCandidates"]:
-            generated_walls = {
-                (wall["x"], wall["y"])
-                for wall in candidate["internalWalls"]
-            }
-            self.assertTrue(
-                all(
-                    size <= 2
-                    for size in backend.get_pc_component_sizes(
-                        generated_walls
-                    )
-                )
-            )
-
-    def test_supportive_layout_walls_form_one_connected_group(self):
-        normalized = backend.normalize_pc_level_request(
-            {
-                **self.context,
-                "competitionMode": "supportive",
-            }
-        )
-
-        self.assertTrue(normalized["layoutCandidates"])
-
-        for candidate in normalized["layoutCandidates"]:
-            generated_walls = {
-                (wall["x"], wall["y"])
-                for wall in candidate["internalWalls"]
-            }
-            self.assertEqual(
-                backend.get_pc_component_sizes(generated_walls),
-                [len(generated_walls)],
-            )
-
-    def test_candidate_validator_rejects_competitive_three_tile_group(self):
+    def test_candidate_validator_accepts_neutral_connected_wall_group(self):
         candidate = [list(row) for row in make_candidate()]
 
         for x, y in ((5, 5), (6, 5), (7, 5)):
             candidate[y][x] = "#"
 
-        with self.assertRaisesRegex(ValueError, "at most two"):
-            backend.validate_pc_level_candidate(
-                {"rows": ["".join(row) for row in candidate]},
-                {
-                    "width": 12,
-                    "height": 10,
-                    "sketchRows": make_sketch(),
-                    "competitionMode": "competitive",
-                },
-            )
+        rows = ["".join(row) for row in candidate]
+        result = backend.validate_pc_level_candidate(
+            {"rows": rows},
+            {
+                "width": 12,
+                "height": 10,
+                "sketchRows": make_sketch(),
+            },
+        )
 
-    def test_candidate_validator_rejects_disconnected_supportive_walls(self):
+        self.assertEqual(result["rows"], rows)
+
+    def test_candidate_validator_accepts_neutral_disconnected_walls(self):
         candidate = [list(row) for row in make_candidate()]
 
         for x, y in ((3, 5), (7, 5), (8, 5)):
             candidate[y][x] = "#"
 
-        with self.assertRaisesRegex(ValueError, "all generated internal wall"):
-            backend.validate_pc_level_candidate(
-                {"rows": ["".join(row) for row in candidate]},
-                {
-                    "width": 12,
-                    "height": 10,
-                    "sketchRows": make_sketch(),
-                    "competitionMode": "supportive",
-                },
-            )
+        rows = ["".join(row) for row in candidate]
+        result = backend.validate_pc_level_candidate(
+            {"rows": rows},
+            {
+                "width": 12,
+                "height": 10,
+                "sketchRows": make_sketch(),
+            },
+        )
 
-    def test_invalid_competition_mode_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "competitionMode"):
-            backend.normalize_pc_level_request(
-                {
-                    **self.context,
-                    "competitionMode": "unknown",
-                }
-            )
+        self.assertEqual(result["rows"], rows)
+
+    def test_legacy_competition_field_is_ignored_during_normalization(self):
+        neutral = backend.normalize_pc_level_request(self.context)
+        legacy = backend.normalize_pc_level_request(
+            {
+                **self.context,
+                "competitionMode": "legacy-value",
+            }
+        )
+
+        self.assertEqual(legacy, neutral)
+        self.assertNotIn("competitionMode", legacy)
 
     def test_layout_candidate_walls_keep_outer_shell_clearance(self):
         normalized = backend.normalize_pc_level_request(self.context)
@@ -1241,7 +1199,7 @@ class PCLevelGenerationTests(unittest.TestCase):
         prompt_text = "\n".join(message["content"] for message in captured_messages)
         self.assertIn("layoutCandidateId", prompt_text)
         self.assertIn("layoutCandidates", prompt_text)
-        self.assertIn("competitionMode", prompt_text)
+        self.assertNotIn("competitionMode", prompt_text)
         self.assertIn("wallStyle", prompt_text)
         self.assertIn("internalWalls", prompt_text)
         self.assertIn("waterArea", prompt_text)

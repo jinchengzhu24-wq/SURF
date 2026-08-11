@@ -119,7 +119,6 @@ public class ChallengeWaitingController : MonoBehaviour
 
         yield return client.SubmitChallenge(
             OnlineMatchContext.PendingChallengeRows,
-            OnlineMatchContext.PendingCompetitionMode,
             OnlineMatchContext.PendingAiAssistantMode,
             state =>
             {

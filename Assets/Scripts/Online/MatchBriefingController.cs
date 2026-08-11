@@ -6,7 +6,7 @@ using UnityEngine.UI;
 public class MatchBriefingController : MonoBehaviour
 {
     private const string LobbySceneName = "Online_Lobby";
-    private const string CompetitionSceneName = "Competition_Mode";
+    private const string DraftSceneName = "Draft";
 
     private OnlineMatchClient client;
     private Button readyButton;
@@ -137,14 +137,16 @@ public class MatchBriefingController : MonoBehaviour
 
     private void TryContinue(OnlineRoomState state)
     {
-        if (state == null || state.status != "choosing_mode" || transitioned)
+        if (state == null
+            || state.status != "waiting_for_challenges"
+            || transitioned)
         {
             return;
         }
 
         transitioned = true;
-        SetFooter("Both players are ready. Opening mode selection...");
-        SceneManager.LoadScene(CompetitionSceneName);
+        SetFooter("Both players are ready. Opening the initial draft step...");
+        SceneManager.LoadScene(DraftSceneName);
     }
 
     private void LeaveMatch()

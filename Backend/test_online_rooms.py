@@ -156,7 +156,7 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(valid_response.json()["playerNumber"], 1)
         self.assertNotIn("playerToken", valid_response.json())
 
-    def test_ready_is_idempotent_and_both_ready_choose_mode(self):
+    def test_ready_is_idempotent_and_both_ready_enter_challenge_creation(self):
         host = self.create_room()
         guest = self.join_room(host["roomCode"])
         ready_url = "/online/rooms/" + host["matchId"] + "/ready"
@@ -198,7 +198,7 @@ class OnlineRoomTests(unittest.TestCase):
             ],
         )
         self.assertEqual(guest_ready.status_code, 200)
-        self.assertEqual(guest_ready.json()["status"], "choosing_mode")
+        self.assertEqual(guest_ready.json()["status"], "waiting_for_challenges")
         self.assertTrue(all(item["ready"] for item in guest_ready.json()["players"]))
 
     def test_ready_rejects_room_without_opponent(self):
@@ -270,14 +270,12 @@ class OnlineRoomTests(unittest.TestCase):
         match_id,
         player_token,
         rows,
-        competition_mode="competitive",
         ai_assistant_mode="description_generation",
     ):
         return self.client.post(
             "/online/rooms/" + match_id + "/challenge",
             json={
                 "rows": rows,
-                "competitionMode": competition_mode,
                 "aiAssistantMode": ai_assistant_mode,
             },
             headers=self.auth_headers(player_token),
@@ -340,15 +338,9 @@ class OnlineRoomTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 400)
 
-    def test_challenge_rejects_unknown_modes(self):
+    def test_challenge_rejects_unknown_ai_assistant_mode(self):
         host, _ = self.ready_both_players()
 
-        bad_competition = self.submit_challenge(
-            host["matchId"],
-            host["playerToken"],
-            SOLVABLE_ROWS_A,
-            competition_mode="unknown",
-        )
         bad_assistant = self.submit_challenge(
             host["matchId"],
             host["playerToken"],
@@ -356,10 +348,9 @@ class OnlineRoomTests(unittest.TestCase):
             ai_assistant_mode="unknown",
         )
 
-        self.assertEqual(bad_competition.status_code, 400)
         self.assertEqual(bad_assistant.status_code, 400)
 
-    def test_legacy_rows_only_challenge_uses_safe_mode_defaults(self):
+    def test_rows_only_challenge_uses_default_draft_method(self):
         host, _ = self.ready_both_players()
         response = self.client.post(
             "/online/rooms/" + host["matchId"] + "/challenge",
@@ -371,9 +362,30 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(
             response.json()["ownChallengeMetadata"],
             {
-                "competitionMode": "competitive",
                 "aiAssistantMode": "description_generation",
             },
+        )
+
+    def test_legacy_competition_field_is_ignored(self):
+        host, _ = self.ready_both_players()
+        response = self.client.post(
+            "/online/rooms/" + host["matchId"] + "/challenge",
+            json={
+                "rows": SOLVABLE_ROWS_A,
+                "competitionMode": "legacy-value",
+                "aiAssistantMode": "description_generation",
+            },
+            headers=self.auth_headers(host["playerToken"]),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(
+            "competitionMode",
+            response.json()["ownChallengeMetadata"],
+        )
+        self.assertNotIn(
+            "competitionMode",
+            backend.ONLINE_MATCH_LOG_FILE.read_text(encoding="utf-8"),
         )
 
     def test_challenge_submission_is_idempotent_and_frozen(self):
@@ -394,11 +406,11 @@ class OnlineRoomTests(unittest.TestCase):
             host["playerToken"],
             SOLVABLE_ROWS_B,
         )
-        changed_mode = self.submit_challenge(
+        changed_method = self.submit_challenge(
             host["matchId"],
             host["playerToken"],
             SOLVABLE_ROWS_A,
-            competition_mode="supportive",
+            ai_assistant_mode="partial_completion",
         )
 
         self.assertEqual(first.status_code, 200)
@@ -407,7 +419,7 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertNotIn("opponentChallengeRows", first.json())
         self.assertEqual(repeated.status_code, 200)
         self.assertEqual(changed.status_code, 409)
-        self.assertEqual(changed_mode.status_code, 409)
+        self.assertEqual(changed_method.status_code, 409)
 
     def test_both_challenges_are_exchanged_by_player_identity(self):
         host, guest = self.ready_both_players()
@@ -420,7 +432,6 @@ class OnlineRoomTests(unittest.TestCase):
             host["matchId"],
             guest["playerToken"],
             SOLVABLE_ROWS_B,
-            competition_mode="supportive",
             ai_assistant_mode="partial_completion",
         )
         host_status = self.client.get(
@@ -443,14 +454,12 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(
             host_status.json()["ownChallengeMetadata"],
             {
-                "competitionMode": "competitive",
                 "aiAssistantMode": "description_generation",
             },
         )
         self.assertEqual(
             host_status.json()["opponentChallengeMetadata"],
             {
-                "competitionMode": "supportive",
                 "aiAssistantMode": "partial_completion",
             },
         )
@@ -557,7 +566,6 @@ class OnlineRoomTests(unittest.TestCase):
             host["matchId"],
             guest["playerToken"],
             SOLVABLE_ROWS_B,
-            competition_mode="supportive",
             ai_assistant_mode="partial_completion",
         )
         self.submit_result(

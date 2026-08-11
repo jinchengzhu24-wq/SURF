@@ -333,9 +333,6 @@ public class LLMLevelDesignClient : MonoBehaviour
                 ? PlayerPrefs.GetString(CreativeIdeaSessionIdPrefsKey, "")
                 : "",
             sceneName = hasContext ? SceneManager.GetActiveScene().name : "",
-            competitionMode = SceneManager.GetActiveScene().name == "DG_Level"
-                ? CompetitionModeController.GetSelectedMode()
-                : "",
             originalIdeaText = GetContextValue(
                 hasContext,
                 CreativeWorkshopContext.OriginalIdeaTextPrefsKey
@@ -406,7 +403,6 @@ public class LLMLevelDesignClient : MonoBehaviour
         public string ideaId;
         public string sessionId;
         public string sceneName;
-        public string competitionMode;
         public string originalIdeaText;
         public string selectedDirectionText;
         public string refinementFeedbackText;

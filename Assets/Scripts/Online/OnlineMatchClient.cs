@@ -100,7 +100,6 @@ public class OnlineMatchClient : MonoBehaviour
 
     public IEnumerator SubmitChallenge(
         string[] rows,
-        string competitionMode,
         string aiAssistantMode,
         Action<OnlineRoomState> onSuccess,
         Action<string> onFailure)
@@ -108,7 +107,6 @@ public class OnlineMatchClient : MonoBehaviour
         OnlineChallengePayload payload = new OnlineChallengePayload
         {
             rows = CloneRows(rows),
-            competitionMode = competitionMode,
             aiAssistantMode = aiAssistantMode
         };
         return SendRoomRequest(
@@ -302,7 +300,6 @@ public class OnlineMatchClient : MonoBehaviour
     private class OnlineChallengePayload
     {
         public string[] rows;
-        public string competitionMode;
         public string aiAssistantMode;
     }
 
