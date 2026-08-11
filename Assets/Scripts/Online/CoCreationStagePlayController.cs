@@ -29,6 +29,7 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
     private int minimumMoves = -1;
     private int minimumPushes = -1;
     private string errorMessage = "";
+    private CoCreationStagePlayView playView;
 
 #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
@@ -38,6 +39,18 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
     private void Awake()
     {
         ResolveReferences();
+        playView = FindObjectOfType<CoCreationStagePlayView>(true);
+
+        if (playView != null)
+        {
+            playView.Bind(IsChinese(), ReturnToLab);
+        }
+        else
+        {
+            Debug.LogError(
+                "CoCreationStagePlayController: The static Stage Play UI is missing."
+            );
+        }
 
         if (levelLoader != null)
         {
@@ -110,6 +123,11 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
         LevelStudyRecorder.PlayerMoveRecorded -= HandlePlayerMove;
         LevelStudyRecorder.LevelRestarted -= HandleRestart;
+
+        if (playView != null)
+        {
+            playView.Unbind();
+        }
     }
 
     private void HandlePlayerMove(bool pushedBox)
@@ -158,6 +176,11 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
         completed = true;
         completedDuration = GetActiveDuration();
+        playView?.SetStatus(
+            IsChinese()
+                ? "PLAY COMPLETED / 试玩完成，结果已记录"
+                : "PLAY COMPLETED — RESULT RECORDED."
+        );
         StartCoroutine(SendMetrics("complete"));
     }
 
@@ -165,52 +188,6 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
     {
         manager.MarkCompletionTransitionHandled();
         StartCoroutine(manager.FadeFromBlackAfterExternalInitialLoad(false));
-    }
-
-    private void OnGUI()
-    {
-        GUIStyle buttonStyle = new GUIStyle(GUI.skin.button)
-        {
-            fontSize = Mathf.RoundToInt(Mathf.Clamp(Screen.width / 34f, 20f, 34f)),
-            fontStyle = FontStyle.Bold,
-            wordWrap = true
-        };
-        GUIStyle labelStyle = new GUIStyle(GUI.skin.label)
-        {
-            fontSize = Mathf.RoundToInt(Mathf.Clamp(Screen.width / 48f, 16f, 26f)),
-            alignment = TextAnchor.MiddleCenter,
-            wordWrap = true
-        };
-
-        float width = Mathf.Min(620f, Screen.width - 40f);
-        Rect buttonRect = new Rect((Screen.width - width) / 2f, 22f, width, 66f);
-        string returnLabel = IsChinese()
-            ? "返回 LLM 共创工作台"
-            : "RETURN TO CO-CREATION LAB";
-
-        GUI.enabled = !returning;
-        if (GUI.Button(buttonRect, returnLabel, buttonStyle))
-        {
-            ReturnToLab();
-        }
-        GUI.enabled = true;
-
-        if (completed)
-        {
-            GUI.Label(
-                new Rect((Screen.width - width) / 2f, 96f, width, 50f),
-                IsChinese() ? "试玩完成。结果已记录。" : "PLAY COMPLETED — RESULT RECORDED.",
-                labelStyle
-            );
-        }
-        else if (!string.IsNullOrEmpty(errorMessage))
-        {
-            GUI.Label(
-                new Rect((Screen.width - width) / 2f, 96f, width, 80f),
-                errorMessage,
-                labelStyle
-            );
-        }
     }
 
     private void ReturnToLab()
@@ -221,6 +198,7 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
         }
 
         returning = true;
+        playView?.SetReturnInteractable(false);
         if (levelManager != null)
         {
             levelManager.SetExternalPlayerInputEnabled(false);
@@ -244,8 +222,9 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
         if (string.IsNullOrWhiteSpace(returnUrl))
         {
-            ShowError("The co-creation return URL is missing.");
             returning = false;
+            playView?.SetReturnInteractable(true);
+            ShowError("The co-creation return URL is missing.");
             yield break;
         }
 
@@ -318,6 +297,7 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
     private void ShowError(string message)
     {
         errorMessage = IsChinese() ? "无法加载试玩：" + message : "PLAY UNAVAILABLE: " + message;
+        playView?.SetStatus(errorMessage);
         Debug.LogError("CoCreationStagePlayController: " + message);
         if (levelManager != null)
         {
