@@ -621,6 +621,7 @@ def assess_version(
         context["validation"],
         context["playSummary"],
         request.state.request_id,
+        stage_context=context["stageContext"],
     )
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
@@ -722,6 +723,7 @@ def send_message(
         solver_metrics=context["validation"],
         play_summary=context["playSummary"],
         proposal_validator=validate_and_solve,
+        stage_context=context["stageContext"],
     )
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
@@ -1272,8 +1274,9 @@ def insert_turn(database, session, role, content, version_id, request_id, execut
         """
         INSERT INTO conversation_turns(
             id, session_id, sequence_number, role, content, language,
-            version_id, request_id, model, attempts_used, latency_ms, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            version_id, request_id, model, attempts_used, latency_ms,
+            guidance_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             turn_id,
@@ -1287,6 +1290,11 @@ def insert_turn(database, session, role, content, version_id, request_id, execut
             execution.model if execution else None,
             execution.attempts_used if execution else None,
             execution.latency_ms if execution else None,
+            (
+                dump_json(execution.guidance)
+                if execution and execution.guidance
+                else None
+            ),
             now,
         ),
     )
@@ -1326,6 +1334,13 @@ def build_llm_context(database, session_id, version):
             {"role": turn["role"], "content": turn["content"]}
             for turn in reversed(turns)
         ],
+        "stageContext": {
+            "stageNumber": version["stage_number"],
+            "source": version["source"],
+            "summary": version["summary"],
+            "parentVersionId": version["parent_version_id"],
+            "diff": load_json(version["diff_json"]),
+        },
         "playSummary": (
             {
                 "status": latest_play["status"],

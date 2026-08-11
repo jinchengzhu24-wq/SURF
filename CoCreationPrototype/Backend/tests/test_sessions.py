@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -96,6 +97,70 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "BOOTSTRAP_TOKEN_USED")
 
+    def test_new_stage_opening_persists_guidance(self):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "The box and target share a compact central route.\n\nWhat would you like another player to notice first?",
+            1,
+            "opening-request",
+            assessment={
+                "solutionSummary": "The solver found a direct route.",
+                "difficultyOpinion": "This looks approachable to me.",
+                "features": ["Compact route"],
+                "suggestions": ["Discuss the opening choice"],
+                "satisfactionQuestion": "What would you like another player to notice first?",
+            },
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "What would you like another player to notice first?",
+                "proposalOffer": None,
+            },
+        )
+
+        with patch.object(
+            backend,
+            "generate_stage_assessment",
+            return_value=execution,
+        ) as mocked:
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "opening_001"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["turns"][-1]["guidance"]["move"], "observe_stage")
+        self.assertEqual(mocked.call_args.kwargs["stage_context"]["stageNumber"], 1)
+
+    def test_legacy_database_receives_nullable_guidance_column(self):
+        original_path = repository.DATABASE_PATH
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            legacy_path = Path(directory) / "legacy.sqlite3"
+            database = sqlite3.connect(legacy_path)
+            database.executescript(
+                repository.SCHEMA.replace("    guidance_json TEXT,\n", "")
+            )
+            database.close()
+
+            try:
+                repository.DATABASE_PATH = legacy_path
+                repository.initialize_database()
+                database = sqlite3.connect(legacy_path)
+                columns = {
+                    row[1]
+                    for row in database.execute(
+                        "PRAGMA table_info(conversation_turns)"
+                    ).fetchall()
+                }
+                database.close()
+            finally:
+                repository.DATABASE_PATH = original_path
+
+        self.assertIn("guidance_json", columns)
+
     def test_manual_stage_requires_current_base_and_is_idempotent(self):
         stage_one = self.read_session()["currentVersionId"]
         request = {
@@ -162,6 +227,13 @@ class CoCreationSessionTests(unittest.TestCase):
                 "satisfactionQuestion": "Is this good enough for your intention?",
             },
             model="mock-model",
+            guidance={
+                "move": "reflect_on_play",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "Did the short route match your expectation?",
+                "proposalOffer": None,
+            },
         )
 
         with patch.object(backend, "generate_chat_reply", return_value=execution) as mocked:
@@ -180,7 +252,13 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(conversation[-1], {"role": "user", "content": "What stands out?"})
         self.assertEqual(mocked.call_args.kwargs["play_summary"]["moveCount"], 6)
         self.assertEqual(mocked.call_args.kwargs["play_summary"]["status"], "completed")
+        self.assertEqual(mocked.call_args.kwargs["stage_context"]["stageNumber"], 1)
+        self.assertEqual(mocked.call_args.kwargs["stage_context"]["source"], "initial")
         self.assertEqual(response.json()["turns"][-1]["role"], "assistant")
+        self.assertEqual(
+            response.json()["turns"][-1]["guidance"]["move"],
+            "reflect_on_play",
+        )
 
     def test_play_ticket_is_single_use_and_metrics_do_not_create_stage(self):
         version_id = self.read_session()["currentVersionId"]
@@ -255,6 +333,13 @@ class CoCreationSessionTests(unittest.TestCase):
             proposed_rows=EDITED_ROWS,
             modification_summary="Moved the player start left.",
             model="mock-model",
+            guidance={
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
         )
 
         with patch.object(backend, "generate_chat_reply", return_value=execution):

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = BACKEND_DIR.parents[1]
 
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
@@ -29,11 +30,38 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
+        self.assertIn("cocreation-pixel-20260811-1", index_response.text)
+        self.assertIn("cocreation-guided-20260811-1", index_response.text)
         self.assertEqual(css_response.status_code, 200)
-        self.assertIn("--brand: #167a67", css_response.text)
+        self.assertIn("--bg: #6f9d31", css_response.text)
+        self.assertIn("--wood: #8b562c", css_response.text)
+        self.assertIn("--pixel-shadow: 4px 4px 0", css_response.text)
         self.assertEqual(js_response.status_code, 200)
         self.assertIn("/api/sessions/", js_response.text)
         self.assertIn("play-attempts", js_response.text)
+        self.assertIn("guidance-offer", js_response.text)
+        self.assertNotIn("createAssessmentCard", js_response.text)
+
+    def test_cocreation_frontend_uses_active_dashboard_visual_contract(self):
+        dashboard_css = (REPOSITORY_ROOT / "Frontend" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+        cocreation_css = (
+            REPOSITORY_ROOT / "CoCreationPrototype" / "Frontend" / "styles.css"
+        ).read_text(encoding="utf-8")
+        shared_tokens = (
+            "--bg: #6f9d31",
+            "--wood: #8b562c",
+            "--stone-dark: #41494d",
+            "--purple: #67478c",
+            "--pixel-shadow: 4px 4px 0",
+            'font-family: Consolas, "Courier New", monospace',
+            "border: 3px solid var(--stone-dark)",
+        )
+
+        for token in shared_tokens:
+            self.assertIn(token, dashboard_css)
+            self.assertIn(token, cocreation_css)
 
     def test_sample_has_expected_shape_and_objects(self):
         response = self.client.get("/api/sample")
@@ -213,6 +241,11 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertIn("\n".join(backend.SAMPLE_ROWS), system_prompt)
         self.assertIn("read-only", system_prompt)
+        self.assertIn("at most one central question", system_prompt)
+        self.assertIn("tentative, correctable hypothesis", system_prompt)
+        self.assertIn("Every difficulty statement must explicitly use", system_prompt)
+        self.assertIn("Stage number is a saved-version index", system_prompt)
+        self.assertIn("offer_revision", system_prompt)
         self.assertNotIn("Competitive", system_prompt)
         self.assertNotIn("Supportive", system_prompt)
         self.assertEqual(prompt_messages[-1]["content"], "What do you notice?")

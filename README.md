@@ -73,7 +73,9 @@ CoCreationPrototype/
 └── Backend/               # FastAPI、DeepSeek 客户端、SQLite 与测试
 ```
 
-前端视觉复用 8000 dashboard 的设计语言：`#f4f7f6` 页面背景、白色卡片、浅灰绿色边框、绿色品牌按钮、sticky topbar、Pixel 风格地图瓦片和响应式布局。桌面为 Stage / 聊天 / 地图编辑器三栏；低于 1200px 收为两栏，低于 900px 为单栏，680px 下进一步缩小间距与瓦片。
+前端视觉复用 8000 MatchMaking/Train dashboard 当前生效的 Pixel-adventure 设计语言：草绿色网格背景、木质 sticky topbar、米白石质面板、蓝紫标题板、硬边像素阴影、Consolas 标题与像素地图框。桌面仍为 Stage / 聊天 / 地图编辑器三栏；低于 1200px 收为两栏，低于 900px 为单栏，680px 下进一步缩小阴影、间距与瓦片。8010 保留独立 CSS，不在运行时引用 8000 文件。
+
+LLM 使用适应型共创策略。每个新 Stage 会收到一次基于真实地图的中性开场；之后 LLM 根据玩家最新表达选择澄清意图、提出观点、讨论权衡、结合试玩反思或建议修改方向。意图推测必须是可纠正的暂定假设，不会写入最终设计意图。LLM 可以主动提出修改方向，但只有玩家明确请求或同意后才能返回完整地图提案。普通聊天不再显示固定的 assessment 报告卡；结构化评价和每轮 guidance 元数据仍保存在 SQLite 中供研究分析。
 
 后端使用独立 SQLite/WAL。默认数据库为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`，`.env` 和数据库文件均被本目录 `.gitignore` 排除。
 生产 systemd 模板保存在 `CoCreationPrototype/Backend/sokoban-cocreation.service`，其中将写权限限制到独立数据目录，并同时读取主后端的 LLM 配置和 8010 自己的安全配置。
@@ -120,7 +122,7 @@ POST  /api/sessions/{sessionId}/intention
 GET   /api/integrations/sessions/{sessionId}
 ```
 
-浏览器会话使用 HttpOnly cookie；Unity 创建会话后持有只读集成 token。Play Ticket 只能换取一次地图，随后使用仅限该 attempt 的 token 提交指标。Stage 保存、恢复、提案决定和 Play 创建均使用幂等键；基于过期 Stage 的写入返回 `409 VERSION_CONFLICT`。
+浏览器会话使用 HttpOnly cookie；Unity 创建会话后持有只读集成 token。Play Ticket 只能换取一次地图，随后使用仅限该 attempt 的 token 提交指标。Stage 保存、恢复、提案决定和 Play 创建均使用幂等键；基于过期 Stage 的写入返回 `409 VERSION_CONFLICT`。会话中的 assistant turn 可额外返回 `guidance`，记录本轮引导动作、暂定意图推测、核心问题和不含地图的修改方向；旧消息中的该字段为 `null`。
 
 ## 8000 在线匹配
 

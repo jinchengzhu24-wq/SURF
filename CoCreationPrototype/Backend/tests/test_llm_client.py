@@ -56,10 +56,24 @@ class LLMClientTests(unittest.TestCase):
 
     def test_valid_response_is_returned(self):
         result, client = self.execute(
-            ['{"assistantMessage":"The level has a compact central route."}']
+            [json.dumps({
+                "assistantMessage": "The level has a compact central route.",
+                "guidance": {
+                    "move": "offer_perspective",
+                    "intentHypothesis": None,
+                    "intentConfidence": None,
+                    "followUpQuestion": "Which part would you like to examine first?",
+                    "proposalOffer": None,
+                },
+                "assessment": None,
+                "proposedRows": None,
+                "modificationSummary": "",
+            })]
         )
 
-        self.assertEqual(result.assistant_message, "The level has a compact central route.")
+        self.assertIn("compact central route", result.assistant_message)
+        self.assertIn("Which part", result.assistant_message)
+        self.assertEqual(result.guidance["move"], "offer_perspective")
         self.assertEqual(result.attempts_used, 1)
         request = client.chat.completions.calls[0]
         self.assertEqual(request["response_format"], {"type": "json_object"})
@@ -69,7 +83,19 @@ class LLMClientTests(unittest.TestCase):
         result, client = self.execute(
             [
                 "not-json",
-                '{"assistantMessage":"Please tell me what experience you want."}',
+                json.dumps({
+                    "assistantMessage": "I would first clarify the experience you have in mind.",
+                    "guidance": {
+                        "move": "clarify_intent",
+                        "intentHypothesis": None,
+                        "intentConfidence": None,
+                        "followUpQuestion": "What experience do you want to create?",
+                        "proposalOffer": None,
+                    },
+                    "assessment": None,
+                    "proposedRows": None,
+                    "modificationSummary": "",
+                }),
             ]
         )
 
@@ -111,15 +137,34 @@ class LLMClientTests(unittest.TestCase):
 
     def test_chinese_response_is_supported(self):
         result = llm_client.validate_chat_response(
-            {"assistantMessage": "你好，世界"}
+            {
+                "assistantMessage": "我注意到中央路线比较紧凑。",
+                "guidance": {
+                    "move": "offer_perspective",
+                    "intentHypothesis": None,
+                    "intentConfidence": None,
+                    "followUpQuestion": "你想先讨论哪一部分？",
+                    "proposalOffer": None,
+                },
+                "assessment": None,
+                "proposedRows": None,
+                "modificationSummary": "",
+            }
         )
 
-        self.assertEqual(result[0], "你好，世界")
+        self.assertEqual(result[0], "我注意到中央路线比较紧凑。")
 
     def test_structured_assessment_and_proposal_are_returned(self):
         rows = ["############"] * 10
         payload = {
             "assistantMessage": "Here is a focused alternative.",
+            "guidance": {
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
             "assessment": {
                 "solutionSummary": "One box route.",
                 "difficultyOpinion": "Likely easy.",
@@ -136,6 +181,78 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result[1]["features"], ["Compact"])
         self.assertEqual(result[2], rows)
         self.assertEqual(result[3], "Moved the player.")
+        self.assertEqual(result[4]["move"], "deliver_revision")
+
+    def test_unsolicited_revision_offer_cannot_include_map(self):
+        payload = {
+            "assistantMessage": "A narrower approach lane could add commitment.",
+            "guidance": {
+                "move": "offer_revision",
+                "intentHypothesis": "You may want the first push to feel consequential.",
+                "intentConfidence": "low",
+                "followUpQuestion": "Would you like me to draft that direction?",
+                "proposalOffer": {
+                    "summary": "Narrow the first approach lane",
+                    "rationale": "It would make the opening choice more deliberate.",
+                },
+            },
+            "assessment": None,
+            "proposedRows": ["############"] * 10,
+            "modificationSummary": "Narrowed the lane.",
+        }
+
+        with self.assertRaisesRegex(ValueError, "cannot include proposedRows"):
+            llm_client.validate_chat_response(payload)
+
+    def test_stage_opening_is_neutral_and_requires_one_question(self):
+        payload = {
+            "assistantMessage": "The box and target share a compact central route.",
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "What would you like another player to notice first?",
+                "proposalOffer": None,
+            },
+            "assessment": {
+                "solutionSummary": "The solver found a direct route.",
+                "difficultyOpinion": "This looks approachable to me.",
+                "features": ["Compact route"],
+                "suggestions": ["Discuss the opening choice"],
+                "satisfactionQuestion": "What would you like another player to notice first?",
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload, assessment_only=True)
+
+        self.assertEqual(result[4]["move"], "observe_stage")
+        self.assertIsNone(result[4]["intentHypothesis"])
+
+    def test_stage_opening_rejects_intention_inference(self):
+        payload = {
+            "assistantMessage": "You want a difficult level.",
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": "You want a difficult level.",
+                "intentConfidence": "medium",
+                "followUpQuestion": "Is that right?",
+                "proposalOffer": None,
+            },
+            "assessment": {
+                "solutionSummary": "A route exists.",
+                "difficultyOpinion": "It may be difficult.",
+                "features": ["One route"],
+                "suggestions": ["Review it"],
+                "satisfactionQuestion": "Is that right?",
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        with self.assertRaisesRegex(ValueError, "cannot infer intention"):
+            llm_client.validate_chat_response(payload, assessment_only=True)
 
 
 if __name__ == "__main__":

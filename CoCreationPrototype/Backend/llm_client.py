@@ -19,7 +19,18 @@ CHAT_TIMEOUT_SECONDS = 25.0
 CHAT_MAX_ATTEMPTS = 2
 CHAT_RESPONSE_MAX_LENGTH = 4000
 RETRY_DELAY_SECONDS = 0.25
-PROMPT_VERSION = "cocreation-v1"
+PROMPT_VERSION = "cocreation-v2-guided"
+
+GUIDANCE_MOVES = {
+    "observe_stage",
+    "clarify_intent",
+    "offer_perspective",
+    "challenge_tradeoff",
+    "reflect_on_play",
+    "offer_revision",
+    "deliver_revision",
+}
+INTENT_CONFIDENCE_LEVELS = {"low", "medium", "high"}
 
 _clients = {}
 _client_lock = Lock()
@@ -35,6 +46,7 @@ class LLMExecutionResult:
     modification_summary: str = ""
     model: str = ""
     latency_ms: int = 0
+    guidance: dict = field(default_factory=dict)
 
 
 class LLMServiceError(Exception):
@@ -63,40 +75,66 @@ def build_chat_messages(
     solver_metrics=None,
     play_summary=None,
     assessment_only=False,
+    stage_context=None,
 ):
     serialized_map = "\n".join(rows)
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     solver_metrics = solver_metrics or {}
     play_summary = play_summary or {}
-    task = (
-        "Assess this saved stage now. Do not propose a changed map."
-        if assessment_only
-        else (
-            "Respond to the designer. If they clearly request a map modification, "
-            "you may provide one complete proposedRows map; otherwise use null."
-        )
-    )
+    stage_context = stage_context or {}
+    task = _build_task_instructions(assessment_only)
     system_prompt = (
-        "You are a neutral Sokoban co-creation partner. Work only with the exact "
-        "saved stage below and the supplied conversation. Treat the saved stage "
-        "as read-only until the designer explicitly accepts a proposal. Help the designer form "
-        "and refine their own intention without assigning a predefined purpose. "
-        "Never claim a proposal has been accepted or saved; the designer must "
-        "accept it in the interface. Clearly treat difficulty statements as your "
-        "opinion. Deterministic solver and play evidence are authoritative for the "
-        "facts they report. Do not invent play results or a verified solution. "
+        "You are an adaptive Sokoban co-creation partner. Work only with the exact "
+        "saved Stage and evidence supplied below. Respond directly to the designer's "
+        "latest contribution instead of producing a generic evaluation report. Choose "
+        "one primary conversational move: observe the Stage, clarify intention, offer "
+        "your perspective, challenge a trade-off respectfully, reflect on play evidence, "
+        "offer a revision direction, or deliver an explicitly requested revision. "
+        "Use two to four short paragraphs and at most one central question. A factual "
+        "question should be answered before any optional follow-up. Do not mechanically "
+        "include every possible move in each reply.\n\n"
+        "Help the designer form and refine their own intention without assigning a "
+        "predefined purpose. Infer intention only when conversation or design actions "
+        "provide evidence. Phrase every inference as a tentative, correctable hypothesis "
+        "and invite correction. Never store or present an inferred intention as the "
+        "designer's final self-report. You may disagree and identify trade-offs, but make "
+        "clear that evaluative and difficulty statements are your perspective. Every "
+        "difficulty statement must explicitly use perspective language such as 'in my "
+        "view', 'I suspect', '在我看来', or '我倾向于认为'; never present difficulty as "
+        "a deterministic solver fact.\n\n"
+        "Treat the saved Stage as read-only until the designer accepts a validated "
+        "proposal in the interface. You may proactively offer one concrete revision "
+        "direction and rationale, but that offer must not contain proposedRows. Generate "
+        "proposedRows only when the designer's latest message explicitly requests a map "
+        "change or explicitly agrees to a previously offered revision direction. Never "
+        "claim a proposal has been accepted, saved, or verified. Deterministic solver and "
+        "play evidence are authoritative only for the facts they report; never invent "
+        "play results or a verified solution. A Stage number is a saved-version index, "
+        "not a campaign or difficulty sequence. Never call Stage 1 the first level, "
+        "assume it is a tutorial, or infer intended player progression from its number.\n\n"
         f"Write all new natural-language fields in {response_language}. {task}\n\n"
         "Return JSON only with exactly these keys:\n"
-        '{"assistantMessage":"...","assessment":'
-        '{"solutionSummary":"...","difficultyOpinion":"...",'
-        '"features":["..."],"suggestions":["..."],'
-        '"satisfactionQuestion":"..."},"proposedRows":null,'
+        '{"assistantMessage":"...","guidance":'
+        '{"move":"observe_stage","intentHypothesis":null,'
+        '"intentConfidence":null,"followUpQuestion":"...",'
+        '"proposalOffer":null},"assessment":null,"proposedRows":null,'
         '"modificationSummary":""}.\n'
+        "guidance.move must be one of observe_stage, clarify_intent, "
+        "offer_perspective, challenge_tradeoff, reflect_on_play, offer_revision, "
+        "or deliver_revision. intentConfidence must be null, low, medium, or high. "
+        "followUpQuestion must be null or one question. proposalOffer must be null or "
+        'an object with exactly {"summary":"...","rationale":"..."}. '
+        "assistantMessage must not repeat followUpQuestion; the application appends it.\n"
+        "assessment must normally be null. For a newly saved Stage opening it must "
+        "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
+        "suggestions, and satisfactionQuestion; features and suggestions are non-empty "
+        "arrays of strings, and satisfactionQuestion must match the conversational focus.\n"
         "When proposedRows is present it must contain exactly 10 strings of 12 "
         "characters using only space, #, ., @, p, s, and t, with one p and one or "
         "two matching s/t pairs. Keep changes focused on the designer request.\n\n"
         f"Current saved stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
+        f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
         f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
     )
@@ -117,6 +155,7 @@ def generate_stage_assessment(
     solver_metrics,
     play_summary,
     request_id,
+    stage_context=None,
 ):
     return generate_chat_reply(
         conversation,
@@ -126,6 +165,7 @@ def generate_stage_assessment(
         solver_metrics=solver_metrics,
         play_summary=play_summary,
         assessment_only=True,
+        stage_context=stage_context,
     )
 
 
@@ -138,6 +178,7 @@ def generate_chat_reply(
     play_summary=None,
     assessment_only=False,
     proposal_validator=None,
+    stage_context=None,
 ):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
@@ -161,6 +202,7 @@ def generate_chat_reply(
         solver_metrics,
         play_summary,
         assessment_only,
+        stage_context,
     )
     started_at = time.monotonic()
 
@@ -199,7 +241,7 @@ def generate_chat_reply(
                     continue
 
             return LLMExecutionResult(
-                assistant_message=validated[0],
+                assistant_message=_compose_assistant_message(validated[0], validated[4]),
                 assessment=validated[1],
                 proposed_rows=validated[2],
                 modification_summary=validated[3],
@@ -207,6 +249,7 @@ def generate_chat_reply(
                 request_id=request_id,
                 model=model,
                 latency_ms=int((time.monotonic() - started_at) * 1000),
+                guidance=validated[4],
             )
         except Exception as exception:
             error = classify_exception(exception, request_id, attempt)
@@ -230,43 +273,61 @@ def validate_chat_response(payload, assessment_only=False):
     if not isinstance(payload, dict):
         raise ValueError("The model response must be a JSON object.")
 
+    if set(payload) != {
+        "assistantMessage",
+        "guidance",
+        "assessment",
+        "proposedRows",
+        "modificationSummary",
+    }:
+        raise ValueError("The model response contains unexpected or missing fields.")
+
     assistant_message = _clean_text(payload.get("assistantMessage"), "assistantMessage")
+    guidance = _validate_guidance(payload.get("guidance"), assessment_only)
+
+    if "?" in assistant_message or "？" in assistant_message:
+        raise ValueError("Questions must be supplied through guidance.followUpQuestion.")
     assessment_payload = payload.get("assessment")
 
     if assessment_payload is None:
-        assessment_payload = {
-            "solutionSummary": assistant_message,
-            "difficultyOpinion": assistant_message,
-            "features": [assistant_message],
-            "suggestions": [assistant_message],
-            "satisfactionQuestion": assistant_message,
-        }
+        if assessment_only:
+            raise ValueError("An assessment-only response requires assessment.")
+        assessment = {}
     elif not isinstance(assessment_payload, dict):
         raise ValueError("assessment must be an object.")
-
-    assessment = {
-        "solutionSummary": _clean_text(
-            assessment_payload.get("solutionSummary"),
-            "assessment.solutionSummary",
-        ),
-        "difficultyOpinion": _clean_text(
-            assessment_payload.get("difficultyOpinion"),
-            "assessment.difficultyOpinion",
-        ),
-        "features": _clean_list(assessment_payload.get("features"), "features"),
-        "suggestions": _clean_list(
-            assessment_payload.get("suggestions"),
-            "suggestions",
-        ),
-        "satisfactionQuestion": _clean_text(
-            assessment_payload.get("satisfactionQuestion"),
-            "assessment.satisfactionQuestion",
-        ),
-    }
+    else:
+        assessment = {
+            "solutionSummary": _clean_text(
+                assessment_payload.get("solutionSummary"),
+                "assessment.solutionSummary",
+            ),
+            "difficultyOpinion": _clean_text(
+                assessment_payload.get("difficultyOpinion"),
+                "assessment.difficultyOpinion",
+            ),
+            "features": _clean_list(assessment_payload.get("features"), "features"),
+            "suggestions": _clean_list(
+                assessment_payload.get("suggestions"),
+                "suggestions",
+            ),
+            "satisfactionQuestion": _clean_text(
+                assessment_payload.get("satisfactionQuestion"),
+                "assessment.satisfactionQuestion",
+            ),
+        }
     proposed_rows = payload.get("proposedRows")
 
     if assessment_only and proposed_rows is not None:
         raise ValueError("An assessment-only response cannot propose a map.")
+
+    if guidance["move"] == "offer_revision" and proposed_rows is not None:
+        raise ValueError("A revision offer cannot include proposedRows.")
+
+    if proposed_rows is not None and guidance["move"] != "deliver_revision":
+        raise ValueError("proposedRows requires the deliver_revision move.")
+
+    if guidance["move"] == "deliver_revision" and proposed_rows is None:
+        raise ValueError("The deliver_revision move requires proposedRows.")
 
     if proposed_rows is not None:
         if not isinstance(proposed_rows, list) or not all(
@@ -286,7 +347,112 @@ def validate_chat_response(payload, assessment_only=False):
         assessment,
         proposed_rows,
         modification_summary.strip()[:1000],
+        guidance,
     )
+
+
+def _build_task_instructions(assessment_only):
+    if assessment_only:
+        return (
+            "Open discussion for this newly saved Stage. Use observe_stage, include a "
+            "grounded structured assessment, do not infer an intention before the "
+            "designer has supplied evidence, include exactly one open follow-up question, "
+            "and do not offer or generate a changed map."
+        )
+
+    return (
+        "Respond adaptively. assessment should normally be null. Use offer_revision "
+        "without proposedRows for an unsolicited revision idea; use deliver_revision "
+        "with a complete proposedRows map only after explicit designer authorization."
+    )
+
+
+def _validate_guidance(payload, assessment_only):
+    if payload is None:
+        raise ValueError("guidance is required.")
+
+    if not isinstance(payload, dict):
+        raise ValueError("guidance must be an object.")
+
+    if set(payload) != {
+        "move",
+        "intentHypothesis",
+        "intentConfidence",
+        "followUpQuestion",
+        "proposalOffer",
+    }:
+        raise ValueError("guidance contains unexpected or missing fields.")
+
+    move = payload.get("move")
+
+    if move not in GUIDANCE_MOVES:
+        raise ValueError("guidance.move is invalid.")
+
+    intent_hypothesis = _clean_optional_text(
+        payload.get("intentHypothesis"),
+        "guidance.intentHypothesis",
+    )
+    intent_confidence = payload.get("intentConfidence")
+
+    if intent_hypothesis is None:
+        if intent_confidence is not None:
+            raise ValueError("intentConfidence requires intentHypothesis.")
+    elif intent_confidence not in INTENT_CONFIDENCE_LEVELS:
+        raise ValueError("intentConfidence is invalid.")
+
+    follow_up_question = _clean_optional_text(
+        payload.get("followUpQuestion"),
+        "guidance.followUpQuestion",
+    )
+
+    if follow_up_question is not None:
+        question_marks = follow_up_question.count("?") + follow_up_question.count("？")
+
+        if question_marks != 1:
+            raise ValueError("followUpQuestion must contain exactly one question.")
+    proposal_offer = payload.get("proposalOffer")
+
+    if proposal_offer is not None:
+        if move != "offer_revision" or not isinstance(proposal_offer, dict):
+            raise ValueError("proposalOffer requires the offer_revision move.")
+
+        if set(proposal_offer) != {"summary", "rationale"}:
+            raise ValueError("proposalOffer must contain summary and rationale.")
+
+        proposal_offer = {
+            "summary": _clean_text(proposal_offer.get("summary"), "proposalOffer.summary"),
+            "rationale": _clean_text(
+                proposal_offer.get("rationale"),
+                "proposalOffer.rationale",
+            ),
+        }
+    elif move == "offer_revision":
+        raise ValueError("The offer_revision move requires proposalOffer.")
+
+    if assessment_only:
+        if move != "observe_stage":
+            raise ValueError("A Stage opening must use observe_stage.")
+        if follow_up_question is None:
+            raise ValueError("A Stage opening requires one follow-up question.")
+        if intent_hypothesis is not None or proposal_offer is not None:
+            raise ValueError("A Stage opening cannot infer intention or offer a revision.")
+
+    return {
+        "move": move,
+        "intentHypothesis": intent_hypothesis,
+        "intentConfidence": intent_confidence,
+        "followUpQuestion": follow_up_question,
+        "proposalOffer": proposal_offer,
+    }
+
+
+def _compose_assistant_message(message, guidance):
+    follow_up = guidance.get("followUpQuestion")
+
+    if not follow_up:
+        return message
+
+    return f"{message}\n\n{follow_up}"
 
 
 def classify_exception(exception, request_id, attempts_used):
@@ -372,6 +538,13 @@ def _clean_list(value, field_name):
         raise ValueError(f"{field_name} must be a non-empty list.")
 
     return [_clean_text(item, field_name) for item in value]
+
+
+def _clean_optional_text(value, field_name):
+    if value is None:
+        return None
+
+    return _clean_text(value, field_name)
 
 
 def _get_client(api_key, base_url):

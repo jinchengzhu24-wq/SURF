@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     model TEXT,
     attempts_used INTEGER,
     latency_ms INTEGER,
+    guidance_json TEXT,
     created_at TEXT NOT NULL,
     UNIQUE(session_id, sequence_number)
 );
@@ -161,6 +162,7 @@ def initialize_database():
 
     try:
         database.executescript(SCHEMA)
+        _ensure_column(database, "conversation_turns", "guidance_json", "TEXT")
         database.execute("PRAGMA journal_mode=WAL")
         database.execute("PRAGMA foreign_keys=ON")
         database.commit()
@@ -232,7 +234,7 @@ def serialize_session(database, session_id):
     turns = database.execute(
         """
         SELECT id, sequence_number, role, content, language, version_id,
-               request_id, created_at
+               request_id, guidance_json, created_at
         FROM conversation_turns
         WHERE session_id = ? ORDER BY sequence_number
         """,
@@ -312,6 +314,7 @@ def serialize_session(database, session_id):
                 "language": turn["language"],
                 "versionId": turn["version_id"],
                 "requestId": turn["request_id"],
+                "guidance": load_json(turn["guidance_json"]),
                 "createdAt": turn["created_at"],
             }
             for turn in turns
@@ -382,6 +385,18 @@ def load_json(value):
         return None
 
     return json.loads(value)
+
+
+def _ensure_column(database, table_name, column_name, declaration):
+    columns = {
+        row[1]
+        for row in database.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+
+    if column_name not in columns:
+        database.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {declaration}"
+        )
 
 
 def _serialize_attempt(attempt):

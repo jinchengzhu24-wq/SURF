@@ -62,6 +62,9 @@ const translations = {
         lockedMode: "The final Stage is locked.",
         unsaved: "Unsaved draft",
         proposal: "Map proposal",
+        suggestedDirection: "Assistant design direction",
+        draftSuggestedRevision: "Ask the assistant to draft this",
+        proposalConsent: "Please create a reviewable map proposal for this direction: {summary}",
         proposalValid: "Deterministic validation passed. Review the changed tiles before deciding.",
         accept: "Accept as new Stage",
         reject: "Reject",
@@ -147,6 +150,9 @@ const translations = {
         lockedMode: "最终 Stage 已锁定。",
         unsaved: "未保存草稿",
         proposal: "地图修改提案",
+        suggestedDirection: "助手提出的设计方向",
+        draftSuggestedRevision: "请助手具体生成这个方案",
+        proposalConsent: "请根据这个方向生成一份可供审查的地图提案：{summary}",
         proposalValid: "确定性验证已通过，请检查改动格子后再决定。",
         accept: "接受为新 Stage",
         reject: "拒绝",
@@ -341,7 +347,6 @@ function renderStages() {
 function renderMessages() {
     elements.messageList.textContent = "";
     elements.emptyChat.hidden = state.session.turns.length > 0;
-    const assessments = new Map(state.session.assessments.map(item => [item.assistantTurnId, item]));
 
     state.session.turns.forEach(turn => {
         const row = document.createElement("div");
@@ -358,26 +363,36 @@ function renderMessages() {
         bubble.className = "message-bubble";
         bubble.textContent = turn.content;
         content.appendChild(bubble);
-        const assessment = assessments.get(turn.turnId);
-        if (assessment) content.appendChild(createAssessmentCard(assessment.payload));
+        if (turn.role === "assistant" && turn.guidance && turn.guidance.proposalOffer) {
+            content.appendChild(createGuidanceOffer(turn.guidance.proposalOffer));
+        }
         row.appendChild(content);
         elements.messageList.appendChild(row);
     });
     requestAnimationFrame(() => elements.chatScroll.scrollTop = elements.chatScroll.scrollHeight);
 }
 
-function createAssessmentCard(payload) {
+function createGuidanceOffer(offer) {
     const card = document.createElement("section");
-    card.className = "assessment-card";
-    const features = (payload.features || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
-    const suggestions = (payload.suggestions || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
+    card.className = "guidance-offer";
     card.innerHTML = `
-        <strong>${escapeHtml(t("aiOpinion"))}</strong>
-        <p>${escapeHtml(payload.solutionSummary || "")}</p>
-        <p>${escapeHtml(payload.difficultyOpinion || "")}</p>
-        <ul>${features}${suggestions}</ul>
-        <b>${escapeHtml(payload.satisfactionQuestion || "")}</b>`;
+        <p class="eyebrow">${escapeHtml(t("suggestedDirection"))}</p>
+        <strong>${escapeHtml(offer.summary || "")}</strong>
+        <p>${escapeHtml(offer.rationale || "")}</p>`;
+    card.appendChild(makeButton(
+        t("draftSuggestedRevision"),
+        "secondary-button guidance-offer-button",
+        () => prefillProposalConsent(offer)
+    ));
     return card;
+}
+
+function prefillProposalConsent(offer) {
+    const summary = String(offer.summary || "").trim();
+    elements.messageInput.value = t("proposalConsent").replace("{summary}", summary);
+    handleComposerInput();
+    elements.messageInput.focus();
+    elements.messageInput.setSelectionRange(elements.messageInput.value.length, elements.messageInput.value.length);
 }
 
 function renderProposal() {
