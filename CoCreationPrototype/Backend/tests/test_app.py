@@ -30,8 +30,9 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("cocreation-pixel-20260811-1", index_response.text)
-        self.assertIn("cocreation-guided-20260811-1", index_response.text)
+        self.assertIn("cocreation-pixel-20260811-2", index_response.text)
+        self.assertIn("cocreation-guided-20260811-2", index_response.text)
+        self.assertIn('<html lang="zh-CN">', index_response.text)
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--bg: #6f9d31", css_response.text)
         self.assertIn("--wood: #8b562c", css_response.text)
@@ -40,6 +41,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("/api/sessions/", js_response.text)
         self.assertIn("play-attempts", js_response.text)
         self.assertIn("guidance-offer", js_response.text)
+        self.assertIn('language: "zh-CN"', js_response.text)
         self.assertNotIn("createAssessmentCard", js_response.text)
 
     def test_cocreation_frontend_uses_active_dashboard_visual_contract(self):
@@ -57,11 +59,21 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "--pixel-shadow: 4px 4px 0",
             'font-family: Consolas, "Courier New", monospace',
             "border: 3px solid var(--stone-dark)",
+            "align-items: stretch",
         )
 
         for token in shared_tokens:
             self.assertIn(token, dashboard_css)
             self.assertIn(token, cocreation_css)
+
+    def test_new_session_request_defaults_to_chinese(self):
+        request = backend.CreateSessionRequest(
+            rows=list(backend.SAMPLE_ROWS),
+            initialDraftMethod="partial_completion",
+            idempotencyKey="default-language-contract",
+        )
+
+        self.assertEqual(request.language, "zh-CN")
 
     def test_sample_has_expected_shape_and_objects(self):
         response = self.client.get("/api/sample")

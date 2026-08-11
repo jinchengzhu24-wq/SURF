@@ -193,7 +193,7 @@ const state = {
     busy: false,
     assessing: new Set(),
     retryAction: null,
-    language: navigator.language && navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en"
+    language: "zh-CN"
 };
 
 const chineseApiErrors = {

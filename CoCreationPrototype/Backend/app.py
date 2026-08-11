@@ -128,7 +128,7 @@ class LegacyChatRequest(StrictModel):
 class CreateSessionRequest(StrictModel):
     rows: list[str]
     initialDraftMethod: Literal["partial_completion", "description_generation"]
-    language: Literal["en", "zh-CN"] = "en"
+    language: Literal["en", "zh-CN"] = "zh-CN"
     idempotencyKey: str
     matchId: str | None = None
     playerNumber: int | None = None
