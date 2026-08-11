@@ -91,7 +91,9 @@ const translations = {
         errorNoSession: "Open this lab from Unity or start a sample session.",
         errorDirtyPlay: "Save or discard the map draft before playing.",
         errorPendingPlay: "Accept or reject the pending map proposal before playing.",
-        errorIntentRequired: "Please describe your design intention before completing the session."
+        errorIntentRequired: "Please describe your design intention before completing the session.",
+        playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
+        playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again."
     },
     "zh-CN": {
         title: "Sokoban 共创实验室",
@@ -179,7 +181,9 @@ const translations = {
         errorNoSession: "请从 Unity 打开共创实验室，或创建示例会话。",
         errorDirtyPlay: "请先保存或放弃地图草稿，再开始试玩。",
         errorPendingPlay: "请先接受或拒绝待处理的地图提案，再开始试玩。",
-        errorIntentRequired: "请先填写设计意图，再完成会话。"
+        errorIntentRequired: "请先填写设计意图，再完成会话。",
+        playSyncFailed: "关卡已经通关，但本次试玩结果未能同步；该记录之后会标记为异常中断。",
+        playLoadFailed: "所选 Stage 未能在 Unity 中加载，请检查该版本后重试。"
     }
 };
 
@@ -266,6 +270,7 @@ async function initialize() {
         state.selectedVersionId = hash.stage || localStorage.getItem(selectedStageKey()) || "";
         await refreshSession();
         restoreComposerDraft();
+        showPlayReturnNotice(hash.playReturn);
     } catch (error) {
         showLanding();
         showError(error, initialize);
@@ -742,6 +747,11 @@ function showNotice(message, retryAction = null) {
     elements.noticeMessage.textContent = message;
     elements.retryButton.hidden = !retryAction;
     elements.notice.classList.add("visible");
+}
+
+function showPlayReturnNotice(status) {
+    if (status === "sync_failed") showNotice(t("playSyncFailed"));
+    if (status === "load_failed") showNotice(t("playLoadFailed"));
 }
 
 function hideNotice() {

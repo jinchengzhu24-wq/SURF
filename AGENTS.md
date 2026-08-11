@@ -79,7 +79,7 @@ Menu -> Online_Lobby -> Match_Briefing -> Draft
 - An unsolicited revision idea may contain only a direction and rationale. A complete map proposal is allowed only after the designer explicitly requests or agrees to it, and still creates a Stage only after deterministic validation and explicit acceptance. Assistant guidance metadata is persisted separately from natural chat text.
 - Web Play uses a five-minute single-use ticket. `CoCreationPlayBootstrap` exchanges it once, clears it from the browser URL, and loads `PC_Level` for `partial_completion` or `DG_Level` for `description_generation`.
 - While `CoCreationPlayContext` is active, PC/DG generation must remain disabled. The Stage rows are revalidated with Unity `LevelSolver`; invalid or expired input must never fall back to random generation.
-- Stage Play records cumulative moves, pushes, restarts, and active time; completion/abandon returns to the same 8010 session and must not create a version, submit a challenge, or enter results/questionnaire routes.
+- Stage Play records cumulative moves, pushes, restarts, and active time. After the normal completion animation and fade, it submits the completed metrics and automatically returns the current tab to the same 8010 session and Stage. There is no in-game early-return control; browser back, close, or refresh remains an interrupted attempt. Stage Play must not create a version, submit a challenge, or enter results/questionnaire routes.
 
 ### Online matchmaking and challenge exchange
 
@@ -99,7 +99,7 @@ Menu -> Online_Lobby -> Match_Briefing -> Draft
 
 ### Deployment and verification state
 
-- Remote verification on 2026-08-11: the neutral 8000 backend, dashboard, and rebuilt WebGL were deployed; `/health`, `/ready`, `/frontend/`, `/game/`, and all four WebGL build assets returned HTTP 200. The WebGL cache key is `cocreation-20260811-2` and includes `CoCreation_Entry`, the PC/DG dual-mode Stage Play bootstrap, the statically serialized Return-to-Lab overlay, and the online questionnaire route.
+- Remote verification on 2026-08-11: the neutral 8000 backend, dashboard, and rebuilt WebGL were deployed; `/health`, `/ready`, `/frontend/`, `/game/`, and all four WebGL build assets returned HTTP 200. The WebGL cache key is `cocreation-20260811-3` and includes `CoCreation_Entry`, the PC/DG dual-mode Stage Play bootstrap, automatic return to the originating 8010 session after completion synchronization, no Stage Play return overlay, and the online questionnaire route.
 - The independent 8010 FastAPI service, persistent SQLite/WAL schema, and three-column bilingual frontend were deployed on 2026-08-11. The deployed workbench uses the Pixel-adventure theme and adaptive guidance prompt `cocreation-v2-guided`; existing databases gain nullable `conversation_turns.guidance_json` without rewriting old turns. Its systemd service reads a separate protected `.env`, reports `tokenSecretConfigured: true`, and stores data at `/root/SURF/CoCreationPrototype/Backend/data/cocreation.sqlite3`.
 - A stale CPU-bound backend process from the former exhaustive search was force-terminated. Before killing any process in future work, identify the exact stale PID with `ps`; never broadly kill Python processes.
 - Backend-only deployment can be done by copying the changed backend files and then running `cd /root/SURF && ./deploy_scp` on the server. The local `deploy_scp.ps1` uploads a broader set including WebGL and frontend assets, so do not use it for a backend-only change without intending that scope.

@@ -9,6 +9,9 @@ using UnityEngine.Networking;
 public sealed class CoCreationStagePlayController : MonoBehaviour
 {
     private const string DefaultBackendBaseUrl = "http://111.231.136.4:8010";
+    private const int CompletionSubmitMaxAttempts = 2;
+    private const int CompletionRequestTimeoutSeconds = 5;
+    private const float CompletionRetryDelaySeconds = 0.5f;
 
     [SerializeField] private string backendBaseUrl = DefaultBackendBaseUrl;
     [SerializeField] private int requestTimeoutSeconds = 10;
@@ -28,8 +31,6 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
     private int restartCount;
     private int minimumMoves = -1;
     private int minimumPushes = -1;
-    private string errorMessage = "";
-    private CoCreationStagePlayView playView;
 
 #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
@@ -39,18 +40,6 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
     private void Awake()
     {
         ResolveReferences();
-        playView = FindObjectOfType<CoCreationStagePlayView>(true);
-
-        if (playView != null)
-        {
-            playView.Bind(IsChinese(), ReturnToLab);
-        }
-        else
-        {
-            Debug.LogError(
-                "CoCreationStagePlayController: The static Stage Play UI is missing."
-            );
-        }
 
         if (levelLoader != null)
         {
@@ -72,7 +61,7 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
     {
         if (!CoCreationPlayContext.IsActive)
         {
-            ShowError("No valid co-creation Play context was found.");
+            HandleLoadFailure("No valid co-creation Play context was found.");
             yield break;
         }
 
@@ -80,13 +69,15 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
         if (levelData == null || levelLoader == null || levelManager == null || levelSolver == null)
         {
-            ShowError("The selected Stage cannot be loaded because scene references are missing.");
+            HandleLoadFailure(
+                "The selected Stage cannot be loaded because scene references are missing."
+            );
             yield break;
         }
 
         if (!TryValidateRows(CoCreationPlayContext.Rows, out string validationError))
         {
-            ShowError(validationError);
+            HandleLoadFailure(validationError);
             yield break;
         }
 
@@ -98,7 +89,7 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
         if (!levelSolver.ParseLevel()
             || !levelSolver.CanSolve(out searchedStates, out minimumMoves, out minimumPushes))
         {
-            ShowError(
+            HandleLoadFailure(
                 "Unity could not verify this Stage. searchedStates=" + searchedStates
             );
             yield break;
@@ -123,11 +114,6 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
         LevelStudyRecorder.PlayerMoveRecorded -= HandlePlayerMove;
         LevelStudyRecorder.LevelRestarted -= HandleRestart;
-
-        if (playView != null)
-        {
-            playView.Unbind();
-        }
     }
 
     private void HandlePlayerMove(bool pushedBox)
@@ -176,56 +162,86 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
         completed = true;
         completedDuration = GetActiveDuration();
-        playView?.SetStatus(
-            IsChinese()
-                ? "PLAY COMPLETED / 试玩完成，结果已记录"
-                : "PLAY COMPLETED — RESULT RECORDED."
-        );
-        StartCoroutine(SendMetrics("complete"));
     }
 
     private void HandleCompletionTransition(LevelManager manager)
     {
         manager.MarkCompletionTransitionHandled();
-        StartCoroutine(manager.FadeFromBlackAfterExternalInitialLoad(false));
-    }
 
-    private void ReturnToLab()
-    {
         if (returning)
         {
             return;
         }
 
         returning = true;
-        playView?.SetReturnInteractable(false);
+        manager.SetExternalPlayerInputEnabled(false);
+        StartCoroutine(CompleteAndReturnRoutine());
+    }
+
+    private IEnumerator CompleteAndReturnRoutine()
+    {
+        bool submitted = false;
+
+        for (int attempt = 1; attempt <= CompletionSubmitMaxAttempts; attempt++)
+        {
+            yield return SendMetrics(
+                "complete",
+                CompletionRequestTimeoutSeconds,
+                "completed",
+                success => submitted = success
+            );
+
+            if (submitted)
+            {
+                break;
+            }
+
+            if (attempt < CompletionSubmitMaxAttempts)
+            {
+                yield return new WaitForSecondsRealtime(
+                    CompletionRetryDelaySeconds
+                );
+            }
+        }
+
+        NavigateToLab(submitted ? "" : "sync_failed");
+    }
+
+    private void HandleLoadFailure(string message)
+    {
+        Debug.LogError("CoCreationStagePlayController: " + message);
+
         if (levelManager != null)
         {
             levelManager.SetExternalPlayerInputEnabled(false);
         }
-        StartCoroutine(ReturnRoutine());
+
+        if (returning)
+        {
+            return;
+        }
+
+        returning = true;
+        StartCoroutine(ReturnAfterLoadFailureRoutine());
     }
 
-    private IEnumerator ReturnRoutine()
+    private IEnumerator ReturnAfterLoadFailureRoutine()
     {
-        if (completed)
-        {
-            yield return SendMetrics("complete");
-        }
-        else
-        {
-            yield return SendMetrics("abandon");
-        }
+        yield return null;
+        NavigateToLab("load_failed");
+    }
 
-        string returnUrl = CoCreationPlayContext.ReturnUrl;
+    private void NavigateToLab(string playReturnStatus)
+    {
+        string returnUrl = ResolveReturnUrl(playReturnStatus);
         CoCreationPlayContext.Clear();
 
         if (string.IsNullOrWhiteSpace(returnUrl))
         {
-            returning = false;
-            playView?.SetReturnInteractable(true);
-            ShowError("The co-creation return URL is missing.");
-            yield break;
+            Debug.LogError(
+                "CoCreationStagePlayController: No safe co-creation return URL is available."
+            );
+            return;
         }
 
 #if UNITY_WEBGL && !UNITY_EDITOR
@@ -237,9 +253,24 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
     private IEnumerator SendMetrics(string action)
     {
+        yield return SendMetrics(
+            action,
+            requestTimeoutSeconds,
+            "",
+            null
+        );
+    }
+
+    private IEnumerator SendMetrics(
+        string action,
+        int timeoutSeconds,
+        string expectedStatus,
+        Action<bool> onComplete)
+    {
         if (string.IsNullOrWhiteSpace(CoCreationPlayContext.AttemptId)
             || string.IsNullOrWhiteSpace(CoCreationPlayContext.AttemptToken))
         {
+            onComplete?.Invoke(false);
             yield break;
         }
 
@@ -266,16 +297,51 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
             );
             request.downloadHandler = new DownloadHandlerBuffer();
             request.SetRequestHeader("Content-Type", "application/json");
-            request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+            request.timeout = Mathf.Max(1, timeoutSeconds);
             yield return request.SendWebRequest();
 
-            if (request.result != UnityWebRequest.Result.Success)
+            bool succeeded = request.result == UnityWebRequest.Result.Success;
+
+            if (succeeded && !string.IsNullOrWhiteSpace(expectedStatus))
+            {
+                try
+                {
+                    PlayMetricsResponse response =
+                        JsonUtility.FromJson<PlayMetricsResponse>(
+                            request.downloadHandler.text
+                        );
+                    succeeded = response != null
+                        && string.Equals(
+                            response.status,
+                            expectedStatus,
+                            StringComparison.Ordinal
+                        );
+                }
+                catch (Exception exception)
+                {
+                    succeeded = false;
+                    Debug.LogWarning(
+                        "CoCreationStagePlayController: Invalid "
+                        + action
+                        + " response: "
+                        + exception.Message
+                    );
+                }
+            }
+
+            if (!succeeded)
             {
                 Debug.LogWarning(
                     "CoCreationStagePlayController: Could not submit "
-                    + action + " metrics: " + request.error
+                    + action
+                    + " metrics: "
+                    + request.error
+                    + " response="
+                    + request.downloadHandler.text
                 );
             }
+
+            onComplete?.Invoke(succeeded);
         }
     }
 
@@ -294,15 +360,76 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
             : 0f;
     }
 
-    private void ShowError(string message)
+    private string ResolveReturnUrl(string playReturnStatus)
     {
-        errorMessage = IsChinese() ? "无法加载试玩：" + message : "PLAY UNAVAILABLE: " + message;
-        playView?.SetStatus(errorMessage);
-        Debug.LogError("CoCreationStagePlayController: " + message);
-        if (levelManager != null)
+        string candidate = CoCreationPlayContext.ReturnUrl;
+
+        if (!TryGetSafeHttpUri(candidate, out Uri returnUri))
         {
-            levelManager.SetExternalPlayerInputEnabled(false);
+            candidate = BuildFallbackReturnUrl();
+
+            if (!TryGetSafeHttpUri(candidate, out returnUri))
+            {
+                return "";
+            }
         }
+
+        if (string.IsNullOrWhiteSpace(playReturnStatus))
+        {
+            return returnUri.AbsoluteUri;
+        }
+
+        UriBuilder builder = new UriBuilder(returnUri);
+        string fragment = builder.Fragment.TrimStart('#');
+        builder.Fragment = string.IsNullOrWhiteSpace(fragment)
+            ? "playReturn=" + Uri.EscapeDataString(playReturnStatus)
+            : fragment
+                + "&playReturn="
+                + Uri.EscapeDataString(playReturnStatus);
+        return builder.Uri.AbsoluteUri;
+    }
+
+    private string BuildFallbackReturnUrl()
+    {
+        if (!TryGetSafeHttpUri(backendBaseUrl, out Uri baseUri))
+        {
+            return "";
+        }
+
+        UriBuilder builder = new UriBuilder(baseUri);
+        builder.Path = builder.Path.TrimEnd('/') + "/";
+        builder.Query = "";
+
+        if (!string.IsNullOrWhiteSpace(CoCreationPlayContext.SessionId))
+        {
+            string fragment = "session="
+                + Uri.EscapeDataString(CoCreationPlayContext.SessionId);
+
+            if (!string.IsNullOrWhiteSpace(CoCreationPlayContext.VersionId))
+            {
+                fragment += "&stage="
+                    + Uri.EscapeDataString(CoCreationPlayContext.VersionId);
+            }
+
+            builder.Fragment = fragment;
+        }
+
+        return builder.Uri.AbsoluteUri;
+    }
+
+    private static bool TryGetSafeHttpUri(string value, out Uri uri)
+    {
+        uri = null;
+
+        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri parsed)
+            || (parsed.Scheme != Uri.UriSchemeHttp
+                && parsed.Scheme != Uri.UriSchemeHttps))
+        {
+            return false;
+        }
+
+        uri = parsed;
+        return true;
     }
 
     private static bool TryValidateRows(string[] rows, out string error)
@@ -342,11 +469,6 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
         Array.Copy(rows, clone, rows.Length);
         return clone;
     }
-
-    private static bool IsChinese()
-    {
-        return string.Equals(CoCreationPlayContext.Language, "zh-CN", StringComparison.Ordinal);
-    }
 }
 
 [Serializable]
@@ -359,4 +481,11 @@ public sealed class PlayMetricsRequest
     public int restartCount;
     public int minimumMoves;
     public int minimumPushes;
+}
+
+[Serializable]
+public sealed class PlayMetricsResponse
+{
+    public string attemptId;
+    public string status;
 }

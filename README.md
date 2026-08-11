@@ -18,7 +18,7 @@ Menu
       → 每次明确保存/接受才创建不可覆盖的新 Stage
       → 可选择任意已保存 Stage 并点击 Play
           → 8000 WebGL → PC_Level 或 DG_Level 只读试玩
-          → 完成、重开或提前返回 → 同一 8010 会话
+          → 通关动画与结果同步 → 自动返回同一 8010 会话
       → 明确确认最终 Stage
       → 填写设计意图
   → Unity 获得最终 rows
@@ -60,7 +60,7 @@ Menu
 - `partial_completion` 加载 `PC_Level`，`description_generation` 加载 `DG_Level`。
 - 试玩上下文存在时，PC/DG 的生成控制器停用；指定 rows 再经 Unity `LevelSolver(maxSearchStates=300000)` 后加载。
 - WASD 移动；`R` 重开地图，但累计移动、推动、重开和首次有效移动后的耗时不清零。
-- 通关或始终可见的 Return 按钮分别记录 `completed` 或 `abandoned`，并返回原 8010 会话。
+- 通关后保留完成动画和淡出，提交 `completed` 指标后自动返回原 8010 会话；Unity 内不再提供主动提前返回按钮，浏览器返回、关闭或刷新按 `interrupted` 处理。
 - 试玩不会进入 `Challenge_Waiting`、`Match_Result` 或问卷。
 
 ## 8010 工作台
@@ -174,7 +174,7 @@ dotnet build Assembly-CSharp.csproj -v:minimal
 1. 生成首版后进入 `CoCreation_Entry`，确认 8010 Stage 1 rows 完全一致。
 2. 连续创建至少三个 Stage，检查聊天、差异、历史恢复及中英文切换。
 3. 试玩最新与历史 Stage，确认分别进入正确 PC/DG 场景且没有重新调用生成接口。
-4. 覆盖通关、`R` 重开、提前返回和重复网络提交，确认指标累计且 Stage 数量不变。
+4. 覆盖通关自动返回、`R` 重开、完成提交重试和浏览器异常中断，确认指标累计且 Stage 数量不变。
 5. 最终确认后填写意图；确认 Unity 只在这一步之后获得最终 rows 并进入 `Challenge_Waiting`。
 6. 双端继续完成挑战交换、`Online_Level`、`Match_Result` 和在线问卷。
 
