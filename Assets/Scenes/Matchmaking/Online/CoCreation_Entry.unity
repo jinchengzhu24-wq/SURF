@@ -192,7 +192,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Unity will not receive completion or level data yet.
+  m_Text: Unity receives the final Stage after intention submission.
 --- !u!222 &24338393
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -429,7 +429,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Open the independent LLM conversation prototype.
+  m_Text: Open the persistent LLM co-creation workspace.
 --- !u!222 &216684468
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -1849,7 +1849,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Review the sample map and discuss it over multiple turns.
+  m_Text: Review the synchronized Stage and discuss it over multiple turns.
 --- !u!222 &547315051
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -1928,7 +1928,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: RETURN WHEN DONE
+  m_Text: FINALIZE IN THE LAB
 --- !u!222 &552392878
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2891,7 +2891,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: PROTOTYPE ONLY - NO MATCH OR LEVEL DATA WILL BE SYNCHRONIZED.
+  m_Text: PROTOTYPE - ONLY THE CONFIRMED FINAL STAGE IS SYNCHRONIZED.
 --- !u!222 &1160447709
 CanvasRenderer:
   m_ObjectHideFlags: 0

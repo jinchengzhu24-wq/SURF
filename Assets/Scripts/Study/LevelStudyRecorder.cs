@@ -41,6 +41,7 @@ public class LevelStudyRecorder : MonoBehaviour
     private LevelLoader currentLevelLoader;
 
     public static event Action<bool> PlayerMoveRecorded;
+    public static event Action LevelRestarted;
 
     public static LevelStudyRecorder Instance
     {
@@ -139,6 +140,7 @@ public class LevelStudyRecorder : MonoBehaviour
 
     public static void RecordLevelRestarted()
     {
+        LevelRestarted?.Invoke();
         LevelStudyRecorder recorder = Instance;
 
         if (!recorder.hasActiveLevel || string.IsNullOrEmpty(recorder.levelRunId))

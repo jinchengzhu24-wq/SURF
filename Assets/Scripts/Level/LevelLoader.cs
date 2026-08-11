@@ -90,6 +90,12 @@ public class LevelLoader : MonoBehaviour
         ResolveGenerationReferences();
         LastGenerationFailureMessage = "";
 
+        if (CoCreationPlayContext.IsActive)
+        {
+            deferLoadToExternalController = true;
+            return;
+        }
+
         if (deferLoadToExternalController)
         {
             return;

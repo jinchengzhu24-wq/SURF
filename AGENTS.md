@@ -34,11 +34,12 @@ The active matchmaking route is:
 Menu -> Online_Lobby -> Match_Briefing -> Draft
                                           -> PC -> PC_Design -> PC_Level
                                           -> DG -> DG_Level
-     -> complete the generated level -> Challenge_Waiting
+     -> CoCreation_Entry -> 8010 Stage loop -> final confirmation -> intention
+     -> confirmed rows return to Unity -> Challenge_Waiting
      -> Online_Level -> Match_Result -> Questionnaire(Online) -> Menu
 ```
 
-`Competition_Mode` and `AI_Asistant_Mode` have been removed; the initial-method chooser is `Draft`. The PC branch is separate from DG and Creative Workshop data. `PC_Level` reads only the sketch saved by `PC_Design`. `CoCreation_Entry` remains a standalone prototype entry and is not part of the active route or Build Settings.
+`Competition_Mode` and `AI_Asistant_Mode` have been removed; the initial-method chooser is `Draft`. The PC branch is separate from DG and Creative Workshop data. `PC_Level` reads only the sketch saved by `PC_Design`. `CoCreation_Entry` is enabled in Build Settings and is the bridge between a verified Unity first draft and the persistent 8010 co-creation session.
 
 ### PC_Design
 
@@ -68,6 +69,16 @@ Menu -> Online_Lobby -> Match_Briefing -> Draft
 - `LLMLevelDesignClient` no longer sends a researcher-defined mode while generating a DG level plan.
 - `LevelGenerator` uses its general wall templates and corridor behavior in `DG_Level`; there is no hidden Competitive/Supportive topology branch.
 
+### Persistent co-creation and Stage play
+
+- In normal generation mode, a successfully verified `PC_Level` or `DG_Level` is not played or submitted immediately. Its exact rows and initial method are staged in `CoCreationDraftContext`, then Unity loads `CoCreation_Entry`.
+- `CoCreation_Entry` creates the 8010 session idempotently, opens its launch URL, polls the integration endpoint, and only stages the confirmed final rows for `Challenge_Waiting` after the designer has submitted an intention.
+- The 8010 service stores sessions, immutable level versions, turns, LLM assessments, proposals, decisions, play attempts, intentions, and audit events in its own SQLite/WAL database. Never place rows in a Play URL or expose a browser/session token to another Stage.
+- The 8010 frontend follows the 8000 dashboard palette and component language, and provides a responsive Stage timeline, persistent chat, map editor, proposal review, Play evidence, final confirmation, and English/Simplified-Chinese switching.
+- Web Play uses a five-minute single-use ticket. `CoCreationPlayBootstrap` exchanges it once, clears it from the browser URL, and loads `PC_Level` for `partial_completion` or `DG_Level` for `description_generation`.
+- While `CoCreationPlayContext` is active, PC/DG generation must remain disabled. The Stage rows are revalidated with Unity `LevelSolver`; invalid or expired input must never fall back to random generation.
+- Stage Play records cumulative moves, pushes, restarts, and active time; completion/abandon returns to the same 8010 session and must not create a version, submit a challenge, or enter results/questionnaire routes.
+
 ### Online matchmaking and challenge exchange
 
 - `MenuController.OpenMatchmaking()` loads `Online_Lobby`. Players create or join an anonymous two-player room, enter `Match_Briefing`, and move directly to `Draft` after both Ready flags are true.
@@ -75,22 +86,22 @@ Menu -> Online_Lobby -> Match_Briefing -> Draft
 - Room endpoints are `POST /online/rooms`, `POST /online/rooms/join`, `GET /online/rooms/{matchId}`, and the authenticated `/ready`, `/challenge`, `/result`, and `/leave` endpoints. Authenticated requests use `X-Player-Token`.
 - Accepted room state changes are also appended to `Backend/study_logs/online_match_events.jsonl` for the MatchMaking dashboard. New events store room/player numbers, `aiAssistantMode`, full challenge rows, results, and server timestamps, but never player tokens or `competitionMode`. GET polling and identical retries do not add events. Historical JSONL lines remain unchanged, while derived dashboard data omits the retired field.
 - `OnlineMatchContext` is runtime-only. It stores the room identity, pending own rows and AI assistant method metadata, opponent rows, room state, and results. Before entering `Questionnaire(Online)`, it temporarily preserves `matchId`, room code, and player number until the survey succeeds so the response can be joined to the match. Refreshing WebGL or restarting the server does not restore a match.
-- In an online room, completing `PC_Level` or `DG_Level` stages the final rows and enters `Challenge_Waiting`. Without a valid online context, both scenes keep their original standalone completion behavior.
+- In an online room, only the final rows returned after 8010 final confirmation and intention are staged for `Challenge_Waiting`. Initial PC/DG generation and optional Stage Play must never submit a challenge.
 - Challenge submissions include `rows` and `aiAssistantMode`. Identical repeats are idempotent; changed rows or method metadata are rejected after the first accepted submission. A legacy extra `competitionMode` is ignored and never stored or returned. The server returns only the opponent rows to each authenticated player after both submissions.
 - `Online_Level` validates and solves the opponent rows locally before loading them. It uses `Player2` with arrow keys; PC/DG continue to use `Player` with WASD. Time and successful moves accumulate from first control until solve and are not reset by `R`.
 - Results include `durationSeconds`, `moveCount`, and `minimumMoves`. After `Online_Level` submits the local result successfully, its completion panel enables the `LEAVE` button and waits for the player to click it before loading `Match_Result`; this transition does not leave the room or clear `OnlineMatchContext`. `Match_Result` displays each challenge's AI assistant method and both runs and polls while one result is missing. Continue leaves the room, clears `OnlineMatchContext`, and loads `Questionnaire(Online)`.
 - `Questionnaire(Online)` reuses `QuestionnaireController` with survey ID `online_post_match_survey`, does not require another nickname, and targets `Menu`. It uses three discrete 1-to-5 sliders with visible integer ticks, circular handles, live score boxes, and a valid default score of 3. Scores remain compatible with the existing answer envelope through `optionIndex`, `score_N` in `optionId`, and the numeric `optionText`. It must load Menu only after `/record-survey-response` succeeds; a failed submission remains on the questionnaire for retry.
 - `/frontend/` is the MatchMaking dashboard and `/frontend/train.html` preserves the original Train dashboard. Both share the existing visual system and provide a top-level flow switch. MatchMaking records are exposed through `/matchmaking-records-data`; password-protected deletion uses `/delete-online-match` and `/clear-matchmaking-records` without changing Train records.
 - `ProjectSettings/ProjectSettings.asset` currently has `runInBackground: 0`. A background WebGL tab may pause polling; dual-browser tests must refocus the waiting result page and allow another polling interval before treating missing data as a role-mapping bug.
-- Online scene UI is serialized and statically visible in the editor. Relevant files are under `Assets/Scenes/Matchmaking/Online/`, `Assets/Scripts/Online/`, and `Assets/Scripts/Study/QuestionnaireController.cs`. All six online scenes are enabled in `ProjectSettings/EditorBuildSettings.asset`.
+- Online scene UI is serialized and statically visible in the editor. Relevant files are under `Assets/Scenes/Matchmaking/Online/`, `Assets/Scripts/Online/`, and `Assets/Scripts/Study/QuestionnaireController.cs`. `CoCreation_Entry` and the existing online scenes are enabled in `ProjectSettings/EditorBuildSettings.asset`.
 
 ### Deployment and verification state
 
-- Last remote verification on 2026-08-02: `http://111.231.136.4:8000/ready` returned ready. The remote backend and WebGL have not yet received the 2026-08-11 neutral-route cleanup and may still expose the retired mode until a coordinated deployment.
-- The remote WebGL at `http://111.231.136.4:8000/game/` currently contains the online scenes through `Match_Result`. Its current cache key is `online-20260731-5`; the deployed `WebGLBuild.data` was last uploaded on 2026-07-31. The newly added `Questionnaire(Online)` route is local-only until the next WebGL build and upload.
+- Remote verification on 2026-08-11: the neutral 8000 backend, dashboard, and rebuilt WebGL were deployed; `/health`, `/ready`, `/frontend/`, `/game/`, and the WebAssembly asset returned HTTP 200. The WebGL cache key is `cocreation-20260811-1` and includes `CoCreation_Entry`, the PC/DG dual-mode Stage Play bootstrap, and the online questionnaire route.
+- The independent 8010 FastAPI service, persistent SQLite/WAL schema, and three-column bilingual frontend were deployed on 2026-08-11. Its systemd service reads a separate protected `.env`, reports `tokenSecretConfigured: true`, and stores data at `/root/SURF/CoCreationPrototype/Backend/data/cocreation.sqlite3`.
 - A stale CPU-bound backend process from the former exhaustive search was force-terminated. Before killing any process in future work, identify the exact stale PID with `ps`; never broadly kill Python processes.
 - Backend-only deployment can be done by copying the changed backend files and then running `cd /root/SURF && ./deploy_scp` on the server. The local `deploy_scp.ps1` uploads a broader set including WebGL and frontend assets, so do not use it for a backend-only change without intending that scope.
-- Last local verification on 2026-08-11: `python -m unittest discover -s Backend -p "test_*.py"` passed 144 tests, the independent `CoCreationPrototype/Backend` suite passed 17 tests, and `dotnet build Assembly-CSharp.csproj -v:minimal` completed with 0 errors and 0 warnings. `node --check Frontend/matchmaking.js` also passed. A future `--no-restore` build requires the generated `Temp/obj/.../project.assets.json` to exist first.
+- Current local verification on 2026-08-11: the main backend suite passes 144 tests, the independent `CoCreationPrototype/Backend` suite passes 25 tests, `node --check CoCreationPrototype/Frontend/app.js` passes, and `dotnet build Assembly-CSharp.csproj -v:minimal` completes with 0 errors (only pre-existing Unity/package/analyzer warnings when applicable). Unity WebGL builds successfully with 0 errors. A future `--no-restore` build requires the generated `Temp/obj/.../project.assets.json` to exist first.
 - The last inspected code baseline before this documentation update was `1611a8f`. Do not treat a recorded commit as authoritative indefinitely; always inspect `git status` and recent history before editing, and preserve unrelated user changes.
 - `WebGLBuild/` is generated output and is not committed. For a WebGL update, rebuild with Unity 2022.3.62f2c1, bump the template cache key when stale browser assets are possible, upload `WebGLBuild/`, and verify the remote index plus the data/framework/wasm responses.
 
@@ -99,6 +110,9 @@ Menu -> Online_Lobby -> Match_Briefing -> Draft
 - `python -m pip install -r Backend/requirements.txt` installs pinned backend dependencies.
 - `python Backend/app.py` starts the local service on `http://127.0.0.1:8000`; check `/health`, `/ready`, and `/frontend/`.
 - `python -m unittest discover -s Backend -p "test_*.py"` runs all backend unit and API-contract tests.
+- `python -m pip install -r CoCreationPrototype/Backend/requirements.txt` installs the independent 8010 service.
+- `python CoCreationPrototype/Backend/app.py` starts the co-creation workbench on `http://127.0.0.1:8010/`.
+- `python -m unittest discover -s CoCreationPrototype/Backend/tests -p "test_*.py"` runs its persistence, prompt, API, ticket, and static-frontend tests.
 - Open the project with Unity `2022.3.62f2c1`. Use **File > Build Settings > WebGL > Build** to regenerate `WebGLBuild/`.
 - Run Unity tests through **Window > General > Test Runner** when adding EditMode or PlayMode coverage.
 

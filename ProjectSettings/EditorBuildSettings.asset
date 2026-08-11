@@ -39,6 +39,9 @@ EditorBuildSettings:
     path: Assets/Scenes/Matchmaking/DG_Level.unity
     guid: f7e72024c7b36b442924de7927bca1a0
   - enabled: 1
+    path: Assets/Scenes/Matchmaking/Online/CoCreation_Entry.unity
+    guid: 31242a5715bfeb14da69b955c3cf9992
+  - enabled: 1
     path: Assets/Scenes/Matchmaking/Online/Challenge_Waiting.unity
     guid: b978d149bc6972e409d30bb2e95b13d6
   - enabled: 1

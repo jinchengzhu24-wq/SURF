@@ -5,6 +5,7 @@ using UnityEngine.UI;
 
 public class PCLevelExpansionController : MonoBehaviour
 {
+    private const string CoCreationEntrySceneName = "CoCreation_Entry";
     private const string GenerationFailureMessage =
         "Generation failed. Retry or adjust the design.";
 
@@ -36,6 +37,12 @@ public class PCLevelExpansionController : MonoBehaviour
 
     private void Awake()
     {
+        if (CoCreationPlayContext.IsActive)
+        {
+            enabled = false;
+            return;
+        }
+
         SetButtonVisible(retryButton, false);
         SetButtonVisible(backButton, false);
         ValidateSceneReferences();
@@ -184,21 +191,18 @@ public class PCLevelExpansionController : MonoBehaviour
 
             HideGenerationUi();
 
-            if (levelManager != null)
+            if (!Application.CanStreamedLevelBeLoaded(CoCreationEntrySceneName))
             {
-                yield return levelManager
-                    .FadeToBlackForExternalInitialLoad();
+                generationRoutine = null;
+                ShowFailure("CoCreation_Entry is not available in Build Settings.");
+                yield break;
             }
 
-            levelLoader.levelData = levelData;
-            levelLoader.LoadLevel();
-
-            if (levelManager != null)
-            {
-                levelManager.RegisterGeneratedLevel();
-                yield return levelManager
-                    .FadeFromBlackAfterExternalInitialLoad();
-            }
+            CoCreationDraftContext.Stage(
+                response.rows,
+                AIAssistantModeController.PartialCompletionApiMode
+            );
+            SceneManager.LoadScene(CoCreationEntrySceneName);
 
             generationRoutine = null;
             yield break;

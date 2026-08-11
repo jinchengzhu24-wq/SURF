@@ -1,252 +1,145 @@
-# Matchmaking 与共创路由说明
+# Sokoban 人机共创与在线挑战
 
-本文档记录双人匹配研究流程的当前可运行场景路由，以及根据反馈整理的未来共创目标路由。
+本仓库包含 Unity 2D Sokoban 客户端、8000 端口的匹配服务与研究 dashboard，以及 8010 端口的独立 LLM 共创工作台。当前原型把“与 LLM 共创地图”和“在 Unity 中游玩地图”分开：Unity 先生成并验证第一版地图，网页负责持续聊天、版本管理和可选试玩。
 
-## 当前路由
-
-```text
-Menu
-  → 点击黄色 Matchmaking 按钮
-Online_Lobby
-  → 创建房间或输入六位房间码加入房间
-Match_Briefing
-  → 双方 Ready
-Draft
-  ├─ Partial-Level Completion
-  │    → PC → PC_Design → PC_Level
-  └─ Description-to-Level Generation
-       → DG → DG_Level
-  → 通关己方生成关卡
-Challenge_Waiting
-  → 提交己方 rows 并等待对手
-Online_Level
-  → 使用 Player2 游玩对手关卡并提交成绩
-Match_Result
-  → 等待并显示双方结果
-Questionnaire(Online)
-  → 完成并成功提交在线赛后问卷
-Menu
-```
-
-完整场景路径见本文末尾的 Build Settings。上述联机场景均已创建并启用。
-
-旧 `Competition_Mode` 和 `AI_Asistant_Mode` 场景已移除；初稿方式选择场景现统一命名为 `Draft`。
-
-## 未来目标路由（规划中）
-
-以下流程根据现有场景、已完成的在线挑战交换能力和 feedback 中的调整策略整理。它描述的是下一阶段的产品方向，不代表这些概念都已经实现，也不要求每个步骤最终都对应一个独立 Unity 场景。上面的“当前路由”仍是现阶段可运行的基线。
+## 当前目标路由
 
 ```text
 Menu
-  → Online_Lobby
-  → Match_Briefing
-  → Neutral Design Brief
-      （只说明与 LLM 共同设计一个给对手游玩的关卡，不分配预设目的）
-  → Initial Draft
-      ├─ Human-first：复用 PC → PC_Design 形成初始草图
-      └─ LLM-first：复用 DG 能力形成初始版本
-  → Co-Creation Workspace（与 Unity 游玩关卡分离）
-      → 加载当前 rows、对话上下文和版本记录
-      → 使用确定性校验器与求解器检查当前版本
-      → LLM 评价当前关卡，并询问设计者是否满意
-      → 设计者接受、拒绝或通过聊天提出修改建议
-      → 生成、校验并保存新版本
-      ↺ 重复“评价 → 反馈 → 修改”，始终围绕同一个关卡演进
-  → Final Confirmation
-      → 设计者明确确认最终 rows
-  → Designer Intention Report
-      → 在看到对手游玩结果前，记录设计者自然形成的目的和预期体验
-  → Challenge_Waiting
-      → 双方交换已经确认的最终关卡
-  → Online_Level
-      → 游玩对手的最终关卡并提交成绩
-  → Match_Result
-  → Post-Match Feedback
-      ├─ Designer：报告人机共创体验，并补充对最终结果的反思
-      └─ Opponent：报告对关卡的理解、难度判断和实际感受
-  → Menu
-```
-
-### 现有功能如何迁移
-
-- 保留 `Online_Lobby`、`Match_Briefing`、`Challenge_Waiting`、`Online_Level`、`Match_Result`，并继续复用现有房间、挑战交换和成绩提交接口。
-- 已移除旧 `Competition_Mode`、对应 PlayerPrefs、联机字段和 PC/DG 墙体拓扑分支。当前与未来共创路径都不在开场为设计者分配预设目的，也不向 LLM 注入研究者定义的模式解释。
-- 共创开始前只显示中性的设计说明，例如“请与 LLM 共同设计一个给对手游玩的关卡”。设计者在过程中自然形成目的，并可自行决定是否通过聊天表达具体想法。
-- `PC_Design` 可作为 Human-first 的初始草图入口，现有 DG 能力可作为 LLM-first 的初始版本入口。两者是否成为正式实验条件仍需结合后续研究设计决定。
-- 在初始版本与 `Challenge_Waiting` 之间增加独立共创工作台。聊天界面不承担关卡游玩，只负责查看当前地图、连续讨论、提出修改、比较版本和最终确认。
-- 每次地图变化都必须先通过格式校验、规则校验和求解器验证；LLM 可以评价和建议，但它的判断不能替代求解器，也不能在没有生成新版本时声称地图已经被修改。
-- 最终提交必须使用设计者明确确认的版本。确认后、看到对手游玩结果前，单独记录设计者原本想实现的目的和预期体验，再进入现有的关卡交换、对手游玩和结果展示流程。
-- 赛后反馈区分设计者和对手两个视角，并通过同一个 match/session 关联，以便比较“设计意图”和“实际体验”是否一致。
-
-### 独立最小测试版的位置
-
-当前 `CoCreationPrototype/` 已验证“LLM 对话与 Unity 游玩分离”的基本技术路径，服务器入口为 `http://111.231.136.4:8010/`。这个版本目前只支持围绕固定只读地图进行多轮讨论；接下来需要接入真实 `rows`、地图修改、确定性校验、版本历史和最终确认，才能进入上述完整路由。
-
-### 尚未固定的研究决策
-
-- Human-first 与 LLM-first 是否作为正式对照条件，以及如何平衡分组。
-- 共创需要设置最少轮数、最多轮数，还是只保留明确的最终确认门槛。
-- 中性说明和设计者意图报告采用哪些具体措辞，才能记录真实意图而不过早提示或限定玩家。
-- 赛后问卷的具体题目、指标和最终研究问题。
-- `Neutral Design Brief`、`Co-Creation Workspace`、`Final Confirmation`、`Designer Intention Report` 和 `Post-Match Feedback` 最终采用 Unity 场景、独立网页还是混合实现。
-
-## 路由实现
-
-- `MenuController.OpenMatchmaking()` 加载 `Online_Lobby`。
-- `Online_Lobby` 创建或加入内存房间，匹配成功后双方进入 `Match_Briefing`。
-- `Match_Briefing` 每秒轮询 Ready 状态；双方 Ready 后直接进入 `Draft`。
-- `Draft` 选择 Partial-Level Completion 后加载 `PC`，选择 Description-to-Level Generation 后加载 `DG`。
-- `PC` 的 Confirm 加载 `PC_Design`。
-- `PC_Design` 的 Submit 会重新校验并保存固定 `12×10` 草图，然后加载 `PC_Level`。
-- 草图中的箱子起点 `s` 不得与墙上下左右相邻；Submit 前还会验证全开放版本至少存在一个可解玩家出生区域。
-- `PC_Level` 只读取 PC 草图上下文。后端先构造最多六个完整安全候选，按五墙、四墙、三墙降级；模型只返回 `layoutCandidateId`，不能跨候选混合坐标。Unity `LevelSolver` 仍执行最终可解性验证。
-- PC/DG 生成已中立化：不再按研究者预设模式限制墙体必须分散或全部连接；通用墙体、水域、连通、格式和可解性规则继续生效。
-- PC 候选不得删除或移动玩家绘制的墙 `#`、箱子起点 `s` 和终点 `t`。
-- 生成失败时可 Retry，或返回 `PC_Design` 并恢复上次提交的草图。
-- 在线房间中，玩家亲自通关 `PC_Level` 或 `DG_Level` 后，最终 rows 和初稿方式会暂存并进入 `Challenge_Waiting`；非联机调试继续执行原场景完成行为。
-- `Challenge_Waiting` 幂等提交关卡并等待对手；双方提交后由玩家确认进入 `Online_Level`。
-- `Online_Level` 使用 `Player2` 和方向键游玩对手 rows，累计耗时、有效移动数和理论最少移动数，通关后提交结果并进入 `Match_Result`。
-- `Match_Result` 先显示己方成绩，再轮询并补齐对手成绩；点击 Continue 后 Leave 当前房间、清理联机上下文并进入 `Questionnaire(Online)`。
-- `Questionnaire(Online)` 使用三条带 1～5 数字刻度的离散滑杆，默认分数均为 3；`/record-survey-response` 提交成功后才加载 `Menu`，提交失败时留在当前场景重试。
-
-## 网页联机流程
-
-联机采用“交换关卡并分别在本地游玩”的异步挑战模式。这里的“下载对手关卡”只表示浏览器从服务器接收一份很小的关卡 JSON 数据，不是下载文件、安装新客户端或重新下载 WebGL 游戏。
-
-当前已完成匹配、双方 Ready、关卡创作、关卡交换、本地游玩、成绩提交和结果汇总链路。客户端统一连接
-`http://111.231.136.4:8000`，使用六位房间码和每秒一次的 HTTP
-轮询同步状态。房间暂存于单进程服务器内存中，30 分钟无活动后清理；
-刷新网页或服务器重启后不恢复房间。当前阶段不判定胜负、不提供排行榜，也不做服务端移动复演或反作弊。
-
-当前完整路由：
-
-```text
-Menu
-  → Online_Lobby
-  → Match_Briefing
-  → Draft
-      ├─ Partial Completion
-      │    → PC → PC_Design → PC_Level
+  → Online_Lobby → Match_Briefing → Draft
+      ├─ Partial-Level Completion
+      │    → PC → PC_Design → PC_Level（生成并验证首版）
       └─ Description-to-Level Generation
-           → DG → DG_Level
-  → 通关己方关卡并提交最终 rows
-  → Challenge_Waiting
-  → 双方完成后确认游玩
-  → Online_Level
-  → 提交耗时、移动数和理论最小移动数
-  → Match_Result
-  → Questionnaire(Online)
-  → 成功提交问卷
-  → Menu
+           → DG → DG_Level（生成并验证首版）
+  → CoCreation_Entry（上传首版并创建 8010 会话）
+  → 8010 Co-Creation Lab
+      → Stage 1 = Unity 首版 rows
+      → LLM 评价、连续聊天、手工编辑或 LLM 修改提案
+      → 每次明确保存/接受才创建不可覆盖的新 Stage
+      → 可选择任意已保存 Stage 并点击 Play
+          → 8000 WebGL → PC_Level 或 DG_Level 只读试玩
+          → 完成、重开或提前返回 → 同一 8010 会话
+      → 明确确认最终 Stage
+      → 填写设计意图
+  → Unity 获得最终 rows
+  → Challenge_Waiting → Online_Level → Match_Result
+  → Questionnaire(Online) → Menu
 ```
 
-一次对局中，玩家 A 和玩家 B 分别完成自己的 PC 或 DG 生成流程，并将最终确认的关卡和初稿方式提交给服务器。服务器冻结两份关卡后，将 A 的关卡交给 B、将 B 的关卡交给 A。双方各自在自己的浏览器中游玩对手关卡，完成后上传耗时、移动数和本地求解器得到的理论最小移动数；结果页负责等待并汇总双方成绩。
+旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。`Draft` 只区分初稿方法；系统不向设计者分配“困难、友好、竞争、支持”等预设目标，也不把这些历史定义注入 LLM。
 
-### 联机场景
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 已于 2026-08-11 部署到 `http://111.231.136.4:8010/` 与 `http://111.231.136.4:8000/game/`。后续修改仍须按本文验证流程重新构建和部署，不能仅凭本地源码判断线上版本。
 
-当前匹配阶段已经使用：
+## 共创规则
 
-- `Online_Lobby`：创建或加入房间、等待匹配对手，并保存服务器返回的 `matchId` 和当前玩家身份。
-- `Match_Briefing`：在匹配成功后展示双方 Ready 状态；双方准备完成后直接进入 `Draft`。
+- `Stage 1` 必须与 PC/DG 在 Unity 中通过格式检查及 `LevelSolver` 验证后的 rows 完全一致。
+- 会话围绕同一个持续演化的关卡进行。聊天历史、版本、差异、评价、提案决定、试玩证据、最终版本和设计意图均持久化。
+- 手工修改只存在于浏览器草稿中，点击“保存为新 Stage”后才成为版本；历史 Stage 永不覆盖。
+- LLM 修改先以提案和差异预览呈现。只有设计者接受且服务器求解验证通过后才创建 Stage。
+- LLM 的难度和体验判断是主观意见；服务器与 Unity 求解器结果才是确定性证据。
+- Play 只允许当前选中的已保存 Stage。未保存草稿、请求处理中或存在待决定提案时禁用。
+- Play 不会修改地图、创建 Stage、确认最终版本或提交在线挑战。
+- 最终确认后先收集设计者自然形成的意图；在此之前，集成接口不会向 Unity暴露最终 rows。
+- 英文/中文切换影响新 UI、错误信息和后续 LLM 回复；历史消息保留原始语言。
 
-当前交换与游玩阶段已经使用：
+是否把 PC/DG 作为正式研究条件、是否设置最少共创轮数、问卷指标和最终研究问题仍未决定，不应提前固化。
 
-- `Challenge_Waiting`：幂等提交己方 rows、轮询对手创作状态；双方完成后启用确认游玩按钮。
-- `Online_Level`：只加载服务器锁定的对手 rows，使用 `Player2` 和方向键游玩，并在本地格式与可解性验证通过后开始累计用时和移动数；不会再次调用 PC 或 DG 生成接口。
-- `Match_Result`：先展示己方成绩并轮询对手状态；双方完成后展示各自耗时、实际移动数、理论最小移动数和 AI Assistant Mode。
-- `Questionnaire(Online)`：通过三条 1～5 分离散滑杆记录在线赛后评分；圆形滑块只能停在整数刻度，右侧分数框实时显示当前数值，默认值为 3。提交成功后返回主菜单，失败时不跳转。
+## PC_Level 与 DG_Level 的双重用途
 
-当前场景路径：
+### 首版生成模式
+
+- `PC_Level` 读取 `PCDesignContext` 中的 `12×10` 草图，请求安全候选，并在 Unity 端重新校验及求解。
+- `DG_Level` 根据玩家描述获取 LLM 方案，通过模板生成和回退策略形成完整地图，并在 Unity 端验证。
+- 两条路径都保持中立，不传递或读取已废除的模式字段。
+- 首版验证成功后不要求玩家先通关；rows 与 `partial_completion` / `description_generation` 写入 `CoCreationDraftContext`，随后加载 `CoCreation_Entry`。
+
+### Stage 试玩模式
+
+- 网页创建五分钟、一次性 Play Ticket，URL 只携带 attempt ID 与票据，不携带 rows。
+- 8000 WebGL 的 Menu 启动组件换取完整 rows、来源、语言、提交 token 和返回 URL，并立即从地址栏清除票据。
+- `partial_completion` 加载 `PC_Level`，`description_generation` 加载 `DG_Level`。
+- 试玩上下文存在时，PC/DG 的生成控制器停用；指定 rows 再经 Unity `LevelSolver(maxSearchStates=300000)` 后加载。
+- WASD 移动；`R` 重开地图，但累计移动、推动、重开和首次有效移动后的耗时不清零。
+- 通关或始终可见的 Return 按钮分别记录 `completed` 或 `abandoned`，并返回原 8010 会话。
+- 试玩不会进入 `Challenge_Waiting`、`Match_Result` 或问卷。
+
+## 8010 工作台
+
+目录：
 
 ```text
-Assets/Scenes/Matchmaking/Online/Online_Lobby.unity
-Assets/Scenes/Matchmaking/Online/Challenge_Waiting.unity
-Assets/Scenes/Matchmaking/Online/Online_Level.unity
-Assets/Scenes/Matchmaking/Online/Match_Result.unity
-Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
-Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
+CoCreationPrototype/
+├── Frontend/              # 独立 HTML/CSS/JS 三栏工作台
+└── Backend/               # FastAPI、DeepSeek 客户端、SQLite 与测试
 ```
 
-`PC_Level` 和 `DG_Level` 继续使用 `Player`（WASD），负责生成、校验、预览并提交己方设计的关卡。`Online_Level` 使用 `Player2`（方向键）单独游玩对手关卡，避免 PC/DG 的生成控制器在加载时覆盖服务器下发的固定布局。
+前端视觉复用 8000 dashboard 的设计语言：`#f4f7f6` 页面背景、白色卡片、浅灰绿色边框、绿色品牌按钮、sticky topbar、Pixel 风格地图瓦片和响应式布局。桌面为 Stage / 聊天 / 地图编辑器三栏；低于 1200px 收为两栏，低于 900px 为单栏，680px 下进一步缩小间距与瓦片。
 
-### 浏览器与服务器的数据流
+后端使用独立 SQLite/WAL。默认数据库为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`，`.env` 和数据库文件均被本目录 `.gitignore` 排除。
+生产 systemd 模板保存在 `CoCreationPrototype/Backend/sokoban-cocreation.service`，其中将写权限限制到独立数据目录，并同时读取主后端的 LLM 配置和 8010 自己的安全配置。
 
-当前使用 HTTP 提交关卡，并通过每秒一次的房间查询取得对手关卡：
+本地启动：
+
+```powershell
+python -m pip install -r CoCreationPrototype/Backend/requirements.txt
+python CoCreationPrototype/Backend/app.py
+```
+
+访问 `http://127.0.0.1:8010/`。关键环境变量见 `CoCreationPrototype/Backend/.env.example`：
+
+- `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`DEEPSEEK_BASE_URL`
+- `COCREATION_PUBLIC_BASE_URL`
+- `COCREATION_WEBGL_BASE_URL`
+- `COCREATION_TOKEN_SECRET`
+- `COCREATION_DATABASE_PATH`
+- `COCREATION_ALLOWED_ORIGINS`
+
+## 8010 API
 
 ```text
-玩家 A 浏览器                     服务器                     玩家 B 浏览器
-生成并确认关卡 rows
-        ── submit challenge ──→  保存并冻结
-                                  保存并冻结  ←── submit challenge ──
-        ← opponent rows JSON ──  交换关卡  ── opponent rows JSON →
-本地游玩 B 的关卡                                          本地游玩 A 的关卡
-        ── time/moves/min ───→  保存并冻结  ←─── time/moves/min ──
-        ←─────────────── 双方最终结果 ─────────────────────→
+POST  /api/sessions
+POST  /api/sessions/{sessionId}/browser-access
+GET   /api/sessions/{sessionId}
+PATCH /api/sessions/{sessionId}/language
+
+POST  /api/sessions/{sessionId}/versions
+POST  /api/sessions/{sessionId}/versions/{versionId}/restore
+POST  /api/sessions/{sessionId}/versions/{versionId}/assessments
+POST  /api/sessions/{sessionId}/messages
+POST  /api/sessions/{sessionId}/proposals/{proposalId}/decision
+
+POST  /api/sessions/{sessionId}/versions/{versionId}/play-attempts
+POST  /api/play-attempts/{attemptId}/bootstrap
+POST  /api/play-attempts/{attemptId}/start
+POST  /api/play-attempts/{attemptId}/progress
+POST  /api/play-attempts/{attemptId}/complete
+POST  /api/play-attempts/{attemptId}/abandon
+
+POST  /api/sessions/{sessionId}/finalize
+POST  /api/sessions/{sessionId}/intention
+GET   /api/integrations/sessions/{sessionId}
 ```
 
-关卡仍使用现有字符行结构，例如：
+浏览器会话使用 HttpOnly cookie；Unity 创建会话后持有只读集成 token。Play Ticket 只能换取一次地图，随后使用仅限该 attempt 的 token 提交指标。Stage 保存、恢复、提案决定和 Play 创建均使用幂等键；基于过期 Stage 的写入返回 `409 VERSION_CONFLICT`。
+
+## 8000 在线匹配
+
+8000 后端继续提供匿名两人房间、Ready、挑战交换、结果提交、问卷和 dashboard。房间位于单进程内存中，使用六位房间码、一秒轮询和 30 分钟惰性清理。
+
+挑战请求只包含：
 
 ```json
 {
-  "rows": [
-    "############",
-    "#          #",
-    "# ...      #",
-    "############"
-  ]
+  "rows": ["..."],
+  "aiAssistantMode": "partial_completion"
 }
 ```
 
-挑战通过 `POST /online/rooms/{matchId}/challenge` 提交，内容包含 `rows` 和
-`aiAssistantMode`，使用 `X-Player-Token` 识别玩家。旧客户端附带的
-`competitionMode` 会被兼容忽略，不会写入房间、事件日志或响应。
-同一玩家重复提交完全相同的挑战幂等成功，修改 rows 或 `aiAssistantMode` 会被拒绝；
-双方提交后，房间查询按当前玩家返回 `opponentChallengeRows` 和双方初稿方式元数据。
-
-通关结果通过 `POST /online/rooms/{matchId}/result` 提交：
-
-```json
-{
-  "durationSeconds": 42.37,
-  "moveCount": 31,
-  "minimumMoves": 24
-}
-```
-
-首位完成后房间进入 `waiting_for_results`，双方完成后进入 `results_ready`。
-结果提交同样幂等冻结；当前阶段不上传移动序列，也不做服务器复演或反作弊。
-
-### 跨场景上下文
-
-常驻的 `OnlineMatchContext` 当前保存：
-
-- 当前 `matchId`、六位房间码、玩家 token 和玩家编号。
-- AI Assistant Mode（PC/DG 初稿方式）的选择。
-- 等待提交的己方 `rows`。
-- 服务器下发的对手 `rows`。
-- 当前房间、Ready 和挑战提交状态。
-- 双方初稿方式元数据和已经提交的成绩。
-
-`OnlineMatchContext` 只保存运行时状态，不把对手关卡写成磁盘文件。当前版本刷新网页后不恢复比赛。
-
-### 场景搭建约定
-
-- `Online_Lobby` 进入后建立联机上下文；离开匹配流程时调用 Leave 并清理运行时状态。当前没有后台保活或刷新恢复。
-- `Draft`、PC 和 DG 场景继续复用，不复制联机专用版本；`CoCreation_Entry` 当前保持独立且不加入该路由。
-- `PC_Level` 或 `DG_Level` 只有在玩家亲自通关生成结果后，才会暂存最终 rows 并进入 `Challenge_Waiting`。
-- `Challenge_Waiting` 自动幂等提交，并通过 HTTP 查询等待对手完成；不会自动跳过确认按钮。
-- `Online_Level` 仅从 `OnlineMatchContext` 加载对手 `rows`，关卡开始后不得编辑布局。
-- `Online_Level` 从首次可操作到通关累计耗时与有效移动；按 `R` 重开不会清零比赛统计。
-- `Online_Level` 通关后幂等提交结果并进入 `Match_Result`；网络失败时留在完成页自动重试。
-- `Match_Result` 在对手尚未完成时每秒轮询，双方完成后停止轮询；Continue 会 Leave、清理运行时上下文并进入在线问卷。项目当前 `runInBackground` 为关闭状态，WebGL 标签页失去焦点时轮询可能暂停，重新聚焦后才会继续。
-- `Questionnaire(Online)` 使用独立的 `online_post_match_survey` ID；三个默认 3 分可直接提交，分数继续写入现有答案结构的 `optionIndex`、`optionId` 和 `optionText`。只有后端确认提交成功后才进入 `Menu`。
-- 生产环境的 WebGL 页面、HTTP API 和 WebSocket 应统一使用 HTTPS/WSS，避免浏览器阻止混合内容。
-
-上述联机场景已经创建并加入 Unity Build Settings。新增或改名场景时必须同步更新场景跳转常量和 Build Settings。
+旧客户端多传的 `competitionMode` 被兼容忽略，不验证、不存储、不返回。历史 JSONL 原件保留，但新事件和派生 dashboard 不暴露该字段。
 
 ## Build Settings
 
-以下场景必须启用：
+共创与匹配所需场景：
 
 ```text
 Assets/Scenes/Menu.unity
@@ -258,24 +151,29 @@ Assets/Scenes/Matchmaking/PC_Design.unity
 Assets/Scenes/Matchmaking/PC_Level.unity
 Assets/Scenes/Matchmaking/DG.unity
 Assets/Scenes/Matchmaking/DG_Level.unity
+Assets/Scenes/Matchmaking/Online/CoCreation_Entry.unity
 Assets/Scenes/Matchmaking/Online/Challenge_Waiting.unity
 Assets/Scenes/Matchmaking/Online/Online_Level.unity
 Assets/Scenes/Matchmaking/Online/Match_Result.unity
 Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
 ```
 
-## 手动验证
+## 验证
 
-1. 用两个浏览器打开远程 `/game/`，从 Menu 点击黄色 `Matchmaking`，确认进入 `Online_Lobby`。
-2. 玩家 A 创建房间并显示六位房间码；玩家 B 输入该码后，双方均进入 `Match_Briefing`。
-3. 单方 Ready 时另一方应在一次轮询后看到状态；双方 Ready 后均直接进入 `Draft`。
-4. 在 `Draft` 分别覆盖两个分支：Partial-Level Completion 应进入 `PC`，Description-to-Level Generation 应进入 `DG`。
-5. 从 `PC` Confirm 后进入 `PC_Design`，零组或数量不匹配的 `s`/`t` 不得通过 Check。
-6. 合法草图 Submit 后进入 `PC_Level`，确认请求中不包含 DG、Creative Workshop 或旧模式参数。
-7. 合法且可解的候选应被加载；无解或格式错误候选不得覆盖当前关卡。
-8. 生成失败后点击 Back to Design，确认原草图完整恢复。
-9. PC/DG 中确认生成的是 `Player` 且 WASD 有效；Online_Level 中确认生成的是 `Player2` 且方向键有效。
-10. 一方通关对手关卡后应进入 `Match_Result` 并显示己方成绩；按 `R` 重开前的耗时和移动数仍计入成绩。
-11. 第二方通关后，第一方结果页应在一次轮询后补齐对手成绩和双方初稿方式；测试两个浏览器时需重新聚焦第一方页面并等待至少一次轮询，因为后台 WebGL 当前会暂停运行。
-12. `CONTINUE` 应调用 Leave、清理房间上下文并进入 `Questionnaire(Online)`，不能直接返回大厅。
-13. 在线问卷初始应显示三条五档滑杆和三个 `3` 分；拖动圆形滑块时只能落在整数刻度，右侧分数同步更新。默认值或调整后的分数只有在服务器返回成功后才进入 `Menu`，提交失败时不得离开。
+```powershell
+python -m unittest discover -s Backend -p "test_*.py"
+python -m unittest discover -s CoCreationPrototype/Backend/tests -p "test_*.py"
+node --check CoCreationPrototype/Frontend/app.js
+dotnet build Assembly-CSharp.csproj -v:minimal
+```
+
+完整手动回归应使用 Unity `2022.3.62f2c1`，分别走 PC 和 DG：
+
+1. 生成首版后进入 `CoCreation_Entry`，确认 8010 Stage 1 rows 完全一致。
+2. 连续创建至少三个 Stage，检查聊天、差异、历史恢复及中英文切换。
+3. 试玩最新与历史 Stage，确认分别进入正确 PC/DG 场景且没有重新调用生成接口。
+4. 覆盖通关、`R` 重开、提前返回和重复网络提交，确认指标累计且 Stage 数量不变。
+5. 最终确认后填写意图；确认 Unity 只在这一步之后获得最终 rows 并进入 `Challenge_Waiting`。
+6. 双端继续完成挑战交换、`Online_Level`、`Match_Result` 和在线问卷。
+
+部署时先备份 8010 SQLite，再更新并重启独立服务；随后用指定 Unity 版本重建 WebGL、更新缓存键并上传 8000 静态构建。不要把 `.env`、API Key、SQLite、研究日志或 `WebGLBuild/` 提交到 Git。

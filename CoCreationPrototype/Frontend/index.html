@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="A minimal Sokoban and LLM co-creation conversation prototype.">
+    <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
     <link rel="stylesheet" href="./styles.css">
 </head>
@@ -13,53 +13,81 @@
             <div class="brand">
                 <div class="brand-mark" aria-hidden="true">S</div>
                 <div>
-                    <h1>Sokoban Co-Creation Lab</h1>
-                    <p class="subtitle">Minimal LLM conversation prototype</p>
+                    <h1 data-i18n="title">Sokoban Co-Creation Lab</h1>
+                    <p class="subtitle" data-i18n="subtitle">Persistent level design workspace</p>
                 </div>
             </div>
-            <div class="prototype-status" id="prototypeStatus">
-                <span class="status-dot" aria-hidden="true"></span>
-                <span>Local prototype</span>
+            <div class="topbar-actions">
+                <button class="language-button" id="languageButton" type="button">中文</button>
+                <div class="prototype-status pending" id="prototypeStatus">
+                    <span class="status-dot" aria-hidden="true"></span>
+                    <span data-i18n="loading">Loading session...</span>
+                </div>
             </div>
         </header>
 
         <main>
             <div class="notice" id="notice" role="alert" aria-live="assertive">
                 <span id="noticeMessage"></span>
-                <button class="notice-retry" id="retryButton" type="button" hidden>Retry</button>
+                <button class="notice-retry" id="retryButton" type="button" hidden data-i18n="retry">Retry</button>
             </div>
 
-            <section class="workspace" aria-label="Co-creation workspace">
+            <section class="landing panel" id="landing" hidden>
+                <div class="landing-mark">S</div>
+                <p class="eyebrow" data-i18n="neutralBrief">Neutral design brief</p>
+                <h2 data-i18n="openFromUnity">Create a first level in Unity, then continue here.</h2>
+                <p data-i18n="landingBody">The lab keeps every accepted Stage, conversation and play attempt together. No predefined design goal is assigned.</p>
+                <button class="primary-button" id="demoButton" type="button" data-i18n="startDemo">Start a sample session</button>
+            </section>
+
+            <section class="workspace" id="workspace" hidden aria-label="Co-creation workspace">
+                <aside class="panel stage-panel" aria-labelledby="stageTitle">
+                    <header class="panel-header compact">
+                        <div>
+                            <p class="eyebrow" data-i18n="versionHistory">Version history</p>
+                            <h2 id="stageTitle" data-i18n="stages">Stages</h2>
+                        </div>
+                        <span class="count-pill" id="stageCount">0</span>
+                    </header>
+                    <div class="stage-list" id="stageList"></div>
+                </aside>
+
                 <section class="panel chat-panel" aria-labelledby="chatTitle">
                     <header class="panel-header">
                         <div>
-                            <p class="eyebrow">Co-creation conversation</p>
-                            <h2 id="chatTitle">Discuss the current level</h2>
+                            <p class="eyebrow" data-i18n="conversation">Co-creation conversation</p>
+                            <h2 id="chatTitle" data-i18n="discuss">Discuss and refine this Stage</h2>
                         </div>
-                        <button class="secondary-button" id="restartButton" type="button">Restart chat</button>
+                        <span class="method-pill" id="methodPill"></span>
                     </header>
+
+                    <div class="history-banner" id="historyBanner" hidden>
+                        <span data-i18n="viewingHistory">You are viewing a historical Stage. Chat remains grounded in the latest Stage.</span>
+                        <button type="button" id="returnCurrentButton" data-i18n="returnCurrent">Return to current</button>
+                    </div>
 
                     <div class="chat-scroll" id="chatScroll">
                         <div class="empty-chat" id="emptyChat">
                             <div class="empty-mark" aria-hidden="true">AI</div>
-                            <h3>Start with your own intention</h3>
-                            <p>Ask the assistant what it notices, explain what you want the level to feel like, or discuss a possible improvement.</p>
+                            <h3 data-i18n="assessmentPending">Preparing the first Stage assessment</h3>
+                            <p data-i18n="assessmentPendingBody">The assistant will discuss the verified current map and ask what you want to refine.</p>
                         </div>
                         <div class="message-list" id="messageList" aria-live="polite"></div>
-                        <div class="typing-row" id="typingRow" hidden aria-label="Assistant is responding">
+                        <div class="typing-row" id="typingRow" hidden>
                             <span></span><span></span><span></span>
-                            <small>Assistant is considering the level...</small>
+                            <small data-i18n="thinking">Assistant is considering the current Stage...</small>
                         </div>
                     </div>
 
+                    <div class="proposal-area" id="proposalArea"></div>
+
                     <form class="composer" id="chatForm">
-                        <label class="sr-only" for="messageInput">Message the level design assistant</label>
-                        <textarea id="messageInput" rows="2" maxlength="2000"
-                            placeholder="Share your thoughts about this level..." required></textarea>
-                        <button class="primary-button" id="sendButton" type="submit">Send</button>
+                        <label class="sr-only" for="messageInput" data-i18n="messageLabel">Message the level design assistant</label>
+                        <textarea id="messageInput" rows="2" maxlength="2000" data-i18n-placeholder="messagePlaceholder" placeholder="Explain what you want to change or ask about the level..."></textarea>
+                        <button class="primary-button" id="sendButton" type="submit" data-i18n="send">Send</button>
                     </form>
                     <div class="composer-meta">
-                        <span>Enter to send · Shift+Enter for a new line</span>
+                        <span data-i18n="sendHint">Enter to send · Shift+Enter for a new line</span>
                         <span id="characterCount">0 / 2000</span>
                     </div>
                 </section>
@@ -67,19 +95,50 @@
                 <aside class="panel map-panel" aria-labelledby="mapTitle">
                     <header class="panel-header">
                         <div>
-                            <p class="eyebrow">Fixed design context</p>
-                            <h2 id="mapTitle">Current level</h2>
+                            <p class="eyebrow" id="selectedStageEyebrow">STAGE</p>
+                            <h2 id="mapTitle" data-i18n="currentLevel">Current level</h2>
                         </div>
-                        <span class="count-pill">12 × 10</span>
+                        <button class="play-button" id="playButton" type="button">
+                            <span class="play-icon">▶</span>
+                            <span data-i18n="playStage">Play this Stage</span>
+                        </button>
                     </header>
                     <div class="map-content">
                         <div class="map-frame">
-                            <div class="map-grid" id="mapGrid" aria-label="Loading Sokoban map"></div>
+                            <div class="map-grid" id="mapGrid" aria-label="Sokoban map"></div>
                         </div>
-                        <div class="legend" id="mapLegend" aria-label="Map legend"></div>
-                        <div class="context-note">
-                            <strong>Read-only prototype</strong>
-                            <p>The assistant can discuss this map but cannot change or play it.</p>
+                        <div class="map-toolbar" id="mapToolbar" aria-label="Tile palette"></div>
+                        <div class="map-mode" id="mapMode"></div>
+                        <div class="validation-card" id="validationCard"></div>
+                        <div class="map-actions">
+                            <button class="primary-button" id="saveStageButton" type="button" data-i18n="saveStage">Save as new Stage</button>
+                            <button class="secondary-button" id="discardDraftButton" type="button" data-i18n="discard">Discard draft</button>
+                            <button class="secondary-button" id="restoreStageButton" type="button" data-i18n="continueFromStage" hidden>Continue from this Stage</button>
+                        </div>
+
+                        <section class="play-evidence" aria-labelledby="playEvidenceTitle">
+                            <div class="section-heading">
+                                <h3 id="playEvidenceTitle" data-i18n="playEvidence">Play evidence</h3>
+                                <span id="playAttemptCount">0</span>
+                            </div>
+                            <div id="playAttemptList" class="attempt-list"></div>
+                        </section>
+
+                        <div class="final-actions" id="finalActions">
+                            <button class="finalize-button" id="finalizeButton" type="button" data-i18n="finalizeStage">Confirm final Stage</button>
+                            <p data-i18n="finalizeHint">Confirmation freezes editing. Your design intention is collected next.</p>
+                        </div>
+
+                        <form class="intention-form" id="intentionForm" hidden>
+                            <p class="eyebrow" data-i18n="intentionTitle">Designer intention</p>
+                            <h3 data-i18n="intentionQuestion">What experience did you want this level to create for another player?</h3>
+                            <textarea id="intentionInput" rows="4" maxlength="4000" required></textarea>
+                            <button class="primary-button" type="submit" data-i18n="completeSession">Complete session</button>
+                        </form>
+
+                        <div class="complete-card" id="completeCard" hidden>
+                            <strong data-i18n="sessionComplete">Session complete</strong>
+                            <p data-i18n="sessionCompleteBody">The final Stage, intention, conversation and play evidence are safely recorded.</p>
                         </div>
                     </div>
                 </aside>
@@ -87,7 +146,18 @@
         </main>
     </div>
 
+    <div class="modal-backdrop" id="finalizeModal" hidden>
+        <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="finalizeModalTitle">
+            <p class="eyebrow" data-i18n="finalConfirmation">Final confirmation</p>
+            <h2 id="finalizeModalTitle" data-i18n="confirmQuestion">Confirm this as your final Stage?</h2>
+            <p data-i18n="confirmBody">Editing and chat will be locked after confirmation. You will then report your design intention.</p>
+            <div class="modal-actions">
+                <button class="secondary-button" id="cancelFinalizeButton" type="button" data-i18n="cancel">Cancel</button>
+                <button class="finalize-button" id="confirmFinalizeButton" type="button" data-i18n="confirmFinal">Confirm final Stage</button>
+            </div>
+        </section>
+    </div>
+
     <script src="./app.js"></script>
 </body>
 </html>
-

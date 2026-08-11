@@ -32,7 +32,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--brand: #167a67", css_response.text)
         self.assertEqual(js_response.status_code, 200)
-        self.assertIn('fetch("/api/chat"', js_response.text)
+        self.assertIn("/api/sessions/", js_response.text)
+        self.assertIn("play-attempts", js_response.text)
 
     def test_sample_has_expected_shape_and_objects(self):
         response = self.client.get("/api/sample")
@@ -252,4 +253,3 @@ def replay_single_box_solution(rows, player, box, moves):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -154,6 +154,36 @@ public class LevelManager : MonoBehaviour
             yield break;
         }
 
+        if (SceneManager.GetActiveScene().name == "DG_Level"
+            && !CoCreationPlayContext.IsActive)
+        {
+            const string coCreationEntrySceneName = "CoCreation_Entry";
+
+            if (levelLoader.levelData == null || levelLoader.levelData.rows == null)
+            {
+                SetInitialLLMLoadingText(true, "The generated draft is missing.");
+                SetInitialLLMRetryButtonVisible(true);
+                yield break;
+            }
+
+            if (!Application.CanStreamedLevelBeLoaded(coCreationEntrySceneName))
+            {
+                SetInitialLLMLoadingText(
+                    true,
+                    "CoCreation_Entry is not available in Build Settings."
+                );
+                SetInitialLLMRetryButtonVisible(true);
+                yield break;
+            }
+
+            CoCreationDraftContext.Stage(
+                levelLoader.levelData.rows,
+                AIAssistantModeController.DescriptionGenerationApiMode
+            );
+            SceneManager.LoadScene(coCreationEntrySceneName);
+            yield break;
+        }
+
         SetInitialLLMLoadingText(false, initialLLMLoadingMessage);
         SetInitialLLMRetryButtonVisible(false);
         yield return Fade(0, 1);

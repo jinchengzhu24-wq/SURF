@@ -109,11 +109,34 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "CONFIGURATION_ERROR")
         self.assertEqual(raised.exception.attempts_used, 0)
 
-    def test_non_ascii_response_is_rejected(self):
-        with self.assertRaises(ValueError):
-            llm_client.validate_chat_response({"assistantMessage": "Hello \u4e16\u754c"})
+    def test_chinese_response_is_supported(self):
+        result = llm_client.validate_chat_response(
+            {"assistantMessage": "你好，世界"}
+        )
+
+        self.assertEqual(result[0], "你好，世界")
+
+    def test_structured_assessment_and_proposal_are_returned(self):
+        rows = ["############"] * 10
+        payload = {
+            "assistantMessage": "Here is a focused alternative.",
+            "assessment": {
+                "solutionSummary": "One box route.",
+                "difficultyOpinion": "Likely easy.",
+                "features": ["Compact"],
+                "suggestions": ["Move the player"],
+                "satisfactionQuestion": "Does this match your intention?",
+            },
+            "proposedRows": rows,
+            "modificationSummary": "Moved the player.",
+        }
+
+        result = llm_client.validate_chat_response(payload)
+
+        self.assertEqual(result[1]["features"], ["Compact"])
+        self.assertEqual(result[2], rows)
+        self.assertEqual(result[3], "Moved the player.")
 
 
 if __name__ == "__main__":
     unittest.main()
-

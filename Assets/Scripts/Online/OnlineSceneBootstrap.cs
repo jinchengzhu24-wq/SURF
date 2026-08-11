@@ -20,7 +20,13 @@ public static class OnlineSceneBootstrap
 
     private static void AttachController(Scene scene)
     {
-        if (scene.name == "Online_Lobby"
+        if (scene.name == "Menu"
+            && Object.FindObjectOfType<CoCreationPlayBootstrap>() == null)
+        {
+            GameObject controller = new GameObject("CoCreationPlayBootstrap");
+            controller.AddComponent<CoCreationPlayBootstrap>();
+        }
+        else if (scene.name == "Online_Lobby"
             && Object.FindObjectOfType<OnlineLobbyController>() == null)
         {
             GameObject controller = new GameObject("OnlineLobbyController");
@@ -52,10 +58,11 @@ public static class OnlineSceneBootstrap
         }
 
         if ((scene.name == "PC_Level" || scene.name == "DG_Level")
-            && Object.FindObjectOfType<OnlineChallengeCompletionRoute>() == null)
+            && CoCreationPlayContext.IsActive
+            && Object.FindObjectOfType<CoCreationStagePlayController>() == null)
         {
-            GameObject route = new GameObject("OnlineChallengeCompletionRoute");
-            route.AddComponent<OnlineChallengeCompletionRoute>();
+            GameObject route = new GameObject("CoCreationStagePlayController");
+            route.AddComponent<CoCreationStagePlayController>();
         }
     }
 }
