@@ -552,7 +552,8 @@ function renderChatRequestStatus() {
 }
 
 async function ensureAssessment(versionId) {
-    if (!state.session || state.session.assessments.some(item => item.versionId === versionId) || state.assessing.has(versionId)) return;
+    const version = findVersion(versionId);
+    if (!state.session || version?.openingTurnId || state.session.assessments.some(item => item.versionId === versionId) || state.assessing.has(versionId)) return;
     state.assessing.add(versionId);
     try {
         state.session = await api(`/api/sessions/${state.sessionId}/versions/${versionId}/assessments`, {
@@ -670,7 +671,6 @@ async function decideProposal(proposal, decision) {
         });
         selectVersion(state.session.currentVersionId, false);
         render();
-        if (decision === "accept") await ensureAssessment(state.session.currentVersionId);
     });
 }
 
@@ -742,9 +742,29 @@ function selectCurrentVersion() { selectVersion(state.session.currentVersionId);
 function selectedVersion() { return findVersion(state.selectedVersionId); }
 function findVersion(versionId) { return state.session && state.session.versions.find(item => item.versionId === versionId); }
 function selectedStageTurns() {
-    return state.session
-        ? state.session.turns.filter(turn => turn.versionId === state.selectedVersionId)
-        : [];
+    if (!state.session) return [];
+
+    const openingTurnId = selectedVersion()?.openingTurnId;
+    const supersededAssessmentTurnIds = new Set(
+        openingTurnId
+            ? state.session.assessments
+                .filter(item => item.versionId === state.selectedVersionId)
+                .map(item => item.assistantTurnId)
+            : []
+    );
+    const directTurns = state.session.turns.filter(
+        turn => turn.versionId === state.selectedVersionId
+            && !supersededAssessmentTurnIds.has(turn.turnId)
+    );
+    const openingTurn = openingTurnId
+        ? state.session.turns.find(turn => turn.turnId === openingTurnId)
+        : null;
+
+    if (!openingTurn || directTurns.some(turn => turn.turnId === openingTurn.turnId)) {
+        return directTurns;
+    }
+
+    return [openingTurn, ...directTurns];
 }
 
 function resetDraftFromSelection() {

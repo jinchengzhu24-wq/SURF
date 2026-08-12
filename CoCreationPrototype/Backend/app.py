@@ -616,6 +616,24 @@ def assess_version(
         if existing is not None:
             return serialize_session(database, session_id)
 
+        accepted_opening = database.execute(
+            """
+            SELECT decision.id
+            FROM designer_decisions AS decision
+            JOIN change_proposals AS proposal
+              ON proposal.id = decision.proposal_id
+            WHERE decision.session_id = ?
+              AND decision.version_id = ?
+              AND decision.decision_type = 'accept'
+              AND proposal.assistant_turn_id IS NOT NULL
+            LIMIT 1
+            """,
+            (session_id, version_id),
+        ).fetchone()
+
+        if accepted_opening is not None:
+            return serialize_session(database, session_id)
+
         context = build_llm_context(database, session_id, version)
         session_language = session["language"]
 
@@ -1381,12 +1399,41 @@ def insert_turn(database, session, role, content, version_id, request_id, execut
 def build_llm_context(database, session_id, version):
     turns = database.execute(
         """
-        SELECT role, content FROM conversation_turns
+        SELECT id, role, content FROM conversation_turns
         WHERE session_id = ? AND version_id = ?
         ORDER BY sequence_number DESC LIMIT 24
         """,
         (session_id, version["id"]),
     ).fetchall()
+    accepted_opening = database.execute(
+        """
+        SELECT proposal.id AS proposal_id, proposal.assistant_turn_id,
+               turn.role, turn.content
+        FROM designer_decisions AS decision
+        JOIN change_proposals AS proposal
+          ON proposal.id = decision.proposal_id
+        JOIN conversation_turns AS turn
+          ON turn.id = proposal.assistant_turn_id
+        WHERE decision.session_id = ?
+          AND decision.version_id = ?
+          AND decision.decision_type = 'accept'
+        ORDER BY decision.created_at LIMIT 1
+        """,
+        (session_id, version["id"]),
+    ).fetchone()
+    superseded_assessment_turn_ids = set()
+
+    if accepted_opening is not None:
+        superseded_assessment_turn_ids = {
+            row["assistant_turn_id"]
+            for row in database.execute(
+                """
+                SELECT assistant_turn_id FROM llm_assessments
+                WHERE session_id = ? AND version_id = ?
+                """,
+                (session_id, version["id"]),
+            ).fetchall()
+        }
     latest_play = database.execute(
         """
         SELECT status, duration_seconds, move_count, push_count, restart_count,
@@ -1409,13 +1456,29 @@ def build_llm_context(database, session_id, version):
         if parent is not None
         else None
     )
+    conversation = [
+        {"role": turn["role"], "content": turn["content"]}
+        for turn in reversed(turns)
+        if turn["id"] not in superseded_assessment_turn_ids
+    ]
+
+    if accepted_opening is not None and not any(
+        turn["content"] == accepted_opening["content"]
+        and turn["role"] == accepted_opening["role"]
+        for turn in conversation
+    ):
+        conversation.insert(
+            0,
+            {
+                "role": accepted_opening["role"],
+                "content": accepted_opening["content"],
+            },
+        )
+
     return {
         "rows": current_rows,
         "validation": load_json(version["validation_json"]),
-        "conversation": [
-            {"role": turn["role"], "content": turn["content"]}
-            for turn in reversed(turns)
-        ],
+        "conversation": conversation,
         "stageContext": {
             "stageNumber": version["stage_number"],
             "source": version["source"],
@@ -1423,6 +1486,16 @@ def build_llm_context(database, session_id, version):
             "parentVersionId": version["parent_version_id"],
             "diff": load_json(version["diff_json"]),
             "changeSummary": change_summary,
+            "openingTurnId": (
+                accepted_opening["assistant_turn_id"]
+                if accepted_opening is not None
+                else None
+            ),
+            "openingProposalId": (
+                accepted_opening["proposal_id"]
+                if accepted_opening is not None
+                else None
+            ),
         },
         "playSummary": (
             {

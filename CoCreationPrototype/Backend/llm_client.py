@@ -18,7 +18,7 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 CHAT_TIMEOUT_SECONDS = 60.0
 CHAT_MAX_ATTEMPTS = 1
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v4-stage-scoped"
+PROMPT_VERSION = "cocreation-v5-accepted-opening"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -120,8 +120,11 @@ def build_chat_messages(
         "than guessing: acknowledge the changed components, note that this saved Stage "
         "passed deterministic solvability validation, evaluate the likely design effects "
         "from your perspective, and continue the dialogue. The supplied conversation "
-        "contains only turns attached to this saved Stage; do not claim that another "
-        "Stage's discussion happened in the current Stage.\n\n"
+        "contains only turns attached to this saved Stage, except that an accepted LLM "
+        "proposal may be carried forward as the opening of the Stage it created. Treat "
+        "that accepted proposal as the established design context for the new Stage, "
+        "not as a request to assess the map from scratch. Do not claim that unrelated "
+        "discussion from another Stage happened in the current Stage.\n\n"
         f"Write all new natural-language fields in {response_language}. {task}\n\n"
         "Return JSON only with exactly these keys:\n"
         '{"assistantMessage":"...","guidance":'

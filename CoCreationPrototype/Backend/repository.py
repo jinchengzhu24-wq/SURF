@@ -264,6 +264,20 @@ def serialize_session(database, session_id):
         """,
         (session_id,),
     ).fetchall()
+    accepted_openings = database.execute(
+        """
+        SELECT decision.version_id, decision.proposal_id,
+               proposal.assistant_turn_id
+        FROM designer_decisions AS decision
+        JOIN change_proposals AS proposal
+          ON proposal.id = decision.proposal_id
+        WHERE decision.session_id = ?
+          AND decision.decision_type = 'accept'
+          AND decision.version_id IS NOT NULL
+        ORDER BY decision.created_at
+        """,
+        (session_id,),
+    ).fetchall()
     intention = database.execute(
         """
         SELECT content, language, created_at
@@ -273,6 +287,9 @@ def serialize_session(database, session_id):
     ).fetchone()
 
     attempts_by_version = {}
+    opening_by_version = {
+        opening["version_id"]: opening for opening in accepted_openings
+    }
 
     for attempt in attempts:
         attempts_by_version.setdefault(attempt["version_id"], []).append(
@@ -302,6 +319,16 @@ def serialize_session(database, session_id):
                 "validation": load_json(version["validation_json"]),
                 "createdAt": version["created_at"],
                 "playAttempts": attempts_by_version.get(version["id"], []),
+                "openingTurnId": (
+                    opening_by_version[version["id"]]["assistant_turn_id"]
+                    if version["id"] in opening_by_version
+                    else None
+                ),
+                "openingProposalId": (
+                    opening_by_version[version["id"]]["proposal_id"]
+                    if version["id"] in opening_by_version
+                    else None
+                ),
             }
             for version in versions
         ],

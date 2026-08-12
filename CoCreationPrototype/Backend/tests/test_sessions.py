@@ -608,6 +608,124 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(len(accepted.json()["versions"]), 2)
         self.assertEqual(accepted.json()["versions"][1]["rows"], EDITED_ROWS)
         self.assertEqual(accepted.json()["versions"][1]["source"], "llm_accepted")
+        stage_two = accepted.json()["versions"][1]
+        proposal_turn = next(
+            turn
+            for turn in accepted.json()["turns"]
+            if turn["turnId"] == proposed_session["proposals"][0]["assistantTurnId"]
+        )
+        self.assertEqual(stage_two["openingTurnId"], proposal_turn["turnId"])
+        self.assertEqual(stage_two["openingProposalId"], proposal_id)
+
+        with patch.object(backend, "generate_stage_assessment") as assessment_mock:
+            opening = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{stage_two['versionId']}/assessments",
+                json={"idempotencyKey": "accepted_opening_001"},
+            )
+
+        self.assertEqual(opening.status_code, 200, opening.text)
+        assessment_mock.assert_not_called()
+        self.assertEqual(
+            [
+                item
+                for item in opening.json()["assessments"]
+                if item["versionId"] == stage_two["versionId"]
+            ],
+            [],
+        )
+
+        legacy_assessment = LLMExecutionResult(
+            "A superseded first assessment.",
+            1,
+            "legacy-accepted-assessment",
+            assessment={
+                "solutionSummary": "Legacy",
+                "difficultyOpinion": "In my view, moderate.",
+                "features": ["Legacy"],
+                "suggestions": ["Legacy"],
+                "satisfactionQuestion": "Legacy?",
+            },
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "Legacy?",
+                "proposalOffer": None,
+            },
+        )
+        with repository.connect(immediate=True) as database:
+            session_row = repository.get_session(database, self.session_id)
+            legacy_turn_id = backend.insert_turn(
+                database,
+                session_row,
+                "assistant",
+                legacy_assessment.assistant_message,
+                stage_two["versionId"],
+                legacy_assessment.request_id,
+                legacy_assessment,
+            )
+            database.execute(
+                """
+                INSERT INTO llm_assessments(
+                    id, session_id, version_id, assistant_turn_id,
+                    payload_json, prompt_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy_accepted_assessment",
+                    self.session_id,
+                    stage_two["versionId"],
+                    legacy_turn_id,
+                    repository.dump_json(legacy_assessment.assessment),
+                    "legacy-prompt",
+                    backend.utc_now(),
+                ),
+            )
+
+        follow_up_execution = LLMExecutionResult(
+            "Let's continue from the accepted proposal.",
+            1,
+            "accepted-follow-up",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            return_value=follow_up_execution,
+        ) as chat_mock:
+            continued = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "What should we inspect next?",
+                    "baseVersionId": stage_two["versionId"],
+                    "idempotencyKey": "accepted_follow_up_001",
+                },
+            )
+
+        self.assertEqual(continued.status_code, 200, continued.text)
+        self.assertEqual(
+            chat_mock.call_args.args[0],
+            [
+                {"role": "assistant", "content": proposal_turn["content"]},
+                {"role": "user", "content": "What should we inspect next?"},
+            ],
+        )
+        self.assertNotIn(
+            legacy_assessment.assistant_message,
+            [turn["content"] for turn in chat_mock.call_args.args[0]],
+        )
+        self.assertEqual(
+            chat_mock.call_args.kwargs["stage_context"]["openingTurnId"],
+            proposal_turn["turnId"],
+        )
 
     def test_finalize_hides_rows_until_intention_is_submitted(self):
         version_id = self.read_session()["currentVersionId"]
