@@ -5,8 +5,10 @@ import re
 import secrets
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Literal
 from urllib.parse import quote
 
@@ -57,6 +59,8 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_COOKIE_NAME = "sokoban_cocreation_access"
 PLAY_TICKET_LIFETIME = timedelta(minutes=5)
 INTERRUPTED_AFTER = timedelta(minutes=30)
+_message_locks = {}
+_message_locks_guard = Lock()
 
 SAMPLE_ROWS = [
     "############",
@@ -678,9 +682,45 @@ def send_message(
     if not content or len(content) > MAX_MESSAGE_LENGTH:
         raise ApiError(400, "INVALID_MESSAGE", "The message must contain 1 to 2000 characters.")
 
+    with message_request_lock(session_id, payload.idempotencyKey):
+        return _send_message_locked(
+            session_id,
+            payload,
+            content,
+            request,
+            response,
+            access_cookie,
+        )
+
+
+def _send_message_locked(
+    session_id,
+    payload,
+    content,
+    request,
+    response,
+    access_cookie,
+):
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
-        require_current_base(session, payload.baseVersionId)
+        prior_user = database.execute(
+            """
+            SELECT * FROM conversation_turns
+            WHERE session_id = ? AND request_id = ? AND role = 'user'
+            """,
+            (session_id, payload.idempotencyKey),
+        ).fetchone()
+
+        if prior_user is not None and (
+            prior_user["content"] != content
+            or prior_user["version_id"] != payload.baseVersionId
+        ):
+            raise ApiError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "The message key was already used for different content or Stage.",
+            )
+
         prior_assistant = database.execute(
             """
             SELECT * FROM conversation_turns
@@ -692,13 +732,7 @@ def send_message(
         if prior_assistant is not None:
             return serialize_session(database, session_id)
 
-        prior_user = database.execute(
-            """
-            SELECT * FROM conversation_turns
-            WHERE session_id = ? AND request_id = ? AND role = 'user'
-            """,
-            (session_id, payload.idempotencyKey),
-        ).fetchone()
+        require_current_base(session, payload.baseVersionId)
 
         if prior_user is None:
             insert_turn(
@@ -775,6 +809,41 @@ def send_message(
                 )
 
         return serialize_session(database, session_id)
+
+
+@contextmanager
+def message_request_lock(session_id, idempotency_key):
+    key = (session_id, idempotency_key)
+
+    with _message_locks_guard:
+        entry = _message_locks.get(key)
+
+        if entry is None:
+            entry = {"lock": Lock(), "users": 0, "error": None}
+            _message_locks[key] = entry
+
+        is_leader = entry["users"] == 0
+        entry["users"] += 1
+
+    entry["lock"].acquire()
+
+    try:
+        if not is_leader and entry["error"] is not None:
+            raise entry["error"]
+
+        yield
+    except Exception as error:
+        if is_leader:
+            entry["error"] = error
+        raise
+    finally:
+        entry["lock"].release()
+
+        with _message_locks_guard:
+            entry["users"] -= 1
+
+            if entry["users"] == 0:
+                _message_locks.pop(key, None)
 
 
 @app.post("/api/sessions/{session_id}/proposals/{proposal_id}/decision")

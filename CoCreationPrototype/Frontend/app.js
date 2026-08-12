@@ -24,6 +24,8 @@ const translations = {
         assessmentPending: "Preparing the first Stage assessment",
         assessmentPendingBody: "The assistant will discuss the verified current map and ask what you want to refine.",
         thinking: "Assistant is considering the current Stage...",
+        chatWaiting: "The assistant is generating a response. This may take up to 60 seconds.",
+        chatRetryPending: "The previous message did not finish. Retry it without creating a duplicate.",
         messageLabel: "Message the level design assistant",
         messagePlaceholder: "Explain what you want to change or ask about the level...",
         send: "Send",
@@ -114,6 +116,8 @@ const translations = {
         assessmentPending: "正在准备首版评价",
         assessmentPendingBody: "助手会围绕已验证的当前地图展开讨论，并询问你希望如何继续完善。",
         thinking: "助手正在分析当前 Stage……",
+        chatWaiting: "助手正在生成回复，最长可能需要 60 秒。",
+        chatRetryPending: "上一条消息尚未完成，可安全重试且不会产生重复记录。",
         messageLabel: "给关卡设计助手发送消息",
         messagePlaceholder: "说明你想修改什么，或询问这个关卡的设计……",
         send: "发送",
@@ -195,6 +199,10 @@ const state = {
     dirty: false,
     selectedTile: ".",
     busy: false,
+    chatBusy: false,
+    chatStatus: "idle",
+    chatError: null,
+    pendingMessage: null,
     assessing: new Set(),
     retryAction: null,
     language: "zh-CN"
@@ -223,7 +231,8 @@ const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus",
     "languageButton", "demoButton", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "chatScroll", "emptyChat", "messageList", "typingRow", "proposalArea",
-    "chatForm", "messageInput", "sendButton", "characterCount", "selectedStageEyebrow", "mapGrid",
+    "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
+    "sendButton", "characterCount", "selectedStageEyebrow", "mapGrid",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
     "restoreStageButton", "playButton", "playAttemptCount", "playAttemptList", "finalActions",
     "finalizeButton", "intentionForm", "intentionInput", "completeCard", "finalizeModal",
@@ -233,6 +242,7 @@ const elements = Object.fromEntries([
 elements.languageButton.addEventListener("click", toggleLanguage);
 elements.demoButton.addEventListener("click", createDemoSession);
 elements.retryButton.addEventListener("click", () => state.retryAction && state.retryAction());
+elements.chatRetryButton.addEventListener("click", retryPendingMessage);
 elements.returnCurrentButton.addEventListener("click", selectCurrentVersion);
 elements.chatForm.addEventListener("submit", sendMessage);
 elements.messageInput.addEventListener("input", handleComposerInput);
@@ -270,6 +280,7 @@ async function initialize() {
         state.selectedVersionId = hash.stage || localStorage.getItem(selectedStageKey()) || "";
         await refreshSession();
         restoreComposerDraft();
+        recoverPendingMessage();
         showPlayReturnNotice(hash.playReturn);
     } catch (error) {
         showLanding();
@@ -319,6 +330,7 @@ function render() {
     renderProposal();
     renderMap();
     renderSessionState();
+    renderChatRequestStatus();
     updateControls();
 }
 
@@ -501,8 +513,20 @@ function updateControls() {
     elements.finalizeButton.disabled = state.busy || state.dirty || pending || state.selectedVersionId !== state.session.currentVersionId;
     elements.messageInput.disabled = state.busy || state.session.status !== "active";
     elements.sendButton.disabled = state.busy || state.session.status !== "active" || !elements.messageInput.value.trim();
-    elements.sendButton.textContent = state.busy ? t("sending") : t("send");
-    elements.typingRow.hidden = !state.busy;
+    elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
+    elements.typingRow.hidden = !state.chatBusy;
+}
+
+function renderChatRequestStatus() {
+    const waiting = state.chatStatus === "waiting";
+    const failed = state.chatStatus === "error";
+    elements.chatRequestStatus.hidden = !waiting && !failed;
+    elements.chatRequestStatus.className = `chat-request-status ${waiting ? "waiting" : "error"}`;
+    elements.chatRequestMessage.textContent = waiting
+        ? t("chatWaiting")
+        : localizedErrorMessage(state.chatError);
+    elements.chatRetryButton.hidden = !failed || !state.chatError?.retryable || !state.pendingMessage;
+    elements.chatRetryButton.textContent = t("retry");
 }
 
 async function ensureAssessment(versionId) {
@@ -525,21 +549,64 @@ async function sendMessage(event) {
     event.preventDefault();
     const content = elements.messageInput.value.trim();
     if (!content || state.busy) return;
-    const draftKey = composerKey();
-    await withBusy(async () => {
+
+    if (
+        !state.pendingMessage
+        || state.pendingMessage.content !== content
+        || state.pendingMessage.baseVersionId !== state.session.currentVersionId
+    ) {
+        state.pendingMessage = {
+            content,
+            baseVersionId: state.session.currentVersionId,
+            idempotencyKey: uniqueId("message")
+        };
+    }
+
+    persistPendingMessage();
+    await submitPendingMessage();
+}
+
+async function retryPendingMessage() {
+    if (!state.pendingMessage || state.busy) return;
+    elements.messageInput.value = state.pendingMessage.content;
+    localStorage.setItem(composerKey(), state.pendingMessage.content);
+    updateCharacterCount();
+    await submitPendingMessage();
+}
+
+async function submitPendingMessage() {
+    const pending = state.pendingMessage;
+    if (!pending || state.busy) return;
+
+    state.busy = true;
+    state.chatBusy = true;
+    state.chatStatus = "waiting";
+    state.chatError = null;
+    hideNotice();
+    renderChatRequestStatus();
+    updateControls();
+
+    try {
         state.session = await api(`/api/sessions/${state.sessionId}/messages`, {
             method: "POST",
-            body: {
-                content,
-                baseVersionId: state.session.currentVersionId,
-                idempotencyKey: uniqueId("message")
-            }
+            body: pending
         });
         elements.messageInput.value = "";
-        localStorage.removeItem(draftKey);
+        localStorage.removeItem(composerKey());
+        clearPendingMessage();
+        state.chatStatus = "idle";
+        state.chatError = null;
         updateCharacterCount();
         render();
-    });
+    } catch (error) {
+        state.chatStatus = "error";
+        state.chatError = error;
+    } finally {
+        state.busy = false;
+        state.chatBusy = false;
+        renderChatRequestStatus();
+        updateControls();
+    }
 }
 
 async function saveManualStage() {
@@ -733,13 +800,17 @@ async function api(path, options = {}) {
 }
 
 function showError(error, retryAction) {
+    showNotice(localizedErrorMessage(error), error.retryable ? retryAction : null);
+}
+
+function localizedErrorMessage(error) {
+    if (error?.code === "PENDING_MESSAGE") return t("chatRetryPending");
     const localized = state.language === "zh-CN"
-        ? chineseApiErrors[error.code]
-        : translations.en[`error_${error.code}`];
-    const message = localized
-        || (state.language === "zh-CN" ? t("errorGeneric") : error.message)
+        ? chineseApiErrors[error?.code]
+        : translations.en[`error_${error?.code}`];
+    return localized
+        || (state.language === "zh-CN" ? t("errorGeneric") : error?.message)
         || t("errorGeneric");
-    showNotice(message, error.retryable ? retryAction : null);
 }
 
 function showNotice(message, retryAction = null) {
@@ -771,10 +842,17 @@ function applyTranslations() {
     document.querySelectorAll("[data-i18n-placeholder]").forEach(element => element.placeholder = t(element.dataset.i18nPlaceholder));
     elements.languageButton.textContent = state.language === "en" ? "中文" : "English";
     updateCharacterCount();
+    renderChatRequestStatus();
 }
 
 function handleComposerInput() {
     if (state.sessionId) localStorage.setItem(composerKey(), elements.messageInput.value);
+    if (state.pendingMessage && elements.messageInput.value.trim() !== state.pendingMessage.content) {
+        clearPendingMessage();
+        state.chatStatus = "idle";
+        state.chatError = null;
+        renderChatRequestStatus();
+    }
     updateCharacterCount();
     updateControls();
 }
@@ -785,9 +863,90 @@ function restoreComposerDraft() {
     updateControls();
 }
 
+function recoverPendingMessage() {
+    const stored = readPendingMessage();
+    const turns = state.session?.turns || [];
+    const finalTurn = turns[turns.length - 1];
+    const unmatched = finalTurn?.role === "user"
+        && finalTurn.requestId
+        && !turns.some(turn => turn.role === "assistant" && turn.requestId === finalTurn.requestId)
+        ? {
+            content: finalTurn.content,
+            baseVersionId: finalTurn.versionId,
+            idempotencyKey: finalTurn.requestId
+        }
+        : null;
+    const pending = stored || unmatched;
+
+    if (!pending) return;
+
+    const completed = turns.some(
+        turn => turn.role === "assistant" && turn.requestId === pending.idempotencyKey
+    );
+
+    if (completed) {
+        if (elements.messageInput.value.trim() === pending.content) {
+            elements.messageInput.value = "";
+            localStorage.removeItem(composerKey());
+        }
+        clearPendingMessage();
+        updateCharacterCount();
+        updateControls();
+        return;
+    }
+
+    const draft = elements.messageInput.value.trim();
+    if (draft && draft !== pending.content) {
+        clearPendingMessage();
+        return;
+    }
+
+    state.pendingMessage = pending;
+    persistPendingMessage();
+    elements.messageInput.value = pending.content;
+    localStorage.setItem(composerKey(), pending.content);
+    state.chatStatus = "error";
+    state.chatError = {
+        code: "PENDING_MESSAGE",
+        message: t("chatRetryPending"),
+        retryable: true
+    };
+    updateCharacterCount();
+    renderChatRequestStatus();
+    updateControls();
+}
+
+function readPendingMessage() {
+    try {
+        const pending = JSON.parse(localStorage.getItem(pendingMessageKey()) || "null");
+        if (
+            !pending
+            || typeof pending.content !== "string"
+            || typeof pending.baseVersionId !== "string"
+            || typeof pending.idempotencyKey !== "string"
+        ) return null;
+        return pending;
+    } catch (error) {
+        localStorage.removeItem(pendingMessageKey());
+        return null;
+    }
+}
+
+function persistPendingMessage() {
+    if (state.pendingMessage) {
+        localStorage.setItem(pendingMessageKey(), JSON.stringify(state.pendingMessage));
+    }
+}
+
+function clearPendingMessage() {
+    state.pendingMessage = null;
+    localStorage.removeItem(pendingMessageKey());
+}
+
 function updateCharacterCount() { elements.characterCount.textContent = `${elements.messageInput.value.length} / ${MAX_MESSAGE_LENGTH}`; }
 function handleComposerKeydown(event) { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.chatForm.requestSubmit(); } }
 function composerKey() { return `cocreationComposer:${state.sessionId}`; }
+function pendingMessageKey() { return `cocreationPendingMessage:${state.sessionId}`; }
 function selectedStageKey() { return `cocreationStage:${state.sessionId}`; }
 
 function readHash() {

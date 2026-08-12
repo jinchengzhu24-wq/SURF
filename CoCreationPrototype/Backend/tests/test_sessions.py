@@ -16,7 +16,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 import app as backend
 import repository
-from llm_client import LLMExecutionResult
+from llm_client import LLMExecutionResult, LLMServiceError
 
 
 SAMPLE_ROWS = list(backend.SAMPLE_ROWS)
@@ -259,6 +259,113 @@ class CoCreationSessionTests(unittest.TestCase):
             response.json()["turns"][-1]["guidance"]["move"],
             "reflect_on_play",
         )
+
+    def test_failed_message_retries_with_one_user_turn_and_one_assistant_turn(self):
+        version_id = self.read_session()["currentVersionId"]
+        request_payload = {
+            "content": "Create a reviewable map proposal.",
+            "baseVersionId": version_id,
+            "idempotencyKey": "retry_message_001",
+        }
+        timeout = LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not respond before the timeout.",
+            "timeout-request",
+            True,
+            1,
+            504,
+        )
+        execution = LLMExecutionResult(
+            "Here is a direction to review.",
+            1,
+            "retry-request",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            side_effect=[timeout, execution],
+        ) as mocked:
+            failed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+            retried = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+            repeated_success = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+
+        self.assertEqual(failed.status_code, 504)
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(repeated_success.status_code, 200)
+        self.assertEqual(mocked.call_count, 2)
+        matching_turns = [
+            turn for turn in retried.json()["turns"]
+            if turn["requestId"] == request_payload["idempotencyKey"]
+        ]
+        self.assertEqual([turn["role"] for turn in matching_turns], ["user", "assistant"])
+        self.assertEqual(len(retried.json()["versions"]), 1)
+        self.assertEqual(retried.json()["proposals"], [])
+
+    def test_message_idempotency_key_rejects_changed_content_or_stage(self):
+        version_id = self.read_session()["currentVersionId"]
+        timeout = LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not respond before the timeout.",
+            "timeout-request",
+            True,
+            1,
+            504,
+        )
+        original = {
+            "content": "Create a reviewable map proposal.",
+            "baseVersionId": version_id,
+            "idempotencyKey": "conflict_message_001",
+        }
+
+        with patch.object(backend, "generate_chat_reply", side_effect=timeout) as mocked:
+            failed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=original,
+            )
+            changed_content = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={**original, "content": "Create a different proposal."},
+            )
+
+        self.assertEqual(failed.status_code, 504)
+        self.assertEqual(changed_content.status_code, 409)
+        self.assertEqual(changed_content.json()["code"], "IDEMPOTENCY_CONFLICT")
+        self.assertEqual(mocked.call_count, 1)
+
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": version_id,
+                "idempotencyKey": "manual_after_timeout",
+                "summary": "Create a second Stage.",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        changed_stage = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={**original, "baseVersionId": saved.json()["currentVersionId"]},
+        )
+        self.assertEqual(changed_stage.status_code, 409)
+        self.assertEqual(changed_stage.json()["code"], "IDEMPOTENCY_CONFLICT")
 
     def test_play_ticket_is_single_use_and_metrics_do_not_create_stage(self):
         version_id = self.read_session()["currentVersionId"]

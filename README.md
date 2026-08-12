@@ -28,7 +28,7 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。`Draft` 只区分初稿方法；系统不向设计者分配“困难、友好、竞争、支持”等预设目标，也不把这些历史定义注入 LLM。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 已于 2026-08-11 部署到 `http://111.231.136.4:8010/` 与 `http://111.231.136.4:8000/game/`。后续修改仍须按本文验证流程重新构建和部署，不能仅凭本地源码判断线上版本。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 已于 2026-08-11 部署到 `http://111.231.136.4:8010/` 与 `http://111.231.136.4:8000/game/`；8010 的 60 秒单次调用、消息恢复和就地重试更新已于 2026-08-12 部署。后续修改仍须按本文验证流程重新构建和部署，不能仅凭本地源码判断线上版本。
 
 ## 共创规则
 
@@ -77,6 +77,8 @@ CoCreationPrototype/
 
 LLM 使用适应型共创策略。每个新 Stage 会收到一次基于真实地图的中性开场；之后 LLM 根据玩家最新表达选择澄清意图、提出观点、讨论权衡、结合试玩反思或建议修改方向。意图推测必须是可纠正的暂定假设，不会写入最终设计意图。LLM 可以主动提出修改方向，但只有玩家明确请求或同意后才能返回完整地图提案。普通聊天不再显示固定的 assessment 报告卡；结构化评价和每轮 guidance 元数据仍保存在 SQLite 中供研究分析。
 
+8010 的同步 LLM 调用最多等待 60 秒且不自动重复调用上游。聊天输入区会就地显示等待或安全错误；失败、刷新或连接中断后使用原消息幂等键重试，确保同一请求最多保存一条 user turn 和一条 assistant turn。修改失败消息内容则视为一条新请求。
+
 后端使用独立 SQLite/WAL。默认数据库为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`，`.env` 和数据库文件均被本目录 `.gitignore` 排除。
 生产 systemd 模板保存在 `CoCreationPrototype/Backend/sokoban-cocreation.service`，其中将写权限限制到独立数据目录，并同时读取主后端的 LLM 配置和 8010 自己的安全配置。
 
@@ -122,7 +124,7 @@ POST  /api/sessions/{sessionId}/intention
 GET   /api/integrations/sessions/{sessionId}
 ```
 
-浏览器会话使用 HttpOnly cookie；Unity 创建会话后持有只读集成 token。Play Ticket 只能换取一次地图，随后使用仅限该 attempt 的 token 提交指标。Stage 保存、恢复、提案决定和 Play 创建均使用幂等键；基于过期 Stage 的写入返回 `409 VERSION_CONFLICT`。会话中的 assistant turn 可额外返回 `guidance`，记录本轮引导动作、暂定意图推测、核心问题和不含地图的修改方向；旧消息中的该字段为 `null`。
+浏览器会话使用 HttpOnly cookie；Unity 创建会话后持有只读集成 token。Play Ticket 只能换取一次地图，随后使用仅限该 attempt 的 token 提交指标。Stage 保存、恢复、消息、提案决定和 Play 创建均使用幂等键；同一消息键若改换内容或 Stage 返回 `409 IDEMPOTENCY_CONFLICT`，基于过期 Stage 的新写入返回 `409 VERSION_CONFLICT`。会话中的 assistant turn 可额外返回 `guidance`，记录本轮引导动作、暂定意图推测、核心问题和不含地图的修改方向；旧消息中的该字段为 `null`。
 
 ## 8000 在线匹配
 

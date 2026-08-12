@@ -30,8 +30,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("cocreation-pixel-20260811-3", index_response.text)
-        self.assertIn("cocreation-guided-20260811-3", index_response.text)
+        self.assertIn("cocreation-pixel-20260812-1", index_response.text)
+        self.assertIn("cocreation-guided-20260812-1", index_response.text)
         self.assertIn('<html lang="zh-CN">', index_response.text)
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--bg: #6f9d31", css_response.text)
@@ -47,6 +47,12 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('status === "load_failed"', js_response.text)
         self.assertIn('playSyncFailed', js_response.text)
         self.assertIn('playLoadFailed', js_response.text)
+        self.assertIn('pendingMessageKey()', js_response.text)
+        self.assertIn('recoverPendingMessage()', js_response.text)
+        self.assertIn('chatWaiting', js_response.text)
+        self.assertIn('chatRetryPending', js_response.text)
+        self.assertIn('id="chatRequestStatus"', index_response.text)
+        self.assertIn('.chat-request-status', css_response.text)
         self.assertNotIn("createAssessmentCard", js_response.text)
 
     def test_cocreation_frontend_uses_active_dashboard_visual_contract(self):

@@ -15,10 +15,9 @@ from openai import (
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-CHAT_TIMEOUT_SECONDS = 25.0
-CHAT_MAX_ATTEMPTS = 2
+CHAT_TIMEOUT_SECONDS = 60.0
+CHAT_MAX_ATTEMPTS = 1
 CHAT_RESPONSE_MAX_LENGTH = 4000
-RETRY_DELAY_SECONDS = 0.25
 PROMPT_VERSION = "cocreation-v2-guided"
 
 GUIDANCE_MOVES = {
@@ -256,8 +255,6 @@ def generate_chat_reply(
 
             if not error.retryable or attempt >= CHAT_MAX_ATTEMPTS:
                 raise error from exception
-
-            time.sleep(RETRY_DELAY_SECONDS)
 
     raise LLMServiceError(
         "INTERNAL_ERROR",

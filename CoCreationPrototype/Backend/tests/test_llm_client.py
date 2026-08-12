@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+from openai import APITimeoutError
+
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
@@ -79,36 +82,12 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(request["response_format"], {"type": "json_object"})
         self.assertFalse(request["stream"])
 
-    def test_invalid_json_is_retried_once(self):
-        result, client = self.execute(
-            [
-                "not-json",
-                json.dumps({
-                    "assistantMessage": "I would first clarify the experience you have in mind.",
-                    "guidance": {
-                        "move": "clarify_intent",
-                        "intentHypothesis": None,
-                        "intentConfidence": None,
-                        "followUpQuestion": "What experience do you want to create?",
-                        "proposalOffer": None,
-                    },
-                    "assessment": None,
-                    "proposedRows": None,
-                    "modificationSummary": "",
-                }),
-            ]
-        )
-
-        self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(len(client.chat.completions.calls), 2)
-
-    def test_two_invalid_responses_raise_safe_error(self):
-        client = FakeClient(["not-json", json.dumps({"wrong": "field"})])
+    def test_invalid_json_fails_without_automatic_retry(self):
+        client = FakeClient(["not-json"])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
             patch.object(llm_client, "_get_client", return_value=client),
-            patch.object(llm_client.time, "sleep"),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -118,8 +97,31 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
-        self.assertEqual(raised.exception.attempts_used, 2)
-        self.assertNotIn("wrong", raised.exception.safe_message)
+        self.assertEqual(raised.exception.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_timeout_uses_one_sixty_second_client_attempt(self):
+        timeout = APITimeoutError(
+            request=httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+        )
+        client = FakeClient([timeout])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_get_client", return_value=client),
+            self.assertRaises(llm_client.LLMServiceError) as raised,
+        ):
+            llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Create a map proposal."}],
+                ["############"] * 10,
+                "timeout-test",
+            )
+
+        self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 60.0)
+        self.assertEqual(llm_client.CHAT_MAX_ATTEMPTS, 1)
+        self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
+        self.assertEqual(raised.exception.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
 
     def test_missing_api_key_fails_without_model_call(self):
         with (
@@ -182,6 +184,44 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result[2], rows)
         self.assertEqual(result[3], "Moved the player.")
         self.assertEqual(result[4]["move"], "deliver_revision")
+
+    def test_invalid_proposal_fails_without_automatic_retry(self):
+        payload = json.dumps({
+            "assistantMessage": "Here is a map proposal.",
+            "guidance": {
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+            "assessment": None,
+            "proposedRows": ["############"] * 10,
+            "modificationSummary": "Changed the map.",
+        })
+        client = FakeClient([payload])
+        validated_rows = []
+
+        def reject_proposal(rows):
+            validated_rows.append(rows)
+            raise ValueError("The proposed map is unsolvable.")
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_get_client", return_value=client),
+            self.assertRaises(llm_client.LLMServiceError) as raised,
+        ):
+            llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Please draft that revision."}],
+                ["############"] * 10,
+                "invalid-proposal-test",
+                proposal_validator=reject_proposal,
+            )
+
+        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+        self.assertEqual(raised.exception.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(len(validated_rows), 1)
 
     def test_unsolicited_revision_offer_cannot_include_map(self):
         payload = {

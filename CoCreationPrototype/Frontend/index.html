@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=cocreation-pixel-20260811-3">
+    <link rel="stylesheet" href="./styles.css?v=cocreation-pixel-20260812-1">
 </head>
 <body>
     <div class="app">
@@ -80,6 +80,11 @@
                     </div>
 
                     <div class="proposal-area" id="proposalArea"></div>
+
+                    <div class="chat-request-status" id="chatRequestStatus" role="status" aria-live="polite" hidden>
+                        <span id="chatRequestMessage"></span>
+                        <button class="chat-retry-button" id="chatRetryButton" type="button" data-i18n="retry">Retry</button>
+                    </div>
 
                     <form class="composer" id="chatForm">
                         <label class="sr-only" for="messageInput" data-i18n="messageLabel">Message the level design assistant</label>
@@ -158,6 +163,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=cocreation-guided-20260811-3"></script>
+    <script src="./app.js?v=cocreation-guided-20260812-1"></script>
 </body>
 </html>
