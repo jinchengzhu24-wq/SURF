@@ -18,7 +18,7 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 CHAT_TIMEOUT_SECONDS = 60.0
 CHAT_MAX_ATTEMPTS = 1
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v2-guided"
+PROMPT_VERSION = "cocreation-v4-stage-scoped"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -111,6 +111,17 @@ def build_chat_messages(
         "play results or a verified solution. A Stage number is a saved-version index, "
         "not a campaign or difficulty sequence. Never call Stage 1 the first level, "
         "assume it is a tutorial, or infer intended player progression from its number.\n\n"
+        "The designer can also edit the level directly with the tile tools in the right "
+        "panel and save it as a new Stage after deterministic validation. Mention this "
+        "option briefly only when it would help the designer act on their own idea—for "
+        "example when they want direct control, reject your direction, or the discussion "
+        "remains abstract. Do not repeat the editor hint every turn and never frame manual "
+        "editing as required. For a newly saved human_edit Stage, use changeSummary rather "
+        "than guessing: acknowledge the changed components, note that this saved Stage "
+        "passed deterministic solvability validation, evaluate the likely design effects "
+        "from your perspective, and continue the dialogue. The supplied conversation "
+        "contains only turns attached to this saved Stage; do not claim that another "
+        "Stage's discussion happened in the current Stage.\n\n"
         f"Write all new natural-language fields in {response_language}. {task}\n\n"
         "Return JSON only with exactly these keys:\n"
         '{"assistantMessage":"...","guidance":'
@@ -240,7 +251,13 @@ def generate_chat_reply(
                     continue
 
             return LLMExecutionResult(
-                assistant_message=_compose_assistant_message(validated[0], validated[4]),
+                assistant_message=_compose_assistant_message(
+                    validated[0],
+                    validated[4],
+                    language,
+                    assessment_only,
+                    stage_context,
+                ),
                 assessment=validated[1],
                 proposed_rows=validated[2],
                 modification_summary=validated[3],
@@ -443,13 +460,74 @@ def _validate_guidance(payload, assessment_only):
     }
 
 
-def _compose_assistant_message(message, guidance):
+def _compose_assistant_message(
+    message,
+    guidance,
+    language="en",
+    assessment_only=False,
+    stage_context=None,
+):
+    stage_context = stage_context or {}
+    change_summary = stage_context.get("changeSummary") or {}
+    components = change_summary.get("components") or []
+
+    if assessment_only and stage_context.get("source") == "human_edit":
+        labels = _localized_change_labels(components, language)
+
+        if language == "zh-CN":
+            subject = "、".join(labels) if labels else "地图布局"
+            acknowledgement = (
+                f"我注意到你对{subject}进行了修改。"
+                "这个已保存的 Stage 已通过确定性检查并确认可解。"
+            )
+        else:
+            subject = _join_english(labels) if labels else "the map layout"
+            acknowledgement = (
+                f"I noticed that you changed {subject}. "
+                "This saved Stage passed deterministic validation and is solvable."
+            )
+
+        message = f"{acknowledgement}\n\n{message}"
+
     follow_up = guidance.get("followUpQuestion")
 
     if not follow_up:
         return message
 
     return f"{message}\n\n{follow_up}"
+
+
+def _localized_change_labels(components, language):
+    labels = {
+        "zh-CN": {
+            "outerShell": "外壳",
+            "water": "水域",
+            "internalWalls": "内部墙体",
+            "boxes": "箱子位置",
+            "targets": "目标点",
+            "player": "玩家位置",
+            "floorArea": "可用地面",
+        },
+        "en": {
+            "outerShell": "the outer shell",
+            "water": "the water area",
+            "internalWalls": "the internal walls",
+            "boxes": "the box positions",
+            "targets": "the target positions",
+            "player": "the player position",
+            "floorArea": "the usable floor area",
+        },
+    }
+    selected = labels["zh-CN" if language == "zh-CN" else "en"]
+    return [selected[component] for component in components if component in selected]
+
+
+def _join_english(values):
+    if len(values) < 2:
+        return values[0] if values else ""
+    if len(values) == 2:
+        return " and ".join(values)
+    return ", ".join(values[:-1]) + ", and " + values[-1]
 
 
 def classify_exception(exception, request_id, attempts_used):

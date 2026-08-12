@@ -19,10 +19,12 @@ const translations = {
         stages: "Stages",
         conversation: "Co-creation conversation",
         discuss: "Discuss and refine this Stage",
-        viewingHistory: "You are viewing a historical Stage. Chat remains grounded in the latest Stage.",
+        viewingHistory: "You are viewing this historical Stage and its own conversation. Return to the current Stage to continue chatting.",
         returnCurrent: "Return to current",
         assessmentPending: "Preparing the first Stage assessment",
         assessmentPendingBody: "The assistant will discuss the verified current map and ask what you want to refine.",
+        noStageConversation: "No conversation has been recorded for this Stage.",
+        noStageConversationBody: "Each Stage keeps only the discussion attached to that saved version.",
         thinking: "Assistant is considering the current Stage...",
         chatWaiting: "The assistant is generating a response. This may take up to 60 seconds.",
         chatRetryPending: "The previous message did not finish. Retry it without creating a duplicate.",
@@ -111,10 +113,12 @@ const translations = {
         stages: "Stages",
         conversation: "共创对话",
         discuss: "讨论并继续完善当前 Stage",
-        viewingHistory: "你正在查看历史 Stage；聊天仍以最新 Stage 为准。",
+        viewingHistory: "你正在查看这个历史 Stage 及其相关对话；返回当前 Stage 后才能继续聊天。",
         returnCurrent: "返回当前版本",
         assessmentPending: "正在准备首版评价",
         assessmentPendingBody: "助手会围绕已验证的当前地图展开讨论，并询问你希望如何继续完善。",
+        noStageConversation: "这个 Stage 暂时没有相关对话。",
+        noStageConversationBody: "每个 Stage 只显示与该已保存版本关联的讨论。",
         thinking: "助手正在分析当前 Stage……",
         chatWaiting: "助手正在生成回复，最长可能需要 60 秒。",
         chatRetryPending: "上一条消息尚未完成，可安全重试且不会产生重复记录。",
@@ -363,9 +367,20 @@ function renderStages() {
 
 function renderMessages() {
     elements.messageList.textContent = "";
-    elements.emptyChat.hidden = state.session.turns.length > 0;
+    const turns = selectedStageTurns();
+    elements.emptyChat.hidden = turns.length > 0;
 
-    state.session.turns.forEach(turn => {
+    if (turns.length === 0) {
+        const historical = state.selectedVersionId !== state.session.currentVersionId;
+        elements.emptyChat.querySelector("h3").textContent = t(
+            historical ? "noStageConversation" : "assessmentPending"
+        );
+        elements.emptyChat.querySelector("p").textContent = t(
+            historical ? "noStageConversationBody" : "assessmentPendingBody"
+        );
+    }
+
+    turns.forEach(turn => {
         const row = document.createElement("div");
         row.className = `message-row ${turn.role}`;
         if (turn.role === "assistant") {
@@ -396,11 +411,13 @@ function createGuidanceOffer(offer) {
         <p class="eyebrow">${escapeHtml(t("suggestedDirection"))}</p>
         <strong>${escapeHtml(offer.summary || "")}</strong>
         <p>${escapeHtml(offer.rationale || "")}</p>`;
-    card.appendChild(makeButton(
-        t("draftSuggestedRevision"),
-        "secondary-button guidance-offer-button",
-        () => prefillProposalConsent(offer)
-    ));
+    if (canEditSelected()) {
+        card.appendChild(makeButton(
+            t("draftSuggestedRevision"),
+            "secondary-button guidance-offer-button",
+            () => prefillProposalConsent(offer)
+        ));
+    }
     return card;
 }
 
@@ -414,6 +431,7 @@ function prefillProposalConsent(offer) {
 
 function renderProposal() {
     elements.proposalArea.textContent = "";
+    if (!canEditSelected()) return;
     const proposal = currentPendingProposal();
     if (!proposal) return;
     const card = document.createElement("section");
@@ -511,13 +529,17 @@ function updateControls() {
     elements.restoreStageButton.disabled = state.busy;
     elements.playButton.disabled = state.busy || state.dirty || pending || !selectedVersion();
     elements.finalizeButton.disabled = state.busy || state.dirty || pending || state.selectedVersionId !== state.session.currentVersionId;
-    elements.messageInput.disabled = state.busy || state.session.status !== "active";
-    elements.sendButton.disabled = state.busy || state.session.status !== "active" || !elements.messageInput.value.trim();
+    elements.messageInput.disabled = state.busy || !editable;
+    elements.sendButton.disabled = state.busy || !editable || !elements.messageInput.value.trim();
     elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
     elements.typingRow.hidden = !state.chatBusy;
 }
 
 function renderChatRequestStatus() {
+    if (!canEditSelected()) {
+        elements.chatRequestStatus.hidden = true;
+        return;
+    }
     const waiting = state.chatStatus === "waiting";
     const failed = state.chatStatus === "error";
     elements.chatRequestStatus.hidden = !waiting && !failed;
@@ -712,12 +734,18 @@ function selectVersion(versionId, shouldRender = true) {
     localStorage.setItem(selectedStageKey(), versionId);
     syncHash();
     resetDraftFromSelection();
+    restoreComposerDraft();
     if (shouldRender) render();
 }
 
 function selectCurrentVersion() { selectVersion(state.session.currentVersionId); }
 function selectedVersion() { return findVersion(state.selectedVersionId); }
 function findVersion(versionId) { return state.session && state.session.versions.find(item => item.versionId === versionId); }
+function selectedStageTurns() {
+    return state.session
+        ? state.session.turns.filter(turn => turn.versionId === state.selectedVersionId)
+        : [];
+}
 
 function resetDraftFromSelection() {
     const version = selectedVersion();
@@ -858,14 +886,18 @@ function handleComposerInput() {
 }
 
 function restoreComposerDraft() {
-    elements.messageInput.value = localStorage.getItem(composerKey()) || "";
+    elements.messageInput.value = canEditSelected()
+        ? localStorage.getItem(composerKey()) || ""
+        : "";
     updateCharacterCount();
     updateControls();
 }
 
 function recoverPendingMessage() {
     const stored = readPendingMessage();
-    const turns = state.session?.turns || [];
+    const turns = (state.session?.turns || []).filter(
+        turn => turn.versionId === state.session.currentVersionId
+    );
     const finalTurn = turns[turns.length - 1];
     const unmatched = finalTurn?.role === "user"
         && finalTurn.requestId
@@ -918,13 +950,22 @@ function recoverPendingMessage() {
 
 function readPendingMessage() {
     try {
-        const pending = JSON.parse(localStorage.getItem(pendingMessageKey()) || "null");
+        const currentKey = pendingMessageKey();
+        const legacyKey = `cocreationPendingMessage:${state.sessionId}`;
+        const pending = JSON.parse(
+            localStorage.getItem(currentKey)
+            || localStorage.getItem(legacyKey)
+            || "null"
+        );
         if (
             !pending
             || typeof pending.content !== "string"
             || typeof pending.baseVersionId !== "string"
             || typeof pending.idempotencyKey !== "string"
         ) return null;
+        if (pending.baseVersionId !== state.session.currentVersionId) return null;
+        localStorage.setItem(currentKey, JSON.stringify(pending));
+        localStorage.removeItem(legacyKey);
         return pending;
     } catch (error) {
         localStorage.removeItem(pendingMessageKey());
@@ -941,12 +982,13 @@ function persistPendingMessage() {
 function clearPendingMessage() {
     state.pendingMessage = null;
     localStorage.removeItem(pendingMessageKey());
+    localStorage.removeItem(`cocreationPendingMessage:${state.sessionId}`);
 }
 
 function updateCharacterCount() { elements.characterCount.textContent = `${elements.messageInput.value.length} / ${MAX_MESSAGE_LENGTH}`; }
 function handleComposerKeydown(event) { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.chatForm.requestSubmit(); } }
-function composerKey() { return `cocreationComposer:${state.sessionId}`; }
-function pendingMessageKey() { return `cocreationPendingMessage:${state.sessionId}`; }
+function composerKey() { return `cocreationComposer:${state.sessionId}:${state.session?.currentVersionId || "none"}`; }
+function pendingMessageKey() { return `cocreationPendingMessage:${state.sessionId}:${state.session?.currentVersionId || "none"}`; }
 function selectedStageKey() { return `cocreationStage:${state.sessionId}`; }
 
 function readHash() {

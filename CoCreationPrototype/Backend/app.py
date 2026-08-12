@@ -26,6 +26,7 @@ from level_validation import (
     WIDTH,
     LevelValidationError,
     describe_diff,
+    summarize_stage_changes,
     validate_and_solve,
 )
 from llm_client import (
@@ -1381,9 +1382,10 @@ def build_llm_context(database, session_id, version):
     turns = database.execute(
         """
         SELECT role, content FROM conversation_turns
-        WHERE session_id = ? ORDER BY sequence_number DESC LIMIT 24
+        WHERE session_id = ? AND version_id = ?
+        ORDER BY sequence_number DESC LIMIT 24
         """,
-        (session_id,),
+        (session_id, version["id"]),
     ).fetchall()
     latest_play = database.execute(
         """
@@ -1396,8 +1398,19 @@ def build_llm_context(database, session_id, version):
         """,
         (session_id, version["id"]),
     ).fetchone()
+    current_rows = load_json(version["rows_json"])
+    parent = (
+        get_version(database, session_id, version["parent_version_id"])
+        if version["parent_version_id"]
+        else None
+    )
+    change_summary = (
+        summarize_stage_changes(load_json(parent["rows_json"]), current_rows)
+        if parent is not None
+        else None
+    )
     return {
-        "rows": load_json(version["rows_json"]),
+        "rows": current_rows,
         "validation": load_json(version["validation_json"]),
         "conversation": [
             {"role": turn["role"], "content": turn["content"]}
@@ -1409,6 +1422,7 @@ def build_llm_context(database, session_id, version):
             "summary": version["summary"],
             "parentVersionId": version["parent_version_id"],
             "diff": load_json(version["diff_json"]),
+            "changeSummary": change_summary,
         },
         "playSummary": (
             {

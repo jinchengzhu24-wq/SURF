@@ -924,8 +924,72 @@ main {
     background: #f0ede3;
 }
 
+.map-panel .panel-header h2 {
+    font-size: 18px;
+}
+
+.map-panel .play-button,
+.map-panel .map-actions button,
+.map-panel .finalize-button,
+.map-panel .intention-form button {
+    font-size: 12px;
+}
+
 .map-frame {
     padding: 18px;
+}
+
+.map-panel .tile {
+    font-size: 11px;
+}
+
+.map-panel .palette-button > span {
+    font-size: 10px;
+}
+
+.map-panel .palette-button small {
+    font-size: 10px;
+}
+
+.map-panel .map-mode {
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.map-panel .validation-card {
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.map-panel .validation-card strong {
+    font-size: 12px;
+}
+
+.map-panel .section-heading h3 {
+    font-size: 14px;
+}
+
+.map-panel .section-heading span {
+    font-size: 12px;
+}
+
+.map-panel .attempt-list {
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.map-panel .final-actions p {
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.map-panel .intention-form h3 {
+    font-size: 15px;
+}
+
+.map-panel .complete-card {
+    font-size: 12px;
+    line-height: 1.55;
 }
 
 .palette-button,
@@ -1057,5 +1121,9 @@ textarea:focus-visible {
 
     .chat-retry-button {
         width: 100%;
+    }
+
+    .map-panel .palette-button small {
+        font-size: 9px;
     }
 }

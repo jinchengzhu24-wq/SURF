@@ -13,6 +13,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import app as backend
+from level_validation import summarize_stage_changes
 from llm_client import LLMExecutionResult, LLMServiceError, build_chat_messages
 
 
@@ -30,8 +31,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("cocreation-pixel-20260812-1", index_response.text)
-        self.assertIn("cocreation-guided-20260812-1", index_response.text)
+        self.assertIn("cocreation-pixel-20260812-2", index_response.text)
+        self.assertIn("cocreation-guided-20260812-3", index_response.text)
         self.assertIn('<html lang="zh-CN">', index_response.text)
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--bg: #6f9d31", css_response.text)
@@ -51,9 +52,49 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('recoverPendingMessage()', js_response.text)
         self.assertIn('chatWaiting', js_response.text)
         self.assertIn('chatRetryPending', js_response.text)
+        self.assertIn('selectedStageTurns()', js_response.text)
+        self.assertIn('turn.versionId === state.selectedVersionId', js_response.text)
+        self.assertIn('noStageConversation', js_response.text)
         self.assertIn('id="chatRequestStatus"', index_response.text)
         self.assertIn('.chat-request-status', css_response.text)
+        self.assertIn('.map-panel .palette-button small', css_response.text)
+        self.assertIn('font-size: 10px', css_response.text)
         self.assertNotIn("createAssessmentCard", js_response.text)
+
+    def test_stage_change_summary_classifies_sokoban_components(self):
+        before = [
+            "############",
+            "#..........#",
+            "#..#.......#",
+            "#...@......#",
+            "#...p......#",
+            "#...s.t....#",
+            "#..........#",
+            "#..........#",
+            "#..........#",
+            "############",
+        ]
+        after = [
+            "#####.######",
+            "#..........#",
+            "#...#......#",
+            "#....@.....#",
+            "#....p.....#",
+            "#....s.t...#",
+            "#..........#",
+            "#..........#",
+            "#..........#",
+            "############",
+        ]
+
+        summary = summarize_stage_changes(before, after)
+
+        self.assertEqual(
+            summary["components"],
+            ["outerShell", "water", "internalWalls", "boxes", "targets", "player"],
+        )
+        self.assertEqual(summary["changedCellCount"], 11)
+        self.assertEqual(summary["componentCellCounts"]["player"], 2)
 
     def test_cocreation_frontend_uses_active_dashboard_visual_contract(self):
         dashboard_css = (REPOSITORY_ROOT / "Frontend" / "styles.css").read_text(
@@ -269,6 +310,9 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("Every difficulty statement must explicitly use", system_prompt)
         self.assertIn("Stage number is a saved-version index", system_prompt)
         self.assertIn("offer_revision", system_prompt)
+        self.assertIn("edit the level directly with the tile tools", system_prompt)
+        self.assertIn("newly saved human_edit Stage", system_prompt)
+        self.assertIn("only turns attached to this saved Stage", system_prompt)
         self.assertNotIn("Competitive", system_prompt)
         self.assertNotIn("Supportive", system_prompt)
         self.assertEqual(prompt_messages[-1]["content"], "What do you notice?")

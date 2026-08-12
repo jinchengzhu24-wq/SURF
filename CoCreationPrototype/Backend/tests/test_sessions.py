@@ -190,6 +190,56 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(conflict.json()["code"], "VERSION_CONFLICT")
 
+    def test_manual_stage_assessment_receives_deterministic_change_summary(self):
+        stage_one = self.read_session()["currentVersionId"]
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": stage_one,
+                "idempotencyKey": "manual_context_001",
+                "summary": "Move player left",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        stage_two = saved.json()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "I noticed the player-position change and would like to discuss its effect.",
+            1,
+            "manual-opening-request",
+            assessment={
+                "solutionSummary": "The solver found a route.",
+                "difficultyOpinion": "In my view, the opening is more direct.",
+                "features": ["Changed player start"],
+                "suggestions": ["Consider the first route choice"],
+                "satisfactionQuestion": "Does this opening match your intention?",
+            },
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "Does this opening match your intention?",
+                "proposalOffer": None,
+            },
+        )
+
+        with patch.object(
+            backend,
+            "generate_stage_assessment",
+            return_value=execution,
+        ) as mocked:
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{stage_two}/assessments",
+                json={"idempotencyKey": "manual_assessment_001"},
+            )
+
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+        context = mocked.call_args.kwargs["stage_context"]
+        self.assertEqual(context["source"], "human_edit")
+        self.assertEqual(context["changeSummary"]["components"], ["player"])
+        self.assertEqual(context["changeSummary"]["componentCellCounts"]["player"], 2)
+
     def test_llm_receives_current_stage_history_and_latest_play_evidence(self):
         session = self.read_session()
         version_id = session["currentVersionId"]
@@ -258,6 +308,86 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(
             response.json()["turns"][-1]["guidance"]["move"],
             "reflect_on_play",
+        )
+
+    def test_llm_conversation_is_scoped_to_current_stage(self):
+        stage_one = self.read_session()["currentVersionId"]
+        first_execution = LLMExecutionResult(
+            "Stage one response.",
+            1,
+            "stage-one-response",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+        second_execution = LLMExecutionResult(
+            "Stage two response.",
+            1,
+            "stage-two-response",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            side_effect=[first_execution, second_execution],
+        ) as mocked:
+            first = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Discuss Stage one.",
+                    "baseVersionId": stage_one,
+                    "idempotencyKey": "stage_one_chat",
+                },
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            saved = self.client.post(
+                f"/api/sessions/{self.session_id}/versions",
+                json={
+                    "rows": EDITED_ROWS,
+                    "baseVersionId": stage_one,
+                    "idempotencyKey": "stage_two_save",
+                    "summary": "Move player left",
+                },
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            stage_two = saved.json()["currentVersionId"]
+            second = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Discuss Stage two.",
+                    "baseVersionId": stage_two,
+                    "idempotencyKey": "stage_two_chat",
+                },
+            )
+
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(mocked.call_count, 2)
+        stage_two_conversation = mocked.call_args_list[1].args[0]
+        self.assertEqual(
+            stage_two_conversation,
+            [{"role": "user", "content": "Discuss Stage two."}],
+        )
+        turns = second.json()["turns"]
+        self.assertEqual(
+            [turn["role"] for turn in turns if turn["versionId"] == stage_one],
+            ["user", "assistant"],
+        )
+        self.assertEqual(
+            [turn["role"] for turn in turns if turn["versionId"] == stage_two],
+            ["user", "assistant"],
         )
 
     def test_failed_message_retries_with_one_user_turn_and_one_assistant_turn(self):

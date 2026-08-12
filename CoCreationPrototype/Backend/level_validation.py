@@ -181,6 +181,93 @@ def describe_diff(before_rows, after_rows):
     return changes
 
 
+def summarize_stage_changes(before_rows, after_rows):
+    before_shell = _boundary_wall_cells(before_rows)
+    after_shell = _boundary_wall_cells(after_rows)
+    changed_cells = describe_diff(before_rows, after_rows)
+    component_cells = {
+        "outerShell": set(),
+        "water": set(),
+        "internalWalls": set(),
+        "boxes": set(),
+        "targets": set(),
+        "player": set(),
+        "floorArea": set(),
+    }
+
+    for change in changed_cells:
+        position = (change["x"], change["y"])
+        before = change["before"]
+        after = change["after"]
+
+        if "#" in {before, after}:
+            component = (
+                "outerShell"
+                if position in before_shell or position in after_shell
+                else "internalWalls"
+            )
+            component_cells[component].add(position)
+
+        for tile, component in (
+            ("@", "water"),
+            ("s", "boxes"),
+            ("t", "targets"),
+            ("p", "player"),
+        ):
+            if tile in {before, after}:
+                component_cells[component].add(position)
+
+        if {before, after}.issubset({".", " "}):
+            component_cells["floorArea"].add(position)
+
+    order = (
+        "outerShell",
+        "water",
+        "internalWalls",
+        "boxes",
+        "targets",
+        "player",
+        "floorArea",
+    )
+    components = [name for name in order if component_cells[name]]
+    return {
+        "components": components,
+        "changedCellCount": len(changed_cells),
+        "componentCellCounts": {
+            name: len(component_cells[name]) for name in components
+        },
+    }
+
+
+def _boundary_wall_cells(rows):
+    pending = []
+    visited = set()
+
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            if x not in {0, WIDTH - 1} and y not in {0, HEIGHT - 1}:
+                continue
+            if rows[y][x] == "#":
+                pending.append((x, y))
+
+    while pending:
+        position = pending.pop()
+
+        if position in visited:
+            continue
+
+        visited.add(position)
+        x, y = position
+
+        for next_x, next_y in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if not (0 <= next_x < WIDTH and 0 <= next_y < HEIGHT):
+                continue
+            if rows[next_y][next_x] == "#" and (next_x, next_y) not in visited:
+                pending.append((next_x, next_y))
+
+    return visited
+
+
 def _find_all(rows, tile):
     return [
         (x, y)

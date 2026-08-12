@@ -294,6 +294,32 @@ class LLMClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot infer intention"):
             llm_client.validate_chat_response(payload, assessment_only=True)
 
+    def test_human_edit_opening_acknowledges_verified_changes_in_chinese(self):
+        message = llm_client._compose_assistant_message(
+            "在我看来，这会让路线选择更集中。",
+            {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "这符合你想强调的体验吗？",
+                "proposalOffer": None,
+            },
+            language="zh-CN",
+            assessment_only=True,
+            stage_context={
+                "source": "human_edit",
+                "changeSummary": {
+                    "components": ["water", "internalWalls", "player"],
+                    "changedCellCount": 6,
+                },
+            },
+        )
+
+        self.assertIn("我注意到你对水域、内部墙体、玩家位置进行了修改", message)
+        self.assertIn("已通过确定性检查并确认可解", message)
+        self.assertIn("在我看来", message)
+        self.assertTrue(message.endswith("这符合你想强调的体验吗？"))
+
 
 if __name__ == "__main__":
     unittest.main()
