@@ -99,6 +99,8 @@ public class LevelManager : MonoBehaviour
         StretchBlackPanelToFullscreen();
         SetPlayerInputEnabled(false);
         SetBlackPanelAlpha(0);
+        SetInitialLLMLoadingText(false, initialLLMLoadingMessage);
+        SetInitialLLMRetryButtonVisible(false);
     }
 
     public IEnumerator FadeToBlackForExternalInitialLoad()
@@ -116,6 +118,8 @@ public class LevelManager : MonoBehaviour
         bool enablePlayerInput = true)
     {
         SetPlayerInputEnabled(false);
+        SetInitialLLMLoadingText(false, initialLLMLoadingMessage);
+        SetInitialLLMRetryButtonVisible(false);
         yield return Fade(GetBlackPanelAlpha(), 0);
         usesExternalInitialLoadingTransition = false;
         ResetLevelState();
