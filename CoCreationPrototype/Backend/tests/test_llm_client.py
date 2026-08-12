@@ -31,6 +31,9 @@ class FakeCompletions:
         if isinstance(outcome, Exception):
             raise outcome
 
+        if hasattr(outcome, "choices"):
+            return outcome
+
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=outcome))]
         )
@@ -100,6 +103,43 @@ class LLMClientTests(unittest.TestCase):
         self.assertFalse(request["stream"])
         self.assertEqual(request["model"], "deepseek-v4-flash")
         self.assertEqual(request["max_tokens"], llm_client.CHAT_MAX_TOKENS)
+        self.assertEqual(request["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_length_truncation_uses_fallback_model(self):
+        truncated = SimpleNamespace(
+            choices=[SimpleNamespace(
+                finish_reason="length",
+                message=SimpleNamespace(content=""),
+            )]
+        )
+        valid = json.dumps({
+            "assistantMessage": "A grounded fallback response.",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        })
+        client = FakeClient([truncated, valid])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Assess the route."}],
+                ["############"] * 10,
+                "length-fallback-test",
+            )
+
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(result.model, "deepseek-v4-pro")
 
     def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
         response = json.dumps({
@@ -260,6 +300,48 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertEqual(result[0], "我注意到中央路线比较紧凑。")
+
+    def test_structured_question_is_removed_from_assistant_body(self):
+        result = llm_client.validate_chat_response(
+            {
+                "assistantMessage": (
+                    "The two targets create distinct routes.\n\n"
+                    "Would you like to preserve that split?"
+                ),
+                "guidance": {
+                    "move": "offer_perspective",
+                    "intentHypothesis": None,
+                    "intentConfidence": None,
+                    "followUpQuestion": "Which route should feel more important?",
+                    "proposalOffer": None,
+                    "uiCues": [],
+                },
+                "assessment": None,
+                "proposedRows": None,
+                "modificationSummary": "",
+            }
+        )
+
+        self.assertEqual(result[0], "The two targets create distinct routes.")
+
+    def test_question_without_structured_follow_up_is_rejected(self):
+        payload = {
+            "assistantMessage": "Would you like to preserve that split?",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        with self.assertRaisesRegex(ValueError, "guidance.followUpQuestion"):
+            llm_client.validate_chat_response(payload)
 
     def test_structured_assessment_and_proposal_are_returned(self):
         rows = ["############"] * 10

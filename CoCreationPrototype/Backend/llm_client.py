@@ -23,7 +23,7 @@ CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
 PROPOSAL_MAX_TOKENS = 2400
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v7-timeout-risk-cues"
+PROMPT_VERSION = "cocreation-v8-nonthinking-normalized"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -356,7 +356,13 @@ async def _generate_with_model_fallback(
                 ),
                 timeout=attempt_timeout,
             )
-            content = str(response.choices[0].message.content or "")
+            choice = response.choices[0]
+            finish_reason = str(getattr(choice, "finish_reason", "") or "")
+
+            if finish_reason == "length":
+                raise ValueError("The model output reached its token limit.")
+
+            content = str(choice.message.content or "")
             payload = json.loads(content)
             validated = validate_chat_response(payload, assessment_only)
 
@@ -457,6 +463,7 @@ async def _request_completion(
             temperature=0.45,
             max_tokens=max_tokens,
             stream=False,
+            extra_body={"thinking": {"type": "disabled"}},
         )
     finally:
         await client.close()
@@ -477,9 +484,10 @@ def validate_chat_response(payload, assessment_only=False):
 
     assistant_message = _clean_text(payload.get("assistantMessage"), "assistantMessage")
     guidance = _validate_guidance(payload.get("guidance"), assessment_only)
-
-    if "?" in assistant_message or "？" in assistant_message:
-        raise ValueError("Questions must be supplied through guidance.followUpQuestion.")
+    assistant_message = _remove_question_paragraphs(
+        assistant_message,
+        guidance["followUpQuestion"],
+    )
     assessment_payload = payload.get("assessment")
 
     if assessment_payload is None:
@@ -542,6 +550,28 @@ def validate_chat_response(payload, assessment_only=False):
         modification_summary.strip()[:1000],
         guidance,
     )
+
+
+def _remove_question_paragraphs(message, follow_up_question):
+    if "?" not in message and "？" not in message:
+        return message
+
+    if follow_up_question is None:
+        raise ValueError("Questions must be supplied through guidance.followUpQuestion.")
+
+    paragraphs = [part.strip() for part in message.split("\n\n")]
+    declarative_paragraphs = [
+        part
+        for part in paragraphs
+        if part and "?" not in part and "？" not in part
+    ]
+
+    if not declarative_paragraphs:
+        raise ValueError(
+            "assistantMessage must contain a declarative response outside its questions."
+        )
+
+    return "\n\n".join(declarative_paragraphs)
 
 
 def _build_task_instructions(assessment_only):
