@@ -368,11 +368,27 @@ body {
         );
     background-size: 16px 16px, 16px 16px, 12px 12px;
     font-family: "Segoe UI", Arial, sans-serif;
+    font-weight: 700;
+}
+
+input,
+textarea,
+select {
+    border-radius: 3px;
+    font-weight: 700;
 }
 
 button,
-textarea {
+.prototype-status,
+.count-pill,
+.method-pill {
     border-radius: 3px;
+    font-weight: 800;
+}
+
+input::placeholder,
+textarea::placeholder {
+    font-weight: 700;
 }
 
 h1,
@@ -710,31 +726,76 @@ main {
         2px 2px 0 #253039;
 }
 
-.guidance-offer {
-    margin-top: 8px;
-    padding: 11px;
-    border: 3px solid var(--purple-dark);
-    border-radius: 3px;
-    color: #2f233a;
-    background: var(--purple-soft);
-    box-shadow:
-        inset 0 0 0 2px #f0e8f6,
-        3px 3px 0 rgba(45, 31, 56, 0.32);
+.guidance-cues {
+    display: grid;
+    gap: 7px;
+    margin-top: 9px;
 }
 
-.guidance-offer strong {
-    display: block;
-    font-family: Consolas, "Courier New", monospace;
-}
-
-.guidance-offer > p:not(.eyebrow) {
-    margin: 6px 0 9px;
-    color: #51445c;
+.guidance-cue {
+    position: relative;
+    padding: 7px 9px 7px 12px;
+    border-left: 5px solid currentColor;
+    background: rgba(255, 255, 255, 0.42);
+    box-shadow: inset 0 0 0 1px currentColor;
+    font-weight: 800;
     line-height: 1.5;
 }
 
-.guidance-offer-button {
+.guidance-cue::before {
+    position: absolute;
+    top: 8px;
+    left: -4px;
+    width: 3px;
+    height: 3px;
+    background: currentColor;
+    content: "";
+}
+
+.guidance-cue-label {
+    display: block;
+    margin-bottom: 3px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+}
+
+.guidance-cue strong {
+    display: block;
+    color: inherit;
+    font-weight: 800;
+}
+
+.guidance-cue p {
+    margin: 4px 0 0;
+    color: inherit;
+    font-weight: 700;
+}
+
+.guidance-cue-manual-edit {
+    color: #315d21;
+    background: #d9ebbd;
+}
+
+.guidance-cue-question {
+    color: #17364a;
+    background: #c9dce5;
+}
+
+.guidance-cue-revision {
+    color: #392752;
+    background: #e0d5eb;
+}
+
+.guidance-cue-tradeoff {
+    color: #684513;
+    background: #f3dc8e;
+}
+
+.guidance-cue-button {
     width: 100%;
+    margin-top: 7px;
 }
 
 .proposal-area,

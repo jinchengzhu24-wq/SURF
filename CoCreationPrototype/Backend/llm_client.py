@@ -18,7 +18,7 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 CHAT_TIMEOUT_SECONDS = 60.0
 CHAT_MAX_ATTEMPTS = 1
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v5-accepted-opening"
+PROMPT_VERSION = "cocreation-v6-ui-cues"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -30,6 +30,7 @@ GUIDANCE_MOVES = {
     "deliver_revision",
 }
 INTENT_CONFIDENCE_LEVELS = {"low", "medium", "high"}
+UI_CUE_TYPES = {"manual_edit", "tradeoff"}
 
 _clients = {}
 _client_lock = Lock()
@@ -116,7 +117,11 @@ def build_chat_messages(
         "option briefly only when it would help the designer act on their own idea—for "
         "example when they want direct control, reject your direction, or the discussion "
         "remains abstract. Do not repeat the editor hint every turn and never frame manual "
-        "editing as required. For a newly saved human_edit Stage, use changeSummary rather "
+        "editing as required. Put the complete editor suggestion in a manual_edit uiCue "
+        "instead of repeating it in assistantMessage. When challenge_tradeoff is the "
+        "primary move, put the concise trade-off warning in a tradeoff uiCue and do not "
+        "repeat it in assistantMessage. Use no more than two uiCues and never add one just "
+        "for decoration. For a newly saved human_edit Stage, use changeSummary rather "
         "than guessing: acknowledge the changed components, note that this saved Stage "
         "passed deterministic solvability validation, evaluate the likely design effects "
         "from your perspective, and continue the dialogue. The supplied conversation "
@@ -130,13 +135,15 @@ def build_chat_messages(
         '{"assistantMessage":"...","guidance":'
         '{"move":"observe_stage","intentHypothesis":null,'
         '"intentConfidence":null,"followUpQuestion":"...",'
-        '"proposalOffer":null},"assessment":null,"proposedRows":null,'
+        '"proposalOffer":null,"uiCues":[]},"assessment":null,"proposedRows":null,'
         '"modificationSummary":""}.\n'
         "guidance.move must be one of observe_stage, clarify_intent, "
         "offer_perspective, challenge_tradeoff, reflect_on_play, offer_revision, "
         "or deliver_revision. intentConfidence must be null, low, medium, or high. "
         "followUpQuestion must be null or one question. proposalOffer must be null or "
         'an object with exactly {"summary":"...","rationale":"..."}. '
+        "uiCues must be an array of at most two unique objects with exactly type and "
+        "text; type must be manual_edit or tradeoff. "
         "assistantMessage must not repeat followUpQuestion; the application appends it.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
         "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
@@ -391,13 +398,16 @@ def _validate_guidance(payload, assessment_only):
     if not isinstance(payload, dict):
         raise ValueError("guidance must be an object.")
 
-    if set(payload) != {
+    required_fields = {
         "move",
         "intentHypothesis",
         "intentConfidence",
         "followUpQuestion",
         "proposalOffer",
-    }:
+    }
+    allowed_fields = required_fields | {"uiCues"}
+
+    if not required_fields.issubset(payload) or not set(payload).issubset(allowed_fields):
         raise ValueError("guidance contains unexpected or missing fields.")
 
     move = payload.get("move")
@@ -446,12 +456,43 @@ def _validate_guidance(payload, assessment_only):
     elif move == "offer_revision":
         raise ValueError("The offer_revision move requires proposalOffer.")
 
+    ui_cues = payload.get("uiCues", [])
+
+    if not isinstance(ui_cues, list) or len(ui_cues) > 2:
+        raise ValueError("guidance.uiCues must be an array with at most two items.")
+
+    normalized_cues = []
+    seen_cue_types = set()
+
+    for index, cue in enumerate(ui_cues):
+        if not isinstance(cue, dict) or set(cue) != {"type", "text"}:
+            raise ValueError("Each guidance.uiCue must contain type and text.")
+
+        cue_type = cue.get("type")
+
+        if cue_type not in UI_CUE_TYPES:
+            raise ValueError("guidance.uiCue.type is invalid.")
+
+        if cue_type in seen_cue_types:
+            raise ValueError("guidance.uiCues cannot repeat a type.")
+
+        seen_cue_types.add(cue_type)
+        normalized_cues.append(
+            {
+                "type": cue_type,
+                "text": _clean_text(cue.get("text"), f"guidance.uiCues[{index}].text"),
+            }
+        )
+
+    if move == "challenge_tradeoff" and "tradeoff" not in seen_cue_types:
+        raise ValueError("challenge_tradeoff requires a tradeoff uiCue.")
+
     if assessment_only:
         if move != "observe_stage":
             raise ValueError("A Stage opening must use observe_stage.")
         if follow_up_question is None:
             raise ValueError("A Stage opening requires one follow-up question.")
-        if intent_hypothesis is not None or proposal_offer is not None:
+        if intent_hypothesis is not None or proposal_offer is not None or normalized_cues:
             raise ValueError("A Stage opening cannot infer intention or offer a revision.")
 
     return {
@@ -460,6 +501,7 @@ def _validate_guidance(payload, assessment_only):
         "intentConfidence": intent_confidence,
         "followUpQuestion": follow_up_question,
         "proposalOffer": proposal_offer,
+        "uiCues": normalized_cues,
     }
 
 
@@ -492,12 +534,14 @@ def _compose_assistant_message(
 
         message = f"{acknowledgement}\n\n{message}"
 
+    ui_cues = guidance.get("uiCues") or []
+    additions = [cue["text"] for cue in ui_cues if cue.get("text")]
     follow_up = guidance.get("followUpQuestion")
 
-    if not follow_up:
-        return message
+    if follow_up:
+        additions.append(follow_up)
 
-    return f"{message}\n\n{follow_up}"
+    return "\n\n".join([message, *additions])
 
 
 def _localized_change_labels(components, language):

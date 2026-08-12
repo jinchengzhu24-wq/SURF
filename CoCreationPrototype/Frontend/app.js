@@ -3,6 +3,20 @@
 const MAX_MESSAGE_LENGTH = 2000;
 const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
 const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
+const GUIDANCE_CUE_LABELS = {
+    en: {
+        manual_edit: "MANUAL EDIT",
+        question: "QUESTION",
+        revision: "REVISION",
+        tradeoff: "TRADE-OFF"
+    },
+    "zh-CN": {
+        manual_edit: "手动编辑",
+        question: "问题",
+        revision: "修改建议",
+        tradeoff: "权衡提醒"
+    }
+};
 
 const translations = {
     en: {
@@ -393,32 +407,101 @@ function renderMessages() {
         content.className = "message-content";
         const bubble = document.createElement("div");
         bubble.className = "message-bubble";
-        bubble.textContent = turn.content;
-        content.appendChild(bubble);
-        if (turn.role === "assistant" && turn.guidance && turn.guidance.proposalOffer) {
-            content.appendChild(createGuidanceOffer(turn.guidance.proposalOffer));
+        if (turn.role === "assistant") {
+            renderAssistantBubble(turn, bubble);
+        } else {
+            bubble.textContent = turn.content;
         }
+        content.appendChild(bubble);
         row.appendChild(content);
         elements.messageList.appendChild(row);
     });
     requestAnimationFrame(() => elements.chatScroll.scrollTop = elements.chatScroll.scrollHeight);
 }
 
-function createGuidanceOffer(offer) {
-    const card = document.createElement("section");
-    card.className = "guidance-offer";
-    card.innerHTML = `
-        <p class="eyebrow">${escapeHtml(t("suggestedDirection"))}</p>
-        <strong>${escapeHtml(offer.summary || "")}</strong>
-        <p>${escapeHtml(offer.rationale || "")}</p>`;
-    if (canEditSelected()) {
-        card.appendChild(makeButton(
-            t("draftSuggestedRevision"),
-            "secondary-button guidance-offer-button",
-            () => prefillProposalConsent(offer)
-        ));
+function renderAssistantBubble(turn, bubble) {
+    const guidance = turn.guidance || {};
+    const question = String(guidance.followUpQuestion || "").trim();
+    const uiCues = Array.isArray(guidance.uiCues) ? guidance.uiCues : [];
+    const bodyNode = document.createElement("div");
+    bodyNode.className = "message-body";
+    bodyNode.textContent = assistantBodyWithoutCues(turn.content, uiCues, question);
+    bubble.appendChild(bodyNode);
+
+    const cueList = document.createElement("div");
+    cueList.className = "guidance-cues";
+    uiCues.forEach(cue => {
+        if (cue && ["manual_edit", "tradeoff"].includes(cue.type) && cue.text) {
+            cueList.appendChild(createGuidanceCue(cue.type, cue.text));
+        }
+    });
+
+    const offer = guidance.proposalOffer;
+    const proposal = proposalForTurn(turn.turnId);
+
+    if (offer && offer.summary) {
+        const revisionCue = createGuidanceCue(
+            "revision",
+            offer.summary,
+            offer.rationale || ""
+        );
+        if (canEditSelected()) {
+            revisionCue.appendChild(makeButton(
+                t("draftSuggestedRevision"),
+                "secondary-button guidance-cue-button",
+                () => prefillProposalConsent(offer)
+            ));
+        }
+        cueList.appendChild(revisionCue);
+    } else if (proposal && proposal.summary) {
+        cueList.appendChild(createGuidanceCue("revision", proposal.summary));
     }
-    return card;
+
+    if (question) {
+        cueList.appendChild(createGuidanceCue("question", question));
+    }
+
+    if (cueList.childElementCount) bubble.appendChild(cueList);
+}
+
+function assistantBodyWithoutCues(content, uiCues, question) {
+    let body = String(content || "").trimEnd();
+    const suffixes = [
+        ...uiCues.map(cue => String(cue?.text || "").trim()).filter(Boolean),
+        question
+    ].filter(Boolean);
+
+    suffixes.reverse().forEach(suffix => {
+        if (body.endsWith(suffix)) {
+            body = body.slice(0, -suffix.length).trimEnd();
+        }
+    });
+
+    return body;
+}
+
+function proposalForTurn(turnId) {
+    return state.session.proposals.find(proposal => proposal.assistantTurnId === turnId);
+}
+
+function createGuidanceCue(type, text, detail = "") {
+    const cue = document.createElement("section");
+    cue.className = `guidance-cue guidance-cue-${type.replace("_", "-")}`;
+    const label = document.createElement("span");
+    label.className = "guidance-cue-label";
+    label.textContent = GUIDANCE_CUE_LABELS[state.language]?.[type]
+        || GUIDANCE_CUE_LABELS.en[type];
+    const message = document.createElement("strong");
+    message.textContent = text;
+    cue.append(label, message);
+
+    if (detail) {
+        const rationale = document.createElement("p");
+        rationale.textContent = detail;
+        cue.appendChild(rationale);
+    }
+
+    return cue;
 }
 
 function prefillProposalConsent(offer) {

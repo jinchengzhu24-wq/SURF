@@ -73,9 +73,9 @@ CoCreationPrototype/
 └── Backend/               # FastAPI、DeepSeek 客户端、SQLite 与测试
 ```
 
-前端视觉复用 8000 MatchMaking/Train dashboard 当前生效的 Pixel-adventure 设计语言：草绿色网格背景、木质 sticky topbar、米白石质面板、蓝紫标题板、硬边像素阴影、Consolas 标题与像素地图框。桌面仍为 Stage / 聊天 / 地图编辑器三栏；低于 1200px 收为两栏，低于 900px 为单栏，680px 下进一步缩小阴影、间距与瓦片。8010 保留独立 CSS，不在运行时引用 8000 文件。
+前端视觉复用 8000 MatchMaking/Train dashboard 当前生效的 Pixel-adventure 设计语言：草绿色网格背景、木质 sticky topbar、米白石质面板、蓝紫标题板、硬边像素阴影、Consolas 标题与像素地图框。8010 所有可见文字以 700 粗体为基础，按钮和状态标签使用 800，页面标题保留 900。桌面仍为 Stage / 聊天 / 地图编辑器三栏；低于 1200px 收为两栏，低于 900px 为单栏，680px 下进一步缩小阴影、间距与瓦片。8010 保留独立 CSS，不在运行时引用 8000 文件。
 
-LLM 使用适应型共创策略。Stage 1、手工保存及从历史恢复的 Stage 会收到一次基于真实地图的中性开场；接受 LLM 地图提案所创建的 Stage 不再另做 first assessment，而把生成该提案的原 assistant 回复作为新 Stage 的承接开场，并据此继续讨论。LLM 根据玩家最新表达选择澄清意图、提出观点、讨论权衡、结合试玩反思或建议修改方向。意图推测必须是可纠正的暂定假设，不会写入最终设计意图。LLM 可以主动提出修改方向，但只有玩家明确请求或同意后才能返回完整地图提案。普通聊天不再显示固定的 assessment 报告卡；结构化评价和每轮 guidance 元数据仍保存在 SQLite 中供研究分析。
+LLM 使用适应型共创策略。Stage 1、手工保存及从历史恢复的 Stage 会收到一次基于真实地图的中性开场；接受 LLM 地图提案所创建的 Stage 不再另做 first assessment，而把生成该提案的原 assistant 回复作为新 Stage 的承接开场，并据此继续讨论。LLM 根据玩家最新表达选择澄清意图、提出观点、讨论权衡、结合试玩反思或建议修改方向。意图推测必须是可纠正的暂定假设，不会写入最终设计意图。LLM 可以主动提出修改方向，但只有玩家明确请求或同意后才能返回完整地图提案。助手气泡将手工编辑提示、问题、修改建议和权衡提醒分别渲染为绿色、蓝色、紫色和橙色的结构化粗体提示行；颜色之外还提供双语标签。普通聊天不再显示固定的 assessment 报告卡；结构化评价和每轮 guidance 元数据仍保存在 SQLite 中供研究分析。
 
 当玩家适合直接实践自己的想法时，LLM 可以简短提示使用右侧地图编辑器并保存为新 Stage，但不把手工编辑说成必选步骤。手工 Stage 通过求解验证后，后端会相对父版本确定性识别外壳、水域、内部墙体、箱子位置、目标点、玩家位置及可用地面的变化；新 Stage 的回复先准确确认这些改动和可解状态，再由 LLM评价其设计影响并继续对话。
 
@@ -128,7 +128,7 @@ POST  /api/sessions/{sessionId}/intention
 GET   /api/integrations/sessions/{sessionId}
 ```
 
-浏览器会话使用 HttpOnly cookie；Unity 创建会话后持有只读集成 token。Play Ticket 只能换取一次地图，随后使用仅限该 attempt 的 token 提交指标。Stage 保存、恢复、消息、提案决定和 Play 创建均使用幂等键；同一消息键若改换内容或 Stage 返回 `409 IDEMPOTENCY_CONFLICT`，基于过期 Stage 的新写入返回 `409 VERSION_CONFLICT`。会话中的 assistant turn 可额外返回 `guidance`，记录本轮引导动作、暂定意图推测、核心问题和不含地图的修改方向；旧消息中的该字段为 `null`。
+浏览器会话使用 HttpOnly cookie；Unity 创建会话后持有只读集成 token。Play Ticket 只能换取一次地图，随后使用仅限该 attempt 的 token 提交指标。Stage 保存、恢复、消息、提案决定和 Play 创建均使用幂等键；同一消息键若改换内容或 Stage 返回 `409 IDEMPOTENCY_CONFLICT`，基于过期 Stage 的新写入返回 `409 VERSION_CONFLICT`。会话中的 assistant turn 可额外返回 `guidance`，记录本轮引导动作、暂定意图推测、核心问题、不含地图的修改方向，以及至多两个 `manual_edit` / `tradeoff` UI cues；旧消息缺少 cues 时按空数组兼容读取。
 
 ## 8000 在线匹配
 

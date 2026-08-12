@@ -67,6 +67,7 @@ class LLMClientTests(unittest.TestCase):
                     "intentConfidence": None,
                     "followUpQuestion": "Which part would you like to examine first?",
                     "proposalOffer": None,
+                    "uiCues": [],
                 },
                 "assessment": None,
                 "proposedRows": None,
@@ -147,6 +148,7 @@ class LLMClientTests(unittest.TestCase):
                     "intentConfidence": None,
                     "followUpQuestion": "你想先讨论哪一部分？",
                     "proposalOffer": None,
+                    "uiCues": [],
                 },
                 "assessment": None,
                 "proposedRows": None,
@@ -166,6 +168,7 @@ class LLMClientTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": None,
                 "proposalOffer": None,
+                "uiCues": [],
             },
             "assessment": {
                 "solutionSummary": "One box route.",
@@ -194,6 +197,7 @@ class LLMClientTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": None,
                 "proposalOffer": None,
+                "uiCues": [],
             },
             "assessment": None,
             "proposedRows": ["############"] * 10,
@@ -235,6 +239,7 @@ class LLMClientTests(unittest.TestCase):
                     "summary": "Narrow the first approach lane",
                     "rationale": "It would make the opening choice more deliberate.",
                 },
+                "uiCues": [],
             },
             "assessment": None,
             "proposedRows": ["############"] * 10,
@@ -243,6 +248,125 @@ class LLMClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "cannot include proposedRows"):
             llm_client.validate_chat_response(payload)
+
+    def test_manual_edit_and_tradeoff_ui_cues_are_validated(self):
+        payload = {
+            "assistantMessage": "You can compare both routing choices directly.",
+            "guidance": {
+                "move": "challenge_tradeoff",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "Which compromise fits your intention better?",
+                "proposalOffer": None,
+                "uiCues": [
+                    {
+                        "type": "tradeoff",
+                        "text": "A wider route improves freedom but reduces commitment.",
+                    },
+                    {
+                        "type": "manual_edit",
+                        "text": "Try the right-side tile editor and save the result as a new Stage.",
+                    },
+                ],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload)
+
+        self.assertEqual(
+            [cue["type"] for cue in result[4]["uiCues"]],
+            ["tradeoff", "manual_edit"],
+        )
+
+    def test_legacy_guidance_without_ui_cues_defaults_to_empty(self):
+        payload = {
+            "assistantMessage": "A concise perspective.",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload)
+
+        self.assertEqual(result[4]["uiCues"], [])
+
+    def test_composed_message_keeps_cues_for_future_llm_context(self):
+        guidance = {
+            "move": "challenge_tradeoff",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": "Which direction do you prefer?",
+            "proposalOffer": None,
+            "uiCues": [
+                {"type": "tradeoff", "text": "The open route reduces commitment."},
+                {"type": "manual_edit", "text": "Compare it with the tile editor."},
+            ],
+        }
+
+        message = llm_client._compose_assistant_message(
+            "Both routes remain solvable.",
+            guidance,
+        )
+
+        self.assertEqual(
+            message,
+            "Both routes remain solvable.\n\n"
+            "The open route reduces commitment.\n\n"
+            "Compare it with the tile editor.\n\n"
+            "Which direction do you prefer?",
+        )
+
+    def test_ui_cues_reject_invalid_duplicate_and_missing_tradeoff(self):
+        base_guidance = {
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+        }
+        cases = (
+            (
+                [{"type": "unknown", "text": "Unknown cue."}],
+                "type is invalid",
+                "offer_perspective",
+            ),
+            (
+                [
+                    {"type": "manual_edit", "text": "First."},
+                    {"type": "manual_edit", "text": "Second."},
+                ],
+                "cannot repeat a type",
+                "offer_perspective",
+            ),
+            ([], "requires a tradeoff uiCue", "challenge_tradeoff"),
+        )
+
+        for ui_cues, expected_error, move in cases:
+            with self.subTest(expected_error=expected_error):
+                payload = {
+                    "assistantMessage": "A grounded response.",
+                    "guidance": {
+                        **base_guidance,
+                        "move": move,
+                        "uiCues": ui_cues,
+                    },
+                    "assessment": None,
+                    "proposedRows": None,
+                    "modificationSummary": "",
+                }
+
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    llm_client.validate_chat_response(payload)
 
     def test_stage_opening_is_neutral_and_requires_one_question(self):
         payload = {
@@ -253,6 +377,7 @@ class LLMClientTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": "What would you like another player to notice first?",
                 "proposalOffer": None,
+                "uiCues": [],
             },
             "assessment": {
                 "solutionSummary": "The solver found a direct route.",
@@ -279,6 +404,7 @@ class LLMClientTests(unittest.TestCase):
                 "intentConfidence": "medium",
                 "followUpQuestion": "Is that right?",
                 "proposalOffer": None,
+                "uiCues": [],
             },
             "assessment": {
                 "solutionSummary": "A route exists.",

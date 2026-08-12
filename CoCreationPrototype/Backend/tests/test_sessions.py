@@ -283,6 +283,12 @@ class CoCreationSessionTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": "Did the short route match your expectation?",
                 "proposalOffer": None,
+                "uiCues": [
+                    {
+                        "type": "manual_edit",
+                        "text": "You can test an alternative with the right-side editor.",
+                    }
+                ],
             },
         )
 
@@ -308,6 +314,10 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(
             response.json()["turns"][-1]["guidance"]["move"],
             "reflect_on_play",
+        )
+        self.assertEqual(
+            response.json()["turns"][-1]["guidance"]["uiCues"][0]["type"],
+            "manual_edit",
         )
 
     def test_llm_conversation_is_scoped_to_current_stage(self):
