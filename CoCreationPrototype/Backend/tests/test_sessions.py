@@ -741,6 +741,107 @@ class CoCreationSessionTests(unittest.TestCase):
             proposal_turn["turnId"],
         )
 
+    def test_unchanged_llm_proposal_is_rejected_before_it_can_be_saved(self):
+        version_id = self.read_session()["currentVersionId"]
+        unchanged_execution = LLMExecutionResult(
+            "I drafted that revision.",
+            1,
+            "unchanged-proposal-request",
+            proposed_rows=SAMPLE_ROWS,
+            modification_summary="Claimed changes that are not present.",
+            model="mock-model",
+            guidance={
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            return_value=unchanged_execution,
+        ):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please make that concrete revision.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "unchanged_proposal_message_001",
+                },
+            )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["code"], "UNCHANGED_PROPOSAL")
+        session = self.read_session()
+        self.assertEqual(len(session["versions"]), 1)
+        self.assertEqual(session["proposals"], [])
+        matching_turns = [
+            turn
+            for turn in session["turns"]
+            if turn["requestId"] == "unchanged_proposal_message_001"
+        ]
+        self.assertEqual([turn["role"] for turn in matching_turns], ["user"])
+
+    def test_unchanged_pending_proposal_cannot_be_accepted(self):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "Here is a real revision for review.",
+            1,
+            "proposal-before-tamper",
+            proposed_rows=EDITED_ROWS,
+            modification_summary="Moved the player start left.",
+            model="mock-model",
+            guidance={
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            proposed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please revise the map.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "proposal_to_tamper_001",
+                },
+            )
+
+        self.assertEqual(proposed.status_code, 200, proposed.text)
+        proposal_id = proposed.json()["proposals"][0]["proposalId"]
+
+        with repository.connect(immediate=True) as database:
+            database.execute(
+                """
+                UPDATE change_proposals
+                SET proposed_rows_json = ?, diff_json = '[]'
+                WHERE id = ?
+                """,
+                (repository.dump_json(SAMPLE_ROWS), proposal_id),
+            )
+
+        accepted = self.client.post(
+            f"/api/sessions/{self.session_id}/proposals/{proposal_id}/decision",
+            json={
+                "decision": "accept",
+                "baseVersionId": version_id,
+                "idempotencyKey": "reject_unchanged_accept_001",
+                "reason": "",
+            },
+        )
+
+        self.assertEqual(accepted.status_code, 400, accepted.text)
+        self.assertEqual(accepted.json()["code"], "UNCHANGED_PROPOSAL")
+        session = self.read_session()
+        self.assertEqual(len(session["versions"]), 1)
+        self.assertEqual(session["proposals"][0]["status"], "pending")
+
     def test_finalize_hides_rows_until_intention_is_submitted(self):
         version_id = self.read_session()["currentVersionId"]
         finalized = self.client.post(

@@ -24,7 +24,7 @@ CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
 PROPOSAL_MAX_TOKENS = 2400
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v13-corrective-fallback"
+PROMPT_VERSION = "cocreation-v14-nonempty-proposals"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -187,7 +187,11 @@ def build_chat_messages(
         "such as Do, Did, Is, Are, Would, or Can.\n"
         "When proposedRows is present it must contain exactly 10 strings of 12 "
         "characters using only space, #, ., @, p, s, and t, with one p and one or "
-        "two matching s/t pairs. Keep changes focused on the designer request.\n\n"
+        "two matching s/t pairs. It must differ from the current saved Stage by at "
+        "least one tile. modificationSummary must accurately describe only the tile "
+        "changes actually present in proposedRows. Never claim that a wall, target, "
+        "water tile, box, or player moved unless the before/after rows prove it. Keep "
+        "changes focused on the designer request.\n\n"
         f"Current saved stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
@@ -387,6 +391,7 @@ async def _generate_with_model_fallback(
             attempt_messages = _messages_with_validation_feedback(
                 messages,
                 validation_feedback,
+                task,
             )
             response = await asyncio.wait_for(
                 _request_completion(
@@ -500,7 +505,7 @@ async def _generate_with_model_fallback(
     )
 
 
-def _messages_with_validation_feedback(messages, validation_feedback):
+def _messages_with_validation_feedback(messages, validation_feedback, task=None):
     if not validation_feedback:
         return messages
 
@@ -511,6 +516,14 @@ def _messages_with_validation_feedback(messages, validation_feedback):
         "that reason while following every original content and safety rule. Do not "
         "mention the retry or validation error to the designer."
     )
+
+    if task == "map_proposal":
+        instruction += (
+            " The designer explicitly authorized a complete map proposal, so keep "
+            "guidance.move as deliver_revision, return non-null proposedRows and a "
+            "truthful modificationSummary, and do not downgrade the response to an "
+            "offer_revision or a text-only suggestion."
+        )
 
     for message in corrected:
         if message.get("role") == "system":

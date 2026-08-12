@@ -775,7 +775,10 @@ def _send_message_locked(
         language=language,
         solver_metrics=context["validation"],
         play_summary=context["playSummary"],
-        proposal_validator=validate_and_solve,
+        proposal_validator=lambda proposed_rows: _validate_changed_proposal(
+            context["rows"],
+            proposed_rows,
+        ),
         stage_context=context["stageContext"],
     )
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
@@ -783,6 +786,15 @@ def _send_message_locked(
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, payload.baseVersionId)
+        current = get_current_version(database, session)
+        proposal_validation = None
+
+        if execution.proposed_rows is not None:
+            proposal_validation = _solve_changed_proposal_or_api_error(
+                load_json(current["rows_json"]),
+                execution.proposed_rows,
+            )
+
         existing = database.execute(
             """
             SELECT * FROM conversation_turns
@@ -803,7 +815,6 @@ def _send_message_locked(
             )
 
             if execution.proposed_rows is not None:
-                proposal_validation = validate_and_solve(execution.proposed_rows)
                 proposal_id = uuid.uuid4().hex
                 database.execute(
                     """
@@ -908,8 +919,11 @@ def decide_proposal(
 
         if payload.decision == "accept":
             proposed_rows = load_json(proposal["proposed_rows_json"])
-            validation = _solve_or_api_error(proposed_rows)
             current = get_current_version(database, session)
+            validation = _solve_changed_proposal_or_api_error(
+                load_json(current["rows_json"]),
+                proposed_rows,
+            )
             new_version_id = _insert_version(
                 database,
                 session,
@@ -1592,6 +1606,25 @@ def validate_legacy_conversation(messages):
 def _solve_or_api_error(rows):
     try:
         return validate_and_solve(rows)
+    except LevelValidationError as error:
+        raise ApiError(400, error.code, str(error), details=error.details) from error
+
+
+def _validate_changed_proposal(base_rows, proposed_rows):
+    validation = validate_and_solve(proposed_rows)
+
+    if not describe_diff(base_rows, validation.rows):
+        raise LevelValidationError(
+            "UNCHANGED_PROPOSAL",
+            "The proposed map must change at least one tile from the current Stage.",
+        )
+
+    return validation
+
+
+def _solve_changed_proposal_or_api_error(base_rows, proposed_rows):
+    try:
+        return _validate_changed_proposal(base_rows, proposed_rows)
     except LevelValidationError as error:
         raise ApiError(400, error.code, str(error), details=error.details) from error
 

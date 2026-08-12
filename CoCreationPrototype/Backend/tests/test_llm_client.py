@@ -465,6 +465,9 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.attempts_used, 2)
         self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertEqual(len(validated_rows), 2)
+        fallback_system = client.chat.completions.calls[1]["messages"][0]["content"]
+        self.assertIn("guidance.move as deliver_revision", fallback_system)
+        self.assertIn("do not downgrade", fallback_system)
 
     def test_unsolicited_revision_offer_cannot_include_map(self):
         payload = {

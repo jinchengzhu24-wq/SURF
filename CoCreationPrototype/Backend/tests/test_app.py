@@ -355,6 +355,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("thoughtful, equal design peer", system_prompt)
         self.assertIn("do not ask a question by habit", system_prompt)
         self.assertIn("do not recite metrics or spell out a move sequence", system_prompt)
+        self.assertIn("differ from the current saved Stage by at least one tile", system_prompt)
+        self.assertIn("unless the before/after rows prove it", system_prompt)
         self.assertIn('"uiCues":[]', system_prompt)
         self.assertIn('"solutionSteps": 12', system_prompt)
         self.assertIn('"solutionPushes": 4', system_prompt)
