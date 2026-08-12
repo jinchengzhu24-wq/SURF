@@ -24,7 +24,7 @@ CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
 PROPOSAL_MAX_TOKENS = 2400
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v12-direct-intent-voice"
+PROMPT_VERSION = "cocreation-v13-corrective-fallback"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -360,6 +360,7 @@ async def _generate_with_model_fallback(
     started_at,
 ):
     last_error = None
+    validation_feedback = None
 
     for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
         elapsed = time.monotonic() - started_at
@@ -383,12 +384,16 @@ async def _generate_with_model_fallback(
         )
 
         try:
+            attempt_messages = _messages_with_validation_feedback(
+                messages,
+                validation_feedback,
+            )
             response = await asyncio.wait_for(
                 _request_completion(
                     api_key,
                     base_url,
                     model,
-                    messages,
+                    attempt_messages,
                     max_tokens,
                     attempt_timeout,
                 ),
@@ -436,6 +441,7 @@ async def _generate_with_model_fallback(
             )
             return result
         except asyncio.TimeoutError as exception:
+            failure_reason = None
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
                 "DeepSeek did not respond before the attempt timeout.",
@@ -445,17 +451,28 @@ async def _generate_with_model_fallback(
                 504,
             )
         except Exception as exception:
+            failure_reason = _safe_validation_reason(exception)
             last_error = classify_exception(exception, request_id, attempt)
+
+            if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
+                validation_feedback = failure_reason
+
+        failure_fields = {
+            "requestId": request_id,
+            "task": task,
+            "model": model,
+            "attempt": attempt,
+            "code": last_error.code,
+            "retryable": last_error.retryable,
+            "latencyMs": int((time.monotonic() - started_at) * 1000),
+        }
+
+        if failure_reason:
+            failure_fields["validationReason"] = failure_reason
 
         _log_llm_event(
             "llm_attempt_failed",
-            requestId=request_id,
-            task=task,
-            model=model,
-            attempt=attempt,
-            code=last_error.code,
-            retryable=last_error.retryable,
-            latencyMs=int((time.monotonic() - started_at) * 1000),
+            **failure_fields,
         )
 
         if not last_error.retryable:
@@ -481,6 +498,38 @@ async def _generate_with_model_fallback(
         0,
         500,
     )
+
+
+def _messages_with_validation_feedback(messages, validation_feedback):
+    if not validation_feedback:
+        return messages
+
+    corrected = [dict(message) for message in messages]
+    instruction = (
+        "Your previous response for this same request was rejected for this structural "
+        f"reason: {validation_feedback} Return a fresh complete JSON object that corrects "
+        "that reason while following every original content and safety rule. Do not "
+        "mention the retry or validation error to the designer."
+    )
+
+    for message in corrected:
+        if message.get("role") == "system":
+            message["content"] = f"{message.get('content', '')}\n\n{instruction}"
+            return corrected
+
+    corrected.insert(0, {"role": "system", "content": instruction})
+    return corrected
+
+
+def _safe_validation_reason(exception):
+    if isinstance(exception, json.JSONDecodeError):
+        return "The response was not a complete valid JSON object."
+
+    if isinstance(exception, (ValueError, TypeError, KeyError)):
+        reason = " ".join(str(exception).split())[:300]
+        return reason or "The response did not match the required JSON contract."
+
+    return None
 
 
 async def _request_completion(

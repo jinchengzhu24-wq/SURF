@@ -205,6 +205,30 @@ class LLMClientTests(unittest.TestCase):
             [call["model"] for call in client.chat.completions.calls],
             ["deepseek-v4-flash", "deepseek-v4-pro"],
         )
+        fallback_system = client.chat.completions.calls[1]["messages"][0]["content"]
+        self.assertIn("previous response", fallback_system)
+        self.assertIn("not a complete valid JSON object", fallback_system)
+        self.assertIn("Do not mention the retry", fallback_system)
+
+    def test_corrective_fallback_does_not_mutate_original_messages(self):
+        messages = [{"role": "system", "content": "Original contract."}]
+
+        corrected = llm_client._messages_with_validation_feedback(
+            messages,
+            "guidance is required.",
+        )
+
+        self.assertEqual(messages[0]["content"], "Original contract.")
+        self.assertIn("guidance is required", corrected[0]["content"])
+
+    def test_safe_validation_reason_does_not_include_invalid_json_content(self):
+        try:
+            json.loads('{"assistantMessage":')
+        except json.JSONDecodeError as exception:
+            reason = llm_client._safe_validation_reason(exception)
+
+        self.assertEqual(reason, "The response was not a complete valid JSON object.")
+        self.assertNotIn("assistantMessage", reason)
 
     def test_wall_clock_limit_cancels_slow_models(self):
         started_at = llm_client.time.monotonic()

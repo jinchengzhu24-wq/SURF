@@ -83,7 +83,7 @@ LLM 每轮还会接收初稿方法与当前 Stage 来源，避免把生成器产
 
 对话以保存的 Stage 为边界：每条 turn 仍完整持久化并带有 `versionId`，但页面选择某个 Stage 时只显示该版本相关的对话，LLM 也只接收当前 Stage 的最近对话。唯一的关系型承接是已接受提案的 assistant turn：它不复制、不改写原记录，而通过 proposal/decision/version 关联同时显示为新 Stage 的第一条上下文。历史 Stage 的对话只读；返回当前 Stage 后才可继续发送，并恢复当前 Stage 自己的草稿或未完成请求。
 
-8010 的一次业务请求使用真正的 60 秒总时长硬上限。普通聊天和 Stage 开场优先使用 `deepseek-v4-flash`，明确请求完整地图提案时优先使用 `deepseek-v4-pro`；首选模型最多占用 40 秒，失败或过慢时在剩余总时限内切换另一模型。上游显式关闭思考输出，避免推理 token 耗尽后只返回空 JSON。普通回复若把唯一问题写进正文，后端会按句保留陈述并把问题提取为结构化 `followUpQuestion`；已有结构化问题时只去除正文重复句。纯问题或多个问题仍会被拒绝。两次上游尝试共用同一 requestId 和消息幂等键，只有最终成功结果会入库。聊天输入区显示实时秒数与主/备用阶段，并在 65 秒执行浏览器安全中止；失败、刷新或连接中断后使用原消息幂等键重试，确保同一请求最多保存一条 user turn 和一条 assistant turn。
+8010 的一次业务请求使用真正的 60 秒总时长硬上限。普通聊天和 Stage 开场优先使用 `deepseek-v4-flash`，明确请求完整地图提案时优先使用 `deepseek-v4-pro`；首选模型最多占用 40 秒，失败或过慢时在剩余总时限内切换另一模型。上游显式关闭思考输出，避免推理 token 耗尽后只返回空 JSON。普通回复若把唯一问题写进正文，后端会按句保留陈述并把问题提取为结构化 `followUpQuestion`；已有结构化问题时只去除正文重复句。纯问题或多个问题仍会被拒绝。首个模型返回结构无效时，备用模型会收到不含聊天内容的安全失败原因并被要求纠正对应 JSON，而不是盲目重复同一提示；服务日志也记录该结构原因。两次上游尝试共用同一 requestId 和消息幂等键，只有最终成功结果会入库。聊天输入区显示实时秒数与主/备用阶段，并在 65 秒执行浏览器安全中止；失败、刷新或连接中断后使用原消息幂等键重试，确保同一请求最多保存一条 user turn 和一条 assistant turn。
 
 后端使用独立 SQLite/WAL。默认数据库为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`，`.env` 和数据库文件均被本目录 `.gitignore` 排除。
 生产 systemd 模板保存在 `CoCreationPrototype/Backend/sokoban-cocreation.service`，其中将写权限限制到独立数据目录，并同时读取主后端的 LLM 配置和 8010 自己的安全配置。
