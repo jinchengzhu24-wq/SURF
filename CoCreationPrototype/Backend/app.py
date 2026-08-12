@@ -1397,6 +1397,10 @@ def insert_turn(database, session, role, content, version_id, request_id, execut
 
 
 def build_llm_context(database, session_id, version):
+    session = database.execute(
+        "SELECT initial_draft_method FROM design_sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
     turns = database.execute(
         """
         SELECT id, role, content FROM conversation_turns
@@ -1482,6 +1486,9 @@ def build_llm_context(database, session_id, version):
         "stageContext": {
             "stageNumber": version["stage_number"],
             "source": version["source"],
+            "initialDraftMethod": (
+                session["initial_draft_method"] if session is not None else None
+            ),
             "summary": version["summary"],
             "parentVersionId": version["parent_version_id"],
             "diff": load_json(version["diff_json"]),

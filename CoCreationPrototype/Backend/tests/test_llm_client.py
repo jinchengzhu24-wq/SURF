@@ -324,7 +324,37 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result[0], "The two targets create distinct routes.")
 
-    def test_question_without_structured_follow_up_is_rejected(self):
+    def test_question_without_structured_follow_up_is_extracted(self):
+        payload = {
+            "assistantMessage": (
+                "In my view, a tighter route would make the push order more visible. "
+                "Would you like to preserve that split?"
+            ),
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload)
+
+        self.assertEqual(
+            result[0],
+            "In my view, a tighter route would make the push order more visible.",
+        )
+        self.assertEqual(
+            result[4]["followUpQuestion"],
+            "Would you like to preserve that split?",
+        )
+
+    def test_question_only_message_is_rejected(self):
         payload = {
             "assistantMessage": "Would you like to preserve that split?",
             "guidance": {
@@ -340,7 +370,7 @@ class LLMClientTests(unittest.TestCase):
             "modificationSummary": "",
         }
 
-        with self.assertRaisesRegex(ValueError, "guidance.followUpQuestion"):
+        with self.assertRaisesRegex(ValueError, "declarative response"):
             llm_client.validate_chat_response(payload)
 
     def test_structured_assessment_and_proposal_are_returned(self):
@@ -485,6 +515,62 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result[4]["uiCues"], [])
 
+    def test_english_intent_hypothesis_uses_direct_tentative_voice(self):
+        cases = {
+            "The designer wants to make the route feel risky.":
+                "I think you may want to make the route feel risky.",
+            "The player seems to want a tighter opening.":
+                "I get the sense that you may want a tighter opening.",
+            "You want the second push to be surprising.":
+                "I think you may want the second push to be surprising.",
+            "I think you may be emphasizing push order.":
+                "I think you may be emphasizing push order.",
+        }
+
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(
+                    llm_client._normalize_intent_hypothesis(source, "en"),
+                    expected,
+                )
+
+    def test_chinese_intent_hypothesis_uses_direct_tentative_voice(self):
+        cases = {
+            "设计者想要让路线更紧张。": "我猜你可能想要让路线更紧张。",
+            "玩家希望突出推动顺序。": "我猜你可能想要突出推动顺序。",
+            "我猜你可能更在意路线辨识度。": "我猜你可能更在意路线辨识度。",
+        }
+
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(
+                    llm_client._normalize_intent_hypothesis(source, "zh-CN"),
+                    expected,
+                )
+
+    def test_validated_guidance_normalizes_report_style_intent(self):
+        payload = {
+            "assistantMessage": "The tighter route could make the opening more deliberate.",
+            "guidance": {
+                "move": "clarify_intent",
+                "intentHypothesis": "The designer wants a more deliberate opening.",
+                "intentConfidence": "low",
+                "followUpQuestion": "What part of that direction matters most to you?",
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload, language="en")
+
+        self.assertEqual(
+            result[4]["intentHypothesis"],
+            "I think you may want a more deliberate opening.",
+        )
+
     def test_composed_message_keeps_cues_for_future_llm_context(self):
         guidance = {
             "move": "challenge_tradeoff",
@@ -627,6 +713,50 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("还是/或者/或是", prompt)
         self.assertIn("do not ask a yes/no question", prompt)
         self.assertIn("not as the prose style", prompt)
+
+    def test_dg_initial_provenance_does_not_attribute_exact_tiles(self):
+        guidance = llm_client._build_draft_provenance_guidance(
+            {
+                "source": "initial",
+                "initialDraftMethod": "description_generation",
+            }
+        )
+
+        self.assertIn("generator produced every exact tile placement", guidance)
+        self.assertIn("Never ask why the designer placed", guidance)
+        self.assertIn("Do not invent or quote parameter values", guidance)
+        self.assertIn("Never say or imply that the designer intended", guidance)
+        self.assertIn("How does this generated result compare", guidance)
+        self.assertIn("what surprised them", guidance)
+
+    def test_pc_initial_provenance_separates_sketch_from_completion(self):
+        guidance = llm_client._build_draft_provenance_guidance(
+            {
+                "source": "initial",
+                "initialDraftMethod": "partial_completion",
+            }
+        )
+
+        self.assertIn("box starts, targets, and broad room/wall constraints", guidance)
+        self.assertIn("added the exact water, generated internal walls", guidance)
+        self.assertIn("never attribute a particular internal wall", guidance)
+        self.assertIn("never claim that the completion system produced or filled in all walls", guidance)
+        self.assertIn("box-target relationship", guidance)
+
+    def test_later_stage_provenance_uses_actual_stage_source(self):
+        human = llm_client._build_draft_provenance_guidance(
+            {"source": "human_edit", "initialDraftMethod": "description_generation"}
+        )
+        accepted = llm_client._build_draft_provenance_guidance(
+            {"source": "llm_accepted", "initialDraftMethod": "partial_completion"}
+        )
+        restored = llm_client._build_draft_provenance_guidance(
+            {"source": "restored", "initialDraftMethod": "partial_completion"}
+        )
+
+        self.assertIn("directly edited by the designer", human)
+        self.assertIn("explicitly accepted", accepted)
+        self.assertIn("restores an earlier saved version", restored)
 
     def test_stage_opening_removes_recoverable_english_choice_anchor(self):
         question = (

@@ -24,7 +24,7 @@ CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
 PROPOSAL_MAX_TOKENS = 2400
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v9-conversational-guidance"
+PROMPT_VERSION = "cocreation-v12-direct-intent-voice"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -86,6 +86,7 @@ def build_chat_messages(
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     task = _build_task_instructions(assessment_only)
+    provenance_guidance = _build_draft_provenance_guidance(stage_context)
     system_prompt = (
         "You are an adaptive Sokoban co-creation partner speaking as a thoughtful, "
         "equal design peer. Work only with the exact saved Stage and evidence supplied "
@@ -107,7 +108,12 @@ def build_chat_messages(
         "Help the designer form and refine their own intention without assigning a "
         "predefined purpose. Infer intention only when conversation or design actions "
         "provide evidence. Phrase every inference as a tentative, correctable hypothesis "
-        "and invite correction. Put that hypothesis only in intentHypothesis so the "
+        "spoken directly from you to the designer. In English use first-person/second-person "
+        "wording such as 'I think you may...', 'My guess is that you might...', or 'I get "
+        "the sense that you may...'. In Chinese use wording such as '我猜你可能……' or "
+        "'我感觉你似乎……'. Never write report-style third-person claims such as 'the "
+        "designer wants...', 'the player wants...', '设计者想要……', or '玩家希望……'. "
+        "Invite correction. Put that hypothesis only in intentHypothesis so the "
         "interface can distinguish it from your ordinary response. Never store or present "
         "an inferred intention as the "
         "designer's final self-report. You may disagree and identify trade-offs, but make "
@@ -154,6 +160,7 @@ def build_chat_messages(
         "not as a request to assess the map from scratch. Do not claim that unrelated "
         "discussion from another Stage happened in the current Stage.\n\n"
         f"Write all new natural-language fields in {response_language}. {task}\n\n"
+        f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         "Return JSON only with exactly these keys:\n"
         '{"assistantMessage":"...","guidance":'
         '{"move":"observe_stage","intentHypothesis":null,'
@@ -395,7 +402,7 @@ async def _generate_with_model_fallback(
 
             content = str(choice.message.content or "")
             payload = json.loads(content)
-            validated = validate_chat_response(payload, assessment_only)
+            validated = validate_chat_response(payload, assessment_only, language)
 
             if validated[2] is not None and proposal_validator is not None:
                 proposal_validator(validated[2])
@@ -500,7 +507,7 @@ async def _request_completion(
         await client.close()
 
 
-def validate_chat_response(payload, assessment_only=False):
+def validate_chat_response(payload, assessment_only=False, language="en"):
     if not isinstance(payload, dict):
         raise ValueError("The model response must be a JSON object.")
 
@@ -514,11 +521,19 @@ def validate_chat_response(payload, assessment_only=False):
         raise ValueError("The model response contains unexpected or missing fields.")
 
     assistant_message = _clean_text(payload.get("assistantMessage"), "assistantMessage")
-    guidance = _validate_guidance(payload.get("guidance"), assessment_only)
-    assistant_message = _remove_question_paragraphs(
+    guidance = _validate_guidance(payload.get("guidance"), assessment_only, language)
+    assistant_message, extracted_question = _extract_message_question(
         assistant_message,
-        guidance["followUpQuestion"],
     )
+
+    if extracted_question is not None:
+        if guidance["followUpQuestion"] is None:
+            if assessment_only:
+                raise ValueError(
+                    "A Stage opening question must use guidance.followUpQuestion."
+                )
+
+            guidance["followUpQuestion"] = extracted_question
 
     if assessment_only:
         assistant_message = _format_stage_opening_paragraphs(assistant_message)
@@ -599,26 +614,43 @@ def validate_chat_response(payload, assessment_only=False):
     )
 
 
-def _remove_question_paragraphs(message, follow_up_question):
+def _extract_message_question(message):
     if "?" not in message and "？" not in message:
-        return message
+        return message, None
 
-    if follow_up_question is None:
-        raise ValueError("Questions must be supplied through guidance.followUpQuestion.")
+    declarative_paragraphs = []
+    questions = []
 
-    paragraphs = [part.strip() for part in message.split("\n\n")]
-    declarative_paragraphs = [
-        part
-        for part in paragraphs
-        if part and "?" not in part and "？" not in part
-    ]
+    for paragraph in (part.strip() for part in message.split("\n\n")):
+        if not paragraph:
+            continue
+
+        sentences = [
+            part.strip()
+            for part in re.split(r"(?<=[.!?。！？])\s*", paragraph)
+            if part.strip()
+        ]
+        declarative_sentences = []
+
+        for sentence in sentences:
+            if sentence.endswith(("?", "？")):
+                questions.append(sentence)
+            else:
+                declarative_sentences.append(sentence)
+
+        if declarative_sentences:
+            separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+            declarative_paragraphs.append(separator.join(declarative_sentences))
+
+    if len(questions) > 1:
+        raise ValueError("assistantMessage can contain at most one question.")
 
     if not declarative_paragraphs:
         raise ValueError(
             "assistantMessage must contain a declarative response outside its questions."
         )
 
-    return "\n\n".join(declarative_paragraphs)
+    return "\n\n".join(declarative_paragraphs), questions[0] if questions else None
 
 
 def _build_task_instructions(assessment_only):
@@ -629,8 +661,9 @@ def _build_task_instructions(assessment_only):
             "map choices that are genuinely worth discussing; do not inventory the whole "
             "map. Offer at least one grounded personal perspective, design association, "
             "or gentle concern, clearly as your view rather than fact. End with exactly "
-            "one open question about one of those concrete authored choices, such as the "
-            "water placement, spatial relationship, or push sequence. Make it easy for "
+            "one open question about a concrete choice the provenance rules say the "
+            "designer actually controlled, or—when exact tiles were generated—about "
+            "the designer's reaction to the generated outcome. Make it easy for "
             "the designer to explain, correct, or extend the thought. Do not say Welcome "
             "to Stage, ask for the designer's overall intended player experience, offer "
             "preselected categories or an either-or choice, infer an intention, enumerate "
@@ -648,7 +681,74 @@ def _build_task_instructions(assessment_only):
     )
 
 
-def _validate_guidance(payload, assessment_only):
+def _build_draft_provenance_guidance(stage_context):
+    source = stage_context.get("source")
+    initial_method = stage_context.get("initialDraftMethod")
+
+    if source == "human_edit":
+        return (
+            "This saved Stage was directly edited by the designer in the workbench. "
+            "Use changeSummary to attribute only the listed changed components to the "
+            "designer; do not guess motivations, and continue to distinguish earlier "
+            "generator-authored structure from these verified edits."
+        )
+
+    if source == "llm_accepted":
+        return (
+            "This Stage came from an LLM proposal that the designer explicitly accepted. "
+            "Describe it as an accepted shared direction, not as tile placement performed "
+            "by the designer and not as an autonomous change already made by the LLM."
+        )
+
+    if source == "restored":
+        return (
+            "This Stage restores an earlier saved version. Frame the conversation as "
+            "revisiting that version; do not infer who originally placed a specific tile."
+        )
+
+    if source == "initial" and initial_method == "description_generation":
+        return (
+            "This is a DG initial draft. The designer supplied an upstream description "
+            "and generation parameters, but the generator produced every exact tile "
+            "placement. Never ask why the designer placed a particular wall, water tile, "
+            "box, target, player, or corridor. Do not invent or quote parameter values "
+            "because they are not supplied here. Discuss exact layout features as outcomes "
+            "of the generated draft. Never say or imply that the designer intended, "
+            "wanted, hoped for, chose, or authored a visible layout feature. Ask an open "
+            "comparison question about how the generated result relates to their expected "
+            "parameter effect, what surprised them, or which observed effect they might "
+            "want to strengthen or revise. A suitable form is: 'How does this generated "
+            "result compare with what you expected from your settings?' Apply this "
+            "attribution rule "
+            "throughout conversation on this Stage, unless the designer explicitly adopts "
+            "or discusses a generated feature."
+        )
+
+    if source == "initial" and initial_method == "partial_completion":
+        return (
+            "This is a PC initial draft. The designer authored a partial sketch, including "
+            "the box starts, targets, and broad room/wall constraints; the completion "
+            "system added the exact water, generated internal walls, player start, and "
+            "remaining completed layout. Because the final map does not identify which "
+            "individual wall cells came from the sketch, never attribute a particular "
+            "internal wall to the designer. Do not ask why they placed water, a specific "
+            "internal wall, or the player start, and never claim that the completion "
+            "system produced or filled in all walls. It added some generated internal "
+            "walls while other wall constraints came from the sketch. You may ask about "
+            "the box-target "
+            "relationship, the broad sketched playable boundary, or how the generated "
+            "completion supports or conflicts with their sketch. Apply this attribution "
+            "rule throughout conversation on this Stage, unless the designer explicitly "
+            "adopts or discusses a generated feature."
+        )
+
+    return (
+        "Authorship of exact initial tiles is unavailable. Discuss observable effects "
+        "without claiming that the designer personally placed a specific tile."
+    )
+
+
+def _validate_guidance(payload, assessment_only, language="en"):
     if payload is None:
         raise ValueError("guidance is required.")
 
@@ -676,6 +776,12 @@ def _validate_guidance(payload, assessment_only):
         payload.get("intentHypothesis"),
         "guidance.intentHypothesis",
     )
+
+    if intent_hypothesis is not None:
+        intent_hypothesis = _normalize_intent_hypothesis(
+            intent_hypothesis,
+            language,
+        )
     intent_confidence = payload.get("intentConfidence")
 
     if intent_hypothesis is None:
@@ -768,6 +874,100 @@ def _validate_guidance(payload, assessment_only):
         "proposalOffer": proposal_offer,
         "uiCues": normalized_cues,
     }
+
+
+def _normalize_intent_hypothesis(hypothesis, language):
+    text = hypothesis.strip()
+
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        direct_prefixes = (
+            "我猜你可能",
+            "我觉得你可能",
+            "我感觉你可能",
+            "我感觉你似乎",
+            "在我看来，你可能",
+            "我倾向于认为你可能",
+        )
+
+        if text.startswith(direct_prefixes):
+            return text
+
+        text = re.sub(r"^(?:这位)?(?:设计者|玩家)", "你", text)
+        match = re.match(r"^你(?:想要|希望|想)(.*)$", text)
+
+        if match:
+            return f"我猜你可能想要{match.group(1)}"
+
+        if text.startswith("你可能"):
+            return f"我觉得{text}"
+
+        if text.startswith("你似乎"):
+            return f"我感觉{text}"
+
+        return f"我感觉你可能在表达这样的倾向：{text}"
+
+    if re.match(
+        r"^(?:I think you (?:may|might)|My guess is (?:that )?you (?:may|might)|"
+        r"I (?:suspect|wonder whether) you (?:may|might)|"
+        r"I get the sense that you (?:may|might)|"
+        r"It seems to me that you (?:may|might))\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return text
+
+    third_person_patterns = (
+        (
+            r"^(?:the )?(?:designer|player) wants? to\b(.*)$",
+            "I think you may want to",
+        ),
+        (
+            r"^(?:the )?(?:designer|player) wants?\b(.*)$",
+            "I think you may want",
+        ),
+        (
+            r"^(?:the )?(?:designer|player) (?:seems|appears) to want\b(.*)$",
+            "I get the sense that you may want",
+        ),
+        (
+            r"^(?:the )?(?:designer|player) may want\b(.*)$",
+            "I think you may want",
+        ),
+        (
+            r"^(?:the )?(?:designer|player) (?:is|seems to be) aiming to\b(.*)$",
+            "I think you may be aiming to",
+        ),
+        (
+            r"^(?:the )?(?:designer|player) (?:prefers|seems to prefer)\b(.*)$",
+            "I think you may prefer",
+        ),
+    )
+
+    for pattern, prefix in third_person_patterns:
+        match = re.match(pattern, text, re.IGNORECASE)
+
+        if match:
+            return f"{prefix}{match.group(1)}"
+
+    text = re.sub(r"^(?:the )?(?:designer|player)\b", "you", text, flags=re.IGNORECASE)
+    patterns = (
+        (r"^you (?:want|want to|hope|hope to)\b(.*)$", "I think you may want"),
+        (r"^you (?:may|might) want\b(.*)$", "I think you may want"),
+        (r"^you (?:seem|appear) to want\b(.*)$", "I get the sense that you may want"),
+        (r"^you (?:are|seem to be) aiming to\b(.*)$", "I think you may be aiming to"),
+        (r"^you (?:prefer|seem to prefer)\b(.*)$", "I think you may prefer"),
+    )
+
+    for pattern, prefix in patterns:
+        match = re.match(pattern, text, re.IGNORECASE)
+
+        if match:
+            return f"{prefix}{match.group(1)}"
+
+    if re.match(r"^you\b", text, re.IGNORECASE):
+        return f"I think you may be signaling this direction: {text}"
+
+    return f"I think you may be signaling this direction: {text}"
 
 
 def _normalize_opening_question(question):

@@ -133,6 +133,10 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["turns"][-1]["guidance"]["move"], "observe_stage")
         self.assertEqual(mocked.call_args.kwargs["stage_context"]["stageNumber"], 1)
+        self.assertEqual(
+            mocked.call_args.kwargs["stage_context"]["initialDraftMethod"],
+            "partial_completion",
+        )
 
     def test_legacy_database_receives_nullable_guidance_column(self):
         original_path = repository.DATABASE_PATH
