@@ -1,24 +1,29 @@
+import asyncio
 import json
 import os
 import time
 from dataclasses import dataclass, field
-from threading import Lock
+from datetime import datetime, timezone
 
 from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
-    OpenAI,
+    AsyncOpenAI,
     RateLimitError,
 )
 
 
 DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_PROPOSAL_MODEL = "deepseek-v4-pro"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
+PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 40.0
 CHAT_TIMEOUT_SECONDS = 60.0
-CHAT_MAX_ATTEMPTS = 1
+CHAT_MAX_ATTEMPTS = 2
+CHAT_MAX_TOKENS = 1400
+PROPOSAL_MAX_TOKENS = 2400
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v6-ui-cues"
+PROMPT_VERSION = "cocreation-v7-timeout-risk-cues"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -30,10 +35,7 @@ GUIDANCE_MOVES = {
     "deliver_revision",
 }
 INTENT_CONFIDENCE_LEVELS = {"low", "medium", "high"}
-UI_CUE_TYPES = {"manual_edit", "tradeoff"}
-
-_clients = {}
-_client_lock = Lock()
+UI_CUE_TYPES = {"manual_edit", "warning", "tradeoff"}
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,9 @@ def build_chat_messages(
         "Help the designer form and refine their own intention without assigning a "
         "predefined purpose. Infer intention only when conversation or design actions "
         "provide evidence. Phrase every inference as a tentative, correctable hypothesis "
-        "and invite correction. Never store or present an inferred intention as the "
+        "and invite correction. Put that hypothesis only in intentHypothesis so the "
+        "interface can distinguish it from your ordinary response. Never store or present "
+        "an inferred intention as the "
         "designer's final self-report. You may disagree and identify trade-offs, but make "
         "clear that evaluative and difficulty statements are your perspective. Every "
         "difficulty statement must explicitly use perspective language such as 'in my "
@@ -118,9 +122,17 @@ def build_chat_messages(
         "example when they want direct control, reject your direction, or the discussion "
         "remains abstract. Do not repeat the editor hint every turn and never frame manual "
         "editing as required. Put the complete editor suggestion in a manual_edit uiCue "
-        "instead of repeating it in assistantMessage. When challenge_tradeoff is the "
-        "primary move, put the concise trade-off warning in a tradeoff uiCue and do not "
-        "repeat it in assistantMessage. Use no more than two uiCues and never add one just "
+        "instead of repeating it in assistantMessage. Use a warning uiCue when current "
+        "map structure, version changes, solver metrics, or play evidence indicates a "
+        "reasonable potential risk. The threshold is intentionally moderate: warn before "
+        "the risk is certain when it could affect playability, deadlocks or softlocks, "
+        "push order, route readability, target comprehension, repetitive movement, or the "
+        "designer's stated direction. Phrase uncertain risks with language such as may, "
+        "I am concerned, or worth playtesting; do not present them as solver facts. Do not "
+        "use warnings for unsupported guesses or purely aesthetic preferences. When "
+        "challenge_tradeoff is the primary move, include exactly one concise warning uiCue "
+        "and do not repeat it in assistantMessage. Use no more than two uiCues, no more "
+        "than one warning, and never add one just "
         "for decoration. For a newly saved human_edit Stage, use changeSummary rather "
         "than guessing: acknowledge the changed components, note that this saved Stage "
         "passed deterministic solvability validation, evaluate the likely design effects "
@@ -143,7 +155,8 @@ def build_chat_messages(
         "followUpQuestion must be null or one question. proposalOffer must be null or "
         'an object with exactly {"summary":"...","rationale":"..."}. '
         "uiCues must be an array of at most two unique objects with exactly type and "
-        "text; type must be manual_edit or tradeoff. "
+        "text; type must be manual_edit or warning. The legacy tradeoff type is accepted "
+        "by the application for historical data but must not be generated. "
         "assistantMessage must not repeat followUpQuestion; the application appends it.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
         "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
@@ -201,7 +214,6 @@ def generate_chat_reply(
     stage_context=None,
 ):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
     base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
 
     if not api_key or api_key == "your_deepseek_api_key_here":
@@ -214,7 +226,6 @@ def generate_chat_reply(
             503,
         )
 
-    client = _get_client(api_key, base_url)
     messages = build_chat_messages(
         conversation,
         rows,
@@ -224,43 +235,136 @@ def generate_chat_reply(
         assessment_only,
         stage_context,
     )
-    started_at = time.monotonic()
+    proposal_request = not assessment_only and _requests_complete_map(conversation)
+    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    proposal_model = (
+        os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
+        or DEFAULT_PROPOSAL_MODEL
+    )
+    configured_fallback = os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip()
+    primary_model = proposal_model if proposal_request else default_model
+    fallback_model = configured_fallback or (
+        default_model if proposal_request else proposal_model
+    )
+    models = [primary_model]
 
-    for attempt in range(1, CHAT_MAX_ATTEMPTS + 1):
+    if fallback_model != primary_model:
+        models.append(fallback_model)
+
+    task = "stage_assessment" if assessment_only else (
+        "map_proposal" if proposal_request else "chat"
+    )
+    max_tokens = PROPOSAL_MAX_TOKENS if proposal_request else CHAT_MAX_TOKENS
+    started_at = time.monotonic()
+    _log_llm_event(
+        "llm_request_started",
+        requestId=request_id,
+        task=task,
+        primaryModel=primary_model,
+        fallbackModel=models[1] if len(models) > 1 else None,
+        timeoutSeconds=CHAT_TIMEOUT_SECONDS,
+    )
+
+    try:
+        return asyncio.run(
+            asyncio.wait_for(
+                _generate_with_model_fallback(
+                    api_key=api_key,
+                    base_url=base_url,
+                    models=models,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    request_id=request_id,
+                    task=task,
+                    language=language,
+                    assessment_only=assessment_only,
+                    proposal_validator=proposal_validator,
+                    stage_context=stage_context,
+                    started_at=started_at,
+                ),
+                timeout=CHAT_TIMEOUT_SECONDS,
+            )
+        )
+    except asyncio.TimeoutError as exception:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task=task,
+            outcome="error",
+            code="UPSTREAM_TIMEOUT",
+            attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS),
+            latencyMs=elapsed_ms,
+        )
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not complete the request before the 60 second limit.",
+            request_id,
+            True,
+            min(len(models), CHAT_MAX_ATTEMPTS),
+            504,
+        ) from exception
+
+
+async def _generate_with_model_fallback(
+    *,
+    api_key,
+    base_url,
+    models,
+    messages,
+    max_tokens,
+    request_id,
+    task,
+    language,
+    assessment_only,
+    proposal_validator,
+    stage_context,
+    started_at,
+):
+    last_error = None
+
+    for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
+        elapsed = time.monotonic() - started_at
+        remaining = CHAT_TIMEOUT_SECONDS - elapsed
+
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+
+        attempt_timeout = min(
+            PRIMARY_ATTEMPT_TIMEOUT_SECONDS if attempt == 1 else remaining,
+            remaining,
+        )
+        _log_llm_event(
+            "llm_attempt_started",
+            requestId=request_id,
+            task=task,
+            model=model,
+            attempt=attempt,
+            maxAttempts=len(models[:CHAT_MAX_ATTEMPTS]),
+            timeoutSeconds=round(attempt_timeout, 3),
+        )
+
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                temperature=0.45,
-                stream=False,
+            response = await asyncio.wait_for(
+                _request_completion(
+                    api_key,
+                    base_url,
+                    model,
+                    messages,
+                    max_tokens,
+                    attempt_timeout,
+                ),
+                timeout=attempt_timeout,
             )
             content = str(response.choices[0].message.content or "")
             payload = json.loads(content)
             validated = validate_chat_response(payload, assessment_only)
 
             if validated[2] is not None and proposal_validator is not None:
-                try:
-                    proposal_validator(validated[2])
-                except ValueError as validation_error:
-                    if attempt >= CHAT_MAX_ATTEMPTS:
-                        raise
+                proposal_validator(validated[2])
 
-                    messages = [
-                        *messages,
-                        {"role": "assistant", "content": content},
-                        {
-                            "role": "system",
-                            "content": (
-                                "The proposedRows map failed deterministic validation: "
-                                + str(validation_error)
-                                + ". Return a corrected complete JSON response."
-                            ),
-                        },
-                    ]
-                    continue
-
-            return LLMExecutionResult(
+            latency_ms = int((time.monotonic() - started_at) * 1000)
+            result = LLMExecutionResult(
                 assistant_message=_compose_assistant_message(
                     validated[0],
                     validated[4],
@@ -274,23 +378,88 @@ def generate_chat_reply(
                 attempts_used=attempt,
                 request_id=request_id,
                 model=model,
-                latency_ms=int((time.monotonic() - started_at) * 1000),
+                latency_ms=latency_ms,
                 guidance=validated[4],
             )
+            _log_llm_event(
+                "llm_request_completed",
+                requestId=request_id,
+                task=task,
+                outcome="success",
+                model=model,
+                attemptsUsed=attempt,
+                latencyMs=latency_ms,
+            )
+            return result
+        except asyncio.TimeoutError as exception:
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT",
+                "DeepSeek did not respond before the attempt timeout.",
+                request_id,
+                True,
+                attempt,
+                504,
+            )
         except Exception as exception:
-            error = classify_exception(exception, request_id, attempt)
+            last_error = classify_exception(exception, request_id, attempt)
 
-            if not error.retryable or attempt >= CHAT_MAX_ATTEMPTS:
-                raise error from exception
+        _log_llm_event(
+            "llm_attempt_failed",
+            requestId=request_id,
+            task=task,
+            model=model,
+            attempt=attempt,
+            code=last_error.code,
+            retryable=last_error.retryable,
+            latencyMs=int((time.monotonic() - started_at) * 1000),
+        )
+
+        if not last_error.retryable:
+            raise last_error
+
+    if last_error is not None:
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task=task,
+            outcome="error",
+            code=last_error.code,
+            attemptsUsed=last_error.attempts_used,
+            latencyMs=int((time.monotonic() - started_at) * 1000),
+        )
+        raise last_error
 
     raise LLMServiceError(
         "INTERNAL_ERROR",
         "The LLM request ended unexpectedly.",
         request_id,
         False,
-        CHAT_MAX_ATTEMPTS,
+        0,
         500,
     )
+
+
+async def _request_completion(
+    api_key,
+    base_url,
+    model,
+    messages,
+    max_tokens,
+    timeout_seconds,
+):
+    client = _create_async_client(api_key, base_url, timeout_seconds)
+
+    try:
+        return await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.45,
+            max_tokens=max_tokens,
+            stream=False,
+        )
+    finally:
+        await client.close()
 
 
 def validate_chat_response(payload, assessment_only=False):
@@ -484,8 +653,13 @@ def _validate_guidance(payload, assessment_only):
             }
         )
 
-    if move == "challenge_tradeoff" and "tradeoff" not in seen_cue_types:
-        raise ValueError("challenge_tradeoff requires a tradeoff uiCue.")
+    risk_cue_types = seen_cue_types.intersection({"warning", "tradeoff"})
+
+    if len(risk_cue_types) > 1:
+        raise ValueError("guidance.uiCues can contain only one warning.")
+
+    if move == "challenge_tradeoff" and not risk_cue_types:
+        raise ValueError("challenge_tradeoff requires a warning uiCue.")
 
     if assessment_only:
         if move != "observe_stage":
@@ -669,19 +843,59 @@ def _clean_optional_text(value, field_name):
     return _clean_text(value, field_name)
 
 
-def _get_client(api_key, base_url):
-    cache_key = (base_url, CHAT_TIMEOUT_SECONDS)
+def _requests_complete_map(conversation):
+    latest_user_message = next(
+        (
+            str(message.get("content") or "").strip().casefold()
+            for message in reversed(conversation)
+            if message.get("role") == "user"
+        ),
+        "",
+    )
 
-    with _client_lock:
-        client = _clients.get(cache_key)
+    if not latest_user_message:
+        return False
 
-        if client is None:
-            client = OpenAI(
-                api_key=api_key,
-                base_url=base_url,
-                timeout=CHAT_TIMEOUT_SECONDS,
-                max_retries=0,
-            )
-            _clients[cache_key] = client
+    english_markers = (
+        "map proposal",
+        "concrete map",
+        "draft this",
+        "draft that",
+        "draft the revision",
+        "generate a map",
+        "create a map",
+        "revise the map",
+        "rework the map",
+    )
+    chinese_markers = (
+        "地图提案",
+        "具体生成",
+        "生成地图",
+        "生成一份",
+        "修改地图",
+        "改一下地图",
+        "把地图改",
+    )
+    return any(
+        marker in latest_user_message
+        for marker in (*english_markers, *chinese_markers)
+    )
 
-        return client
+
+def _create_async_client(api_key, base_url, timeout_seconds):
+    return AsyncOpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout_seconds,
+        max_retries=0,
+    )
+
+
+def _log_llm_event(event, **fields):
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "level": "INFO",
+        "event": event,
+        **fields,
+    }
+    print(json.dumps(payload, ensure_ascii=True, separators=(",", ":")), flush=True)

@@ -788,9 +788,15 @@ main {
     background: #e0d5eb;
 }
 
-.guidance-cue-tradeoff {
+.guidance-cue-intent {
     color: #684513;
     background: #f3dc8e;
+}
+
+.guidance-cue-warning,
+.guidance-cue-tradeoff {
+    color: #752719;
+    background: #f0c6b9;
 }
 
 .guidance-cue-button {

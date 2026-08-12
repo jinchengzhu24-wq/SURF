@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sys
@@ -23,7 +24,7 @@ class FakeCompletions:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def create(self, **kwargs):
+    async def create(self, **kwargs):
         self.calls.append(kwargs)
         outcome = self.outcomes.pop(0)
 
@@ -39,6 +40,22 @@ class FakeClient:
     def __init__(self, outcomes):
         self.chat = SimpleNamespace(completions=FakeCompletions(outcomes))
 
+    async def close(self):
+        return None
+
+
+class SlowCompletions:
+    async def create(self, **kwargs):
+        await asyncio.sleep(10)
+
+
+class SlowClient:
+    def __init__(self):
+        self.chat = SimpleNamespace(completions=SlowCompletions())
+
+    async def close(self):
+        return None
+
 
 class LLMClientTests(unittest.TestCase):
     def execute(self, outcomes):
@@ -46,8 +63,7 @@ class LLMClientTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_get_client", return_value=client),
-            patch.object(llm_client.time, "sleep"),
+            patch.object(llm_client, "_create_async_client", return_value=client),
         ):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Assess the level."}],
@@ -82,13 +98,99 @@ class LLMClientTests(unittest.TestCase):
         request = client.chat.completions.calls[0]
         self.assertEqual(request["response_format"], {"type": "json_object"})
         self.assertFalse(request["stream"])
+        self.assertEqual(request["model"], "deepseek-v4-flash")
+        self.assertEqual(request["max_tokens"], llm_client.CHAT_MAX_TOKENS)
 
-    def test_invalid_json_fails_without_automatic_retry(self):
-        client = FakeClient(["not-json"])
+    def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
+        response = json.dumps({
+            "assistantMessage": "I will prepare the requested map.",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        })
+        client = FakeClient([response])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_get_client", return_value=client),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Please create a reviewable map proposal."}],
+                ["############"] * 10,
+                "proposal-model-test",
+            )
+
+        request = client.chat.completions.calls[0]
+        self.assertEqual(request["model"], "deepseek-v4-pro")
+        self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_MAX_TOKENS)
+
+    def test_flash_invalid_response_falls_back_to_pro(self):
+        valid = json.dumps({
+            "assistantMessage": "A grounded fallback response.",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        })
+        client = FakeClient(["not-json", valid])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Assess the route."}],
+                ["############"] * 10,
+                "fallback-model-test",
+            )
+
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(result.model, "deepseek-v4-pro")
+        self.assertEqual(
+            [call["model"] for call in client.chat.completions.calls],
+            ["deepseek-v4-flash", "deepseek-v4-pro"],
+        )
+
+    def test_wall_clock_limit_cancels_slow_models(self):
+        started_at = llm_client.time.monotonic()
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "CHAT_TIMEOUT_SECONDS", 0.06),
+            patch.object(llm_client, "PRIMARY_ATTEMPT_TIMEOUT_SECONDS", 0.02),
+            patch.object(llm_client, "_create_async_client", return_value=SlowClient()),
+            self.assertRaises(llm_client.LLMServiceError) as raised,
+        ):
+            llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Assess the route."}],
+                ["############"] * 10,
+                "wall-clock-timeout-test",
+            )
+
+        self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
+        self.assertLess(llm_client.time.monotonic() - started_at, 1.0)
+
+    def test_invalid_json_uses_fallback_then_fails(self):
+        client = FakeClient(["not-json", "still-not-json"])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -98,18 +200,18 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
-        self.assertEqual(raised.exception.attempts_used, 1)
-        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(raised.exception.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
 
-    def test_timeout_uses_one_sixty_second_client_attempt(self):
+    def test_timeout_uses_two_models_with_one_sixty_second_total_limit(self):
         timeout = APITimeoutError(
             request=httpx.Request("POST", "https://api.deepseek.com/chat/completions")
         )
-        client = FakeClient([timeout])
+        client = FakeClient([timeout, timeout])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_get_client", return_value=client),
+            patch.object(llm_client, "_create_async_client", return_value=client),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -119,10 +221,11 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 60.0)
-        self.assertEqual(llm_client.CHAT_MAX_ATTEMPTS, 1)
+        self.assertEqual(llm_client.PRIMARY_ATTEMPT_TIMEOUT_SECONDS, 40.0)
+        self.assertEqual(llm_client.CHAT_MAX_ATTEMPTS, 2)
         self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
-        self.assertEqual(raised.exception.attempts_used, 1)
-        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(raised.exception.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
 
     def test_missing_api_key_fails_without_model_call(self):
         with (
@@ -188,7 +291,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result[3], "Moved the player.")
         self.assertEqual(result[4]["move"], "deliver_revision")
 
-    def test_invalid_proposal_fails_without_automatic_retry(self):
+    def test_invalid_proposal_uses_fallback_then_fails(self):
         payload = json.dumps({
             "assistantMessage": "Here is a map proposal.",
             "guidance": {
@@ -203,7 +306,7 @@ class LLMClientTests(unittest.TestCase):
             "proposedRows": ["############"] * 10,
             "modificationSummary": "Changed the map.",
         })
-        client = FakeClient([payload])
+        client = FakeClient([payload, payload])
         validated_rows = []
 
         def reject_proposal(rows):
@@ -212,7 +315,7 @@ class LLMClientTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_get_client", return_value=client),
+            patch.object(llm_client, "_create_async_client", return_value=client),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -223,9 +326,9 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
-        self.assertEqual(raised.exception.attempts_used, 1)
-        self.assertEqual(len(client.chat.completions.calls), 1)
-        self.assertEqual(len(validated_rows), 1)
+        self.assertEqual(raised.exception.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(len(validated_rows), 2)
 
     def test_unsolicited_revision_offer_cannot_include_map(self):
         payload = {
@@ -249,7 +352,7 @@ class LLMClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot include proposedRows"):
             llm_client.validate_chat_response(payload)
 
-    def test_manual_edit_and_tradeoff_ui_cues_are_validated(self):
+    def test_manual_edit_and_warning_ui_cues_are_validated(self):
         payload = {
             "assistantMessage": "You can compare both routing choices directly.",
             "guidance": {
@@ -260,7 +363,7 @@ class LLMClientTests(unittest.TestCase):
                 "proposalOffer": None,
                 "uiCues": [
                     {
-                        "type": "tradeoff",
+                        "type": "warning",
                         "text": "A wider route improves freedom but reduces commitment.",
                     },
                     {
@@ -278,7 +381,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(
             [cue["type"] for cue in result[4]["uiCues"]],
-            ["tradeoff", "manual_edit"],
+            ["warning", "manual_edit"],
         )
 
     def test_legacy_guidance_without_ui_cues_defaults_to_empty(self):
@@ -348,7 +451,7 @@ class LLMClientTests(unittest.TestCase):
                 "cannot repeat a type",
                 "offer_perspective",
             ),
-            ([], "requires a tradeoff uiCue", "challenge_tradeoff"),
+            ([], "requires a warning uiCue", "challenge_tradeoff"),
         )
 
         for ui_cues, expected_error, move in cases:

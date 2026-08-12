@@ -8,13 +8,17 @@ const GUIDANCE_CUE_LABELS = {
         manual_edit: "MANUAL EDIT",
         question: "QUESTION",
         revision: "REVISION",
-        tradeoff: "TRADE-OFF"
+        intent: "TENTATIVE INTENT",
+        warning: "WARNING",
+        tradeoff: "WARNING"
     },
     "zh-CN": {
         manual_edit: "手动编辑",
         question: "问题",
         revision: "修改建议",
-        tradeoff: "权衡提醒"
+        intent: "暂定意图",
+        warning: "警告",
+        tradeoff: "警告"
     }
 };
 
@@ -40,7 +44,8 @@ const translations = {
         noStageConversation: "No conversation has been recorded for this Stage.",
         noStageConversationBody: "Each Stage keeps only the discussion attached to that saved version.",
         thinking: "Assistant is considering the current Stage...",
-        chatWaiting: "The assistant is generating a response. This may take up to 60 seconds.",
+        chatWaitingPrimary: "Waiting for the primary assistant",
+        chatWaitingFallback: "The primary assistant was slow; trying the fallback assistant",
         chatRetryPending: "The previous message did not finish. Retry it without creating a duplicate.",
         messageLabel: "Message the level design assistant",
         messagePlaceholder: "Explain what you want to change or ask about the level...",
@@ -110,6 +115,7 @@ const translations = {
         errorDirtyPlay: "Save or discard the map draft before playing.",
         errorPendingPlay: "Accept or reject the pending map proposal before playing.",
         errorIntentRequired: "Please describe your design intention before completing the session.",
+        error_CLIENT_TIMEOUT: "The assistant did not finish within the browser safety limit. You can retry without creating a duplicate message.",
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
         playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again."
     },
@@ -134,7 +140,8 @@ const translations = {
         noStageConversation: "这个 Stage 暂时没有相关对话。",
         noStageConversationBody: "每个 Stage 只显示与该已保存版本关联的讨论。",
         thinking: "助手正在分析当前 Stage……",
-        chatWaiting: "助手正在生成回复，最长可能需要 60 秒。",
+        chatWaitingPrimary: "正在等待首选模型生成回复",
+        chatWaitingFallback: "首选模型响应较慢，正在尝试备用模型",
         chatRetryPending: "上一条消息尚未完成，可安全重试且不会产生重复记录。",
         messageLabel: "给关卡设计助手发送消息",
         messagePlaceholder: "说明你想修改什么，或询问这个关卡的设计……",
@@ -220,6 +227,8 @@ const state = {
     chatBusy: false,
     chatStatus: "idle",
     chatError: null,
+    chatStartedAt: 0,
+    chatTimerId: null,
     pendingMessage: null,
     assessing: new Set(),
     retryAction: null,
@@ -242,6 +251,7 @@ const chineseApiErrors = {
     UNSOLVABLE_LEVEL: "确定性求解器未能验证这张地图可解。",
     UPSTREAM_TIMEOUT: "LLM 响应超时，请稍后重试。",
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
+    CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。"
 };
 
@@ -430,9 +440,15 @@ function renderAssistantBubble(turn, bubble) {
 
     const cueList = document.createElement("div");
     cueList.className = "guidance-cues";
+
+    if (guidance.intentHypothesis) {
+        cueList.appendChild(createGuidanceCue("intent", guidance.intentHypothesis));
+    }
+
     uiCues.forEach(cue => {
-        if (cue && ["manual_edit", "tradeoff"].includes(cue.type) && cue.text) {
-            cueList.appendChild(createGuidanceCue(cue.type, cue.text));
+        if (cue && ["manual_edit", "warning", "tradeoff"].includes(cue.type) && cue.text) {
+            const displayType = cue.type === "tradeoff" ? "warning" : cue.type;
+            cueList.appendChild(createGuidanceCue(displayType, cue.text));
         }
     });
 
@@ -628,10 +644,34 @@ function renderChatRequestStatus() {
     elements.chatRequestStatus.hidden = !waiting && !failed;
     elements.chatRequestStatus.className = `chat-request-status ${waiting ? "waiting" : "error"}`;
     elements.chatRequestMessage.textContent = waiting
-        ? t("chatWaiting")
+        ? chatWaitingMessage()
         : localizedErrorMessage(state.chatError);
     elements.chatRetryButton.hidden = !failed || !state.chatError?.retryable || !state.pendingMessage;
     elements.chatRetryButton.textContent = t("retry");
+}
+
+function chatWaitingMessage() {
+    const elapsedSeconds = Math.min(
+        60,
+        Math.max(0, Math.floor((Date.now() - state.chatStartedAt) / 1000))
+    );
+    const phase = elapsedSeconds < 40
+        ? t("chatWaitingPrimary")
+        : t("chatWaitingFallback");
+    return `${phase} · ${elapsedSeconds} / 60 ${t("seconds")}`;
+}
+
+function startChatTimer() {
+    stopChatTimer();
+    state.chatStartedAt = Date.now();
+    state.chatTimerId = window.setInterval(renderChatRequestStatus, 250);
+}
+
+function stopChatTimer() {
+    if (state.chatTimerId !== null) {
+        window.clearInterval(state.chatTimerId);
+        state.chatTimerId = null;
+    }
 }
 
 async function ensureAssessment(versionId) {
@@ -641,7 +681,8 @@ async function ensureAssessment(versionId) {
     try {
         state.session = await api(`/api/sessions/${state.sessionId}/versions/${versionId}/assessments`, {
             method: "POST",
-            body: { idempotencyKey: uniqueId("assessment") }
+            body: { idempotencyKey: uniqueId("assessment") },
+            timeoutMs: 65000
         });
         render();
     } catch (error) {
@@ -688,6 +729,7 @@ async function submitPendingMessage() {
     state.chatBusy = true;
     state.chatStatus = "waiting";
     state.chatError = null;
+    startChatTimer();
     hideNotice();
     renderChatRequestStatus();
     updateControls();
@@ -695,7 +737,8 @@ async function submitPendingMessage() {
     try {
         state.session = await api(`/api/sessions/${state.sessionId}/messages`, {
             method: "POST",
-            body: pending
+            body: pending,
+            timeoutMs: 65000
         });
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());
@@ -708,6 +751,7 @@ async function submitPendingMessage() {
         state.chatStatus = "error";
         state.chatError = error;
     } finally {
+        stopChatTimer();
         state.busy = false;
         state.chatBusy = false;
         renderChatRequestStatus();
@@ -914,11 +958,31 @@ async function withBusy(action) {
 
 async function api(path, options = {}) {
     const request = { method: options.method || "GET", credentials: "include", headers: {} };
+    const controller = options.timeoutMs ? new AbortController() : null;
+    const timeoutId = controller
+        ? window.setTimeout(() => controller.abort(), options.timeoutMs)
+        : null;
+
+    if (controller) request.signal = controller.signal;
     if (options.body !== undefined) {
         request.headers["Content-Type"] = "application/json";
         request.body = JSON.stringify(options.body);
     }
-    const response = await fetch(path, request);
+    let response;
+
+    try {
+        response = await fetch(path, request);
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            const timeoutError = new Error(t("error_CLIENT_TIMEOUT"));
+            timeoutError.code = "CLIENT_TIMEOUT";
+            timeoutError.retryable = true;
+            throw timeoutError;
+        }
+        throw error;
+    } finally {
+        if (timeoutId !== null) window.clearTimeout(timeoutId);
+    }
     let payload = {};
     try { payload = await response.json(); } catch (error) { payload = {}; }
     if (!response.ok) {
