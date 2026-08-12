@@ -6,7 +6,7 @@ const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
 const GUIDANCE_CUE_LABELS = {
     en: {
         manual_edit: "MANUAL EDIT",
-        question: "QUESTION",
+        question: "LET'S DISCUSS",
         revision: "REVISION",
         intent: "TENTATIVE INTENT",
         warning: "WARNING",
@@ -14,7 +14,7 @@ const GUIDANCE_CUE_LABELS = {
     },
     "zh-CN": {
         manual_edit: "手动编辑",
-        question: "问题",
+        question: "一起聊聊",
         revision: "修改建议",
         intent: "暂定意图",
         warning: "警告",

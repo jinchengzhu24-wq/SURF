@@ -555,7 +555,10 @@ class LLMClientTests(unittest.TestCase):
 
     def test_stage_opening_is_neutral_and_requires_one_question(self):
         payload = {
-            "assistantMessage": "The box and target share a compact central route.",
+            "assistantMessage": (
+                "The box and target share a compact central route. "
+                "In my view, that makes the opening relationship easy to notice."
+            ),
             "guidance": {
                 "move": "observe_stage",
                 "intentHypothesis": None,
@@ -580,6 +583,109 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result[4]["move"], "observe_stage")
         self.assertIsNone(result[4]["intentHypothesis"])
 
+    def test_stage_opening_requires_archival_question_to_match_discussion(self):
+        payload = {
+            "assistantMessage": (
+                "The water shapes the opening route. "
+                "In my view, it makes the first push worth discussing."
+            ),
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "What were you exploring with the central water?",
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The solver found a route.",
+                "difficultyOpinion": "In my view, the opening requires attention.",
+                "features": ["Central water"],
+                "suggestions": ["Discuss the opening push"],
+                "satisfactionQuestion": "What other part should we discuss next?",
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        with self.assertRaisesRegex(ValueError, "must match"):
+            llm_client.validate_chat_response(payload, assessment_only=True)
+
+    def test_stage_opening_prompt_is_concrete_and_non_anchoring(self):
+        messages = llm_client.build_chat_messages(
+            [],
+            ["############"] * 10,
+            assessment_only=True,
+        )
+        prompt = messages[0]["content"]
+
+        self.assertIn("two or three short paragraphs", prompt)
+        self.assertIn("one or two concrete map choices", prompt)
+        self.assertIn("grounded personal perspective", prompt)
+        self.assertIn("Do not say Welcome to Stage", prompt)
+        self.assertIn("either-or choice", prompt)
+        self.assertIn("还是/或者/或是", prompt)
+        self.assertIn("do not ask a yes/no question", prompt)
+        self.assertIn("not as the prose style", prompt)
+
+    def test_stage_opening_removes_recoverable_english_choice_anchor(self):
+        question = (
+            "What drew you to place the target beside the box—were you aiming for "
+            "a quick solve, or a longer sequence?"
+        )
+
+        self.assertEqual(
+            llm_client._normalize_opening_question(question),
+            "What drew you to place the target beside the box?",
+        )
+
+    def test_stage_opening_removes_recoverable_chinese_choice_anchor(self):
+        question = "你把箱子和目标放在紧邻的位置，是希望快速完成，还是继续扩展？"
+
+        self.assertEqual(
+            llm_client._normalize_opening_question(question),
+            "你把箱子和目标放在紧邻的位置时，你最先考虑的是什么？",
+        )
+
+    def test_stage_opening_chinese_anchor_does_not_duplicate_time_suffix(self):
+        question = "你设计这个初始布局时，是想保持开放，还是增加墙体？"
+
+        self.assertEqual(
+            llm_client._normalize_opening_question(question),
+            "你设计这个初始布局时，你最先考虑的是什么？",
+        )
+
+    def test_stage_opening_converts_recoverable_chinese_yes_no_question(self):
+        question = "你选择把箱子和目标放在同一行，是刻意强调绕行吗？"
+
+        self.assertEqual(
+            llm_client._normalize_opening_question(question),
+            "你选择把箱子和目标放在同一行时，你最先考虑的是什么？",
+        )
+
+    def test_stage_opening_rejects_english_yes_no_question(self):
+        with self.assertRaisesRegex(ValueError, "cannot anchor"):
+            llm_client._normalize_opening_question(
+                "Did you intend the central water to control the first push?"
+            )
+
+    def test_stage_opening_rejects_unrecoverable_choice_anchor(self):
+        with self.assertRaisesRegex(ValueError, "cannot anchor"):
+            llm_client._normalize_opening_question(
+                "Would you prefer a quick solve or a longer sequence?"
+            )
+
+    def test_stage_opening_single_block_is_split_into_two_short_paragraphs(self):
+        message = (
+            "The water divides the room. In my view, that makes the first push clearer. "
+            "The open lower area may still invite experimentation."
+        )
+
+        result = llm_client._format_stage_opening_paragraphs(message)
+
+        self.assertEqual(len(result.split("\n\n")), 2)
+        self.assertIn("In my view", result)
+
     def test_stage_opening_rejects_intention_inference(self):
         payload = {
             "assistantMessage": "You want a difficult level.",
@@ -587,7 +693,7 @@ class LLMClientTests(unittest.TestCase):
                 "move": "observe_stage",
                 "intentHypothesis": "You want a difficult level.",
                 "intentConfidence": "medium",
-                "followUpQuestion": "Is that right?",
+                "followUpQuestion": "What shaped this placement choice?",
                 "proposalOffer": None,
                 "uiCues": [],
             },
@@ -596,7 +702,7 @@ class LLMClientTests(unittest.TestCase):
                 "difficultyOpinion": "It may be difficult.",
                 "features": ["One route"],
                 "suggestions": ["Review it"],
-                "satisfactionQuestion": "Is that right?",
+                "satisfactionQuestion": "What shaped this placement choice?",
             },
             "proposedRows": None,
             "modificationSummary": "",

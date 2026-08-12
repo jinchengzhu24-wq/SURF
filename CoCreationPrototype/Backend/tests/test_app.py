@@ -32,7 +32,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
         self.assertIn("cocreation-pixel-20260812-5", index_response.text)
-        self.assertIn("cocreation-guided-20260812-8", index_response.text)
+        self.assertIn("cocreation-guided-20260812-9", index_response.text)
         self.assertIn('<html lang="zh-CN">', index_response.text)
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--bg: #6f9d31", css_response.text)
@@ -79,7 +79,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('.guidance-cue-tradeoff', css_response.text)
         self.assertIn('font-weight: 800;', css_response.text)
         self.assertIn('manual_edit: "手动编辑"', js_response.text)
-        self.assertIn('question: "问题"', js_response.text)
+        self.assertIn('question: "一起聊聊"', js_response.text)
+        self.assertIn('question: "LET\'S DISCUSS"', js_response.text)
         self.assertIn('revision: "修改建议"', js_response.text)
         self.assertIn('intent: "暂定意图"', js_response.text)
         self.assertIn('warning: "警告"', js_response.text)
@@ -326,6 +327,14 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         prompt_messages = build_chat_messages(
             [{"role": "user", "content": "What do you notice?"}],
             backend.SAMPLE_ROWS,
+            solver_metrics={
+                "valid": True,
+                "solvable": True,
+                "searchedStates": 42,
+                "solutionSteps": 12,
+                "solutionPushes": 4,
+                "solution": "UURRDDLL",
+            },
         )
         system_prompt = prompt_messages[0]["content"]
 
@@ -343,7 +352,14 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("manual_edit uiCue", system_prompt)
         self.assertIn("warning uiCue", system_prompt)
         self.assertIn("threshold is intentionally moderate", system_prompt)
+        self.assertIn("thoughtful, equal design peer", system_prompt)
+        self.assertIn("do not ask a question by habit", system_prompt)
+        self.assertIn("do not recite metrics or spell out a move sequence", system_prompt)
         self.assertIn('"uiCues":[]', system_prompt)
+        self.assertIn('"solutionSteps": 12', system_prompt)
+        self.assertIn('"solutionPushes": 4', system_prompt)
+        self.assertNotIn("UURRDDLL", system_prompt)
+        self.assertNotIn('"solution":', system_prompt)
         self.assertNotIn("Competitive", system_prompt)
         self.assertNotIn("Supportive", system_prompt)
         self.assertEqual(prompt_messages[-1]["content"], "What do you notice?")

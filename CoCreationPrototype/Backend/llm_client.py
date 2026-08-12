@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
 PROPOSAL_MAX_TOKENS = 2400
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v8-nonthinking-normalized"
+PROMPT_VERSION = "cocreation-v9-conversational-guidance"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -81,18 +82,26 @@ def build_chat_messages(
 ):
     serialized_map = "\n".join(rows)
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
-    solver_metrics = solver_metrics or {}
+    solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     task = _build_task_instructions(assessment_only)
     system_prompt = (
-        "You are an adaptive Sokoban co-creation partner. Work only with the exact "
-        "saved Stage and evidence supplied below. Respond directly to the designer's "
-        "latest contribution instead of producing a generic evaluation report. Choose "
+        "You are an adaptive Sokoban co-creation partner speaking as a thoughtful, "
+        "equal design peer. Work only with the exact saved Stage and evidence supplied "
+        "below. Keep the exchange natural, candid, and easy to answer: notice concrete "
+        "design choices, contribute your own grounded interpretation or concern, and "
+        "leave room for the designer to disagree. Do not sound like a survey, examiner, "
+        "workflow assistant, or unconditional cheerleader. Respond directly to the "
+        "designer's latest contribution instead of producing a generic evaluation "
+        "report. Choose "
         "one primary conversational move: observe the Stage, clarify intention, offer "
         "your perspective, challenge a trade-off respectfully, reflect on play evidence, "
         "offer a revision direction, or deliver an explicitly requested revision. "
-        "Use two to four short paragraphs and at most one central question. A factual "
+        "Use one to three short paragraphs and at most one central question. First "
+        "respond to what the designer just said, then add a useful perspective, design "
+        "association, or evidence-grounded concern. Ask a question only when it genuinely "
+        "moves the discussion forward; ordinary replies may have no question. A factual "
         "question should be answered before any optional follow-up. Do not mechanically "
         "include every possible move in each reply.\n\n"
         "Help the designer form and refine their own intention without assigning a "
@@ -113,7 +122,9 @@ def build_chat_messages(
         "change or explicitly agrees to a previously offered revision direction. Never "
         "claim a proposal has been accepted, saved, or verified. Deterministic solver and "
         "play evidence are authoritative only for the facts they report; never invent "
-        "play results or a verified solution. A Stage number is a saved-version index, "
+        "play results or a verified solution. Refer to solver step or push counts only "
+        "when they support a useful design observation; do not recite metrics or spell "
+        "out a move sequence. A Stage number is a saved-version index, "
         "not a campaign or difficulty sequence. Never call Stage 1 the first level, "
         "assume it is a tutorial, or infer intended player progression from its number.\n\n"
         "The designer can also edit the level directly with the tile tools in the right "
@@ -161,7 +172,12 @@ def build_chat_messages(
         "assessment must normally be null. For a newly saved Stage opening it must "
         "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
         "suggestions, and satisfactionQuestion; features and suggestions are non-empty "
-        "arrays of strings, and satisfactionQuestion must match the conversational focus.\n"
+        "arrays of strings. satisfactionQuestion is a compatibility field: copy the "
+        "exact followUpQuestion into it, even when the question is not about satisfaction.\n"
+        "For a Stage opening, followUpQuestion must be genuinely open: do not use the "
+        "English words or/versus/vs or the Chinese words 还是/或者/或是 to present choices, "
+        "and do not ask a yes/no question ending in 吗 or beginning with an auxiliary "
+        "such as Do, Did, Is, Are, Would, or Can.\n"
         "When proposedRows is present it must contain exactly 10 strings of 12 "
         "characters using only space, #, ., @, p, s, and t, with one p and one or "
         "two matching s/t pairs. Keep changes focused on the designer request.\n\n"
@@ -179,6 +195,21 @@ def build_chat_messages(
             if message.get("role") in {"user", "assistant"}
         ],
     ]
+
+
+def _llm_solver_evidence(solver_metrics):
+    allowed_fields = (
+        "valid",
+        "solvable",
+        "searchedStates",
+        "solutionSteps",
+        "solutionPushes",
+    )
+    return {
+        field: solver_metrics[field]
+        for field in allowed_fields
+        if field in solver_metrics
+    }
 
 
 def generate_stage_assessment(
@@ -488,6 +519,9 @@ def validate_chat_response(payload, assessment_only=False):
         assistant_message,
         guidance["followUpQuestion"],
     )
+
+    if assessment_only:
+        assistant_message = _format_stage_opening_paragraphs(assistant_message)
     assessment_payload = payload.get("assessment")
 
     if assessment_payload is None:
@@ -516,6 +550,19 @@ def validate_chat_response(payload, assessment_only=False):
                 "assessment.satisfactionQuestion",
             ),
         }
+
+        if assessment_only:
+            assessment["satisfactionQuestion"] = _normalize_opening_question(
+                assessment["satisfactionQuestion"]
+            )
+
+        if (
+            assessment_only
+            and assessment["satisfactionQuestion"] != guidance["followUpQuestion"]
+        ):
+            raise ValueError(
+                "assessment.satisfactionQuestion must match guidance.followUpQuestion."
+            )
     proposed_rows = payload.get("proposedRows")
 
     if assessment_only and proposed_rows is not None:
@@ -577,16 +624,27 @@ def _remove_question_paragraphs(message, follow_up_question):
 def _build_task_instructions(assessment_only):
     if assessment_only:
         return (
-            "Open discussion for this newly saved Stage. Use observe_stage, include a "
-            "grounded structured assessment, do not infer an intention before the "
-            "designer has supplied evidence, include exactly one open follow-up question, "
-            "and do not offer or generate a changed map."
+            "Open a friendly discussion for this newly saved Stage. Use observe_stage "
+            "and write two or three short paragraphs. Select only one or two concrete "
+            "map choices that are genuinely worth discussing; do not inventory the whole "
+            "map. Offer at least one grounded personal perspective, design association, "
+            "or gentle concern, clearly as your view rather than fact. End with exactly "
+            "one open question about one of those concrete authored choices, such as the "
+            "water placement, spatial relationship, or push sequence. Make it easy for "
+            "the designer to explain, correct, or extend the thought. Do not say Welcome "
+            "to Stage, ask for the designer's overall intended player experience, offer "
+            "preselected categories or an either-or choice, infer an intention, enumerate "
+            "solver moves, or offer or generate a changed map. Include the grounded "
+            "structured assessment only as archival research data, not as the prose style."
         )
 
     return (
-        "Respond adaptively. assessment should normally be null. Use offer_revision "
-        "without proposedRows for an unsolicited revision idea; use deliver_revision "
-        "with a complete proposedRows map only after explicit designer authorization."
+        "Continue as a conversational design peer. Respond to the latest message before "
+        "adding your own useful view; do not agree reflexively and do not ask a question "
+        "by habit. When a decision is actually required, a direct confirmation question "
+        "is appropriate. assessment should normally be null. Use offer_revision without "
+        "proposedRows for an unsolicited revision idea; use deliver_revision with a "
+        "complete proposedRows map only after explicit designer authorization."
     )
 
 
@@ -636,6 +694,9 @@ def _validate_guidance(payload, assessment_only):
 
         if question_marks != 1:
             raise ValueError("followUpQuestion must contain exactly one question.")
+
+        if assessment_only:
+            follow_up_question = _normalize_opening_question(follow_up_question)
     proposal_offer = payload.get("proposalOffer")
 
     if proposal_offer is not None:
@@ -707,6 +768,74 @@ def _validate_guidance(payload, assessment_only):
         "proposalOffer": proposal_offer,
         "uiCues": normalized_cues,
     }
+
+
+def _normalize_opening_question(question):
+    chinese_anchor = re.search(r"还是|或者|或是|抑或", question)
+    english_anchor = re.search(r"\b(?:or|versus|vs\.?)\b", question, re.IGNORECASE)
+    chinese_yes_no = re.search(r"吗[？?]\s*$", question)
+    english_yes_no = re.match(
+        r"^(?:do|does|did|is|are|was|were|would|could|can|will|have|has)\b",
+        question,
+        re.IGNORECASE,
+    )
+
+    if (
+        chinese_anchor is None
+        and english_anchor is None
+        and chinese_yes_no is None
+        and english_yes_no is None
+    ):
+        return question
+
+    if chinese_anchor is not None or chinese_yes_no is not None:
+        choice_intro = re.search(
+            r"[，,](?:你)?(?:是|是否|主要是|更倾向于)",
+            question,
+        )
+
+        if choice_intro is not None:
+            subject = question[:choice_intro.start()].rstrip("，,。！？? ")
+
+            if subject:
+                time_suffix = "" if subject.endswith("时") else "时"
+                return f"{subject}{time_suffix}，你最先考虑的是什么？"
+
+    if english_anchor is not None:
+        for separator in ("—", "--", " - "):
+            if separator not in question:
+                continue
+
+            subject = question.split(separator, 1)[0].strip().rstrip(".?! ")
+
+            if re.match(r"^(?:what|why|how|where|when|which)\b", subject, re.IGNORECASE):
+                return f"{subject}?"
+
+    raise ValueError("A Stage opening question cannot anchor the designer with choices.")
+
+
+def _format_stage_opening_paragraphs(message):
+    paragraphs = [part.strip() for part in message.split("\n\n") if part.strip()]
+
+    if len(paragraphs) == 1:
+        sentences = [
+            part.strip()
+            for part in re.split(r"(?<=[.!。！])\s*", paragraphs[0])
+            if part.strip()
+        ]
+
+        if len(sentences) < 2:
+            raise ValueError("A Stage opening requires at least two short paragraphs.")
+
+        split_at = max(1, len(sentences) // 2)
+        paragraphs = [
+            " ".join(sentences[:split_at]),
+            " ".join(sentences[split_at:]),
+        ]
+    elif len(paragraphs) > 3:
+        paragraphs = [paragraphs[0], paragraphs[1], " ".join(paragraphs[2:])]
+
+    return "\n\n".join(paragraphs)
 
 
 def _compose_assistant_message(
