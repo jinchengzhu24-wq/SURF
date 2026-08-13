@@ -666,7 +666,7 @@ class LLMClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected_error):
                     llm_client.validate_chat_response(payload)
 
-    def test_stage_opening_is_neutral_and_requires_one_question(self):
+    def test_stage_opening_is_neutral_and_may_include_one_question(self):
         payload = {
             "assistantMessage": (
                 "The box and target share a compact central route. "
@@ -695,6 +695,36 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result[4]["move"], "observe_stage")
         self.assertIsNone(result[4]["intentHypothesis"])
+
+    def test_stage_opening_allows_no_question(self):
+        payload = {
+            "assistantMessage": (
+                "The water turns the lower route into a deliberate detour. "
+                "To me, that gives the small room a surprisingly clear identity."
+            ),
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The solver found a route.",
+                "difficultyOpinion": "This looks deliberate to me.",
+                "features": ["Lower detour"],
+                "suggestions": ["Playtest the route"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload, assessment_only=True)
+
+        self.assertIsNone(result[4]["followUpQuestion"])
+        self.assertIsNone(result[1]["satisfactionQuestion"])
 
     def test_stage_opening_requires_archival_question_to_match_discussion(self):
         payload = {
@@ -732,9 +762,10 @@ class LLMClientTests(unittest.TestCase):
         )
         prompt = messages[0]["content"]
 
-        self.assertIn("two or three short paragraphs", prompt)
+        self.assertIn("one to three short paragraphs", prompt)
         self.assertIn("one or two concrete map choices", prompt)
         self.assertIn("grounded personal perspective", prompt)
+        self.assertIn("Do not force a question", prompt)
         self.assertIn("Do not say Welcome to Stage", prompt)
         self.assertIn("either-or choice", prompt)
         self.assertIn("还是/或者/或是", prompt)
@@ -832,7 +863,7 @@ class LLMClientTests(unittest.TestCase):
                 "Would you prefer a quick solve or a longer sequence?"
             )
 
-    def test_stage_opening_single_block_is_split_into_two_short_paragraphs(self):
+    def test_stage_opening_single_block_remains_natural(self):
         message = (
             "The water divides the room. In my view, that makes the first push clearer. "
             "The open lower area may still invite experimentation."
@@ -840,7 +871,7 @@ class LLMClientTests(unittest.TestCase):
 
         result = llm_client._format_stage_opening_paragraphs(message)
 
-        self.assertEqual(len(result.split("\n\n")), 2)
+        self.assertEqual(len(result.split("\n\n")), 1)
         self.assertIn("In my view", result)
 
     def test_stage_opening_rejects_intention_inference(self):

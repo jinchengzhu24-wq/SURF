@@ -24,7 +24,7 @@ CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
 PROPOSAL_MAX_TOKENS = 2400
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v14-nonempty-proposals"
+PROMPT_VERSION = "cocreation-v15-natural-optional-questions"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -99,12 +99,16 @@ def build_chat_messages(
         "one primary conversational move: observe the Stage, clarify intention, offer "
         "your perspective, challenge a trade-off respectfully, reflect on play evidence, "
         "offer a revision direction, or deliver an explicitly requested revision. "
-        "Use one to three short paragraphs and at most one central question. First "
-        "respond to what the designer just said, then add a useful perspective, design "
-        "association, or evidence-grounded concern. Ask a question only when it genuinely "
-        "moves the discussion forward; ordinary replies may have no question. A factual "
-        "question should be answered before any optional follow-up. Do not mechanically "
-        "include every possible move in each reply.\n\n"
+        "Use one to three short paragraphs and at most one central question. Vary the "
+        "shape and rhythm of replies according to the moment: a concise direct answer, "
+        "an observation, a design association, a respectful disagreement, or a longer "
+        "reflection can each stand on its own. Do not mechanically follow a fixed order "
+        "such as acknowledgement, evaluation, then question, and do not paraphrase the "
+        "designer merely to prove that you heard them. Ask a question only when the "
+        "answer would genuinely change what you say or do next. Statements are a complete "
+        "response; do not end with a question by habit. A factual question should be "
+        "answered before any optional follow-up. Do not mechanically include every "
+        "possible move in each reply.\n\n"
         "Help the designer form and refine their own intention without assigning a "
         "predefined purpose. Infer intention only when conversation or design actions "
         "provide evidence. Phrase every inference as a tentative, correctable hypothesis "
@@ -164,7 +168,7 @@ def build_chat_messages(
         "Return JSON only with exactly these keys:\n"
         '{"assistantMessage":"...","guidance":'
         '{"move":"observe_stage","intentHypothesis":null,'
-        '"intentConfidence":null,"followUpQuestion":"...",'
+        '"intentConfidence":null,"followUpQuestion":null,'
         '"proposalOffer":null,"uiCues":[]},"assessment":null,"proposedRows":null,'
         '"modificationSummary":""}.\n'
         "guidance.move must be one of observe_stage, clarify_intent, "
@@ -175,13 +179,15 @@ def build_chat_messages(
         "uiCues must be an array of at most two unique objects with exactly type and "
         "text; type must be manual_edit or warning. The legacy tradeoff type is accepted "
         "by the application for historical data but must not be generated. "
-        "assistantMessage must not repeat followUpQuestion; the application appends it.\n"
+        "assistantMessage must not repeat followUpQuestion; when non-null, the application "
+        "appends it in a separate discussion card. Prefer null unless an answer is needed "
+        "to move the collaboration forward.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
         "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
         "suggestions, and satisfactionQuestion; features and suggestions are non-empty "
-        "arrays of strings. satisfactionQuestion is a compatibility field: copy the "
-        "exact followUpQuestion into it, even when the question is not about satisfaction.\n"
-        "For a Stage opening, followUpQuestion must be genuinely open: do not use the "
+        "arrays of strings. satisfactionQuestion is a nullable compatibility field: copy "
+        "the exact followUpQuestion into it, including null. A Stage opening does not need "
+        "a question. If it uses one, followUpQuestion must be genuinely open: do not use the "
         "English words or/versus/vs or the Chinese words 还是/或者/或是 to present choices, "
         "and do not ask a yes/no question ending in 吗 or beginning with an auxiliary "
         "such as Do, Did, Is, Are, Would, or Can.\n"
@@ -622,13 +628,13 @@ def validate_chat_response(payload, assessment_only=False, language="en"):
                 assessment_payload.get("suggestions"),
                 "suggestions",
             ),
-            "satisfactionQuestion": _clean_text(
+            "satisfactionQuestion": _clean_optional_text(
                 assessment_payload.get("satisfactionQuestion"),
                 "assessment.satisfactionQuestion",
             ),
         }
 
-        if assessment_only:
+        if assessment_only and assessment["satisfactionQuestion"] is not None:
             assessment["satisfactionQuestion"] = _normalize_opening_question(
                 assessment["satisfactionQuestion"]
             )
@@ -719,14 +725,15 @@ def _build_task_instructions(assessment_only):
     if assessment_only:
         return (
             "Open a friendly discussion for this newly saved Stage. Use observe_stage "
-            "and write two or three short paragraphs. Select only one or two concrete "
+            "and write one to three short paragraphs, choosing the length and rhythm that "
+            "fit what is worth saying. Select only one or two concrete "
             "map choices that are genuinely worth discussing; do not inventory the whole "
             "map. Offer at least one grounded personal perspective, design association, "
-            "or gentle concern, clearly as your view rather than fact. End with exactly "
-            "one open question about a concrete choice the provenance rules say the "
-            "designer actually controlled, or—when exact tiles were generated—about "
-            "the designer's reaction to the generated outcome. Make it easy for "
-            "the designer to explain, correct, or extend the thought. Do not say Welcome "
+            "or gentle concern, clearly as your view rather than fact. Do not force a "
+            "question or use one as a routine closing. When a question would materially "
+            "help, ask one open question about a concrete choice the provenance rules say "
+            "the designer actually controlled, or—when exact tiles were generated—about "
+            "the designer's reaction to the generated outcome. Do not say Welcome "
             "to Stage, ask for the designer's overall intended player experience, offer "
             "preselected categories or an either-or choice, infer an intention, enumerate "
             "solver moves, or offer or generate a changed map. Include the grounded "
@@ -734,10 +741,11 @@ def _build_task_instructions(assessment_only):
         )
 
     return (
-        "Continue as a conversational design peer. Respond to the latest message before "
-        "adding your own useful view; do not agree reflexively and do not ask a question "
-        "by habit. When a decision is actually required, a direct confirmation question "
-        "is appropriate. assessment should normally be null. Use offer_revision without "
+        "Continue as a conversational design peer. Address the latest message, but vary "
+        "how you do so and let a useful observation or direct answer stand without a "
+        "follow-up question. Do not agree reflexively. When a decision is actually "
+        "required, a direct confirmation question is appropriate. assessment should "
+        "normally be null. Use offer_revision without "
         "proposedRows for an unsolicited revision idea; use deliver_revision with a "
         "complete proposedRows map only after explicit designer authorization."
     )
@@ -776,11 +784,12 @@ def _build_draft_provenance_guidance(stage_context):
             "box, target, player, or corridor. Do not invent or quote parameter values "
             "because they are not supplied here. Discuss exact layout features as outcomes "
             "of the generated draft. Never say or imply that the designer intended, "
-            "wanted, hoped for, chose, or authored a visible layout feature. Ask an open "
-            "comparison question about how the generated result relates to their expected "
-            "parameter effect, what surprised them, or which observed effect they might "
-            "want to strengthen or revise. A suitable form is: 'How does this generated "
-            "result compare with what you expected from your settings?' Apply this "
+            "wanted, hoped for, chose, or authored a visible layout feature. If a question "
+            "is genuinely useful, make it an open comparison about how the generated "
+            "result relates to their expected parameter effect, what surprised them, or "
+            "which observed effect they might want to strengthen or revise. A suitable "
+            "form is: 'How does this generated result compare with what you expected from "
+            "your settings?' Apply this "
             "attribution rule "
             "throughout conversation on this Stage, unless the designer explicitly adopts "
             "or discusses a generated feature."
@@ -923,8 +932,6 @@ def _validate_guidance(payload, assessment_only, language="en"):
     if assessment_only:
         if move != "observe_stage":
             raise ValueError("A Stage opening must use observe_stage.")
-        if follow_up_question is None:
-            raise ValueError("A Stage opening requires one follow-up question.")
         if intent_hypothesis is not None or proposal_offer is not None or normalized_cues:
             raise ValueError("A Stage opening cannot infer intention or offer a revision.")
 
@@ -1079,22 +1086,7 @@ def _normalize_opening_question(question):
 def _format_stage_opening_paragraphs(message):
     paragraphs = [part.strip() for part in message.split("\n\n") if part.strip()]
 
-    if len(paragraphs) == 1:
-        sentences = [
-            part.strip()
-            for part in re.split(r"(?<=[.!。！])\s*", paragraphs[0])
-            if part.strip()
-        ]
-
-        if len(sentences) < 2:
-            raise ValueError("A Stage opening requires at least two short paragraphs.")
-
-        split_at = max(1, len(sentences) // 2)
-        paragraphs = [
-            " ".join(sentences[:split_at]),
-            " ".join(sentences[split_at:]),
-        ]
-    elif len(paragraphs) > 3:
+    if len(paragraphs) > 3:
         paragraphs = [paragraphs[0], paragraphs[1], " ".join(paragraphs[2:])]
 
     return "\n\n".join(paragraphs)
