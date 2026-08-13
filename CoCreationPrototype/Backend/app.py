@@ -1636,6 +1636,7 @@ def build_llm_context(database, session_id, version):
     recent_guidance = {
         "intentHypothesis": None,
         "proposalOffer": None,
+        "uiCues": {},
     }
     guidance_sources = [
         load_json(turn["guidance_json"]) or {}
@@ -1654,8 +1655,34 @@ def build_llm_context(database, session_id, version):
             recent_guidance["intentHypothesis"] = guidance["intentHypothesis"]
         if recent_guidance["proposalOffer"] is None and guidance.get("proposalOffer"):
             recent_guidance["proposalOffer"] = guidance["proposalOffer"]
-        if all(recent_guidance.values()):
+        for cue in guidance.get("uiCues") or []:
+            cue_type = cue.get("type")
+            if cue_type == "tradeoff":
+                cue_type = "warning"
+            if (
+                cue_type in {"warning", "manual_edit"}
+                and cue_type not in recent_guidance["uiCues"]
+            ):
+                recent_guidance["uiCues"][cue_type] = {
+                    "text": cue.get("text"),
+                    "evidenceSignature": guidance.get("evidenceSignature"),
+                }
+        if (
+            recent_guidance["intentHypothesis"]
+            and recent_guidance["proposalOffer"]
+            and len(recent_guidance["uiCues"]) == 2
+        ):
             break
+
+    latest_user_direction = _latest_substantive_design_direction(turns)
+    evidence_payload = {
+        "versionId": version["id"],
+        "play": dict(latest_play) if latest_play is not None else None,
+        "direction": latest_user_direction,
+    }
+    guidance_evidence_signature = hashlib.sha256(
+        dump_json(evidence_payload).encode("utf-8")
+    ).hexdigest()[:16]
 
     if accepted_opening is not None and not any(
         turn["content"] == accepted_opening["content"]
@@ -1685,6 +1712,7 @@ def build_llm_context(database, session_id, version):
             "diff": load_json(version["diff_json"]),
             "changeSummary": change_summary,
             "recentGuidance": recent_guidance,
+            "guidanceEvidenceSignature": guidance_evidence_signature,
             "openingTurnId": (
                 accepted_opening["assistant_turn_id"]
                 if accepted_opening is not None
@@ -1711,6 +1739,57 @@ def build_llm_context(database, session_id, version):
             else None
         ),
     }
+
+
+def _latest_substantive_design_direction(turns):
+    design_terms = (
+        "水",
+        "箱",
+        "目标",
+        "墙",
+        "通道",
+        "路线",
+        "推动",
+        "绕行",
+        "难度",
+        "节奏",
+        "water",
+        "box",
+        "crate",
+        "target",
+        "wall",
+        "corridor",
+        "route",
+        "push",
+        "difficulty",
+        "pacing",
+    )
+    generic_continuations = {
+        "继续",
+        "展开",
+        "展开讲讲",
+        "可以",
+        "好的",
+        "好",
+        "行",
+        "试试",
+        "continue",
+        "go on",
+        "okay",
+        "ok",
+        "yes",
+    }
+
+    for turn in turns:
+        if turn["role"] != "user":
+            continue
+        content = turn["content"].strip().casefold()
+        normalized = re.sub(r"[\s,.!?。！？]+", "", content)
+        if not content or normalized in generic_continuations:
+            continue
+        if any(term in content for term in design_terms):
+            return content
+    return ""
 
 
 def require_browser_session(database, session_id, token):

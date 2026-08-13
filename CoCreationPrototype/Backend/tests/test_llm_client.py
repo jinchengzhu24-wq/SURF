@@ -79,11 +79,12 @@ class LLMClientTests(unittest.TestCase):
     def test_valid_response_is_returned(self):
         result, client = self.execute([
             "The level has a compact central route.\n\n"
-            "Which part would you like to examine first?"
+            "When the box enters the water-side corridor, which route choice should the "
+            "player notice first so we can judge its readability?"
         ])
 
         self.assertIn("compact central route", result.assistant_message)
-        self.assertIn("Which part", result.assistant_message)
+        self.assertIn("water-side corridor", result.assistant_message)
         self.assertEqual(result.guidance["move"], "offer_perspective")
         self.assertEqual(result.attempts_used, 1)
         request = client.chat.completions.calls[0]
@@ -189,7 +190,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertIsNone(result.guidance["proposalOffer"])
 
-        _, changed_intent, _ = llm_client._extract_plain_guidance(
+        _, changed_intent, _, _ = llm_client._extract_plain_guidance(
             "Reply.\n<GUIDANCE>\nINTENT: I think you may want water to control two route decisions\n</GUIDANCE>",
             "en",
             stage_context,
@@ -209,11 +210,33 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("recentGuidance", messages[0]["content"])
         self.assertIn("you MUST output INTENT", messages[0]["content"])
 
-    def test_pure_question_stays_in_body_without_failing(self):
-        result, _ = self.execute(["What effect do you want to preserve?"])
+    def test_pure_generic_question_uses_fallback_model(self):
+        result, client = self.execute([
+            "What do you think?",
+            "The water-side route could carry more of the decision.",
+        ])
 
-        self.assertEqual(result.assistant_message, "What effect do you want to preserve?")
+        self.assertIn("water-side route", result.assistant_message)
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(client.chat.completions.calls[1]["model"], "deepseek-v4-pro")
         self.assertIsNone(result.guidance["followUpQuestion"])
+
+    def test_two_pure_generic_questions_return_low_quality_error(self):
+        client = FakeClient(["What do you think?", "Is this direction okay?"])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            with self.assertRaises(llm_client.LLMServiceError) as raised:
+                llm_client.generate_chat_reply(
+                    [{"role": "user", "content": "Assess the level."}],
+                    ["############"] * 10,
+                    "low-quality-test",
+                )
+
+        self.assertEqual(raised.exception.code, "MODEL_LOW_QUALITY_RESPONSE")
+        self.assertEqual(raised.exception.attempts_used, 2)
 
     def test_multiple_questions_stay_in_body_without_failing(self):
         reply = "What should stay? What should change?"
@@ -237,11 +260,122 @@ class LLMClientTests(unittest.TestCase):
                 "no-forced-question-test",
             )
 
-        self.assertEqual(
-            result.assistant_message,
-            "That would make the opening commitment more legible.",
-        )
+        self.assertTrue(result.assistant_message.startswith(
+            "That would make the opening commitment more legible."
+        ))
         self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
+
+    def test_plain_guidance_extracts_warning_and_manual_edit(self):
+        result, _ = self.execute([
+            "The water can shape the first route decision.\n"
+            "<GUIDANCE>WARNING: The box may lose its escape route beside the water after "
+            "the first push || MANUAL_EDIT: Try a small experiment around the water edge "
+            "and watch whether the route choice becomes clearer</GUIDANCE>"
+        ])
+
+        self.assertEqual(
+            [cue["type"] for cue in result.guidance["uiCues"]],
+            ["warning", "manual_edit"],
+        )
+        self.assertNotIn("GUIDANCE", result.assistant_message)
+        self.assertLessEqual(len(result.guidance["uiCues"]), 2)
+
+    def test_invalid_or_duplicate_ui_cue_fields_do_not_break_visible_reply(self):
+        visible, _, _, cues = llm_client._extract_plain_guidance(
+            "Visible reply.\n<GUIDANCE>WARNING: The water colors look dull || "
+            "WARNING: The box may be stuck beside the water || UNKNOWN: hidden || "
+            "MANUAL_EDIT: Move the wall at row 3 and observe it</GUIDANCE>",
+            "en",
+            {},
+        )
+
+        self.assertEqual(visible, "Visible reply.")
+        self.assertEqual(cues, [])
+
+    def test_ui_cue_dedup_allows_same_warning_after_evidence_changes(self):
+        content = (
+            "Visible reply.\n<GUIDANCE>WARNING: The box may lose its escape route "
+            "beside the water after the first push</GUIDANCE>"
+        )
+        recent = {
+            "recentGuidance": {
+                "uiCues": {
+                    "warning": {
+                        "text": "The box may lose its escape route beside the water after the first push.",
+                        "evidenceSignature": "same",
+                    }
+                }
+            },
+            "guidanceEvidenceSignature": "same",
+        }
+        _, _, _, same_cues = llm_client._extract_plain_guidance(content, "en", recent)
+        recent["guidanceEvidenceSignature"] = "changed"
+        _, _, _, changed_cues = llm_client._extract_plain_guidance(content, "en", recent)
+
+        self.assertEqual(same_cues, [])
+        self.assertEqual(changed_cues[0]["type"], "warning")
+
+    def test_human_edit_without_play_evidence_gets_tentative_warning(self):
+        warning = llm_client._deterministic_warning(
+            "The revision is saved.",
+            "en",
+            {
+                "source": "human_edit",
+                "changeSummary": {"components": ["water", "boxes"]},
+            },
+            None,
+        )
+
+        self.assertIn("may alter", warning)
+        self.assertIn("first push", warning)
+
+    def test_contextual_manual_edit_avoids_exact_coordinates(self):
+        cue = llm_client._contextual_manual_edit(
+            ["############", "#p   @     #", "#    @ s t #"] + ["############"] * 7,
+            "en",
+        )
+
+        self.assertIn("water edge", cue)
+        self.assertIn("watch", cue)
+        self.assertNotRegex(cue, r"\b(?:row|column)\s+\d+")
+
+    def test_evidence_grounded_warning_is_extracted_but_aesthetic_opinion_is_not(self):
+        warning = llm_client._deterministic_warning(
+            "I am concerned the box may lose its escape route beside the water after the first push.",
+            "en",
+            {},
+            None,
+        )
+        aesthetic = llm_client._deterministic_warning(
+            "The water looks too plain and the colors feel dull.",
+            "en",
+            {},
+            None,
+        )
+
+        self.assertIsNotNone(warning)
+        self.assertIsNone(aesthetic)
+
+    def test_specific_vivid_question_is_kept_as_blue_card(self):
+        result, _ = self.execute([
+            "The water edge can make the route legible. When the box enters the corridor "
+            "beside the water, which route choice should the player notice first so we can "
+            "judge its readability?"
+        ])
+
+        self.assertIn("water", result.guidance["followUpQuestion"])
+        self.assertNotIn("?", result.assistant_message.split("\n\n", 1)[0])
+
+    def test_generic_question_is_removed_when_declarative_body_exists(self):
+        result, client = self.execute([
+            "Moving the target beside the water would create a route decision. "
+            "Does this direction work?"
+        ])
+
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertNotIn("Does this direction work", result.assistant_message)
 
     def test_chinese_agreement_is_treated_as_an_explicit_direction(self):
         self.assertTrue(llm_client._latest_user_states_direction([

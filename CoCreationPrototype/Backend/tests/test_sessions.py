@@ -425,7 +425,17 @@ class CoCreationSessionTests(unittest.TestCase):
                     "summary": "Link the lower target to the water edge",
                     "rationale": "Make the first push depend on reading the water route",
                 },
-                "uiCues": [],
+                "uiCues": [
+                    {
+                        "type": "warning",
+                        "text": "The box may lose its escape route beside the water.",
+                    },
+                    {
+                        "type": "manual_edit",
+                        "text": "Try the water edge and observe the first route choice.",
+                    },
+                ],
+                "evidenceSignature": "saved-evidence",
             },
         )
         second_execution = LLMExecutionResult(
@@ -470,6 +480,26 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(
             recent["proposalOffer"]["summary"],
             "Link the lower target to the water edge",
+        )
+        self.assertEqual(
+            recent["uiCues"]["warning"]["evidenceSignature"],
+            "saved-evidence",
+        )
+        self.assertIn("manual_edit", recent["uiCues"])
+        self.assertTrue(
+            mocked.call_args_list[1].kwargs["stage_context"]["guidanceEvidenceSignature"]
+        )
+
+    def test_generic_continuation_does_not_replace_substantive_design_direction(self):
+        turns = [
+            {"role": "user", "content": "继续"},
+            {"role": "assistant", "content": "我再展开一点。"},
+            {"role": "user", "content": "我希望水域参与箱子的推进路线。"},
+        ]
+
+        self.assertEqual(
+            backend._latest_substantive_design_direction(turns),
+            "我希望水域参与箱子的推进路线。",
         )
 
     def test_failed_message_retries_with_one_user_turn_and_one_assistant_turn(self):
@@ -569,6 +599,36 @@ class CoCreationSessionTests(unittest.TestCase):
         stored = self.read_session()
         matching_turns = [
             turn for turn in stored["turns"]
+            if turn["requestId"] == request_payload["idempotencyKey"]
+        ]
+        self.assertEqual([turn["role"] for turn in matching_turns], ["user"])
+
+    def test_low_quality_model_failure_saves_no_assistant_turn(self):
+        version_id = self.read_session()["currentVersionId"]
+        request_payload = {
+            "content": "展开讲讲。",
+            "baseVersionId": version_id,
+            "idempotencyKey": "low_quality_message_001",
+        }
+        error = LLMServiceError(
+            "MODEL_LOW_QUALITY_RESPONSE",
+            "The LLM returned only a low-information question.",
+            request_payload["idempotencyKey"],
+            True,
+            2,
+            502,
+        )
+
+        with patch.object(backend, "generate_chat_reply", side_effect=error):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["code"], "MODEL_LOW_QUALITY_RESPONSE")
+        matching_turns = [
+            turn for turn in self.read_session()["turns"]
             if turn["requestId"] == request_payload["idempotencyKey"]
         ]
         self.assertEqual([turn["role"] for turn in matching_turns], ["user"])
@@ -1015,7 +1075,10 @@ class CoCreationSessionTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": "What should stand out first?",
                 "proposalOffer": None,
-                "uiCues": [],
+                "uiCues": [
+                    {"type": "warning", "text": "The box may be trapped by the water."},
+                    {"type": "manual_edit", "text": "Try a small route experiment."},
+                ],
             },
         )
 
@@ -1035,7 +1098,7 @@ class CoCreationSessionTests(unittest.TestCase):
                     "intentHypothesis": None,
                     "proposalOfferSummary": None,
                     "proposalOfferRationale": None,
-                    "uiCueTexts": [],
+                    "uiCueTexts": ["箱子可能被水域卡住。", "尝试一次小范围路线实验。"],
                     "proposalSummary": None,
                 }
             ],
@@ -1062,6 +1125,17 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(
             translated_turn["translations"]["zh-CN"]["guidance"]["followUpQuestion"],
             "你希望玩家首先注意到什么？",
+        )
+        self.assertEqual(
+            [
+                cue["type"]
+                for cue in translated_turn["translations"]["zh-CN"]["guidance"]["uiCues"]
+            ],
+            ["warning", "manual_edit"],
+        )
+        self.assertEqual(
+            translated_turn["translations"]["zh-CN"]["guidance"]["uiCues"][0]["text"],
+            "箱子可能被水域卡住。",
         )
         self.assertEqual(mocked.call_count, 1)
 

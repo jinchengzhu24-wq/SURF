@@ -29,7 +29,7 @@ PLAIN_CHAT_MAX_TOKENS = 700
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v17-guidance-cards"
+PROMPT_VERSION = "cocreation-v18-risk-edit-question-quality"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -86,6 +86,10 @@ class LLMServiceError(Exception):
 
 
 class EmptyModelResponse(ValueError):
+    pass
+
+
+class LowQualityModelResponse(ValueError):
     pass
 
 
@@ -260,15 +264,23 @@ def build_plain_chat_messages(
         else (
             "After the visible reply, you may append one optional machine-readable block "
             "as one final line using exactly this compact form:\n"
-            "<GUIDANCE>INTENT: ... || PROPOSAL_SUMMARY: ... || "
-            "PROPOSAL_RATIONALE: ...</GUIDANCE>\n"
+            "<GUIDANCE>WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
+            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ...</GUIDANCE>\n"
             "Omit any field that is not warranted, and omit the entire block when no card "
             "would improve the collaboration. Once multi-turn evidence supports a meaningful "
             "preference or direction, you MUST output INTENT. When you describe a concrete, "
             "actionable revision direction, you MUST output both proposal fields. After the "
             "designer explicitly agrees to move forward with a direction, you MUST output "
-            "both INTENT and the two proposal fields together. These metadata requirements "
-            "do not require a question. Do not repeat an unchanged card "
+            "both INTENT and the two proposal fields together. Add WARNING when the map, a "
+            "saved change, solver evidence, or play evidence supports a possible deadlock or "
+            "soft lock, push-order issue, route ambiguity, target misreading, repeated movement, "
+            "or conflict between directions. Name the specific area, element, or action and use "
+            "tentative wording such as 'may', 'worth playtesting', or 'I am concerned'; do not "
+            "turn a purely aesthetic opinion into a warning. Add MANUAL_EDIT when one local "
+            "experiment could advance the judgment: name the area, what to observe, and why, "
+            "without prescribing final coordinates or implying manual editing is required. "
+            "Output at most two UI cue fields. These metadata requirements do not require a "
+            "question. Do not repeat an unchanged card "
             "listed in Saved Stage context.recentGuidance. The visible reply must stand on "
             "its own and must not mention these tags or mechanically repeat their text. "
         )
@@ -286,7 +298,11 @@ def build_plain_chat_messages(
         "would genuinely move the discussion forward; a declarative reply is complete. "
         "For ordinary continuation, default to no question. Ask only when the latest "
         "contribution is genuinely ambiguous or a necessary design decision remains "
-        "unresolved. If the latest contribution already states a preference, evaluation, "
+        "unresolved. Every question must name a concrete map anchor, evoke a specific play "
+        "moment or action result, and say or make clear which design judgment the answer will "
+        "affect (such as route choice, push order, or target readability). Never ask generic "
+        "confirmation questions such as 'What do you think?', 'Does this direction work?', or "
+        "'Is this okay?'. If the latest contribution already states a preference, evaluation, "
         "or direction, your reply must contain no question; contribute a useful view and "
         "stop. Never ask for a preference the designer has already stated. "
         "When inferring intention, speak tentatively and directly to the designer using "
@@ -563,6 +579,8 @@ def _generate_plain_chat_sync(
                     task=task,
                     language=language,
                     solver_metrics=solver_metrics,
+                    rows=rows,
+                    play_summary=play_summary,
                     stage_opening=stage_opening,
                     stage_context=stage_context,
                     started_at=started_at,
@@ -840,6 +858,8 @@ async def _generate_plain_with_model_fallback(
     task,
     language,
     solver_metrics,
+    rows,
+    play_summary,
     stage_opening,
     stage_context,
     started_at,
@@ -891,13 +911,13 @@ async def _generate_plain_with_model_fallback(
             if len(content.strip()) > CHAT_RESPONSE_MAX_LENGTH:
                 raise ValueError("The model response is too long.")
 
-            visible_content, intent_hypothesis, proposal_offer = _extract_plain_guidance(
+            visible_content, intent_hypothesis, proposal_offer, ui_cues = _extract_plain_guidance(
                 content.strip(),
                 language,
                 stage_context,
                 stage_opening,
             )
-            intent_hypothesis, proposal_offer, guidance_fallback_used = (
+            intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = (
                 _apply_deterministic_guidance_fallback(
                     messages,
                     visible_content,
@@ -906,9 +926,24 @@ async def _generate_plain_with_model_fallback(
                     stage_opening,
                     intent_hypothesis,
                     proposal_offer,
+                    ui_cues,
+                    rows,
+                    play_summary,
                 )
             )
-            body, question = _extract_plain_message_question(visible_content)
+            visible_content = _remove_extracted_warning_sentence(
+                visible_content,
+                ui_cues,
+            )
+            body, question, pure_low_quality = _extract_plain_message_question(
+                visible_content,
+                language,
+            )
+
+            if pure_low_quality:
+                raise LowQualityModelResponse(
+                    "The model returned only a low-information question."
+                )
 
             if _latest_user_states_direction(messages):
                 body = _remove_questions_from_plain_reply(body)
@@ -931,8 +966,11 @@ async def _generate_plain_with_model_fallback(
                 "intentConfidence": "medium" if intent_hypothesis else None,
                 "followUpQuestion": question,
                 "proposalOffer": proposal_offer,
-                "uiCues": [],
+                "uiCues": ui_cues[:2],
             }
+            evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
+            if evidence_signature and ui_cues:
+                guidance["evidenceSignature"] = evidence_signature
             assessment = (
                 _build_minimal_stage_assessment(
                     body,
@@ -973,6 +1011,8 @@ async def _generate_plain_with_model_fallback(
                 guidanceFallbackUsed=guidance_fallback_used,
                 intentCard=bool(intent_hypothesis),
                 proposalCard=bool(proposal_offer),
+                warningCard=any(cue.get("type") == "warning" for cue in ui_cues),
+                manualEditCard=any(cue.get("type") == "manual_edit" for cue in ui_cues),
                 **response_fields,
             )
             return result
@@ -1515,10 +1555,10 @@ def _extract_message_question(message):
     return "\n\n".join(declarative_paragraphs), questions[0] if questions else None
 
 
-def _extract_plain_message_question(message):
-    """Extract one clean question when doing so cannot discard the actual reply."""
+def _extract_plain_message_question(message, language="en"):
+    """Extract one useful question and discard low-information questions beside prose."""
     if "?" not in message and "？" not in message:
-        return message, None
+        return message, None, False
 
     declarative_paragraphs = []
     questions = []
@@ -1546,10 +1586,58 @@ def _extract_plain_message_question(message):
 
     question_marks = message.count("?") + message.count("？")
 
-    if len(questions) != 1 or question_marks != 1 or not declarative_paragraphs:
-        return message, None
+    if len(questions) == 1 and question_marks == 1:
+        question = questions[0]
+        useful = _question_is_specific_and_vivid(question, language)
 
-    return "\n\n".join(declarative_paragraphs), questions[0]
+        if not declarative_paragraphs:
+            return ("", question, False) if useful else (message, None, True)
+
+        if useful:
+            return "\n\n".join(declarative_paragraphs), question, False
+
+        return "\n\n".join(declarative_paragraphs), None, False
+
+    if declarative_paragraphs and questions and all(
+        not _question_is_specific_and_vivid(question, language)
+        for question in questions
+    ):
+        return "\n\n".join(declarative_paragraphs), None, False
+
+    return message, None, False
+
+
+def _question_is_specific_and_vivid(question, language="en"):
+    text = str(question or "").strip().casefold()
+
+    if not text:
+        return False
+
+    generic_patterns = (
+        r"^(?:你)?(?:觉得|认为)(?:这个|这条|该)?(?:方向|思路|方案)(?:如何|怎么样|可行吗)[？?]?$",
+        r"^(?:你)?怎么看[？?]?$",
+        r"^(?:这样|这)(?:可以|行|好吗|合适吗)[？?]?$",
+        r"^(?:what do you think|does (?:this|that) (?:direction )?(?:work|seem good)|"
+        r"is (?:this|that) (?:okay|ok|good|feasible))[?]?$",
+    )
+
+    if any(re.match(pattern, text, re.IGNORECASE) for pattern in generic_patterns):
+        return False
+
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        anchors = ("水", "箱", "目标", "墙", "通道", "路线", "入口", "出口", "角落", "边缘", "水边")
+        moments = ("推", "绕", "进入", "经过", "贴着", "到达", "转向", "第一次", "当", "卡住", "退回")
+        judgments = ("选择", "顺序", "辨认", "理解", "注意", "判断", "读懂", "可读", "退路", "预期", "意识", "感到")
+    else:
+        anchors = ("water", "box", "crate", "target", "wall", "corridor", "route", "entrance", "corner", "edge")
+        moments = ("push", "move", "enter", "pass", "along", "reach", "turn", "first", "when", "stuck", "return")
+        judgments = ("choice", "order", "read", "notice", "judge", "understand", "clarity", "recognize", "expect", "realize")
+
+    return (
+        any(word in text for word in anchors)
+        and any(word in text for word in moments)
+        and any(word in text for word in judgments)
+    )
 
 
 def _extract_plain_guidance(content, language, stage_context, stage_opening=False):
@@ -1557,7 +1645,7 @@ def _extract_plain_guidance(content, language, stage_context, stage_opening=Fals
     marker_index = content.find(marker)
 
     if marker_index < 0:
-        return content.strip(), None, None
+        return content.strip(), None, None, []
 
     visible = content[:marker_index].strip()
 
@@ -1565,19 +1653,19 @@ def _extract_plain_guidance(content, language, stage_context, stage_opening=Fals
         raise ValueError("The natural-language reply must contain visible text.")
 
     if stage_opening:
-        return visible, None, None
+        return visible, None, None, []
 
     block_tail = content[marker_index + len(marker):]
     closing_index = block_tail.find("</GUIDANCE>")
 
     if closing_index < 0:
-        return visible, None, None
+        return visible, None, None, []
 
     fields = {}
 
     for raw_line in re.split(r"\s*\|\|\s*|[\r\n]+", block_tail[:closing_index]):
         match = re.match(
-            r"^(INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE)\s*:\s*(.+?)\s*$",
+            r"^(WARNING|MANUAL_EDIT|INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE)\s*:\s*(.+?)\s*$",
             raw_line.strip(),
         )
 
@@ -1600,6 +1688,7 @@ def _extract_plain_guidance(content, language, stage_context, stage_opening=Fals
         else None
     )
     recent_guidance = (stage_context or {}).get("recentGuidance") or {}
+    evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
 
     if intent and _guidance_text_matches(
         intent,
@@ -1615,7 +1704,81 @@ def _extract_plain_guidance(content, language, stage_context, stage_opening=Fals
     ):
         proposal_offer = None
 
-    return visible, intent, proposal_offer
+    ui_cues = []
+    previous_cues = recent_guidance.get("uiCues") or {}
+
+    for field_name, cue_type in (("WARNING", "warning"), ("MANUAL_EDIT", "manual_edit")):
+        cue_text = str(fields.get(field_name) or "").strip()[:1000]
+        previous = previous_cues.get(cue_type) or {}
+
+        if not cue_text:
+            continue
+        if cue_type == "warning" and not _warning_text_is_evidence_grounded(cue_text, language):
+            continue
+        if cue_type == "manual_edit" and not _manual_edit_text_is_contextual(cue_text, language):
+            continue
+        if (
+            _guidance_text_matches(cue_text, previous.get("text"))
+            and previous.get("evidenceSignature") == evidence_signature
+        ):
+            continue
+        ui_cues.append({"type": cue_type, "text": cue_text})
+
+    return visible, intent, proposal_offer, ui_cues[:2]
+
+
+def _warning_text_is_evidence_grounded(text, language):
+    lowered = str(text or "").casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", lowered):
+        anchors = ("水", "箱", "目标", "墙", "通道", "路线", "入口", "退路", "推动", "绕行")
+        risks = ("可能", "担心", "风险", "值得", "死锁", "卡住", "误读", "重复", "顺序", "退路")
+    else:
+        anchors = ("water", "box", "crate", "target", "wall", "corridor", "route", "entrance", "escape", "push")
+        risks = ("may", "might", "concern", "risk", "worth", "deadlock", "stuck", "misread", "repeat", "order", "escape")
+    return any(word in lowered for word in anchors) and any(word in lowered for word in risks)
+
+
+def _manual_edit_text_is_contextual(text, language):
+    lowered = str(text or "").casefold()
+    exact_coordinate = re.search(
+        r"(?:第\s*\d+\s*(?:行|列|格)|\b(?:row|column|col)\s*\d+\b|\bx\s*=\s*\d+|\by\s*=\s*\d+)",
+        lowered,
+    )
+    if exact_coordinate:
+        return False
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", lowered):
+        anchors = ("水", "箱", "目标", "墙", "通道", "路线", "区域", "边缘", "编辑器")
+        experiments = ("尝试", "实验", "调整", "移动", "改动", "试玩")
+        observations = ("观察", "比较", "确认", "看看", "判断", "是否")
+    else:
+        anchors = ("water", "box", "crate", "target", "wall", "corridor", "route", "area", "edge", "editor")
+        experiments = ("try", "experiment", "adjust", "move", "edit", "playtest")
+        observations = ("observe", "watch", "compare", "confirm", "judge", "whether")
+    return (
+        any(word in lowered for word in anchors)
+        and any(word in lowered for word in experiments)
+        and any(word in lowered for word in observations)
+    )
+
+
+def _remove_extracted_warning_sentence(visible_content, ui_cues):
+    warning_texts = [
+        cue.get("text", "")
+        for cue in ui_cues
+        if cue.get("type") == "warning"
+    ]
+    result = str(visible_content or "")
+    for warning in warning_texts:
+        candidates = [warning]
+        if ":" in warning or "：" in warning:
+            candidates.append(re.split(r"[:：]", warning, maxsplit=1)[1].strip())
+        for candidate in candidates:
+            if candidate and candidate in result:
+                result = result.replace(candidate, "", 1)
+                break
+    result = re.sub(r"[ \t]+\n", "\n", result)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
 
 def _guidance_text_matches(current, previous):
@@ -1652,14 +1815,18 @@ def _apply_deterministic_guidance_fallback(
     stage_opening,
     intent_hypothesis,
     proposal_offer,
+    ui_cues,
+    rows,
+    play_summary,
 ):
     if stage_opening:
-        return intent_hypothesis, proposal_offer, False
+        return intent_hypothesis, proposal_offer, [], False
 
     latest_user = _latest_role_content(messages, "user")
     explicit_direction = _latest_user_states_direction(messages)
     explicit_agreement = _latest_user_explicitly_agrees(latest_user)
     recent = (stage_context or {}).get("recentGuidance") or {}
+    evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
     fallback_used = False
 
     if (
@@ -1715,7 +1882,141 @@ def _apply_deterministic_guidance_fallback(
             proposal_offer = candidate_offer
             fallback_used = True
 
-    return intent_hypothesis, proposal_offer, fallback_used
+    cue_by_type = {
+        cue.get("type"): cue
+        for cue in ui_cues
+        if cue.get("type") in {"warning", "manual_edit"} and cue.get("text")
+    }
+
+    if "warning" not in cue_by_type:
+        warning = _deterministic_warning(
+            visible_content,
+            language,
+            stage_context,
+            play_summary,
+        )
+        if warning and not _cue_repeats_current_evidence(
+            "warning", warning, recent, evidence_signature
+        ):
+            cue_by_type["warning"] = {"type": "warning", "text": warning}
+            fallback_used = True
+
+    if "manual_edit" not in cue_by_type and (explicit_direction or explicit_agreement):
+        manual_edit = _contextual_manual_edit(rows, language)
+        if manual_edit and not _cue_repeats_current_evidence(
+            "manual_edit", manual_edit, recent, evidence_signature
+        ):
+            cue_by_type["manual_edit"] = {
+                "type": "manual_edit",
+                "text": manual_edit,
+            }
+            fallback_used = True
+
+    ordered_cues = [
+        cue_by_type[cue_type]
+        for cue_type in ("warning", "manual_edit")
+        if cue_type in cue_by_type
+    ][:2]
+    return intent_hypothesis, proposal_offer, ordered_cues, fallback_used
+
+
+def _cue_repeats_current_evidence(cue_type, text, recent_guidance, evidence_signature):
+    previous = ((recent_guidance or {}).get("uiCues") or {}).get(cue_type) or {}
+    return (
+        previous.get("evidenceSignature") == evidence_signature
+        and _guidance_text_matches(text, previous.get("text"))
+    )
+
+
+def _deterministic_warning(visible_content, language, stage_context, play_summary):
+    change_summary = (stage_context or {}).get("changeSummary") or {}
+    changed = set(change_summary.get("components") or {}).intersection(
+        {"boxes", "targets", "water", "internalWalls"}
+    )
+
+    if (
+        (stage_context or {}).get("source") == "human_edit"
+        and changed
+        and not play_summary
+    ):
+        labels_zh = {
+            "boxes": "箱子起点",
+            "targets": "目标点",
+            "water": "水域",
+            "internalWalls": "内部墙体",
+        }
+        labels_en = {
+            "boxes": "box starts",
+            "targets": "targets",
+            "water": "water",
+            "internalWalls": "internal walls",
+        }
+        if language == "zh-CN":
+            labels = "、".join(labels_zh[key] for key in sorted(changed))
+            return f"这版改动涉及{labels}，我担心它可能改变第一次推箱后的退路或推动顺序；值得实际走一遍确认路线仍然容易读懂。"
+        labels = ", ".join(labels_en[key] for key in sorted(changed))
+        return (
+            f"This edit changes {labels}; I am concerned it may alter the escape route "
+            "or push order after the first push, so it is worth confirming in play."
+        )
+
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(visible_content or ""))
+        if part.strip()
+    ]
+    if language == "zh-CN":
+        evidence = ("水", "箱", "目标", "墙", "通道", "路线", "推动", "绕行", "入口", "退路")
+        risk = ("可能", "担心", "风险", "死锁", "卡住", "无法", "误读", "重复", "顺序", "退路", "绕")
+    else:
+        evidence = ("water", "box", "crate", "target", "wall", "corridor", "route", "push", "entrance", "escape")
+        risk = ("may", "might", "concern", "risk", "deadlock", "stuck", "unable", "misread", "repeat", "order", "escape", "detour")
+
+    for sentence in sentences:
+        lowered = sentence.casefold()
+        if any(word in lowered for word in evidence) and any(word in lowered for word in risk):
+            if language == "zh-CN" and not any(word in lowered for word in ("可能", "担心", "风险", "值得")):
+                return f"值得试玩确认：{sentence}"
+            if language != "zh-CN" and not any(word in lowered for word in ("may", "might", "concern", "risk", "worth")):
+                return f"Worth confirming in play: {sentence}"
+            return sentence[:1000]
+    return None
+
+
+def _contextual_manual_edit(rows, language):
+    rows = list(rows or [])
+    water = []
+    boxes = []
+    targets = []
+    for row_index, row in enumerate(rows):
+        for column_index, tile in enumerate(str(row)):
+            if tile == "@":
+                water.append((row_index, column_index))
+            elif tile == "s":
+                boxes.append((row_index, column_index))
+            elif tile == "t":
+                targets.append((row_index, column_index))
+
+    if water:
+        anchor_zh = "水域边缘与相邻的推箱路线"
+        anchor_en = "the water edge and its neighboring box route"
+    elif boxes and targets:
+        anchor_zh = "箱子进入目标区域前的通路"
+        anchor_en = "the route before a box enters the target area"
+    else:
+        anchor_zh = "当前讨论的局部通路"
+        anchor_en = "the local route under discussion"
+
+    if language == "zh-CN":
+        return (
+            f"如果你想亲手验证，可以在右侧编辑器只围绕{anchor_zh}做一次小范围尝试，"
+            "保存后观察第一次推动时路线选择是否更清楚；这只是用来比较体验，不必当作最终方案。"
+        )
+    return (
+        f"If you want to test it directly, you could make one small experiment around "
+        f"{anchor_en} in the editor, then save and watch whether the route choice is clearer "
+        "at the first push; it is a comparison, not a required final layout."
+    )
 
 
 def _latest_role_content(messages, role):
@@ -2245,7 +2546,7 @@ def _compose_assistant_message(
     if follow_up:
         additions.append(follow_up)
 
-    return "\n\n".join([message, *additions])
+    return "\n\n".join(part for part in [message, *additions] if part)
 
 
 def _localized_change_labels(components, language):
@@ -2289,6 +2590,16 @@ def classify_exception(exception, request_id, attempts_used):
         return LLMServiceError(
             "MODEL_EMPTY_RESPONSE",
             "The LLM returned an empty response.",
+            request_id,
+            True,
+            attempts_used,
+            502,
+        )
+
+    if isinstance(exception, LowQualityModelResponse):
+        return LLMServiceError(
+            "MODEL_LOW_QUALITY_RESPONSE",
+            "The LLM returned only a low-information question.",
             request_id,
             True,
             attempts_used,
@@ -2360,6 +2671,7 @@ def classify_exception(exception, request_id, attempts_used):
 def _plain_fallback_allowed(error):
     return error.code in {
         "MODEL_EMPTY_RESPONSE",
+        "MODEL_LOW_QUALITY_RESPONSE",
         "UPSTREAM_TIMEOUT",
         "UPSTREAM_CONNECTION_ERROR",
     }
