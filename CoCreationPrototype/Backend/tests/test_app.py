@@ -32,7 +32,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
         self.assertIn("cocreation-pixel-20260812-5", index_response.text)
-        self.assertIn("cocreation-guided-20260812-9", index_response.text)
+        self.assertIn("cocreation-guided-20260813-10", index_response.text)
         self.assertIn('<html lang="zh-CN">', index_response.text)
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--bg: #6f9d31", css_response.text)

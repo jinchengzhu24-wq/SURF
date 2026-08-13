@@ -28,7 +28,7 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。`Draft` 只区分初稿方法；系统不向设计者分配“困难、友好、竞争、支持”等预设目标，也不把这些历史定义注入 LLM。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 已于 2026-08-11 部署到 `http://111.231.136.4:8010/` 与 `http://111.231.136.4:8000/game/`；8010 的消息可靠性、编辑器感知引导、手工 Stage 改动确认和 Stage-scoped 对话已于 2026-08-12 部署。后续修改仍须按本文验证流程重新构建和部署，不能仅凭本地源码判断线上版本。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 已部署到 `http://111.231.136.4:8010/` 与 `http://111.231.136.4:8000/game/`。2026-08-13 的线上版本使用提示词 `cocreation-v15-natural-optional-questions`、8010 前端缓存键 `cocreation-guided-20260813-10` 和 WebGL 缓存键 `cocreation-20260813-4`：蓝色问题卡片保留但不再强制提问，WebGL 已使用 Unity 2022.3.62f2c1 重建。后续修改仍须按本文验证流程重新构建和部署，不能仅凭本地源码判断线上版本。
 
 ## 共创规则
 
