@@ -25,11 +25,11 @@ CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
 PLAIN_CHAT_TIMEOUT_SECONDS = 25.0
 PLAIN_PRIMARY_TIMEOUT_SECONDS = 15.0
-PLAIN_CHAT_MAX_TOKENS = 700
+PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v20-single-level-dialogue"
+PROMPT_VERSION = "cocreation-v21-lively-explicit-revisions"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -123,7 +123,11 @@ def build_chat_messages(
         "one primary conversational move: observe the Stage, clarify intention, offer "
         "your perspective, challenge a trade-off respectfully, reflect on play evidence, "
         "offer a revision direction, or deliver an explicitly requested revision. "
-        "Use one to three short paragraphs and at most one central question. Vary the "
+        "Usually write two to four compact paragraphs and at most one central question. A "
+        "simple factual answer may be shorter, but a design response should normally include "
+        "a concrete observation, your own interpretation, and enough reasoning or a playable "
+        "example to feel like a real person thinking alongside the designer. Do not pad the "
+        "reply or turn it into a report. Vary the "
         "shape and rhythm of replies according to the moment: a concise direct answer, "
         "an observation, a design association, a respectful disagreement, or a longer "
         "reflection can each stand on its own. Do not mechanically follow a fixed order "
@@ -153,11 +157,17 @@ def build_chat_messages(
         "view', 'I suspect', '在我看来', or '我倾向于认为'; never present difficulty as "
         "a deterministic solver fact.\n\n"
         "Treat the saved Stage as read-only until the designer accepts a validated "
-        "proposal in the interface. You may proactively offer one concrete revision "
+        "proposal in the interface. Treat natural requests such as '你帮我改', '你来改吧', "
+        "'按这个思路改', 'can you change it', and 'go ahead and revise it' as explicit "
+        "authorization when the preceding conversation supplies the direction. You may "
+        "proactively offer one concrete revision "
         "direction and rationale, but that offer must not contain proposedRows. Generate "
         "proposedRows only when the designer's latest message explicitly requests a map "
         "change or explicitly agrees to a previously offered revision direction. Never "
-        "claim a proposal has been accepted, saved, or verified. Deterministic solver and "
+        "claim a proposal has been accepted, saved, or verified. Before proposedRows exist, "
+        "never say the map has been changed, finished, or is ready to play. When proposedRows "
+        "exist, describe them as a reviewable proposal that still awaits the designer's "
+        "acceptance, not as a completed edit. Deterministic solver and "
         "play evidence are authoritative only for the facts they report; never invent "
         "play results or a verified solution. Refer to solver step or push counts only "
         "when they support a useful design observation; do not recite metrics or spell "
@@ -235,7 +245,10 @@ def build_chat_messages(
         "least one tile. modificationSummary must accurately describe only the tile "
         "changes actually present in proposedRows. Never claim that a wall, target, "
         "water tile, box, or player moved unless the before/after rows prove it. Keep "
-        "changes focused on the designer request.\n\n"
+        "changes focused on the designer request. For deliver_revision, write a natural, "
+        "substantive assistantMessage that explains two or three actual changes, connects "
+        "them to the playable effect being pursued, and invites the designer to inspect the "
+        "proposal before accepting it. Do not merely say that the work is done.\n\n"
         f"Current saved stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
@@ -296,7 +309,11 @@ def build_plain_chat_messages(
             "designer explicitly agrees to move forward with a direction, you MUST output "
             "both INTENT and the two proposal fields together. Write INTENT as a compact, "
             "correctable first-person reading of this particular exchange, and vary its "
-            "opening from recent cards. Add WARNING only with strong evidence: explicit play "
+            "opening from recent cards. A generic execution request such as '你帮我改' is not "
+            "itself a design intention: ground INTENT in the substantive direction from the "
+            "conversation or omit it. Give each card one complete, natural thought rather than "
+            "a slogan; proposal rationale should explain the expected playable effect. Add "
+            "WARNING only with strong evidence: explicit play "
             "difficulty, or a mechanically explainable interaction between at least two "
             "specific map elements and a concrete push moment. Keep ordinary uncertainty, "
             "route trade-offs, and aesthetic opinions in the visible reply. A warning should "
@@ -320,7 +337,10 @@ def build_plain_chat_messages(
         "formatting instructions. The only permitted metadata is the optional trailing "
         "GUIDANCE block described below. "
         f"{opening_instruction}"
-        "Use one to three short paragraphs, varying their rhythm and opening. Do not "
+        "Usually use two to four compact paragraphs, varying their rhythm and opening. A "
+        "very simple answer may be shorter. Give observations room to breathe: connect a "
+        "specific map detail to a playable moment, explain why your view follows, and add a "
+        "small concrete example when useful. Keep it conversational rather than exhaustive. Do not "
         "mechanically follow acknowledgement, evaluation, then question; do not restate "
         "the designer's sentence before responding. Add one grounded independent view when "
         "useful. Do not sound like a survey, examiner, workflow assistant, customer-service "
@@ -338,7 +358,9 @@ def build_plain_chat_messages(
         "first/second-person language. Avoid repeatedly opening with 'I think you may' or "
         "'我猜你可能'. Treat difficulty as "
         "your perspective, not solver fact. Do not invent play evidence, researcher goals, "
-        "or exact authorship. Do not provide a complete map or claim a change was saved. "
+        "or exact authorship. Do not provide a complete map or claim a change was saved, "
+        "finished, or ready to play. Never say '改好了' in ordinary chat. A request to help "
+        "change the map should be handled by the proposal workflow, not acted out in prose. "
         "You may offer a concise revision direction, while direct editing remains optional. "
         "There is exactly one level in this session; every Stage is only a saved version of "
         "that same level. Never describe a Stage as a first, second, next, or later level, "
@@ -944,7 +966,10 @@ async def _generate_plain_with_model_fallback(
             if len(content.strip()) > CHAT_RESPONSE_MAX_LENGTH:
                 raise ValueError("The model response is too long.")
 
-            content = _normalize_single_level_language(content.strip())
+            content = _normalize_unsaved_change_claims(
+                _normalize_single_level_language(content.strip()),
+                language,
+            )
             discussion_focus = _extract_plain_discussion_focus(
                 content,
                 language,
@@ -1626,6 +1651,12 @@ def validate_chat_response(
 
         proposed_rows = list(proposed_rows)
 
+    assistant_message = _normalize_change_claims_for_proposal(
+        assistant_message,
+        language,
+        proposed_rows is not None,
+    )
+
     modification_summary = payload.get("modificationSummary", "")
 
     if not isinstance(modification_summary, str):
@@ -1821,6 +1852,79 @@ def _normalize_single_level_language(value):
         flags=re.IGNORECASE,
     )
     return text
+
+
+def _normalize_unsaved_change_claims(value, language="en"):
+    text = str(value or "")
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        text = re.sub(
+            r"(?:^|(?<=[。！？\n]))\s*(?:好[，,。！!]?\s*)?"
+            r"(?:我)?(?:已经|已)?(?:帮你)?(?:改好了|改完了|修改完成了)"
+            r"[，,。！!]*(?:你)?(?:可以)?(?:去|先)?试试(?:看)?[。！!]?",
+            "我先把这个修改方向说具体，生成可审查的方案后再由你决定是否采用。",
+            text,
+        )
+        text = re.sub(
+            r"(?:^|(?<=[。！？\n]))\s*(?:我)?(?:已经|已)(?:帮你)?(?:改好|修改|调整)了[。！!]?",
+            "我现在说的是修改方向，还没有替你保存地图。",
+            text,
+        )
+    else:
+        text = re.sub(
+            r"(?:^|(?<=[.!?\n]))\s*(?:done[.!]?\s*)?(?:i(?:'ve| have)?|we(?:'ve| have)?)"
+            r"\s+(?:changed|modified|revised|updated|finished)\s+(?:it|this|the map|the level)"
+            r"[.!]*(?:\s+(?:go ahead and )?(?:try|play)(?: it)?[.!]?)?",
+            "I am describing the revision direction for now; I have not saved a map change.",
+            text,
+            flags=re.IGNORECASE,
+        )
+    return text.strip()
+
+
+def _normalize_change_claims_for_proposal(value, language, has_proposed_rows):
+    if not has_proposed_rows:
+        return _normalize_unsaved_change_claims(value, language)
+
+    text = str(value or "")
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        text = re.sub(
+            r"我按(.{0,80}?)(?:方向|思路|方案)?改[：:]",
+            r"我按\1方向做了一份修改提案：",
+            text,
+        )
+        text = re.sub(
+            r"(?:我)?(?:已经|已)?(?:帮你)?(?:改好了|改完了|修改完成了)",
+            "我做了一份可审查的修改提案",
+            text,
+        )
+        text = re.sub(r"改完的版本", "这份待审查提案", text)
+        text = re.sub(r"修改后的版本", "这份待审查提案", text)
+        text = re.sub(
+            r"(?:你)?(?:可以)?(?:去|先)?试试(?:看)?",
+            "你可以先看提案的实际差异，再决定是否接受",
+            text,
+        )
+    else:
+        text = re.sub(
+            r"\bI (?:changed|revised|updated) it (?:as|by|to)\b",
+            "I made a revision proposal by",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\b(?:i(?:'ve| have)?|we(?:'ve| have)?)\s+"
+            r"(?:changed|modified|revised|updated|finished)\s+(?:it|this|the map|the level)\b",
+            "I made a reviewable revision proposal",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\b(?:the )?(?:changed|revised|updated|finished) version\b",
+            "this pending proposal",
+            text,
+            flags=re.IGNORECASE,
+        )
+    return text.strip()
 
 
 def _deterministic_stage_opening_question(stage_context, language):
@@ -2044,6 +2148,8 @@ def _extract_plain_guidance(content, language, stage_context, stage_opening=Fals
 
     if intent:
         intent = _normalize_intent_hypothesis(intent[:1000], language)
+        if _intent_is_only_execution_authorization(intent, language):
+            intent = None
 
     summary = fields.get("PROPOSAL_SUMMARY")
     rationale = fields.get("PROPOSAL_RATIONALE")
@@ -2327,6 +2433,38 @@ def _natural_intent_candidate(latest_user, language, explicit_agreement):
             f"I read your preference as wanting the next design step to answer “{excerpt}”.",
         )
     return options[variant]
+
+
+def _intent_is_only_execution_authorization(text, language="en"):
+    value = str(text or "").strip().casefold()
+    if not value:
+        return False
+
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", value):
+        execution = any(
+            marker in value
+            for marker in (
+                "你帮我改", "帮我改一下", "你来改", "请你改", "交给你改",
+                "我来帮你改", "把修改交给我", "由我来改",
+            )
+        )
+        design_anchors = (
+            "水", "箱", "目标", "墙", "通道", "路线", "推动", "落点", "节奏",
+            "难度", "选择", "可读", "绕行", "空间",
+        )
+    else:
+        execution = bool(
+            re.search(
+                r"\b(?:help me|you|assistant|i should)\s+"
+                r"(?:change|modify|revise|edit|do)\b",
+                value,
+            )
+        )
+        design_anchors = (
+            "water", "box", "crate", "target", "wall", "corridor", "route",
+            "push", "rhythm", "difficulty", "choice", "readability", "space",
+        )
+    return execution and not any(anchor in value for anchor in design_anchors)
 
 
 def _cue_repeats_current_evidence(cue_type, text, recent_guidance, evidence_signature):
@@ -2768,6 +2906,7 @@ def _validate_guidance(payload, assessment_only, language="en"):
         payload.get("intentHypothesis"),
         "guidance.intentHypothesis",
     )
+    intent_suppressed = False
 
     if intent_hypothesis is not None:
         intent_hypothesis = _normalize_single_level_language(intent_hypothesis)
@@ -2775,11 +2914,15 @@ def _validate_guidance(payload, assessment_only, language="en"):
             intent_hypothesis,
             language,
         )
+        if _intent_is_only_execution_authorization(intent_hypothesis, language):
+            intent_hypothesis = None
+            intent_suppressed = True
     intent_confidence = payload.get("intentConfidence")
 
     if intent_hypothesis is None:
-        if intent_confidence is not None:
+        if intent_confidence is not None and not intent_suppressed:
             raise ValueError("intentConfidence requires intentHypothesis.")
+        intent_confidence = None
     elif intent_confidence not in INTENT_CONFIDENCE_LEVELS:
         raise ValueError("intentConfidence is invalid.")
 
@@ -3277,11 +3420,55 @@ def _requests_complete_map(conversation):
         "修改地图",
         "改一下地图",
         "把地图改",
+        "你帮我改",
+        "帮我改一下",
+        "帮我改改",
+        "你来改",
+        "请你改",
+        "交给你改",
+        "你直接改",
+        "帮我做个方案",
+        "帮我做一个方案",
     )
-    return any(
+    marker_match = any(
         marker in latest_user_message
         for marker in (*english_markers, *chinese_markers)
     )
+    chinese_authorization = re.search(
+        r"(?:按|照着|依照)(?:这个|这条|刚才的|上面的)?(?:方向|思路|方案)?"
+        r"(?:帮我|你来|直接)?改(?:一下|改|吧)?",
+        latest_user_message,
+    )
+    english_authorization = re.search(
+        r"\b(?:(?:can|could|would|will) you(?: please)?|please|go ahead and|"
+        r"you can|i want you to)\s+(?:change|modify|revise|rework|edit)"
+        r"(?:\s+(?:it|this|that|the (?:map|level|layout|revision)))?\b",
+        latest_user_message,
+    )
+    english_design_question = re.search(
+        r"\b(?:how|what)\s+(?:would|could|should|can)\s+you\s+"
+        r"(?:change|modify|revise|rework|edit)\b",
+        latest_user_message,
+    )
+    chinese_design_question = re.search(
+        r"(?:怎么|如何|怎样)(?:来)?改|改(?:成)?什么样",
+        latest_user_message,
+    )
+    english_imperative = re.search(
+        r"\b(?:please|go ahead and|then)\s+(?:change|modify|revise|rework|edit|do it)\b",
+        latest_user_message,
+    )
+    chinese_imperative = re.search(
+        r"(?:直接|就|按这个|照这个|帮我|请你)(?:方向|思路|方案)?改(?:一下|改|吧)?",
+        latest_user_message,
+    )
+    if english_design_question is not None and english_imperative is None:
+        english_authorization = None
+        marker_match = False
+    if chinese_design_question is not None and chinese_imperative is None:
+        chinese_authorization = None
+        marker_match = False
+    return marker_match or chinese_authorization is not None or english_authorization is not None
 
 
 def _create_async_client(api_key, base_url, timeout_seconds):

@@ -113,6 +113,26 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("第二关", result.assistant_message)
         self.assertNotIn("后面关卡", result.assistant_message)
 
+    def test_plain_chat_cannot_claim_an_unsaved_map_change_is_finished(self):
+        result, _ = self.execute([
+            "我会让右侧水域贴近推动路线。\n\n改好了，你去试试看。"
+        ], language="zh-CN")
+
+        self.assertIn("生成可审查的方案后再由你决定是否采用", result.assistant_message)
+        self.assertNotIn("改好了", result.assistant_message)
+        self.assertNotIn("去试试看", result.assistant_message)
+
+    def test_generic_change_authorization_is_not_saved_as_design_intent(self):
+        visible, intent, _, _ = llm_client._extract_plain_guidance(
+            "我先把方向说清楚。\n<GUIDANCE>INTENT: 我暂时把你的方向理解为：你帮我改。"
+            "</GUIDANCE>",
+            "zh-CN",
+            {},
+        )
+
+        self.assertEqual(visible, "我先把方向说清楚。")
+        self.assertIsNone(intent)
+
     def test_plain_discuss_card_can_hold_a_first_person_design_insight(self):
         result, _ = self.execute([
             "这个版本的下半区多了一点回旋空间。\n"
@@ -254,6 +274,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("<GUIDANCE>", messages[0]["content"])
         self.assertIn("recentGuidance", messages[0]["content"])
         self.assertIn("you MUST output INTENT", messages[0]["content"])
+        self.assertIn("two to four compact paragraphs", messages[0]["content"])
+        self.assertIn("Give observations room to breathe", messages[0]["content"])
 
     def test_pure_generic_question_uses_fallback_model(self):
         result, client = self.execute([
@@ -657,6 +679,76 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_MAX_TOKENS)
         self.assertEqual(request["response_format"], {"type": "json_object"})
 
+    def test_natural_chinese_request_to_help_change_uses_proposal_workflow(self):
+        proposed_rows = ["############"] * 10
+        response = json.dumps({
+            "assistantMessage": (
+                "我做了一份可以一起审查的修改提案。水域与右侧通路现在形成了更明确的"
+                "第一次推动关系，你可以先看实际差异，再决定是否接受。"
+            ),
+            "guidance": {
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": proposed_rows,
+            "modificationSummary": "让水域参与右侧通路的第一次推动判断。",
+        })
+        client = FakeClient([response])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [
+                    {"role": "assistant", "content": "我建议让水域贴近右侧推动路线。"},
+                    {"role": "user", "content": "你帮我改"},
+                ],
+                ["############"] * 10,
+                "natural-chinese-proposal-test",
+                language="zh-CN",
+            )
+
+        self.assertIsNotNone(result.proposed_rows)
+        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-pro")
+        self.assertEqual(
+            client.chat.completions.calls[0]["response_format"],
+            {"type": "json_object"},
+        )
+
+    def test_map_request_phrases_are_detected_without_matching_design_questions(self):
+        positives = (
+            "你帮我改",
+            "你来改吧",
+            "按这个思路帮我改一下",
+            "请你改一下地图",
+            "Can you change it?",
+            "Go ahead and revise the map.",
+        )
+        negatives = (
+            "你觉得应该怎么改？",
+            "如果你来改，你会怎么改？",
+            "先说说修改思路",
+            "How would you change the route?",
+            "How would you revise the map?",
+        )
+
+        for message in positives:
+            with self.subTest(message=message):
+                self.assertTrue(llm_client._requests_complete_map([
+                    {"role": "user", "content": message},
+                ]))
+        for message in negatives:
+            with self.subTest(message=message):
+                self.assertFalse(llm_client._requests_complete_map([
+                    {"role": "user", "content": message},
+                ]))
+
     def test_explicit_map_proposal_rejects_text_only_result(self):
         text_only = json.dumps({
             "assistantMessage": "I would narrow the route.",
@@ -927,6 +1019,39 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result[2], rows)
         self.assertEqual(result[3], "Moved the player.")
         self.assertEqual(result[4]["move"], "deliver_revision")
+
+    def test_complete_proposal_is_not_described_as_an_already_saved_edit(self):
+        payload = {
+            "assistantMessage": "改好了，你先去试试看。",
+            "guidance": {
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": ["############"] * 10,
+            "modificationSummary": "调整路线。",
+        }
+
+        result = llm_client.validate_chat_response(payload, language="zh-CN")
+
+        self.assertIn("可审查的修改提案", result[0])
+        self.assertIn("决定是否接受", result[0])
+        self.assertNotIn("改好了", result[0])
+
+    def test_proposal_language_stays_pending_until_acceptance(self):
+        normalized = llm_client._normalize_change_claims_for_proposal(
+            "好，我按刚才说的方向改：把水域收拢。改完的版本你可以先看看。",
+            "zh-CN",
+            True,
+        )
+
+        self.assertIn("我按刚才说的方向做了一份修改提案", normalized)
+        self.assertIn("这份待审查提案", normalized)
+        self.assertNotIn("改完的版本", normalized)
 
     def test_invalid_proposal_uses_fallback_then_fails(self):
         payload = json.dumps({
