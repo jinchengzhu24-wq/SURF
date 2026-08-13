@@ -1,4 +1,5 @@
 import asyncio
+from difflib import SequenceMatcher
 import json
 import os
 import re
@@ -28,7 +29,7 @@ PLAIN_CHAT_MAX_TOKENS = 700
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v16-plain-chat-fallback"
+PROMPT_VERSION = "cocreation-v17-guidance-cards"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -253,10 +254,30 @@ def build_plain_chat_messages(
         if stage_opening
         else "Respond to the designer's latest contribution first. "
     )
+    guidance_instruction = (
+        "Do not output a GUIDANCE block for a Stage opening. "
+        if stage_opening
+        else (
+            "After the visible reply, you may append one optional machine-readable block "
+            "as one final line using exactly this compact form:\n"
+            "<GUIDANCE>INTENT: ... || PROPOSAL_SUMMARY: ... || "
+            "PROPOSAL_RATIONALE: ...</GUIDANCE>\n"
+            "Omit any field that is not warranted, and omit the entire block when no card "
+            "would improve the collaboration. Once multi-turn evidence supports a meaningful "
+            "preference or direction, you MUST output INTENT. When you describe a concrete, "
+            "actionable revision direction, you MUST output both proposal fields. After the "
+            "designer explicitly agrees to move forward with a direction, you MUST output "
+            "both INTENT and the two proposal fields together. These metadata requirements "
+            "do not require a question. Do not repeat an unchanged card "
+            "listed in Saved Stage context.recentGuidance. The visible reply must stand on "
+            "its own and must not mention these tags or mechanically repeat their text. "
+        )
+    )
     system_prompt = (
         "You are a thoughtful, equal Sokoban co-creation partner. Write only the visible "
-        f"reply to the designer in {response_language}; do not output JSON, metadata, "
-        "labels, analysis, or formatting instructions. "
+        f"reply to the designer in {response_language}; do not output JSON, analysis, or "
+        "formatting instructions. The only permitted metadata is the optional trailing "
+        "GUIDANCE block described below. "
         f"{opening_instruction}"
         "Use one to three short paragraphs. Add one grounded independent view when it is "
         "useful, but do not mechanically follow acknowledgement, evaluation, then "
@@ -273,6 +294,7 @@ def build_plain_chat_messages(
         "your perspective, not solver fact. Do not invent play evidence, researcher goals, "
         "or exact authorship. Do not provide a complete map or claim a change was saved. "
         "You may offer a concise revision direction, while direct editing remains optional.\n\n"
+        f"{guidance_instruction}\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         f"Current saved Stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
@@ -869,24 +891,46 @@ async def _generate_plain_with_model_fallback(
             if len(content.strip()) > CHAT_RESPONSE_MAX_LENGTH:
                 raise ValueError("The model response is too long.")
 
-            body, question = _extract_plain_message_question(content.strip())
+            visible_content, intent_hypothesis, proposal_offer = _extract_plain_guidance(
+                content.strip(),
+                language,
+                stage_context,
+                stage_opening,
+            )
+            intent_hypothesis, proposal_offer, guidance_fallback_used = (
+                _apply_deterministic_guidance_fallback(
+                    messages,
+                    visible_content,
+                    language,
+                    stage_context,
+                    stage_opening,
+                    intent_hypothesis,
+                    proposal_offer,
+                )
+            )
+            body, question = _extract_plain_message_question(visible_content)
 
-            if question is not None and _latest_user_states_direction(messages):
+            if _latest_user_states_direction(messages):
+                body = _remove_questions_from_plain_reply(body)
                 question = None
 
             if stage_opening and question is not None:
                 try:
                     question = _normalize_opening_question(question)
                 except ValueError:
-                    body = content.strip()
+                    body = visible_content
                     question = None
 
             guidance = {
-                "move": "observe_stage" if stage_opening else "offer_perspective",
-                "intentHypothesis": None,
-                "intentConfidence": None,
+                "move": _plain_guidance_move(
+                    stage_opening,
+                    intent_hypothesis,
+                    proposal_offer,
+                ),
+                "intentHypothesis": intent_hypothesis,
+                "intentConfidence": "medium" if intent_hypothesis else None,
                 "followUpQuestion": question,
-                "proposalOffer": None,
+                "proposalOffer": proposal_offer,
                 "uiCues": [],
             }
             assessment = (
@@ -926,6 +970,9 @@ async def _generate_plain_with_model_fallback(
                 attemptsUsed=attempt,
                 latencyMs=latency_ms,
                 responseMode="plain_text",
+                guidanceFallbackUsed=guidance_fallback_used,
+                intentCard=bool(intent_hypothesis),
+                proposalCard=bool(proposal_offer),
                 **response_fields,
             )
             return result
@@ -1505,22 +1552,231 @@ def _extract_plain_message_question(message):
     return "\n\n".join(declarative_paragraphs), questions[0]
 
 
-def _latest_user_states_direction(messages):
-    latest = next(
+def _extract_plain_guidance(content, language, stage_context, stage_opening=False):
+    marker = "<GUIDANCE>"
+    marker_index = content.find(marker)
+
+    if marker_index < 0:
+        return content.strip(), None, None
+
+    visible = content[:marker_index].strip()
+
+    if not visible:
+        raise ValueError("The natural-language reply must contain visible text.")
+
+    if stage_opening:
+        return visible, None, None
+
+    block_tail = content[marker_index + len(marker):]
+    closing_index = block_tail.find("</GUIDANCE>")
+
+    if closing_index < 0:
+        return visible, None, None
+
+    fields = {}
+
+    for raw_line in re.split(r"\s*\|\|\s*|[\r\n]+", block_tail[:closing_index]):
+        match = re.match(
+            r"^(INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE)\s*:\s*(.+?)\s*$",
+            raw_line.strip(),
+        )
+
+        if match and match.group(1) not in fields:
+            fields[match.group(1)] = match.group(2).strip()
+
+    intent = fields.get("INTENT")
+
+    if intent:
+        intent = _normalize_intent_hypothesis(intent[:1000], language)
+
+    summary = fields.get("PROPOSAL_SUMMARY")
+    rationale = fields.get("PROPOSAL_RATIONALE")
+    proposal_offer = (
+        {
+            "summary": summary[:600],
+            "rationale": rationale[:1000],
+        }
+        if summary and rationale
+        else None
+    )
+    recent_guidance = (stage_context or {}).get("recentGuidance") or {}
+
+    if intent and _guidance_text_matches(
+        intent,
+        recent_guidance.get("intentHypothesis"),
+    ):
+        intent = None
+
+    previous_offer = recent_guidance.get("proposalOffer") or {}
+
+    if proposal_offer and _guidance_text_matches(
+        f"{proposal_offer['summary']} {proposal_offer['rationale']}",
+        f"{previous_offer.get('summary', '')} {previous_offer.get('rationale', '')}",
+    ):
+        proposal_offer = None
+
+    return visible, intent, proposal_offer
+
+
+def _guidance_text_matches(current, previous):
+    def normalize(value):
+        return re.sub(r"[^\w\u3400-\u9fff]+", "", str(value or "").casefold())
+
+    current_text = normalize(current)
+    previous_text = normalize(previous)
+
+    if not current_text or not previous_text:
+        return False
+
+    return (
+        current_text == previous_text
+        or SequenceMatcher(None, current_text, previous_text).ratio() >= 0.88
+    )
+
+
+def _plain_guidance_move(stage_opening, intent_hypothesis, proposal_offer):
+    if stage_opening:
+        return "observe_stage"
+    if proposal_offer:
+        return "offer_revision"
+    if intent_hypothesis:
+        return "clarify_intent"
+    return "offer_perspective"
+
+
+def _apply_deterministic_guidance_fallback(
+    messages,
+    visible_content,
+    language,
+    stage_context,
+    stage_opening,
+    intent_hypothesis,
+    proposal_offer,
+):
+    if stage_opening:
+        return intent_hypothesis, proposal_offer, False
+
+    latest_user = _latest_role_content(messages, "user")
+    explicit_direction = _latest_user_states_direction(messages)
+    explicit_agreement = _latest_user_explicitly_agrees(latest_user)
+    recent = (stage_context or {}).get("recentGuidance") or {}
+    fallback_used = False
+
+    if (
+        intent_hypothesis is None
+        and explicit_direction
+        and not recent.get("intentHypothesis")
+    ):
+        if language == "zh-CN":
+            if explicit_agreement:
+                candidate = "我猜你可能愿意沿着刚才讨论的方向继续做一次具体尝试。"
+            else:
+                candidate = f"我猜你可能希望后续设计回应你刚才表达的方向：“{latest_user[:120]}”。"
+        elif explicit_agreement:
+            candidate = "I think you may want to continue with the direction we just discussed."
+        else:
+            candidate = (
+                "I think you may want the next design step to respond to this direction: "
+                f'“{latest_user[:160]}”.'
+            )
+
+        if not _guidance_text_matches(candidate, recent.get("intentHypothesis")):
+            intent_hypothesis = candidate
+            fallback_used = True
+
+    if (
+        proposal_offer is None
+        and explicit_agreement
+        and not recent.get("proposalOffer")
+    ):
+        previous_assistant = _latest_role_content(messages[:-1], "assistant")
+        summary_source = _first_declarative_sentence(visible_content)
+        rationale_source = _first_declarative_sentence(previous_assistant)
+
+        if language == "zh-CN":
+            summary = summary_source or "把刚才讨论的方向落实为一个可审查的局部修改"
+            rationale = rationale_source or "把玩家已经确认的方向转化为可验证的地图变化"
+        else:
+            summary = summary_source or "Turn the agreed direction into a reviewable local revision"
+            rationale = rationale_source or (
+                "Translate the direction you confirmed into a map change that can be validated"
+            )
+
+        candidate_offer = {
+            "summary": summary[:600],
+            "rationale": rationale[:1000],
+        }
+        previous_offer = recent.get("proposalOffer") or {}
+
+        if not _guidance_text_matches(
+            f"{candidate_offer['summary']} {candidate_offer['rationale']}",
+            f"{previous_offer.get('summary', '')} {previous_offer.get('rationale', '')}",
+        ):
+            proposal_offer = candidate_offer
+            fallback_used = True
+
+    return intent_hypothesis, proposal_offer, fallback_used
+
+
+def _latest_role_content(messages, role):
+    return next(
         (
             str(message.get("content") or "").strip()
             for message in reversed(messages)
-            if message.get("role") == "user"
+            if message.get("role") == role
         ),
         "",
     )
+
+
+def _latest_user_explicitly_agrees(message):
+    text = str(message or "").strip().casefold()
+    english = re.search(
+        r"\b(?:yes|okay|ok|sounds good|go ahead|do (?:it|that)|let'?s do (?:it|that))\b",
+        text,
+    )
+    chinese = any(
+        marker in text
+        for marker in ("可以", "好", "行", "同意", "就这样", "做吧", "改吧", "试试", "做点")
+    )
+    return english is not None or chinese
+
+
+def _first_declarative_sentence(message):
+    for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(message or "")):
+        cleaned = sentence.strip()
+        if cleaned and not cleaned.endswith(("?", "？")):
+            return cleaned
+    return ""
+
+
+def _remove_questions_from_plain_reply(message):
+    declarative = []
+
+    for paragraph in (part.strip() for part in str(message or "").split("\n\n")):
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])\s*", paragraph)
+            if sentence.strip()
+        ]
+        kept = [sentence for sentence in sentences if not sentence.endswith(("?", "？"))]
+
+        if kept:
+            separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+            declarative.append(separator.join(kept))
+
+    return "\n\n".join(declarative) or message
+
+
+def _latest_user_states_direction(messages):
+    latest = _latest_role_content(messages, "user")
 
     if not latest or "?" in latest or "？" in latest:
         return False
 
     english_direction = re.search(
         r"\b(?:i\s+(?:want|prefer|would like)|please|keep|make|change|remove|add|"
-        r"preserve|reduce|increase|strengthen|weaken)\b",
+        r"preserve|reduce|increase|strengthen|weaken|go ahead|do (?:it|that)|let'?s)\b",
         latest,
         re.IGNORECASE,
     )
@@ -1531,6 +1787,8 @@ def _latest_user_states_direction(messages):
             "我希望",
             "我更喜欢",
             "请",
+            "做",
+            "改",
             "保留",
             "让",
             "不要",

@@ -100,6 +100,102 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIn("useful prose", result.assistant_message)
 
+    def test_plain_reply_extracts_intent_card(self):
+        result, _ = self.execute([
+            "The water now reads as part of the route.\n\n"
+            "<GUIDANCE>\n"
+            "INTENT: The designer wants the water to affect the route.\n"
+            "</GUIDANCE>"
+        ])
+
+        self.assertEqual(result.guidance["move"], "clarify_intent")
+        self.assertEqual(result.guidance["intentConfidence"], "medium")
+        self.assertTrue(result.guidance["intentHypothesis"].startswith("I think you may"))
+        self.assertNotIn("GUIDANCE", result.assistant_message)
+
+    def test_plain_reply_extracts_proposal_card(self):
+        result, _ = self.execute([
+            "A small route linkage would make the water consequential.\n\n"
+            "<GUIDANCE>\n"
+            "PROPOSAL_SUMMARY: Link the lower target to the water edge\n"
+            "PROPOSAL_RATIONALE: Make the first push depend on reading the water route\n"
+            "</GUIDANCE>"
+        ])
+
+        self.assertEqual(result.guidance["move"], "offer_revision")
+        self.assertEqual(
+            result.guidance["proposalOffer"]["summary"],
+            "Link the lower target to the water edge",
+        )
+        self.assertNotIn("PROPOSAL_SUMMARY", result.assistant_message)
+
+    def test_plain_reply_can_extract_intent_and_proposal_cards_together(self):
+        result, _ = self.execute([
+            "That gives us a focused next move.\n\n"
+            "<GUIDANCE>\n"
+            "INTENT: You want the water to shape the route without dominating it\n"
+            "PROPOSAL_SUMMARY: Move the target beneath the water edge\n"
+            "PROPOSAL_RATIONALE: Tie one push decision to the water while preserving the main route\n"
+            "</GUIDANCE>"
+        ])
+
+        self.assertEqual(result.guidance["move"], "offer_revision")
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNotNone(result.guidance["proposalOffer"])
+
+    def test_malformed_guidance_is_hidden_without_failing_reply(self):
+        for reply in (
+            "Visible reply.\n<GUIDANCE>\nINTENT: You want a tighter route",
+            "Visible reply.\n<GUIDANCE>\nUNKNOWN: hidden\n</GUIDANCE>",
+            "Visible reply.\n<GUIDANCE>\nPROPOSAL_SUMMARY: Incomplete\n</GUIDANCE>",
+        ):
+            with self.subTest(reply=reply):
+                result, _ = self.execute([reply])
+                self.assertEqual(result.assistant_message, "Visible reply.")
+                self.assertIsNone(result.guidance["intentHypothesis"])
+                self.assertIsNone(result.guidance["proposalOffer"])
+
+    def test_repeated_guidance_cards_are_suppressed_but_changed_intent_remains(self):
+        content = (
+            "This direction is now concrete.\n"
+            "<GUIDANCE>\n"
+            "INTENT: I think you may want water to shape the route\n"
+            "PROPOSAL_SUMMARY: Link the target to the water edge\n"
+            "PROPOSAL_RATIONALE: Make water influence the first push\n"
+            "</GUIDANCE>"
+        )
+        client = FakeClient([content])
+        stage_context = {
+            "recentGuidance": {
+                "intentHypothesis": "I think you may want water to shape the route.",
+                "proposalOffer": {
+                    "summary": "Link the target to the water edge",
+                    "rationale": "Make water influence the first push.",
+                },
+            }
+        }
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Yes, do that."}],
+                ["############"] * 10,
+                "guidance-dedup-test",
+                stage_context=stage_context,
+            )
+
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["proposalOffer"])
+
+        _, changed_intent, _ = llm_client._extract_plain_guidance(
+            "Reply.\n<GUIDANCE>\nINTENT: I think you may want water to control two route decisions\n</GUIDANCE>",
+            "en",
+            stage_context,
+        )
+        self.assertIsNotNone(changed_intent)
+
     def test_plain_prompt_defaults_to_no_question(self):
         messages = llm_client.build_plain_chat_messages(
             [{"role": "user", "content": "Make the choice smaller but consequential."}],
@@ -109,6 +205,9 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("default to no question", messages[0]["content"])
         self.assertIn("your reply must contain no question", messages[0]["content"])
         self.assertIn("Never ask for a preference the designer has already stated", messages[0]["content"])
+        self.assertIn("<GUIDANCE>", messages[0]["content"])
+        self.assertIn("recentGuidance", messages[0]["content"])
+        self.assertIn("you MUST output INTENT", messages[0]["content"])
 
     def test_pure_question_stays_in_body_without_failing(self):
         result, _ = self.execute(["What effect do you want to preserve?"])
@@ -143,6 +242,40 @@ class LLMClientTests(unittest.TestCase):
             "That would make the opening commitment more legible.",
         )
         self.assertIsNone(result.guidance["followUpQuestion"])
+
+    def test_chinese_agreement_is_treated_as_an_explicit_direction(self):
+        self.assertTrue(llm_client._latest_user_states_direction([
+            {"role": "user", "content": "做点联动吧"},
+        ]))
+
+    def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
+        client = FakeClient([
+            "我会把右下目标与水塘做局部联动。这样能让水域影响第一次推动。"
+            "你还想改别的区域吗？要不要扩大水域？"
+        ])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [
+                    {"role": "user", "content": "我认为水域纯摆设"},
+                    {"role": "assistant", "content": "可以让水塘与目标点形成一个小联动。"},
+                    {"role": "user", "content": "做点联动吧"},
+                ],
+                ["############"] * 10,
+                "deterministic-guidance-test",
+                language="zh-CN",
+                stage_context={"recentGuidance": {}},
+            )
+
+        self.assertEqual(result.guidance["move"], "offer_revision")
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNotNone(result.guidance["proposalOffer"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertNotIn("？", result.assistant_message)
+        self.assertNotIn("吗", result.assistant_message)
 
     def test_invalid_stage_json_falls_back_to_plain_opening(self):
         client = FakeClient(["   ", "The water narrows the central route in an interesting way."])

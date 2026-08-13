@@ -409,6 +409,69 @@ class CoCreationSessionTests(unittest.TestCase):
             ["user", "assistant"],
         )
 
+    def test_llm_context_includes_latest_stage_guidance_for_card_deduplication(self):
+        version_id = self.read_session()["currentVersionId"]
+        first_execution = LLMExecutionResult(
+            "The water can become part of the route.",
+            1,
+            "first-guidance",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": "I think you may want the water to shape the route.",
+                "intentConfidence": "medium",
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Link the lower target to the water edge",
+                    "rationale": "Make the first push depend on reading the water route",
+                },
+                "uiCues": [],
+            },
+        )
+        second_execution = LLMExecutionResult(
+            "That direction is now established.",
+            1,
+            "second-guidance",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            side_effect=[first_execution, second_execution],
+        ) as mocked:
+            for content, request_key in (
+                ("The water feels decorative.", "guidance_context_1"),
+                ("Make it part of the route.", "guidance_context_2"),
+            ):
+                response = self.client.post(
+                    f"/api/sessions/{self.session_id}/messages",
+                    json={
+                        "content": content,
+                        "baseVersionId": version_id,
+                        "idempotencyKey": request_key,
+                    },
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+
+        recent = mocked.call_args_list[1].kwargs["stage_context"]["recentGuidance"]
+        self.assertEqual(
+            recent["intentHypothesis"],
+            "I think you may want the water to shape the route.",
+        )
+        self.assertEqual(
+            recent["proposalOffer"]["summary"],
+            "Link the lower target to the water edge",
+        )
+
     def test_failed_message_retries_with_one_user_turn_and_one_assistant_turn(self):
         version_id = self.read_session()["currentVersionId"]
         request_payload = {

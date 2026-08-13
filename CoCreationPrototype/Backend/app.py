@@ -1571,7 +1571,7 @@ def build_llm_context(database, session_id, version):
     ).fetchone()
     turns = database.execute(
         """
-        SELECT id, role, content FROM conversation_turns
+        SELECT id, role, content, guidance_json FROM conversation_turns
         WHERE session_id = ? AND version_id = ?
         ORDER BY sequence_number DESC LIMIT 24
         """,
@@ -1580,7 +1580,7 @@ def build_llm_context(database, session_id, version):
     accepted_opening = database.execute(
         """
         SELECT proposal.id AS proposal_id, proposal.assistant_turn_id,
-               turn.role, turn.content
+               turn.role, turn.content, turn.guidance_json
         FROM designer_decisions AS decision
         JOIN change_proposals AS proposal
           ON proposal.id = decision.proposal_id
@@ -1633,6 +1633,29 @@ def build_llm_context(database, session_id, version):
         for turn in reversed(turns)
         if turn["id"] not in superseded_assessment_turn_ids
     ]
+    recent_guidance = {
+        "intentHypothesis": None,
+        "proposalOffer": None,
+    }
+    guidance_sources = [
+        load_json(turn["guidance_json"]) or {}
+        for turn in turns
+        if turn["id"] not in superseded_assessment_turn_ids
+    ]
+
+    if accepted_opening is not None:
+        guidance_sources.append(load_json(accepted_opening["guidance_json"]) or {})
+
+    for guidance in guidance_sources:
+        if (
+            recent_guidance["intentHypothesis"] is None
+            and guidance.get("intentHypothesis")
+        ):
+            recent_guidance["intentHypothesis"] = guidance["intentHypothesis"]
+        if recent_guidance["proposalOffer"] is None and guidance.get("proposalOffer"):
+            recent_guidance["proposalOffer"] = guidance["proposalOffer"]
+        if all(recent_guidance.values()):
+            break
 
     if accepted_opening is not None and not any(
         turn["content"] == accepted_opening["content"]
@@ -1661,6 +1684,7 @@ def build_llm_context(database, session_id, version):
             "parentVersionId": version["parent_version_id"],
             "diff": load_json(version["diff_json"]),
             "changeSummary": change_summary,
+            "recentGuidance": recent_guidance,
             "openingTurnId": (
                 accepted_opening["assistant_turn_id"]
                 if accepted_opening is not None
