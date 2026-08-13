@@ -13,7 +13,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import app as backend
-from level_validation import summarize_stage_changes
+from level_validation import summarize_stage_changes, summarize_verified_diff
 from llm_client import LLMExecutionResult, LLMServiceError, build_chat_messages
 
 
@@ -32,7 +32,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
         self.assertIn("cocreation-smooth-chat-20260813-13", index_response.text)
-        self.assertIn("cocreation-distilled-guidance-20260813-14", index_response.text)
+        self.assertIn("cocreation-diff-grounded-20260813-15", index_response.text)
         self.assertIn('<html lang="zh-CN">', index_response.text)
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--bg: #6f9d31", css_response.text)
@@ -49,6 +49,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('body: { language: "zh-CN" }', js_response.text)
         self.assertIn("ensureVisibleTranslations()", js_response.text)
         self.assertIn("localizedAssistantTurn(turn)", js_response.text)
+        self.assertIn("verifiedProposalSummary(proposal.diff)", js_response.text)
+        self.assertIn("verifiedProposalMessage()", js_response.text)
         self.assertIn("translation-label", css_response.text)
         self.assertIn('hash.playReturn', js_response.text)
         self.assertIn('status === "sync_failed"', js_response.text)
@@ -136,6 +138,17 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         )
         self.assertEqual(summary["changedCellCount"], 11)
         self.assertEqual(summary["componentCellCounts"]["player"], 2)
+
+    def test_verified_proposal_summary_is_derived_from_every_actual_small_diff(self):
+        before = list(backend.SAMPLE_ROWS)
+        after = list(before)
+        after[1] = "#.@@.......#"
+
+        summary = summarize_verified_diff(before, after, "zh-CN")
+
+        self.assertIn("共2格", summary)
+        self.assertIn("第2行第3列：地面→水面", summary)
+        self.assertIn("第2行第4列：地面→水面", summary)
 
     def test_cocreation_frontend_uses_active_dashboard_visual_contract(self):
         dashboard_css = (REPOSITORY_ROOT / "Frontend" / "styles.css").read_text(

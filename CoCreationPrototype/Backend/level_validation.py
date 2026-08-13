@@ -181,6 +181,74 @@ def describe_diff(before_rows, after_rows):
     return changes
 
 
+def summarize_verified_diff(before_rows, after_rows, language="en"):
+    """Describe only the tile changes proven by the before/after rows."""
+    changes = describe_diff(before_rows, after_rows)
+
+    if not changes:
+        return "未检测到实际格子改动。" if language == "zh-CN" else "No tile changes detected."
+
+    tile_names = (
+        {
+            " ": "边界外区域",
+            "#": "墙",
+            ".": "地面",
+            "@": "水面",
+            "p": "玩家",
+            "s": "箱子",
+            "t": "目标点",
+        }
+        if language == "zh-CN"
+        else {
+            " ": "void",
+            "#": "wall",
+            ".": "floor",
+            "@": "water",
+            "p": "player",
+            "s": "box",
+            "t": "target",
+        }
+    )
+
+    if len(changes) <= 8:
+        if language == "zh-CN":
+            details = "；".join(
+                f"第{change['y'] + 1}行第{change['x'] + 1}列："
+                f"{tile_names[change['before']]}→{tile_names[change['after']]}"
+                for change in changes
+            )
+            return f"已核对实际改动（共{len(changes)}格）：{details}。"
+
+        details = "; ".join(
+            f"row {change['y'] + 1}, column {change['x'] + 1}: "
+            f"{tile_names[change['before']]} → {tile_names[change['after']]}"
+            for change in changes
+        )
+        return f"Verified tile changes ({len(changes)} total): {details}."
+
+    transition_counts = {}
+
+    for change in changes:
+        transition = (change["before"], change["after"])
+        transition_counts[transition] = transition_counts.get(transition, 0) + 1
+
+    if language == "zh-CN":
+        details = "；".join(
+            f"{tile_names[before]}→{tile_names[after]} {count}格"
+            for (before, after), count in transition_counts.items()
+        )
+        return f"已核对实际改动（共{len(changes)}格）：{details}。具体位置以地图高亮为准。"
+
+    details = "; ".join(
+        f"{tile_names[before]} → {tile_names[after]}: {count}"
+        for (before, after), count in transition_counts.items()
+    )
+    return (
+        f"Verified tile changes ({len(changes)} total): {details}. "
+        "See the highlighted map cells for every location."
+    )
+
+
 def summarize_stage_changes(before_rows, after_rows):
     before_shell = _boundary_wall_cells(before_rows)
     after_shell = _boundary_wall_cells(after_rows)

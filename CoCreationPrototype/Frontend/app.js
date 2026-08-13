@@ -929,6 +929,12 @@ function selectedStageTurns() {
 }
 
 function localizedAssistantTurn(turn) {
+    if (turn.role === "assistant" && proposalForTurn(turn.turnId)) {
+        return {
+            ...turn,
+            content: verifiedProposalMessage()
+        };
+    }
     if (turn.role !== "assistant" || turn.language === state.language) return turn;
     const translation = turn.translations?.[state.language];
     if (!translation) return turn;
@@ -940,8 +946,50 @@ function localizedAssistantTurn(turn) {
 }
 
 function localizedProposalSummary(proposal) {
-    const turn = state.session?.turns.find(item => item.turnId === proposal.assistantTurnId);
-    return turn?.translations?.[state.language]?.proposalSummary || proposal.summary;
+    return verifiedProposalSummary(proposal.diff);
+}
+
+function verifiedProposalMessage() {
+    if (state.language === "zh-CN") {
+        return "我生成了一份待审查的地图提案。为避免文字与地图不一致，提案卡里的修改说明由系统直接根据前后地图逐格生成；请检查高亮差异是否真正实现了你刚才的方向，再决定是否接受。";
+    }
+    return "I generated a map proposal for review. To keep the copy consistent with the actual map, the proposal card describes changes directly from the before/after tile diff. Please check whether the highlighted changes truly implement your direction before accepting it.";
+}
+
+function verifiedProposalSummary(diff) {
+    const changes = Array.isArray(diff) ? diff : [];
+    if (!changes.length) {
+        return state.language === "zh-CN" ? "未检测到实际格子改动。" : "No tile changes detected.";
+    }
+
+    const names = state.language === "zh-CN"
+        ? { " ": "边界外区域", "#": "墙", ".": "地面", "@": "水面", p: "玩家", s: "箱子", t: "目标点" }
+        : { " ": "void", "#": "wall", ".": "floor", "@": "water", p: "player", s: "box", t: "target" };
+
+    if (changes.length <= 8) {
+        const details = changes.map(change => state.language === "zh-CN"
+            ? `第${change.y + 1}行第${change.x + 1}列：${names[change.before]}→${names[change.after]}`
+            : `row ${change.y + 1}, column ${change.x + 1}: ${names[change.before]} → ${names[change.after]}`
+        );
+        return state.language === "zh-CN"
+            ? `已核对实际改动（共${changes.length}格）：${details.join("；")}。`
+            : `Verified tile changes (${changes.length} total): ${details.join("; ")}.`;
+    }
+
+    const transitionCounts = new Map();
+    changes.forEach(change => {
+        const key = `${change.before}\u0000${change.after}`;
+        transitionCounts.set(key, (transitionCounts.get(key) || 0) + 1);
+    });
+    const details = Array.from(transitionCounts.entries()).map(([key, count]) => {
+        const [before, after] = key.split("\u0000");
+        return state.language === "zh-CN"
+            ? `${names[before]}→${names[after]} ${count}格`
+            : `${names[before]} → ${names[after]}: ${count}`;
+    });
+    return state.language === "zh-CN"
+        ? `已核对实际改动（共${changes.length}格）：${details.join("；")}。具体位置以地图高亮为准。`
+        : `Verified tile changes (${changes.length} total): ${details.join("; ")}. See the highlighted map cells for every location.`;
 }
 
 async function ensureVisibleTranslations() {

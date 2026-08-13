@@ -29,7 +29,7 @@ PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v22-distilled-guidance-reliable-proposals"
+PROMPT_VERSION = "cocreation-v23-diff-grounded-proposals"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -245,13 +245,19 @@ def build_chat_messages(
         "When proposedRows is present it must contain exactly 10 strings of 12 "
         "characters using only space, #, ., @, p, s, and t, with one p and one or "
         "two matching s/t pairs. It must differ from the current saved Stage by at "
-        "least one tile. modificationSummary must accurately describe only the tile "
-        "changes actually present in proposedRows. Never claim that a wall, target, "
-        "water tile, box, or player moved unless the before/after rows prove it. Keep "
-        "changes focused on the designer request. For deliver_revision, write a natural, "
-        "substantive assistantMessage that explains two or three actual changes, connects "
-        "them to the playable effect being pursued, and invites the designer to inspect the "
-        "proposal before accepting it. Do not merely say that the work is done.\n\n"
+        "least one tile. A one-cell or otherwise small proposal is allowed only when that "
+        "small edit has a concrete purpose in the designer's latest authorized direction. "
+        "Do not make arbitrary peripheral edits merely to produce a non-empty diff. Every "
+        "changed cell must contribute to the stated direction; if a cell has no defensible "
+        "route, push-order, constraint, readability, or explicitly requested visual effect, "
+        "leave it unchanged. A broad requested change needs coordinated map changes rather "
+        "than a token cosmetic edit. modificationSummary must accurately describe only the "
+        "tile changes actually present in proposedRows. Never claim that a wall, target, "
+        "water tile, box, or player moved unless the before/after rows prove it, and never "
+        "describe more changes than the diff contains. The application will replace this "
+        "free-form summary and proposal message with a deterministic before/after diff for "
+        "the designer, so proposedRows itself must carry the intended revision. For "
+        "deliver_revision, keep assistantMessage concise and frame the map as pending review.\n\n"
         f"Current saved stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"

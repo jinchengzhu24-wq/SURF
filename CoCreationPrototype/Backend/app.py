@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
@@ -26,6 +27,7 @@ from level_validation import (
     WIDTH,
     LevelValidationError,
     describe_diff,
+    summarize_verified_diff,
     summarize_stage_changes,
     validate_and_solve,
 )
@@ -863,6 +865,17 @@ def _send_message_locked(
                 load_json(current["rows_json"]),
                 execution.proposed_rows,
             )
+            current_rows = load_json(current["rows_json"])
+            verified_summary = summarize_verified_diff(
+                current_rows,
+                proposal_validation.rows,
+                language,
+            )
+            execution = replace(
+                execution,
+                assistant_message=_verified_proposal_message(language),
+                modification_summary=verified_summary,
+            )
 
         existing = database.execute(
             """
@@ -899,7 +912,7 @@ def _send_message_locked(
                         payload.baseVersionId,
                         dump_json(list(proposal_validation.rows)),
                         execution.modification_summary,
-                        dump_json(describe_diff(context["rows"], proposal_validation.rows)),
+                        dump_json(describe_diff(current_rows, proposal_validation.rows)),
                         dump_json(proposal_validation.as_dict()),
                         assistant_turn_id,
                         payload.idempotencyKey,
@@ -908,6 +921,22 @@ def _send_message_locked(
                 )
 
         return serialize_session(database, session_id)
+
+
+def _verified_proposal_message(language):
+    if language == "zh-CN":
+        return (
+            "我生成了一份待审查的地图提案。为避免文字与地图不一致，提案卡里的修改说明"
+            "由系统直接根据前后地图逐格生成；请检查高亮差异是否真正实现了你刚才的方向，"
+            "再决定是否接受。"
+        )
+
+    return (
+        "I generated a map proposal for review. To keep the copy consistent with the "
+        "actual map, the proposal card describes changes directly from the before/after "
+        "tile diff. Please check whether the highlighted changes truly implement your "
+        "direction before accepting it."
+    )
 
 
 @contextmanager
@@ -985,29 +1014,43 @@ def decide_proposal(
 
         now = utc_now()
         new_version_id = None
+        verified_summary = None
 
         if payload.decision == "accept":
             proposed_rows = load_json(proposal["proposed_rows_json"])
             current = get_current_version(database, session)
+            current_rows = load_json(current["rows_json"])
             validation = _solve_changed_proposal_or_api_error(
-                load_json(current["rows_json"]),
+                current_rows,
                 proposed_rows,
+            )
+            verified_summary = summarize_verified_diff(
+                current_rows,
+                validation.rows,
+                session["language"],
             )
             new_version_id = _insert_version(
                 database,
                 session,
                 validation,
                 "llm_accepted",
-                proposal["summary"] or "Accepted LLM map proposal",
+                verified_summary,
                 "proposal:" + payload.idempotencyKey,
                 current,
             )
 
         database.execute(
             """
-            UPDATE change_proposals SET status = ?, decided_at = ? WHERE id = ?
+            UPDATE change_proposals
+            SET status = ?, decided_at = ?, summary = COALESCE(?, summary)
+            WHERE id = ?
             """,
-            ("accepted" if payload.decision == "accept" else "rejected", now, proposal_id),
+            (
+                "accepted" if payload.decision == "accept" else "rejected",
+                now,
+                verified_summary,
+                proposal_id,
+            ),
         )
         _insert_decision(
             database,
@@ -1566,7 +1609,7 @@ def _translated_guidance(source_guidance, translated):
 
 def build_llm_context(database, session_id, version):
     session = database.execute(
-        "SELECT initial_draft_method FROM design_sessions WHERE id = ?",
+        "SELECT initial_draft_method, language FROM design_sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
     turns = database.execute(
@@ -1688,7 +1731,7 @@ def build_llm_context(database, session_id, version):
     ).hexdigest()[:16]
 
     if accepted_opening is not None and not any(
-        turn["content"] == accepted_opening["content"]
+        turn["content"] == _verified_proposal_message(session["language"])
         and turn["role"] == accepted_opening["role"]
         for turn in conversation
     ):
@@ -1696,7 +1739,7 @@ def build_llm_context(database, session_id, version):
             0,
             {
                 "role": accepted_opening["role"],
-                "content": accepted_opening["content"],
+                "content": _verified_proposal_message(session["language"]),
             },
         )
 

@@ -780,6 +780,24 @@ class CoCreationSessionTests(unittest.TestCase):
         proposed_session = proposed.json()
         self.assertEqual(len(proposed_session["versions"]), 1)
         self.assertEqual(proposed_session["proposals"][0]["status"], "pending")
+        self.assertEqual(
+            proposed_session["proposals"][0]["summary"],
+            "Verified tile changes (2 total): row 5, column 4: floor → player; "
+            "row 5, column 5: player → floor.",
+        )
+        proposal_turn_before_acceptance = next(
+            turn
+            for turn in proposed_session["turns"]
+            if turn["turnId"] == proposed_session["proposals"][0]["assistantTurnId"]
+        )
+        self.assertIn(
+            "describes changes directly from the before/after tile diff",
+            proposal_turn_before_acceptance["content"],
+        )
+        self.assertNotIn(
+            "Moved the player start left",
+            proposal_turn_before_acceptance["content"],
+        )
         proposal_id = proposed_session["proposals"][0]["proposalId"]
 
         accepted = self.client.post(
