@@ -102,6 +102,50 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIn("useful prose", result.assistant_message)
 
+    def test_plain_reply_normalizes_stages_that_are_mistaken_for_separate_levels(self):
+        result, _ = self.execute([
+            "这种留一点犹豫空间的做法，很符合第二关该有的手感。"
+            "这个判断会影响后面关卡里的目标摆放。"
+        ], language="zh-CN")
+
+        self.assertIn("这个版本现在呈现出的手感", result.assistant_message)
+        self.assertIn("后续版本里的目标摆放", result.assistant_message)
+        self.assertNotIn("第二关", result.assistant_message)
+        self.assertNotIn("后面关卡", result.assistant_message)
+
+    def test_plain_discuss_card_can_hold_a_first_person_design_insight(self):
+        result, _ = self.execute([
+            "这个版本的下半区多了一点回旋空间。\n"
+            "<GUIDANCE>DISCUSS: 我更喜欢水边这次留下的路线犹豫，它让第一次推动的选择更有分量。</GUIDANCE>"
+        ], language="zh-CN")
+
+        focus = result.guidance["followUpQuestion"]
+        self.assertEqual(
+            focus,
+            "我更喜欢水边这次留下的路线犹豫，它让第一次推动的选择更有分量。",
+        )
+        self.assertNotIn("？", focus)
+        self.assertNotIn("GUIDANCE", result.assistant_message)
+
+    def test_plain_discuss_card_does_not_repeat_the_recent_focus(self):
+        content = (
+            "这个版本的下半区多了一点回旋空间。\n"
+            "<GUIDANCE>DISCUSS: 我更喜欢水边留下的路线犹豫，它让第一次推动的选择更有分量。</GUIDANCE>"
+        )
+        result, _ = self.execute(
+            [content],
+            language="zh-CN",
+            stage_context={
+                "recentGuidance": {
+                    "discussionFocus": (
+                        "我更喜欢水边留下的路线犹豫，它让第一次推动的选择更有分量。"
+                    )
+                }
+            },
+        )
+
+        self.assertIsNone(result.guidance["followUpQuestion"])
+
     def test_plain_reply_extracts_intent_card(self):
         result, _ = self.execute([
             "The water now reads as part of the route.\n\n"
@@ -1055,6 +1099,51 @@ class LLMClientTests(unittest.TestCase):
             "I read your preference as wanting a more deliberate opening.",
         )
 
+    def test_structured_discussion_card_accepts_a_concrete_first_person_insight(self):
+        payload = {
+            "assistantMessage": "The lower route now has more breathing room.",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": (
+                    "I prefer the hesitation beside the water because it gives the first "
+                    "route choice more weight."
+                ),
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload, language="en")
+
+        self.assertIn("I prefer", result[4]["followUpQuestion"])
+        self.assertNotIn("?", result[4]["followUpQuestion"])
+
+    def test_structured_fields_normalize_false_level_progression(self):
+        payload = {
+            "assistantMessage": "This feels like the second level, not the first level.",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "Tune the next level.",
+        }
+
+        result = llm_client.validate_chat_response(payload, language="en")
+
+        self.assertEqual(result[0], "This feels like this Stage, not this Stage.")
+        self.assertEqual(result[3], "Tune the next version.")
+
     def test_composed_message_keeps_cues_for_future_llm_context(self):
         guidance = {
             "move": "challenge_tradeoff",
@@ -1251,6 +1340,62 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertIn("water-side corridor", result[4]["followUpQuestion"])
+
+    def test_verified_human_edit_opening_adds_a_concrete_discussion_question(self):
+        payload = {
+            "assistantMessage": "我更喜欢这次水域和通路之间留下的回旋空间。",
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "求解器找到了可行路线。",
+                "difficultyOpinion": "在我看来，新的路线更有选择感。",
+                "features": ["水边通路"],
+                "suggestions": ["观察第一次推动"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+        context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "changeSummary": {"components": ["water", "internalWalls", "targets"]},
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="zh-CN",
+            stage_context=context,
+        )
+
+        question = result[4]["followUpQuestion"]
+        self.assertIn("水域边缘", question)
+        self.assertIn("路线选择", question)
+        self.assertEqual(result[1]["satisfactionQuestion"], question)
+
+    def test_later_turn_in_stage_one_may_still_ask_a_concrete_question(self):
+        client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "我觉得水域现在只是摆设。"}],
+                ["############"] * 10,
+                "stage-one-later-turn-question-test",
+                language="zh-CN",
+                stage_context={"stageNumber": 1, "source": "initial"},
+            )
+
+        self.assertIn("水域边缘", result.guidance["followUpQuestion"])
 
     def test_stage_opening_requires_archival_question_to_match_discussion(self):
         payload = {
@@ -1488,6 +1633,34 @@ class LLMClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "must remain null"):
             llm_client.validate_translation_response(payload, source)
+
+    def test_translation_normalizes_false_multi_level_language(self):
+        source = [{
+            "turnId": "turn-level",
+            "body": "This version has more route choice.",
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": None,
+            "proposalOfferRationale": None,
+            "uiCueTexts": [],
+            "proposalSummary": None,
+        }]
+        payload = {"translations": [{
+            "turnId": "turn-level",
+            "body": "这很符合第二关该有的手感，也会影响后面关卡。",
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": None,
+            "proposalOfferRationale": None,
+            "uiCueTexts": [],
+            "proposalSummary": None,
+        }]}
+
+        translated = llm_client.validate_translation_response(payload, source)[0]["body"]
+
+        self.assertIn("这个版本现在呈现出的手感", translated)
+        self.assertIn("后续版本", translated)
+        self.assertNotIn("第二关", translated)
 
 
 if __name__ == "__main__":

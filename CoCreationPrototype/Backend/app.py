@@ -1634,6 +1634,7 @@ def build_llm_context(database, session_id, version):
         if turn["id"] not in superseded_assessment_turn_ids
     ]
     recent_guidance = {
+        "discussionFocus": None,
         "intentHypothesis": None,
         "proposalOffer": None,
         "uiCues": {},
@@ -1648,6 +1649,8 @@ def build_llm_context(database, session_id, version):
         guidance_sources.append(load_json(accepted_opening["guidance_json"]) or {})
 
     for guidance in guidance_sources:
+        if recent_guidance["discussionFocus"] is None and guidance.get("followUpQuestion"):
+            recent_guidance["discussionFocus"] = guidance["followUpQuestion"]
         if (
             recent_guidance["intentHypothesis"] is None
             and guidance.get("intentHypothesis")

@@ -29,7 +29,7 @@ PLAIN_CHAT_MAX_TOKENS = 700
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v19-natural-peer-dialogue"
+PROMPT_VERSION = "cocreation-v20-single-level-dialogue"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -161,9 +161,12 @@ def build_chat_messages(
         "play evidence are authoritative only for the facts they report; never invent "
         "play results or a verified solution. Refer to solver step or push counts only "
         "when they support a useful design observation; do not recite metrics or spell "
-        "out a move sequence. A Stage number is a saved-version index, "
-        "not a campaign or difficulty sequence. Never call Stage 1 the first level, "
-        "assume it is a tutorial, or infer intended player progression from its number.\n\n"
+        "out a move sequence. There is exactly one level in this entire co-creation "
+        "session. Every Stage number is only a saved-version index for that same level, "
+        "never a campaign, level order, or difficulty sequence. Never say first level, "
+        "second level, next level, later levels, 第几关, 下一关, or 后面关卡, and never "
+        "infer intended player progression from a Stage number. Compare Stages as versions "
+        "or revisions of the one level.\n\n"
         "The designer can also edit the level directly with the tile tools in the right "
         "panel and save it as a new Stage after deterministic validation. Mention this "
         "option briefly only when it would help the designer act on their own idea—for "
@@ -204,21 +207,25 @@ def build_chat_messages(
         "guidance.move must be one of observe_stage, clarify_intent, "
         "offer_perspective, challenge_tradeoff, reflect_on_play, offer_revision, "
         "or deliver_revision. intentConfidence must be null, low, medium, or high. "
-        "followUpQuestion must be null or one question. proposalOffer must be null or "
+        "followUpQuestion is the LET'S DISCUSS card. It must be null, one concrete question, "
+        "or one concise first-person design insight worth discussing. A declarative insight "
+        "must name a concrete map or play judgment and must not duplicate assistantMessage. "
+        "proposalOffer must be null or "
         'an object with exactly {"summary":"...","rationale":"..."}. '
         "uiCues must be an array of at most two unique objects with exactly type and "
         "text; type must be manual_edit or warning. The legacy tradeoff type is accepted "
         "by the application for historical data but must not be generated. "
         "assistantMessage must not repeat followUpQuestion; when non-null, the application "
-        "appends it in a separate discussion card. At a genuine decision point, prefer one "
-        "concrete question over ending the exchange passively. Do not reuse the preceding "
-        "question's judgment or wording.\n"
+        "appends it in a separate discussion card. At a genuine decision point, use either "
+        "one concrete question or one independent first-person insight instead of ending the "
+        "exchange passively. Do not reuse the preceding card's judgment or wording.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
         "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
         "suggestions, and satisfactionQuestion; features and suggestions are non-empty "
         "arrays of strings. satisfactionQuestion is a nullable compatibility field: copy "
-        "the exact followUpQuestion into it, including null. A Stage opening does not need "
-        "a question. If it uses one, followUpQuestion must be genuinely open: do not use the "
+        "the exact followUpQuestion discussion focus into it, including null. A Stage opening "
+        "does not need a discussion card. If it uses a question, it must be genuinely open: "
+        "do not use the "
         "English words or/versus/vs or the Chinese words 还是/或者/或是 to present choices, "
         "and do not ask a yes/no question ending in 吗 or beginning with an auxiliary "
         "such as Do, Did, Is, Are, Would, or Can.\n"
@@ -280,7 +287,7 @@ def build_plain_chat_messages(
         else (
             "After the visible reply, you may append one optional machine-readable block "
             "as one final line using exactly this compact form:\n"
-            "<GUIDANCE>WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
+            "<GUIDANCE>DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
             "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ...</GUIDANCE>\n"
             "Omit any field that is not warranted, and omit the entire block when no card "
             "would improve the collaboration. Once multi-turn evidence supports a meaningful "
@@ -294,6 +301,9 @@ def build_plain_chat_messages(
             "specific map elements and a concrete push moment. Keep ordinary uncertainty, "
             "route trade-offs, and aesthetic opinions in the visible reply. A warning should "
             "sound like a natural first-person aside, not a formal alert or stock phrase. "
+            "Use DISCUSS at a useful later decision point for either one concrete, vivid "
+            "question or one concise first-person design insight. A DISCUSS insight must add "
+            "a judgment rather than repeat the visible reply. "
             "Add MANUAL_EDIT when one local "
             "experiment could advance the judgment: name the area, what to observe, and why, "
             "without prescribing final coordinates or implying manual editing is required. "
@@ -329,7 +339,10 @@ def build_plain_chat_messages(
         "'我猜你可能'. Treat difficulty as "
         "your perspective, not solver fact. Do not invent play evidence, researcher goals, "
         "or exact authorship. Do not provide a complete map or claim a change was saved. "
-        "You may offer a concise revision direction, while direct editing remains optional.\n\n"
+        "You may offer a concise revision direction, while direct editing remains optional. "
+        "There is exactly one level in this session; every Stage is only a saved version of "
+        "that same level. Never describe a Stage as a first, second, next, or later level, "
+        "and never imply a campaign progression.\n\n"
         f"{guidance_instruction}\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         f"Current saved Stage (12 x 10):\n{serialized_map}\n\n"
@@ -931,8 +944,15 @@ async def _generate_plain_with_model_fallback(
             if len(content.strip()) > CHAT_RESPONSE_MAX_LENGTH:
                 raise ValueError("The model response is too long.")
 
+            content = _normalize_single_level_language(content.strip())
+            discussion_focus = _extract_plain_discussion_focus(
+                content,
+                language,
+                stage_opening,
+                stage_context,
+            )
             visible_content, intent_hypothesis, proposal_offer, ui_cues = _extract_plain_guidance(
-                content.strip(),
+                content,
                 language,
                 stage_context,
                 stage_opening,
@@ -959,6 +979,9 @@ async def _generate_plain_with_model_fallback(
                 visible_content,
                 language,
             )
+
+            if discussion_focus is not None:
+                question = discussion_focus
 
             if pure_low_quality:
                 raise LowQualityModelResponse(
@@ -991,6 +1014,12 @@ async def _generate_plain_with_model_fallback(
                 except ValueError:
                     body = visible_content
                     question = None
+
+            if stage_opening and question is None:
+                question = _deterministic_stage_opening_question(
+                    stage_context,
+                    language,
+                )
 
             guidance = {
                 "move": _plain_guidance_move(
@@ -1419,7 +1448,7 @@ def _validate_translated_text(value, source_value, field_name, allow_empty=False
     if len(normalized) > maximum_length:
         raise ValueError(f"{field_name} is unexpectedly long.")
 
-    return normalized
+    return _normalize_single_level_language(normalized)
 
 
 async def _request_completion(
@@ -1468,9 +1497,12 @@ def validate_chat_response(
     }:
         raise ValueError("The model response contains unexpected or missing fields.")
 
-    assistant_message = _clean_text(payload.get("assistantMessage"), "assistantMessage")
+    assistant_message = _normalize_single_level_language(
+        _clean_text(payload.get("assistantMessage"), "assistantMessage")
+    )
     guidance = _validate_guidance(payload.get("guidance"), assessment_only, language)
     stage_one_opening = assessment_only and _is_stage_one(stage_context)
+    deterministic_opening_question = None
 
     if stage_one_opening:
         assistant_message = _questionless_body(assistant_message)
@@ -1497,6 +1529,13 @@ def validate_chat_response(
 
             guidance["followUpQuestion"] = extracted_question
 
+    if assessment_only and not stage_one_opening and guidance["followUpQuestion"] is None:
+        deterministic_opening_question = _deterministic_stage_opening_question(
+            stage_context,
+            language,
+        )
+        guidance["followUpQuestion"] = deterministic_opening_question
+
     if assessment_only:
         assistant_message = _format_stage_opening_paragraphs(assistant_message)
     assessment_payload = payload.get("assessment")
@@ -1509,32 +1548,54 @@ def validate_chat_response(
         raise ValueError("assessment must be an object.")
     else:
         assessment = {
-            "solutionSummary": _clean_text(
+            "solutionSummary": _normalize_single_level_language(_clean_text(
                 assessment_payload.get("solutionSummary"),
                 "assessment.solutionSummary",
-            ),
-            "difficultyOpinion": _clean_text(
+            )),
+            "difficultyOpinion": _normalize_single_level_language(_clean_text(
                 assessment_payload.get("difficultyOpinion"),
                 "assessment.difficultyOpinion",
-            ),
-            "features": _clean_list(assessment_payload.get("features"), "features"),
-            "suggestions": _clean_list(
-                assessment_payload.get("suggestions"),
-                "suggestions",
-            ),
-            "satisfactionQuestion": _clean_optional_text(
-                assessment_payload.get("satisfactionQuestion"),
-                "assessment.satisfactionQuestion",
+            )),
+            "features": [
+                _normalize_single_level_language(item)
+                for item in _clean_list(assessment_payload.get("features"), "features")
+            ],
+            "suggestions": [
+                _normalize_single_level_language(item)
+                for item in _clean_list(
+                    assessment_payload.get("suggestions"),
+                    "suggestions",
+                )
+            ],
+            "satisfactionQuestion": _normalize_single_level_language(
+                _clean_optional_text(
+                    assessment_payload.get("satisfactionQuestion"),
+                    "assessment.satisfactionQuestion",
+                )
             ),
         }
 
         if stage_one_opening:
             assessment["satisfactionQuestion"] = None
+        elif deterministic_opening_question is not None:
+            assessment["satisfactionQuestion"] = deterministic_opening_question
 
         if assessment_only and assessment["satisfactionQuestion"] is not None:
-            assessment["satisfactionQuestion"] = _normalize_opening_question(
-                assessment["satisfactionQuestion"]
+            satisfaction_marks = (
+                assessment["satisfactionQuestion"].count("?")
+                + assessment["satisfactionQuestion"].count("？")
             )
+            if satisfaction_marks == 1:
+                assessment["satisfactionQuestion"] = _normalize_opening_question(
+                    assessment["satisfactionQuestion"]
+                )
+            elif satisfaction_marks > 1 or not _discussion_insight_is_useful(
+                assessment["satisfactionQuestion"],
+                language,
+            ):
+                raise ValueError(
+                    "assessment.satisfactionQuestion must be one useful discussion focus."
+                )
 
         if (
             assessment_only
@@ -1574,7 +1635,7 @@ def validate_chat_response(
         assistant_message,
         assessment,
         proposed_rows,
-        modification_summary.strip()[:1000],
+        _normalize_single_level_language(modification_summary.strip())[:1000],
         guidance,
     )
 
@@ -1713,6 +1774,117 @@ def _question_repeats_recent_judgment(question, messages):
     return any(_guidance_text_matches(question, previous) for previous in previous_questions)
 
 
+def _normalize_single_level_language(value):
+    """Keep model prose aligned with the one-level, multi-version study structure."""
+    if value is None:
+        return None
+
+    text = str(value)
+    chinese_ordinal = r"[零〇一二三四五六七八九十百两\d]+"
+    text = re.sub(
+        rf"第{chinese_ordinal}关(?:卡)?该有的",
+        "这个版本现在呈现出的",
+        text,
+    )
+    text = re.sub(r"(?:后面|之后|后续|未来)(?:的)?关卡", "后续版本", text)
+    text = re.sub(r"(?:下一个|下一)关(?:卡)?", "下一个版本", text)
+    text = re.sub(r"(?:上一个|上一)关(?:卡)?", "上一个版本", text)
+    text = re.sub(r"前面(?:的)?关卡", "之前的版本", text)
+    text = re.sub(rf"第{chinese_ordinal}关(?:卡)?", "这个 Stage", text)
+
+    english_ordinal = (
+        r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|"
+        r"tenth|\d+(?:st|nd|rd|th))"
+    )
+    text = re.sub(
+        rf"\b(?:the\s+)?{english_ordinal}\s+levels?\b",
+        "this Stage",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:the\s+)?(?:next|following)\s+level\b",
+        "the next version",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:later|future|subsequent|following)\s+levels\b",
+        "later versions",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:the\s+)?previous\s+level\b",
+        "the previous version",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
+def _deterministic_stage_opening_question(stage_context, language):
+    """Ask about a verified edit without inventing a second level or exact coordinates."""
+    context = stage_context or {}
+    if _is_stage_one(context) or context.get("source") != "human_edit":
+        return None
+
+    components = set((context.get("changeSummary") or {}).get("components") or [])
+    if not components:
+        return None
+
+    if language == "zh-CN":
+        if "water" in components:
+            return (
+                "当箱子第一次贴着调整后的水域边缘推进时，你最想观察哪一处转折，"
+                "来判断这个版本的路线选择是否更清楚？"
+            )
+        if "internalWalls" in components:
+            return (
+                "当箱子第一次穿过调整后的内部通道时，你最想观察哪个转折，"
+                "来判断这个版本的推动顺序是否更容易读懂？"
+            )
+        if "targets" in components:
+            return (
+                "当箱子第一次接近调整后的目标点时，你最想观察哪一步停顿，"
+                "来判断这个版本的目标关系是否更容易读懂？"
+            )
+        if "boxes" in components:
+            return (
+                "当调整后的箱子开始第一次推进时，你最想观察哪一步，"
+                "来判断这个版本的推动顺序是否足够清楚？"
+            )
+        return (
+            "当箱子第一次进入这次调整影响的区域时，你最想观察哪个动作，"
+            "来判断这个版本的路线是否更容易读懂？"
+        )
+
+    if "water" in components:
+        return (
+            "When the box first moves along the adjusted water edge, which turn would you "
+            "watch to judge whether this version makes the route choice clearer?"
+        )
+    if "internalWalls" in components:
+        return (
+            "When the box first passes through the adjusted inner passage, which turn would "
+            "you watch to judge whether this version makes the push order easier to read?"
+        )
+    if "targets" in components:
+        return (
+            "When the box first approaches the adjusted target, which pause would you watch "
+            "to judge whether this version makes the target relationship easier to read?"
+        )
+    if "boxes" in components:
+        return (
+            "When the adjusted box begins its first push, which step would you watch to judge "
+            "whether this version makes the push order clear enough?"
+        )
+    return (
+        "When the box first enters the area affected by this edit, which move would you "
+        "watch to judge whether this version makes the route easier to read?"
+    )
+
+
 def _deterministic_key_question(messages, language, rows):
     latest = _latest_role_content(messages, "user")
     lowered = latest.casefold()
@@ -1768,6 +1940,72 @@ def _deterministic_key_question(messages, language, rows):
             "read the route choice ahead?"
         )
     return None
+
+
+def _extract_plain_discussion_focus(
+    content,
+    language,
+    stage_opening=False,
+    stage_context=None,
+):
+    if stage_opening:
+        return None
+
+    value = str(content or "")
+    marker_index = value.find("<GUIDANCE>")
+    closing_index = value.find("</GUIDANCE>", marker_index + 10)
+    if marker_index < 0 or closing_index < 0:
+        return None
+
+    focus = None
+    block = value[marker_index + len("<GUIDANCE>"):closing_index]
+    for raw_line in re.split(r"\s*\|\|\s*|[\r\n]+", block):
+        match = re.match(r"^DISCUSS\s*:\s*(.+?)\s*$", raw_line.strip(), re.IGNORECASE)
+        if match:
+            focus = _normalize_single_level_language(match.group(1).strip())[:1000]
+            break
+    if not focus:
+        return None
+
+    question_marks = focus.count("?") + focus.count("？")
+    useful = (
+        _question_is_specific_and_vivid(focus, language)
+        if question_marks == 1
+        else question_marks == 0 and _discussion_insight_is_useful(focus, language)
+    )
+    recent_focus = ((stage_context or {}).get("recentGuidance") or {}).get(
+        "discussionFocus"
+    )
+    if not useful or _guidance_text_matches(focus, recent_focus):
+        return None
+    return focus
+
+
+def _discussion_insight_is_useful(text, language="en"):
+    value = str(text or "").strip()
+    if not 18 <= len(value) <= 320 or "?" in value or "？" in value:
+        return False
+
+    lowered = value.casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", value):
+        first_person = any(marker in value for marker in ("我", "在我看来", "对我来说"))
+        anchors = ("水", "箱", "目标", "墙", "通道", "路线", "推动", "落点", "转折", "玩家")
+        judgments = ("选择", "顺序", "读", "判断", "节奏", "犹豫", "取舍", "注意", "自由", "压力")
+    else:
+        first_person = bool(re.search(r"\b(?:i|my|me)\b", lowered)) or "to me" in lowered
+        anchors = (
+            "water", "box", "crate", "target", "wall", "corridor", "route",
+            "push", "landing", "turn", "player",
+        )
+        judgments = (
+            "choice", "order", "read", "judg", "rhythm", "hesitat", "trade-off",
+            "notice", "freedom", "pressure",
+        )
+    return (
+        first_person
+        and any(anchor in lowered for anchor in anchors)
+        and any(judgment in lowered for judgment in judgments)
+    )
 
 
 def _extract_plain_guidance(content, language, stage_context, stage_opening=False):
@@ -2532,6 +2770,7 @@ def _validate_guidance(payload, assessment_only, language="en"):
     )
 
     if intent_hypothesis is not None:
+        intent_hypothesis = _normalize_single_level_language(intent_hypothesis)
         intent_hypothesis = _normalize_intent_hypothesis(
             intent_hypothesis,
             language,
@@ -2550,12 +2789,19 @@ def _validate_guidance(payload, assessment_only, language="en"):
     )
 
     if follow_up_question is not None:
+        follow_up_question = _normalize_single_level_language(follow_up_question)
         question_marks = follow_up_question.count("?") + follow_up_question.count("？")
 
-        if question_marks != 1:
-            raise ValueError("followUpQuestion must contain exactly one question.")
-
-        if assessment_only:
+        if question_marks > 1:
+            raise ValueError("followUpQuestion must contain at most one question.")
+        if question_marks == 0 and not _discussion_insight_is_useful(
+            follow_up_question,
+            language,
+        ):
+            raise ValueError(
+                "A declarative followUpQuestion must be a concrete first-person design insight."
+            )
+        if assessment_only and question_marks == 1:
             follow_up_question = _normalize_opening_question(follow_up_question)
     proposal_offer = payload.get("proposalOffer")
 
@@ -2567,11 +2813,13 @@ def _validate_guidance(payload, assessment_only, language="en"):
             raise ValueError("proposalOffer must contain summary and rationale.")
 
         proposal_offer = {
-            "summary": _clean_text(proposal_offer.get("summary"), "proposalOffer.summary"),
-            "rationale": _clean_text(
+            "summary": _normalize_single_level_language(
+                _clean_text(proposal_offer.get("summary"), "proposalOffer.summary")
+            ),
+            "rationale": _normalize_single_level_language(_clean_text(
                 proposal_offer.get("rationale"),
                 "proposalOffer.rationale",
-            ),
+            )),
         }
     elif move == "offer_revision":
         raise ValueError("The offer_revision move requires proposalOffer.")
@@ -2600,7 +2848,9 @@ def _validate_guidance(payload, assessment_only, language="en"):
         normalized_cues.append(
             {
                 "type": cue_type,
-                "text": _clean_text(cue.get("text"), f"guidance.uiCues[{index}].text"),
+                "text": _normalize_single_level_language(
+                    _clean_text(cue.get("text"), f"guidance.uiCues[{index}].text")
+                ),
             }
         )
 

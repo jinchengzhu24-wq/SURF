@@ -420,7 +420,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "move": "offer_revision",
                 "intentHypothesis": "I think you may want the water to shape the route.",
                 "intentConfidence": "medium",
-                "followUpQuestion": None,
+                "followUpQuestion": (
+                    "I prefer the water-side hesitation because it gives the route choice weight."
+                ),
                 "proposalOffer": {
                     "summary": "Link the lower target to the water edge",
                     "rationale": "Make the first push depend on reading the water route",
@@ -473,6 +475,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
 
         recent = mocked.call_args_list[1].kwargs["stage_context"]["recentGuidance"]
+        self.assertIn("water-side hesitation", recent["discussionFocus"])
         self.assertEqual(
             recent["intentHypothesis"],
             "I think you may want the water to shape the route.",
