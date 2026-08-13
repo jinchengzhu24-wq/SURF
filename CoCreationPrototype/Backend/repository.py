@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     UNIQUE(session_id, sequence_number)
 );
 
+CREATE TABLE IF NOT EXISTS turn_translations (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES design_sessions(id),
+    turn_id TEXT NOT NULL REFERENCES conversation_turns(id),
+    language TEXT NOT NULL,
+    body TEXT NOT NULL,
+    guidance_json TEXT,
+    proposal_summary TEXT,
+    model TEXT,
+    attempts_used INTEGER,
+    latency_ms INTEGER,
+    created_at TEXT NOT NULL,
+    UNIQUE(turn_id, language)
+);
+
 CREATE TABLE IF NOT EXISTS llm_assessments (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES design_sessions(id),
@@ -150,6 +165,8 @@ CREATE INDEX IF NOT EXISTS idx_versions_session
     ON level_versions(session_id, stage_number);
 CREATE INDEX IF NOT EXISTS idx_turns_session
     ON conversation_turns(session_id, sequence_number);
+CREATE INDEX IF NOT EXISTS idx_turn_translations_session
+    ON turn_translations(session_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_version
     ON play_attempts(session_id, version_id, issued_at);
 """
@@ -240,6 +257,15 @@ def serialize_session(database, session_id):
         """,
         (session_id,),
     ).fetchall()
+    translations = database.execute(
+        """
+        SELECT turn_id, language, body, guidance_json, proposal_summary,
+               created_at
+        FROM turn_translations
+        WHERE session_id = ? ORDER BY created_at
+        """,
+        (session_id,),
+    ).fetchall()
     assessments = database.execute(
         """
         SELECT id, version_id, assistant_turn_id, payload_json, created_at
@@ -287,6 +313,7 @@ def serialize_session(database, session_id):
     ).fetchone()
 
     attempts_by_version = {}
+    translations_by_turn = {}
     opening_by_version = {
         opening["version_id"]: opening for opening in accepted_openings
     }
@@ -295,6 +322,16 @@ def serialize_session(database, session_id):
         attempts_by_version.setdefault(attempt["version_id"], []).append(
             _serialize_attempt(attempt)
         )
+
+    for translation in translations:
+        translations_by_turn.setdefault(translation["turn_id"], {})[
+            translation["language"]
+        ] = {
+            "body": translation["body"],
+            "guidance": load_json(translation["guidance_json"]),
+            "proposalSummary": translation["proposal_summary"],
+            "createdAt": translation["created_at"],
+        }
 
     return {
         "sessionId": session["id"],
@@ -342,6 +379,7 @@ def serialize_session(database, session_id):
                 "versionId": turn["version_id"],
                 "requestId": turn["request_id"],
                 "guidance": load_json(turn["guidance_json"]),
+                "translations": translations_by_turn.get(turn["id"], {}),
                 "createdAt": turn["created_at"],
             }
             for turn in turns

@@ -117,7 +117,8 @@ const translations = {
         errorIntentRequired: "Please describe your design intention before completing the session.",
         error_CLIENT_TIMEOUT: "The assistant did not finish within the browser safety limit. You can retry without creating a duplicate message.",
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
-        playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again."
+        playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again.",
+        translatedDisplay: "Translated display"
     },
     "zh-CN": {
         title: "Sokoban 共创实验室",
@@ -212,7 +213,8 @@ const translations = {
         errorPendingPlay: "请先接受或拒绝待处理的地图提案，再开始试玩。",
         errorIntentRequired: "请先填写设计意图，再完成会话。",
         playSyncFailed: "关卡已经通关，但本次试玩结果未能同步；该记录之后会标记为异常中断。",
-        playLoadFailed: "所选 Stage 未能在 Unity 中加载，请检查该版本后重试。"
+        playLoadFailed: "所选 Stage 未能在 Unity 中加载，请检查该版本后重试。",
+        translatedDisplay: "翻译内容"
     }
 };
 
@@ -302,6 +304,10 @@ async function initialize() {
                 method: "POST",
                 body: { bootstrapToken: hash.bootstrap }
             });
+            await api(`/api/sessions/${encodeURIComponent(state.sessionId)}/language`, {
+                method: "PATCH",
+                body: { language: "zh-CN" }
+            });
         }
 
         localStorage.setItem(SESSION_STORAGE_KEY, state.sessionId);
@@ -344,6 +350,7 @@ async function refreshSession() {
     syncHash();
     resetDraftFromSelection();
     render();
+    await ensureVisibleTranslations();
     await ensureAssessment(state.session.currentVersionId);
 }
 
@@ -430,13 +437,21 @@ function renderMessages() {
 }
 
 function renderAssistantBubble(turn, bubble) {
-    const guidance = turn.guidance || {};
+    const localized = localizedAssistantTurn(turn);
+    const guidance = localized.guidance || {};
     const question = String(guidance.followUpQuestion || "").trim();
     const uiCues = Array.isArray(guidance.uiCues) ? guidance.uiCues : [];
     const bodyNode = document.createElement("div");
     bodyNode.className = "message-body";
-    bodyNode.textContent = assistantBodyWithoutCues(turn.content, uiCues, question);
+    bodyNode.textContent = assistantBodyWithoutCues(localized.content, uiCues, question);
     bubble.appendChild(bodyNode);
+
+    if (localized !== turn) {
+        const translatedLabel = document.createElement("small");
+        translatedLabel.className = "translation-label";
+        translatedLabel.textContent = t("translatedDisplay");
+        bubble.appendChild(translatedLabel);
+    }
 
     const cueList = document.createElement("div");
     cueList.className = "guidance-cues";
@@ -535,8 +550,9 @@ function renderProposal() {
     if (!proposal) return;
     const card = document.createElement("section");
     card.className = "proposal-card";
+    const summary = localizedProposalSummary(proposal);
     card.innerHTML = `
-        <div class="proposal-heading"><div><p class="eyebrow">${escapeHtml(t("proposal"))}</p><h3>${escapeHtml(proposal.summary || t("proposal"))}</h3></div><span>${proposal.diff.length} ${escapeHtml(t("changedTiles"))}</span></div>
+        <div class="proposal-heading"><div><p class="eyebrow">${escapeHtml(t("proposal"))}</p><h3>${escapeHtml(summary || t("proposal"))}</h3></div><span>${proposal.diff.length} ${escapeHtml(t("changedTiles"))}</span></div>
         <p>${escapeHtml(t("proposalValid"))}</p>`;
     card.appendChild(createMiniMap(proposal.proposedRows, proposal.diff, "proposal-map"));
     const actions = document.createElement("div");
@@ -852,6 +868,7 @@ async function toggleLanguage() {
         state.session = await api(`/api/sessions/${state.sessionId}/language`, { method: "PATCH", body: { language: next } });
         state.language = next;
         render();
+        await ensureVisibleTranslations();
     });
 }
 
@@ -862,7 +879,10 @@ function selectVersion(versionId, shouldRender = true) {
     syncHash();
     resetDraftFromSelection();
     restoreComposerDraft();
-    if (shouldRender) render();
+    if (shouldRender) {
+        render();
+        void withBusy(ensureVisibleTranslations);
+    }
 }
 
 function selectCurrentVersion() { selectVersion(state.session.currentVersionId); }
@@ -892,6 +912,43 @@ function selectedStageTurns() {
     }
 
     return [openingTurn, ...directTurns];
+}
+
+function localizedAssistantTurn(turn) {
+    if (turn.role !== "assistant" || turn.language === state.language) return turn;
+    const translation = turn.translations?.[state.language];
+    if (!translation) return turn;
+    return {
+        ...turn,
+        content: translation.body,
+        guidance: translation.guidance || {}
+    };
+}
+
+function localizedProposalSummary(proposal) {
+    const turn = state.session?.turns.find(item => item.turnId === proposal.assistantTurnId);
+    return turn?.translations?.[state.language]?.proposalSummary || proposal.summary;
+}
+
+async function ensureVisibleTranslations() {
+    if (!state.session) return;
+    const missing = selectedStageTurns().filter(
+        turn => turn.role === "assistant"
+            && turn.language !== state.language
+            && !turn.translations?.[state.language]
+    );
+
+    for (let index = 0; index < missing.length; index += 8) {
+        state.session = await api(
+            `/api/sessions/${state.sessionId}/translations/${encodeURIComponent(state.language)}`,
+            {
+                method: "POST",
+                body: { turnIds: missing.slice(index, index + 8).map(turn => turn.turnId) },
+                timeoutMs: 65000
+            }
+        );
+        render();
+    }
 }
 
 function resetDraftFromSelection() {

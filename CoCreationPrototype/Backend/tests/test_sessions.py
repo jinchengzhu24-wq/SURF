@@ -16,7 +16,11 @@ if str(BACKEND_DIR) not in sys.path:
 
 import app as backend
 import repository
-from llm_client import LLMExecutionResult, LLMServiceError
+from llm_client import (
+    LLMExecutionResult,
+    LLMServiceError,
+    TranslationExecutionResult,
+)
 
 
 SAMPLE_ROWS = list(backend.SAMPLE_ROWS)
@@ -44,6 +48,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "designer_decisions",
                 "change_proposals",
                 "llm_assessments",
+                "turn_translations",
                 "conversation_turns",
                 "level_versions",
                 "design_sessions",
@@ -145,7 +150,7 @@ class CoCreationSessionTests(unittest.TestCase):
             legacy_path = Path(directory) / "legacy.sqlite3"
             database = sqlite3.connect(legacy_path)
             database.executescript(
-                repository.SCHEMA.replace("    guidance_json TEXT,\n", "")
+                repository.SCHEMA.replace("    guidance_json TEXT,\n", "", 1)
             )
             database.close()
 
@@ -884,6 +889,85 @@ class CoCreationSessionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["language"], "zh-CN")
+
+    def test_assistant_translation_is_cached_without_changing_original_turn(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "The central route may feel direct.\n\nWhat should stand out first?",
+            1,
+            "translation-opening",
+            assessment={
+                "solutionSummary": "The solver found a route.",
+                "difficultyOpinion": "This looks approachable to me.",
+                "features": ["Central route"],
+                "suggestions": ["Discuss the focal point"],
+                "satisfactionQuestion": "What should stand out first?",
+            },
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "What should stand out first?",
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "translation_opening_001"},
+            )
+
+        turn = assessed.json()["turns"][-1]
+        translated = TranslationExecutionResult(
+            translations=[
+                {
+                    "turnId": turn["turnId"],
+                    "body": "中央路线可能显得较为直接。",
+                    "followUpQuestion": "你希望玩家首先注意到什么？",
+                    "intentHypothesis": None,
+                    "proposalOfferSummary": None,
+                    "proposalOfferRationale": None,
+                    "uiCueTexts": [],
+                    "proposalSummary": None,
+                }
+            ],
+            attempts_used=1,
+            request_id="translation-request",
+            model="translation-model",
+            latency_ms=25,
+        )
+
+        with patch.object(backend, "translate_turns", return_value=translated) as mocked:
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/translations/zh-CN",
+                json={"turnIds": [turn["turnId"]]},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        translated_turn = response.json()["turns"][-1]
+        self.assertEqual(translated_turn["content"], turn["content"])
+        self.assertEqual(translated_turn["language"], "en")
+        self.assertEqual(
+            translated_turn["translations"]["zh-CN"]["body"],
+            "中央路线可能显得较为直接。",
+        )
+        self.assertEqual(
+            translated_turn["translations"]["zh-CN"]["guidance"]["followUpQuestion"],
+            "你希望玩家首先注意到什么？",
+        )
+        self.assertEqual(mocked.call_count, 1)
+
+        with patch.object(backend, "translate_turns") as cached_mock:
+            cached = self.client.post(
+                f"/api/sessions/{self.session_id}/translations/zh-CN",
+                json={"turnIds": [turn["turnId"]]},
+            )
+
+        self.assertEqual(cached.status_code, 200, cached.text)
+        cached_mock.assert_not_called()
 
 
 if __name__ == "__main__":

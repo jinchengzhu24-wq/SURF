@@ -193,10 +193,22 @@ public class DescriptionGenerationController : MonoBehaviour
         advancedToggleText = advancedToggleButton != null
             ? advancedToggleButton.GetComponentInChildren<Text>(true)
             : null;
-        descriptionInput = FindComponent<InputField>(
+        InputField contentDescriptionInput = FindComponent<InputField>(
             content,
             "DescriptionInputRow/InputField"
         );
+
+        if (contentDescriptionInput != null)
+        {
+            descriptionInput = contentDescriptionInput;
+        }
+        else if (descriptionInput == null)
+        {
+            descriptionInput = FindComponent<InputField>(
+                canvas.transform,
+                "DescriptionInputRow/InputField"
+            );
+        }
 
         if (descriptionInput != null && descriptionInput.textComponent == null)
         {

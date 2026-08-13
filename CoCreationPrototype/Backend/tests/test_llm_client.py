@@ -925,6 +925,44 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("在我看来", message)
         self.assertTrue(message.endswith("这符合你想强调的体验吗？"))
 
+    def test_translation_validation_preserves_ids_nulls_and_cue_order(self):
+        source = [
+            {
+                "turnId": "turn-1",
+                "body": "A compact route.",
+                "followUpQuestion": "What should stand out?",
+                "intentHypothesis": None,
+                "proposalOfferSummary": None,
+                "proposalOfferRationale": None,
+                "uiCueTexts": ["The corner may be tight."],
+                "proposalSummary": None,
+            }
+        ]
+        payload = {
+            "translations": [
+                {
+                    "turnId": "turn-1",
+                    "body": "一条紧凑的路线。",
+                    "followUpQuestion": "你希望什么最突出？",
+                    "intentHypothesis": None,
+                    "proposalOfferSummary": None,
+                    "proposalOfferRationale": None,
+                    "uiCueTexts": ["这个角落可能较紧。"],
+                    "proposalSummary": None,
+                }
+            ]
+        }
+
+        self.assertEqual(
+            llm_client.validate_translation_response(payload, source),
+            payload["translations"],
+        )
+
+        payload["translations"][0]["intentHypothesis"] = "新增的意图"
+
+        with self.assertRaisesRegex(ValueError, "must remain null"):
+            llm_client.validate_translation_response(payload, source)
+
 
 if __name__ == "__main__":
     unittest.main()

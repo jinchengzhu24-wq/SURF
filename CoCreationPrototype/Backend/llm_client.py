@@ -23,6 +23,7 @@ CHAT_TIMEOUT_SECONDS = 60.0
 CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
 PROPOSAL_MAX_TOKENS = 2400
+TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
 PROMPT_VERSION = "cocreation-v15-natural-optional-questions"
 
@@ -50,6 +51,15 @@ class LLMExecutionResult:
     model: str = ""
     latency_ms: int = 0
     guidance: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TranslationExecutionResult:
+    translations: list[dict]
+    attempts_used: int
+    request_id: str
+    model: str = ""
+    latency_ms: int = 0
 
 
 class LLMServiceError(Exception):
@@ -354,6 +364,229 @@ def generate_chat_reply(
         ) from exception
 
 
+def translate_turns(items, target_language, request_id):
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+
+    if not api_key or api_key == "your_deepseek_api_key_here":
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR",
+            "DEEPSEEK_API_KEY is missing.",
+            request_id,
+            False,
+            0,
+            503,
+        )
+
+    target_name = "Simplified Chinese" if target_language == "zh-CN" else "English"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"Translate the supplied Sokoban co-design UI text into {target_name}. "
+                "Return one complete JSON object only. Preserve meaning, uncertainty, "
+                "direct first/second-person voice, paragraph breaks, and question marks. "
+                "Do not add advice, questions, claims, or explanations. Keep null values "
+                "null and keep every turnId unchanged. Translate each uiCueTexts item in "
+                "the same order. Return exactly {\"translations\":[{\"turnId\":\"...\","
+                "\"body\":\"...\",\"followUpQuestion\":null,"
+                "\"intentHypothesis\":null,\"proposalOfferSummary\":null,"
+                "\"proposalOfferRationale\":null,\"uiCueTexts\":[],"
+                "\"proposalSummary\":null}]}."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps({"items": items}, ensure_ascii=False),
+        },
+    ]
+    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    fallback_model = (
+        os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip()
+        or os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
+        or DEFAULT_PROPOSAL_MODEL
+    )
+    models = [default_model]
+
+    if fallback_model != default_model:
+        models.append(fallback_model)
+
+    started_at = time.monotonic()
+    _log_llm_event(
+        "llm_request_started",
+        requestId=request_id,
+        task="translation",
+        primaryModel=models[0],
+        fallbackModel=models[1] if len(models) > 1 else None,
+        timeoutSeconds=CHAT_TIMEOUT_SECONDS,
+    )
+
+    try:
+        return asyncio.run(
+            asyncio.wait_for(
+                _translate_with_model_fallback(
+                    api_key=api_key,
+                    base_url=base_url,
+                    models=models,
+                    messages=messages,
+                    items=items,
+                    request_id=request_id,
+                    started_at=started_at,
+                ),
+                timeout=CHAT_TIMEOUT_SECONDS,
+            )
+        )
+    except asyncio.TimeoutError as exception:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task="translation",
+            outcome="error",
+            code="UPSTREAM_TIMEOUT",
+            attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS),
+            latencyMs=elapsed_ms,
+        )
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not complete the translation before the 60 second limit.",
+            request_id,
+            True,
+            min(len(models), CHAT_MAX_ATTEMPTS),
+            504,
+        ) from exception
+
+
+async def _translate_with_model_fallback(
+    *,
+    api_key,
+    base_url,
+    models,
+    messages,
+    items,
+    request_id,
+    started_at,
+):
+    last_error = None
+    validation_feedback = None
+
+    for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
+        remaining = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+
+        attempt_timeout = min(
+            PRIMARY_ATTEMPT_TIMEOUT_SECONDS if attempt == 1 else remaining,
+            remaining,
+        )
+        _log_llm_event(
+            "llm_attempt_started",
+            requestId=request_id,
+            task="translation",
+            model=model,
+            attempt=attempt,
+            maxAttempts=len(models[:CHAT_MAX_ATTEMPTS]),
+            timeoutSeconds=round(attempt_timeout, 3),
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                _request_completion(
+                    api_key,
+                    base_url,
+                    model,
+                    _messages_with_validation_feedback(
+                        messages,
+                        validation_feedback,
+                        "translation",
+                    ),
+                    TRANSLATION_MAX_TOKENS,
+                    attempt_timeout,
+                ),
+                timeout=attempt_timeout,
+            )
+            choice = response.choices[0]
+
+            if str(getattr(choice, "finish_reason", "") or "") == "length":
+                raise ValueError("The model output reached its token limit.")
+
+            payload = json.loads(str(choice.message.content or ""))
+            translations = validate_translation_response(payload, items)
+            latency_ms = int((time.monotonic() - started_at) * 1000)
+            _log_llm_event(
+                "llm_request_completed",
+                requestId=request_id,
+                task="translation",
+                outcome="success",
+                model=model,
+                attemptsUsed=attempt,
+                latencyMs=latency_ms,
+            )
+            return TranslationExecutionResult(
+                translations=translations,
+                attempts_used=attempt,
+                request_id=request_id,
+                model=model,
+                latency_ms=latency_ms,
+            )
+        except asyncio.TimeoutError as exception:
+            failure_reason = None
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT",
+                "DeepSeek did not respond before the translation attempt timeout.",
+                request_id,
+                True,
+                attempt,
+                504,
+            )
+        except Exception as exception:
+            failure_reason = _safe_validation_reason(exception)
+            last_error = classify_exception(exception, request_id, attempt)
+
+            if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
+                validation_feedback = failure_reason
+
+        failure_fields = {
+            "requestId": request_id,
+            "task": "translation",
+            "model": model,
+            "attempt": attempt,
+            "code": last_error.code,
+            "retryable": last_error.retryable,
+            "latencyMs": int((time.monotonic() - started_at) * 1000),
+        }
+
+        if failure_reason:
+            failure_fields["validationReason"] = failure_reason
+
+        _log_llm_event("llm_attempt_failed", **failure_fields)
+
+        if not last_error.retryable:
+            raise last_error
+
+    if last_error is not None:
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task="translation",
+            outcome="error",
+            code=last_error.code,
+            attemptsUsed=last_error.attempts_used,
+            latencyMs=int((time.monotonic() - started_at) * 1000),
+        )
+        raise last_error
+
+    raise LLMServiceError(
+        "INTERNAL_ERROR",
+        "The translation request ended unexpectedly.",
+        request_id,
+        False,
+        0,
+        500,
+    )
+
+
 async def _generate_with_model_fallback(
     *,
     api_key,
@@ -549,6 +782,104 @@ def _safe_validation_reason(exception):
         return reason or "The response did not match the required JSON contract."
 
     return None
+
+
+def validate_translation_response(payload, source_items):
+    if not isinstance(payload, dict) or set(payload) != {"translations"}:
+        raise ValueError("Translation output must contain only translations.")
+
+    translations = payload["translations"]
+
+    if not isinstance(translations, list) or len(translations) != len(source_items):
+        raise ValueError("Translation output must contain one item for every source turn.")
+
+    source_by_id = {item["turnId"]: item for item in source_items}
+    expected_fields = {
+        "turnId",
+        "body",
+        "followUpQuestion",
+        "intentHypothesis",
+        "proposalOfferSummary",
+        "proposalOfferRationale",
+        "uiCueTexts",
+        "proposalSummary",
+    }
+    translated_by_id = {}
+
+    for index, translation in enumerate(translations):
+        if not isinstance(translation, dict) or set(translation) != expected_fields:
+            raise ValueError(f"Translation item {index} does not match the required fields.")
+
+        turn_id = translation["turnId"]
+
+        if turn_id not in source_by_id or turn_id in translated_by_id:
+            raise ValueError("Translation turnIds must match the requested turns exactly.")
+
+        source = source_by_id[turn_id]
+        normalized = {"turnId": turn_id}
+        normalized["body"] = _validate_translated_text(
+            translation["body"],
+            source["body"],
+            f"translations[{index}].body",
+            allow_empty=True,
+        )
+
+        for field_name in (
+            "followUpQuestion",
+            "intentHypothesis",
+            "proposalOfferSummary",
+            "proposalOfferRationale",
+            "proposalSummary",
+        ):
+            normalized[field_name] = _validate_translated_text(
+                translation[field_name],
+                source[field_name],
+                f"translations[{index}].{field_name}",
+            )
+
+        source_cues = source["uiCueTexts"]
+        translated_cues = translation["uiCueTexts"]
+
+        if not isinstance(translated_cues, list) or len(translated_cues) != len(source_cues):
+            raise ValueError("Translated uiCueTexts must preserve the source item count.")
+
+        normalized["uiCueTexts"] = [
+            _validate_translated_text(
+                translated_text,
+                source_cues[cue_index],
+                f"translations[{index}].uiCueTexts[{cue_index}]",
+            )
+            for cue_index, translated_text in enumerate(translated_cues)
+        ]
+        translated_by_id[turn_id] = normalized
+
+    if set(translated_by_id) != set(source_by_id):
+        raise ValueError("Translation output omitted one or more requested turns.")
+
+    return [translated_by_id[item["turnId"]] for item in source_items]
+
+
+def _validate_translated_text(value, source_value, field_name, allow_empty=False):
+    if source_value is None:
+        if value is not None:
+            raise ValueError(f"{field_name} must remain null.")
+
+        return None
+
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string.")
+
+    normalized = value.strip()
+
+    if not normalized and not allow_empty:
+        raise ValueError(f"{field_name} must not be empty.")
+
+    maximum_length = max(400, len(str(source_value)) * 4 + 200)
+
+    if len(normalized) > maximum_length:
+        raise ValueError(f"{field_name} is unexpectedly long.")
+
+    return normalized
 
 
 async def _request_completion(

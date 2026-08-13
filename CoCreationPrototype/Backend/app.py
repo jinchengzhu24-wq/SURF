@@ -34,6 +34,7 @@ from llm_client import (
     PROMPT_VERSION,
     generate_chat_reply,
     generate_stage_assessment,
+    translate_turns,
 )
 from repository import (
     DATABASE_PATH,
@@ -145,6 +146,10 @@ class BrowserAccessRequest(StrictModel):
 
 class LanguageRequest(StrictModel):
     language: Literal["en", "zh-CN"]
+
+
+class TranslationRequest(StrictModel):
+    turnIds: list[str]
 
 
 class VersionRequest(StrictModel):
@@ -486,6 +491,70 @@ def change_language(
             "language_changed",
             {"language": payload.language},
             now,
+        )
+        return serialize_session(database, session["id"])
+
+
+@app.post("/api/sessions/{session_id}/translations/{language}")
+def translate_session_turns(
+    session_id: str,
+    language: Literal["en", "zh-CN"],
+    payload: TranslationRequest,
+    request: Request,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
+):
+    with connect(immediate=True) as database:
+        session = require_browser_session(database, session_id, access_cookie)
+        pending = _pending_assistant_translations(
+            database,
+            session_id,
+            language,
+            payload.turnIds,
+        )
+
+        if not pending:
+            return serialize_session(database, session["id"])
+
+    execution = translate_turns(pending, language, request.state.request_id)
+
+    with connect(immediate=True) as database:
+        session = require_browser_session(database, session_id, access_cookie)
+
+        for translated in execution.translations:
+            source = next(item for item in pending if item["turnId"] == translated["turnId"])
+            guidance = _translated_guidance(source["guidance"], translated)
+            database.execute(
+                """
+                INSERT OR IGNORE INTO turn_translations(
+                    id, session_id, turn_id, language, body, guidance_json,
+                    proposal_summary, model, attempts_used, latency_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    session_id,
+                    translated["turnId"],
+                    language,
+                    translated["body"],
+                    dump_json(guidance) if guidance else None,
+                    translated["proposalSummary"],
+                    execution.model,
+                    execution.attempts_used,
+                    execution.latency_ms,
+                    utc_now(),
+                ),
+            )
+
+        record_event(
+            database,
+            session_id,
+            "turn_translations_created",
+            {
+                "language": language,
+                "turnIds": [item["turnId"] for item in execution.translations],
+                "model": execution.model,
+            },
+            utc_now(),
         )
         return serialize_session(database, session["id"])
 
@@ -1408,6 +1477,91 @@ def insert_turn(database, session, role, content, version_id, request_id, execut
         now,
     )
     return turn_id
+
+
+def _pending_assistant_translations(database, session_id, language, turn_ids):
+    unique_turn_ids = list(dict.fromkeys(turn_ids))
+
+    if not unique_turn_ids or len(unique_turn_ids) > 8:
+        raise ApiError(
+            400,
+            "INVALID_TRANSLATION_REQUEST",
+            "Translation requests require between 1 and 8 unique turnIds.",
+        )
+
+    for turn_id in unique_turn_ids:
+        _validate_identifier(turn_id, "turnId")
+
+    placeholders = ",".join("?" for _ in unique_turn_ids)
+    rows = database.execute(
+        f"""
+        SELECT turn.id, turn.content, turn.guidance_json, proposal.summary
+        FROM conversation_turns AS turn
+        LEFT JOIN change_proposals AS proposal
+          ON proposal.assistant_turn_id = turn.id
+        LEFT JOIN turn_translations AS translation
+          ON translation.turn_id = turn.id AND translation.language = ?
+        WHERE turn.session_id = ?
+          AND turn.role = 'assistant'
+          AND turn.language != ?
+          AND translation.id IS NULL
+          AND turn.id IN ({placeholders})
+        ORDER BY turn.sequence_number
+        """,
+        (language, session_id, language, *unique_turn_ids),
+    ).fetchall()
+    items = []
+
+    for row in rows:
+        guidance = load_json(row["guidance_json"]) or {}
+        proposal_offer = guidance.get("proposalOffer") or {}
+        ui_cues = guidance.get("uiCues") or []
+        excluded_suffixes = [
+            *[str(cue.get("text") or "").strip() for cue in ui_cues],
+            str(guidance.get("followUpQuestion") or "").strip(),
+        ]
+        body = str(row["content"] or "").rstrip()
+
+        for suffix in reversed([value for value in excluded_suffixes if value]):
+            if body.endswith(suffix):
+                body = body[: -len(suffix)].rstrip()
+
+        items.append(
+            {
+                "turnId": row["id"],
+                "body": body,
+                "followUpQuestion": guidance.get("followUpQuestion"),
+                "intentHypothesis": guidance.get("intentHypothesis"),
+                "proposalOfferSummary": proposal_offer.get("summary"),
+                "proposalOfferRationale": proposal_offer.get("rationale"),
+                "uiCueTexts": [cue.get("text") for cue in ui_cues],
+                "proposalSummary": row["summary"],
+                "guidance": guidance,
+            }
+        )
+
+    return items
+
+
+def _translated_guidance(source_guidance, translated):
+    guidance = dict(source_guidance or {})
+    guidance["followUpQuestion"] = translated["followUpQuestion"]
+    guidance["intentHypothesis"] = translated["intentHypothesis"]
+    source_offer = guidance.get("proposalOffer")
+
+    if source_offer:
+        guidance["proposalOffer"] = {
+            **source_offer,
+            "summary": translated["proposalOfferSummary"],
+            "rationale": translated["proposalOfferRationale"],
+        }
+
+    translated_cues = translated["uiCueTexts"]
+    guidance["uiCues"] = [
+        {**cue, "text": translated_cues[index]}
+        for index, cue in enumerate(guidance.get("uiCues") or [])
+    ]
+    return guidance
 
 
 def build_llm_context(database, session_id, version):
