@@ -182,6 +182,7 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 .message-bubble { padding: 10px 12px; border: 1px solid var(--border); border-radius: 5px 10px 10px 10px; background: var(--surface); box-shadow: 0 3px 10px rgba(28, 52, 45, 0.04); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-row.user .message-bubble { border-color: var(--brand); border-radius: 10px 5px 10px 10px; color: #fff; background: var(--brand); }
 .translation-label { display: block; margin-top: 7px; color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+.translation-label.translation-unavailable { color: var(--danger); }
 .assessment-card { margin-top: 6px; padding: 10px 11px; border: 1px solid #a9ddc1; border-radius: 8px; background: #e9f8ef; font-size: 10px; line-height: 1.5; }
 .assessment-card strong { color: var(--green); text-transform: uppercase; letter-spacing: .05em; }
 .assessment-card p { margin: 5px 0; }

@@ -77,33 +77,98 @@ class LLMClientTests(unittest.TestCase):
         return result, client
 
     def test_valid_response_is_returned(self):
-        result, client = self.execute(
-            [json.dumps({
-                "assistantMessage": "The level has a compact central route.",
-                "guidance": {
-                    "move": "offer_perspective",
-                    "intentHypothesis": None,
-                    "intentConfidence": None,
-                    "followUpQuestion": "Which part would you like to examine first?",
-                    "proposalOffer": None,
-                    "uiCues": [],
-                },
-                "assessment": None,
-                "proposedRows": None,
-                "modificationSummary": "",
-            })]
-        )
+        result, client = self.execute([
+            "The level has a compact central route.\n\n"
+            "Which part would you like to examine first?"
+        ])
 
         self.assertIn("compact central route", result.assistant_message)
         self.assertIn("Which part", result.assistant_message)
         self.assertEqual(result.guidance["move"], "offer_perspective")
         self.assertEqual(result.attempts_used, 1)
         request = client.chat.completions.calls[0]
-        self.assertEqual(request["response_format"], {"type": "json_object"})
+        self.assertNotIn("response_format", request)
         self.assertFalse(request["stream"])
         self.assertEqual(request["model"], "deepseek-v4-flash")
-        self.assertEqual(request["max_tokens"], llm_client.CHAT_MAX_TOKENS)
+        self.assertEqual(request["max_tokens"], llm_client.PLAIN_CHAT_MAX_TOKENS)
         self.assertEqual(request["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_non_json_natural_language_is_accepted_immediately(self):
+        result, client = self.execute(["This is useful prose, not a JSON object."])
+
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertIn("useful prose", result.assistant_message)
+
+    def test_plain_prompt_defaults_to_no_question(self):
+        messages = llm_client.build_plain_chat_messages(
+            [{"role": "user", "content": "Make the choice smaller but consequential."}],
+            ["############"] * 10,
+        )
+
+        self.assertIn("default to no question", messages[0]["content"])
+        self.assertIn("your reply must contain no question", messages[0]["content"])
+        self.assertIn("Never ask for a preference the designer has already stated", messages[0]["content"])
+
+    def test_pure_question_stays_in_body_without_failing(self):
+        result, _ = self.execute(["What effect do you want to preserve?"])
+
+        self.assertEqual(result.assistant_message, "What effect do you want to preserve?")
+        self.assertIsNone(result.guidance["followUpQuestion"])
+
+    def test_multiple_questions_stay_in_body_without_failing(self):
+        reply = "What should stay? What should change?"
+        result, _ = self.execute([reply])
+
+        self.assertEqual(result.assistant_message, reply)
+        self.assertIsNone(result.guidance["followUpQuestion"])
+
+    def test_redundant_question_is_removed_after_an_explicit_direction(self):
+        client = FakeClient([
+            "That would make the opening commitment more legible. What else do you prefer?"
+        ])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Keep it compact, but make the first push consequential."}],
+                ["############"] * 10,
+                "no-forced-question-test",
+            )
+
+        self.assertEqual(
+            result.assistant_message,
+            "That would make the opening commitment more legible.",
+        )
+        self.assertIsNone(result.guidance["followUpQuestion"])
+
+    def test_invalid_stage_json_falls_back_to_plain_opening(self):
+        client = FakeClient(["   ", "The water narrows the central route in an interesting way."])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_stage_assessment(
+                [],
+                ["############"] * 10,
+                "en",
+                {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
+                {},
+                "stage-fallback-test",
+                {"source": "initial", "initialDraftMethod": "description_generation"},
+            )
+
+        self.assertIn("water narrows", result.assistant_message)
+        self.assertIn("deterministic solver", result.assessment["solutionSummary"])
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(
+            client.chat.completions.calls[0]["response_format"],
+            {"type": "json_object"},
+        )
+        self.assertNotIn("response_format", client.chat.completions.calls[1])
 
     def test_length_truncation_uses_fallback_model(self):
         truncated = SimpleNamespace(
@@ -112,20 +177,7 @@ class LLMClientTests(unittest.TestCase):
                 message=SimpleNamespace(content=""),
             )]
         )
-        valid = json.dumps({
-            "assistantMessage": "A grounded fallback response.",
-            "guidance": {
-                "move": "offer_perspective",
-                "intentHypothesis": None,
-                "intentConfidence": None,
-                "followUpQuestion": None,
-                "proposalOffer": None,
-                "uiCues": [],
-            },
-            "assessment": None,
-            "proposedRows": None,
-            "modificationSummary": "",
-        })
+        valid = "A grounded fallback response."
         client = FakeClient([truncated, valid])
 
         with (
@@ -142,10 +194,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.model, "deepseek-v4-pro")
 
     def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
+        proposed_rows = ["############"] * 10
         response = json.dumps({
             "assistantMessage": "I will prepare the requested map.",
             "guidance": {
-                "move": "offer_perspective",
+                "move": "deliver_revision",
                 "intentHypothesis": None,
                 "intentConfidence": None,
                 "followUpQuestion": None,
@@ -153,8 +206,8 @@ class LLMClientTests(unittest.TestCase):
                 "uiCues": [],
             },
             "assessment": None,
-            "proposedRows": None,
-            "modificationSummary": "",
+            "proposedRows": proposed_rows,
+            "modificationSummary": "Changed the route.",
         })
         client = FakeClient([response])
 
@@ -171,10 +224,11 @@ class LLMClientTests(unittest.TestCase):
         request = client.chat.completions.calls[0]
         self.assertEqual(request["model"], "deepseek-v4-pro")
         self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_MAX_TOKENS)
+        self.assertEqual(request["response_format"], {"type": "json_object"})
 
-    def test_flash_invalid_response_falls_back_to_pro(self):
-        valid = json.dumps({
-            "assistantMessage": "A grounded fallback response.",
+    def test_explicit_map_proposal_rejects_text_only_result(self):
+        text_only = json.dumps({
+            "assistantMessage": "I would narrow the route.",
             "guidance": {
                 "move": "offer_perspective",
                 "intentHypothesis": None,
@@ -187,7 +241,26 @@ class LLMClientTests(unittest.TestCase):
             "proposedRows": None,
             "modificationSummary": "",
         })
-        client = FakeClient(["not-json", valid])
+        client = FakeClient([text_only, text_only])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+            self.assertRaises(llm_client.LLMServiceError) as raised,
+        ):
+            llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Please create a reviewable map proposal."}],
+                ["############"] * 10,
+                "proposal-required-test",
+            )
+
+        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
+        self.assertIn("explicitly authorized a complete map proposal", retry_prompt)
+
+    def test_flash_empty_response_falls_back_to_pro(self):
+        client = FakeClient(["   \n ", "A grounded fallback response."])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -205,10 +278,7 @@ class LLMClientTests(unittest.TestCase):
             [call["model"] for call in client.chat.completions.calls],
             ["deepseek-v4-flash", "deepseek-v4-pro"],
         )
-        fallback_system = client.chat.completions.calls[1]["messages"][0]["content"]
-        self.assertIn("previous response", fallback_system)
-        self.assertIn("not a complete valid JSON object", fallback_system)
-        self.assertIn("Do not mention the retry", fallback_system)
+        self.assertNotIn("response_format", client.chat.completions.calls[1])
 
     def test_corrective_fallback_does_not_mutate_original_messages(self):
         messages = [{"role": "system", "content": "Original contract."}]
@@ -235,8 +305,8 @@ class LLMClientTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "CHAT_TIMEOUT_SECONDS", 0.06),
-            patch.object(llm_client, "PRIMARY_ATTEMPT_TIMEOUT_SECONDS", 0.02),
+            patch.object(llm_client, "PLAIN_CHAT_TIMEOUT_SECONDS", 0.06),
+            patch.object(llm_client, "PLAIN_PRIMARY_TIMEOUT_SECONDS", 0.02),
             patch.object(llm_client, "_create_async_client", return_value=SlowClient()),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
@@ -249,8 +319,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
         self.assertLess(llm_client.time.monotonic() - started_at, 1.0)
 
-    def test_invalid_json_uses_fallback_then_fails(self):
-        client = FakeClient(["not-json", "still-not-json"])
+    def test_two_empty_plain_responses_use_fallback_then_fail(self):
+        client = FakeClient(["   ", "\n\t"])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -263,7 +333,7 @@ class LLMClientTests(unittest.TestCase):
                 "invalid-test",
             )
 
-        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+        self.assertEqual(raised.exception.code, "MODEL_EMPTY_RESPONSE")
         self.assertEqual(raised.exception.attempts_used, 2)
         self.assertEqual(len(client.chat.completions.calls), 2)
 

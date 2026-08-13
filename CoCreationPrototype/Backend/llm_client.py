@@ -22,10 +22,13 @@ PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 40.0
 CHAT_TIMEOUT_SECONDS = 60.0
 CHAT_MAX_ATTEMPTS = 2
 CHAT_MAX_TOKENS = 1400
+PLAIN_CHAT_TIMEOUT_SECONDS = 25.0
+PLAIN_PRIMARY_TIMEOUT_SECONDS = 15.0
+PLAIN_CHAT_MAX_TOKENS = 700
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v15-natural-optional-questions"
+PROMPT_VERSION = "cocreation-v16-plain-chat-fallback"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -79,6 +82,10 @@ class LLMServiceError(Exception):
         self.retryable = bool(retryable)
         self.attempts_used = int(attempts_used)
         self.status_code = int(status_code)
+
+
+class EmptyModelResponse(ValueError):
+    pass
 
 
 def build_chat_messages(
@@ -224,6 +231,65 @@ def build_chat_messages(
     ]
 
 
+def build_plain_chat_messages(
+    conversation,
+    rows,
+    language="en",
+    solver_metrics=None,
+    play_summary=None,
+    stage_context=None,
+    stage_opening=False,
+):
+    serialized_map = "\n".join(rows)
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    solver_metrics = _llm_solver_evidence(solver_metrics or {})
+    play_summary = play_summary or {}
+    stage_context = stage_context or {}
+    provenance_guidance = _build_draft_provenance_guidance(stage_context)
+    opening_instruction = (
+        "This is the opening for a verified saved Stage. Notice one or two concrete "
+        "authored choices and offer a clearly subjective perspective. Do not inventory "
+        "the map, use a workflow greeting, or ask for an overall experience category. "
+        if stage_opening
+        else "Respond to the designer's latest contribution first. "
+    )
+    system_prompt = (
+        "You are a thoughtful, equal Sokoban co-creation partner. Write only the visible "
+        f"reply to the designer in {response_language}; do not output JSON, metadata, "
+        "labels, analysis, or formatting instructions. "
+        f"{opening_instruction}"
+        "Use one to three short paragraphs. Add one grounded independent view when it is "
+        "useful, but do not mechanically follow acknowledgement, evaluation, then "
+        "question. Do not sound like a survey, examiner, workflow assistant, or "
+        "unconditional cheerleader. Ask at most one question and only when its answer "
+        "would genuinely move the discussion forward; a declarative reply is complete. "
+        "For ordinary continuation, default to no question. Ask only when the latest "
+        "contribution is genuinely ambiguous or a necessary design decision remains "
+        "unresolved. If the latest contribution already states a preference, evaluation, "
+        "or direction, your reply must contain no question; contribute a useful view and "
+        "stop. Never ask for a preference the designer has already stated. "
+        "When inferring intention, speak tentatively and directly to the designer using "
+        "first/second-person language and leave room for correction. Treat difficulty as "
+        "your perspective, not solver fact. Do not invent play evidence, researcher goals, "
+        "or exact authorship. Do not provide a complete map or claim a change was saved. "
+        "You may offer a concise revision direction, while direct editing remains optional.\n\n"
+        f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
+        f"Current saved Stage (12 x 10):\n{serialized_map}\n\n"
+        "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
+        f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
+        f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
+        f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        *[
+            {"role": message["role"], "content": message["content"]}
+            for message in conversation
+            if message.get("role") in {"user", "assistant"}
+        ],
+    ]
+
+
 def _llm_solver_evidence(solver_metrics):
     allowed_fields = (
         "valid",
@@ -248,16 +314,43 @@ def generate_stage_assessment(
     request_id,
     stage_context=None,
 ):
-    return generate_chat_reply(
-        conversation,
-        rows,
-        request_id,
-        language=language,
-        solver_metrics=solver_metrics,
-        play_summary=play_summary,
-        assessment_only=True,
-        stage_context=stage_context,
-    )
+    try:
+        return generate_chat_reply(
+            conversation,
+            rows,
+            request_id,
+            language=language,
+            solver_metrics=solver_metrics,
+            play_summary=play_summary,
+            assessment_only=True,
+            stage_context=stage_context,
+            _max_attempts=1,
+        )
+    except LLMServiceError as exception:
+        if exception.code not in {
+            "MODEL_EMPTY_RESPONSE",
+            "MODEL_RESPONSE_INVALID",
+            "UPSTREAM_TIMEOUT",
+            "UPSTREAM_CONNECTION_ERROR",
+        }:
+            raise
+
+        _log_llm_event(
+            "llm_stage_opening_fallback",
+            requestId=request_id,
+            fromCode=exception.code,
+            responseMode="plain_text",
+        )
+        return _generate_plain_chat_sync(
+            conversation=conversation,
+            rows=rows,
+            request_id=request_id,
+            language=language,
+            solver_metrics=solver_metrics,
+            play_summary=play_summary,
+            stage_context=stage_context,
+            stage_opening=True,
+        )
 
 
 def generate_chat_reply(
@@ -270,6 +363,7 @@ def generate_chat_reply(
     assessment_only=False,
     proposal_validator=None,
     stage_context=None,
+    _max_attempts=CHAT_MAX_ATTEMPTS,
 ):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
@@ -284,6 +378,19 @@ def generate_chat_reply(
             503,
         )
 
+    proposal_request = not assessment_only and _requests_complete_map(conversation)
+
+    if not assessment_only and not proposal_request:
+        return _generate_plain_chat_sync(
+            conversation=conversation,
+            rows=rows,
+            request_id=request_id,
+            language=language,
+            solver_metrics=solver_metrics,
+            play_summary=play_summary,
+            stage_context=stage_context,
+        )
+
     messages = build_chat_messages(
         conversation,
         rows,
@@ -293,7 +400,6 @@ def generate_chat_reply(
         assessment_only,
         stage_context,
     )
-    proposal_request = not assessment_only and _requests_complete_map(conversation)
     default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
     proposal_model = (
         os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
@@ -321,6 +427,7 @@ def generate_chat_reply(
         primaryModel=primary_model,
         fallbackModel=models[1] if len(models) > 1 else None,
         timeoutSeconds=CHAT_TIMEOUT_SECONDS,
+        responseMode="json_object",
     )
 
     try:
@@ -339,6 +446,7 @@ def generate_chat_reply(
                     proposal_validator=proposal_validator,
                     stage_context=stage_context,
                     started_at=started_at,
+                    max_attempts=_max_attempts,
                 ),
                 timeout=CHAT_TIMEOUT_SECONDS,
             )
@@ -351,12 +459,110 @@ def generate_chat_reply(
             task=task,
             outcome="error",
             code="UPSTREAM_TIMEOUT",
-            attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS),
+            attemptsUsed=min(len(models), _max_attempts),
             latencyMs=elapsed_ms,
+            responseMode="json_object",
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
             "DeepSeek did not complete the request before the 60 second limit.",
+            request_id,
+            True,
+            min(len(models), _max_attempts),
+            504,
+        ) from exception
+
+
+def _generate_plain_chat_sync(
+    *,
+    conversation,
+    rows,
+    request_id,
+    language,
+    solver_metrics,
+    play_summary,
+    stage_context,
+    stage_opening=False,
+):
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+
+    if not api_key or api_key == "your_deepseek_api_key_here":
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR",
+            "DEEPSEEK_API_KEY is missing.",
+            request_id,
+            False,
+            0,
+            503,
+        )
+
+    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    fallback_model = (
+        os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip()
+        or os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
+        or DEFAULT_PROPOSAL_MODEL
+    )
+    models = [default_model]
+
+    if fallback_model != default_model:
+        models.append(fallback_model)
+
+    messages = build_plain_chat_messages(
+        conversation,
+        rows,
+        language,
+        solver_metrics,
+        play_summary,
+        stage_context,
+        stage_opening=stage_opening,
+    )
+    task = "stage_assessment_fallback" if stage_opening else "chat"
+    started_at = time.monotonic()
+    _log_llm_event(
+        "llm_request_started",
+        requestId=request_id,
+        task=task,
+        primaryModel=models[0],
+        fallbackModel=models[1] if len(models) > 1 else None,
+        timeoutSeconds=PLAIN_CHAT_TIMEOUT_SECONDS,
+        responseMode="plain_text",
+    )
+
+    try:
+        return asyncio.run(
+            asyncio.wait_for(
+                _generate_plain_with_model_fallback(
+                    api_key=api_key,
+                    base_url=base_url,
+                    models=models,
+                    messages=messages,
+                    request_id=request_id,
+                    task=task,
+                    language=language,
+                    solver_metrics=solver_metrics,
+                    stage_opening=stage_opening,
+                    stage_context=stage_context,
+                    started_at=started_at,
+                ),
+                timeout=PLAIN_CHAT_TIMEOUT_SECONDS,
+            )
+        )
+    except asyncio.TimeoutError as exception:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task=task,
+            outcome="error",
+            code="UPSTREAM_TIMEOUT",
+            attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS),
+            latencyMs=elapsed_ms,
+            responseMode="plain_text",
+        )
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not complete the request before the 25 second limit.",
             request_id,
             True,
             min(len(models), CHAT_MAX_ATTEMPTS),
@@ -419,6 +625,7 @@ def translate_turns(items, target_language, request_id):
         primaryModel=models[0],
         fallbackModel=models[1] if len(models) > 1 else None,
         timeoutSeconds=CHAT_TIMEOUT_SECONDS,
+        responseMode="json_object",
     )
 
     try:
@@ -446,6 +653,7 @@ def translate_turns(items, target_language, request_id):
             code="UPSTREAM_TIMEOUT",
             attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS),
             latencyMs=elapsed_ms,
+            responseMode="json_object",
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
@@ -472,6 +680,7 @@ async def _translate_with_model_fallback(
 
     for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
         remaining = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        response_fields = _empty_response_diagnostics()
 
         if remaining <= 0:
             raise asyncio.TimeoutError()
@@ -488,6 +697,7 @@ async def _translate_with_model_fallback(
             attempt=attempt,
             maxAttempts=len(models[:CHAT_MAX_ATTEMPTS]),
             timeoutSeconds=round(attempt_timeout, 3),
+            responseMode="json_object",
         )
 
         try:
@@ -507,11 +717,17 @@ async def _translate_with_model_fallback(
                 timeout=attempt_timeout,
             )
             choice = response.choices[0]
+            response_fields = _response_diagnostics(response, choice)
 
             if str(getattr(choice, "finish_reason", "") or "") == "length":
                 raise ValueError("The model output reached its token limit.")
 
-            payload = json.loads(str(choice.message.content or ""))
+            content = str(choice.message.content or "")
+
+            if not content.strip():
+                raise EmptyModelResponse("The model returned an empty response.")
+
+            payload = json.loads(content)
             translations = validate_translation_response(payload, items)
             latency_ms = int((time.monotonic() - started_at) * 1000)
             _log_llm_event(
@@ -522,6 +738,8 @@ async def _translate_with_model_fallback(
                 model=model,
                 attemptsUsed=attempt,
                 latencyMs=latency_ms,
+                responseMode="json_object",
+                **response_fields,
             )
             return TranslationExecutionResult(
                 translations=translations,
@@ -555,6 +773,8 @@ async def _translate_with_model_fallback(
             "code": last_error.code,
             "retryable": last_error.retryable,
             "latencyMs": int((time.monotonic() - started_at) * 1000),
+            "responseMode": "json_object",
+            **response_fields,
         }
 
         if failure_reason:
@@ -574,12 +794,185 @@ async def _translate_with_model_fallback(
             code=last_error.code,
             attemptsUsed=last_error.attempts_used,
             latencyMs=int((time.monotonic() - started_at) * 1000),
+            responseMode="json_object",
         )
         raise last_error
 
     raise LLMServiceError(
         "INTERNAL_ERROR",
         "The translation request ended unexpectedly.",
+        request_id,
+        False,
+        0,
+        500,
+    )
+
+
+async def _generate_plain_with_model_fallback(
+    *,
+    api_key,
+    base_url,
+    models,
+    messages,
+    request_id,
+    task,
+    language,
+    solver_metrics,
+    stage_opening,
+    stage_context,
+    started_at,
+):
+    last_error = None
+
+    for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
+        remaining = PLAIN_CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+
+        attempt_timeout = min(
+            PLAIN_PRIMARY_TIMEOUT_SECONDS if attempt == 1 else remaining,
+            remaining,
+        )
+        response_fields = _empty_response_diagnostics()
+        _log_llm_event(
+            "llm_attempt_started",
+            requestId=request_id,
+            task=task,
+            model=model,
+            attempt=attempt,
+            maxAttempts=len(models[:CHAT_MAX_ATTEMPTS]),
+            timeoutSeconds=round(attempt_timeout, 3),
+            responseMode="plain_text",
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                _request_completion(
+                    api_key,
+                    base_url,
+                    model,
+                    messages,
+                    PLAIN_CHAT_MAX_TOKENS,
+                    attempt_timeout,
+                    structured=False,
+                ),
+                timeout=attempt_timeout,
+            )
+            choice = response.choices[0]
+            response_fields = _response_diagnostics(response, choice)
+            content = str(choice.message.content or "")
+
+            if not content.strip():
+                raise EmptyModelResponse("The model returned an empty response.")
+
+            if len(content.strip()) > CHAT_RESPONSE_MAX_LENGTH:
+                raise ValueError("The model response is too long.")
+
+            body, question = _extract_plain_message_question(content.strip())
+
+            if question is not None and _latest_user_states_direction(messages):
+                question = None
+
+            if stage_opening and question is not None:
+                try:
+                    question = _normalize_opening_question(question)
+                except ValueError:
+                    body = content.strip()
+                    question = None
+
+            guidance = {
+                "move": "observe_stage" if stage_opening else "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": question,
+                "proposalOffer": None,
+                "uiCues": [],
+            }
+            assessment = (
+                _build_minimal_stage_assessment(
+                    body,
+                    question,
+                    language,
+                    solver_metrics,
+                )
+                if stage_opening
+                else {}
+            )
+            latency_ms = int((time.monotonic() - started_at) * 1000)
+            result = LLMExecutionResult(
+                assistant_message=_compose_assistant_message(
+                    _format_stage_opening_paragraphs(body) if stage_opening else body,
+                    guidance,
+                    language,
+                    stage_opening,
+                    stage_context,
+                ),
+                assessment=assessment,
+                proposed_rows=None,
+                modification_summary="",
+                attempts_used=attempt,
+                request_id=request_id,
+                model=model,
+                latency_ms=latency_ms,
+                guidance=guidance,
+            )
+            _log_llm_event(
+                "llm_request_completed",
+                requestId=request_id,
+                task=task,
+                outcome="success",
+                model=model,
+                attemptsUsed=attempt,
+                latencyMs=latency_ms,
+                responseMode="plain_text",
+                **response_fields,
+            )
+            return result
+        except asyncio.TimeoutError:
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT",
+                "DeepSeek did not respond before the attempt timeout.",
+                request_id,
+                True,
+                attempt,
+                504,
+            )
+        except Exception as exception:
+            last_error = classify_exception(exception, request_id, attempt)
+
+        _log_llm_event(
+            "llm_attempt_failed",
+            requestId=request_id,
+            task=task,
+            model=model,
+            attempt=attempt,
+            code=last_error.code,
+            retryable=last_error.retryable,
+            latencyMs=int((time.monotonic() - started_at) * 1000),
+            responseMode="plain_text",
+            **response_fields,
+        )
+
+        if attempt == 1 and not _plain_fallback_allowed(last_error):
+            break
+
+    if last_error is not None:
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task=task,
+            outcome="error",
+            code=last_error.code,
+            attemptsUsed=last_error.attempts_used,
+            latencyMs=int((time.monotonic() - started_at) * 1000),
+            responseMode="plain_text",
+        )
+        raise last_error
+
+    raise LLMServiceError(
+        "INTERNAL_ERROR",
+        "The LLM request ended unexpectedly.",
         request_id,
         False,
         0,
@@ -601,13 +994,15 @@ async def _generate_with_model_fallback(
     proposal_validator,
     stage_context,
     started_at,
+    max_attempts,
 ):
     last_error = None
     validation_feedback = None
 
-    for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
+    for attempt, model in enumerate(models[:max_attempts], start=1):
         elapsed = time.monotonic() - started_at
         remaining = CHAT_TIMEOUT_SECONDS - elapsed
+        response_fields = _empty_response_diagnostics()
 
         if remaining <= 0:
             raise asyncio.TimeoutError()
@@ -622,8 +1017,9 @@ async def _generate_with_model_fallback(
             task=task,
             model=model,
             attempt=attempt,
-            maxAttempts=len(models[:CHAT_MAX_ATTEMPTS]),
+            maxAttempts=len(models[:max_attempts]),
             timeoutSeconds=round(attempt_timeout, 3),
+            responseMode="json_object",
         )
 
         try:
@@ -649,9 +1045,19 @@ async def _generate_with_model_fallback(
             if finish_reason == "length":
                 raise ValueError("The model output reached its token limit.")
 
+            response_fields = _response_diagnostics(response, choice)
             content = str(choice.message.content or "")
+
+            if not content.strip():
+                raise EmptyModelResponse("The model returned an empty response.")
+
             payload = json.loads(content)
             validated = validate_chat_response(payload, assessment_only, language)
+
+            if task == "map_proposal" and validated[2] is None:
+                raise ValueError(
+                    "An explicitly requested map proposal requires proposedRows."
+                )
 
             if validated[2] is not None and proposal_validator is not None:
                 proposal_validator(validated[2])
@@ -682,6 +1088,8 @@ async def _generate_with_model_fallback(
                 model=model,
                 attemptsUsed=attempt,
                 latencyMs=latency_ms,
+                responseMode="json_object",
+                **response_fields,
             )
             return result
         except asyncio.TimeoutError as exception:
@@ -709,7 +1117,10 @@ async def _generate_with_model_fallback(
             "code": last_error.code,
             "retryable": last_error.retryable,
             "latencyMs": int((time.monotonic() - started_at) * 1000),
+            "responseMode": "json_object",
         }
+
+        failure_fields.update(response_fields)
 
         if failure_reason:
             failure_fields["validationReason"] = failure_reason
@@ -731,6 +1142,7 @@ async def _generate_with_model_fallback(
             code=last_error.code,
             attemptsUsed=last_error.attempts_used,
             latencyMs=int((time.monotonic() - started_at) * 1000),
+            responseMode="json_object",
         )
         raise last_error
 
@@ -889,19 +1301,23 @@ async def _request_completion(
     messages,
     max_tokens,
     timeout_seconds,
+    structured=True,
 ):
     client = _create_async_client(api_key, base_url, timeout_seconds)
+    request_options = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.45,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+
+    if structured:
+        request_options["response_format"] = {"type": "json_object"}
 
     try:
-        return await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.45,
-            max_tokens=max_tokens,
-            stream=False,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
+        return await client.chat.completions.create(**request_options)
     finally:
         await client.close()
 
@@ -1050,6 +1466,118 @@ def _extract_message_question(message):
         )
 
     return "\n\n".join(declarative_paragraphs), questions[0] if questions else None
+
+
+def _extract_plain_message_question(message):
+    """Extract one clean question when doing so cannot discard the actual reply."""
+    if "?" not in message and "？" not in message:
+        return message, None
+
+    declarative_paragraphs = []
+    questions = []
+
+    for paragraph in (part.strip() for part in message.split("\n\n")):
+        if not paragraph:
+            continue
+
+        sentences = [
+            part.strip()
+            for part in re.split(r"(?<=[.!?。！？])\s*", paragraph)
+            if part.strip()
+        ]
+        declarative_sentences = []
+
+        for sentence in sentences:
+            if sentence.endswith(("?", "？")):
+                questions.append(sentence)
+            else:
+                declarative_sentences.append(sentence)
+
+        if declarative_sentences:
+            separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+            declarative_paragraphs.append(separator.join(declarative_sentences))
+
+    question_marks = message.count("?") + message.count("？")
+
+    if len(questions) != 1 or question_marks != 1 or not declarative_paragraphs:
+        return message, None
+
+    return "\n\n".join(declarative_paragraphs), questions[0]
+
+
+def _latest_user_states_direction(messages):
+    latest = next(
+        (
+            str(message.get("content") or "").strip()
+            for message in reversed(messages)
+            if message.get("role") == "user"
+        ),
+        "",
+    )
+
+    if not latest or "?" in latest or "？" in latest:
+        return False
+
+    english_direction = re.search(
+        r"\b(?:i\s+(?:want|prefer|would like)|please|keep|make|change|remove|add|"
+        r"preserve|reduce|increase|strengthen|weaken)\b",
+        latest,
+        re.IGNORECASE,
+    )
+    chinese_direction = any(
+        marker in latest
+        for marker in (
+            "我想",
+            "我希望",
+            "我更喜欢",
+            "请",
+            "保留",
+            "让",
+            "不要",
+            "增加",
+            "减少",
+            "加强",
+            "弱化",
+        )
+    )
+    return english_direction is not None or chinese_direction
+
+
+def _build_minimal_stage_assessment(message, question, language, solver_metrics):
+    solver_metrics = solver_metrics or {}
+    steps = solver_metrics.get("solutionSteps")
+    pushes = solver_metrics.get("solutionPushes")
+
+    if language == "zh-CN":
+        if isinstance(steps, int) and isinstance(pushes, int):
+            solution_summary = f"确定性求解器已验证可解：{steps} 步，其中 {pushes} 次推动。"
+        else:
+            solution_summary = "这个已保存的 Stage 已通过确定性检查并确认可解。"
+        difficulty_opinion = "在我看来，仅凭求解器验证还不足以确定实际游玩难度。"
+        features = ["已验证可解的当前 Stage"]
+        suggestions = ["结合设计者反馈或实际游玩证据继续判断设计效果"]
+    else:
+        if isinstance(steps, int) and isinstance(pushes, int):
+            solution_summary = (
+                f"The deterministic solver verified a solution in {steps} steps "
+                f"with {pushes} pushes."
+            )
+        else:
+            solution_summary = "This saved Stage passed deterministic validation and is solvable."
+        difficulty_opinion = (
+            "In my view, solver validation alone is not enough to determine the "
+            "experienced difficulty."
+        )
+        features = ["A deterministically verified, solvable current Stage"]
+        suggestions = ["Use designer feedback or play evidence to judge its design effect"]
+
+    return {
+        "solutionSummary": solution_summary,
+        "difficultyOpinion": difficulty_opinion,
+        "features": features,
+        "suggestions": suggestions,
+        "satisfactionQuestion": question,
+    }
 
 
 def _build_task_instructions(assessment_only):
@@ -1499,6 +2027,16 @@ def classify_exception(exception, request_id, attempts_used):
     if isinstance(exception, LLMServiceError):
         return exception
 
+    if isinstance(exception, EmptyModelResponse):
+        return LLMServiceError(
+            "MODEL_EMPTY_RESPONSE",
+            "The LLM returned an empty response.",
+            request_id,
+            True,
+            attempts_used,
+            502,
+        )
+
     if isinstance(exception, APITimeoutError):
         return LLMServiceError(
             "UPSTREAM_TIMEOUT",
@@ -1559,6 +2097,36 @@ def classify_exception(exception, request_id, attempts_used):
         attempts_used,
         500,
     )
+
+
+def _plain_fallback_allowed(error):
+    return error.code in {
+        "MODEL_EMPTY_RESPONSE",
+        "UPSTREAM_TIMEOUT",
+        "UPSTREAM_CONNECTION_ERROR",
+    }
+
+
+def _response_diagnostics(response, choice):
+    usage = getattr(response, "usage", None)
+    content = str(getattr(getattr(choice, "message", None), "content", "") or "")
+    return {
+        "finishReason": str(getattr(choice, "finish_reason", "") or ""),
+        "responseChars": len(content),
+        "promptTokens": getattr(usage, "prompt_tokens", None),
+        "completionTokens": getattr(usage, "completion_tokens", None),
+        "totalTokens": getattr(usage, "total_tokens", None),
+    }
+
+
+def _empty_response_diagnostics():
+    return {
+        "finishReason": None,
+        "responseChars": None,
+        "promptTokens": None,
+        "completionTokens": None,
+        "totalTokens": None,
+    }
 
 
 def _clean_text(value, field_name):

@@ -116,9 +116,11 @@ const translations = {
         errorPendingPlay: "Accept or reject the pending map proposal before playing.",
         errorIntentRequired: "Please describe your design intention before completing the session.",
         error_CLIENT_TIMEOUT: "The assistant did not finish within the browser safety limit. You can retry without creating a duplicate message.",
+        error_MODEL_EMPTY_RESPONSE: "Both assistants returned an empty response. Retry this message without creating a duplicate.",
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
         playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again.",
-        translatedDisplay: "Translated display"
+        translatedDisplay: "Translated display",
+        translationUnavailable: "Translation temporarily unavailable · showing original"
     },
     "zh-CN": {
         title: "Sokoban 共创实验室",
@@ -214,7 +216,8 @@ const translations = {
         errorIntentRequired: "请先填写设计意图，再完成会话。",
         playSyncFailed: "关卡已经通关，但本次试玩结果未能同步；该记录之后会标记为异常中断。",
         playLoadFailed: "所选 Stage 未能在 Unity 中加载，请检查该版本后重试。",
-        translatedDisplay: "翻译内容"
+        translatedDisplay: "翻译内容",
+        translationUnavailable: "译文暂不可用 · 当前显示原文"
     }
 };
 
@@ -233,6 +236,8 @@ const state = {
     chatTimerId: null,
     pendingMessage: null,
     assessing: new Set(),
+    translating: new Set(),
+    translationFailures: new Set(),
     retryAction: null,
     language: "zh-CN"
 };
@@ -253,6 +258,7 @@ const chineseApiErrors = {
     UNSOLVABLE_LEVEL: "确定性求解器未能验证这张地图可解。",
     UPSTREAM_TIMEOUT: "LLM 响应超时，请稍后重试。",
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
+    MODEL_EMPTY_RESPONSE: "两个模型都返回了空内容；可使用原消息安全重试，不会产生重复记录。",
     CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。"
 };
@@ -350,7 +356,7 @@ async function refreshSession() {
     syncHash();
     resetDraftFromSelection();
     render();
-    await ensureVisibleTranslations();
+    void ensureVisibleTranslations();
     await ensureAssessment(state.session.currentVersionId);
 }
 
@@ -451,6 +457,14 @@ function renderAssistantBubble(turn, bubble) {
         translatedLabel.className = "translation-label";
         translatedLabel.textContent = t("translatedDisplay");
         bubble.appendChild(translatedLabel);
+    } else if (
+        turn.language !== state.language
+        && state.translationFailures.has(`${turn.turnId}:${state.language}`)
+    ) {
+        const unavailableLabel = document.createElement("small");
+        unavailableLabel.className = "translation-label translation-unavailable";
+        unavailableLabel.textContent = t("translationUnavailable");
+        bubble.appendChild(unavailableLabel);
     }
 
     const cueList = document.createElement("div");
@@ -668,13 +682,13 @@ function renderChatRequestStatus() {
 
 function chatWaitingMessage() {
     const elapsedSeconds = Math.min(
-        60,
+        25,
         Math.max(0, Math.floor((Date.now() - state.chatStartedAt) / 1000))
     );
-    const phase = elapsedSeconds < 40
+    const phase = elapsedSeconds < 15
         ? t("chatWaitingPrimary")
         : t("chatWaitingFallback");
-    return `${phase} · ${elapsedSeconds} / 60 ${t("seconds")}`;
+    return `${phase} · ${elapsedSeconds} / 25 ${t("seconds")}`;
 }
 
 function startChatTimer() {
@@ -754,7 +768,7 @@ async function submitPendingMessage() {
         state.session = await api(`/api/sessions/${state.sessionId}/messages`, {
             method: "POST",
             body: pending,
-            timeoutMs: 65000
+            timeoutMs: 30000
         });
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());
@@ -868,8 +882,8 @@ async function toggleLanguage() {
         state.session = await api(`/api/sessions/${state.sessionId}/language`, { method: "PATCH", body: { language: next } });
         state.language = next;
         render();
-        await ensureVisibleTranslations();
     });
+    void ensureVisibleTranslations();
 }
 
 function selectVersion(versionId, shouldRender = true) {
@@ -881,7 +895,7 @@ function selectVersion(versionId, shouldRender = true) {
     restoreComposerDraft();
     if (shouldRender) {
         render();
-        void withBusy(ensureVisibleTranslations);
+        void ensureVisibleTranslations();
     }
 }
 
@@ -932,22 +946,47 @@ function localizedProposalSummary(proposal) {
 
 async function ensureVisibleTranslations() {
     if (!state.session) return;
+    const targetLanguage = state.language;
     const missing = selectedStageTurns().filter(
         turn => turn.role === "assistant"
-            && turn.language !== state.language
-            && !turn.translations?.[state.language]
+            && turn.language !== targetLanguage
+            && !turn.translations?.[targetLanguage]
     );
 
     for (let index = 0; index < missing.length; index += 8) {
-        state.session = await api(
-            `/api/sessions/${state.sessionId}/translations/${encodeURIComponent(state.language)}`,
-            {
-                method: "POST",
-                body: { turnIds: missing.slice(index, index + 8).map(turn => turn.turnId) },
-                timeoutMs: 65000
-            }
-        );
-        render();
+        const batch = missing.slice(index, index + 8);
+        const turnIds = batch.map(turn => turn.turnId);
+        const requestKey = `${targetLanguage}:${turnIds.join(",")}`;
+        if (state.translating.has(requestKey)) continue;
+        state.translating.add(requestKey);
+
+        try {
+            const translatedSession = await api(
+                `/api/sessions/${state.sessionId}/translations/${encodeURIComponent(targetLanguage)}`,
+                {
+                    method: "POST",
+                    body: { turnIds },
+                    timeoutMs: 65000
+                }
+            );
+            const translatedById = new Map(
+                translatedSession.turns.map(turn => [turn.turnId, turn])
+            );
+            state.session.turns = state.session.turns.map(turn => {
+                const translated = translatedById.get(turn.turnId);
+                return translated ? { ...turn, translations: translated.translations } : turn;
+            });
+            turnIds.forEach(turnId => {
+                state.translationFailures.delete(`${turnId}:${targetLanguage}`);
+            });
+        } catch (error) {
+            turnIds.forEach(turnId => {
+                state.translationFailures.add(`${turnId}:${targetLanguage}`);
+            });
+        } finally {
+            state.translating.delete(requestKey);
+            render();
+        }
     }
 }
 

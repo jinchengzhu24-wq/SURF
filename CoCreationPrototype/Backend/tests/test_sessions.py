@@ -468,6 +468,48 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(len(retried.json()["versions"]), 1)
         self.assertEqual(retried.json()["proposals"], [])
 
+    def test_empty_model_failure_saves_one_user_turn_and_no_assistant_turn(self):
+        version_id = self.read_session()["currentVersionId"]
+        request_payload = {
+            "content": "I think the route is too easy.",
+            "baseVersionId": version_id,
+            "idempotencyKey": "empty_message_001",
+        }
+        empty_response = LLMServiceError(
+            "MODEL_EMPTY_RESPONSE",
+            "The LLM returned an empty response.",
+            request_payload["idempotencyKey"],
+            True,
+            2,
+            502,
+        )
+
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            side_effect=empty_response,
+        ) as mocked:
+            first = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+            second = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+
+        self.assertEqual(first.status_code, 502)
+        self.assertEqual(first.json()["code"], "MODEL_EMPTY_RESPONSE")
+        self.assertTrue(first.json()["retryable"])
+        self.assertEqual(second.status_code, 502)
+        self.assertEqual(mocked.call_count, 2)
+        stored = self.read_session()
+        matching_turns = [
+            turn for turn in stored["turns"]
+            if turn["requestId"] == request_payload["idempotencyKey"]
+        ]
+        self.assertEqual([turn["role"] for turn in matching_turns], ["user"])
+
     def test_message_idempotency_key_rejects_changed_content_or_stage(self):
         version_id = self.read_session()["currentVersionId"]
         timeout = LLMServiceError(
