@@ -29,7 +29,7 @@ PLAIN_CHAT_MAX_TOKENS = 700
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v18-risk-edit-question-quality"
+PROMPT_VERSION = "cocreation-v19-natural-peer-dialogue"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -107,11 +107,13 @@ def build_chat_messages(
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
-    task = _build_task_instructions(assessment_only)
+    task = _build_task_instructions(assessment_only, stage_context)
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
     system_prompt = (
-        "You are an adaptive Sokoban co-creation partner speaking as a thoughtful, "
-        "equal design peer. Work only with the exact saved Stage and evidence supplied "
+        "You are an adaptive Sokoban co-creation partner: a thoughtful, equal design peer "
+        "who speaks like a rational, warm friend with your own point of view. Prefer natural "
+        "first-person language. Work "
+        "only with the exact saved Stage and evidence supplied "
         "below. Keep the exchange natural, candid, and easy to answer: notice concrete "
         "design choices, contribute your own grounded interpretation or concern, and "
         "leave room for the designer to disagree. Do not sound like a survey, examiner, "
@@ -126,18 +128,21 @@ def build_chat_messages(
         "an observation, a design association, a respectful disagreement, or a longer "
         "reflection can each stand on its own. Do not mechanically follow a fixed order "
         "such as acknowledgement, evaluation, then question, and do not paraphrase the "
-        "designer merely to prove that you heard them. Ask a question only when the "
-        "answer would genuinely change what you say or do next. Statements are a complete "
-        "response; do not end with a question by habit. A factual question should be "
+        "designer merely to prove that you heard them. At an unclear evaluation, meaningful "
+        "trade-off, actionable direction, or new play evidence, actively ask a concrete "
+        "question whose answer changes what you say or do next. Otherwise, statements are a "
+        "complete response; do not end with a question by habit. A factual question should be "
         "answered before any optional follow-up. Do not mechanically include every "
         "possible move in each reply.\n\n"
         "Help the designer form and refine their own intention without assigning a "
         "predefined purpose. Infer intention only when conversation or design actions "
         "provide evidence. Phrase every inference as a tentative, correctable hypothesis "
-        "spoken directly from you to the designer. In English use first-person/second-person "
-        "wording such as 'I think you may...', 'My guess is that you might...', or 'I get "
-        "the sense that you may...'. In Chinese use wording such as '我猜你可能……' or "
-        "'我感觉你似乎……'. Never write report-style third-person claims such as 'the "
+        "spoken directly from you to the designer. In English vary first-person/second-person "
+        "wording such as 'It sounds to me like...', 'For now, I understand your direction "
+        "as...', or 'I get the sense that you may...'. In Chinese vary wording such as "
+        "'听起来你更在意……', '我暂时把你的方向理解为……', or '我读到的倾向是……'. Do not "
+        "repeatedly use 'I think you may' or '我猜你可能'. Never write report-style "
+        "third-person claims such as 'the "
         "designer wants...', 'the player wants...', '设计者想要……', or '玩家希望……'. "
         "Invite correction. Put that hypothesis only in intentHypothesis so the "
         "interface can distinguish it from your ordinary response. Never store or present "
@@ -165,16 +170,19 @@ def build_chat_messages(
         "example when they want direct control, reject your direction, or the discussion "
         "remains abstract. Do not repeat the editor hint every turn and never frame manual "
         "editing as required. Put the complete editor suggestion in a manual_edit uiCue "
-        "instead of repeating it in assistantMessage. Use a warning uiCue when current "
-        "map structure, version changes, solver metrics, or play evidence indicates a "
-        "reasonable potential risk. The threshold is intentionally moderate: warn before "
-        "the risk is certain when it could affect playability, deadlocks or softlocks, "
-        "push order, route readability, target comprehension, repetitive movement, or the "
-        "designer's stated direction. Phrase uncertain risks with language such as may, "
-        "I am concerned, or worth playtesting; do not present them as solver facts. Do not "
-        "use warnings for unsupported guesses or purely aesthetic preferences. When "
+        "instead of repeating it in assistantMessage. Use a warning uiCue only when strong "
+        "map, verified-change, solver, or play evidence supports a specific mechanical risk. "
+        "Ordinary uncertainty, route trade-offs, and aesthetic preferences stay in the "
+        "visible conversation. Phrase a supported warning as a natural first-person "
+        "observation about a concrete playable moment, never as a solver fact or formal "
+        "alert. When "
         "challenge_tradeoff is the primary move, include exactly one concise warning uiCue "
-        "and do not repeat it in assistantMessage. Use no more than two uiCues, no more "
+        "and do not repeat it in assistantMessage. A warning needs strong evidence: a "
+        "specific play anomaly, a mechanically explainable interaction among concrete "
+        "map elements, a verified change with a direct consequence, or a clear conflict "
+        "with the designer's stated direction. Ordinary uncertainty and aesthetic or "
+        "strategic trade-offs belong in the visible conversation, not a red card. Use no "
+        "more than two uiCues, no more "
         "than one warning, and never add one just "
         "for decoration. For a newly saved human_edit Stage, use changeSummary rather "
         "than guessing: acknowledge the changed components, note that this saved Stage "
@@ -202,8 +210,9 @@ def build_chat_messages(
         "text; type must be manual_edit or warning. The legacy tradeoff type is accepted "
         "by the application for historical data but must not be generated. "
         "assistantMessage must not repeat followUpQuestion; when non-null, the application "
-        "appends it in a separate discussion card. Prefer null unless an answer is needed "
-        "to move the collaboration forward.\n"
+        "appends it in a separate discussion card. At a genuine decision point, prefer one "
+        "concrete question over ending the exchange passively. Do not reuse the preceding "
+        "question's judgment or wording.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
         "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
         "suggestions, and satisfactionQuestion; features and suggestions are non-empty "
@@ -255,6 +264,13 @@ def build_plain_chat_messages(
         "This is the opening for a verified saved Stage. Notice one or two concrete "
         "authored choices and offer a clearly subjective perspective. Do not inventory "
         "the map, use a workflow greeting, or ask for an overall experience category. "
+        + (
+            "This is Stage 1: do not ask any question. Naturally mention that the designer "
+            "can share an impression, play the Stage, or try a local edit in the right panel; "
+            "present these as possibilities, not a checklist. "
+            if _is_stage_one(stage_context)
+            else ""
+        )
         if stage_opening
         else "Respond to the designer's latest contribution first. "
     )
@@ -271,12 +287,14 @@ def build_plain_chat_messages(
             "preference or direction, you MUST output INTENT. When you describe a concrete, "
             "actionable revision direction, you MUST output both proposal fields. After the "
             "designer explicitly agrees to move forward with a direction, you MUST output "
-            "both INTENT and the two proposal fields together. Add WARNING when the map, a "
-            "saved change, solver evidence, or play evidence supports a possible deadlock or "
-            "soft lock, push-order issue, route ambiguity, target misreading, repeated movement, "
-            "or conflict between directions. Name the specific area, element, or action and use "
-            "tentative wording such as 'may', 'worth playtesting', or 'I am concerned'; do not "
-            "turn a purely aesthetic opinion into a warning. Add MANUAL_EDIT when one local "
+            "both INTENT and the two proposal fields together. Write INTENT as a compact, "
+            "correctable first-person reading of this particular exchange, and vary its "
+            "opening from recent cards. Add WARNING only with strong evidence: explicit play "
+            "difficulty, or a mechanically explainable interaction between at least two "
+            "specific map elements and a concrete push moment. Keep ordinary uncertainty, "
+            "route trade-offs, and aesthetic opinions in the visible reply. A warning should "
+            "sound like a natural first-person aside, not a formal alert or stock phrase. "
+            "Add MANUAL_EDIT when one local "
             "experiment could advance the judgment: name the area, what to observe, and why, "
             "without prescribing final coordinates or implying manual editing is required. "
             "Output at most two UI cue fields. These metadata requirements do not require a "
@@ -286,27 +304,29 @@ def build_plain_chat_messages(
         )
     )
     system_prompt = (
-        "You are a thoughtful, equal Sokoban co-creation partner. Write only the visible "
+        "You are a thoughtful, equal Sokoban co-creation partner speaking like a rational, "
+        "warm friend. Prefer first-person observations and opinions. Write only the visible "
         f"reply to the designer in {response_language}; do not output JSON, analysis, or "
         "formatting instructions. The only permitted metadata is the optional trailing "
         "GUIDANCE block described below. "
         f"{opening_instruction}"
-        "Use one to three short paragraphs. Add one grounded independent view when it is "
-        "useful, but do not mechanically follow acknowledgement, evaluation, then "
-        "question. Do not sound like a survey, examiner, workflow assistant, or "
-        "unconditional cheerleader. Ask at most one question and only when its answer "
-        "would genuinely move the discussion forward; a declarative reply is complete. "
-        "For ordinary continuation, default to no question. Ask only when the latest "
-        "contribution is genuinely ambiguous or a necessary design decision remains "
-        "unresolved. Every question must name a concrete map anchor, evoke a specific play "
+        "Use one to three short paragraphs, varying their rhythm and opening. Do not "
+        "mechanically follow acknowledgement, evaluation, then question; do not restate "
+        "the designer's sentence before responding. Add one grounded independent view when "
+        "useful. Do not sound like a survey, examiner, workflow assistant, customer-service "
+        "script, or unconditional cheerleader. Ask at most one question. Actively ask at a "
+        "real decision point: an unclear evaluation, a meaningful trade-off, a direction "
+        "becoming actionable, or new play evidence. A stated preference does not forbid a "
+        "deeper question, but never ask the designer to approve the preference they just "
+        "gave. Every question must name a concrete map anchor, evoke a specific play "
         "moment or action result, and say or make clear which design judgment the answer will "
         "affect (such as route choice, push order, or target readability). Never ask generic "
         "confirmation questions such as 'What do you think?', 'Does this direction work?', or "
-        "'Is this okay?'. If the latest contribution already states a preference, evaluation, "
-        "or direction, your reply must contain no question; contribute a useful view and "
-        "stop. Never ask for a preference the designer has already stated. "
-        "When inferring intention, speak tentatively and directly to the designer using "
-        "first/second-person language and leave room for correction. Treat difficulty as "
+        "'Is this okay?'. Consecutive turns may each ask a question only when they advance "
+        "different judgments; never paraphrase the previous question. When inferring "
+        "intention, speak tentatively and directly to the designer using varied, natural "
+        "first/second-person language. Avoid repeatedly opening with 'I think you may' or "
+        "'我猜你可能'. Treat difficulty as "
         "your perspective, not solver fact. Do not invent play evidence, researcher goals, "
         "or exact authorship. Do not provide a complete map or claim a change was saved. "
         "You may offer a concise revision direction, while direct editing remains optional.\n\n"
@@ -945,11 +965,27 @@ async def _generate_plain_with_model_fallback(
                     "The model returned only a low-information question."
                 )
 
-            if _latest_user_states_direction(messages):
-                body = _remove_questions_from_plain_reply(body)
+            if question and _question_repeats_recent_judgment(question, messages):
                 question = None
 
-            if stage_opening and question is not None:
+            if not stage_opening and question is None:
+                question = _deterministic_key_question(
+                    messages,
+                    language,
+                    rows,
+                )
+                if question and _question_repeats_recent_judgment(question, messages):
+                    question = None
+
+            if stage_opening and _is_stage_one(stage_context):
+                body = _questionless_body(visible_content)
+                question = None
+                if not body:
+                    raise LowQualityModelResponse(
+                        "The Stage 1 opening contained only questions."
+                    )
+                body = _ensure_stage_one_orientation(body, rows, language)
+            elif stage_opening and question is not None:
                 try:
                     question = _normalize_opening_question(question)
                 except ValueError:
@@ -1139,7 +1175,12 @@ async def _generate_with_model_fallback(
                 raise EmptyModelResponse("The model returned an empty response.")
 
             payload = json.loads(content)
-            validated = validate_chat_response(payload, assessment_only, language)
+            validated = validate_chat_response(
+                payload,
+                assessment_only,
+                language,
+                stage_context,
+            )
 
             if task == "map_proposal" and validated[2] is None:
                 raise ValueError(
@@ -1409,7 +1450,12 @@ async def _request_completion(
         await client.close()
 
 
-def validate_chat_response(payload, assessment_only=False, language="en"):
+def validate_chat_response(
+    payload,
+    assessment_only=False,
+    language="en",
+    stage_context=None,
+):
     if not isinstance(payload, dict):
         raise ValueError("The model response must be a JSON object.")
 
@@ -1424,9 +1470,23 @@ def validate_chat_response(payload, assessment_only=False, language="en"):
 
     assistant_message = _clean_text(payload.get("assistantMessage"), "assistantMessage")
     guidance = _validate_guidance(payload.get("guidance"), assessment_only, language)
-    assistant_message, extracted_question = _extract_message_question(
-        assistant_message,
-    )
+    stage_one_opening = assessment_only and _is_stage_one(stage_context)
+
+    if stage_one_opening:
+        assistant_message = _questionless_body(assistant_message)
+        if not assistant_message:
+            raise ValueError("A Stage 1 opening must contain guidance outside its questions.")
+        assistant_message = _ensure_stage_one_orientation(
+            assistant_message,
+            None,
+            language,
+        )
+        guidance["followUpQuestion"] = None
+        extracted_question = None
+    else:
+        assistant_message, extracted_question = _extract_message_question(
+            assistant_message,
+        )
 
     if extracted_question is not None:
         if guidance["followUpQuestion"] is None:
@@ -1467,6 +1527,9 @@ def validate_chat_response(payload, assessment_only=False, language="en"):
                 "assessment.satisfactionQuestion",
             ),
         }
+
+        if stage_one_opening:
+            assessment["satisfactionQuestion"] = None
 
         if assessment_only and assessment["satisfactionQuestion"] is not None:
             assessment["satisfactionQuestion"] = _normalize_opening_question(
@@ -1640,6 +1703,73 @@ def _question_is_specific_and_vivid(question, language="en"):
     )
 
 
+def _question_repeats_recent_judgment(question, messages):
+    previous_assistant = _latest_role_content(messages[:-1], "assistant")
+    previous_questions = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", previous_assistant)
+        if sentence.strip().endswith(("?", "？"))
+    ]
+    return any(_guidance_text_matches(question, previous) for previous in previous_questions)
+
+
+def _deterministic_key_question(messages, language, rows):
+    latest = _latest_role_content(messages, "user")
+    lowered = latest.casefold()
+    if not latest or "?" in latest or "？" in latest:
+        return None
+
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", latest):
+        evaluation = any(
+            marker in latest
+            for marker in ("我觉得", "我认为", "感觉", "显得", "只是", "太", "不够", "像")
+        )
+        direction = _latest_user_states_direction(messages)
+        if not (evaluation or direction):
+            return None
+        if "水" in latest and "箱" in latest:
+            return "当箱子第一次贴着水边推进后，哪一段路线最该让玩家意识到水域正在影响判断？"
+        if "水" in latest:
+            return "当箱子第一次经过水域边缘时，哪条路线应该最先让玩家读出水域并不只是背景？"
+        if "箱" in latest and "目标" in latest:
+            return "当箱子第一次朝目标推进时，哪个落点最该帮助玩家读懂接下来的推动顺序？"
+        if "通道" in latest or "路线" in latest:
+            return "当箱子第一次进入这条通道时，哪个转折最该让玩家看清后续路线选择？"
+        return None
+
+    evaluation = bool(
+        re.search(r"\b(?:i think|i feel|feels?|seems?|looks?|too|only|just|not enough)\b", lowered)
+    )
+    direction = _latest_user_states_direction(messages)
+    if not (evaluation or direction):
+        return None
+    if any(word in lowered for word in ("water", "pond")) and any(
+        word in lowered for word in ("box", "crate")
+    ):
+        return (
+            "When the box first moves along the water edge, which part of the route should "
+            "make the player notice that the water is shaping their decision?"
+        )
+    if any(word in lowered for word in ("water", "pond")):
+        return (
+            "When the box first passes the water edge, which route should make the player "
+            "recognize that the water is more than scenery?"
+        )
+    if any(word in lowered for word in ("box", "crate")) and any(
+        word in lowered for word in ("target", "goal")
+    ):
+        return (
+            "When the box first moves toward the target, which landing point should help "
+            "the player read the next push order?"
+        )
+    if any(word in lowered for word in ("corridor", "route")):
+        return (
+            "When the box first enters that corridor, which turn should help the player "
+            "read the route choice ahead?"
+        )
+    return None
+
+
 def _extract_plain_guidance(content, language, stage_context, stage_opening=False):
     marker = "<GUIDANCE>"
     marker_index = content.find(marker)
@@ -1731,10 +1861,16 @@ def _warning_text_is_evidence_grounded(text, language):
     lowered = str(text or "").casefold()
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", lowered):
         anchors = ("水", "箱", "目标", "墙", "通道", "路线", "入口", "退路", "推动", "绕行")
-        risks = ("可能", "担心", "风险", "值得", "死锁", "卡住", "误读", "重复", "顺序", "退路")
+        risks = (
+            "可能", "担心", "风险", "值得", "我有点在意", "我不太放心",
+            "死锁", "卡住", "误读", "重复", "顺序", "退路",
+        )
     else:
         anchors = ("water", "box", "crate", "target", "wall", "corridor", "route", "entrance", "escape", "push")
-        risks = ("may", "might", "concern", "risk", "worth", "deadlock", "stuck", "misread", "repeat", "order", "escape")
+        risks = (
+            "may", "might", "concern", "risk", "worth", "i notice", "i am uneasy",
+            "deadlock", "stuck", "misread", "repeat", "order", "escape",
+        )
     return any(word in lowered for word in anchors) and any(word in lowered for word in risks)
 
 
@@ -1834,18 +1970,11 @@ def _apply_deterministic_guidance_fallback(
         and explicit_direction
         and not recent.get("intentHypothesis")
     ):
-        if language == "zh-CN":
-            if explicit_agreement:
-                candidate = "我猜你可能愿意沿着刚才讨论的方向继续做一次具体尝试。"
-            else:
-                candidate = f"我猜你可能希望后续设计回应你刚才表达的方向：“{latest_user[:120]}”。"
-        elif explicit_agreement:
-            candidate = "I think you may want to continue with the direction we just discussed."
-        else:
-            candidate = (
-                "I think you may want the next design step to respond to this direction: "
-                f'“{latest_user[:160]}”.'
-            )
+        candidate = _natural_intent_candidate(
+            latest_user,
+            language,
+            explicit_agreement,
+        )
 
         if not _guidance_text_matches(candidate, recent.get("intentHypothesis")):
             intent_hypothesis = candidate
@@ -1888,11 +2017,19 @@ def _apply_deterministic_guidance_fallback(
         if cue.get("type") in {"warning", "manual_edit"} and cue.get("text")
     }
 
+    warning_cue = cue_by_type.get("warning")
+    if warning_cue and not _warning_has_strong_evidence(
+        warning_cue["text"],
+        language,
+        rows,
+        stage_context,
+        play_summary,
+    ):
+        cue_by_type.pop("warning", None)
+
     if "warning" not in cue_by_type:
-        warning = _deterministic_warning(
-            visible_content,
+        warning = _deterministic_play_warning(
             language,
-            stage_context,
             play_summary,
         )
         if warning and not _cue_repeats_current_evidence(
@@ -1920,6 +2057,40 @@ def _apply_deterministic_guidance_fallback(
     return intent_hypothesis, proposal_offer, ordered_cues, fallback_used
 
 
+def _natural_intent_candidate(latest_user, language, explicit_agreement):
+    source = re.sub(r"\s+", " ", str(latest_user or "")).strip()
+    variant = sum(ord(character) for character in source) % 3
+
+    if language == "zh-CN":
+        if explicit_agreement:
+            options = (
+                "听起来你已经准备把刚才的想法放进一次具体尝试里；这是我目前的理解。",
+                "我暂时把你的方向理解为：先让这个局部想法真正参与一次游玩判断。",
+                "我读到的倾向是，你更想先做出一个能亲手比较的局部变化。",
+            )
+        else:
+            excerpt = source[:120].rstrip("。！？?!")
+            options = (
+                f"我暂时把你的方向理解为：{excerpt}。",
+                f"听起来你更在意的是“{excerpt}”带来的实际游玩感受。",
+                f"我读到的倾向是，你希望后续设计真正回应“{excerpt}”。",
+            )
+    elif explicit_agreement:
+        options = (
+            "It sounds to me like you are ready to put that idea into a concrete trial.",
+            "For now, I understand your direction as testing this idea through a local change.",
+            "I read your preference as making this idea tangible enough to compare in play.",
+        )
+    else:
+        excerpt = source[:160].rstrip(".!?")
+        options = (
+            f"For now, I understand your direction as: {excerpt}.",
+            f"It sounds to me like the play effect behind “{excerpt}” matters most to you.",
+            f"I read your preference as wanting the next design step to answer “{excerpt}”.",
+        )
+    return options[variant]
+
+
 def _cue_repeats_current_evidence(cue_type, text, recent_guidance, evidence_signature):
     previous = ((recent_guidance or {}).get("uiCues") or {}).get(cue_type) or {}
     return (
@@ -1928,59 +2099,90 @@ def _cue_repeats_current_evidence(cue_type, text, recent_guidance, evidence_sign
     )
 
 
-def _deterministic_warning(visible_content, language, stage_context, play_summary):
-    change_summary = (stage_context or {}).get("changeSummary") or {}
-    changed = set(change_summary.get("components") or {}).intersection(
-        {"boxes", "targets", "water", "internalWalls"}
-    )
+def _warning_has_strong_evidence(text, language, rows, stage_context, play_summary):
+    if not _warning_text_is_evidence_grounded(text, language):
+        return False
 
-    if (
-        (stage_context or {}).get("source") == "human_edit"
-        and changed
-        and not play_summary
-    ):
-        labels_zh = {
-            "boxes": "箱子起点",
-            "targets": "目标点",
-            "water": "水域",
-            "internalWalls": "内部墙体",
-        }
-        labels_en = {
-            "boxes": "box starts",
-            "targets": "targets",
-            "water": "water",
-            "internalWalls": "internal walls",
-        }
-        if language == "zh-CN":
-            labels = "、".join(labels_zh[key] for key in sorted(changed))
-            return f"这版改动涉及{labels}，我担心它可能改变第一次推箱后的退路或推动顺序；值得实际走一遍确认路线仍然容易读懂。"
-        labels = ", ".join(labels_en[key] for key in sorted(changed))
-        return (
-            f"This edit changes {labels}; I am concerned it may alter the escape route "
-            "or push order after the first push, so it is worth confirming in play."
+    lowered = str(text or "").casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", lowered):
+        categories = (
+            ("water", ("水", "水边", "水域")),
+            ("box", ("箱", "箱子")),
+            ("target", ("目标", "目标点")),
+            ("wall", ("墙", "通道", "角落")),
         )
-
-    sentences = [
-        part.strip()
-        for part in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(visible_content or ""))
-        if part.strip()
-    ]
-    if language == "zh-CN":
-        evidence = ("水", "箱", "目标", "墙", "通道", "路线", "推动", "绕行", "入口", "退路")
-        risk = ("可能", "担心", "风险", "死锁", "卡住", "无法", "误读", "重复", "顺序", "退路", "绕")
+        actions = ("推", "进入", "贴着", "绕", "到达", "退回", "卡住")
+        consequences = ("退路", "顺序", "死锁", "软锁", "误读", "重复", "无法", "卡住")
+        uncertainty = ("可能", "也许", "我有点", "我在意", "我不太放心", "值得")
     else:
-        evidence = ("water", "box", "crate", "target", "wall", "corridor", "route", "push", "entrance", "escape")
-        risk = ("may", "might", "concern", "risk", "deadlock", "stuck", "unable", "misread", "repeat", "order", "escape", "detour")
+        categories = (
+            ("water", ("water", "water edge")),
+            ("box", ("box", "crate")),
+            ("target", ("target", "goal")),
+            ("wall", ("wall", "corridor", "corner")),
+        )
+        actions = ("push", "enter", "along", "detour", "reach", "return", "stuck")
+        consequences = ("escape", "order", "deadlock", "soft lock", "misread", "repeat", "unable", "stuck")
+        uncertainty = ("may", "might", "I notice", "I am uneasy", "I am not sure", "worth")
 
-    for sentence in sentences:
-        lowered = sentence.casefold()
-        if any(word in lowered for word in evidence) and any(word in lowered for word in risk):
-            if language == "zh-CN" and not any(word in lowered for word in ("可能", "担心", "风险", "值得")):
-                return f"值得试玩确认：{sentence}"
-            if language != "zh-CN" and not any(word in lowered for word in ("may", "might", "concern", "risk", "worth")):
-                return f"Worth confirming in play: {sentence}"
-            return sentence[:1000]
-    return None
+    present_tiles = set("".join(str(row) for row in (rows or [])))
+    tile_requirements = {"water": "@", "box": "s", "target": "t", "wall": "#"}
+    mentioned = {
+        name
+        for name, words in categories
+        if tile_requirements[name] in present_tiles and any(word.casefold() in lowered for word in words)
+    }
+    mechanical = (
+        len(mentioned) >= 2
+        and any(word.casefold() in lowered for word in actions)
+        and any(word.casefold() in lowered for word in consequences)
+        and any(word.casefold() in lowered for word in uncertainty)
+    )
+    return mechanical or _play_evidence_is_strong(play_summary)
+
+
+def _play_evidence_is_strong(play_summary):
+    evidence = play_summary or {}
+    restarts = int(evidence.get("restartCount") or 0)
+    moves = evidence.get("moveCount")
+    minimum_moves = evidence.get("minimumMoves")
+    pushes = evidence.get("pushCount")
+    minimum_pushes = evidence.get("minimumPushes")
+    excessive_moves = (
+        isinstance(moves, int)
+        and isinstance(minimum_moves, int)
+        and minimum_moves > 0
+        and moves - minimum_moves >= 8
+        and moves / minimum_moves >= 1.5
+    )
+    excessive_pushes = (
+        isinstance(pushes, int)
+        and isinstance(minimum_pushes, int)
+        and minimum_pushes > 0
+        and pushes - minimum_pushes >= 2
+        and pushes / minimum_pushes >= 1.35
+    )
+    return restarts > 0 or excessive_moves or excessive_pushes
+
+
+def _deterministic_play_warning(language, play_summary):
+    if not _play_evidence_is_strong(play_summary):
+        return None
+    evidence = play_summary or {}
+    restarts = int(evidence.get("restartCount") or 0)
+    if language == "zh-CN":
+        if restarts:
+            return f"我注意到这次试玩重开了 {restarts} 次；某个推动后的退路可能不够直观，我会把它当成值得继续观察的信号。"
+        return "这次实际路线明显长于最短解，我会留意玩家是否在某个推动节点反复绕行，而不急着把它判定为难度。"
+    if restarts:
+        return (
+            f"I notice this playthrough restarted {restarts} time(s); an escape route after "
+            "one of the pushes may not read clearly, so I would keep an eye on that moment."
+        )
+    return (
+        "This playthrough wandered well beyond the shortest route; I would watch for a push "
+        "where the player circles back, without treating that alone as proof of difficulty."
+    )
 
 
 def _contextual_manual_edit(rows, language):
@@ -2069,6 +2271,55 @@ def _remove_questions_from_plain_reply(message):
     return "\n\n".join(declarative) or message
 
 
+def _questionless_body(message):
+    declarative = []
+
+    for paragraph in (part.strip() for part in str(message or "").split("\n\n")):
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])\s*", paragraph)
+            if sentence.strip()
+        ]
+        kept = [sentence for sentence in sentences if not sentence.endswith(("?", "？"))]
+        if kept:
+            separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+            declarative.append(separator.join(kept))
+
+    return "\n\n".join(declarative)
+
+
+def _ensure_stage_one_orientation(message, rows, language):
+    text = str(message or "").strip()
+    lowered = text.casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        has_orientation = (
+            any(word in text for word in ("感受", "直觉", "反应", "想法"))
+            and "试玩" in text
+            and any(word in text for word in ("编辑", "调整", "修改"))
+        )
+        options = (
+            "你可以先从直觉说起；想验证时，右侧的试玩和局部编辑都可以随时接上。",
+            "这里不用先定好目标，先说哪处让你在意也行；之后可以试玩，或在右侧做一点局部调整。",
+            "接下来可以先聊第一反应，也可以先试玩，再用右侧编辑器动一小块看看体验怎么变化。",
+        )
+    else:
+        has_orientation = (
+            any(word in lowered for word in ("impression", "instinct", "reaction", "idea"))
+            and any(word in lowered for word in ("play", "try the stage"))
+            and any(word in lowered for word in ("edit", "adjust", "right panel"))
+        )
+        options = (
+            "You can start with your first impression; when you want to test it, play the Stage or try a small edit in the right panel.",
+            "There is no need to settle on a goal yet—share what catches your attention, then play or make a small local adjustment when useful.",
+            "From here, you can talk through your first reaction, play the Stage, or nudge one local area in the right-hand editor and compare the feel.",
+        )
+    if has_orientation:
+        return text
+    serialized_rows = "".join(str(row) for row in (rows or []))
+    variant = sum(ord(character) for character in serialized_rows or text) % len(options)
+    return f"{text}\n\n{options[variant]}"
+
+
 def _latest_user_states_direction(messages):
     latest = _latest_role_content(messages, "user")
 
@@ -2139,8 +2390,19 @@ def _build_minimal_stage_assessment(message, question, language, solver_metrics)
     }
 
 
-def _build_task_instructions(assessment_only):
+def _is_stage_one(stage_context):
+    return int((stage_context or {}).get("stageNumber") or 0) == 1
+
+
+def _build_task_instructions(assessment_only, stage_context=None):
     if assessment_only:
+        stage_one_instruction = (
+            "This is Stage 1. Do not ask a question. After your concrete observation, "
+            "naturally let the designer know they can share an impression, play this Stage, "
+            "or make a local edit in the right panel. Do not present those options as a list. "
+            if _is_stage_one(stage_context)
+            else ""
+        )
         return (
             "Open a friendly discussion for this newly saved Stage. Use observe_stage "
             "and write one to three short paragraphs, choosing the length and rhythm that "
@@ -2155,14 +2417,17 @@ def _build_task_instructions(assessment_only):
             "to Stage, ask for the designer's overall intended player experience, offer "
             "preselected categories or an either-or choice, infer an intention, enumerate "
             "solver moves, or offer or generate a changed map. Include the grounded "
-            "structured assessment only as archival research data, not as the prose style."
+            "structured assessment only as archival research data, not as the prose style. "
+            + stage_one_instruction
         )
 
     return (
-        "Continue as a conversational design peer. Address the latest message, but vary "
-        "how you do so and let a useful observation or direct answer stand without a "
-        "follow-up question. Do not agree reflexively. When a decision is actually "
-        "required, a direct confirmation question is appropriate. assessment should "
+        "Continue as a rational, warm design friend with an independent first-person view. "
+        "Address the latest message without restating it, vary your opening and paragraph "
+        "rhythm, and do not fall into an acknowledgement-evaluation-question template. "
+        "At an unclear evaluation, meaningful trade-off, actionable direction, or new play "
+        "evidence, actively ask one concrete question; otherwise let a useful observation "
+        "stand. Do not agree reflexively. assessment should "
         "normally be null. Use offer_revision without "
         "proposedRows for an unsolicited revision idea; use deliver_revision with a "
         "complete proposedRows map only after explicit designer authorization."
@@ -2374,6 +2639,10 @@ def _normalize_intent_hypothesis(hypothesis, language):
             "我感觉你似乎",
             "在我看来，你可能",
             "我倾向于认为你可能",
+            "听起来你",
+            "我暂时把你的方向理解为",
+            "我读到的倾向是",
+            "我在想，你可能",
         )
 
         if text.startswith(direct_prefixes):
@@ -2383,7 +2652,7 @@ def _normalize_intent_hypothesis(hypothesis, language):
         match = re.match(r"^你(?:想要|希望|想)(.*)$", text)
 
         if match:
-            return f"我猜你可能想要{match.group(1)}"
+            return f"听起来你更想要{match.group(1)}"
 
         if text.startswith("你可能"):
             return f"我觉得{text}"
@@ -2391,13 +2660,14 @@ def _normalize_intent_hypothesis(hypothesis, language):
         if text.startswith("你似乎"):
             return f"我感觉{text}"
 
-        return f"我感觉你可能在表达这样的倾向：{text}"
+        return f"我暂时把你的方向理解为：{text}"
 
     if re.match(
         r"^(?:I think you (?:may|might)|My guess is (?:that )?you (?:may|might)|"
         r"I (?:suspect|wonder whether) you (?:may|might)|"
         r"I get the sense that you (?:may|might)|"
-        r"It seems to me that you (?:may|might))\b",
+        r"It seems to me that you (?:may|might)|It sounds to me like you|"
+        r"For now, I understand your direction as|I read your preference as)\b",
         text,
         re.IGNORECASE,
     ):
@@ -2406,11 +2676,11 @@ def _normalize_intent_hypothesis(hypothesis, language):
     third_person_patterns = (
         (
             r"^(?:the )?(?:designer|player) wants? to\b(.*)$",
-            "I think you may want to",
+            "It sounds to me like you want to",
         ),
         (
             r"^(?:the )?(?:designer|player) wants?\b(.*)$",
-            "I think you may want",
+            "I read your preference as wanting",
         ),
         (
             r"^(?:the )?(?:designer|player) (?:seems|appears) to want\b(.*)$",
@@ -2418,7 +2688,7 @@ def _normalize_intent_hypothesis(hypothesis, language):
         ),
         (
             r"^(?:the )?(?:designer|player) may want\b(.*)$",
-            "I think you may want",
+            "For now, I understand your direction as wanting",
         ),
         (
             r"^(?:the )?(?:designer|player) (?:is|seems to be) aiming to\b(.*)$",
@@ -2438,8 +2708,8 @@ def _normalize_intent_hypothesis(hypothesis, language):
 
     text = re.sub(r"^(?:the )?(?:designer|player)\b", "you", text, flags=re.IGNORECASE)
     patterns = (
-        (r"^you (?:want|want to|hope|hope to)\b(.*)$", "I think you may want"),
-        (r"^you (?:may|might) want\b(.*)$", "I think you may want"),
+        (r"^you (?:want|want to|hope|hope to)\b(.*)$", "It sounds to me like you want"),
+        (r"^you (?:may|might) want\b(.*)$", "For now, I understand your direction as wanting"),
         (r"^you (?:seem|appear) to want\b(.*)$", "I get the sense that you may want"),
         (r"^you (?:are|seem to be) aiming to\b(.*)$", "I think you may be aiming to"),
         (r"^you (?:prefer|seem to prefer)\b(.*)$", "I think you may prefer"),
@@ -2454,7 +2724,7 @@ def _normalize_intent_hypothesis(hypothesis, language):
     if re.match(r"^you\b", text, re.IGNORECASE):
         return f"I think you may be signaling this direction: {text}"
 
-    return f"I think you may be signaling this direction: {text}"
+    return f"For now, I understand your direction as: {text}"
 
 
 def _normalize_opening_question(question):

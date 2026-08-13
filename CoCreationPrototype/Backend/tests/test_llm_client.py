@@ -61,7 +61,7 @@ class SlowClient:
 
 
 class LLMClientTests(unittest.TestCase):
-    def execute(self, outcomes):
+    def execute(self, outcomes, rows=None, **reply_kwargs):
         client = FakeClient(outcomes)
 
         with (
@@ -70,8 +70,9 @@ class LLMClientTests(unittest.TestCase):
         ):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Assess the level."}],
-                ["############"] * 10,
+                rows or ["############"] * 10,
                 "request-test",
+                **reply_kwargs,
             )
 
         return result, client
@@ -111,7 +112,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result.guidance["move"], "clarify_intent")
         self.assertEqual(result.guidance["intentConfidence"], "medium")
-        self.assertTrue(result.guidance["intentHypothesis"].startswith("I think you may"))
+        self.assertTrue(result.guidance["intentHypothesis"].startswith("I read your preference"))
         self.assertNotIn("GUIDANCE", result.assistant_message)
 
     def test_plain_reply_extracts_proposal_card(self):
@@ -197,15 +198,15 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertIsNotNone(changed_intent)
 
-    def test_plain_prompt_defaults_to_no_question(self):
+    def test_plain_prompt_asks_at_real_decision_points_without_a_fixed_template(self):
         messages = llm_client.build_plain_chat_messages(
             [{"role": "user", "content": "Make the choice smaller but consequential."}],
             ["############"] * 10,
         )
 
-        self.assertIn("default to no question", messages[0]["content"])
-        self.assertIn("your reply must contain no question", messages[0]["content"])
-        self.assertIn("Never ask for a preference the designer has already stated", messages[0]["content"])
+        self.assertIn("Actively ask at a real decision point", messages[0]["content"])
+        self.assertIn("varying their rhythm and opening", messages[0]["content"])
+        self.assertIn("never ask the designer to approve the preference", messages[0]["content"])
         self.assertIn("<GUIDANCE>", messages[0]["content"])
         self.assertIn("recentGuidance", messages[0]["content"])
         self.assertIn("you MUST output INTENT", messages[0]["content"])
@@ -266,13 +267,33 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
 
+    def test_explicit_direction_can_keep_a_deeper_concrete_question(self):
+        client = FakeClient([
+            "That makes the first commitment more legible. When the box enters the "
+            "water-side corridor, which route should the player notice first so we can "
+            "judge the opening's readability?"
+        ])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Keep it compact, but make the first push consequential."}],
+                ["############"] * 10,
+                "deeper-question-test",
+            )
+
+        self.assertIn("water-side corridor", result.guidance["followUpQuestion"])
+        self.assertNotIn("water-side corridor", result.assistant_message.split("\n\n")[0])
+
     def test_plain_guidance_extracts_warning_and_manual_edit(self):
         result, _ = self.execute([
             "The water can shape the first route decision.\n"
             "<GUIDANCE>WARNING: The box may lose its escape route beside the water after "
             "the first push || MANUAL_EDIT: Try a small experiment around the water edge "
             "and watch whether the route choice becomes clearer</GUIDANCE>"
-        ])
+        ], rows=["############", "#p.s @  t  #"] + ["############"] * 8)
 
         self.assertEqual(
             [cue["type"] for cue in result.guidance["uiCues"]],
@@ -316,19 +337,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(same_cues, [])
         self.assertEqual(changed_cues[0]["type"], "warning")
 
-    def test_human_edit_without_play_evidence_gets_tentative_warning(self):
-        warning = llm_client._deterministic_warning(
-            "The revision is saved.",
-            "en",
-            {
-                "source": "human_edit",
-                "changeSummary": {"components": ["water", "boxes"]},
-            },
-            None,
-        )
-
-        self.assertIn("may alter", warning)
-        self.assertIn("first push", warning)
+    def test_human_edit_without_play_evidence_does_not_get_automatic_warning(self):
+        self.assertIsNone(llm_client._deterministic_play_warning("en", None))
 
     def test_contextual_manual_edit_avoids_exact_coordinates(self):
         cue = llm_client._contextual_manual_edit(
@@ -341,21 +351,60 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotRegex(cue, r"\b(?:row|column)\s+\d+")
 
     def test_evidence_grounded_warning_is_extracted_but_aesthetic_opinion_is_not(self):
-        warning = llm_client._deterministic_warning(
-            "I am concerned the box may lose its escape route beside the water after the first push.",
+        rows = ["############", "#p.s @  t  #"] + ["############"] * 8
+        warning = llm_client._warning_has_strong_evidence(
+            "I notice the box may lose its escape route beside the water after the first push.",
             "en",
+            rows,
             {},
             None,
         )
-        aesthetic = llm_client._deterministic_warning(
+        aesthetic = llm_client._warning_has_strong_evidence(
             "The water looks too plain and the colors feel dull.",
             "en",
+            rows,
             {},
             None,
         )
 
-        self.assertIsNotNone(warning)
-        self.assertIsNone(aesthetic)
+        self.assertTrue(warning)
+        self.assertFalse(aesthetic)
+
+    def test_general_route_uncertainty_is_not_promoted_to_warning(self):
+        strong = llm_client._warning_has_strong_evidence(
+            "I am concerned the route may feel unclear after the first push.",
+            "en",
+            ["############", "#p.s @  t  #"] + ["############"] * 8,
+            {},
+            None,
+        )
+
+        self.assertFalse(strong)
+
+    def test_play_restart_produces_a_first_person_warning(self):
+        warning = llm_client._deterministic_play_warning(
+            "zh-CN",
+            {"restartCount": 2, "moveCount": 30, "minimumMoves": 20},
+        )
+
+        self.assertTrue(warning.startswith("我注意到"))
+        self.assertIn("重开了 2 次", warning)
+
+    def test_intent_fallback_varies_naturally_with_context(self):
+        first = llm_client._natural_intent_candidate(
+            "a route with water",
+            "en",
+            False,
+        )
+        second = llm_client._natural_intent_candidate(
+            "b route with water",
+            "en",
+            False,
+        )
+
+        self.assertNotEqual(first.split(":", 1)[0], second.split(":", 1)[0])
+        self.assertNotIn("designer", (first + second).casefold())
+        self.assertNotIn("player wants", (first + second).casefold())
 
     def test_specific_vivid_question_is_kept_as_blue_card(self):
         result, _ = self.execute([
@@ -367,6 +416,35 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("water", result.guidance["followUpQuestion"])
         self.assertNotIn("?", result.assistant_message.split("\n\n", 1)[0])
 
+    def test_consecutive_question_repeating_the_same_judgment_is_suppressed(self):
+        client = FakeClient([
+            "The route remains focused. When the box enters the water-side corridor, "
+            "which route choice should the player notice first so we can judge readability?"
+        ])
+        conversation = [
+            {
+                "role": "assistant",
+                "content": (
+                    "I am looking at the same moment. When the box enters the water-side "
+                    "corridor, which route choice should the player notice first so we can "
+                    "judge readability?"
+                ),
+            },
+            {"role": "user", "content": "The upper route."},
+        ]
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                conversation,
+                ["############"] * 10,
+                "question-dedup-test",
+            )
+
+        self.assertIsNone(result.guidance["followUpQuestion"])
+
     def test_generic_question_is_removed_when_declarative_body_exists(self):
         result, client = self.execute([
             "Moving the target beside the water would create a route decision. "
@@ -376,6 +454,37 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertNotIn("Does this direction work", result.assistant_message)
+
+    def test_clear_evaluation_gets_a_specific_question_when_model_omits_one(self):
+        client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "我觉得水域现在只是摆设。"}],
+                ["############"] * 10,
+                "question-frequency-test",
+                language="zh-CN",
+            )
+
+        question = result.guidance["followUpQuestion"]
+        self.assertIn("水域边缘", question)
+        self.assertIn("路线", question)
+        self.assertTrue(question.endswith("？"))
+
+    def test_direction_question_goes_deeper_instead_of_asking_for_approval(self):
+        question = llm_client._deterministic_key_question(
+            [{"role": "user", "content": "我想让箱子贴着水边推进时更有路线判断。"}],
+            "zh-CN",
+            ["############"] * 10,
+        )
+
+        self.assertIn("第一次", question)
+        self.assertIn("路线", question)
+        self.assertNotIn("方向如何", question)
+        self.assertNotIn("可行吗", question)
 
     def test_chinese_agreement_is_treated_as_an_explicit_direction(self):
         self.assertTrue(llm_client._latest_user_states_direction([
@@ -412,7 +521,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("吗", result.assistant_message)
 
     def test_invalid_stage_json_falls_back_to_plain_opening(self):
-        client = FakeClient(["   ", "The water narrows the central route in an interesting way."])
+        client = FakeClient([
+            "   ",
+            "The water narrows the central route in an interesting way. "
+            "When the box enters that corridor, which route should read first?",
+        ])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -425,10 +538,17 @@ class LLMClientTests(unittest.TestCase):
                 {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
                 {},
                 "stage-fallback-test",
-                {"source": "initial", "initialDraftMethod": "description_generation"},
+                {
+                    "stageNumber": 1,
+                    "source": "initial",
+                    "initialDraftMethod": "description_generation",
+                },
             )
 
         self.assertIn("water narrows", result.assistant_message)
+        self.assertNotIn("?", result.assistant_message)
+        self.assertIn("play the Stage", result.assistant_message)
+        self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertIn("deterministic solver", result.assessment["solutionSummary"])
         self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertEqual(
@@ -882,11 +1002,11 @@ class LLMClientTests(unittest.TestCase):
     def test_english_intent_hypothesis_uses_direct_tentative_voice(self):
         cases = {
             "The designer wants to make the route feel risky.":
-                "I think you may want to make the route feel risky.",
+                "It sounds to me like you want to make the route feel risky.",
             "The player seems to want a tighter opening.":
                 "I get the sense that you may want a tighter opening.",
             "You want the second push to be surprising.":
-                "I think you may want the second push to be surprising.",
+                "It sounds to me like you want the second push to be surprising.",
             "I think you may be emphasizing push order.":
                 "I think you may be emphasizing push order.",
         }
@@ -900,8 +1020,8 @@ class LLMClientTests(unittest.TestCase):
 
     def test_chinese_intent_hypothesis_uses_direct_tentative_voice(self):
         cases = {
-            "设计者想要让路线更紧张。": "我猜你可能想要让路线更紧张。",
-            "玩家希望突出推动顺序。": "我猜你可能想要突出推动顺序。",
+            "设计者想要让路线更紧张。": "听起来你更想要让路线更紧张。",
+            "玩家希望突出推动顺序。": "听起来你更想要突出推动顺序。",
             "我猜你可能更在意路线辨识度。": "我猜你可能更在意路线辨识度。",
         }
 
@@ -932,7 +1052,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(
             result[4]["intentHypothesis"],
-            "I think you may want a more deliberate opening.",
+            "I read your preference as wanting a more deliberate opening.",
         )
 
     def test_composed_message_keeps_cues_for_future_llm_context(self):
@@ -1062,6 +1182,75 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIsNone(result[4]["followUpQuestion"])
         self.assertIsNone(result[1]["satisfactionQuestion"])
+
+    def test_stage_one_opening_removes_question_and_adds_natural_orientation(self):
+        payload = {
+            "assistantMessage": (
+                "I notice the water makes the lower route feel more deliberate. "
+                "When the box reaches the edge, what should stand out first?"
+            ),
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "When the box reaches the edge, what should stand out first?",
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The solver found a route.",
+                "difficultyOpinion": "In my view, the opening is readable.",
+                "features": ["Lower route"],
+                "suggestions": ["Try the opening"],
+                "satisfactionQuestion": "When the box reaches the edge, what should stand out first?",
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="en",
+            stage_context={"stageNumber": 1},
+        )
+
+        self.assertNotIn("?", result[0])
+        self.assertIn("play", result[0].casefold())
+        self.assertIn("edit", result[0].casefold())
+        self.assertIsNone(result[4]["followUpQuestion"])
+        self.assertIsNone(result[1]["satisfactionQuestion"])
+
+    def test_later_stage_opening_keeps_a_useful_question(self):
+        payload = {
+            "assistantMessage": "I notice the water makes the lower route feel deliberate.",
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "What changes in your reading when the box enters the water-side corridor?",
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The solver found a route.",
+                "difficultyOpinion": "In my view, the opening is readable.",
+                "features": ["Lower route"],
+                "suggestions": ["Discuss route readability"],
+                "satisfactionQuestion": "What changes in your reading when the box enters the water-side corridor?",
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="en",
+            stage_context={"stageNumber": 2},
+        )
+
+        self.assertIn("water-side corridor", result[4]["followUpQuestion"])
 
     def test_stage_opening_requires_archival_question_to_match_discussion(self):
         payload = {
