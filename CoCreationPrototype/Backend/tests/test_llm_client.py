@@ -85,7 +85,8 @@ class LLMClientTests(unittest.TestCase):
         ])
 
         self.assertIn("compact central route", result.assistant_message)
-        self.assertIn("water-side corridor", result.assistant_message)
+        self.assertIn("first moves beside the water", result.assistant_message)
+        self.assertIn("judge whether the linkage", result.assistant_message)
         self.assertEqual(result.guidance["move"], "offer_perspective")
         self.assertEqual(result.attempts_used, 1)
         request = client.chat.completions.calls[0]
@@ -140,10 +141,9 @@ class LLMClientTests(unittest.TestCase):
         ], language="zh-CN")
 
         focus = result.guidance["followUpQuestion"]
-        self.assertEqual(
-            focus,
-            "我更喜欢水边这次留下的路线犹豫，它让第一次推动的选择更有分量。",
-        )
+        self.assertIn("单独留下这个判断", focus)
+        self.assertIn("第一次推动", focus)
+        self.assertIn("路线读法", focus)
         self.assertNotIn("？", focus)
         self.assertNotIn("GUIDANCE", result.assistant_message)
 
@@ -208,6 +208,42 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.guidance["move"], "offer_revision")
         self.assertIsNotNone(result.guidance["intentHypothesis"])
         self.assertIsNotNone(result.guidance["proposalOffer"])
+
+    def test_proposal_card_distills_body_copy_into_title_and_play_rationale(self):
+        copied = (
+            "这个想法挺自然的——把其中一个目标点挪到下方空旷区域，确实能直接平衡两边的密度。"
+        )
+        client = FakeClient([
+            copied + "\n<GUIDANCE>PROPOSAL_SUMMARY: " + copied
+            + " || PROPOSAL_RATIONALE: 你说得对，上下半区的密度落差确实一眼就能看出来。"
+            + "</GUIDANCE>"
+        ])
+        conversation = [
+            {"role": "assistant", "content": "你说得对，上下半区的密度落差确实一眼就能看出来。"},
+            {"role": "user", "content": "展开讲讲"},
+        ]
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                conversation,
+                ["############"] * 10,
+                "distilled-proposal-card-test",
+                language="zh-CN",
+            )
+
+        offer = result.guidance["proposalOffer"]
+        self.assertEqual(offer["summary"], "重排下半区的目标落点与推进路线")
+        self.assertIn("第一次推进", offer["rationale"])
+        self.assertIn("操作密度", offer["rationale"])
+        self.assertNotEqual(offer["summary"], copied)
+        self.assertNotIn("你说得对", offer["rationale"])
+        self.assertIsNotNone(result.guidance["followUpQuestion"])
+        self.assertIn("下方箱子", result.guidance["followUpQuestion"])
+        self.assertIn("新目标", result.guidance["followUpQuestion"])
+        self.assertIn("下一步", result.guidance["followUpQuestion"])
 
     def test_malformed_guidance_is_hidden_without_failing_reply(self):
         for reply in (
@@ -350,7 +386,8 @@ class LLMClientTests(unittest.TestCase):
                 "deeper-question-test",
             )
 
-        self.assertIn("water-side corridor", result.guidance["followUpQuestion"])
+        self.assertIn("first moves beside the water", result.guidance["followUpQuestion"])
+        self.assertIn("judge whether the linkage", result.guidance["followUpQuestion"])
         self.assertNotIn("water-side corridor", result.assistant_message.split("\n\n")[0])
 
     def test_plain_guidance_extracts_warning_and_manual_edit(self):
@@ -536,9 +573,10 @@ class LLMClientTests(unittest.TestCase):
             )
 
         question = result.guidance["followUpQuestion"]
-        self.assertIn("水域边缘", question)
+        self.assertIn("水边推进", question)
         self.assertIn("路线", question)
-        self.assertTrue(question.endswith("？"))
+        self.assertIn("？", question)
+        self.assertIn("判断", question)
 
     def test_direction_question_goes_deeper_instead_of_asking_for_approval(self):
         question = llm_client._deterministic_key_question(
@@ -782,6 +820,52 @@ class LLMClientTests(unittest.TestCase):
         retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
         self.assertIn("explicitly authorized a complete map proposal", retry_prompt)
 
+    def test_structurally_invalid_proposal_retries_with_pro_for_correction(self):
+        proposed_rows = ["############"] * 10
+        payload = json.dumps({
+            "assistantMessage": "I prepared a reviewable route revision.",
+            "guidance": {
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": proposed_rows,
+            "modificationSummary": "Adjusted the route.",
+        })
+        client = FakeClient([payload, payload])
+        validations = 0
+
+        def reject_once(rows):
+            nonlocal validations
+            validations += 1
+            if validations == 1:
+                raise ValueError("Row 3 must contain exactly 12 tiles.")
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Please revise the map."}],
+                ["############"] * 10,
+                "proposal-pro-correction-test",
+                proposal_validator=reject_once,
+            )
+
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(
+            [call["model"] for call in client.chat.completions.calls],
+            ["deepseek-v4-pro", "deepseek-v4-pro"],
+        )
+        self.assertIn(
+            "Row 3 must contain exactly 12 tiles",
+            client.chat.completions.calls[1]["messages"][0]["content"],
+        )
+
     def test_flash_empty_response_falls_back_to_pro(self):
         client = FakeClient(["   \n ", "A grounded fallback response."])
 
@@ -966,10 +1050,9 @@ class LLMClientTests(unittest.TestCase):
             result[0],
             "In my view, a tighter route would make the push order more visible.",
         )
-        self.assertEqual(
-            result[4]["followUpQuestion"],
-            "Would you like to preserve that split?",
-        )
+        self.assertIn("focus our discussion", result[4]["followUpQuestion"])
+        self.assertIn("Would you like to preserve that split?", result[4]["followUpQuestion"])
+        self.assertIn("next step", result[4]["followUpQuestion"])
 
     def test_question_only_message_is_rejected(self):
         payload = {
@@ -1520,7 +1603,7 @@ class LLMClientTests(unittest.TestCase):
                 stage_context={"stageNumber": 1, "source": "initial"},
             )
 
-        self.assertIn("水域边缘", result.guidance["followUpQuestion"])
+        self.assertIn("水边推进", result.guidance["followUpQuestion"])
 
     def test_stage_opening_requires_archival_question_to_match_discussion(self):
         payload = {

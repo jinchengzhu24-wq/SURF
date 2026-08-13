@@ -29,7 +29,7 @@ PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v21-lively-explicit-revisions"
+PROMPT_VERSION = "cocreation-v22-distilled-guidance-reliable-proposals"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -226,7 +226,10 @@ def build_chat_messages(
         "text; type must be manual_edit or warning. The legacy tradeoff type is accepted "
         "by the application for historical data but must not be generated. "
         "assistantMessage must not repeat followUpQuestion; when non-null, the application "
-        "appends it in a separate discussion card. At a genuine decision point, use either "
+        "appends it in a separate discussion card. The card must not merely lift a sentence "
+        "from assistantMessage: distill a sharper discussion focus or expand it with the "
+        "playable judgment and the next design decision it informs. At a genuine decision "
+        "point, use either "
         "one concrete question or one independent first-person insight instead of ending the "
         "exchange passively. Do not reuse the preceding card's judgment or wording.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
@@ -311,8 +314,11 @@ def build_plain_chat_messages(
             "correctable first-person reading of this particular exchange, and vary its "
             "opening from recent cards. A generic execution request such as '你帮我改' is not "
             "itself a design intention: ground INTENT in the substantive direction from the "
-            "conversation or omit it. Give each card one complete, natural thought rather than "
-            "a slogan; proposal rationale should explain the expected playable effect. Add "
+            "conversation or omit it. Every card must distill the exchange rather than copy a "
+            "sentence from assistantMessage or the preceding turn. Give each card one complete, "
+            "natural thought rather than a slogan. PROPOSAL_SUMMARY should be a short title-like "
+            "synthesis of the actual design move; PROPOSAL_RATIONALE should independently expand "
+            "the expected playable effect and what the designer can judge from it. Add "
             "WARNING only with strong evidence: explicit play "
             "difficulty, or a mechanically explainable interaction between at least two "
             "specific map elements and a concrete push moment. Keep ordinary uncertainty, "
@@ -996,6 +1002,13 @@ async def _generate_plain_with_model_fallback(
                     play_summary,
                 )
             )
+            if proposal_offer is not None:
+                proposal_offer = _distill_proposal_offer(
+                    proposal_offer,
+                    visible_content,
+                    _latest_role_content(messages[:-1], "assistant"),
+                    language,
+                )
             visible_content = _remove_extracted_warning_sentence(
                 visible_content,
                 ui_cues,
@@ -1022,7 +1035,17 @@ async def _generate_plain_with_model_fallback(
                     language,
                     rows,
                 )
+                if question is None and proposal_offer is not None:
+                    question = _deterministic_reply_discussion_focus(
+                        visible_content,
+                        language,
+                    )
                 if question and _question_repeats_recent_judgment(question, messages):
+                    question = None
+                recent_focus = ((stage_context or {}).get("recentGuidance") or {}).get(
+                    "discussionFocus"
+                )
+                if question and _guidance_text_matches(question, recent_focus):
                     question = None
 
             if stage_opening and _is_stage_one(stage_context):
@@ -1043,6 +1066,13 @@ async def _generate_plain_with_model_fallback(
             if stage_opening and question is None:
                 question = _deterministic_stage_opening_question(
                     stage_context,
+                    language,
+                )
+
+            if not stage_opening and question is not None:
+                question = _refine_discussion_focus(
+                    question,
+                    visible_content,
                     language,
                 )
 
@@ -1176,7 +1206,12 @@ async def _generate_with_model_fallback(
     last_error = None
     validation_feedback = None
 
-    for attempt, model in enumerate(models[:max_attempts], start=1):
+    for attempt, configured_model in enumerate(models[:max_attempts], start=1):
+        model = (
+            models[0]
+            if task == "map_proposal" and validation_feedback is not None
+            else configured_model
+        )
         elapsed = time.monotonic() - started_at
         remaining = CHAT_TIMEOUT_SECONDS - elapsed
         response_fields = _empty_response_diagnostics()
@@ -1526,6 +1561,13 @@ def validate_chat_response(
         _clean_text(payload.get("assistantMessage"), "assistantMessage")
     )
     guidance = _validate_guidance(payload.get("guidance"), assessment_only, language)
+    if guidance.get("proposalOffer") is not None:
+        guidance["proposalOffer"] = _distill_proposal_offer(
+            guidance["proposalOffer"],
+            assistant_message,
+            "",
+            language,
+        )
     stage_one_opening = assessment_only and _is_stage_one(stage_context)
     deterministic_opening_question = None
 
@@ -1553,6 +1595,13 @@ def validate_chat_response(
                 )
 
             guidance["followUpQuestion"] = extracted_question
+
+    if not assessment_only and guidance["followUpQuestion"] is not None:
+        guidance["followUpQuestion"] = _refine_discussion_focus(
+            guidance["followUpQuestion"],
+            assistant_message,
+            language,
+        )
 
     if assessment_only and not stage_one_opening and guidance["followUpQuestion"] is None:
         deterministic_opening_question = _deterministic_stage_opening_question(
@@ -2046,6 +2095,101 @@ def _deterministic_key_question(messages, language, rows):
     return None
 
 
+def _deterministic_reply_discussion_focus(visible_content, language):
+    text = str(visible_content or "")
+    lowered = text.casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        if "目标" in text and "箱" in text and any(
+            word in text for word in ("下方", "下半", "底部", "右下", "空旷")
+        ):
+            return (
+                "当下方箱子第一次朝新目标推进时，哪一步最能暴露新的绕行负担与上下区域的节奏差异？"
+                "我会用这个瞬间判断下一步更该调整路线关系，还是保留现在的空间结构。"
+            )
+        if "水" in text and "箱" in text:
+            return (
+                "当箱子第一次贴着水边推进时，哪一个转折最该让玩家意识到水域正在改变路线？"
+                "我会用这个瞬间判断联动是否真的成立。"
+            )
+        if "目标" in text and any(word in text for word in ("移动", "挪", "落位", "落点")):
+            return (
+                "当箱子第一次接近调整后的目标落点时，哪个动作最该让玩家读懂新的推进顺序？"
+            )
+        if "墙" in text and any(word in text for word in ("通道", "路线", "绕", "转折")):
+            return (
+                "当箱子第一次穿过调整后的墙边通道时，我更想看玩家在哪个转折停下来重新判断路线。"
+            )
+        return None
+
+    if "target" in lowered and any(word in lowered for word in ("box", "crate")) and any(
+        word in lowered for word in ("lower", "bottom", "open area")
+    ):
+        return (
+            "When the lower box first moves toward the new target, which step best reveals the "
+            "new detour burden and the rhythm difference between the upper and lower areas? "
+            "I would use that moment to judge whether to tune the route or preserve the space."
+        )
+    if any(word in lowered for word in ("water", "pond")) and any(
+        word in lowered for word in ("box", "crate")
+    ):
+        return (
+            "When the box first moves beside the water, which turn should make the player "
+            "realize that it is changing the route? I would use that moment to judge whether "
+            "the linkage is actually working."
+        )
+    if "target" in lowered and any(word in lowered for word in ("move", "shift", "position")):
+        return (
+            "When the box first approaches the adjusted target, which move should make the new "
+            "push order readable?"
+        )
+    if "wall" in lowered and any(word in lowered for word in ("corridor", "route", "turn")):
+        return (
+            "When the box first passes the adjusted wall corridor, I would watch where the player "
+            "pauses to reread the route."
+        )
+    return None
+
+
+def _refine_discussion_focus(focus, visible_content, language):
+    value = re.sub(r"\s+", " ", str(focus or "")).strip()
+    if not value:
+        return value
+
+    combined = f"{visible_content} {value}".strip()
+    synthesized = _deterministic_reply_discussion_focus(combined, language)
+    if synthesized and not _guidance_reuses_visible_sentence(synthesized, visible_content):
+        return synthesized[:1000]
+
+    question_marks = value.count("?") + value.count("？")
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", combined):
+        if question_marks == 1:
+            core = value.rstrip()
+            return (
+                f"我想把讨论收在这个具体的游玩判断上：{core}"
+                "你的回答会帮助我判断下一步更该调整路线关系，还是保留现在的空间结构。"
+            )[:1000]
+        if len(value) < 72:
+            return (
+                f"我更想单独留下这个判断：{value.rstrip('。')}。"
+                "它值得通过第一次推动来验证，因为真正需要比较的是路线读法，而不只是地图外观。"
+            )[:1000]
+        return value[:1000]
+
+    if question_marks == 1:
+        return (
+            f"I would focus our discussion on this playable judgment: {value} "
+            "Your answer will tell me whether the next step should change the route relationship "
+            "or preserve the current spatial structure."
+        )[:1000]
+    if len(value) < 150:
+        return (
+            f"I would keep this judgment separate for discussion: {value.rstrip('.')}. "
+            "It is worth testing through the first push because the real comparison is how the "
+            "route reads, not only how the map looks."
+        )[:1000]
+    return value[:1000]
+
+
 def _extract_plain_discussion_focus(
     content,
     language,
@@ -2080,7 +2224,12 @@ def _extract_plain_discussion_focus(
     recent_focus = ((stage_context or {}).get("recentGuidance") or {}).get(
         "discussionFocus"
     )
-    if not useful or _guidance_text_matches(focus, recent_focus):
+    visible = value[:marker_index].strip()
+    if (
+        not useful
+        or _guidance_text_matches(focus, recent_focus)
+        or _guidance_reuses_visible_sentence(focus, visible)
+    ):
         return None
     return focus
 
@@ -2275,6 +2424,153 @@ def _guidance_text_matches(current, previous):
         current_text == previous_text
         or SequenceMatcher(None, current_text, previous_text).ratio() >= 0.88
     )
+
+
+def _guidance_reuses_visible_sentence(card_text, visible_content):
+    card = re.sub(r"\s+", " ", str(card_text or "")).strip()
+    if not card:
+        return False
+    sentences = [
+        re.sub(r"\s+", " ", sentence).strip()
+        for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(visible_content or ""))
+        if sentence.strip()
+    ]
+    normalized_card = re.sub(r"[^\w\u3400-\u9fff]+", "", card.casefold())
+    for sentence in sentences:
+        normalized_sentence = re.sub(
+            r"[^\w\u3400-\u9fff]+",
+            "",
+            sentence.casefold(),
+        )
+        if not normalized_sentence:
+            continue
+        if normalized_card in normalized_sentence or normalized_sentence in normalized_card:
+            return True
+        if SequenceMatcher(None, normalized_card, normalized_sentence).ratio() >= 0.76:
+            return True
+    return False
+
+
+def _distill_proposal_offer(proposal_offer, visible_content, previous_content, language):
+    if not proposal_offer:
+        return None
+
+    original_summary = str(proposal_offer.get("summary") or "").strip()
+    original_rationale = str(proposal_offer.get("rationale") or "").strip()
+    corpus = " ".join(
+        part for part in (visible_content, previous_content, original_summary, original_rationale)
+        if part
+    )
+    lowered = corpus.casefold()
+    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", corpus)
+
+    if chinese:
+        has_water = "水" in corpus
+        has_target = "目标" in corpus
+        has_box = "箱" in corpus
+        has_wall = "墙" in corpus
+        lower_area = any(word in corpus for word in ("下方", "下半", "右下", "底部", "空旷"))
+        route = any(word in corpus for word in ("路线", "通道", "绕", "推进", "推动"))
+
+        if has_target and lower_area:
+            summary = "重排下半区的目标落点与推进路线"
+            rationale = (
+                "我会把判断重点放在目标下移后的第一次推进：它是否让下方箱子承担新的绕行，"
+                "同时让上下区域的操作密度更均衡，而不是只把空地填满。"
+            )
+        elif has_water and has_target:
+            summary = "让目标落点与水域形成路线联动"
+            rationale = (
+                "我想让玩家在箱子第一次靠近目标时就感到水域正在改变进入方向；"
+                "这样既保留空间感，也能用实际推动判断水域是否真正参与了解法。"
+            )
+        elif has_water and (has_box or route):
+            summary = "让水域参与箱子的首次路线判断"
+            rationale = (
+                "这一步关注的不是水域面积本身，而是箱子贴近水边推进时，玩家是否必须重新读取"
+                "绕行空间与推动顺序，从而让水域从背景变成有作用的路径条件。"
+            )
+        elif has_wall and route:
+            summary = "调整内部墙体形成的通道节奏"
+            rationale = (
+                "我会观察箱子第一次进入调整区域时，墙体是否制造了清楚但不唯一的转折；"
+                "这能帮助我们判断路线选择变丰富了，还是只是增加了额外移动。"
+            )
+        elif has_box and has_target:
+            summary = "重新组织箱子与目标之间的推进关系"
+            rationale = (
+                "我想用第一次接近目标的推动来检验这项调整：玩家应该能读出新的先后关系，"
+                "但仍保留一点需要亲手确认的路线犹豫。"
+            )
+        else:
+            summary = "把当前方向落实为可比较的局部调整"
+            rationale = (
+                "我会让改动集中在刚才讨论的区域，并用第一次推动时的路线选择来判断它是否"
+                "真正改变了体验，而不是只在视觉上显得不同。"
+            )
+        title_limit = 42
+    else:
+        has_water = any(word in lowered for word in ("water", "pond"))
+        has_target = any(word in lowered for word in ("target", "goal"))
+        has_box = any(word in lowered for word in ("box", "crate"))
+        has_wall = "wall" in lowered
+        lower_area = any(word in lowered for word in ("lower", "bottom", "bottom-right", "open area"))
+        route = any(word in lowered for word in ("route", "corridor", "detour", "push", "path"))
+
+        if has_target and lower_area:
+            summary = "Rebalance the lower targets and push routes"
+            rationale = (
+                "I would judge this through the first push after the target moves: whether it "
+                "gives the lower box a meaningful detour and balances activity across the map, "
+                "rather than merely filling empty floor."
+            )
+        elif has_water and has_target:
+            summary = "Link the target approach to the water"
+            rationale = (
+                "I want the water to change how the player enters the target route on the first "
+                "approach, so play can tell us whether it has become a real path condition."
+            )
+        elif has_water and (has_box or route):
+            summary = "Make water shape the box's first route choice"
+            rationale = (
+                "The useful test is not the water's size but whether pushing beside it makes the "
+                "player reread detour space and push order, turning scenery into a path condition."
+            )
+        elif has_wall and route:
+            summary = "Reshape the corridor rhythm around the inner walls"
+            rationale = (
+                "I would watch the box's first entry into this area to see whether the wall creates "
+                "a legible but non-obvious turn instead of merely adding movement."
+            )
+        elif has_box and has_target:
+            summary = "Reframe the push relationship between box and target"
+            rationale = (
+                "I would use the first target approach to judge whether the new order reads clearly "
+                "while still leaving a route decision worth testing by hand."
+            )
+        else:
+            summary = "Turn the direction into a comparable local revision"
+            rationale = (
+                "I would keep the change around the area we discussed and judge it through the first "
+                "route decision, so the result changes play rather than only appearance."
+            )
+        title_limit = 90
+
+    summary_needs_distilling = (
+        len(original_summary) > title_limit
+        or _guidance_reuses_visible_sentence(original_summary, visible_content)
+        or _guidance_reuses_visible_sentence(original_summary, previous_content)
+    )
+    rationale_needs_expansion = (
+        len(original_rationale) < (28 if chinese else 60)
+        or _guidance_reuses_visible_sentence(original_rationale, visible_content)
+        or _guidance_reuses_visible_sentence(original_rationale, previous_content)
+        or _guidance_text_matches(original_summary, original_rationale)
+    )
+    return {
+        "summary": (summary if summary_needs_distilling else original_summary)[:600],
+        "rationale": (rationale if rationale_needs_expansion else original_rationale)[:1000],
+    }
 
 
 def _plain_guidance_move(stage_opening, intent_hypothesis, proposal_offer):

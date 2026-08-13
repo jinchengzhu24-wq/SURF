@@ -116,7 +116,7 @@ const translations = {
         errorPendingPlay: "Accept or reject the pending map proposal before playing.",
         errorIntentRequired: "Please describe your design intention before completing the session.",
         error_CLIENT_TIMEOUT: "The assistant did not finish within the browser safety limit. You can retry without creating a duplicate message.",
-        error_MODEL_EMPTY_RESPONSE: "Both assistants returned an empty response. Retry this message without creating a duplicate.",
+        error_MODEL_EMPTY_RESPONSE: "The latest model attempt returned blank content, and no earlier attempt produced a valid result. Retry without creating a duplicate.",
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
         playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again.",
         translatedDisplay: "Translated display",
@@ -258,7 +258,7 @@ const chineseApiErrors = {
     UNSOLVABLE_LEVEL: "确定性求解器未能验证这张地图可解。",
     UPSTREAM_TIMEOUT: "LLM 响应超时，请稍后重试。",
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
-    MODEL_EMPTY_RESPONSE: "两个模型都返回了空内容；可使用原消息安全重试，不会产生重复记录。",
+    MODEL_EMPTY_RESPONSE: "最后一次模型尝试返回了空白内容，且此前尝试也未产生有效结果；可使用原消息安全重试，不会产生重复记录。",
     CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。"
 };
