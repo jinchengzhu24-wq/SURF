@@ -925,6 +925,20 @@ def _send_message_locked(
                 execution,
             )
 
+            if execution.revision_plan and execution.proposed_rows is not None:
+                record_event(
+                    database,
+                    session_id,
+                    "proposal_search_completed",
+                    {
+                        "baseVersionId": payload.baseVersionId,
+                        "messageKey": payload.idempotencyKey,
+                        "revisionPlan": execution.revision_plan,
+                        "search": execution.proposal_diagnostics,
+                    },
+                    utc_now(),
+                )
+
             if execution.proposed_rows is not None:
                 proposal_id = uuid.uuid4().hex
                 database.execute(
@@ -967,7 +981,7 @@ def _verified_proposal_message(language):
     )
 
 
-def _proposal_relaxation_fallback_after_failure(
+def _legacy_proposal_relaxation_fallback_after_failure(
     *,
     session_id,
     access_cookie,
@@ -1085,6 +1099,119 @@ def _proposal_relaxation_fallback_after_failure(
                 "briefHash": brief_hash,
             },
         },
+    )
+
+
+def _proposal_relaxation_fallback_after_failure(
+    *,
+    session_id,
+    access_cookie,
+    base_version_id,
+    idempotency_key,
+    revision_state,
+    revision_brief,
+    language,
+    exception,
+):
+    if (
+        revision_state != "authorized"
+        or exception.code != "PROPOSAL_SEARCH_EXHAUSTED"
+        or not str(revision_brief or "").strip()
+    ):
+        return None
+
+    original_brief = str(revision_brief).strip()
+    brief_hash = hashlib.sha256(original_brief.encode("utf-8")).hexdigest()[:20]
+    revision_plan = getattr(exception, "revision_plan", {}) or {}
+    diagnostics = getattr(exception, "proposal_diagnostics", {}) or {}
+    failure_payload = {
+        "baseVersionId": base_version_id,
+        "messageKey": idempotency_key,
+        "briefHash": brief_hash,
+        "code": exception.code,
+        "attemptsUsed": exception.attempts_used,
+        "revisionPlan": revision_plan,
+        "search": diagnostics,
+    }
+
+    with connect(immediate=True) as database:
+        session = require_active_session(database, session_id, access_cookie)
+        require_current_base(session, base_version_id)
+        already_offered = database.execute(
+            """
+            SELECT 1 FROM audit_events
+            WHERE session_id = ? AND event_type = 'proposal_relaxation_offered'
+              AND json_extract(payload_json, '$.baseVersionId') = ?
+              AND json_extract(payload_json, '$.messageKey') = ?
+              AND json_extract(payload_json, '$.briefHash') = ?
+            LIMIT 1
+            """,
+            (session_id, base_version_id, idempotency_key, brief_hash),
+        ).fetchone()
+        if already_offered is not None:
+            return None
+        now = utc_now()
+        record_event(database, session_id, "proposal_search_failed", failure_payload, now)
+        record_event(
+            database,
+            session_id,
+            "proposal_relaxation_offered",
+            {**failure_payload, "failedRequests": 1},
+            now,
+        )
+
+    relaxed_brief = _build_relaxed_revision_brief(original_brief)
+    constructed = int(diagnostics.get("constructedCandidates") or 0)
+    if language == "zh-CN":
+        message = (
+            f"我已经按照刚才确认的方向完成了语义修改搜索，并检查了{constructed}个局部候选，"
+            "但还没有找到一份既满足全部要求、包含真实变化又能通过求解验证的地图。"
+            "当前 Stage 没有被修改，你也不需要原样反复点击重试。\n\n"
+            "我可以采用一次后备标准：保留你的核心方向、可解性、地图外壳、明确禁止事项和"
+            "未涉及区域，只把“同时实现全部次要效果”放宽为“先实现一个连贯、可试玩的局部效果”。"
+            "你愿意让我按这个边界继续吗？"
+        )
+        warning = (
+            "确定性搜索没有找到同时满足当前全部条件的可解修改。这表示当前修改范围内的可行候选不足，"
+            "不代表你的设计方向有问题，也不会影响原有可解 Stage。"
+        )
+    else:
+        message = (
+            f"I completed the semantic revision search and checked {constructed} local candidates, "
+            "but none both satisfied the complete request, made a real change, and passed the solver. "
+            "The current Stage is unchanged, and repeating the same request is unnecessary.\n\n"
+            "I can use one fallback standard: preserve your core direction, solvability, outer shell, "
+            "explicit prohibitions, and unrelated areas, while realizing one coherent, play-testable "
+            "local effect instead of every secondary effect at once. May I continue on that basis?"
+        )
+        warning = (
+            "Deterministic search found no solvable revision satisfying every current condition. "
+            "This indicates a narrow feasible search space, not a problem with your design direction, "
+            "and the original solvable Stage remains unchanged."
+        )
+    return LLMExecutionResult(
+        assistant_message=message,
+        attempts_used=exception.attempts_used,
+        request_id=exception.request_id,
+        model="deterministic-search-relaxation-offer",
+        latency_ms=0,
+        guidance={
+            "move": "challenge_tradeoff",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "uiCues": [{"type": "warning", "text": warning}],
+            "relaxationOffer": {
+                "status": "awaiting_confirmation",
+                "originalBrief": original_brief,
+                "relaxedBrief": relaxed_brief,
+                "baseVersionId": base_version_id,
+                "briefHash": brief_hash,
+            },
+        },
+        revision_plan=revision_plan,
+        proposal_diagnostics=diagnostics,
     )
 
 

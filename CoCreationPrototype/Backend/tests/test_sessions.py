@@ -566,7 +566,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(len(retried.json()["versions"]), 1)
         self.assertEqual(retried.json()["proposals"], [])
 
-    def test_three_internal_failures_offer_relaxed_suggestion_before_map_generation(self):
+    def test_exhausted_deterministic_search_offers_relaxed_suggestion_before_map_generation(self):
         version_id = self.read_session()["currentVersionId"]
         request_payload = {
             "content": "Please revise the map by moving the target one cell to the right.",
@@ -574,13 +574,21 @@ class CoCreationSessionTests(unittest.TestCase):
             "idempotencyKey": "strict_relaxation_message_001",
         }
         invalid = LLMServiceError(
-            "MODEL_RESPONSE_INVALID",
-            "The LLM returned invalid map candidates.",
+            "PROPOSAL_SEARCH_EXHAUSTED",
+            "Deterministic search found no solvable map.",
             "invalid-proposal-request",
             True,
-            3,
+            1,
             502,
         )
+        invalid.revision_plan = {
+            "strategies": [{"effect": "relocate_target"}],
+        }
+        invalid.proposal_diagnostics = {
+            "constructedCandidates": 64,
+            "validCandidates": 0,
+            "failureReasons": {"UNSOLVABLE_LEVEL": 64},
+        }
         relaxed_execution = LLMExecutionResult(
             "Here is the approved fallback proposal.",
             1,
@@ -623,7 +631,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 warning_turn["guidance"]["relaxationOffer"]["status"],
                 "awaiting_confirmation",
             )
-            self.assertIn("three", warning_turn["content"].lower())
+            self.assertIn("64 local candidates", warning_turn["content"].lower())
             self.assertEqual(failed_generation.json()["proposals"], [])
 
             confirmed = self.client.post(
@@ -683,7 +691,7 @@ class CoCreationSessionTests(unittest.TestCase):
                     (self.session_id,),
                 ).fetchall()
             ]
-        self.assertEqual(event_types.count("proposal_generation_failed"), 1)
+        self.assertEqual(event_types.count("proposal_search_failed"), 1)
         self.assertEqual(event_types.count("proposal_relaxation_offered"), 1)
 
     def test_transport_failures_never_trigger_relaxation_offer(self):
@@ -927,6 +935,17 @@ class CoCreationSessionTests(unittest.TestCase):
                 "followUpQuestion": None,
                 "proposalOffer": None,
             },
+            revision_plan={
+                "strategies": [{
+                    "effect": "relocate_start",
+                    "operators": ["move_player"],
+                }],
+            },
+            proposal_diagnostics={
+                "constructedCandidates": 12,
+                "validCandidates": 4,
+                "selectedOperators": ["move_player"],
+            },
         )
 
         with patch.object(backend, "generate_chat_reply", return_value=execution):
@@ -965,6 +984,40 @@ class CoCreationSessionTests(unittest.TestCase):
             [cue["type"] for cue in proposal_turn_before_acceptance["guidance"]["uiCues"]],
             ["manual_edit"],
         )
+        with repository.connect() as database:
+            search_event = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'proposal_search_completed'
+                """,
+                (self.session_id,),
+            ).fetchone()
+        self.assertIsNotNone(search_event)
+        search_payload = repository.load_json(search_event["payload_json"])
+        self.assertEqual(search_payload["search"]["validCandidates"], 4)
+        self.assertEqual(
+            search_payload["revisionPlan"]["strategies"][0]["effect"],
+            "relocate_start",
+        )
+        repeated = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Move the player one cell left.",
+                "baseVersionId": version_id,
+                "idempotencyKey": "proposal_message_001",
+            },
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(len(repeated.json()["proposals"]), 1)
+        with repository.connect() as database:
+            search_event_count = database.execute(
+                """
+                SELECT COUNT(*) AS count FROM audit_events
+                WHERE session_id = ? AND event_type = 'proposal_search_completed'
+                """,
+                (self.session_id,),
+            ).fetchone()["count"]
+        self.assertEqual(search_event_count, 1)
         proposal_id = proposed_session["proposals"][0]["proposalId"]
 
         accepted = self.client.post(

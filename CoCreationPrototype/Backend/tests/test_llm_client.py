@@ -42,6 +42,32 @@ def operation_payload(*operation_sets):
     })
 
 
+def revision_plan_payload(
+    effect="relocate_target",
+    operators=None,
+    focus=None,
+    preserve=None,
+    edit_budget=2,
+    metric_goals=None,
+):
+    return json.dumps({
+        "strategies": [{
+            "effect": effect,
+            "focus": focus or {"row": 6, "column": 8, "radius": 1},
+            "operators": operators or ["move_target"],
+            "preserve": preserve or [
+                "outer_shell",
+                "player",
+                "boxes",
+                "water",
+                "unrelated_areas",
+            ],
+            "editBudget": edit_budget,
+            "metricGoals": metric_goals or [],
+        }]
+    })
+
+
 TARGET_SHIFT_OPERATIONS = [
     {"row": 6, "column": 7, "from": "t", "to": "."},
     {"row": 6, "column": 8, "from": ".", "to": "t"},
@@ -807,7 +833,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.model, "deepseek-v4-pro")
 
     def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
-        response = operation_payload(TARGET_SHIFT_OPERATIONS)
+        response = revision_plan_payload()
         client = FakeClient([response])
 
         with (
@@ -825,14 +851,19 @@ class LLMClientTests(unittest.TestCase):
 
         request = client.chat.completions.calls[0]
         self.assertEqual(request["model"], "deepseek-v4-pro")
-        self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_OPERATION_MAX_TOKENS)
+        self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_PLAN_MAX_TOKENS)
         self.assertEqual(request["response_format"], {"type": "json_object"})
+        self.assertIn("semantic RevisionPlan", request["messages"][0]["content"])
+        self.assertIn("Do not generate map rows", request["messages"][0]["content"])
 
     def test_natural_chinese_request_to_help_change_uses_proposal_workflow(self):
-        water_operations = [
-            {"row": 3, "column": 7, "from": ".", "to": "@"},
-        ]
-        response = operation_payload(water_operations)
+        response = revision_plan_payload(
+            effect="reshape_water",
+            operators=["add_water"],
+            focus={"row": 3, "column": 7, "radius": 1},
+            preserve=["outer_shell", "player", "boxes", "targets", "unrelated_areas"],
+            edit_budget=1,
+        )
         client = FakeClient([response])
 
         with (
@@ -857,7 +888,13 @@ class LLMClientTests(unittest.TestCase):
         )
 
     def test_confirmed_concrete_chinese_plan_immediately_uses_proposal_workflow(self):
-        response = operation_payload([{"row": 3, "column": 7, "from": ".", "to": "@"}])
+        response = revision_plan_payload(
+            effect="reshape_water",
+            operators=["add_water"],
+            focus={"row": 3, "column": 7, "radius": 1},
+            preserve=["outer_shell", "player", "boxes", "targets", "unrelated_areas"],
+            edit_budget=1,
+        )
         client = FakeClient([response])
         conversation = [
             {
@@ -883,7 +920,13 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("第7行第6到第8列", client.chat.completions.calls[0]["messages"][1]["content"])
 
     def test_help_me_do_inherits_a_confirmed_concrete_chinese_plan(self):
-        response = operation_payload([{"row": 3, "column": 7, "from": ".", "to": "@"}])
+        response = revision_plan_payload(
+            effect="reshape_water",
+            operators=["add_water"],
+            focus={"row": 3, "column": 7, "radius": 1},
+            preserve=["outer_shell", "player", "boxes", "targets", "unrelated_areas"],
+            edit_budget=1,
+        )
         client = FakeClient([response])
         conversation = [
             {
@@ -1006,7 +1049,7 @@ class LLMClientTests(unittest.TestCase):
             "proposedRows": None,
             "modificationSummary": "",
         })
-        client = FakeClient([text_only, text_only, text_only])
+        client = FakeClient([text_only, text_only])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1023,22 +1066,15 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
-        self.assertEqual(raised.exception.attempts_used, 3)
-        self.assertEqual(len(client.chat.completions.calls), 3)
+        self.assertEqual(raised.exception.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
         retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
-        self.assertIn("authorized brief", retry_prompt)
-        self.assertIn("do not return the original map unchanged", retry_prompt)
+        self.assertIn("previous RevisionPlan was rejected", retry_prompt)
+        self.assertIn("Do not return map rows or tile operations", retry_prompt)
 
-    def test_structurally_invalid_proposal_retries_with_pro_for_correction(self):
-        payload = operation_payload(TARGET_SHIFT_OPERATIONS)
-        client = FakeClient([payload, payload, payload])
-        validations = 0
-
-        def reject_once(rows):
-            nonlocal validations
-            validations += 1
-            if validations == 1:
-                raise ValueError("Row 3 must contain exactly 12 tiles.")
+    def test_structurally_invalid_revision_plan_retries_with_pro_for_correction(self):
+        invalid = json.dumps({"strategies": []})
+        client = FakeClient([invalid, revision_plan_payload()])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1051,7 +1087,6 @@ class LLMClientTests(unittest.TestCase):
                 ],
                 OPERATION_BASE_ROWS,
                 "proposal-pro-correction-test",
-                proposal_validator=reject_once,
             )
 
         self.assertEqual(result.attempts_used, 2)
@@ -1060,16 +1095,12 @@ class LLMClientTests(unittest.TestCase):
             ["deepseek-v4-pro", "deepseek-v4-pro"],
         )
         self.assertIn(
-            "Row 3 must contain exactly 12 tiles",
+            "strategies must contain one to three items",
             client.chat.completions.calls[1]["messages"][0]["content"],
         )
 
-    def test_operation_candidates_select_first_valid_map_without_showing_alternatives(self):
-        invalid_no_op = [
-            {"row": 6, "column": 7, "from": "t", "to": "t"},
-        ]
-        payload = operation_payload(invalid_no_op, TARGET_SHIFT_OPERATIONS)
-        client = FakeClient([payload])
+    def test_revision_plan_search_returns_only_selected_verified_map(self):
+        client = FakeClient([revision_plan_payload()])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1083,16 +1114,14 @@ class LLMClientTests(unittest.TestCase):
                 "candidate-selection-test",
             )
 
-        self.assertEqual(result.proposed_rows[5], "#...s..t...#")
+        self.assertIsNotNone(result.proposed_rows)
+        self.assertEqual(result.revision_plan["strategies"][0]["effect"], "relocate_target")
+        self.assertGreater(result.proposal_diagnostics["validCandidates"], 0)
         self.assertEqual(result.attempts_used, 1)
         self.assertEqual(len(client.chat.completions.calls), 1)
 
-    def test_operation_candidates_use_server_read_current_tile_protocol(self):
-        operations = [
-            {"row": 6, "column": 7, "to": "."},
-            {"row": 6, "column": 8, "to": "t"},
-        ]
-        client = FakeClient([operation_payload(operations)])
+    def test_revision_plan_protocol_never_asks_model_for_tile_operations(self):
+        client = FakeClient([revision_plan_payload()])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1106,10 +1135,11 @@ class LLMClientTests(unittest.TestCase):
                 "server-source-operation-test",
             )
 
-        self.assertEqual(result.proposed_rows[5], "#...s..t...#")
+        self.assertIsNotNone(result.proposed_rows)
         system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
-        self.assertIn("Do not emit a from field", system_prompt)
-        self.assertIn('"row":1,"column":1,"to":"#"', system_prompt)
+        self.assertIn("Do not generate map rows", system_prompt)
+        self.assertIn("Do not generate", system_prompt)
+        self.assertNotIn('"to":"#"', system_prompt)
 
     def test_verbose_brief_with_multiple_regions_does_not_require_every_region(self):
         rows = llm_client._apply_map_operations(
@@ -1123,34 +1153,45 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(rows[5], "#...s..t...#")
 
-    def test_operation_candidates_cannot_edit_outer_shell_or_fake_from_tile(self):
-        shell_edit = [
-            {"row": 1, "column": 1, "from": "#", "to": "."},
-        ]
-        fake_from = [
-            {"row": 6, "column": 7, "from": ".", "to": "t"},
-        ]
-        payload = operation_payload(shell_edit, fake_from)
-        client = FakeClient([payload, payload, payload])
+    def test_legacy_operation_normalizer_drops_noops_and_identical_duplicates(self):
+        rows = llm_client._apply_map_operations(
+            OPERATION_BASE_ROWS,
+            [
+                {"row": 2, "column": 2, "to": "."},
+                {"row": 6, "column": 7, "to": "."},
+                {"row": 6, "column": 8, "to": "t"},
+                {"row": 6, "column": 8, "to": "t"},
+            ],
+            "Move the target one cell to the right.",
+        )
+        self.assertEqual(rows[5], "#...s..t...#")
 
+        with self.assertRaisesRegex(ValueError, "real tile change"):
+            llm_client._apply_map_operations(
+                OPERATION_BASE_ROWS,
+                [{"row": 2, "column": 2, "to": "."}],
+                "Keep the map unchanged.",
+            )
+
+    def test_semantic_search_keeps_outer_shell_immutable(self):
+        client = FakeClient([revision_plan_payload(
+            effect="narrow_route",
+            operators=["add_wall"],
+            focus={"row": 1, "column": 1, "radius": 3},
+            preserve=["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+            edit_budget=2,
+        )])
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
             patch.object(llm_client, "_create_async_client", return_value=client),
-            self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
-            llm_client.generate_chat_reply(
-                [
-                    {"role": "user", "content": "Move the target one cell to the right and revise the map."},
-                ],
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Narrow the upper-left route and revise the map."}],
                 OPERATION_BASE_ROWS,
                 "candidate-safety-test",
             )
-
-        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
-        self.assertEqual(raised.exception.attempts_used, 3)
-        retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
-        self.assertIn("outer shell", retry_prompt)
-        self.assertIn("declared from tile", retry_prompt)
+        self.assertEqual(result.proposed_rows[0], OPERATION_BASE_ROWS[0])
+        self.assertEqual(result.proposed_rows[-1], OPERATION_BASE_ROWS[-1])
 
     def test_flash_empty_response_falls_back_to_pro(self):
         client = FakeClient(["   \n ", "A grounded fallback response."])
@@ -1230,11 +1271,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.attempts_used, 2)
         self.assertEqual(len(client.chat.completions.calls), 2)
 
-    def test_proposal_timeout_uses_three_internal_attempts_with_one_sixty_second_limit(self):
+    def test_revision_plan_timeout_uses_two_attempts_and_reserves_search_time(self):
         timeout = APITimeoutError(
             request=httpx.Request("POST", "https://api.deepseek.com/chat/completions")
         )
-        client = FakeClient([timeout, timeout, timeout])
+        client = FakeClient([timeout, timeout])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1253,11 +1294,14 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 60.0)
         self.assertEqual(llm_client.PRIMARY_ATTEMPT_TIMEOUT_SECONDS, 40.0)
         self.assertEqual(llm_client.CHAT_MAX_ATTEMPTS, 2)
-        self.assertEqual(llm_client.PROPOSAL_GENERATION_ATTEMPTS, 3)
-        self.assertEqual(llm_client.PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, 18.0)
+        self.assertEqual(llm_client.PROPOSAL_GENERATION_ATTEMPTS, 2)
+        self.assertEqual(llm_client.PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, 18.0)
+        self.assertEqual(llm_client.PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, 8.0)
+        self.assertEqual(llm_client.PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, 26.0)
+        self.assertEqual(llm_client.PROPOSAL_SEARCH_DEADLINE_SECONDS, 55.0)
         self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
-        self.assertEqual(raised.exception.attempts_used, 3)
-        self.assertEqual(len(client.chat.completions.calls), 3)
+        self.assertEqual(raised.exception.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
 
     def test_missing_api_key_fails_without_model_call(self):
         with (
@@ -1472,8 +1516,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("改完的版本", normalized)
 
     def test_invalid_proposal_uses_fallback_then_fails(self):
-        payload = operation_payload(TARGET_SHIFT_OPERATIONS)
-        client = FakeClient([payload, payload, payload])
+        client = FakeClient([revision_plan_payload()])
         validated_rows = []
 
         def reject_proposal(rows):
@@ -1495,13 +1538,11 @@ class LLMClientTests(unittest.TestCase):
                 proposal_validator=reject_proposal,
             )
 
-        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
-        self.assertEqual(raised.exception.attempts_used, 3)
-        self.assertEqual(len(client.chat.completions.calls), 3)
-        self.assertEqual(len(validated_rows), 3)
-        fallback_system = client.chat.completions.calls[1]["messages"][0]["content"]
-        self.assertIn("authorized brief", fallback_system)
-        self.assertIn("preserve-unlisted contract", fallback_system)
+        self.assertEqual(raised.exception.code, "PROPOSAL_SEARCH_EXHAUSTED")
+        self.assertEqual(raised.exception.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertGreater(len(validated_rows), 0)
+        self.assertIn("constructedCandidates", raised.exception.proposal_diagnostics)
 
     def test_unsolicited_revision_offer_cannot_include_map(self):
         payload = {

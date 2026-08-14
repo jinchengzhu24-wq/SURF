@@ -15,6 +15,13 @@ from openai import (
     RateLimitError,
 )
 
+from proposal_search import (
+    ProposalSearchExhausted,
+    parse_revision_plan,
+    search_revision_plan,
+)
+from level_validation import validate_and_solve
+
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PROPOSAL_MODEL = "deepseek-v4-pro"
@@ -22,19 +29,26 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 40.0
 CHAT_TIMEOUT_SECONDS = 60.0
 CHAT_MAX_ATTEMPTS = 2
-PROPOSAL_GENERATION_ATTEMPTS = 3
-PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = 18.0
+PROPOSAL_GENERATION_ATTEMPTS = 2
+PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS = 18.0
+PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS = 8.0
+PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS = 26.0
+PROPOSAL_SEARCH_DEADLINE_SECONDS = 55.0
+# Compatibility for older diagnostics; the operation-candidate path is no longer invoked.
+PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
 CHAT_MAX_TOKENS = 1400
 PLAIN_CHAT_TIMEOUT_SECONDS = 25.0
 PLAIN_PRIMARY_TIMEOUT_SECONDS = 15.0
 PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
-PROPOSAL_OPERATION_MAX_TOKENS = 1800
+PROPOSAL_PLAN_MAX_TOKENS = 1400
+# Kept as a compatibility alias for external diagnostics that imported the old name.
+PROPOSAL_OPERATION_MAX_TOKENS = PROPOSAL_PLAN_MAX_TOKENS
 PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v28-server-sourced-operations"
+PROMPT_VERSION = "cocreation-v29-intent-search"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -60,6 +74,8 @@ class LLMExecutionResult:
     model: str = ""
     latency_ms: int = 0
     guidance: dict = field(default_factory=dict)
+    revision_plan: dict = field(default_factory=dict)
+    proposal_diagnostics: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -557,7 +573,7 @@ def generate_chat_reply(
         )
 
     if proposal_request:
-        return _generate_map_proposal_sync(
+        return _generate_revision_search_proposal_sync(
             api_key=api_key,
             base_url=base_url,
             conversation=conversation,
@@ -566,6 +582,7 @@ def generate_chat_reply(
             language=language,
             proposal_validator=proposal_validator,
             stage_context=effective_stage_context,
+            baseline_metrics=solver_metrics,
         )
 
     messages = build_chat_messages(
@@ -648,6 +665,331 @@ def generate_chat_reply(
             min(len(models), _max_attempts),
             504,
         ) from exception
+
+
+def _generate_revision_search_proposal_sync(
+    *,
+    api_key,
+    base_url,
+    conversation,
+    rows,
+    request_id,
+    language,
+    proposal_validator,
+    stage_context,
+    baseline_metrics=None,
+):
+    proposal_model = (
+        os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
+        or DEFAULT_PROPOSAL_MODEL
+    )
+    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    fallback_model = os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip() or default_model
+    models = [proposal_model]
+    if fallback_model != proposal_model:
+        models.append(fallback_model)
+    messages = _build_revision_plan_messages(
+        conversation,
+        rows,
+        language,
+        stage_context,
+    )
+    started_at = time.monotonic()
+    _log_llm_event(
+        "llm_request_started",
+        requestId=request_id,
+        task="map_proposal",
+        primaryModel=models[0],
+        fallbackModel=models[1] if len(models) > 1 else None,
+        timeoutSeconds=CHAT_TIMEOUT_SECONDS,
+        responseMode="revision_plan_search",
+    )
+    try:
+        plan, attempts_used, model = asyncio.run(
+            asyncio.wait_for(
+                _compile_revision_plan(
+                    api_key=api_key,
+                    base_url=base_url,
+                    models=models,
+                    messages=messages,
+                    request_id=request_id,
+                    started_at=started_at,
+                ),
+                timeout=PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+            )
+        )
+    except asyncio.TimeoutError as exception:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task="map_proposal",
+            outcome="error",
+            code="UPSTREAM_TIMEOUT",
+            attemptsUsed=PROPOSAL_GENERATION_ATTEMPTS,
+            latencyMs=elapsed_ms,
+            responseMode="revision_plan_search",
+        )
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not compile the revision plan before the proposal time limit.",
+            request_id,
+            True,
+            PROPOSAL_GENERATION_ATTEMPTS,
+            504,
+        ) from exception
+    except LLMServiceError as exception:
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task="map_proposal",
+            outcome="error",
+            code=exception.code,
+            attemptsUsed=exception.attempts_used,
+            latencyMs=int((time.monotonic() - started_at) * 1000),
+            responseMode="revision_plan_search",
+        )
+        raise
+
+    validator = proposal_validator or validate_and_solve
+    try:
+        search_result = search_revision_plan(
+            rows,
+            plan,
+            validator,
+            baseline_metrics=baseline_metrics,
+            deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
+        )
+    except ProposalSearchExhausted as exception:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task="map_proposal",
+            outcome="error",
+            code="PROPOSAL_SEARCH_EXHAUSTED",
+            attemptsUsed=attempts_used,
+            latencyMs=elapsed_ms,
+            responseMode="revision_plan_search",
+            search=exception.diagnostics,
+        )
+        error = LLMServiceError(
+            "PROPOSAL_SEARCH_EXHAUSTED",
+            "Deterministic search found no solvable map satisfying the revision plan.",
+            request_id,
+            True,
+            attempts_used,
+            502,
+        )
+        error.revision_plan = plan.as_dict()
+        error.proposal_diagnostics = exception.diagnostics
+        raise error from exception
+
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    _log_llm_event(
+        "llm_request_completed",
+        requestId=request_id,
+        task="map_proposal",
+        outcome="success",
+        model=model,
+        attemptsUsed=attempts_used,
+        latencyMs=elapsed_ms,
+        responseMode="revision_plan_search",
+        changedCellCount=search_result.score["changedCells"],
+        search=search_result.diagnostics,
+    )
+    return LLMExecutionResult(
+        assistant_message=(
+            "我整理了一份等待你审查的地图提案。"
+            if language == "zh-CN"
+            else "I prepared a map proposal for your review."
+        ),
+        attempts_used=attempts_used,
+        request_id=request_id,
+        proposed_rows=list(search_result.rows),
+        modification_summary="",
+        model=model,
+        latency_ms=elapsed_ms,
+        guidance={
+            "move": "deliver_revision",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "uiCues": [],
+        },
+        revision_plan=plan.as_dict(),
+        proposal_diagnostics=search_result.diagnostics,
+    )
+
+
+def _build_revision_plan_messages(conversation, rows, language, stage_context):
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
+    original_brief = str(stage_context.get("relaxationOriginalBrief") or "").strip()
+    relaxation_rule = (
+        "This is a designer-approved fallback. Preserve the original core direction, but one "
+        "coherent local effect is sufficient; do not weaken solvability, the outer shell, explicit "
+        "prohibitions, or protection of unrelated areas."
+        if stage_context.get("revisionRelaxed")
+        else "Do not weaken or reinterpret the authorized direction."
+    )
+    numbered_map = "\n".join(
+        f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
+    )
+    transcript = [
+        {
+            "role": message.get("role"),
+            "content": str(message.get("content") or "")[:2000],
+        }
+        for message in conversation[-12:]
+        if message.get("role") in {"user", "assistant"}
+    ]
+    system_prompt = (
+        "You compile a designer-authorized revision for one saved 12x10 Sokoban Stage into a "
+        "small semantic RevisionPlan. Do not generate map rows, coordinates to edit, or tile "
+        "operations. The application owns all cell changes, structural validation, search, and "
+        "solvability. Preserve the authorized direction and every explicit prohibition. Treat "
+        "unmentioned areas as protected. Return JSON only with exactly one key, strategies, "
+        "containing one to three objects. Every strategy has exactly: effect, focus, operators, "
+        "preserve, editBudget, metricGoals. effect is one of open_route, narrow_route, "
+        "adjust_internal_walls, relocate_start, relocate_box, relocate_target, reshape_water, "
+        "change_box_order. focus is null or {row,column,radius}; coordinates are one-based, row "
+        "1..10, column 1..12, radius 1..3. operators contains one to three distinct values from "
+        "add_wall, remove_wall, move_player, move_box, move_target, add_water, remove_water. "
+        "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
+        "unrelated_areas. Never list an operator that edits a preserved component. editBudget is "
+        "an integer 1..24. metricGoals is an empty list or up to three distinct objects with metric "
+        "solutionSteps, solutionPushes, or searchedStates and direction increase, decrease, or "
+        "preserve. Use objective metrics only when the designer's direction clearly implies them. "
+        "Always preserve outer_shell and unrelated_areas. Natural-language reasoning is internal. "
+        f"Interpret conversation in {response_language}."
+    )
+    user_prompt = (
+        f"Authorized revision brief: {revision_brief!r}. "
+        f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule}\n\n"
+        "Column ruler (one-based): 123456789012\n"
+        f"Current saved Stage:\n{numbered_map}\n\n"
+        "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
+        f"Recent Stage conversation JSON: {json.dumps(transcript, ensure_ascii=False)}"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+async def _compile_revision_plan(
+    *,
+    api_key,
+    base_url,
+    models,
+    messages,
+    request_id,
+    started_at,
+):
+    last_error = None
+    validation_feedback = None
+    first_failure_code = None
+    for attempt in range(1, PROPOSAL_GENERATION_ATTEMPTS + 1):
+        if attempt == 1 or first_failure_code == "MODEL_RESPONSE_INVALID":
+            model = models[0]
+        else:
+            model = models[1] if len(models) > 1 else models[0]
+        remaining = PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        attempt_timeout = min(
+            PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS if attempt == 1 else PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS,
+            remaining,
+        )
+        response_fields = _empty_response_diagnostics()
+        _log_llm_event(
+            "llm_attempt_started",
+            requestId=request_id,
+            task="map_proposal",
+            model=model,
+            attempt=attempt,
+            maxAttempts=PROPOSAL_GENERATION_ATTEMPTS,
+            timeoutSeconds=round(attempt_timeout, 3),
+            responseMode="revision_plan",
+        )
+        try:
+            response = await asyncio.wait_for(
+                _request_completion(
+                    api_key,
+                    base_url,
+                    model,
+                    _revision_plan_messages_with_feedback(messages, validation_feedback),
+                    PROPOSAL_PLAN_MAX_TOKENS,
+                    attempt_timeout,
+                ),
+                timeout=attempt_timeout,
+            )
+            choice = response.choices[0]
+            response_fields = _response_diagnostics(response, choice)
+            if str(getattr(choice, "finish_reason", "") or "") == "length":
+                raise ValueError("The RevisionPlan output reached its token limit.")
+            content = str(choice.message.content or "")
+            if not content.strip():
+                raise EmptyModelResponse("The model returned an empty response.")
+            plan = parse_revision_plan(json.loads(content))
+            return plan, attempt, model
+        except asyncio.TimeoutError:
+            failure_reason = None
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT",
+                "DeepSeek did not respond before the revision-plan attempt timeout.",
+                request_id,
+                True,
+                attempt,
+                504,
+            )
+        except Exception as exception:
+            failure_reason = _safe_validation_reason(exception)
+            last_error = classify_exception(exception, request_id, attempt)
+            if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
+                validation_feedback = failure_reason[:1200]
+        if attempt == 1:
+            first_failure_code = last_error.code
+        fields = {
+            "requestId": request_id,
+            "task": "map_proposal",
+            "model": model,
+            "attempt": attempt,
+            "code": last_error.code,
+            "retryable": last_error.retryable,
+            "latencyMs": int((time.monotonic() - started_at) * 1000),
+            "responseMode": "revision_plan",
+            **response_fields,
+        }
+        if failure_reason:
+            fields["validationReason"] = failure_reason
+        _log_llm_event("llm_attempt_failed", **fields)
+        if not last_error.retryable:
+            raise last_error
+        if attempt == 1 and last_error.code not in {
+            "MODEL_RESPONSE_INVALID",
+            "MODEL_EMPTY_RESPONSE",
+            "UPSTREAM_TIMEOUT",
+            "UPSTREAM_CONNECTION_ERROR",
+        }:
+            raise last_error
+    raise last_error
+
+
+def _revision_plan_messages_with_feedback(messages, validation_feedback):
+    if not validation_feedback:
+        return messages
+    corrected = [dict(message) for message in messages]
+    instruction = (
+        "The previous RevisionPlan was rejected for this safe reason: "
+        f"{validation_feedback} Return a fresh RevisionPlan JSON object. Keep the authorized "
+        "brief, explicit prohibitions, and preserve-unlisted contract unchanged. Do not return "
+        "map rows or tile operations."
+    )
+    corrected[0]["content"] = f"{corrected[0]['content']}\n\n{instruction}"
+    return corrected
 
 
 def _generate_map_proposal_sync(
@@ -988,7 +1330,7 @@ def _apply_map_operations(base_rows, operations, revision_brief):
         raise ValueError("operations must contain one to 24 cell changes")
     allowed_tiles = set(" #.@pst")
     mutable = [list(row) for row in base_rows]
-    seen = set()
+    seen = {}
     shell = _connected_outer_shell(base_rows)
     normalized = []
     for operation in operations:
@@ -1005,23 +1347,27 @@ def _apply_map_operations(base_rows, operations, revision_brief):
         y, x = row - 1, column - 1
         if not (0 <= y < len(base_rows) and 0 <= x < len(base_rows[y])):
             raise ValueError("operation coordinate is outside the 12x10 Stage")
-        if (x, y) in seen:
-            raise ValueError("operation coordinates must be unique")
-        seen.add((x, y))
         before = base_rows[y][x]
         declared_before = operation.get("from")
         if declared_before is not None and declared_before != before:
             raise ValueError(f"row {row}, column {column} does not match its declared from tile")
         if before not in allowed_tiles or after not in allowed_tiles or len(before) != 1 or len(after) != 1:
             raise ValueError("operation contains an unsupported tile")
+        if (x, y) in seen:
+            if seen[(x, y)] == after:
+                continue
+            raise ValueError("duplicate operation coordinates conflict")
+        seen[(x, y)] = after
         if before == after:
-            raise ValueError("operation must change the tile")
+            continue
         if before == " " or after == " ":
             raise ValueError("void cells cannot be edited")
         if (x, y) in shell:
             raise ValueError("the connected outer shell cannot be edited")
         mutable[y][x] = after
         normalized.append((x, y, before, after))
+    if not normalized:
+        raise ValueError("operations must contain at least one real tile change")
     _validate_operation_intent_scope(normalized, revision_brief)
     return ["".join(row) for row in mutable]
 
