@@ -260,6 +260,7 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 .intention-form .primary-button { width: 100%; margin-top: 8px; }
 .complete-card { margin-top: 14px; padding: 13px; border: 1px solid #a9ddc1; border-radius: 9px; color: #0f5132; background: #e9f8ef; }
 .complete-card p { margin: 5px 0 0; font-size: 10px; line-height: 1.5; }
+.complete-card .primary-button { width: 100%; margin-top: 10px; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: rgba(15, 28, 24, .42); }
 .confirm-modal { width: min(460px, 100%); padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: 0 24px 70px rgba(15, 28, 24, .24); }

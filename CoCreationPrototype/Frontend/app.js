@@ -66,7 +66,10 @@ const translations = {
         intentionQuestion: "What experience did you want this level to create for another player?",
         completeSession: "Complete session",
         sessionComplete: "Session complete",
-        sessionCompleteBody: "The final Stage, intention, conversation and play evidence are safely recorded. Return to the original Unity tab to continue.",
+        sessionCompleteBody: "The final Stage, intention, conversation and play evidence are safely recorded. Continue in the original Unity game to enter Challenge Waiting.",
+        returnUnity: "Continue in Unity",
+        returnUnityUnavailable: "The original Unity tab is no longer available. Return to that tab manually; do not open a new game page, because the match is stored in the original game instance.",
+        returnUnityCloseBlocked: "Unity is ready in the original tab. If this lab tab did not close automatically, switch to the Unity tab to continue.",
         finalConfirmation: "Final confirmation",
         confirmQuestion: "Confirm this as your final Stage?",
         confirmBody: "Editing and chat will be locked after confirmation. You will then report your design intention.",
@@ -165,7 +168,10 @@ const translations = {
         intentionQuestion: "你希望这个关卡为另一位玩家带来怎样的体验？",
         completeSession: "完成会话",
         sessionComplete: "会话已完成",
-        sessionCompleteBody: "最终 Stage、设计意图、对话和试玩证据均已安全记录。请返回原来的 Unity 标签页继续。",
+        sessionCompleteBody: "最终 Stage、设计意图、对话和试玩证据均已安全记录。请返回原 Unity 游戏并进入 Challenge Waiting。",
+        returnUnity: "返回 Unity 继续",
+        returnUnityUnavailable: "无法访问原 Unity 标签页。请手动返回该标签页；不要重新打开游戏页面，因为匹配状态保存在原来的游戏实例中。",
+        returnUnityCloseBlocked: "Unity 已在原标签页中准备继续。如果共创页面没有自动关闭，请切换到 Unity 标签页。",
         finalConfirmation: "最终确认",
         confirmQuestion: "确认将这个版本作为最终 Stage 吗？",
         confirmBody: "确认后将锁定编辑和聊天，随后需要填写你的设计意图。",
@@ -272,7 +278,7 @@ const elements = Object.fromEntries([
     "sendButton", "characterCount", "selectedStageEyebrow", "mapGrid",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
     "restoreStageButton", "playButton", "playAttemptCount", "playAttemptList", "finalActions",
-    "finalizeButton", "intentionForm", "intentionInput", "completeCard", "finalizeModal",
+    "finalizeButton", "intentionForm", "intentionInput", "completeCard", "returnUnityButton", "finalizeModal",
     "cancelFinalizeButton", "confirmFinalizeButton"
 ].map(id => [id, document.getElementById(id)]));
 
@@ -292,6 +298,7 @@ elements.finalizeButton.addEventListener("click", () => elements.finalizeModal.h
 elements.cancelFinalizeButton.addEventListener("click", () => elements.finalizeModal.hidden = true);
 elements.confirmFinalizeButton.addEventListener("click", finalizeSession);
 elements.intentionForm.addEventListener("submit", submitIntention);
+elements.returnUnityButton.addEventListener("click", returnToUnity);
 
 applyTranslations();
 initialize();
@@ -688,6 +695,9 @@ function renderSessionState() {
     elements.finalActions.hidden = status !== "active";
     elements.intentionForm.hidden = status !== "awaiting_intention";
     elements.completeCard.hidden = status !== "completed";
+    elements.returnUnityButton.hidden = status !== "completed"
+        || !state.session.matchId
+        || ![1, 2].includes(Number(state.session.playerNumber));
     elements.historyBanner.hidden = state.selectedVersionId === state.session.currentVersionId;
 }
 
@@ -916,6 +926,24 @@ async function submitIntention(event) {
         });
         render();
     });
+}
+
+function returnToUnity() {
+    hideNotice();
+    const unityWindow = window.opener;
+
+    if (!unityWindow || unityWindow.closed) {
+        showNotice(t("returnUnityUnavailable"));
+        return;
+    }
+
+    try {
+        unityWindow.focus();
+        window.close();
+        window.setTimeout(() => showNotice(t("returnUnityCloseBlocked")), 150);
+    } catch (_error) {
+        showNotice(t("returnUnityUnavailable"));
+    }
 }
 
 async function toggleLanguage() {
