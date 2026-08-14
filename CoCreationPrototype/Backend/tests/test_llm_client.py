@@ -1122,6 +1122,33 @@ class LLMClientTests(unittest.TestCase):
             client.chat.completions.calls[1]["messages"][0]["content"],
         )
 
+    def test_zero_candidate_revision_plan_retries_with_safe_search_feedback(self):
+        no_expandable_cells = revision_plan_payload(
+            effect="adjust_internal_walls",
+            operators=["remove_wall"],
+            focus={"row": 5, "column": 5, "radius": 1},
+            preserve=["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+            edit_budget=2,
+        )
+        client = FakeClient([no_expandable_cells, revision_plan_payload()])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Move the target and revise the map."}],
+                OPERATION_BASE_ROWS,
+                "zero-candidate-plan-correction-test",
+            )
+
+        self.assertIsNotNone(result.proposed_rows)
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        correction_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
+        self.assertIn("could not produce any legal local edit", correction_prompt)
+        self.assertIn("Do not return map rows or tile operations", correction_prompt)
+
     def test_revision_plan_search_returns_only_selected_verified_map(self):
         client = FakeClient([revision_plan_payload()])
 

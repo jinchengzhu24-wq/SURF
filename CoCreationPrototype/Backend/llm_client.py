@@ -764,29 +764,89 @@ def _generate_revision_search_proposal_sync(
             deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
         )
     except ProposalSearchExhausted as exception:
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        _log_llm_event(
-            "llm_request_completed",
-            requestId=request_id,
-            task="map_proposal",
-            outcome="error",
-            code="PROPOSAL_SEARCH_EXHAUSTED",
-            attemptsUsed=attempts_used,
-            latencyMs=elapsed_ms,
-            responseMode="revision_plan_search",
-            search=exception.diagnostics,
-        )
-        error = LLMServiceError(
-            "PROPOSAL_SEARCH_EXHAUSTED",
-            "Deterministic search found no solvable map satisfying the revision plan.",
-            request_id,
-            True,
-            attempts_used,
-            502,
-        )
-        error.revision_plan = plan.as_dict()
-        error.proposal_diagnostics = exception.diagnostics
-        raise error from exception
+        # A syntactically valid plan can still name an operator/focus pair with
+        # no legal cells to expand.  Spend the existing second Pro attempt on
+        # a correction informed by that safe structural fact rather than
+        # making the designer press Retry and hope for a different plan.
+        correction_succeeded = False
+        if (
+            attempts_used < PROPOSAL_GENERATION_ATTEMPTS
+            and exception.diagnostics.get("constructedCandidates", 0) == 0
+        ):
+            correction_reason = _revision_search_correction_reason(exception.diagnostics)
+            remaining = PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+            if remaining > 0:
+                try:
+                    corrected_plan, correction_attempts, corrected_model = asyncio.run(
+                        asyncio.wait_for(
+                            _compile_revision_plan(
+                                api_key=api_key,
+                                base_url=base_url,
+                                models=models,
+                                messages=messages,
+                                request_id=request_id,
+                                started_at=started_at,
+                                max_attempts=1,
+                                initial_validation_feedback=correction_reason,
+                                first_attempt_timeout=PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS,
+                            ),
+                            timeout=remaining,
+                        )
+                    )
+                    corrected_search = search_revision_plan(
+                        rows,
+                        corrected_plan,
+                        validator,
+                        baseline_metrics=baseline_metrics,
+                        deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
+                    )
+                    plan = corrected_plan
+                    attempts_used += correction_attempts
+                    model = corrected_model
+                    search_result = corrected_search
+                    correction_succeeded = True
+                except ProposalSearchExhausted as corrected_exception:
+                    exception = corrected_exception
+                    attempts_used += 1
+                except asyncio.TimeoutError as timeout_exception:
+                    raise LLMServiceError(
+                        "UPSTREAM_TIMEOUT",
+                        "DeepSeek did not correct the revision plan before the proposal time limit.",
+                        request_id,
+                        True,
+                        attempts_used + 1,
+                        504,
+                    ) from timeout_exception
+                except LLMServiceError as correction_exception:
+                    correction_exception.attempts_used += attempts_used
+                    raise correction_exception
+            else:
+                exception.diagnostics["correctionSkipped"] = "llm_phase_deadline"
+
+        if not correction_succeeded:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            _log_llm_event(
+                "llm_request_completed",
+                requestId=request_id,
+                task="map_proposal",
+                outcome="error",
+                code="PROPOSAL_SEARCH_EXHAUSTED",
+                attemptsUsed=attempts_used,
+                latencyMs=elapsed_ms,
+                responseMode="revision_plan_search",
+                search=exception.diagnostics,
+            )
+            error = LLMServiceError(
+                "PROPOSAL_SEARCH_EXHAUSTED",
+                "Deterministic search found no solvable map satisfying the revision plan.",
+                request_id,
+                True,
+                attempts_used,
+                502,
+            )
+            error.revision_plan = plan.as_dict()
+            error.proposal_diagnostics = exception.diagnostics
+            raise error from exception
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     _log_llm_event(
@@ -890,11 +950,14 @@ async def _compile_revision_plan(
     messages,
     request_id,
     started_at,
+    max_attempts=PROPOSAL_GENERATION_ATTEMPTS,
+    initial_validation_feedback=None,
+    first_attempt_timeout=PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS,
 ):
     last_error = None
-    validation_feedback = None
+    validation_feedback = initial_validation_feedback
     first_failure_code = None
-    for attempt in range(1, PROPOSAL_GENERATION_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         if attempt == 1 or first_failure_code == "MODEL_RESPONSE_INVALID":
             model = models[0]
         else:
@@ -903,7 +966,7 @@ async def _compile_revision_plan(
         if remaining <= 0:
             raise asyncio.TimeoutError()
         attempt_timeout = min(
-            PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS if attempt == 1 else PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS,
+            first_attempt_timeout if attempt == 1 else PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS,
             remaining,
         )
         response_fields = _empty_response_diagnostics()
@@ -913,7 +976,7 @@ async def _compile_revision_plan(
             task="map_proposal",
             model=model,
             attempt=attempt,
-            maxAttempts=PROPOSAL_GENERATION_ATTEMPTS,
+            maxAttempts=max_attempts,
             timeoutSeconds=round(attempt_timeout, 3),
             responseMode="revision_plan",
         )
@@ -979,6 +1042,16 @@ async def _compile_revision_plan(
         }:
             raise last_error
     raise last_error
+
+
+def _revision_search_correction_reason(diagnostics):
+    if diagnostics.get("constructedCandidates", 0) == 0:
+        return (
+            "The previous RevisionPlan could not produce any legal local edit: its requested "
+            "operators and focus have no compatible editable cells. Choose a different supported "
+            "operator and/or a focus that matches components visible in the numbered map."
+        )
+    return "The previous RevisionPlan produced no candidate that passed deterministic validation."
 
 
 def _revision_plan_messages_with_feedback(messages, validation_feedback):
