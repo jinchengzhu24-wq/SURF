@@ -730,13 +730,13 @@ function renderChatRequestStatus() {
 
 function chatWaitingMessage() {
     const elapsedSeconds = Math.min(
-        25,
+        65,
         Math.max(0, Math.floor((Date.now() - state.chatStartedAt) / 1000))
     );
-    const phase = elapsedSeconds < 15
+    const phase = elapsedSeconds < 40
         ? t("chatWaitingPrimary")
         : t("chatWaitingFallback");
-    return `${phase} · ${elapsedSeconds} / 25 ${t("seconds")}`;
+    return `${phase} · ${elapsedSeconds} / 65 ${t("seconds")}`;
 }
 
 function startChatTimer() {
@@ -816,7 +816,7 @@ async function submitPendingMessage() {
         state.session = await api(`/api/sessions/${state.sessionId}/messages`, {
             method: "POST",
             body: pending,
-            timeoutMs: 30000
+            timeoutMs: 65000
         });
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());

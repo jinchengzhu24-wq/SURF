@@ -27,9 +27,12 @@ PLAIN_CHAT_TIMEOUT_SECONDS = 25.0
 PLAIN_PRIMARY_TIMEOUT_SECONDS = 15.0
 PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
+PROPOSAL_OPERATION_MAX_TOKENS = 1800
+PROPOSAL_CANDIDATE_LIMIT = 3
+PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v25-unified-friendly-cards"
+PROMPT_VERSION = "cocreation-v26-grounded-proposals-strict-relaxation"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -518,13 +521,26 @@ def generate_chat_reply(
         stage_context,
     )
     effective_stage_context = dict(stage_context or {})
+    effective_stage_context["responseLanguage"] = language
 
     if not assessment_only and revision_state != "not_request":
         effective_stage_context["revisionRequestState"] = revision_state
     if revision_brief:
         effective_stage_context["authorizedRevisionBrief"] = revision_brief
 
-    proposal_request = not assessment_only and revision_state == "authorized"
+    proposal_request = not assessment_only and revision_state in {
+        "authorized",
+        "authorized_relaxed",
+    }
+
+    if revision_state == "authorized_relaxed":
+        effective_stage_context["revisionRelaxed"] = True
+        effective_stage_context["relaxationOriginalBrief"] = str(
+            (((stage_context or {}).get("recentGuidance") or {}).get("relaxationOffer") or {}).get(
+                "originalBrief"
+            )
+            or ""
+        )
 
     if not assessment_only and not proposal_request:
         return _generate_plain_chat_sync(
@@ -534,6 +550,18 @@ def generate_chat_reply(
             language=language,
             solver_metrics=solver_metrics,
             play_summary=play_summary,
+            stage_context=effective_stage_context,
+        )
+
+    if proposal_request:
+        return _generate_map_proposal_sync(
+            api_key=api_key,
+            base_url=base_url,
+            conversation=conversation,
+            rows=rows,
+            request_id=request_id,
+            language=language,
+            proposal_validator=proposal_validator,
             stage_context=effective_stage_context,
         )
 
@@ -617,6 +645,439 @@ def generate_chat_reply(
             min(len(models), _max_attempts),
             504,
         ) from exception
+
+
+def _generate_map_proposal_sync(
+    *,
+    api_key,
+    base_url,
+    conversation,
+    rows,
+    request_id,
+    language,
+    proposal_validator,
+    stage_context,
+):
+    proposal_model = (
+        os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
+        or DEFAULT_PROPOSAL_MODEL
+    )
+    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    configured_fallback = os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip()
+    fallback_model = configured_fallback or default_model
+    models = [proposal_model]
+    if fallback_model != proposal_model:
+        models.append(fallback_model)
+    messages = _build_map_operation_messages(
+        conversation,
+        rows,
+        language,
+        stage_context,
+    )
+    started_at = time.monotonic()
+    _log_llm_event(
+        "llm_request_started",
+        requestId=request_id,
+        task="map_proposal",
+        primaryModel=models[0],
+        fallbackModel=models[1] if len(models) > 1 else None,
+        timeoutSeconds=CHAT_TIMEOUT_SECONDS,
+        responseMode="operation_candidates",
+    )
+    try:
+        return asyncio.run(
+            asyncio.wait_for(
+                _generate_map_operation_candidates(
+                    api_key=api_key,
+                    base_url=base_url,
+                    models=models,
+                    messages=messages,
+                    base_rows=rows,
+                    request_id=request_id,
+                    proposal_validator=proposal_validator,
+                    stage_context=stage_context,
+                    started_at=started_at,
+                ),
+                timeout=CHAT_TIMEOUT_SECONDS,
+            )
+        )
+    except asyncio.TimeoutError as exception:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        _log_llm_event(
+            "llm_request_completed",
+            requestId=request_id,
+            task="map_proposal",
+            outcome="error",
+            code="UPSTREAM_TIMEOUT",
+            attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS),
+            latencyMs=elapsed_ms,
+            responseMode="operation_candidates",
+        )
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not complete the request before the 60 second limit.",
+            request_id,
+            True,
+            min(len(models), CHAT_MAX_ATTEMPTS),
+            504,
+        ) from exception
+
+
+def _build_map_operation_messages(conversation, rows, language, stage_context):
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
+    original_brief = str(stage_context.get("relaxationOriginalBrief") or "").strip()
+    relaxation_rule = (
+        "This is a designer-approved fallback. Preserve the original core direction, but "
+        "the proposal only needs to realize one coherent, play-testable local effect instead "
+        "of every secondary effect at once. Solvability, the outer shell, explicit prohibitions, "
+        "and every untouched cell remain non-negotiable."
+        if stage_context.get("revisionRelaxed")
+        else "Do not weaken or reinterpret the authorized direction."
+    )
+    numbered_map = "\n".join(
+        f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
+    )
+    transcript = [
+        {
+            "role": message.get("role"),
+            "content": str(message.get("content") or "")[:2000],
+        }
+        for message in conversation[-12:]
+        if message.get("role") in {"user", "assistant"}
+    ]
+    system_prompt = (
+        "You create reviewable edit candidates for one saved 12x10 Sokoban Stage. The saved "
+        "map is immutable; return only cell operations and let the application construct the "
+        "complete map. The designer's authorized revision brief is authoritative. Use the same "
+        "preserve-unlisted rule as a strict change contract: change only the smallest coherent "
+        "set of causally necessary cells, and never add an unrelated improvement merely to make "
+        "the diff non-empty. Every candidate must make a real change that serves the brief. "
+        "Never edit void cells or the connected outer-shell wall. Keep exactly one player and "
+        "one or two matching box/target pairs. Produce up to three meaningfully distinct candidates "
+        "in preferred order so deterministic validation can select the first solvable one. "
+        "Coordinates are one-based. Each operation must state the exact current tile in from and a "
+        "different supported tile in to. A moved player, box, or target normally requires paired "
+        "operations that clear the old cell and place the tile on a current floor cell. Return JSON "
+        "only with exactly this shape: {\"candidates\":[{\"operations\":[{\"row\":1,"
+        "\"column\":1,\"from\":\".\",\"to\":\"#\"}]}]}. candidates must contain "
+        "one to three items; every operations array must contain one to 24 unique cells. Allowed "
+        "tiles are space, #, ., @, p, s, and t, although space/outer-shell edits are forbidden. "
+        f"Natural-language reasoning is internal; any unavoidable text must use {response_language}."
+    )
+    user_prompt = (
+        f"Authorized revision brief: {revision_brief!r}. "
+        f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule}\n\n"
+        f"Current saved Stage:\n{numbered_map}\n\n"
+        "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
+        f"Recent Stage conversation JSON: {json.dumps(transcript, ensure_ascii=False)}"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+async def _generate_map_operation_candidates(
+    *,
+    api_key,
+    base_url,
+    models,
+    messages,
+    base_rows,
+    request_id,
+    proposal_validator,
+    stage_context,
+    started_at,
+):
+    last_error = None
+    validation_feedback = None
+    attempted_models = models[:CHAT_MAX_ATTEMPTS]
+    brief = str(stage_context.get("authorizedRevisionBrief") or "")
+
+    for attempt, configured_model in enumerate(attempted_models, start=1):
+        model = models[0] if validation_feedback is not None else configured_model
+        remaining = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        if remaining <= 0:
+            raise asyncio.TimeoutError()
+        attempt_timeout = min(
+            PRIMARY_ATTEMPT_TIMEOUT_SECONDS if attempt == 1 else remaining,
+            remaining,
+        )
+        response_fields = _empty_response_diagnostics()
+        _log_llm_event(
+            "llm_attempt_started",
+            requestId=request_id,
+            task="map_proposal",
+            model=model,
+            attempt=attempt,
+            maxAttempts=len(attempted_models),
+            timeoutSeconds=round(attempt_timeout, 3),
+            responseMode="operation_candidates",
+        )
+        try:
+            attempt_messages = _operation_messages_with_feedback(
+                messages,
+                validation_feedback,
+            )
+            response = await asyncio.wait_for(
+                _request_completion(
+                    api_key,
+                    base_url,
+                    model,
+                    attempt_messages,
+                    PROPOSAL_OPERATION_MAX_TOKENS,
+                    attempt_timeout,
+                ),
+                timeout=attempt_timeout,
+            )
+            choice = response.choices[0]
+            if str(getattr(choice, "finish_reason", "") or "") == "length":
+                raise ValueError("The operation-candidate output reached its token limit.")
+            response_fields = _response_diagnostics(response, choice)
+            content = str(choice.message.content or "")
+            if not content.strip():
+                raise EmptyModelResponse("The model returned an empty response.")
+            payload = json.loads(content)
+            selected_rows, selected_index, candidate_count = _select_operation_candidate(
+                payload,
+                base_rows,
+                brief,
+                proposal_validator,
+            )
+            latency_ms = int((time.monotonic() - started_at) * 1000)
+            result = LLMExecutionResult(
+                assistant_message=(
+                    "我整理了一份等待你审查的地图提案。"
+                    if language_from_context(stage_context) == "zh-CN"
+                    else "I prepared a map proposal for your review."
+                ),
+                attempts_used=attempt,
+                request_id=request_id,
+                proposed_rows=list(selected_rows),
+                modification_summary="",
+                model=model,
+                latency_ms=latency_ms,
+                guidance={
+                    "move": "deliver_revision",
+                    "intentHypothesis": None,
+                    "intentConfidence": None,
+                    "followUpQuestion": None,
+                    "proposalOffer": None,
+                    "uiCues": [],
+                },
+            )
+            _log_llm_event(
+                "llm_request_completed",
+                requestId=request_id,
+                task="map_proposal",
+                outcome="success",
+                model=model,
+                attemptsUsed=attempt,
+                latencyMs=latency_ms,
+                responseMode="operation_candidates",
+                candidateCount=candidate_count,
+                selectedCandidateIndex=selected_index,
+                changedCellCount=sum(
+                    1
+                    for before_row, after_row in zip(base_rows, selected_rows)
+                    for before, after in zip(before_row, after_row)
+                    if before != after
+                ),
+                **response_fields,
+            )
+            return result
+        except asyncio.TimeoutError:
+            failure_reason = None
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT",
+                "DeepSeek did not respond before the attempt timeout.",
+                request_id,
+                True,
+                attempt,
+                504,
+            )
+        except Exception as exception:
+            failure_reason = _safe_validation_reason(exception)
+            last_error = classify_exception(exception, request_id, attempt)
+            if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
+                validation_feedback = failure_reason[:1200]
+        failure_fields = {
+            "requestId": request_id,
+            "task": "map_proposal",
+            "model": model,
+            "attempt": attempt,
+            "code": last_error.code,
+            "retryable": last_error.retryable,
+            "latencyMs": int((time.monotonic() - started_at) * 1000),
+            "responseMode": "operation_candidates",
+            **response_fields,
+        }
+        if failure_reason:
+            failure_fields["validationReason"] = failure_reason[:1200]
+        _log_llm_event("llm_attempt_failed", **failure_fields)
+        if not last_error.retryable:
+            raise last_error
+
+    _log_llm_event(
+        "llm_request_completed",
+        requestId=request_id,
+        task="map_proposal",
+        outcome="error",
+        code=last_error.code,
+        attemptsUsed=last_error.attempts_used,
+        latencyMs=int((time.monotonic() - started_at) * 1000),
+        responseMode="operation_candidates",
+    )
+    raise last_error
+
+
+def language_from_context(stage_context):
+    return "zh-CN" if stage_context.get("responseLanguage") == "zh-CN" else "en"
+
+
+def _operation_messages_with_feedback(messages, validation_feedback):
+    if not validation_feedback:
+        return messages
+    corrected = [dict(message) for message in messages]
+    instruction = (
+        "Every candidate in the previous attempt was rejected for these safe reasons: "
+        f"{validation_feedback} Return a fresh candidates JSON object. Do not reuse a rejected "
+        "operation set, do not return the original map unchanged, and keep the authorized brief "
+        "and preserve-unlisted contract unchanged."
+    )
+    corrected[0]["content"] = f"{corrected[0]['content']}\n\n{instruction}"
+    return corrected
+
+
+def _select_operation_candidate(payload, base_rows, revision_brief, proposal_validator):
+    if not isinstance(payload, dict):
+        raise ValueError("The map proposal must be a JSON object.")
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= PROPOSAL_CANDIDATE_LIMIT:
+        raise ValueError("candidates must contain one to three operation candidates.")
+    failures = []
+    canonical = set()
+    for index, candidate in enumerate(candidates, start=1):
+        try:
+            if not isinstance(candidate, dict):
+                raise ValueError("candidate must be an object")
+            operations = candidate.get("operations")
+            rows = _apply_map_operations(base_rows, operations, revision_brief)
+            signature = tuple(rows)
+            if signature in canonical:
+                raise ValueError("candidate duplicates an earlier operation result")
+            canonical.add(signature)
+            if proposal_validator is not None:
+                proposal_validator(rows)
+            return rows, index, len(candidates)
+        except Exception as exception:
+            failures.append(f"candidate {index}: {_safe_validation_reason(exception)}")
+    raise ValueError("; ".join(failures)[:1200])
+
+
+def _apply_map_operations(base_rows, operations, revision_brief):
+    if not isinstance(operations, list) or not 1 <= len(operations) <= PROPOSAL_OPERATION_LIMIT:
+        raise ValueError("operations must contain one to 24 cell changes")
+    allowed_tiles = set(" #.@pst")
+    mutable = [list(row) for row in base_rows]
+    seen = set()
+    shell = _connected_outer_shell(base_rows)
+    normalized = []
+    for operation in operations:
+        if not isinstance(operation, dict) or set(operation) != {"row", "column", "from", "to"}:
+            raise ValueError("each operation must contain exactly row, column, from, and to")
+        row = operation["row"]
+        column = operation["column"]
+        before = operation["from"]
+        after = operation["to"]
+        if isinstance(row, bool) or isinstance(column, bool) or not isinstance(row, int) or not isinstance(column, int):
+            raise ValueError("operation coordinates must be integers")
+        y, x = row - 1, column - 1
+        if not (0 <= y < len(base_rows) and 0 <= x < len(base_rows[y])):
+            raise ValueError("operation coordinate is outside the 12x10 Stage")
+        if (x, y) in seen:
+            raise ValueError("operation coordinates must be unique")
+        seen.add((x, y))
+        if before not in allowed_tiles or after not in allowed_tiles or len(before) != 1 or len(after) != 1:
+            raise ValueError("operation contains an unsupported tile")
+        if before == after:
+            raise ValueError("operation must change the tile")
+        if base_rows[y][x] != before:
+            raise ValueError(f"row {row}, column {column} does not match its declared from tile")
+        if before == " " or after == " ":
+            raise ValueError("void cells cannot be edited")
+        if (x, y) in shell:
+            raise ValueError("the connected outer shell cannot be edited")
+        mutable[y][x] = after
+        normalized.append((x, y, before, after))
+    _validate_operation_intent_scope(normalized, revision_brief)
+    return ["".join(row) for row in mutable]
+
+
+def _connected_outer_shell(rows):
+    pending = []
+    visited = set()
+    height = len(rows)
+    width = len(rows[0]) if rows else 0
+    for y, row in enumerate(rows):
+        for x, tile in enumerate(row):
+            if tile == "#" and (x in {0, width - 1} or y in {0, height - 1}):
+                pending.append((x, y))
+    while pending:
+        position = pending.pop()
+        if position in visited:
+            continue
+        visited.add(position)
+        x, y = position
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= nx < width and 0 <= ny < height and rows[ny][nx] == "#":
+                pending.append((nx, ny))
+    return visited
+
+
+def _validate_operation_intent_scope(operations, revision_brief):
+    text = str(revision_brief or "").casefold()
+    touched = {tile for _, _, before, after in operations for tile in (before, after)}
+    component_markers = (
+        (("目标", "落点", "target", "goal"), "t", "target"),
+        (("箱", "box", "crate"), "s", "box"),
+        (("水", "water", "pond"), "@", "water"),
+        (("墙", "wall"), "#", "wall"),
+        (("玩家", "起点", "player start"), "p", "player"),
+    )
+    for markers, tile, label in component_markers:
+        if _brief_requests_component_change(text, markers) and tile not in touched:
+            raise ValueError(f"the operations do not change the explicitly requested {label}")
+    positions = [(x, y) for x, y, _, _ in operations]
+    region_rules = (
+        (("下半", "下方", "底部", "lower", "bottom"), lambda x, y: y >= 5, "lower area"),
+        (("上半", "上方", "顶部", "upper", "top"), lambda x, y: y < 5, "upper area"),
+        (("左侧", "左边", "left"), lambda x, y: x < 6, "left area"),
+        (("右侧", "右边", "right"), lambda x, y: x >= 6, "right area"),
+    )
+    for markers, predicate, label in region_rules:
+        if any(marker in text for marker in markers) and not any(predicate(x, y) for x, y in positions):
+            raise ValueError(f"the operations do not touch the explicitly requested {label}")
+
+
+def _brief_requests_component_change(text, markers):
+    action_pattern = re.compile(
+        r"移动|调整|重排|增加|减少|移除|改变|拉开|收紧|添加|删除|改动|修改|"
+        r"move|shift|adjust|rearrange|add|remove|reduce|increase|change|reshape|revise"
+    )
+    preserve_pattern = re.compile(r"保持|保留|不动|不改|preserve|keep|unchanged")
+    for marker in markers:
+        start = 0
+        while True:
+            index = text.find(marker, start)
+            if index < 0:
+                break
+            window = text[max(0, index - 10): index + len(marker) + 10]
+            if action_pattern.search(window) and not preserve_pattern.search(window):
+                return True
+            start = index + len(marker)
+    return False
 
 
 def _generate_plain_chat_sync(
@@ -2532,6 +2993,14 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
 
     original_summary = str(proposal_offer.get("summary") or "").strip()
     original_rationale = str(proposal_offer.get("rationale") or "").strip()
+    grounded_offer = _semantics_preserving_proposal_offer(
+        original_summary,
+        original_rationale,
+        visible_content,
+        language,
+    )
+    if grounded_offer is not None:
+        return grounded_offer
     corpus = " ".join(
         part for part in (visible_content, previous_content, original_summary, original_rationale)
         if part
@@ -2648,6 +3117,55 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
     }
 
 
+def _semantics_preserving_proposal_offer(summary, rationale, visible_content, language):
+    source = " ".join(part for part in (summary, rationale) if part).strip()
+    if not source:
+        return None
+    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", source)
+    title_limit = 42 if chinese else 90
+    chosen_summary = summary
+    if not chosen_summary:
+        chosen_summary = _first_declarative_sentence(rationale)
+    if len(chosen_summary) > title_limit or _guidance_reuses_visible_sentence(
+        chosen_summary,
+        visible_content,
+    ):
+        clauses = [
+            clause.strip(" ，,。.!！")
+            for clause in re.split(r"[；;。.!！]|(?:，|,)(?=.{8,})", source)
+            if clause.strip()
+        ]
+        action_words = (
+            ("移动", "调整", "重排", "增加", "减少", "拉开", "收紧", "改变", "让", "保留")
+            if chinese
+            else ("move", "adjust", "rearrange", "add", "reduce", "separate", "tighten", "change", "make", "keep")
+        )
+        action_clause = next(
+            (clause for clause in clauses if any(word in clause.casefold() for word in action_words)),
+            clauses[0] if clauses else chosen_summary,
+        )
+        chosen_summary = action_clause[:title_limit].rstrip(" ，,。.!！")
+    chosen_summary = chosen_summary or (
+        "落实刚才确认的局部修改" if chinese else "Apply the agreed local revision"
+    )
+    chosen_rationale = rationale
+    if (
+        not chosen_rationale
+        or len(chosen_rationale) < (28 if chinese else 60)
+        or _guidance_text_matches(chosen_summary, chosen_rationale)
+        or _guidance_reuses_visible_sentence(chosen_rationale, visible_content)
+    ):
+        chosen_rationale = (
+            f"我会把“{chosen_summary}”作为唯一改动方向，只调整实现它所必需的局部，并用实际格子变化与游玩结果判断它是否成立。"
+            if chinese
+            else f"I will treat “{chosen_summary}” as the only revision direction, change only the local cells needed to realize it, and judge it through the verified diff and play."
+        )
+    return {
+        "summary": chosen_summary[:600],
+        "rationale": chosen_rationale[:1000],
+    }
+
+
 def _plain_guidance_move(stage_opening, intent_hypothesis, proposal_offer):
     if stage_opening:
         return "observe_stage"
@@ -2701,7 +3219,10 @@ def _apply_deterministic_guidance_fallback(
         and not recent.get("proposalOffer")
     ):
         previous_assistant = _latest_role_content(messages[:-1], "assistant")
-        summary_source = _first_declarative_sentence(visible_content)
+        summary_source = (
+            _revision_direction_sentence(visible_content)
+            or _first_declarative_sentence(visible_content)
+        )
         rationale_source = _first_declarative_sentence(previous_assistant)
 
         if language == "zh-CN":
@@ -3148,10 +3669,48 @@ def _latest_user_explicitly_agrees(message):
     return english is not None or chinese
 
 
+def _latest_user_explicitly_rejects(message):
+    text = str(message or "").strip().casefold()
+    english = re.search(
+        r"\b(?:no|do not|don't|keep the original|without relaxing|not acceptable)\b",
+        text,
+    )
+    chinese = any(
+        marker in text
+        for marker in (
+            "不可以", "不同意", "不要降级", "不能降级", "保持原要求", "按原要求",
+            "不接受放宽", "不要放宽",
+        )
+    )
+    return english is not None or chinese
+
+
 def _first_declarative_sentence(message):
     for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(message or "")):
         cleaned = sentence.strip()
         if cleaned and not cleaned.endswith(("?", "？")):
+            return cleaned
+    return ""
+
+
+def _revision_direction_sentence(message):
+    anchors = (
+        "水", "箱", "目标", "墙", "通道", "路线", "落点", "区域", "开局",
+        "water", "box", "crate", "target", "goal", "wall", "corridor", "route", "opening",
+    )
+    actions = (
+        "移动", "调整", "重排", "增加", "减少", "移除", "拉开", "收紧", "加一块", "改",
+        "move", "adjust", "rearrange", "add", "reduce", "remove", "separate", "tighten", "change",
+    )
+    for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(message or "")):
+        cleaned = sentence.strip()
+        lowered = cleaned.casefold()
+        if (
+            cleaned
+            and not cleaned.endswith(("?", "？"))
+            and any(anchor in lowered for anchor in anchors)
+            and any(action in lowered for action in actions)
+        ):
             return cleaned
     return ""
 
@@ -3930,6 +4489,17 @@ def _classify_revision_request(conversation, stage_context=None):
     if _user_explicitly_off_topic(latest_user_message):
         return "not_request", None
 
+    relaxation_offer = (
+        ((stage_context or {}).get("recentGuidance") or {}).get("relaxationOffer") or {}
+    )
+    if relaxation_offer.get("status") == "awaiting_confirmation":
+        if _latest_user_explicitly_agrees(latest_user_message):
+            relaxed_brief = str(relaxation_offer.get("relaxedBrief") or "").strip()
+            if relaxed_brief:
+                return "authorized_relaxed", relaxed_brief
+        if _latest_user_explicitly_rejects(latest_user_message):
+            return "not_request", None
+
     english_markers = (
         "map proposal",
         "concrete map",
@@ -4030,7 +4600,12 @@ def _classify_revision_request(conversation, stage_context=None):
 
 def _requests_complete_map(conversation, stage_context=None):
     state, _ = _classify_revision_request(conversation, stage_context)
-    return state == "authorized"
+    return state in {"authorized", "authorized_relaxed"}
+
+
+def classify_revision_request(conversation, stage_context=None):
+    """Expose the deterministic request state to the API orchestration layer."""
+    return _classify_revision_request(conversation, stage_context)
 
 
 def _authorized_revision_brief(conversation, stage_context, latest_user_message):

@@ -19,6 +19,35 @@ if str(BACKEND_DIR) not in sys.path:
 import llm_client
 
 
+OPERATION_BASE_ROWS = [
+    "############",
+    "#..........#",
+    "#..........#",
+    "#..........#",
+    "#...p......#",
+    "#...s.t....#",
+    "#..........#",
+    "#..........#",
+    "#..........#",
+    "############",
+]
+
+
+def operation_payload(*operation_sets):
+    return json.dumps({
+        "candidates": [
+            {"operations": operations}
+            for operations in operation_sets
+        ]
+    })
+
+
+TARGET_SHIFT_OPERATIONS = [
+    {"row": 6, "column": 7, "from": "t", "to": "."},
+    {"row": 6, "column": 8, "from": ".", "to": "t"},
+]
+
+
 class FakeCompletions:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
@@ -294,9 +323,9 @@ class LLMClientTests(unittest.TestCase):
             )
 
         offer = result.guidance["proposalOffer"]
-        self.assertEqual(offer["summary"], "重排下半区的目标落点与推进路线")
-        self.assertIn("第一次推进", offer["rationale"])
-        self.assertIn("操作密度", offer["rationale"])
+        self.assertIn("目标点", offer["summary"])
+        self.assertIn("下方", offer["summary"])
+        self.assertIn("唯一改动方向", offer["rationale"])
         self.assertNotEqual(offer["summary"], copied)
         self.assertNotIn("你说得对", offer["rationale"])
         self.assertIsNone(result.guidance["followUpQuestion"])
@@ -748,21 +777,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.model, "deepseek-v4-pro")
 
     def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
-        proposed_rows = ["############"] * 10
-        response = json.dumps({
-            "assistantMessage": "I will prepare the requested map.",
-            "guidance": {
-                "move": "deliver_revision",
-                "intentHypothesis": None,
-                "intentConfidence": None,
-                "followUpQuestion": None,
-                "proposalOffer": None,
-                "uiCues": [],
-            },
-            "assessment": None,
-            "proposedRows": proposed_rows,
-            "modificationSummary": "Changed the route.",
-        })
+        response = operation_payload(TARGET_SHIFT_OPERATIONS)
         client = FakeClient([response])
 
         with (
@@ -774,34 +789,20 @@ class LLMClientTests(unittest.TestCase):
                     {"role": "assistant", "content": "Move the lower target beside the water route."},
                     {"role": "user", "content": "Please create a reviewable map proposal."},
                 ],
-                ["############"] * 10,
+                OPERATION_BASE_ROWS,
                 "proposal-model-test",
             )
 
         request = client.chat.completions.calls[0]
         self.assertEqual(request["model"], "deepseek-v4-pro")
-        self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_MAX_TOKENS)
+        self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_OPERATION_MAX_TOKENS)
         self.assertEqual(request["response_format"], {"type": "json_object"})
 
     def test_natural_chinese_request_to_help_change_uses_proposal_workflow(self):
-        proposed_rows = ["############"] * 10
-        response = json.dumps({
-            "assistantMessage": (
-                "我做了一份可以一起审查的修改提案。水域与右侧通路现在形成了更明确的"
-                "第一次推动关系，你可以先看实际差异，再决定是否接受。"
-            ),
-            "guidance": {
-                "move": "deliver_revision",
-                "intentHypothesis": None,
-                "intentConfidence": None,
-                "followUpQuestion": None,
-                "proposalOffer": None,
-                "uiCues": [],
-            },
-            "assessment": None,
-            "proposedRows": proposed_rows,
-            "modificationSummary": "让水域参与右侧通路的第一次推动判断。",
-        })
+        water_operations = [
+            {"row": 3, "column": 7, "from": ".", "to": "@"},
+        ]
+        response = operation_payload(water_operations)
         client = FakeClient([response])
 
         with (
@@ -813,7 +814,7 @@ class LLMClientTests(unittest.TestCase):
                     {"role": "assistant", "content": "我建议让水域贴近右侧推动路线。"},
                     {"role": "user", "content": "你帮我改"},
                 ],
-                ["############"] * 10,
+                OPERATION_BASE_ROWS,
                 "natural-chinese-proposal-test",
                 language="zh-CN",
             )
@@ -935,24 +936,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
         self.assertEqual(len(client.chat.completions.calls), 2)
         retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
-        self.assertIn("explicitly authorized a complete map proposal", retry_prompt)
+        self.assertIn("authorized brief", retry_prompt)
+        self.assertIn("do not return the original map unchanged", retry_prompt)
 
     def test_structurally_invalid_proposal_retries_with_pro_for_correction(self):
-        proposed_rows = ["############"] * 10
-        payload = json.dumps({
-            "assistantMessage": "I prepared a reviewable route revision.",
-            "guidance": {
-                "move": "deliver_revision",
-                "intentHypothesis": None,
-                "intentConfidence": None,
-                "followUpQuestion": None,
-                "proposalOffer": None,
-                "uiCues": [],
-            },
-            "assessment": None,
-            "proposedRows": proposed_rows,
-            "modificationSummary": "Adjusted the route.",
-        })
+        payload = operation_payload(TARGET_SHIFT_OPERATIONS)
         client = FakeClient([payload, payload])
         validations = 0
 
@@ -971,7 +959,7 @@ class LLMClientTests(unittest.TestCase):
                     {"role": "assistant", "content": "Move the lower target beside the water route."},
                     {"role": "user", "content": "Please revise the map."},
                 ],
-                ["############"] * 10,
+                OPERATION_BASE_ROWS,
                 "proposal-pro-correction-test",
                 proposal_validator=reject_once,
             )
@@ -985,6 +973,57 @@ class LLMClientTests(unittest.TestCase):
             "Row 3 must contain exactly 12 tiles",
             client.chat.completions.calls[1]["messages"][0]["content"],
         )
+
+    def test_operation_candidates_select_first_valid_map_without_showing_alternatives(self):
+        invalid_no_op = [
+            {"row": 6, "column": 7, "from": "t", "to": "t"},
+        ]
+        payload = operation_payload(invalid_no_op, TARGET_SHIFT_OPERATIONS)
+        client = FakeClient([payload])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [
+                    {"role": "user", "content": "Move the target one cell to the right and revise the map."},
+                ],
+                OPERATION_BASE_ROWS,
+                "candidate-selection-test",
+            )
+
+        self.assertEqual(result.proposed_rows[5], "#...s..t...#")
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_operation_candidates_cannot_edit_outer_shell_or_fake_from_tile(self):
+        shell_edit = [
+            {"row": 1, "column": 1, "from": "#", "to": "."},
+        ]
+        fake_from = [
+            {"row": 6, "column": 7, "from": ".", "to": "t"},
+        ]
+        payload = operation_payload(shell_edit, fake_from)
+        client = FakeClient([payload, payload])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+            self.assertRaises(llm_client.LLMServiceError) as raised,
+        ):
+            llm_client.generate_chat_reply(
+                [
+                    {"role": "user", "content": "Move the target one cell to the right and revise the map."},
+                ],
+                OPERATION_BASE_ROWS,
+                "candidate-safety-test",
+            )
+
+        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+        retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
+        self.assertIn("outer shell", retry_prompt)
+        self.assertIn("declared from tile", retry_prompt)
 
     def test_flash_empty_response_falls_back_to_pro(self):
         client = FakeClient(["   \n ", "A grounded fallback response."])
@@ -1257,20 +1296,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("改完的版本", normalized)
 
     def test_invalid_proposal_uses_fallback_then_fails(self):
-        payload = json.dumps({
-            "assistantMessage": "Here is a map proposal.",
-            "guidance": {
-                "move": "deliver_revision",
-                "intentHypothesis": None,
-                "intentConfidence": None,
-                "followUpQuestion": None,
-                "proposalOffer": None,
-                "uiCues": [],
-            },
-            "assessment": None,
-            "proposedRows": ["############"] * 10,
-            "modificationSummary": "Changed the map.",
-        })
+        payload = operation_payload(TARGET_SHIFT_OPERATIONS)
         client = FakeClient([payload, payload])
         validated_rows = []
 
@@ -1288,7 +1314,7 @@ class LLMClientTests(unittest.TestCase):
                     {"role": "assistant", "content": "Move the lower target beside the water route."},
                     {"role": "user", "content": "Please draft that revision."},
                 ],
-                ["############"] * 10,
+                OPERATION_BASE_ROWS,
                 "invalid-proposal-test",
                 proposal_validator=reject_proposal,
             )
@@ -1298,8 +1324,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertEqual(len(validated_rows), 2)
         fallback_system = client.chat.completions.calls[1]["messages"][0]["content"]
-        self.assertIn("guidance.move as deliver_revision", fallback_system)
-        self.assertIn("do not downgrade", fallback_system)
+        self.assertIn("authorized brief", fallback_system)
+        self.assertIn("preserve-unlisted contract", fallback_system)
 
     def test_unsolicited_revision_offer_cannot_include_map(self):
         payload = {

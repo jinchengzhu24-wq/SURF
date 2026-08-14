@@ -32,8 +32,10 @@ from level_validation import (
     validate_and_solve,
 )
 from llm_client import (
+    LLMExecutionResult,
     LLMServiceError,
     PROMPT_VERSION,
+    classify_revision_request,
     generate_chat_reply,
     generate_stage_assessment,
     translate_turns,
@@ -63,6 +65,7 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_COOKIE_NAME = "sokoban_cocreation_access"
 PLAY_TICKET_LIFETIME = timedelta(minutes=5)
 INTERRUPTED_AFTER = timedelta(minutes=30)
+PROPOSAL_RELAXATION_FAILURE_THRESHOLD = 3
 _message_locks = {}
 _message_locks_guard = Lock()
 
@@ -839,19 +842,37 @@ def _send_message_locked(
         context = build_llm_context(database, session_id, current)
         language = session["language"]
 
-    execution = generate_chat_reply(
+    revision_state, revision_brief = classify_revision_request(
         context["conversation"],
-        context["rows"],
-        request.state.request_id,
-        language=language,
-        solver_metrics=context["validation"],
-        play_summary=context["playSummary"],
-        proposal_validator=lambda proposed_rows: _validate_changed_proposal(
-            context["rows"],
-            proposed_rows,
-        ),
-        stage_context=context["stageContext"],
+        context["stageContext"],
     )
+    try:
+        execution = generate_chat_reply(
+            context["conversation"],
+            context["rows"],
+            request.state.request_id,
+            language=language,
+            solver_metrics=context["validation"],
+            play_summary=context["playSummary"],
+            proposal_validator=lambda proposed_rows: _validate_changed_proposal(
+                context["rows"],
+                proposed_rows,
+            ),
+            stage_context=context["stageContext"],
+        )
+    except LLMServiceError as exception:
+        execution = _proposal_relaxation_fallback_after_failure(
+            session_id=session_id,
+            access_cookie=access_cookie,
+            base_version_id=payload.baseVersionId,
+            idempotency_key=payload.idempotencyKey,
+            revision_state=revision_state,
+            revision_brief=revision_brief,
+            language=language,
+            exception=exception,
+        )
+        if execution is None:
+            raise
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     with connect(immediate=True) as database:
@@ -936,6 +957,155 @@ def _verified_proposal_message(language):
         "I have organized this map proposal and checked its real before/after tile changes. "
         "It is still yours to review; I would first look at whether the highlighted cells "
         "really answer the direction we discussed before deciding whether to accept it."
+    )
+
+
+def _proposal_relaxation_fallback_after_failure(
+    *,
+    session_id,
+    access_cookie,
+    base_version_id,
+    idempotency_key,
+    revision_state,
+    revision_brief,
+    language,
+    exception,
+):
+    if (
+        revision_state != "authorized"
+        or exception.code != "MODEL_RESPONSE_INVALID"
+        or exception.attempts_used < 2
+        or not str(revision_brief or "").strip()
+    ):
+        return None
+
+    original_brief = str(revision_brief).strip()
+    brief_hash = hashlib.sha256(original_brief.encode("utf-8")).hexdigest()[:20]
+    failure_payload = {
+        "baseVersionId": base_version_id,
+        "messageKey": idempotency_key,
+        "briefHash": brief_hash,
+        "code": exception.code,
+        "attemptsUsed": exception.attempts_used,
+    }
+
+    with connect(immediate=True) as database:
+        session = require_active_session(database, session_id, access_cookie)
+        require_current_base(session, base_version_id)
+        events = database.execute(
+            """
+            SELECT event_type, payload_json FROM audit_events
+            WHERE session_id = ? AND event_type IN (
+                'proposal_generation_failed',
+                'proposal_relaxation_offered'
+            )
+            ORDER BY id ASC
+            """,
+            (session_id,),
+        ).fetchall()
+        matching_failures = 0
+        already_offered = False
+        for event in events:
+            payload = load_json(event["payload_json"]) or {}
+            matches = (
+                payload.get("baseVersionId") == base_version_id
+                and payload.get("messageKey") == idempotency_key
+                and payload.get("briefHash") == brief_hash
+            )
+            if not matches:
+                continue
+            if event["event_type"] == "proposal_generation_failed":
+                matching_failures += 1
+            elif event["event_type"] == "proposal_relaxation_offered":
+                already_offered = True
+
+        if already_offered:
+            return None
+
+        record_event(
+            database,
+            session_id,
+            "proposal_generation_failed",
+            failure_payload,
+            utc_now(),
+        )
+        matching_failures += 1
+        if matching_failures < PROPOSAL_RELAXATION_FAILURE_THRESHOLD:
+            return None
+
+        record_event(
+            database,
+            session_id,
+            "proposal_relaxation_offered",
+            {
+                **failure_payload,
+                "failureCount": matching_failures,
+                "internalAttempts": matching_failures * exception.attempts_used,
+            },
+            utc_now(),
+        )
+
+    relaxed_brief = _build_relaxed_revision_brief(original_brief)
+    if language == "zh-CN":
+        message = (
+            "我已经按同一要求完整尝试了三次，每次都进行了两轮地图生成，但仍没有一份方案"
+            "同时产生真实改动并通过可解性检查。我不想继续拿同样的失败让你反复重试，更不想"
+            "为了通过校验偷偷改一个无关格子。\n\n"
+            "我可以启用一次后备标准：你的核心修改方向、可解性、地图外壳和未涉及区域全部"
+            "保持不变，只把“一份方案必须同时兑现所有预期效果”放宽为“先兑现其中一个可以"
+            "通过游玩验证的局部效果”。你愿意让我按这个后备标准再生成一次吗？"
+        )
+        warning = (
+            "连续六轮生成都没有得到同时符合原要求、包含真实格子变化且可解的地图。继续原样"
+            "重试很可能只会重复失败；这是生成可靠性风险，不代表你的设计要求本身有问题。"
+        )
+    else:
+        message = (
+            "I have now tried the same requirement three full times, with two map-generation "
+            "attempts each, and still do not have a proposal that both changes real cells and "
+            "passes solvability validation. I do not want to make you repeat the same retry or "
+            "quietly change an unrelated tile just to pass validation.\n\n"
+            "I can use one fallback standard: keep your core direction, solvability, the outer "
+            "shell, and every unrelated area unchanged, while relaxing only the requirement that "
+            "one proposal realize every expected effect at once. May I try once more by realizing "
+            "one local, play-testable effect first?"
+        )
+        warning = (
+            "Six generation attempts produced no map that both made real cell changes and met the "
+            "original requirement while remaining solvable. Repeating it unchanged is likely to "
+            "fail again; this is a generation-reliability risk, not evidence that your design "
+            "request is wrong."
+        )
+    return LLMExecutionResult(
+        assistant_message=message,
+        attempts_used=exception.attempts_used,
+        request_id=exception.request_id,
+        model="deterministic-relaxation-offer",
+        latency_ms=0,
+        guidance={
+            "move": "challenge_tradeoff",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "uiCues": [{"type": "warning", "text": warning}],
+            "relaxationOffer": {
+                "status": "awaiting_confirmation",
+                "originalBrief": original_brief,
+                "relaxedBrief": relaxed_brief,
+                "baseVersionId": base_version_id,
+                "briefHash": brief_hash,
+            },
+        },
+    )
+
+
+def _build_relaxed_revision_brief(original_brief):
+    return (
+        f"Preserve this designer-authored core direction exactly: {original_brief!r}. "
+        "Implement one coherent, play-testable local effect that advances that direction. "
+        "It is not necessary for this single proposal to realize every secondary route, rhythm, "
+        "or difficulty effect at once. Do not change an unrelated component or area."
     )
 
 
@@ -1711,6 +1881,14 @@ def build_llm_context(database, session_id, version):
         "discussionFocus": None,
         "intentHypothesis": None,
         "proposalOffer": None,
+        "relaxationOffer": next(
+            (
+                (load_json(turn["guidance_json"]) or {}).get("relaxationOffer")
+                for turn in turns
+                if turn["role"] == "assistant"
+            ),
+            None,
+        ),
         "uiCues": {},
     }
     guidance_sources = [

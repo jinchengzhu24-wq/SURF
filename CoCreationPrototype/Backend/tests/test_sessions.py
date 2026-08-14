@@ -26,6 +26,8 @@ from llm_client import (
 SAMPLE_ROWS = list(backend.SAMPLE_ROWS)
 EDITED_ROWS = list(SAMPLE_ROWS)
 EDITED_ROWS[4] = "#..p.......#"
+TARGET_SHIFT_ROWS = list(SAMPLE_ROWS)
+TARGET_SHIFT_ROWS[5] = "#...s..t...#"
 
 
 class CoCreationSessionTests(unittest.TestCase):
@@ -563,6 +565,148 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual([turn["role"] for turn in matching_turns], ["user", "assistant"])
         self.assertEqual(len(retried.json()["versions"]), 1)
         self.assertEqual(retried.json()["proposals"], [])
+
+    def test_strict_relaxation_offer_requires_three_complete_invalid_proposal_failures(self):
+        version_id = self.read_session()["currentVersionId"]
+        request_payload = {
+            "content": "Please revise the map by moving the target one cell to the right.",
+            "baseVersionId": version_id,
+            "idempotencyKey": "strict_relaxation_message_001",
+        }
+        invalid = LLMServiceError(
+            "MODEL_RESPONSE_INVALID",
+            "The LLM returned invalid map candidates.",
+            "invalid-proposal-request",
+            True,
+            2,
+            502,
+        )
+        relaxed_execution = LLMExecutionResult(
+            "Here is the approved fallback proposal.",
+            1,
+            "relaxed-proposal-request",
+            proposed_rows=TARGET_SHIFT_ROWS,
+            model="mock-pro-model",
+            guidance={
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            side_effect=[invalid, invalid, invalid, relaxed_execution],
+        ) as mocked:
+            first = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+            second = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+            third = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_payload,
+            )
+
+            self.assertEqual(first.status_code, 502)
+            self.assertEqual(second.status_code, 502)
+            self.assertEqual(third.status_code, 200, third.text)
+            matching = [
+                turn for turn in third.json()["turns"]
+                if turn["requestId"] == request_payload["idempotencyKey"]
+            ]
+            self.assertEqual([turn["role"] for turn in matching], ["user", "assistant"])
+            warning_turn = matching[-1]
+            self.assertEqual(
+                [cue["type"] for cue in warning_turn["guidance"]["uiCues"]],
+                ["warning"],
+            )
+            self.assertIsNone(warning_turn["guidance"]["proposalOffer"])
+            self.assertEqual(
+                warning_turn["guidance"]["relaxationOffer"]["status"],
+                "awaiting_confirmation",
+            )
+            self.assertEqual(third.json()["proposals"], [])
+
+            confirmed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Yes, you may use that fallback standard.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "strict_relaxation_confirm_001",
+                },
+            )
+
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertEqual(len(confirmed.json()["proposals"]), 1)
+        confirmation_call = mocked.call_args_list[3]
+        state, brief = backend.classify_revision_request(
+            confirmation_call.args[0],
+            confirmation_call.kwargs["stage_context"],
+        )
+        self.assertEqual(state, "authorized_relaxed")
+        self.assertIn("one coherent, play-testable local effect", brief)
+        with repository.connect() as database:
+            event_types = [
+                row[0]
+                for row in database.execute(
+                    "SELECT event_type FROM audit_events WHERE session_id = ?",
+                    (self.session_id,),
+                ).fetchall()
+            ]
+        self.assertEqual(event_types.count("proposal_generation_failed"), 3)
+        self.assertEqual(event_types.count("proposal_relaxation_offered"), 1)
+
+    def test_transport_failures_never_trigger_relaxation_offer(self):
+        version_id = self.read_session()["currentVersionId"]
+        request_payload = {
+            "content": "Please revise the map by moving the target one cell to the right.",
+            "baseVersionId": version_id,
+            "idempotencyKey": "transport_failure_message_001",
+        }
+        timeout = LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not respond before the timeout.",
+            "timeout-proposal-request",
+            True,
+            2,
+            504,
+        )
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            side_effect=[timeout, timeout, timeout],
+        ):
+            responses = [
+                self.client.post(
+                    f"/api/sessions/{self.session_id}/messages",
+                    json=request_payload,
+                )
+                for _ in range(3)
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [504, 504, 504])
+        matching = [
+            turn for turn in self.read_session()["turns"]
+            if turn["requestId"] == request_payload["idempotencyKey"]
+        ]
+        self.assertEqual([turn["role"] for turn in matching], ["user"])
+        with repository.connect() as database:
+            count = database.execute(
+                """
+                SELECT COUNT(*) FROM audit_events
+                WHERE session_id = ? AND event_type LIKE 'proposal_%'
+                """,
+                (self.session_id,),
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
 
     def test_empty_model_failure_saves_one_user_turn_and_no_assistant_turn(self):
         version_id = self.read_session()["currentVersionId"]
