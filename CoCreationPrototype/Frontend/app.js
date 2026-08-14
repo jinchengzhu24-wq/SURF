@@ -6,20 +6,20 @@ const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
 const DISCUSSION_FOCUS_LABEL = "LET'S DISCUSS / 一起聊聊";
 const GUIDANCE_CUE_LABELS = {
     en: {
-        manual_edit: "MANUAL EDIT",
-        question: "LET'S DISCUSS",
-        revision: "REVISION",
-        intent: "TENTATIVE INTENT",
-        warning: "WARNING",
-        tradeoff: "WARNING"
+        manual_edit: "MANUAL EDIT / 手动编辑",
+        question: "LET'S DISCUSS / 一起聊聊",
+        revision: "REVISION / 修改建议",
+        intent: "TENTATIVE INTENT / 暂定意图",
+        warning: "WARNING / 风险提示",
+        tradeoff: "WARNING / 风险提示"
     },
     "zh-CN": {
-        manual_edit: "手动编辑",
-        question: "一起聊聊",
-        revision: "修改建议",
-        intent: "暂定意图",
-        warning: "警告",
-        tradeoff: "警告"
+        manual_edit: "MANUAL EDIT / 手动编辑",
+        question: "LET'S DISCUSS / 一起聊聊",
+        revision: "REVISION / 修改建议",
+        intent: "TENTATIVE INTENT / 暂定意图",
+        warning: "WARNING / 风险提示",
+        tradeoff: "WARNING / 风险提示"
     }
 };
 

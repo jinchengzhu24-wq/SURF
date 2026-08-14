@@ -793,6 +793,7 @@ main {
 }
 
 .discussion-focus {
+    margin-top: 30px;
     color: #17364a;
     background: #c9dce5;
 }
