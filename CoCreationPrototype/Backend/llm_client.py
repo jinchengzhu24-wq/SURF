@@ -48,7 +48,7 @@ PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v29-intent-search"
+PROMPT_VERSION = "cocreation-v30-disagreement-intent"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -185,7 +185,10 @@ def build_chat_messages(
         "clear that evaluative and difficulty statements are your perspective. Every "
         "difficulty statement must explicitly use perspective language such as 'in my "
         "view', 'I suspect', '在我看来', or '我倾向于认为'; never present difficulty as "
-        "a deterministic solver fact.\n\n"
+        "a deterministic solver fact. When the designer explicitly reframes or challenges "
+        "your judgment of difficulty, priority, or play effect, include a fresh, correctable "
+        "intentHypothesis that states what you now understand they care about; do not leave "
+        "that disagreement only in the prose or discussion card.\n\n"
         "Treat the saved Stage as read-only until the designer accepts a validated "
         "proposal in the interface. Treat natural requests such as '你帮我改', '你来改吧', "
         "'按这个思路改', 'can you change it', and 'go ahead and revise it' as explicit "
@@ -3713,15 +3716,16 @@ def _apply_deterministic_guidance_fallback(
     evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
     fallback_used = False
 
-    if (
-        intent_hypothesis is None
-        and explicit_direction
-        and not recent.get("intentHypothesis")
+    difficulty_reframe = _user_reframes_difficulty_judgment(messages)
+    if intent_hypothesis is None and (
+        difficulty_reframe
+        or (explicit_direction and not recent.get("intentHypothesis"))
     ):
         candidate = _natural_intent_candidate(
             latest_user,
             language,
             explicit_agreement,
+            difficulty_reframe=difficulty_reframe,
         )
 
         if not _guidance_text_matches(candidate, recent.get("intentHypothesis")):
@@ -3971,9 +3975,44 @@ def _unclear_revision_reply(language):
     )
 
 
-def _natural_intent_candidate(latest_user, language, explicit_agreement):
+def _natural_intent_candidate(
+    latest_user,
+    language,
+    explicit_agreement,
+    *,
+    difficulty_reframe=False,
+):
     source = re.sub(r"\s+", " ", str(latest_user or "")).strip()
     variant = sum(ord(character) for character in source) % 3
+
+    if difficulty_reframe:
+        stance = _difficulty_stance(source)
+        if language == "zh-CN":
+            if stance == "easy":
+                options = (
+                    "我暂时把你的方向理解为：你要的不是多走几步，而是让关键推动前真的出现需要停下来读路线的判断；如果我理解偏了，请纠正我。",
+                    "听起来你更在意的是，玩家不能只顺着流程把箱子推到底，而要在关键节点承担一次真实的路线选择；这只是我目前的理解。",
+                    "我读到的倾向是，你希望这张图的难度来自推动顺序和后果，而不只是表面上多加一点障碍；若重点不是这里，你可以改正我。",
+                )
+            else:
+                options = (
+                    "我暂时把你的方向理解为：你更想减轻关键推动前的负担，让玩家能读懂路线而不是被无谓阻力拖住；如果我理解偏了，请纠正我。",
+                    "听起来你在意的是保留判断感，但别让路线复杂到遮住真正的选择；这只是我目前的理解。",
+                    "我读到的倾向是，你希望难度来自清楚的取舍，而不是让人因为读不清路线而受挫；若重点不是这里，你可以改正我。",
+                )
+        elif stance == "easy":
+            options = (
+                "For now, I understand your direction as wanting a real route judgment before a key push, not simply more walking; please correct me if I have that wrong.",
+                "It sounds to me like you want the player to make a consequential choice rather than push straight through the route; that is only my current reading.",
+                "I read your preference as difficulty coming from push order and consequences, not merely from adding obstacles; please correct me if that misses the point.",
+            )
+        else:
+            options = (
+                "For now, I understand your direction as keeping the key route readable instead of adding friction that hides the real choice; please correct me if I have that wrong.",
+                "It sounds to me like you want to preserve meaningful judgment without making the route harder to read; that is only my current reading.",
+                "I read your preference as wanting difficulty to come from clear trade-offs rather than confusing resistance; please correct me if that misses the point.",
+            )
+        return options[variant]
 
     if language == "zh-CN":
         if explicit_agreement:
@@ -4003,6 +4042,46 @@ def _natural_intent_candidate(latest_user, language, explicit_agreement):
             f"I read your preference as wanting the next design step to answer “{excerpt}”.",
         )
     return options[variant]
+
+
+def _difficulty_stance(text):
+    value = str(text or "").casefold()
+    if any(marker in value for marker in (
+        "太简单", "太容易", "不够难", "没难度", "太顺", "一路平推",
+        "too easy", "too simple", "not hard enough", "no challenge",
+    )):
+        return "easy"
+    if any(marker in value for marker in (
+        "太难", "太复杂", "太绕", "不够简单", "太卡",
+        "too hard", "too difficult", "too complex", "too confusing",
+    )):
+        return "hard"
+    return None
+
+
+def _user_reframes_difficulty_judgment(messages):
+    latest = _latest_role_content(messages, "user")
+    if not latest or "?" in latest or "？" in latest:
+        return False
+    stance = _difficulty_stance(latest)
+    if stance is None:
+        return False
+    previous_assistant = _latest_role_content(messages[:-1], "assistant")
+    if not previous_assistant:
+        return False
+    lowered = latest.casefold()
+    first_person_evaluation = (
+        any(marker in latest for marker in ("我认为", "我觉得", "我感觉", "我不认同", "我不同意"))
+        or bool(re.search(r"\b(?:i think|i feel|i disagree|to me)\b", lowered))
+    )
+    contrast = any(marker in lowered for marker in (
+        "还是", "其实", "但", "不认同", "不同意",
+        "still", "actually", "but", "however", "disagree",
+    ))
+    previous_stance = _difficulty_stance(previous_assistant)
+    return first_person_evaluation and (
+        contrast or previous_stance is not None
+    )
 
 
 def _intent_is_only_execution_authorization(text, language="en"):

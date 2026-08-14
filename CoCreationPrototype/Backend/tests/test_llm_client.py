@@ -725,6 +725,29 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("？", question)
         self.assertIn("判断", question)
 
+    def test_user_difficulty_reframe_gets_a_tentative_intent_card(self):
+        result, _ = self.execute(
+            [
+                "我会继续看第一次推箱时的路线判断，避免把难度只理解成增加障碍。"
+            ],
+            language="zh-CN",
+            conversation=[
+                {
+                    "role": "assistant",
+                    "content": "在我看来，这张图目前更像顺着流程完成，而不是被很难的谜题卡住。",
+                },
+                {"role": "user", "content": "我认为还是太简单了。"},
+            ],
+        )
+
+        intent = result.guidance["intentHypothesis"]
+        self.assertEqual(result.guidance["move"], "clarify_intent")
+        self.assertEqual(result.guidance["intentConfidence"], "medium")
+        self.assertIsNotNone(intent)
+        self.assertIn("你", intent)
+        self.assertIn("推", intent)
+        self.assertNotIn("设计者", intent)
+
     def test_direction_question_goes_deeper_instead_of_asking_for_approval(self):
         question = llm_client._deterministic_key_question(
             [{"role": "user", "content": "我想让箱子贴着水边推进时更有路线判断。"}],
