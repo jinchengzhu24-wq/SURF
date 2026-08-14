@@ -1928,6 +1928,7 @@ def build_llm_context(database, session_id, version):
     ]
     recent_guidance = {
         "discussionFocus": None,
+        "discussionFocusHistory": [],
         "intentHypothesis": None,
         "proposalOffer": None,
         "relaxationOffer": next(
@@ -1950,8 +1951,15 @@ def build_llm_context(database, session_id, version):
         guidance_sources.append(load_json(accepted_opening["guidance_json"]) or {})
 
     for guidance in guidance_sources:
-        if recent_guidance["discussionFocus"] is None and guidance.get("followUpQuestion"):
-            recent_guidance["discussionFocus"] = guidance["followUpQuestion"]
+        discussion_focus = guidance.get("followUpQuestion")
+        if discussion_focus:
+            if recent_guidance["discussionFocus"] is None:
+                recent_guidance["discussionFocus"] = discussion_focus
+            if (
+                len(recent_guidance["discussionFocusHistory"]) < 3
+                and discussion_focus not in recent_guidance["discussionFocusHistory"]
+            ):
+                recent_guidance["discussionFocusHistory"].append(discussion_focus)
         if (
             recent_guidance["intentHypothesis"] is None
             and guidance.get("intentHypothesis")

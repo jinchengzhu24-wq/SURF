@@ -156,6 +156,15 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("改好了", result.assistant_message)
         self.assertNotIn("去试试看", result.assistant_message)
 
+    def test_plain_chat_cannot_describe_an_uncreated_pending_proposal_as_real(self):
+        result, _ = self.execute([
+            "好，那我把第7行第6到第8列连成一片水，其余格子不动。"
+            "这份提案会保持待审查状态。"
+        ], language="zh-CN")
+
+        self.assertIn("还没有实际落到地图上", result.assistant_message)
+        self.assertNotIn("会保持待审查状态", result.assistant_message)
+
     def test_generic_change_authorization_is_not_saved_as_design_intent(self):
         visible, intent, _, _ = llm_client._extract_plain_guidance(
             "我先把方向说清楚。\n<GUIDANCE>INTENT: 我暂时把你的方向理解为：你帮我改。"
@@ -165,6 +174,14 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertEqual(visible, "我先把方向说清楚。")
+        self.assertIsNone(intent)
+
+        _, intent, _, _ = llm_client._extract_plain_guidance(
+            "我先把方向说清楚。\n<GUIDANCE>INTENT: 我读到的倾向是，你希望后续设计回应“帮我做”。"
+            "</GUIDANCE>",
+            "zh-CN",
+            {},
+        )
         self.assertIsNone(intent)
 
     def test_plain_discuss_card_can_hold_a_first_person_design_insight(self):
@@ -826,9 +843,68 @@ class LLMClientTests(unittest.TestCase):
             {"type": "json_object"},
         )
 
+    def test_confirmed_concrete_chinese_plan_immediately_uses_proposal_workflow(self):
+        response = operation_payload([{"row": 3, "column": 7, "from": ".", "to": "@"}])
+        client = FakeClient([response])
+        conversation = [
+            {
+                "role": "assistant",
+                "content": "好，那就定三格：把第7行第6到第8列连成一片水，其余格子不动。",
+            },
+            {"role": "user", "content": "三格可以"},
+        ]
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                conversation,
+                OPERATION_BASE_ROWS,
+                "confirmed-chinese-plan-test",
+                language="zh-CN",
+            )
+
+        self.assertIsNotNone(result.proposed_rows)
+        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-pro")
+        self.assertIn("第7行第6到第8列", client.chat.completions.calls[0]["messages"][1]["content"])
+
+    def test_help_me_do_inherits_a_confirmed_concrete_chinese_plan(self):
+        response = operation_payload([{"row": 3, "column": 7, "from": ".", "to": "@"}])
+        client = FakeClient([response])
+        conversation = [
+            {
+                "role": "assistant",
+                "content": "好，那就定三格：把第7行第6到第8列连成一片水，其余格子不动。",
+            },
+            {"role": "user", "content": "三格可以"},
+            {"role": "assistant", "content": "这个方向已经说清楚了。"},
+            {"role": "user", "content": "帮我做"},
+        ]
+
+        state, brief = llm_client._classify_revision_request(conversation)
+
+        self.assertEqual(state, "authorized")
+        self.assertIn("第7行第6到第8列", brief)
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                conversation,
+                OPERATION_BASE_ROWS,
+                "help-me-do-chinese-plan-test",
+                language="zh-CN",
+            )
+
+        self.assertIsNotNone(result.proposed_rows)
+        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-pro")
+
     def test_map_request_phrases_are_detected_without_matching_design_questions(self):
         positives = (
             "你帮我改",
+            "帮我做",
             "你来改吧",
             "按这个思路帮我改一下",
             "请你改一下地图",
@@ -857,7 +933,7 @@ class LLMClientTests(unittest.TestCase):
                     {"role": "user", "content": message},
                 ]))
 
-        for message in ("可以帮我修改吗？", "修改", "Can you change it?"):
+        for message in ("可以帮我修改吗？", "修改", "帮我做", "Can you change it?"):
             with self.subTest(message=f"no-basis:{message}"):
                 state, brief = llm_client._classify_revision_request([
                     {"role": "user", "content": message},
@@ -1226,6 +1302,50 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertEqual(result[0], "The two targets create distinct routes.")
+
+    def test_discussion_card_is_not_repeated_in_the_saved_assistant_body(self):
+        focus = "我会留意水边第一次推进是否真的改变了路线判断。"
+        message = (
+            "水域现在贴近推进路线。\n\n"
+            f"{focus}\n\n{focus}"
+        )
+        composed = llm_client._compose_assistant_message(
+            message,
+            {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": focus,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "zh-CN",
+        )
+
+        self.assertEqual(composed.count(focus), 1)
+        self.assertIn("水域现在贴近推进路线", composed)
+
+    def test_recent_discussion_focus_history_suppresses_an_older_repeat(self):
+        focus = "我会留意水边第一次推进是否真的改变了路线判断。"
+        content = (
+            "水域让右侧路线有了新的转折。\n"
+            f"<GUIDANCE>DISCUSS: {focus}</GUIDANCE>"
+        )
+
+        extracted = llm_client._extract_plain_discussion_focus(
+            content,
+            "zh-CN",
+            stage_context={
+                "recentGuidance": {
+                    "discussionFocusHistory": [
+                        "我会看玩家进入调整区域的第一步会不会重新判断顺序。",
+                        focus,
+                    ],
+                },
+            },
+        )
+
+        self.assertIsNone(extracted)
 
     def test_question_without_structured_follow_up_is_extracted(self):
         payload = {

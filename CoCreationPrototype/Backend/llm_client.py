@@ -1566,10 +1566,7 @@ async def _generate_plain_with_model_fallback(
                     )
                 if question and _question_repeats_recent_judgment(question, messages):
                     question = None
-                recent_focus = ((stage_context or {}).get("recentGuidance") or {}).get(
-                    "discussionFocus"
-                )
-                if question and _guidance_text_matches(question, recent_focus):
+                if question and _discussion_focus_repeats_recent(question, stage_context):
                     question = None
 
             if stage_opening and _is_stage_one(stage_context):
@@ -1631,6 +1628,11 @@ async def _generate_plain_with_model_fallback(
                 rows,
                 stage_opening,
                 stage_context,
+            )
+            body = _deduplicate_assistant_body(body)
+            body = _remove_guidance_from_body(
+                body,
+                guidance.get("followUpQuestion"),
             )
             evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
             if evidence_signature and guidance["uiCues"]:
@@ -2153,6 +2155,11 @@ def validate_chat_response(
             assistant_message,
             language,
         )
+        if _discussion_focus_repeats_recent(
+            guidance["followUpQuestion"],
+            stage_context,
+        ):
+            guidance["followUpQuestion"] = None
 
     if assessment_only and not stage_one_opening and guidance["followUpQuestion"] is None:
         deterministic_opening_question = _deterministic_stage_opening_question(
@@ -2255,6 +2262,11 @@ def validate_chat_response(
         assistant_message,
         language,
         proposed_rows is not None,
+    )
+    assistant_message = _deduplicate_assistant_body(assistant_message)
+    assistant_message = _remove_guidance_from_body(
+        assistant_message,
+        guidance.get("followUpQuestion"),
     )
 
     modification_summary = payload.get("modificationSummary", "")
@@ -2469,12 +2481,31 @@ def _normalize_unsaved_change_claims(value, language="en"):
             "我现在说的是修改方向，还没有替你保存地图。",
             text,
         )
+        text = re.sub(
+            r"(?:^|(?<=[。！？\n]))\s*(?:好[，,。！!]?\s*)?(?:那)?我(?:就)?(?:按[^。！？\n]{0,48})?"
+            r"把[^。！？\n]{0,72}(?:改成|改为|变成|连成|移到|挪到)[^。！？\n]*[。！？!]?",
+            "我已经理解这个修改方向；生成出可审查地图前，它还没有实际落到地图上。",
+            text,
+        )
+        text = re.sub(
+            r"(?:这份|这个)?(?:提案|方案)(?:会|将)?(?:保持|处于)[^。！？\n]{0,24}"
+            r"(?:待审查|审查状态)[。！？!]?",
+            "如果你明确授权生成，它会先以待审查提案的形式出现。",
+            text,
+        )
     else:
         text = re.sub(
             r"(?:^|(?<=[.!?\n]))\s*(?:done[.!]?\s*)?(?:i(?:'ve| have)?|we(?:'ve| have)?)"
             r"\s+(?:changed|modified|revised|updated|finished)\s+(?:it|this|the map|the level)"
             r"[.!]*(?:\s+(?:go ahead and )?(?:try|play)(?: it)?[.!]?)?",
             "I am describing the revision direction for now; I have not saved a map change.",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"(?:^|(?<=[.!?\n]))\s*(?:okay[, ]+)?i(?: will|'ll)?\s+"
+            r"(?:change|modify|revise|update)\b[^.!?\n]*",
+            "I understand the revision direction; no map has been generated or saved yet.",
             text,
             flags=re.IGNORECASE,
         )
@@ -2773,13 +2804,10 @@ def _extract_plain_discussion_focus(
         if question_marks == 1
         else question_marks == 0 and _discussion_insight_is_useful(focus, language)
     )
-    recent_focus = ((stage_context or {}).get("recentGuidance") or {}).get(
-        "discussionFocus"
-    )
     visible = value[:marker_index].strip()
     if (
         not useful
-        or _guidance_text_matches(focus, recent_focus)
+        or _discussion_focus_repeats_recent(focus, stage_context)
         or _guidance_reuses_visible_sentence(focus, visible)
     ):
         return None
@@ -2960,6 +2988,89 @@ def _remove_extracted_warning_sentence(visible_content, ui_cues):
     result = re.sub(r"[ \t]+\n", "\n", result)
     result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
+
+
+def _deduplicate_assistant_body(value):
+    """Keep one natural copy of a repeated model paragraph or sentence."""
+    paragraphs = []
+
+    for raw_paragraph in str(value or "").split("\n\n"):
+        paragraph = raw_paragraph.strip()
+        if not paragraph:
+            continue
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])\s*", paragraph)
+            if sentence.strip()
+        ]
+        kept_sentences = []
+
+        for sentence in sentences:
+            if not any(_guidance_text_matches(sentence, kept) for kept in kept_sentences):
+                kept_sentences.append(sentence)
+
+        separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+        candidate = separator.join(kept_sentences).strip()
+
+        if candidate and not any(
+            _guidance_text_matches(candidate, previous)
+            for previous in paragraphs
+        ):
+            paragraphs.append(candidate)
+
+    return "\n\n".join(paragraphs)
+
+
+def _remove_guidance_from_body(value, guidance_text):
+    """Cards are rendered separately, so their thought must not remain in the body."""
+    body = _deduplicate_assistant_body(value)
+    guidance = str(guidance_text or "").strip()
+
+    if not body or not guidance:
+        return body
+
+    paragraphs = []
+
+    for paragraph in body.split("\n\n"):
+        if _guidance_text_matches(paragraph, guidance):
+            continue
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])\s*", paragraph)
+            if sentence.strip()
+        ]
+        kept = [
+            sentence for sentence in sentences
+            if not _guidance_text_matches(sentence, guidance)
+        ]
+        if kept:
+            separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+            paragraphs.append(separator.join(kept))
+
+    return "\n\n".join(paragraphs).strip() or body
+
+
+def _recent_discussion_focuses(stage_context):
+    recent_guidance = ((stage_context or {}).get("recentGuidance") or {})
+    history = recent_guidance.get("discussionFocusHistory") or []
+
+    if not isinstance(history, (list, tuple)):
+        history = []
+
+    values = [str(item).strip() for item in history if str(item or "").strip()]
+    latest = str(recent_guidance.get("discussionFocus") or "").strip()
+
+    if latest and not any(_guidance_text_matches(latest, item) for item in values):
+        values.insert(0, latest)
+
+    return values[:3]
+
+
+def _discussion_focus_repeats_recent(focus, stage_context):
+    return any(
+        _guidance_text_matches(focus, previous)
+        for previous in _recent_discussion_focuses(stage_context)
+    )
 
 
 def _guidance_text_matches(current, previous):
@@ -3391,7 +3502,7 @@ def _ensure_required_guidance_card(
         rows,
         language,
         latest_user,
-        ((stage_context or {}).get("recentGuidance") or {}).get("discussionFocus"),
+        _recent_discussion_focuses(stage_context),
     )
     return normalized
 
@@ -3412,24 +3523,31 @@ def _user_explicitly_off_topic(message):
     return any(marker in text for marker in (*chinese, *english))
 
 
-def _friendly_default_discussion_focus(rows, language, latest_user, recent_focus):
+def _friendly_default_discussion_focus(rows, language, latest_user, recent_focuses):
     serialized = "".join(str(row) for row in (rows or []))
     seed = sum(ord(character) for character in f"{serialized}{latest_user}")
     if language == "zh-CN":
         options = (
-            "我想先陪你看看第一次推箱时，玩家会不会自然停下来想一想路线。这个瞬间舒服的话，我们就微调附近；如果还是太直白，再一起看整条路。",
-            "我更想先看箱子第一次靠近目标前，玩家会不会有一点自然的犹豫。这个感觉对了，就别急着大改；不对，我们再一起找是哪里太顺了。",
-            "我想先盯住玩家第一次得决定“先推哪个箱子”的瞬间。要是这里已经让人想一想，我们就只动局部；如果一眼看穿，再回头看路线本身。",
+            "我会留意第一次推箱时，玩家会不会自然停下来读一眼路线；这个瞬间能告诉我们该微调附近还是保留空间。",
+            "我在意的是箱子第一次靠近目标前的犹豫有没有真实出现；它比单看格子摆放更能说明路线是否有了分量。",
+            "我想把注意力放在玩家第一次决定先推哪个箱子的片刻；这个判断会决定下一步只动局部，还是回头整理路线。",
+            "对我来说，水边第一次推进时的回旋空间最值得观察；那里能看出水域是在参与路线，还是只停留在视觉上。",
+            "我会看玩家进入调整区域的第一步会不会重新判断顺序；这比额外移动多少更能说明这次变化是否有效。",
         )
     else:
         options = (
-            "I want to keep the route reading at the first push separate for discussion; it will tell us whether to preserve the current space or clarify the key turn next.",
-            "To me, the hesitation before a box first approaches its target is worth watching; it will shape whether we adjust the route relationship or preserve this structure.",
-            "I would first watch the moment when the player has to plan the push order; that judgment can tell us whether the next revision should change local rhythm or the larger route.",
+            "I would watch whether the first push makes the player pause to read the route; that moment tells us whether to tune nearby space or preserve it.",
+            "To me, the hesitation before a box first approaches its target is worth watching; it says more about route weight than the tile arrangement alone.",
+            "I would focus on the first moment the player chooses which box to push; that judgment decides whether the next revision stays local or revisits the route.",
+            "The first push beside the water is the moment I would watch; it shows whether water is shaping the route or remaining visual scenery.",
+            "I would look at whether the first step into the adjusted area makes the player reread the order; that matters more than merely adding movement.",
         )
     for offset in range(len(options)):
         candidate = options[(seed + offset) % len(options)]
-        if not _guidance_text_matches(candidate, recent_focus):
+        if not any(
+            _guidance_text_matches(candidate, recent_focus)
+            for recent_focus in (recent_focuses or [])
+        ):
             return candidate
     return options[seed % len(options)]
 
@@ -3509,7 +3627,8 @@ def _intent_is_only_execution_authorization(text, language="en"):
             marker in value
             for marker in (
                 "你帮我改", "帮我改一下", "你来改", "请你改", "交给你改",
-                "我来帮你改", "把修改交给我", "由我来改",
+                "我来帮你改", "把修改交给我", "由我来改", "帮我做",
+                "就这么做", "照这个做", "按这个做",
             )
         )
         design_anchors = (
@@ -3683,6 +3802,25 @@ def _latest_user_explicitly_agrees(message):
         for marker in ("可以", "好", "行", "同意", "就这样", "做吧", "改吧", "试试", "做点")
     )
     return english is not None or chinese
+
+
+def _latest_user_confirms_revision(message):
+    """Recognize a short confirmation of the immediately preceding concrete plan."""
+    text = str(message or "").strip().casefold()
+    if not text:
+        return False
+
+    english = re.fullmatch(
+        r"(?:yes|okay|ok|sounds good|go ahead|do (?:it|that)|let'?s do (?:it|that))"
+        r"[.!?]*",
+        text,
+    )
+    chinese = re.fullmatch(
+        r"(?:好(?:的)?|可以|行|同意|就这样|按这个来|照这个来|按这个做|照这个做|"
+        r"(?:[一二三四五六七八九十\d]+)格(?:可以|就行|行))\s*[。！!？?]*",
+        text,
+    )
+    return english is not None or chinese is not None
 
 
 def _latest_user_explicitly_rejects(message):
@@ -4283,6 +4421,7 @@ def _compose_assistant_message(
     stage_context=None,
 ):
     stage_context = stage_context or {}
+    message = _deduplicate_assistant_body(message)
     change_summary = stage_context.get("changeSummary") or {}
     components = change_summary.get("components") or []
 
@@ -4307,6 +4446,9 @@ def _compose_assistant_message(
     ui_cues = guidance.get("uiCues") or []
     additions = [cue["text"] for cue in ui_cues if cue.get("text")]
     follow_up = guidance.get("followUpQuestion")
+
+    for addition in [*additions, follow_up]:
+        message = _remove_guidance_from_body(message, addition)
 
     if follow_up:
         additions.append(follow_up)
@@ -4542,8 +4684,12 @@ def _classify_revision_request(conversation, stage_context=None):
         "请你改",
         "交给你改",
         "你直接改",
+        "帮我做",
         "帮我做个方案",
         "帮我做一个方案",
+        "就这么做",
+        "照这个做",
+        "按这个做",
     )
     marker_match = any(
         marker in latest_user_message
@@ -4595,12 +4741,21 @@ def _classify_revision_request(conversation, stage_context=None):
         chinese_polite_request = None
         chinese_short_command = None
 
+    inherited_brief = _authorized_revision_brief(
+        conversation,
+        stage_context,
+        latest_user_message,
+    )
     requested = (
         marker_match
         or chinese_authorization is not None
         or chinese_polite_request is not None
         or chinese_short_command is not None
         or english_authorization is not None
+        or (
+            _latest_user_confirms_revision(latest_user_message)
+            and inherited_brief is not None
+        )
     )
 
     if not requested:
@@ -4611,11 +4766,7 @@ def _classify_revision_request(conversation, stage_context=None):
         if relaxed_brief:
             return "authorized_relaxed", relaxed_brief
 
-    brief = _authorized_revision_brief(
-        conversation,
-        stage_context,
-        latest_user_message,
-    )
+    brief = inherited_brief
     return ("authorized", brief) if brief else ("needs_direction", None)
 
 
@@ -4678,7 +4829,8 @@ def _contains_concrete_revision_direction(value, require_proposal_framing=False)
         )
         actions = (
             "移", "挪", "调整", "重排", "保留", "减少", "增加", "改变",
-            "集中", "连接", "缩短", "拉开", "让", "改动", "修改",
+            "集中", "连接", "连成", "缩短", "拉开", "让", "改动", "修改",
+            "改成", "改为", "变成", "放", "设", "铺", "不动",
         )
     else:
         anchors = (
@@ -4704,7 +4856,12 @@ def _contains_concrete_revision_direction(value, require_proposal_framing=False)
             "修改方案", "具体改", "改成", "把它", "把这个", "把那",
         )
         framed_action = re.search(
-            r"把.{0,40}(?:移|挪|调整|重排|保留|减少|增加|改变|集中|连接|缩短|拉开|改)",
+            r"把.{0,48}(?:移|挪|调整|重排|保留|减少|增加|改变|集中|连接|连成|缩短|拉开|改|变成|放|设|铺)",
+            text,
+        )
+        explicit_operation = re.search(
+            r"第\s*\d+\s*行.{0,32}(?:第\s*\d+\s*(?:到|至|-)?\s*第?\s*\d*\s*列|第\s*\d+\s*列)"
+            r".{0,48}(?:水|箱|目标|墙|地面)",
             text,
         )
     else:
@@ -4716,7 +4873,16 @@ def _contains_concrete_revision_direction(value, require_proposal_framing=False)
             r"(?:move|shift|adjust|rearrange|keep|preserve|reduce|increase|change|connect|shorten|separate|revise)\b",
             text,
         )
-    return any(marker in text for marker in framing) or framed_action is not None
+        explicit_operation = re.search(
+            r"\brow\s*\d+.{0,40}\b(?:col(?:umn)?\s*\d+|columns?\s*\d+)"
+            r".{0,48}\b(?:water|box|crate|target|wall|floor)\b",
+            text,
+        )
+    return (
+        any(marker in text for marker in framing)
+        or framed_action is not None
+        or explicit_operation is not None
+    )
 
 
 def _create_async_client(api_key, base_url, timeout_seconds):
