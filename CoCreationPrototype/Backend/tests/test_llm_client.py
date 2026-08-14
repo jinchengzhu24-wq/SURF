@@ -145,9 +145,9 @@ class LLMClientTests(unittest.TestCase):
         ], language="zh-CN")
 
         focus = result.guidance["followUpQuestion"]
-        self.assertIn("单独留下这个判断", focus)
+        self.assertIn("先陪你验证一下", focus)
         self.assertIn("第一次推动", focus)
-        self.assertIn("路线读法", focus)
+        self.assertIn("第一次推箱", focus)
         self.assertNotIn("？", focus)
         self.assertNotIn("GUIDANCE", result.assistant_message)
 
@@ -636,7 +636,8 @@ class LLMClientTests(unittest.TestCase):
         question = result.guidance["followUpQuestion"]
         self.assertIn("水边推进", question)
         self.assertIn("路线", question)
-        self.assertIn("？", question)
+        self.assertIn("我想先陪你看", question)
+        self.assertNotIn("？", question)
         self.assertIn("判断", question)
 
     def test_direction_question_goes_deeper_instead_of_asking_for_approval(self):

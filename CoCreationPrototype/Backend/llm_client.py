@@ -29,7 +29,7 @@ PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v24-focused-card-routing"
+PROMPT_VERSION = "cocreation-v25-unified-friendly-cards"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -2177,21 +2177,22 @@ def _deterministic_reply_discussion_focus(visible_content, language):
             word in text for word in ("下方", "下半", "底部", "右下", "空旷")
         ):
             return (
-                "当下方箱子第一次朝新目标推进时，哪一步最能暴露新的绕行负担与上下区域的节奏差异？"
-                "我会用这个瞬间判断下一步更该调整路线关系，还是保留现在的空间结构。"
+                "我想先陪你看下方箱子第一次朝新目标推进时，玩家会不会因为绕路自然停一下想一想。"
+                "这个瞬间已经有意思，我们就保留大结构；如果还是太直白，再一起改路线。"
             )
         if "水" in text and "箱" in text:
             return (
-                "当箱子第一次贴着水边推进时，哪一个转折最该让玩家意识到水域正在改变路线？"
-                "我会用这个瞬间判断联动是否真的成立。"
+                "我想先陪你看箱子第一次贴着水边推进时，会不会自然感到路线得重新想一下。"
+                "这个小停顿能告诉我们，水域真的参与了判断，还是只是摆在旁边。"
             )
         if "目标" in text and any(word in text for word in ("移动", "挪", "落位", "落点")):
             return (
-                "当箱子第一次接近调整后的目标落点时，哪个动作最该让玩家读懂新的推进顺序？"
+                "我想先看看箱子第一次靠近新目标时，玩家会不会自然读到新的推进顺序。"
             )
         if "墙" in text and any(word in text for word in ("通道", "路线", "绕", "转折")):
             return (
-                "当箱子第一次穿过调整后的墙边通道时，我更想看玩家在哪个转折停下来重新判断路线。"
+                "我想先陪你看箱子第一次走进这段墙边通道时，会不会自然停下来重新想路线。"
+                "这能告诉我们，墙是真的让路线更有意思，还是只是多走了几步。"
             )
         return None
 
@@ -2239,13 +2240,13 @@ def _refine_discussion_focus(focus, visible_content, language):
         if question_marks == 1:
             core = value.rstrip()
             return (
-                f"我想把讨论收在这个具体的游玩判断上：{core}"
-                "你的回答会帮助我判断下一步更该调整路线关系，还是保留现在的空间结构。"
+                f"我想先和你盯住这个瞬间：{core}"
+                "看完它，我们就知道是只动附近，还是该回头看看整条路线。"
             )[:1000]
         if len(value) < 72:
             return (
-                f"我更想单独留下这个判断：{value.rstrip('。')}。"
-                "它值得通过第一次推动来验证，因为真正需要比较的是路线读法，而不只是地图外观。"
+                f"我想先陪你验证一下：{value.rstrip('。')}。"
+                "别急着动大结构，先看第一次推箱时玩家会不会自然停一下想路线。"
             )[:1000]
         return value[:1000]
 
@@ -2879,9 +2880,9 @@ def _friendly_default_discussion_focus(rows, language, latest_user, recent_focus
     seed = sum(ord(character) for character in f"{serialized}{latest_user}")
     if language == "zh-CN":
         options = (
-            "我想把第一次推动时的路线读法单独留下来聊聊；它会告诉我们下一步该保留现在的空间，还是让关键转折更清楚。",
-            "在我看来，箱子第一次接近目标前的那次犹豫最值得继续观察；它会影响我们下一步调整路线关系还是保留当前结构。",
-            "我更想先盯住玩家第一次需要规划推箱顺序的瞬间；这个判断能帮助我们决定下一次修改应该动局部节奏还是整体通路。",
+            "我想先陪你看看第一次推箱时，玩家会不会自然停下来想一想路线。这个瞬间舒服的话，我们就微调附近；如果还是太直白，再一起看整条路。",
+            "我更想先看箱子第一次靠近目标前，玩家会不会有一点自然的犹豫。这个感觉对了，就别急着大改；不对，我们再一起找是哪里太顺了。",
+            "我想先盯住玩家第一次得决定“先推哪个箱子”的瞬间。要是这里已经让人想一想，我们就只动局部；如果一眼看穿，再回头看路线本身。",
         )
     else:
         options = (
