@@ -34,7 +34,7 @@ PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v27-internal-retries-relaxed-offer"
+PROMPT_VERSION = "cocreation-v28-server-sourced-operations"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -758,11 +758,12 @@ def _build_map_operation_messages(conversation, rows, language, stage_context):
         "Never edit void cells or the connected outer-shell wall. Keep exactly one player and "
         "one or two matching box/target pairs. Produce up to three meaningfully distinct candidates "
         "in preferred order so deterministic validation can select the first solvable one. "
-        "Coordinates are one-based. Each operation must state the exact current tile in from and a "
-        "different supported tile in to. A moved player, box, or target normally requires paired "
-        "operations that clear the old cell and place the tile on a current floor cell. Return JSON "
-        "only with exactly this shape: {\"candidates\":[{\"operations\":[{\"row\":1,"
-        "\"column\":1,\"from\":\".\",\"to\":\"#\"}]}]}. candidates must contain "
+        "Coordinates are one-based. Each operation must state only row, column, and a different "
+        "supported destination tile in to; the server reads the real current tile itself. Do not "
+        "emit a from field. A moved player, box, or target normally requires paired operations "
+        "that clear the old cell and place the tile on a current floor cell. Return JSON only with "
+        "exactly this shape: {\"candidates\":[{\"operations\":[{\"row\":1,\"column\":1,"
+        "\"to\":\"#\"}]}]}. candidates must contain "
         "one to three items; every operations array must contain one to 24 unique cells. Allowed "
         "tiles are space, #, ., @, p, s, and t, although space/outer-shell edits are forbidden. "
         f"Natural-language reasoning is internal; any unavoidable text must use {response_language}."
@@ -770,6 +771,7 @@ def _build_map_operation_messages(conversation, rows, language, stage_context):
     user_prompt = (
         f"Authorized revision brief: {revision_brief!r}. "
         f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule}\n\n"
+        "Column ruler (one-based): 123456789012\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Recent Stage conversation JSON: {json.dumps(transcript, ensure_ascii=False)}"
@@ -989,11 +991,13 @@ def _apply_map_operations(base_rows, operations, revision_brief):
     shell = _connected_outer_shell(base_rows)
     normalized = []
     for operation in operations:
-        if not isinstance(operation, dict) or set(operation) != {"row", "column", "from", "to"}:
-            raise ValueError("each operation must contain exactly row, column, from, and to")
+        if not isinstance(operation, dict) or set(operation) not in (
+            {"row", "column", "to"},
+            {"row", "column", "from", "to"},
+        ):
+            raise ValueError("each operation must contain row, column, and to")
         row = operation["row"]
         column = operation["column"]
-        before = operation["from"]
         after = operation["to"]
         if isinstance(row, bool) or isinstance(column, bool) or not isinstance(row, int) or not isinstance(column, int):
             raise ValueError("operation coordinates must be integers")
@@ -1003,12 +1007,14 @@ def _apply_map_operations(base_rows, operations, revision_brief):
         if (x, y) in seen:
             raise ValueError("operation coordinates must be unique")
         seen.add((x, y))
+        before = base_rows[y][x]
+        declared_before = operation.get("from")
+        if declared_before is not None and declared_before != before:
+            raise ValueError(f"row {row}, column {column} does not match its declared from tile")
         if before not in allowed_tiles or after not in allowed_tiles or len(before) != 1 or len(after) != 1:
             raise ValueError("operation contains an unsupported tile")
         if before == after:
             raise ValueError("operation must change the tile")
-        if base_rows[y][x] != before:
-            raise ValueError(f"row {row}, column {column} does not match its declared from tile")
         if before == " " or after == " ":
             raise ValueError("void cells cannot be edited")
         if (x, y) in shell:
@@ -1060,8 +1066,14 @@ def _validate_operation_intent_scope(operations, revision_brief):
         (("左侧", "左边", "left"), lambda x, y: x < 6, "left area"),
         (("右侧", "右边", "right"), lambda x, y: x >= 6, "right area"),
     )
-    for markers, predicate, label in region_rules:
-        if any(marker in text for marker in markers) and not any(predicate(x, y) for x, y in positions):
+    matched_regions = [
+        (predicate, label)
+        for markers, predicate, label in region_rules
+        if any(marker in text for marker in markers)
+    ]
+    if len(matched_regions) == 1:
+        predicate, label = matched_regions[0]
+        if not any(predicate(x, y) for x, y in positions):
             raise ValueError(f"the operations do not touch the explicitly requested {label}")
 
 

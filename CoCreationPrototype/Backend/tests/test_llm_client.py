@@ -998,6 +998,42 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.attempts_used, 1)
         self.assertEqual(len(client.chat.completions.calls), 1)
 
+    def test_operation_candidates_use_server_read_current_tile_protocol(self):
+        operations = [
+            {"row": 6, "column": 7, "to": "."},
+            {"row": 6, "column": 8, "to": "t"},
+        ]
+        client = FakeClient([operation_payload(operations)])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [
+                    {"role": "user", "content": "Move the target one cell to the right and revise the map."},
+                ],
+                OPERATION_BASE_ROWS,
+                "server-source-operation-test",
+            )
+
+        self.assertEqual(result.proposed_rows[5], "#...s..t...#")
+        system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+        self.assertIn("Do not emit a from field", system_prompt)
+        self.assertIn('"row":1,"column":1,"to":"#"', system_prompt)
+
+    def test_verbose_brief_with_multiple_regions_does_not_require_every_region(self):
+        rows = llm_client._apply_map_operations(
+            OPERATION_BASE_ROWS,
+            [
+                {"row": 6, "column": 7, "to": "."},
+                {"row": 6, "column": 8, "to": "t"},
+            ],
+            "Keep the left side connected to the right side and make one local change.",
+        )
+
+        self.assertEqual(rows[5], "#...s..t...#")
+
     def test_operation_candidates_cannot_edit_outer_shell_or_fake_from_tile(self):
         shell_edit = [
             {"row": 1, "column": 1, "from": "#", "to": "."},
