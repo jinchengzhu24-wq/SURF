@@ -29,7 +29,7 @@ PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v23-diff-grounded-proposals"
+PROMPT_VERSION = "cocreation-v24-focused-card-routing"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -109,10 +109,19 @@ def build_chat_messages(
     stage_context = stage_context or {}
     task = _build_task_instructions(assessment_only, stage_context)
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
+    revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
+    revision_contract = (
+        "The designer's current message authorizes execution of this established revision "
+        f"brief: {revision_brief!r}. Treat that brief as the content contract. The latest "
+        "short authorization does not replace or weaken it; every changed tile must serve it. "
+        if revision_brief
+        else ""
+    )
     system_prompt = (
         "You are an adaptive Sokoban co-creation partner: a thoughtful, equal design peer "
         "who speaks like a rational, warm friend with your own point of view. Prefer natural "
-        "first-person language. Work "
+        "first-person language. Sound personally engaged, kind, and clear-headed; never use "
+        "stiff workflow language, bureaucratic notices, or canned service phrasing. Work "
         "only with the exact saved Stage and evidence supplied "
         "below. Keep the exchange natural, candid, and easy to answer: notice concrete "
         "design choices, contribute your own grounded interpretation or concern, and "
@@ -206,7 +215,8 @@ def build_chat_messages(
         "that accepted proposal as the established design context for the new Stage, "
         "not as a request to assess the map from scratch. Do not claim that unrelated "
         "discussion from another Stage happened in the current Stage.\n\n"
-        f"Write all new natural-language fields in {response_language}. {task}\n\n"
+        f"Write all new natural-language fields in {response_language}. {task} "
+        f"{revision_contract}\n\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         "Return JSON only with exactly these keys:\n"
         '{"assistantMessage":"...","guidance":'
@@ -289,6 +299,16 @@ def build_plain_chat_messages(
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
+    revision_request_state = stage_context.get("revisionRequestState")
+    revision_instruction = (
+        "The designer asked you to modify the map, but neither this message nor the recent "
+        "conversation contains a concrete revision direction. Do not invent one and do not "
+        "claim to edit anything. Give a short declarative explanation and output only one "
+        "contextual MANUAL_EDIT card that helps the designer point out or try the unclear area; "
+        "do not output DISCUSS, INTENT, WARNING, or proposal fields. "
+        if revision_request_state == "needs_direction"
+        else ""
+    )
     opening_instruction = (
         "This is the opening for a verified saved Stage. Notice one or two concrete "
         "authored choices and offer a clearly subjective perspective. Do not inventory "
@@ -312,11 +332,19 @@ def build_plain_chat_messages(
             "<GUIDANCE>DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
             "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ...</GUIDANCE>\n"
             "Omit any field that is not warranted, and omit the entire block when no card "
-            "would improve the collaboration. Once multi-turn evidence supports a meaningful "
-            "preference or direction, you MUST output INTENT. When you describe a concrete, "
-            "actionable revision direction, you MUST output both proposal fields. After the "
-            "designer explicitly agrees to move forward with a direction, you MUST output "
-            "both INTENT and the two proposal fields together. Write INTENT as a compact, "
+            "would improve the collaboration only when the designer explicitly changes to a "
+            "topic unrelated to this project. Apart from that off-topic exception and the very "
+            "first Stage 1 opening, every reply must produce at least one card. Visible cards "
+            "belong to exactly one of two "
+            "families. The discussion family may use any non-empty combination of DISCUSS, "
+            "WARNING, and INTENT, for a maximum of three cards. The action family is exactly "
+            "MANUAL_EDIT alone, both proposal fields plus MANUAL_EDIT, or both proposal fields "
+            "plus MANUAL_EDIT and WARNING. Never combine proposal fields or MANUAL_EDIT with "
+            "DISCUSS or INTENT, and never produce four cards. Once multi-turn evidence supports "
+            "a meaningful preference or direction, output INTENT only when using the discussion "
+            "family. When you describe a concrete, actionable revision direction, output both "
+            "proposal fields and MANUAL_EDIT; WARNING remains optional and needs strong evidence. "
+            "Write INTENT as a compact, "
             "correctable first-person reading of this particular exchange, and vary its "
             "opening from recent cards. A generic execution request such as '你帮我改' is not "
             "itself a design intention: ground INTENT in the substantive direction from the "
@@ -333,10 +361,10 @@ def build_plain_chat_messages(
             "Use DISCUSS at a useful later decision point for either one concrete, vivid "
             "question or one concise first-person design insight. A DISCUSS insight must add "
             "a judgment rather than repeat the visible reply. "
-            "Add MANUAL_EDIT when one local "
-            "experiment could advance the judgment: name the area, what to observe, and why, "
-            "without prescribing final coordinates or implying manual editing is required. "
-            "Output at most two UI cue fields. These metadata requirements do not require a "
+            "Use MANUAL_EDIT alone when the designer's direction is too unclear to turn into a "
+            "proposal, or pair it with a concrete proposal so designer and LLM can compare the "
+            "same local idea. Name the area, what to observe, and why, without prescribing exact "
+            "coordinates or implying manual editing is required. These metadata requirements do not require a "
             "question. Do not repeat an unchanged card "
             "listed in Saved Stage context.recentGuidance. The visible reply must stand on "
             "its own and must not mention these tags or mechanically repeat their text. "
@@ -344,11 +372,13 @@ def build_plain_chat_messages(
     )
     system_prompt = (
         "You are a thoughtful, equal Sokoban co-creation partner speaking like a rational, "
-        "warm friend. Prefer first-person observations and opinions. Write only the visible "
+        "warm friend. Prefer first-person observations and opinions. Sound personally engaged, "
+        "kind, and clear-headed; avoid stiff transitions, workflow announcements, bureaucratic "
+        "notices, and canned service phrasing. Write only the visible "
         f"reply to the designer in {response_language}; do not output JSON, analysis, or "
         "formatting instructions. The only permitted metadata is the optional trailing "
         "GUIDANCE block described below. "
-        f"{opening_instruction}"
+        f"{opening_instruction}{revision_instruction}"
         "Usually use two to four compact paragraphs, varying their rhythm and opening. A "
         "very simple answer may be shorter. Give observations room to breathe: connect a "
         "specific map detail to a playable moment, explain why your view follows, and add a "
@@ -483,7 +513,18 @@ def generate_chat_reply(
             503,
         )
 
-    proposal_request = not assessment_only and _requests_complete_map(conversation)
+    revision_state, revision_brief = _classify_revision_request(
+        conversation,
+        stage_context,
+    )
+    effective_stage_context = dict(stage_context or {})
+
+    if not assessment_only and revision_state != "not_request":
+        effective_stage_context["revisionRequestState"] = revision_state
+    if revision_brief:
+        effective_stage_context["authorizedRevisionBrief"] = revision_brief
+
+    proposal_request = not assessment_only and revision_state == "authorized"
 
     if not assessment_only and not proposal_request:
         return _generate_plain_chat_sync(
@@ -493,7 +534,7 @@ def generate_chat_reply(
             language=language,
             solver_metrics=solver_metrics,
             play_summary=play_summary,
-            stage_context=stage_context,
+            stage_context=effective_stage_context,
         )
 
     messages = build_chat_messages(
@@ -503,7 +544,7 @@ def generate_chat_reply(
         solver_metrics,
         play_summary,
         assessment_only,
-        stage_context,
+        effective_stage_context,
     )
     default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
     proposal_model = (
@@ -549,7 +590,7 @@ def generate_chat_reply(
                     language=language,
                     assessment_only=assessment_only,
                     proposal_validator=proposal_validator,
-                    stage_context=stage_context,
+                    stage_context=effective_stage_context,
                     started_at=started_at,
                     max_attempts=_max_attempts,
                 ),
@@ -1082,6 +1123,17 @@ async def _generate_plain_with_model_fallback(
                     language,
                 )
 
+            if (stage_context or {}).get("revisionRequestState") == "needs_direction":
+                body = _unclear_revision_reply(language)
+                question = None
+                intent_hypothesis = None
+                proposal_offer = None
+                ui_cues = [{
+                    "type": "manual_edit",
+                    "text": _unclear_revision_manual_edit(language),
+                }]
+                guidance_fallback_used = True
+
             guidance = {
                 "move": _plain_guidance_move(
                     stage_opening,
@@ -1094,8 +1146,17 @@ async def _generate_plain_with_model_fallback(
                 "proposalOffer": proposal_offer,
                 "uiCues": ui_cues[:2],
             }
+            guidance = _apply_guidance_card_policy(guidance)
+            guidance = _ensure_required_guidance_card(
+                guidance,
+                messages,
+                language,
+                rows,
+                stage_opening,
+                stage_context,
+            )
             evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
-            if evidence_signature and ui_cues:
+            if evidence_signature and guidance["uiCues"]:
                 guidance["evidenceSignature"] = evidence_signature
             assessment = (
                 _build_minimal_stage_assessment(
@@ -1135,10 +1196,17 @@ async def _generate_plain_with_model_fallback(
                 latencyMs=latency_ms,
                 responseMode="plain_text",
                 guidanceFallbackUsed=guidance_fallback_used,
-                intentCard=bool(intent_hypothesis),
-                proposalCard=bool(proposal_offer),
-                warningCard=any(cue.get("type") == "warning" for cue in ui_cues),
-                manualEditCard=any(cue.get("type") == "manual_edit" for cue in ui_cues),
+                intentCard=bool(guidance.get("intentHypothesis")),
+                questionCard=bool(guidance.get("followUpQuestion")),
+                proposalCard=bool(guidance.get("proposalOffer")),
+                warningCard=any(
+                    cue.get("type") in {"warning", "tradeoff"}
+                    for cue in guidance.get("uiCues", [])
+                ),
+                manualEditCard=any(
+                    cue.get("type") == "manual_edit"
+                    for cue in guidance.get("uiCues", [])
+                ),
                 **response_fields,
             )
             return result
@@ -2684,8 +2752,17 @@ def _apply_deterministic_guidance_fallback(
             cue_by_type["warning"] = {"type": "warning", "text": warning}
             fallback_used = True
 
-    if "manual_edit" not in cue_by_type and (explicit_direction or explicit_agreement):
-        manual_edit = _contextual_manual_edit(rows, language)
+    needs_direction = (stage_context or {}).get("revisionRequestState") == "needs_direction"
+    needs_action_companion = proposal_offer is not None
+
+    if "manual_edit" not in cue_by_type and (
+        needs_direction or needs_action_companion
+    ):
+        manual_edit = (
+            _unclear_revision_manual_edit(language)
+            if needs_direction
+            else _contextual_manual_edit(rows, language)
+        )
         if manual_edit and not _cue_repeats_current_evidence(
             "manual_edit", manual_edit, recent, evidence_signature
         ):
@@ -2701,6 +2778,153 @@ def _apply_deterministic_guidance_fallback(
         if cue_type in cue_by_type
     ][:2]
     return intent_hypothesis, proposal_offer, ordered_cues, fallback_used
+
+
+def _apply_guidance_card_policy(guidance):
+    """Normalize guidance into one of the approved one-to-three card families."""
+    normalized = dict(guidance or {})
+    cues = [
+        dict(cue)
+        for cue in normalized.get("uiCues") or []
+        if cue.get("type") in {"warning", "tradeoff", "manual_edit"}
+        and cue.get("text")
+    ]
+    warning = next(
+        (cue for cue in cues if cue.get("type") in {"warning", "tradeoff"}),
+        None,
+    )
+    manual = next(
+        (cue for cue in cues if cue.get("type") == "manual_edit"),
+        None,
+    )
+
+    if normalized.get("proposalOffer") is not None:
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
+        normalized["followUpQuestion"] = None
+        normalized["uiCues"] = [
+            cue for cue in (manual, warning) if cue is not None
+        ]
+        return normalized
+
+    if manual is not None:
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
+        normalized["followUpQuestion"] = None
+        normalized["uiCues"] = [manual]
+        return normalized
+
+    normalized["uiCues"] = [warning] if warning is not None else []
+    return normalized
+
+
+def _ensure_required_guidance_card(
+    guidance,
+    messages,
+    language,
+    rows,
+    stage_opening,
+    stage_context,
+):
+    normalized = dict(guidance or {})
+    latest_user = _latest_role_content(messages, "user")
+
+    if _is_stage_one(stage_context) and stage_opening:
+        return normalized
+
+    if _user_explicitly_off_topic(latest_user):
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
+        normalized["followUpQuestion"] = None
+        normalized["proposalOffer"] = None
+        normalized["uiCues"] = []
+        return normalized
+
+    card_count = (
+        int(bool(normalized.get("intentHypothesis")))
+        + int(bool(normalized.get("followUpQuestion")))
+        + int(bool(normalized.get("proposalOffer")))
+        + len(normalized.get("uiCues") or [])
+    )
+    if card_count:
+        return normalized
+
+    normalized["followUpQuestion"] = _friendly_default_discussion_focus(
+        rows,
+        language,
+        latest_user,
+        ((stage_context or {}).get("recentGuidance") or {}).get("discussionFocus"),
+    )
+    return normalized
+
+
+def _user_explicitly_off_topic(message):
+    text = str(message or "").strip().casefold()
+    if not text:
+        return False
+    chinese = (
+        "换个话题", "题外话", "与这个项目无关", "和这个项目无关", "与地图无关",
+        "和地图无关", "先不聊地图", "不谈这个关卡", "聊点别的", "说点别的",
+    )
+    english = (
+        "change the subject", "off topic", "unrelated to this project",
+        "unrelated to the map", "let's talk about something else",
+        "stop talking about the map",
+    )
+    return any(marker in text for marker in (*chinese, *english))
+
+
+def _friendly_default_discussion_focus(rows, language, latest_user, recent_focus):
+    serialized = "".join(str(row) for row in (rows or []))
+    seed = sum(ord(character) for character in f"{serialized}{latest_user}")
+    if language == "zh-CN":
+        options = (
+            "我想把第一次推动时的路线读法单独留下来聊聊；它会告诉我们下一步该保留现在的空间，还是让关键转折更清楚。",
+            "在我看来，箱子第一次接近目标前的那次犹豫最值得继续观察；它会影响我们下一步调整路线关系还是保留当前结构。",
+            "我更想先盯住玩家第一次需要规划推箱顺序的瞬间；这个判断能帮助我们决定下一次修改应该动局部节奏还是整体通路。",
+        )
+    else:
+        options = (
+            "I want to keep the route reading at the first push separate for discussion; it will tell us whether to preserve the current space or clarify the key turn next.",
+            "To me, the hesitation before a box first approaches its target is worth watching; it will shape whether we adjust the route relationship or preserve this structure.",
+            "I would first watch the moment when the player has to plan the push order; that judgment can tell us whether the next revision should change local rhythm or the larger route.",
+        )
+    for offset in range(len(options)):
+        candidate = options[(seed + offset) % len(options)]
+        if not _guidance_text_matches(candidate, recent_focus):
+            return candidate
+    return options[seed % len(options)]
+
+
+def _unclear_revision_manual_edit(language):
+    if language == "zh-CN":
+        return (
+            "我还没读准你最想动哪一块。你可以先在右侧编辑器标出或轻微调整最在意的"
+            "局部；保存后，我会沿着这个真实变化继续和你一起判断。"
+        )
+    return (
+        "I have not yet understood which part you most want to change. You can mark or "
+        "lightly adjust the area that concerns you most in the right-hand editor; after it "
+        "is saved, I can continue from that actual change with you."
+    )
+
+
+def _unclear_revision_reply(language):
+    if language == "zh-CN":
+        return (
+            "可以，我愿意和你一起改。只是我还没读准你最想动的是哪一块；如果现在直接替你"
+            "改地图，我其实是在替你猜，这样不可靠。\n\n"
+            "你可以先在右侧编辑器标出最在意的局部，哪怕只动一格也行。等真实变化保存下来，"
+            "我就能沿着它继续判断，而不是把自己的想法冒充成你的要求。"
+        )
+    return (
+        "Yes, I am happy to work on it with you. I just have not understood which part you "
+        "most want changed; if I edited the map now, I would be guessing on your behalf, "
+        "and that would not be reliable.\n\n"
+        "You can mark the area that matters most in the editor, even with a one-tile change. "
+        "Once that real change is saved, I can continue from it without presenting my own "
+        "idea as your request."
+    )
 
 
 def _natural_intent_candidate(latest_user, language, explicit_agreement):
@@ -3690,7 +3914,7 @@ def _clean_optional_text(value, field_name):
     return _clean_text(value, field_name)
 
 
-def _requests_complete_map(conversation):
+def _classify_revision_request(conversation, stage_context=None):
     latest_user_message = next(
         (
             str(message.get("content") or "").strip().casefold()
@@ -3701,7 +3925,9 @@ def _requests_complete_map(conversation):
     )
 
     if not latest_user_message:
-        return False
+        return "not_request", None
+    if _user_explicitly_off_topic(latest_user_message):
+        return "not_request", None
 
     english_markers = (
         "map proposal",
@@ -3735,6 +3961,15 @@ def _requests_complete_map(conversation):
     marker_match = any(
         marker in latest_user_message
         for marker in (*english_markers, *chinese_markers)
+    )
+    chinese_polite_request = re.search(
+        r"(?:可以|能|能不能|可不可以|请|麻烦)?(?:你)?(?:帮我|替我|给我)"
+        r"(?:修改|改|调整)(?:一下|一版|这个|地图|关卡|布局)?",
+        latest_user_message,
+    )
+    chinese_short_command = re.fullmatch(
+        r"\s*(?:开始)?(?:修改|改|调整)(?:一下|吧)?\s*[。！!？?]*\s*",
+        latest_user_message,
     )
     chinese_authorization = re.search(
         r"(?:按|照着|依照)(?:这个|这条|刚才的|上面的)?(?:方向|思路|方案)?"
@@ -3770,7 +4005,121 @@ def _requests_complete_map(conversation):
     if chinese_design_question is not None and chinese_imperative is None:
         chinese_authorization = None
         marker_match = False
-    return marker_match or chinese_authorization is not None or english_authorization is not None
+        chinese_polite_request = None
+        chinese_short_command = None
+
+    requested = (
+        marker_match
+        or chinese_authorization is not None
+        or chinese_polite_request is not None
+        or chinese_short_command is not None
+        or english_authorization is not None
+    )
+
+    if not requested:
+        return "not_request", None
+
+    brief = _authorized_revision_brief(
+        conversation,
+        stage_context,
+        latest_user_message,
+    )
+    return ("authorized", brief) if brief else ("needs_direction", None)
+
+
+def _requests_complete_map(conversation, stage_context=None):
+    state, _ = _classify_revision_request(conversation, stage_context)
+    return state == "authorized"
+
+
+def _authorized_revision_brief(conversation, stage_context, latest_user_message):
+    if _contains_concrete_revision_direction(latest_user_message):
+        return latest_user_message[:1200]
+
+    recent_offer = ((stage_context or {}).get("recentGuidance") or {}).get(
+        "proposalOffer"
+    ) or {}
+    offer_text = " ".join(
+        str(recent_offer.get(field) or "").strip()
+        for field in ("summary", "rationale")
+    ).strip()
+
+    if _contains_concrete_revision_direction(offer_text):
+        return offer_text[:1200]
+
+    skipped_latest_user = False
+    for message in reversed(conversation):
+        role = message.get("role")
+        content = str(message.get("content") or "").strip()
+
+        if role == "user" and not skipped_latest_user:
+            skipped_latest_user = True
+            continue
+        if role == "assistant" and _contains_concrete_revision_direction(
+            content,
+            require_proposal_framing=True,
+        ):
+            return content[:1200]
+        if role == "user" and _contains_concrete_revision_direction(
+            content,
+            require_proposal_framing=True,
+        ):
+            return content[:1200]
+
+    return None
+
+
+def _contains_concrete_revision_direction(value, require_proposal_framing=False):
+    text = str(value or "").strip().casefold()
+    if not text:
+        return False
+
+    if re.search(r"[\u3400-\u9fff]", text):
+        anchors = (
+            "水", "箱", "目标", "墙", "通道", "路线", "区域", "入口",
+            "落点", "推动", "节奏", "左上", "右上", "左下", "右下",
+        )
+        actions = (
+            "移", "挪", "调整", "重排", "保留", "减少", "增加", "改变",
+            "集中", "连接", "缩短", "拉开", "让", "改动", "修改",
+        )
+    else:
+        anchors = (
+            "water", "box", "crate", "target", "goal", "wall", "corridor",
+            "route", "area", "entrance", "landing", "push", "rhythm",
+            "upper", "lower", "left", "right",
+        )
+        actions = (
+            "move", "shift", "adjust", "rearrange", "keep", "preserve",
+            "reduce", "increase", "change", "connect", "shorten", "separate",
+            "make", "revise",
+        )
+
+    has_direction = any(anchor in text for anchor in anchors) and any(
+        action in text for action in actions
+    )
+    if not has_direction or not require_proposal_framing:
+        return has_direction
+
+    if re.search(r"[\u3400-\u9fff]", text):
+        framing = (
+            "建议", "可以把", "不如", "试试", "我倾向", "我想改", "我的方案",
+            "修改方案", "具体改", "改成", "把它", "把这个", "把那",
+        )
+        framed_action = re.search(
+            r"把.{0,40}(?:移|挪|调整|重排|保留|减少|增加|改变|集中|连接|缩短|拉开|改)",
+            text,
+        )
+    else:
+        framing = (
+            "i suggest", "we could", "you could", "let's", "let us", "try ",
+            "i would", "my proposal", "revision direction", "change it to",
+        )
+        framed_action = re.match(
+            r"(?:move|shift|adjust|rearrange|keep|preserve|reduce|increase|change|connect|shorten|separate|revise)\b",
+            text,
+        )
+    return any(marker in text for marker in framing) or framed_action is not None
 
 
 def _create_async_client(api_key, base_url, timeout_seconds):

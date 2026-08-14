@@ -785,6 +785,48 @@ main {
     background: #c9dce5;
 }
 
+.discussion-focus {
+    position: relative;
+    margin-top: 15px;
+    padding: 13px 14px 12px;
+    border: 3px solid #17364a;
+    border-radius: 2px;
+    color: #17364a;
+    background: #c9dce5;
+    box-shadow:
+        inset 0 0 0 2px #e7f1f4,
+        3px 3px 0 #33454f;
+    font-weight: 800;
+    line-height: 1.55;
+}
+
+.discussion-focus::before {
+    position: absolute;
+    top: -8px;
+    left: 14px;
+    width: 44px;
+    height: 5px;
+    border: 2px solid #17364a;
+    background: #4f819a;
+    content: "";
+}
+
+.discussion-focus-label {
+    display: block;
+    margin-bottom: 7px;
+    color: #234f67;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 0.06em;
+}
+
+.discussion-focus strong {
+    display: block;
+    color: #17364a;
+    font-weight: 800;
+}
+
 .guidance-cue-revision {
     color: #392752;
     background: #e0d5eb;

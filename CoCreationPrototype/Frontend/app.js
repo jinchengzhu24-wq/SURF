@@ -3,6 +3,7 @@
 const MAX_MESSAGE_LENGTH = 2000;
 const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
 const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
+const DISCUSSION_FOCUS_LABEL = "LET'S DISCUSS / 一起聊聊";
 const GUIDANCE_CUE_LABELS = {
     en: {
         manual_edit: "MANUAL EDIT",
@@ -444,7 +445,8 @@ function renderMessages() {
 
 function renderAssistantBubble(turn, bubble) {
     const localized = localizedAssistantTurn(turn);
-    const guidance = localized.guidance || {};
+    const proposal = proposalForTurn(turn.turnId);
+    const guidance = guidanceForDisplay(localized.guidance || {}, proposal);
     const question = String(guidance.followUpQuestion || "").trim();
     const uiCues = Array.isArray(guidance.uiCues) ? guidance.uiCues : [];
     const bodyNode = document.createElement("div");
@@ -470,19 +472,7 @@ function renderAssistantBubble(turn, bubble) {
     const cueList = document.createElement("div");
     cueList.className = "guidance-cues";
 
-    if (guidance.intentHypothesis) {
-        cueList.appendChild(createGuidanceCue("intent", guidance.intentHypothesis));
-    }
-
-    uiCues.forEach(cue => {
-        if (cue && ["manual_edit", "warning", "tradeoff"].includes(cue.type) && cue.text) {
-            const displayType = cue.type === "tradeoff" ? "warning" : cue.type;
-            cueList.appendChild(createGuidanceCue(displayType, cue.text));
-        }
-    });
-
     const offer = guidance.proposalOffer;
-    const proposal = proposalForTurn(turn.turnId);
 
     if (offer && offer.summary) {
         const revisionCue = createGuidanceCue(
@@ -499,14 +489,72 @@ function renderAssistantBubble(turn, bubble) {
         }
         cueList.appendChild(revisionCue);
     } else if (proposal && proposal.summary) {
-        cueList.appendChild(createGuidanceCue("revision", proposal.summary));
+        cueList.appendChild(createGuidanceCue(
+            "revision",
+            localizedProposalSummary(proposal)
+        ));
+    } else if (guidance.intentHypothesis) {
+        cueList.appendChild(createGuidanceCue("intent", guidance.intentHypothesis));
     }
 
-    if (question) {
-        cueList.appendChild(createGuidanceCue("question", question));
-    }
+    uiCues.forEach(cue => {
+        if (cue && ["manual_edit", "warning", "tradeoff"].includes(cue.type) && cue.text) {
+            const displayType = cue.type === "tradeoff" ? "warning" : cue.type;
+            cueList.appendChild(createGuidanceCue(displayType, cue.text));
+        }
+    });
 
     if (cueList.childElementCount) bubble.appendChild(cueList);
+    if (question) bubble.appendChild(createDiscussionFocus(question));
+}
+
+function guidanceForDisplay(source, proposal = null) {
+    const guidance = { ...source };
+    const cues = Array.isArray(source.uiCues) ? source.uiCues.filter(Boolean) : [];
+    const warning = cues.find(cue => ["warning", "tradeoff"].includes(cue.type) && cue.text);
+    let manual = cues.find(cue => cue.type === "manual_edit" && cue.text);
+
+    if (guidance.proposalOffer || proposal) {
+        manual ||= {
+            type: "manual_edit",
+            text: proposalCompanionManualText(Boolean(proposal))
+        };
+        guidance.intentHypothesis = null;
+        guidance.followUpQuestion = null;
+        guidance.uiCues = [manual, warning].filter(Boolean);
+        return guidance;
+    }
+    if (manual) {
+        guidance.intentHypothesis = null;
+        guidance.followUpQuestion = null;
+        guidance.uiCues = [manual];
+        return guidance;
+    }
+    guidance.uiCues = warning ? [warning] : [];
+    return guidance;
+}
+
+function proposalCompanionManualText(pendingProposal) {
+    if (state.language === "zh-CN") {
+        return pendingProposal
+            ? "这份地图还只是待确认的方案。如果你想自己调整，请先拒绝它，再从右侧编辑器接着改；这样不会把两套改动混在一起。"
+            : "如果这个方向接近你的想法，也可以先在右侧编辑器围绕同一区域做个小范围尝试，再比较哪种处理更像你想要的体验。";
+    }
+    return pendingProposal
+        ? "This map is still a pending proposal. If you would rather adjust it yourself, reject it first and continue in the editor so the two sets of changes do not get mixed together."
+        : "If this direction feels close to what you mean, you can also try a small edit in the same area and compare which version better matches the experience you want.";
+}
+
+function createDiscussionFocus(text) {
+    const cue = document.createElement("section");
+    cue.className = "discussion-focus";
+    const label = document.createElement("span");
+    label.className = "discussion-focus-label";
+    label.textContent = DISCUSSION_FOCUS_LABEL;
+    const message = document.createElement("strong");
+    message.textContent = text;
+    cue.append(label, message);
+    return cue;
 }
 
 function assistantBodyWithoutCues(content, uiCues, question) {
@@ -951,9 +999,9 @@ function localizedProposalSummary(proposal) {
 
 function verifiedProposalMessage() {
     if (state.language === "zh-CN") {
-        return "我生成了一份待审查的地图提案。为避免文字与地图不一致，提案卡里的修改说明由系统直接根据前后地图逐格生成；请检查高亮差异是否真正实现了你刚才的方向，再决定是否接受。";
+        return "我把这次地图提案整理好了，也逐格核对了前后的真实变化。它现在仍是一份等你审查的方案；我更想让你先看高亮位置是否真的回应了刚才的方向，再决定要不要接受。";
     }
-    return "I generated a map proposal for review. To keep the copy consistent with the actual map, the proposal card describes changes directly from the before/after tile diff. Please check whether the highlighted changes truly implement your direction before accepting it.";
+    return "I have organized this map proposal and checked its real before/after tile changes. It is still yours to review; I would first look at whether the highlighted cells really answer the direction we discussed before deciding whether to accept it.";
 }
 
 function verifiedProposalSummary(diff) {

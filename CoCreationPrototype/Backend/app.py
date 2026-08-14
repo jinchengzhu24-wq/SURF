@@ -875,6 +875,7 @@ def _send_message_locked(
                 execution,
                 assistant_message=_verified_proposal_message(language),
                 modification_summary=verified_summary,
+                guidance=_proposal_review_guidance(execution.guidance, language),
             )
 
         existing = database.execute(
@@ -926,17 +927,47 @@ def _send_message_locked(
 def _verified_proposal_message(language):
     if language == "zh-CN":
         return (
-            "我生成了一份待审查的地图提案。为避免文字与地图不一致，提案卡里的修改说明"
-            "由系统直接根据前后地图逐格生成；请检查高亮差异是否真正实现了你刚才的方向，"
-            "再决定是否接受。"
+            "我把这次地图提案整理好了，也逐格核对了前后的真实变化。它现在仍是一份"
+            "等你审查的方案；我更想让你先看高亮位置是否真的回应了刚才的方向，再决定"
+            "要不要接受。"
         )
 
     return (
-        "I generated a map proposal for review. To keep the copy consistent with the "
-        "actual map, the proposal card describes changes directly from the before/after "
-        "tile diff. Please check whether the highlighted changes truly implement your "
-        "direction before accepting it."
+        "I have organized this map proposal and checked its real before/after tile changes. "
+        "It is still yours to review; I would first look at whether the highlighted cells "
+        "really answer the direction we discussed before deciding whether to accept it."
     )
+
+
+def _proposal_review_guidance(guidance, language):
+    source = dict(guidance or {})
+    warning = next(
+        (
+            dict(cue)
+            for cue in source.get("uiCues") or []
+            if cue.get("type") in {"warning", "tradeoff"} and cue.get("text")
+        ),
+        None,
+    )
+    manual_text = (
+        "这份提案会先保持待审查状态。如果你更想亲手微调，可以先拒绝它，再在右侧编辑器"
+        "沿着高亮区域继续改；我会把你的实际修改当作下一轮共同判断的依据。"
+        if language == "zh-CN"
+        else (
+            "This proposal stays pending while you review it. If you would rather tune it "
+            "yourself, reject it first and continue around the highlighted area in the "
+            "right-hand editor; I will use your actual edit as our next shared evidence."
+        )
+    )
+    source["intentHypothesis"] = None
+    source["intentConfidence"] = None
+    source["followUpQuestion"] = None
+    source["proposalOffer"] = None
+    source["uiCues"] = [
+        {"type": "manual_edit", "text": manual_text},
+        *([warning] if warning is not None else []),
+    ]
+    return source
 
 
 @contextmanager

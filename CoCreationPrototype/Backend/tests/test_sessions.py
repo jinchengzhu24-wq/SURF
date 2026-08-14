@@ -791,12 +791,16 @@ class CoCreationSessionTests(unittest.TestCase):
             if turn["turnId"] == proposed_session["proposals"][0]["assistantTurnId"]
         )
         self.assertIn(
-            "describes changes directly from the before/after tile diff",
+            "checked its real before/after tile changes",
             proposal_turn_before_acceptance["content"],
         )
         self.assertNotIn(
             "Moved the player start left",
             proposal_turn_before_acceptance["content"],
+        )
+        self.assertEqual(
+            [cue["type"] for cue in proposal_turn_before_acceptance["guidance"]["uiCues"]],
+            ["manual_edit"],
         )
         proposal_id = proposed_session["proposals"][0]["proposalId"]
 

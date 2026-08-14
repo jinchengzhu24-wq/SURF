@@ -63,13 +63,17 @@ class SlowClient:
 class LLMClientTests(unittest.TestCase):
     def execute(self, outcomes, rows=None, **reply_kwargs):
         client = FakeClient(outcomes)
+        conversation = reply_kwargs.pop(
+            "conversation",
+            [{"role": "user", "content": "Assess the level."}],
+        )
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
             patch.object(llm_client, "_create_async_client", return_value=client),
         ):
             result = llm_client.generate_chat_reply(
-                [{"role": "user", "content": "Assess the level."}],
+                conversation,
                 rows or ["############"] * 10,
                 "request-test",
                 **reply_kwargs,
@@ -164,7 +168,12 @@ class LLMClientTests(unittest.TestCase):
             },
         )
 
-        self.assertIsNone(result.guidance["followUpQuestion"])
+        focus = result.guidance["followUpQuestion"]
+        self.assertIsNotNone(focus)
+        self.assertNotEqual(
+            focus,
+            result.guidance.get("recentGuidance", {}).get("discussionFocus"),
+        )
 
     def test_plain_reply_extracts_intent_card(self):
         result, _ = self.execute([
@@ -206,8 +215,58 @@ class LLMClientTests(unittest.TestCase):
         ])
 
         self.assertEqual(result.guidance["move"], "offer_revision")
-        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertIsNotNone(result.guidance["proposalOffer"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
+
+    def test_guidance_card_policy_keeps_only_the_confirmed_families(self):
+        discussion = llm_client._apply_guidance_card_policy({
+            "intentHypothesis": "I read your preference as preserving the upper route.",
+            "intentConfidence": "medium",
+            "followUpQuestion": "Which first push should carry the route judgment?",
+            "proposalOffer": None,
+            "uiCues": [{"type": "warning", "text": "The box may lose its return route."}],
+        })
+        self.assertIsNotNone(discussion["intentHypothesis"])
+        self.assertIsNotNone(discussion["followUpQuestion"])
+        self.assertEqual([cue["type"] for cue in discussion["uiCues"]], ["warning"])
+
+        action = llm_client._apply_guidance_card_policy({
+            "intentHypothesis": "This must be removed.",
+            "intentConfidence": "medium",
+            "followUpQuestion": "This must be removed too?",
+            "proposalOffer": {"summary": "Move the target", "rationale": "Change the route"},
+            "uiCues": [
+                {"type": "manual_edit", "text": "Try the same area in the editor."},
+                {"type": "warning", "text": "The box may lose its return route."},
+            ],
+        })
+        self.assertIsNone(action["intentHypothesis"])
+        self.assertIsNone(action["followUpQuestion"])
+        self.assertEqual(
+            [cue["type"] for cue in action["uiCues"]],
+            ["manual_edit", "warning"],
+        )
+
+    def test_non_opening_replies_require_a_card_but_explicit_off_topic_does_not(self):
+        result, _ = self.execute(["The route remains readable."])
+        self.assertIsNotNone(result.guidance["followUpQuestion"])
+
+        client = FakeClient(["当然，我们可以先聊点别的。"])
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            off_topic = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "这个与地图无关，我们换个话题。"}],
+                ["############"] * 10,
+                "off-topic-card-test",
+                language="zh-CN",
+            )
+        self.assertIsNone(off_topic.guidance["followUpQuestion"])
+        self.assertIsNone(off_topic.guidance["intentHypothesis"])
+        self.assertEqual(off_topic.guidance["uiCues"], [])
 
     def test_proposal_card_distills_body_copy_into_title_and_play_rationale(self):
         copied = (
@@ -240,10 +299,9 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("操作密度", offer["rationale"])
         self.assertNotEqual(offer["summary"], copied)
         self.assertNotIn("你说得对", offer["rationale"])
-        self.assertIsNotNone(result.guidance["followUpQuestion"])
-        self.assertIn("下方箱子", result.guidance["followUpQuestion"])
-        self.assertIn("新目标", result.guidance["followUpQuestion"])
-        self.assertIn("下一步", result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
 
     def test_malformed_guidance_is_hidden_without_failing_reply(self):
         for reply in (
@@ -253,9 +311,10 @@ class LLMClientTests(unittest.TestCase):
         ):
             with self.subTest(reply=reply):
                 result, _ = self.execute([reply])
-                self.assertEqual(result.assistant_message, "Visible reply.")
+                self.assertTrue(result.assistant_message.startswith("Visible reply."))
                 self.assertIsNone(result.guidance["intentHypothesis"])
                 self.assertIsNone(result.guidance["proposalOffer"])
+                self.assertIsNotNone(result.guidance["followUpQuestion"])
 
     def test_repeated_guidance_cards_are_suppressed_but_changed_intent_remains(self):
         content = (
@@ -309,7 +368,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("never ask the designer to approve the preference", messages[0]["content"])
         self.assertIn("<GUIDANCE>", messages[0]["content"])
         self.assertIn("recentGuidance", messages[0]["content"])
-        self.assertIn("you MUST output INTENT", messages[0]["content"])
+        self.assertIn("every reply must produce at least one card", messages[0]["content"])
+        self.assertIn("never produce four cards", messages[0]["content"])
         self.assertIn("two to four compact paragraphs", messages[0]["content"])
         self.assertIn("Give observations room to breathe", messages[0]["content"])
 
@@ -322,7 +382,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("water-side route", result.assistant_message)
         self.assertEqual(result.attempts_used, 2)
         self.assertEqual(client.chat.completions.calls[1]["model"], "deepseek-v4-pro")
-        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertIsNotNone(result.guidance["followUpQuestion"])
 
     def test_two_pure_generic_questions_return_low_quality_error(self):
         client = FakeClient(["What do you think?", "Is this direction okay?"])
@@ -345,8 +405,8 @@ class LLMClientTests(unittest.TestCase):
         reply = "What should stay? What should change?"
         result, _ = self.execute([reply])
 
-        self.assertEqual(result.assistant_message, reply)
-        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertTrue(result.assistant_message.startswith(reply))
+        self.assertIsNotNone(result.guidance["followUpQuestion"])
 
     def test_redundant_question_is_removed_after_an_explicit_direction(self):
         client = FakeClient([
@@ -367,7 +427,8 @@ class LLMClientTests(unittest.TestCase):
             "That would make the opening commitment more legible."
         ))
         self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertEqual(result.guidance["uiCues"], [])
 
     def test_explicit_direction_can_keep_a_deeper_concrete_question(self):
         client = FakeClient([
@@ -400,7 +461,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(
             [cue["type"] for cue in result.guidance["uiCues"]],
-            ["warning", "manual_edit"],
+            ["manual_edit"],
         )
         self.assertNotIn("GUIDANCE", result.assistant_message)
         self.assertLessEqual(len(result.guidance["uiCues"]), 2)
@@ -546,7 +607,7 @@ class LLMClientTests(unittest.TestCase):
                 "question-dedup-test",
             )
 
-        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertIsNotNone(result.guidance["followUpQuestion"])
 
     def test_generic_question_is_removed_when_declarative_body_exists(self):
         result, client = self.execute([
@@ -555,7 +616,7 @@ class LLMClientTests(unittest.TestCase):
         ])
 
         self.assertEqual(len(client.chat.completions.calls), 1)
-        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertIsNotNone(result.guidance["followUpQuestion"])
         self.assertNotIn("Does this direction work", result.assistant_message)
 
     def test_clear_evaluation_gets_a_specific_question_when_model_omits_one(self):
@@ -618,9 +679,10 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(result.guidance["move"], "offer_revision")
-        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertIsNotNone(result.guidance["proposalOffer"])
         self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
         self.assertNotIn("？", result.assistant_message)
         self.assertNotIn("吗", result.assistant_message)
 
@@ -707,7 +769,10 @@ class LLMClientTests(unittest.TestCase):
             patch.object(llm_client, "_create_async_client", return_value=client),
         ):
             llm_client.generate_chat_reply(
-                [{"role": "user", "content": "Please create a reviewable map proposal."}],
+                [
+                    {"role": "assistant", "content": "Move the lower target beside the water route."},
+                    {"role": "user", "content": "Please create a reviewable map proposal."},
+                ],
                 ["############"] * 10,
                 "proposal-model-test",
             )
@@ -765,6 +830,8 @@ class LLMClientTests(unittest.TestCase):
             "你来改吧",
             "按这个思路帮我改一下",
             "请你改一下地图",
+            "可以帮我修改吗？",
+            "修改",
             "Can you change it?",
             "Go ahead and revise the map.",
         )
@@ -779,6 +846,7 @@ class LLMClientTests(unittest.TestCase):
         for message in positives:
             with self.subTest(message=message):
                 self.assertTrue(llm_client._requests_complete_map([
+                    {"role": "assistant", "content": "把右下目标移近水域，让推动路线形成绕行。"},
                     {"role": "user", "content": message},
                 ]))
         for message in negatives:
@@ -786,6 +854,51 @@ class LLMClientTests(unittest.TestCase):
                 self.assertFalse(llm_client._requests_complete_map([
                     {"role": "user", "content": message},
                 ]))
+
+        for message in ("可以帮我修改吗？", "修改", "Can you change it?"):
+            with self.subTest(message=f"no-basis:{message}"):
+                state, brief = llm_client._classify_revision_request([
+                    {"role": "user", "content": message},
+                ])
+                self.assertEqual(state, "needs_direction")
+                self.assertIsNone(brief)
+
+        state, brief = llm_client._classify_revision_request([
+            {
+                "role": "assistant",
+                "content": "我觉得水域让下半区的路线更有犹豫感。",
+            },
+            {"role": "user", "content": "修改"},
+        ])
+        self.assertEqual(state, "needs_direction")
+        self.assertIsNone(brief)
+
+        state, brief = llm_client._classify_revision_request([
+            {"role": "user", "content": "换个话题，帮我修改一首与地图无关的诗。"},
+        ])
+        self.assertEqual(state, "not_request")
+        self.assertIsNone(brief)
+
+    def test_unclear_revision_request_is_manual_edit_only(self):
+        result, _ = self.execute(
+            [
+                "I can help, but I still need to understand the area you mean.\n"
+                "<GUIDANCE>DISCUSS: Which route should change? || "
+                "INTENT: I think you may want a more deliberate route. || "
+                "PROPOSAL_SUMMARY: Move the target || "
+                "PROPOSAL_RATIONALE: Make the route less direct.</GUIDANCE>"
+            ],
+            conversation=[{"role": "user", "content": "Can you change it?"}],
+        )
+
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["proposalOffer"])
+        self.assertEqual(
+            [cue["type"] for cue in result.guidance["uiCues"]],
+            ["manual_edit"],
+        )
+        self.assertIn("I would be guessing on your behalf", result.assistant_message)
 
     def test_explicit_map_proposal_rejects_text_only_result(self):
         text_only = json.dumps({
@@ -810,7 +923,10 @@ class LLMClientTests(unittest.TestCase):
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
-                [{"role": "user", "content": "Please create a reviewable map proposal."}],
+                [
+                    {"role": "assistant", "content": "Move the lower target beside the water route."},
+                    {"role": "user", "content": "Please create a reviewable map proposal."},
+                ],
                 ["############"] * 10,
                 "proposal-required-test",
             )
@@ -850,7 +966,10 @@ class LLMClientTests(unittest.TestCase):
             patch.object(llm_client, "_create_async_client", return_value=client),
         ):
             result = llm_client.generate_chat_reply(
-                [{"role": "user", "content": "Please revise the map."}],
+                [
+                    {"role": "assistant", "content": "Move the lower target beside the water route."},
+                    {"role": "user", "content": "Please revise the map."},
+                ],
                 ["############"] * 10,
                 "proposal-pro-correction-test",
                 proposal_validator=reject_once,
@@ -1164,7 +1283,10 @@ class LLMClientTests(unittest.TestCase):
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
-                [{"role": "user", "content": "Please draft that revision."}],
+                [
+                    {"role": "assistant", "content": "Move the lower target beside the water route."},
+                    {"role": "user", "content": "Please draft that revision."},
+                ],
                 ["############"] * 10,
                 "invalid-proposal-test",
                 proposal_validator=reject_proposal,
