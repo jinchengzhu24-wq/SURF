@@ -32,7 +32,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
         self.assertIn("cocreation-card-spacing-20260814-18", index_response.text)
-        self.assertIn("cocreation-strict-relaxation-20260814-20", index_response.text)
+        self.assertIn("cocreation-relaxed-offer-20260814-21", index_response.text)
         self.assertIn('<html lang="zh-CN">', index_response.text)
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--bg: #6f9d31", css_response.text)
@@ -53,6 +53,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("verifiedProposalMessage()", js_response.text)
         self.assertIn("guidanceForDisplay", js_response.text)
         self.assertIn("createDiscussionFocus", js_response.text)
+        self.assertIn("elements.chatForm.requestSubmit()", js_response.text)
+
         self.assertIn("LET'S DISCUSS / 一起聊聊", js_response.text)
         self.assertIn(".discussion-focus", css_response.text)
         self.assertIn(".guidance-cue,\n.discussion-focus", css_response.text)
@@ -111,6 +113,34 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('tradeoff: "WARNING / 风险提示"', js_response.text)
         self.assertNotIn('.guidance-offer {', css_response.text)
         self.assertNotIn("createAssessmentCard", js_response.text)
+
+    def test_relaxed_revision_suggestion_names_the_lowered_requirement_before_generation(self):
+        execution = backend._relaxed_revision_suggestion_execution(
+            {
+                "recentGuidance": {
+                    "relaxationOffer": {
+                        "status": "awaiting_confirmation",
+                        "originalBrief": "重排下半区目标与推进路线",
+                        "relaxedBrief": "Preserve the core direction and realize one local effect.",
+                        "baseVersionId": "version-1",
+                        "briefHash": "brief-hash",
+                    }
+                }
+            },
+            "zh-CN",
+            "relaxed-suggestion-test",
+        )
+
+        self.assertIsNone(execution.proposed_rows)
+        self.assertIn("现在还不会直接改图", execution.assistant_message)
+        self.assertIn(
+            "降低后的修改要求",
+            execution.guidance["proposalOffer"]["rationale"],
+        )
+        self.assertEqual(
+            execution.guidance["relaxationOffer"]["status"],
+            "suggestion_ready",
+        )
 
     def test_stage_change_summary_classifies_sokoban_components(self):
         before = [

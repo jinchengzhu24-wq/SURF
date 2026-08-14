@@ -601,8 +601,7 @@ function prefillProposalConsent(offer) {
     const summary = String(offer.summary || "").trim();
     elements.messageInput.value = t("proposalConsent").replace("{summary}", summary);
     handleComposerInput();
-    elements.messageInput.focus();
-    elements.messageInput.setSelectionRange(elements.messageInput.value.length, elements.messageInput.value.length);
+    elements.chatForm.requestSubmit();
 }
 
 function renderProposal() {

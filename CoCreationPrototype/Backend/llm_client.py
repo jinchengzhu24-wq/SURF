@@ -22,6 +22,8 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 40.0
 CHAT_TIMEOUT_SECONDS = 60.0
 CHAT_MAX_ATTEMPTS = 2
+PROPOSAL_GENERATION_ATTEMPTS = 3
+PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = 18.0
 CHAT_MAX_TOKENS = 1400
 PLAIN_CHAT_TIMEOUT_SECONDS = 25.0
 PLAIN_PRIMARY_TIMEOUT_SECONDS = 15.0
@@ -32,7 +34,7 @@ PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v26-grounded-proposals-strict-relaxation"
+PROMPT_VERSION = "cocreation-v27-internal-retries-relaxed-offer"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -709,7 +711,7 @@ def _generate_map_proposal_sync(
             task="map_proposal",
             outcome="error",
             code="UPSTREAM_TIMEOUT",
-            attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS),
+            attemptsUsed=PROPOSAL_GENERATION_ATTEMPTS,
             latencyMs=elapsed_ms,
             responseMode="operation_candidates",
         )
@@ -718,7 +720,7 @@ def _generate_map_proposal_sync(
             "DeepSeek did not complete the request before the 60 second limit.",
             request_id,
             True,
-            min(len(models), CHAT_MAX_ATTEMPTS),
+            PROPOSAL_GENERATION_ATTEMPTS,
             504,
         ) from exception
 
@@ -792,7 +794,12 @@ async def _generate_map_operation_candidates(
 ):
     last_error = None
     validation_feedback = None
-    attempted_models = models[:CHAT_MAX_ATTEMPTS]
+    attempted_models = [models[0]]
+    if len(models) > 1:
+        attempted_models.append(models[1])
+    else:
+        attempted_models.append(models[0])
+    attempted_models.append(models[0])
     brief = str(stage_context.get("authorizedRevisionBrief") or "")
 
     for attempt, configured_model in enumerate(attempted_models, start=1):
@@ -800,10 +807,7 @@ async def _generate_map_operation_candidates(
         remaining = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
         if remaining <= 0:
             raise asyncio.TimeoutError()
-        attempt_timeout = min(
-            PRIMARY_ATTEMPT_TIMEOUT_SECONDS if attempt == 1 else remaining,
-            remaining,
-        )
+        attempt_timeout = min(PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, remaining)
         response_fields = _empty_response_diagnostics()
         _log_llm_event(
             "llm_attempt_started",
@@ -4496,7 +4500,7 @@ def _classify_revision_request(conversation, stage_context=None):
         if _latest_user_explicitly_agrees(latest_user_message):
             relaxed_brief = str(relaxation_offer.get("relaxedBrief") or "").strip()
             if relaxed_brief:
-                return "authorized_relaxed", relaxed_brief
+                return "relaxation_confirmed", relaxed_brief
         if _latest_user_explicitly_rejects(latest_user_message):
             return "not_request", None
 
@@ -4589,6 +4593,11 @@ def _classify_revision_request(conversation, stage_context=None):
 
     if not requested:
         return "not_request", None
+
+    if relaxation_offer.get("status") == "suggestion_ready":
+        relaxed_brief = str(relaxation_offer.get("relaxedBrief") or "").strip()
+        if relaxed_brief:
+            return "authorized_relaxed", relaxed_brief
 
     brief = _authorized_revision_brief(
         conversation,

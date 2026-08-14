@@ -917,7 +917,7 @@ class LLMClientTests(unittest.TestCase):
             "proposedRows": None,
             "modificationSummary": "",
         })
-        client = FakeClient([text_only, text_only])
+        client = FakeClient([text_only, text_only, text_only])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -934,14 +934,15 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(raised.exception.attempts_used, 3)
+        self.assertEqual(len(client.chat.completions.calls), 3)
         retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
         self.assertIn("authorized brief", retry_prompt)
         self.assertIn("do not return the original map unchanged", retry_prompt)
 
     def test_structurally_invalid_proposal_retries_with_pro_for_correction(self):
         payload = operation_payload(TARGET_SHIFT_OPERATIONS)
-        client = FakeClient([payload, payload])
+        client = FakeClient([payload, payload, payload])
         validations = 0
 
         def reject_once(rows):
@@ -1005,7 +1006,7 @@ class LLMClientTests(unittest.TestCase):
             {"row": 6, "column": 7, "from": ".", "to": "t"},
         ]
         payload = operation_payload(shell_edit, fake_from)
-        client = FakeClient([payload, payload])
+        client = FakeClient([payload, payload, payload])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1021,6 +1022,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+        self.assertEqual(raised.exception.attempts_used, 3)
         retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
         self.assertIn("outer shell", retry_prompt)
         self.assertIn("declared from tile", retry_prompt)
@@ -1103,11 +1105,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.attempts_used, 2)
         self.assertEqual(len(client.chat.completions.calls), 2)
 
-    def test_timeout_uses_two_models_with_one_sixty_second_total_limit(self):
+    def test_proposal_timeout_uses_three_internal_attempts_with_one_sixty_second_limit(self):
         timeout = APITimeoutError(
             request=httpx.Request("POST", "https://api.deepseek.com/chat/completions")
         )
-        client = FakeClient([timeout, timeout])
+        client = FakeClient([timeout, timeout, timeout])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1115,7 +1117,10 @@ class LLMClientTests(unittest.TestCase):
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
-                [{"role": "user", "content": "Create a map proposal."}],
+                [
+                    {"role": "assistant", "content": "Move the lower target beside the water route."},
+                    {"role": "user", "content": "Please create a map proposal."},
+                ],
                 ["############"] * 10,
                 "timeout-test",
             )
@@ -1123,9 +1128,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 60.0)
         self.assertEqual(llm_client.PRIMARY_ATTEMPT_TIMEOUT_SECONDS, 40.0)
         self.assertEqual(llm_client.CHAT_MAX_ATTEMPTS, 2)
+        self.assertEqual(llm_client.PROPOSAL_GENERATION_ATTEMPTS, 3)
+        self.assertEqual(llm_client.PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, 18.0)
         self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
-        self.assertEqual(raised.exception.attempts_used, 2)
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(raised.exception.attempts_used, 3)
+        self.assertEqual(len(client.chat.completions.calls), 3)
 
     def test_missing_api_key_fails_without_model_call(self):
         with (
@@ -1297,7 +1304,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_invalid_proposal_uses_fallback_then_fails(self):
         payload = operation_payload(TARGET_SHIFT_OPERATIONS)
-        client = FakeClient([payload, payload])
+        client = FakeClient([payload, payload, payload])
         validated_rows = []
 
         def reject_proposal(rows):
@@ -1320,9 +1327,9 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
-        self.assertEqual(raised.exception.attempts_used, 2)
-        self.assertEqual(len(client.chat.completions.calls), 2)
-        self.assertEqual(len(validated_rows), 2)
+        self.assertEqual(raised.exception.attempts_used, 3)
+        self.assertEqual(len(client.chat.completions.calls), 3)
+        self.assertEqual(len(validated_rows), 3)
         fallback_system = client.chat.completions.calls[1]["messages"][0]["content"]
         self.assertIn("authorized brief", fallback_system)
         self.assertIn("preserve-unlisted contract", fallback_system)
