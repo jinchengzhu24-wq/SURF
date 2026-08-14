@@ -695,9 +695,10 @@ function renderSessionState() {
     elements.finalActions.hidden = status !== "active";
     elements.intentionForm.hidden = status !== "awaiting_intention";
     elements.completeCard.hidden = status !== "completed";
-    elements.returnUnityButton.hidden = status !== "completed"
-        || !state.session.matchId
-        || ![1, 2].includes(Number(state.session.playerNumber));
+    // A completed session always offers the return action.  Some local or
+    // legacy sessions do not carry online-room metadata, but they may still
+    // have been opened by Unity and therefore retain a valid opener tab.
+    elements.returnUnityButton.hidden = status !== "completed";
     elements.historyBanner.hidden = state.selectedVersionId === state.session.currentVersionId;
 }
 
