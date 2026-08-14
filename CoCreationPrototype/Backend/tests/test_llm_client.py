@@ -349,6 +349,19 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
 
+    def test_proposal_card_rejects_a_bare_confirmation_as_its_title(self):
+        content = (
+            "好，那就往旁边挪一格。我倾向于挪右边那个箱子，让左边箱子先有可读的下推空间。\n"
+            "<GUIDANCE>PROPOSAL_SUMMARY: 好 || "
+            "PROPOSAL_RATIONALE: 让两个箱子的推进顺序更清楚。</GUIDANCE>"
+        )
+        result, _ = self.execute([content], language="zh-CN")
+
+        offer = result.guidance["proposalOffer"]
+        self.assertNotEqual(offer["summary"], "好")
+        self.assertIn("箱子", offer["summary"])
+        self.assertNotIn("“好”", offer["rationale"])
+
     def test_malformed_guidance_is_hidden_without_failing_reply(self):
         for reply in (
             "Visible reply.\n<GUIDANCE>\nINTENT: You want a tighter route",

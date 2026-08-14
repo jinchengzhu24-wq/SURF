@@ -356,7 +356,8 @@ def build_plain_chat_messages(
             "conversation or omit it. Every card must distill the exchange rather than copy a "
             "sentence from assistantMessage or the preceding turn. Give each card one complete, "
             "natural thought rather than a slogan. PROPOSAL_SUMMARY should be a short title-like "
-            "synthesis of the actual design move; PROPOSAL_RATIONALE should independently expand "
+            "synthesis of the actual design move, never a bare confirmation such as '好', '可以', "
+            "'ok', or 'yes'; PROPOSAL_RATIONALE should independently expand "
             "the expected playable effect and what the designer can judge from it. Add "
             "WARNING only with strong evidence: explicit play "
             "difficulty, or a mechanically explainable interaction between at least two "
@@ -3114,20 +3115,42 @@ def _guidance_reuses_visible_sentence(card_text, visible_content):
     return False
 
 
+def _proposal_summary_is_substantive(summary, language):
+    value = re.sub(r"\s+", "", str(summary or "")).casefold()
+    if not value:
+        return False
+
+    confirmations = {
+        "好", "好的", "可以", "行", "同意", "就这样", "没问题", "嗯",
+        "ok", "okay", "yes", "yep", "soundsgood", "agreed",
+    }
+    if value in confirmations:
+        return False
+
+    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", value)
+    anchors = (
+        ("水", "箱", "目标", "墙", "通道", "路线", "推进", "区域", "位置")
+        if chinese
+        else ("water", "box", "crate", "target", "goal", "wall", "corridor", "route", "push", "area", "position")
+    )
+    return len(value) >= (4 if chinese else 8) and any(anchor in value for anchor in anchors)
+
+
 def _distill_proposal_offer(proposal_offer, visible_content, previous_content, language):
     if not proposal_offer:
         return None
 
     original_summary = str(proposal_offer.get("summary") or "").strip()
     original_rationale = str(proposal_offer.get("rationale") or "").strip()
-    grounded_offer = _semantics_preserving_proposal_offer(
-        original_summary,
-        original_rationale,
-        visible_content,
-        language,
-    )
-    if grounded_offer is not None:
-        return grounded_offer
+    if _proposal_summary_is_substantive(original_summary, language):
+        grounded_offer = _semantics_preserving_proposal_offer(
+            original_summary,
+            original_rationale,
+            visible_content,
+            language,
+        )
+        if grounded_offer is not None:
+            return grounded_offer
     corpus = " ".join(
         part for part in (visible_content, previous_content, original_summary, original_rationale)
         if part
@@ -3142,8 +3165,17 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
         has_wall = "墙" in corpus
         lower_area = any(word in corpus for word in ("下方", "下半", "右下", "底部", "空旷"))
         route = any(word in corpus for word in ("路线", "通道", "绕", "推进", "推动"))
+        box_spacing = has_box and any(
+            word in corpus for word in ("错开", "挪", "旁边", "一格", "对着")
+        )
 
-        if has_target and lower_area:
+        if box_spacing:
+            summary = "错开相邻箱子的推进位置"
+            rationale = (
+                "我会只调整其中一只箱子的相对位置，让另一只箱子先获得可读的推进空间；"
+                "然后观察这个错开是否真的带来路线选择，而不是只改变画面。"
+            )
+        elif has_target and lower_area:
             summary = "重排下半区的目标落点与推进路线"
             rationale = (
                 "我会把判断重点放在目标下移后的第一次推进：它是否让下方箱子承担新的绕行，"
@@ -3187,8 +3219,18 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
         has_wall = "wall" in lowered
         lower_area = any(word in lowered for word in ("lower", "bottom", "bottom-right", "open area"))
         route = any(word in lowered for word in ("route", "corridor", "detour", "push", "path"))
+        box_spacing = has_box and any(
+            word in lowered for word in ("separate", "space apart", "shift", "move over", "one tile", "beside")
+        )
 
-        if has_target and lower_area:
+        if box_spacing:
+            summary = "Separate the adjacent boxes' push positions"
+            rationale = (
+                "I would move only one box relative to the other so the remaining box has a "
+                "legible first push, then judge whether that separation creates a real route choice "
+                "rather than only a visual change."
+            )
+        elif has_target and lower_area:
             summary = "Rebalance the lower targets and push routes"
             rationale = (
                 "I would judge this through the first push after the target moves: whether it "
