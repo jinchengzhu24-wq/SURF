@@ -2337,26 +2337,6 @@ async def _generate_plain_with_model_fallback(
             if question and _question_repeats_recent_judgment(question, messages):
                 question = None
 
-            if (
-                not stage_opening
-                and question is None
-                and _discussion_follow_up_is_needed(messages, language)
-            ):
-                question = _deterministic_key_question(
-                    messages,
-                    language,
-                    rows,
-                )
-                if question is None and proposal_offer is not None:
-                    question = _deterministic_reply_discussion_focus(
-                        visible_content,
-                        language,
-                    )
-                if question and _question_repeats_recent_judgment(question, messages):
-                    question = None
-                if question and _discussion_focus_repeats_recent(question, stage_context):
-                    question = None
-
             if stage_opening and _is_stage_one(stage_context):
                 body = _questionless_body(visible_content)
                 question = None
@@ -3001,18 +2981,6 @@ def validate_chat_response(
             language,
         )
 
-    if (
-        assessment_only
-        and not stage_one_opening
-        and guidance["followUpQuestion"] is None
-        and _reply_needs_clarifying_question(assistant_message, language)
-    ):
-        deterministic_opening_question = _deterministic_stage_opening_question(
-            stage_context,
-            language,
-        )
-        guidance["followUpQuestion"] = deterministic_opening_question
-
     if assessment_only:
         assistant_message = _format_stage_opening_paragraphs(assistant_message)
     assessment_payload = payload.get("assessment")
@@ -3646,7 +3614,7 @@ def _discussion_focus_is_grounded_in_reply(focus, visible_content, language):
 
 
 def _perspective_discussion_focus(visible_content, language):
-    """Distill the assistant's own stated judgment before falling back to a generic prompt."""
+    """Distill a concrete judgment or uncertainty already present in the reply."""
     sentences = [
         re.sub(r"\s+", " ", sentence).strip()
         for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(visible_content or ""))
@@ -3655,6 +3623,24 @@ def _perspective_discussion_focus(visible_content, language):
     chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", str(visible_content or ""))
 
     if chinese:
+        uncertainty = re.compile(
+            r"(?:我唯一有点拿不准|我有点拿不准|我不太确定|我还不确定|我担心|不清楚|难以判断)"
+        )
+        anchors = ("水", "墙", "箱", "目标", "T1", "T2", "通道", "路线", "入口", "推")
+        for index, sentence in enumerate(sentences):
+            if not uncertainty.search(sentence) or not any(anchor in sentence for anchor in anchors):
+                continue
+            related = [sentence.rstrip("。！!？?")]
+            if index + 1 < len(sentences) and any(
+                anchor in sentences[index + 1] for anchor in anchors
+            ):
+                related.append(sentences[index + 1].rstrip("。！!？?"))
+            claim = "。".join(related)
+            return (
+                f"我想先把这点看清：{claim}。试玩时，重点看它是否真的让玩家改变推箱顺序；"
+                "这个结果会决定下一步该保留当前入口，还是继续调整附近的局部空间。"
+            )[:1000]
+
         marker = re.compile(
             r"(?:我(?:更)?倾向于认为|我倾向于觉得|在我看来|我觉得|我感觉|"
             r"我(?:比较|更)?在意的是|我(?:更)?喜欢的是|我(?:更)?喜欢)"
@@ -3691,6 +3677,20 @@ def _perspective_discussion_focus(visible_content, language):
         re.IGNORECASE,
     )
     anchors = ("water", "wall", "box", "crate", "target", "goal", "corridor", "route", "opening", "push")
+    uncertainty = re.compile(
+        r"\b(?:i am not sure|i'm not sure|i am uncertain|i worry|i am concerned|unclear|hard to tell)\b",
+        re.IGNORECASE,
+    )
+    for sentence in sentences:
+        if not uncertainty.search(sentence) or not any(anchor in sentence.casefold() for anchor in anchors):
+            continue
+        claim = sentence.rstrip(".!?")
+        return (
+            f"I want to keep this uncertainty in view: {claim}. During play, watch whether it "
+            "actually changes the push order; that tells us whether to preserve the current "
+            "opening or adjust the nearby space."
+        )[:1000]
+
     for sentence in sentences:
         match = marker.search(sentence)
         if not match or not any(anchor in sentence.casefold() for anchor in anchors):
@@ -3752,38 +3752,10 @@ def _refine_discussion_focus(focus, visible_content, language):
     if _discussion_focus_is_grounded_in_reply(value, visible_content, language):
         return value[:1000]
 
-    combined = f"{visible_content} {value}".strip()
-    synthesized = _deterministic_reply_discussion_focus(combined, language)
-    if synthesized and not _guidance_reuses_visible_sentence(synthesized, visible_content):
-        return synthesized[:1000]
-
-    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", combined):
-        if question_marks == 1:
-            core = value.rstrip()
-            return (
-                f"我想先和你盯住这个瞬间：{core}"
-                "看完它，我们就知道是只动附近，还是该回头看看整条路线。"
-            )[:1000]
-        if len(value) < 72:
-            return (
-                f"不如先看这一点：{value.rstrip('。')}。"
-                "先别急着动大结构，看看第一次推箱时玩家会不会自然停下来想路线。"
-            )[:1000]
-        return value[:1000]
-
-    if question_marks == 1:
-        return (
-            f"I would focus our discussion on this playable judgment: {value} "
-            "Your answer will tell me whether the next step should change the route relationship "
-            "or preserve the current spatial structure."
-        )[:1000]
-    if len(value) < 150:
-        return (
-            f"I would keep this judgment separate for discussion: {value.rstrip('.')}. "
-            "It is worth testing through the first push because the real comparison is how the "
-            "route reads, not only how the map looks."
-        )[:1000]
-    return value[:1000]
+    # A card may be more specific than the body, but it must remain visibly
+    # grounded in this reply.  Do not manufacture a generic water/box prompt
+    # merely to fill the blue card slot.
+    return None
 
 
 def _extract_plain_discussion_focus(
@@ -4674,13 +4646,6 @@ def _ensure_required_guidance_card(
     if card_count:
         return normalized
 
-    if _discussion_follow_up_is_needed(messages, language):
-        normalized["followUpQuestion"] = _friendly_default_discussion_focus(
-            rows,
-            language,
-            latest_user,
-            _recent_discussion_focuses(stage_context),
-        )
     return normalized
 
 

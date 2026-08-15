@@ -275,15 +275,13 @@ class LLMClientTests(unittest.TestCase):
 
     def test_plain_discuss_card_can_hold_a_first_person_design_insight(self):
         result, _ = self.execute([
-            "这个版本的下半区多了一点回旋空间。\n"
+            "这个版本的下半区水边多了一点回旋空间。\n"
             "<GUIDANCE>DISCUSS: 我更喜欢水边这次留下的路线犹豫，它让第一次推动的选择更有分量。</GUIDANCE>"
         ], language="zh-CN")
 
         focus = result.guidance["followUpQuestion"]
-        self.assertIn("不如先看这一点", focus)
+        self.assertIn("我更喜欢", focus)
         self.assertIn("第一次推动", focus)
-        self.assertIn("第一次推箱", focus)
-        self.assertNotIn("？", focus)
         self.assertNotIn("GUIDANCE", result.assistant_message)
 
     def test_repeated_plain_discuss_card_is_omitted_when_no_new_focus_is_needed(self):
@@ -2403,6 +2401,67 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("我会先把这版理解为", focus)
         self.assertIn("试玩时", focus)
         self.assertEqual(result[1]["satisfactionQuestion"], focus)
+
+    def test_human_edit_uncertainty_card_stays_with_the_stated_target_issue(self):
+        payload = {
+            "assistantMessage": (
+                "我唯一有点拿不准的是T1在(2,10)那个角落。"
+                "右上角现在被墙收窄了，入口只有(2,9)那一条。"
+                "这个判断会影响我理解整张图的推箱顺序。"
+            ),
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "求解器已确认可解。",
+                "difficultyOpinion": "我认为入口会影响推箱顺序。",
+                "features": ["右上角目标入口"],
+                "suggestions": ["观察目标入口"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="zh-CN",
+            stage_context={
+                "stageNumber": 2,
+                "source": "human_edit",
+                "changeSummary": {"components": ["water", "internalWalls"]},
+            },
+        )
+
+        focus = result[4]["followUpQuestion"]
+        self.assertIn("T1", focus)
+        self.assertIn("入口", focus)
+        self.assertNotIn("水域边缘推进", focus)
+
+    def test_no_blue_card_is_invented_when_the_reply_has_no_grounded_focus(self):
+        guidance = llm_client._ensure_required_guidance_card(
+            {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            [{"role": "user", "content": "你觉得水域应该怎么改？"}],
+            "zh-CN",
+            OPERATION_BASE_ROWS,
+            False,
+            {"stageNumber": 2},
+        )
+
+        self.assertIsNone(guidance["followUpQuestion"])
 
     def test_later_turn_in_stage_one_may_still_ask_a_concrete_question(self):
         client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
