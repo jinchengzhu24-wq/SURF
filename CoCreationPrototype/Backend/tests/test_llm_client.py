@@ -1046,6 +1046,39 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertNotIn("response_format", client.chat.completions.calls[1])
 
+    def test_later_human_edit_plain_opening_never_uses_the_stock_water_question(self):
+        client = FakeClient([
+            "   ",
+            (
+                "我唯一有点拿不准的是T1在(2,10)那个角落。"
+                "右上角现在被墙收窄了，入口只有(2,9)那一条。"
+                "这个判断会影响我理解整张图的推箱顺序。"
+            ),
+        ])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_stage_assessment(
+                [],
+                ["############"] * 10,
+                "zh-CN",
+                {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
+                {},
+                "later-human-edit-plain-opening-test",
+                {
+                    "stageNumber": 2,
+                    "source": "human_edit",
+                    "changeSummary": {"components": ["water", "internalWalls"]},
+                },
+            )
+
+        focus = result.guidance["followUpQuestion"]
+        self.assertIn("T1", focus)
+        self.assertIn("入口", focus)
+        self.assertNotIn("水域边缘推进", focus)
+
     def test_structured_stage_one_opening_receives_rows_for_scope_normalization(self):
         payload = json.dumps({
             "assistantMessage": "The central water area makes the first route split easy to read.",

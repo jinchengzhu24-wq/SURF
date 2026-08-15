@@ -2345,18 +2345,17 @@ async def _generate_plain_with_model_fallback(
                         "The Stage 1 opening contained only questions."
                     )
                 body = _ensure_stage_one_orientation(body, rows, language)
+            elif stage_opening and question is None:
+                # A later saved Stage may expose a concrete uncertainty or
+                # first-person judgment in ordinary prose.  Distill that
+                # actual point; never substitute a stock water/box question.
+                question = _perspective_discussion_focus(body, language)
             elif stage_opening and question is not None:
                 try:
                     question = _normalize_opening_question(question)
                 except ValueError:
                     body = visible_content
                     question = None
-
-            if stage_opening and question is None:
-                question = _deterministic_stage_opening_question(
-                    stage_context,
-                    language,
-                )
 
             if not stage_opening and question is not None:
                 question = _refine_discussion_focus(
@@ -3389,68 +3388,6 @@ def _normalize_change_claims_for_proposal(value, language, has_proposed_rows):
             flags=re.IGNORECASE,
         )
     return text.strip()
-
-
-def _deterministic_stage_opening_question(stage_context, language):
-    """Ask about a verified edit without inventing a second level or exact coordinates."""
-    context = stage_context or {}
-    if _is_stage_one(context) or context.get("source") != "human_edit":
-        return None
-
-    components = set((context.get("changeSummary") or {}).get("components") or [])
-    if not components:
-        return None
-
-    if language == "zh-CN":
-        if "water" in components:
-            return (
-                "当箱子第一次贴着调整后的水域边缘推进时，你最想观察哪一处转折，"
-                "来判断这个版本的路线选择是否更清楚？"
-            )
-        if "internalWalls" in components:
-            return (
-                "当箱子第一次穿过调整后的内部通道时，你最想观察哪个转折，"
-                "来判断这个版本的推动顺序是否更容易读懂？"
-            )
-        if "targets" in components:
-            return (
-                "当箱子第一次接近调整后的目标点时，你最想观察哪一步停顿，"
-                "来判断这个版本的目标关系是否更容易读懂？"
-            )
-        if "boxes" in components:
-            return (
-                "当调整后的箱子开始第一次推进时，你最想观察哪一步，"
-                "来判断这个版本的推动顺序是否足够清楚？"
-            )
-        return (
-            "当箱子第一次进入这次调整影响的区域时，你最想观察哪个动作，"
-            "来判断这个版本的路线是否更容易读懂？"
-        )
-
-    if "water" in components:
-        return (
-            "When the box first moves along the adjusted water edge, which turn would you "
-            "watch to judge whether this version makes the route choice clearer?"
-        )
-    if "internalWalls" in components:
-        return (
-            "When the box first passes through the adjusted inner passage, which turn would "
-            "you watch to judge whether this version makes the push order easier to read?"
-        )
-    if "targets" in components:
-        return (
-            "When the box first approaches the adjusted target, which pause would you watch "
-            "to judge whether this version makes the target relationship easier to read?"
-        )
-    if "boxes" in components:
-        return (
-            "When the adjusted box begins its first push, which step would you watch to judge "
-            "whether this version makes the push order clear enough?"
-        )
-    return (
-        "When the box first enters the area affected by this edit, which move would you "
-        "watch to judge whether this version makes the route easier to read?"
-    )
 
 
 def _deterministic_key_question(messages, language, rows):
