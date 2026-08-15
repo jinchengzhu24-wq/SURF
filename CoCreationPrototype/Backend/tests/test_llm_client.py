@@ -144,8 +144,8 @@ class LLMClientTests(unittest.TestCase):
         ])
 
         self.assertIn("compact central route", result.assistant_message)
-        self.assertIn("first moves beside the water", result.assistant_message)
-        self.assertIn("judge whether the linkage", result.assistant_message)
+        self.assertIn("box enters the water-side corridor", result.assistant_message)
+        self.assertIn("route choice should the player notice first", result.assistant_message)
         self.assertEqual(result.guidance["move"], "offer_perspective")
         self.assertEqual(result.attempts_used, 1)
         request = client.chat.completions.calls[0]
@@ -364,7 +364,7 @@ class LLMClientTests(unittest.TestCase):
         offer = result.guidance["proposalOffer"]
         self.assertIn("目标点", offer["summary"])
         self.assertIn("下方", offer["summary"])
-        self.assertIn("唯一改动方向", offer["rationale"])
+        self.assertIn("具体做法是", offer["rationale"])
         self.assertNotEqual(offer["summary"], copied)
         self.assertNotIn("你说得对", offer["rationale"])
         self.assertIsNone(result.guidance["followUpQuestion"])
@@ -528,8 +528,8 @@ class LLMClientTests(unittest.TestCase):
                 "deeper-question-test",
             )
 
-        self.assertIn("first moves beside the water", result.guidance["followUpQuestion"])
-        self.assertIn("judge whether the linkage", result.guidance["followUpQuestion"])
+        self.assertIn("box enters the water-side corridor", result.guidance["followUpQuestion"])
+        self.assertIn("route should the player notice first", result.guidance["followUpQuestion"])
         self.assertNotIn("water-side corridor", result.assistant_message.split("\n\n")[0])
 
     def test_plain_guidance_extracts_warning_and_manual_edit(self):
@@ -852,6 +852,47 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("试玩时，请直接看", focus)
         self.assertIn("先向上绕开", focus)
         self.assertIn("如果还是只有一条很显眼的走法", focus)
+
+    def test_discussion_card_keeps_a_grounded_model_question_instead_of_generic_replacement(self):
+        visible = (
+            "右上角目标移到左下角后，箱子需要先绕过水塘和墙边通道，才能决定最后一箱的处理顺序。"
+            "我担心开局会不会因此变得不够明确。"
+        )
+        original_focus = (
+            "试玩时，请看玩家刚进入右上角时，能不能先判断目标已经不在附近、需要暂时放下这只箱子？"
+            "如果这一点仍不明显，说明开局提示还不够。"
+        )
+
+        refined = llm_client._refine_discussion_focus(original_focus, visible, "zh-CN")
+
+        self.assertEqual(refined, original_focus)
+        self.assertNotIn("贴着调整后的水边", refined)
+
+    def test_revision_card_strips_a_personal_leadin_and_keeps_the_actual_action(self):
+        offer = llm_client._semantics_preserving_proposal_offer(
+            "如果是我，我会考虑把其中一格水往旁边挪一格",
+            "让箱子贴水推进时多一个明确的转向选择。",
+            "我会把 (7,6) 的水移到 (6,6)，让水带不再形成直角。",
+            "zh-CN",
+        )
+
+        self.assertTrue(offer["summary"].startswith("把其中一格水往旁边挪一格"))
+        self.assertNotIn("如果是我", offer["summary"])
+
+    def test_revision_card_has_a_concrete_change_and_playable_text_explanation(self):
+        offer = llm_client._distill_proposal_offer(
+            {
+                "summary": "如果是我",
+                "rationale": "我会把它作为唯一改动方向，并用实际格子变化判断是否成立。",
+            },
+            "把 (7,6) 的水移到 (6,6)，让水带从直角变成斜线。这样箱子贴水推进时会多一个转向选择。",
+            "",
+            "zh-CN",
+        )
+
+        self.assertIn("(7,6)", offer["summary"])
+        self.assertIn("具体做法是", offer["rationale"])
+        self.assertIn("转向选择", offer["rationale"])
 
     def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
         client = FakeClient([

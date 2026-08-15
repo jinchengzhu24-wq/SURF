@@ -191,7 +191,9 @@ def build_chat_messages(
         "that disagreement only in the prose or discussion card. An intentHypothesis must "
         "infer the playable purpose behind the designer's stated operation; never merely copy "
         "or prefix their wording (for example, turn a request to reshape water into a tentative "
-        "claim about how water should affect route reading or push decisions).\n\n"
+        "claim about how water should affect route reading or push decisions). It must also "
+        "distill an interpretation already supported by assistantMessage: never introduce a "
+        "different map element, design goal, or operation only inside the intent card.\n\n"
         "Treat the saved Stage as read-only until the designer accepts a validated "
         "proposal in the interface. Treat natural requests such as '你帮我改', '你来改吧', "
         "'按这个思路改', 'can you change it', and 'go ahead and revise it' as explicit "
@@ -262,6 +264,9 @@ def build_chat_messages(
         "face, and what each observed outcome would mean for the next revision. Avoid abstract "
         "phrases such as 'route weight', 'readability', or 'route choice' without explaining "
         "the concrete play situation they refer to. "
+        "The discussion card must continue the exact unresolved judgment in assistantMessage; "
+        "do not replace a stated concern about a target, opening, wall, or ordering with a "
+        "generic question about water and boxes merely because those tiles also appear. "
         "Write an insight like a natural next observation from a design peer: begin with the "
         "specific play moment, then say why it is worth watching. Avoid report-like lead-ins "
         "such as '我在意的是', '我想把注意力放在', or '比单看格子摆放更能说明'. "
@@ -3378,10 +3383,45 @@ def _deterministic_reply_discussion_focus(visible_content, language):
     return None
 
 
+def _discussion_focus_is_grounded_in_reply(focus, visible_content, language):
+    value = str(focus or "").strip()
+    content = str(visible_content or "").strip()
+    if not value or not content:
+        return False
+
+    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", f"{value}{content}")
+    if chinese:
+        components = ("水", "墙", "箱", "目标", "玩家", "通道", "路线", "开局", "区域")
+        moments = (
+            "第一次", "推", "绕", "入口", "进入", "靠近", "顺序", "停", "选择", "往哪", "哪边",
+            "判断", "处理", "放下",
+        )
+        minimum_length = 16
+    else:
+        components = ("water", "wall", "box", "crate", "target", "goal", "player", "corridor", "route", "opening", "area")
+        moments = ("first", "push", "turn", "approach", "order", "pause", "choose", "which", "where")
+        minimum_length = 36
+
+    lowered_value = value.casefold()
+    lowered_content = content.casefold()
+    shared_components = [
+        component for component in components
+        if component in lowered_value and component in lowered_content
+    ]
+    return (
+        len(value) >= minimum_length
+        and bool(shared_components)
+        and any(moment in lowered_value for moment in moments)
+    )
+
+
 def _refine_discussion_focus(focus, visible_content, language):
     value = re.sub(r"\s+", " ", str(focus or "")).strip()
     if not value:
         return value
+
+    if _discussion_focus_is_grounded_in_reply(value, visible_content, language):
+        return value[:1000]
 
     combined = f"{visible_content} {value}".strip()
     synthesized = _deterministic_reply_discussion_focus(combined, language)
@@ -3786,6 +3826,9 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
 
     original_summary = str(proposal_offer.get("summary") or "").strip()
     original_rationale = str(proposal_offer.get("rationale") or "").strip()
+    visible_action = _revision_direction_sentence(visible_content)
+    if visible_action and not _proposal_summary_has_concrete_action(original_summary, language):
+        original_summary = visible_action
     if _proposal_summary_is_substantive(original_summary, language):
         grounded_offer = _semantics_preserving_proposal_offer(
             original_summary,
@@ -3794,7 +3837,11 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
             language,
         )
         if grounded_offer is not None:
-            return grounded_offer
+            return _ensure_proposal_offer_explanation(
+                grounded_offer,
+                visible_content,
+                language,
+            )
     corpus = " ".join(
         part for part in (visible_content, previous_content, original_summary, original_rationale)
         if part
@@ -3924,13 +3971,88 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
         or _guidance_reuses_visible_sentence(original_rationale, previous_content)
         or _guidance_text_matches(original_summary, original_rationale)
     )
-    return {
+    return _ensure_proposal_offer_explanation({
         "summary": (summary if summary_needs_distilling else original_summary)[:600],
         "rationale": (rationale if rationale_needs_expansion else original_rationale)[:1000],
-    }
+    }, visible_content, language)
+
+
+def _proposal_summary_has_concrete_action(summary, language):
+    value = str(summary or "").strip()
+    if not value:
+        return False
+    lowered = value.casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", value):
+        return bool(re.search(r"\(\s*\d+\s*,\s*\d+\s*\)", value)) or any(
+            word in value for word in (
+                "移", "挪", "调", "改", "加", "减", "删", "缩", "拉开", "收紧", "打开", "封住",
+            )
+        )
+    return bool(re.search(r"\b(?:row|column|tile)\s*\d+", lowered)) or any(
+        word in lowered for word in (
+            "move", "shift", "adjust", "add", "remove", "reduce", "expand", "tighten", "open", "close",
+        )
+    )
+
+
+def _ensure_proposal_offer_explanation(offer, visible_content, language):
+    summary = _strip_revision_summary_leadin(offer.get("summary") or "")[:600]
+    rationale = str(offer.get("rationale") or "").strip()
+    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", f"{summary}{rationale}{visible_content}")
+    visible_action = _revision_direction_sentence(visible_content)
+    if (
+        visible_action
+        and re.search(r"\(\s*\d+\s*,\s*\d+\s*\)", visible_action)
+        and not re.search(r"\(\s*\d+\s*,\s*\d+\s*\)", summary)
+    ):
+        summary = _strip_revision_summary_leadin(visible_action)[:600]
+    generic_markers = (
+        ("唯一改动方向", "实际格子变化", "只调整", "是否成立")
+        if chinese
+        else ("only revision direction", "verified diff", "only local cells", "whether it works")
+    )
+    should_expand = (
+        not rationale
+        or any(marker in rationale.casefold() for marker in generic_markers)
+        or _guidance_text_matches(rationale, summary)
+    )
+    if should_expand:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[。！？!?])\s*", str(visible_content or ""))
+            if sentence.strip()
+        ]
+        explanation_markers = (
+            ("让", "使", "这样", "玩家", "推", "路线", "选择", "顺序")
+            if chinese
+            else ("make", "let", "so that", "player", "push", "route", "choice", "order")
+        )
+        explanation = next(
+            (
+                sentence for sentence in sentences
+                if any(marker in sentence.casefold() for marker in explanation_markers)
+                and summary not in sentence
+                and sentence not in summary
+            ),
+            "",
+        )
+        if chinese:
+            rationale = (
+                f"具体做法是：{summary.rstrip('。.!！')}。{explanation or '这样做是为了让相关箱子的第一次推进出现新的路线判断；试玩时需要确认它带来的是选择，而不只是外观变化。'}"
+            )
+        else:
+            rationale = (
+                f"Concrete change: {summary}. {explanation or 'The goal is to make the first relevant push create a new route judgment; play should confirm that it creates a choice rather than only a visual difference.'}"
+            )
+    elif chinese and not rationale.startswith("具体做法是："):
+        rationale = f"具体做法是：{summary}。{rationale}"
+    elif not chinese and not rationale.lower().startswith("concrete change:"):
+        rationale = f"Concrete change: {summary}. {rationale}"
+    return {"summary": summary, "rationale": rationale[:1000]}
 
 
 def _semantics_preserving_proposal_offer(summary, rationale, visible_content, language):
+    summary = _strip_revision_summary_leadin(summary)
     source = " ".join(part for part in (summary, rationale) if part).strip()
     if not source:
         return None
@@ -3977,6 +4099,26 @@ def _semantics_preserving_proposal_offer(summary, rationale, visible_content, la
         "summary": chosen_summary[:600],
         "rationale": chosen_rationale[:1000],
     }
+
+
+def _strip_revision_summary_leadin(summary):
+    value = str(summary or "").strip()
+    if not value:
+        return value
+    value = re.sub(
+        r"^(?:(?:如果是我|如果让我来|我的想法是|我倾向于)[，,:：\s]*)?"
+        r"(?:我会(?:考虑|想先)?|我想(?:先)?|建议(?:先)?|可以(?:先)?)?[，,:：\s]*",
+        "",
+        value,
+    ).strip()
+    value = re.sub(
+        r"^(?:(?:if it were me|my suggestion is|my thought is)[,:\s]*)?"
+        r"(?:i would(?: consider)?|i would suggest|i suggest|we could)[,:\s]*",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    ).strip()
+    return value
 
 
 def _plain_guidance_move(stage_opening, intent_hypothesis, proposal_offer):
