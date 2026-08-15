@@ -838,6 +838,7 @@ def _send_message_locked(
                 None,
             )
 
+        retrying_failed_message = prior_user is not None
         current = get_current_version(database, session)
         context = build_llm_context(database, session_id, current)
         language = session["language"]
@@ -879,7 +880,47 @@ def _send_message_locked(
                 exception=exception,
             )
             if execution is None:
-                raise
+                if not retrying_failed_message:
+                    with connect(immediate=True) as database:
+                        active_session = require_active_session(
+                            database,
+                            session_id,
+                            access_cookie,
+                        )
+                        require_current_base(active_session, payload.baseVersionId)
+                        record_event(
+                            database,
+                            session_id,
+                            "message_generation_failed",
+                            {
+                                "baseVersionId": payload.baseVersionId,
+                                "messageKey": payload.idempotencyKey,
+                                "code": exception.code,
+                                "attemptsUsed": exception.attempts_used,
+                            },
+                            utc_now(),
+                        )
+                    raise
+                execution = _retry_exhausted_execution(language, exception)
+                with connect(immediate=True) as database:
+                    active_session = require_active_session(
+                        database,
+                        session_id,
+                        access_cookie,
+                    )
+                    require_current_base(active_session, payload.baseVersionId)
+                    record_event(
+                        database,
+                        session_id,
+                        "message_retry_exhausted",
+                        {
+                            "baseVersionId": payload.baseVersionId,
+                            "messageKey": payload.idempotencyKey,
+                            "code": exception.code,
+                            "attemptsUsed": exception.attempts_used,
+                        },
+                        utc_now(),
+                    )
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     with connect(immediate=True) as database:
@@ -964,6 +1005,35 @@ def _send_message_locked(
                 )
 
         return serialize_session(database, session_id)
+
+
+def _retry_exhausted_execution(language, exception):
+    if language == "zh-CN":
+        message = (
+            "我注意到你尝试了一次重新生成，非常抱歉，由于我的能力不足，我可能无法帮助你进行这个修改，"
+            "请你根据我们商量好的方案进行自主修改。"
+        )
+    else:
+        message = (
+            "I noticed that you tried generating the revision again. I am sorry, but this "
+            "request appears to be beyond what I can reliably produce. Please make the change "
+            "yourself using the direction we discussed."
+        )
+    return LLMExecutionResult(
+        assistant_message=message,
+        attempts_used=exception.attempts_used,
+        request_id=exception.request_id,
+        model="deterministic-retry-exhausted-guidance",
+        latency_ms=0,
+        guidance={
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "uiCues": [],
+        },
+    )
 
 
 def _verified_proposal_message(language):

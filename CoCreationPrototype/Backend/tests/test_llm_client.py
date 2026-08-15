@@ -144,8 +144,8 @@ class LLMClientTests(unittest.TestCase):
         ])
 
         self.assertIn("compact central route", result.assistant_message)
-        self.assertIn("box enters the water-side corridor", result.assistant_message)
-        self.assertIn("route choice should the player notice first", result.assistant_message)
+        self.assertNotIn("box enters the water-side corridor", result.assistant_message)
+        self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertEqual(result.guidance["move"], "offer_perspective")
         self.assertEqual(result.attempts_used, 1)
         request = client.chat.completions.calls[0]
@@ -511,7 +511,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNotNone(result.guidance["intentHypothesis"])
         self.assertEqual(result.guidance["uiCues"], [])
 
-    def test_explicit_direction_can_keep_a_deeper_concrete_question(self):
+    def test_explicit_direction_does_not_keep_a_routine_question_when_the_reply_is_clear(self):
         client = FakeClient([
             "That makes the first commitment more legible. When the box enters the "
             "water-side corridor, which route should the player notice first so we can "
@@ -528,8 +528,7 @@ class LLMClientTests(unittest.TestCase):
                 "deeper-question-test",
             )
 
-        self.assertIn("box enters the water-side corridor", result.guidance["followUpQuestion"])
-        self.assertIn("route should the player notice first", result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertNotIn("water-side corridor", result.assistant_message.split("\n\n")[0])
 
     def test_plain_guidance_extracts_warning_and_manual_edit(self):
@@ -651,14 +650,14 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("designer", (first + second).casefold())
         self.assertNotIn("player wants", (first + second).casefold())
 
-    def test_specific_vivid_question_is_kept_as_blue_card(self):
+    def test_specific_vivid_question_is_suppressed_when_no_uncertainty_is_stated(self):
         result, _ = self.execute([
             "The water edge can make the route legible. When the box enters the corridor "
             "beside the water, which route choice should the player notice first so we can "
             "judge its readability?"
         ])
 
-        self.assertIn("water", result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertNotIn("?", result.assistant_message.split("\n\n", 1)[0])
 
     def test_consecutive_question_repeating_the_same_judgment_is_suppressed(self):
@@ -867,6 +866,31 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(refined, original_focus)
         self.assertNotIn("贴着调整后的水边", refined)
+
+    def test_discussion_card_summarizes_a_clear_assistant_judgment_instead_of_asking(self):
+        visible = (
+            "这版把中间两堵墙打通，又把右下角的一只箱子挪到了上方。"
+            "我倾向于认为这个改动让开局更直接，但中段的推箱顺序会更依赖玩家对墙缝的判断。"
+        )
+        generic_question = (
+            "当箱子第一次穿过调整后的内部通道时，你最想观察哪个转折，"
+            "来判断这个版本的推箱顺序是否更容易读懂？"
+        )
+
+        refined = llm_client._refine_discussion_focus(generic_question, visible, "zh-CN")
+
+        self.assertIn("开局更直接", refined)
+        self.assertIn("墙缝", refined)
+        self.assertIn("试玩时", refined)
+        self.assertNotIn("最想观察哪个转折", refined)
+
+    def test_discussion_question_is_suppressed_without_an_unresolved_judgment(self):
+        visible = "右侧墙缝让中段推箱顺序更值得判断，开局也更直接。"
+        generic_question = "当箱子第一次经过墙缝时，你最想观察哪个转折？"
+
+        refined = llm_client._refine_discussion_focus(generic_question, visible, "zh-CN")
+
+        self.assertIsNone(refined)
 
     def test_revision_card_strips_a_personal_leadin_and_keeps_the_actual_action(self):
         offer = llm_client._semantics_preserving_proposal_offer(
@@ -1711,9 +1735,9 @@ class LLMClientTests(unittest.TestCase):
             result[0],
             "In my view, a tighter route would make the push order more visible.",
         )
-        self.assertIn("focus our discussion", result[4]["followUpQuestion"])
-        self.assertIn("Would you like to preserve that split?", result[4]["followUpQuestion"])
-        self.assertIn("next step", result[4]["followUpQuestion"])
+        self.assertIn("My reading of this version", result[4]["followUpQuestion"])
+        self.assertIn("tighter route", result[4]["followUpQuestion"])
+        self.assertNotIn("Would you like", result[4]["followUpQuestion"])
 
     def test_question_only_message_is_rejected(self):
         payload = {

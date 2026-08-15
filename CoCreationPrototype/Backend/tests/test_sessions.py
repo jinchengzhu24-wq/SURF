@@ -735,7 +735,7 @@ class CoCreationSessionTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(count, 0)
 
-    def test_empty_model_failure_saves_one_user_turn_and_no_assistant_turn(self):
+    def test_retry_after_model_failure_saves_a_self_edit_guidance_reply(self):
         version_id = self.read_session()["currentVersionId"]
         request_payload = {
             "content": "I think the route is too easy.",
@@ -768,14 +768,43 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(first.status_code, 502)
         self.assertEqual(first.json()["code"], "MODEL_EMPTY_RESPONSE")
         self.assertTrue(first.json()["retryable"])
-        self.assertEqual(second.status_code, 502)
+        self.assertEqual(second.status_code, 200, second.text)
         self.assertEqual(mocked.call_count, 2)
         stored = self.read_session()
         matching_turns = [
             turn for turn in stored["turns"]
             if turn["requestId"] == request_payload["idempotencyKey"]
         ]
-        self.assertEqual([turn["role"] for turn in matching_turns], ["user"])
+        self.assertEqual([turn["role"] for turn in matching_turns], ["user", "assistant"])
+        self.assertIn("tried generating the revision again", matching_turns[1]["content"])
+        self.assertIn("make the change yourself", matching_turns[1]["content"])
+        with repository.connect() as database:
+            retry_event = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'message_retry_exhausted'
+                """,
+                (self.session_id,),
+            ).fetchone()
+        self.assertIsNotNone(retry_event)
+
+    def test_retry_exhausted_reply_uses_the_requested_chinese_copy(self):
+        failure = LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "Timed out.",
+            "retry-copy-test",
+            True,
+            2,
+            504,
+        )
+
+        execution = backend._retry_exhausted_execution("zh-CN", failure)
+
+        self.assertEqual(
+            execution.assistant_message,
+            "我注意到你尝试了一次重新生成，非常抱歉，由于我的能力不足，我可能无法帮助你进行这个修改，"
+            "请你根据我们商量好的方案进行自主修改。",
+        )
 
     def test_low_quality_model_failure_saves_no_assistant_turn(self):
         version_id = self.read_session()["currentVersionId"]

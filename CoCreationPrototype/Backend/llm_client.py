@@ -267,6 +267,11 @@ def build_chat_messages(
         "The discussion card must continue the exact unresolved judgment in assistantMessage; "
         "do not replace a stated concern about a target, opening, wall, or ordering with a "
         "generic question about water and boxes merely because those tiles also appear. "
+        "Use a question only when assistantMessage genuinely says that a particular player "
+        "intention, map effect, or trade-off is unclear and needs confirmation. Otherwise the "
+        "card must be a declarative first-person summary of your concrete interpretation, plus "
+        "the specific play moment that would verify it; do not turn an already clear judgment "
+        "into a routine question. "
         "Write an insight like a natural next observation from a design peer: begin with the "
         "specific play moment, then say why it is worth watching. Avoid report-like lead-ins "
         "such as '我在意的是', '我想把注意力放在', or '比单看格子摆放更能说明'. "
@@ -3415,10 +3420,78 @@ def _discussion_focus_is_grounded_in_reply(focus, visible_content, language):
     )
 
 
+def _perspective_discussion_focus(visible_content, language):
+    """Distill the assistant's own stated judgment before falling back to a generic prompt."""
+    sentences = [
+        re.sub(r"\s+", " ", sentence).strip()
+        for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(visible_content or ""))
+        if sentence.strip()
+    ]
+    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", str(visible_content or ""))
+
+    if chinese:
+        marker = re.compile(r"(?:我(?:更)?倾向于认为|我倾向于觉得|在我看来|我觉得|我感觉)")
+        anchors = ("水", "墙", "箱", "目标", "通道", "路线", "开局", "推")
+        for sentence in sentences:
+            match = marker.search(sentence)
+            if not match or not any(anchor in sentence for anchor in anchors):
+                continue
+            claim = sentence[match.end():].strip(" ：:，,").rstrip("。！!？?")
+            if len(claim) < 12:
+                continue
+            return (
+                f"我会先把这版理解为：{claim}。试玩时，重点看玩家第一次把箱子推到相关位置时，"
+                "会不会因为这个变化停下来重新判断顺序；这能验证上面的取舍是否真的落在操作上。"
+            )[:1000]
+        return None
+
+    marker = re.compile(
+        r"\b(?:I tend to think|I am inclined to think|I think|I feel|in my view)\b",
+        re.IGNORECASE,
+    )
+    anchors = ("water", "wall", "box", "crate", "target", "goal", "corridor", "route", "opening", "push")
+    for sentence in sentences:
+        match = marker.search(sentence)
+        if not match or not any(anchor in sentence.casefold() for anchor in anchors):
+            continue
+        claim = sentence[match.end():].strip(" :,").rstrip(".!?")
+        if len(claim) < 18:
+            continue
+        return (
+            f"My reading of this version is: {claim}. During play, watch whether the first push "
+            "at that changed area makes the player stop and reconsider the order; that will show "
+            "whether this trade-off is actually present in play."
+        )[:1000]
+    return None
+
+
+def _reply_needs_clarifying_question(visible_content, language):
+    text = str(visible_content or "").casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        uncertainty_markers = (
+            "不清楚", "不确定", "看不出", "难以判断", "需要确认", "还不够明确",
+            "会不会", "是否", "我担心", "拿不准", "不太确定",
+        )
+    else:
+        uncertainty_markers = (
+            "unclear", "uncertain", "not sure", "hard to tell", "need to confirm",
+            "i worry", "i am concerned", "whether", "not yet clear",
+        )
+    return any(marker in text for marker in uncertainty_markers)
+
+
 def _refine_discussion_focus(focus, visible_content, language):
     value = re.sub(r"\s+", " ", str(focus or "")).strip()
     if not value:
         return value
+
+    perspective_focus = _perspective_discussion_focus(visible_content, language)
+    if perspective_focus:
+        return perspective_focus
+
+    question_marks = value.count("?") + value.count("？")
+    if question_marks and not _reply_needs_clarifying_question(visible_content, language):
+        return None
 
     if _discussion_focus_is_grounded_in_reply(value, visible_content, language):
         return value[:1000]
@@ -3428,7 +3501,6 @@ def _refine_discussion_focus(focus, visible_content, language):
     if synthesized and not _guidance_reuses_visible_sentence(synthesized, visible_content):
         return synthesized[:1000]
 
-    question_marks = value.count("?") + value.count("？")
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", combined):
         if question_marks == 1:
             core = value.rstrip()
