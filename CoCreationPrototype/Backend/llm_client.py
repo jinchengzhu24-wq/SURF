@@ -257,6 +257,11 @@ def build_chat_messages(
         "followUpQuestion is the LET'S DISCUSS card. It must be null, one concrete question, "
         "or one concise first-person design insight worth discussing. A declarative insight "
         "must name a concrete map or play judgment and must not duplicate assistantMessage. "
+        "Use plain, specific language for both assistantMessage and the discussion card: name "
+        "the relevant tiles, the first push or route moment to watch, the decision a player may "
+        "face, and what each observed outcome would mean for the next revision. Avoid abstract "
+        "phrases such as 'route weight', 'readability', or 'route choice' without explaining "
+        "the concrete play situation they refer to. "
         "Write an insight like a natural next observation from a design peer: begin with the "
         "specific play moment, then say why it is worth watching. Avoid report-like lead-ins "
         "such as '我在意的是', '我想把注意力放在', or '比单看格子摆放更能说明'. "
@@ -3306,6 +3311,21 @@ def _deterministic_reply_discussion_focus(visible_content, language):
     text = str(visible_content or "")
     lowered = text.casefold()
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        if "水" in text and "箱" in text:
+            return (
+                "试玩时，请直接看箱子第一次贴着调整后的水边推进：在推之前，玩家能不能看清该先向上绕开，"
+                "还是沿水边继续下推？如果还是只有一条很显眼的走法，说明这次调整还没有带来真正需要判断的路线。"
+            )
+        if "目标" in text and "箱" in text:
+            return (
+                "试玩时，请看箱子第一次靠近目标的那一推：玩家能不能马上判断该先处理哪只箱子、从哪一侧接近目标？"
+                "如果仍能不经思考地一路推到底，说明目标附近还需要补出一个会影响顺序的局部选择。"
+            )
+        if "墙" in text and any(word in text for word in ("通道", "路线", "转折")):
+            return (
+                "试玩时，请看箱子第一次进入这段墙边通道：玩家会不会在入口停下来确认下一步该往哪边走？"
+                "如果只是多走几步却没有新的判断，说明墙的位置只增加了距离，没有改变路线。"
+            )
         if "目标" in text and "箱" in text and any(
             word in text for word in ("下方", "下半", "底部", "右下", "空旷")
         ):

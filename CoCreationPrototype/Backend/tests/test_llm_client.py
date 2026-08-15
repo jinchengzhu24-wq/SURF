@@ -843,6 +843,16 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("把中间那格水往左挪一格", summary)
         self.assertNotEqual(summary, "当然")
 
+    def test_water_discussion_focus_is_direct_and_explains_the_observation(self):
+        focus = llm_client._deterministic_reply_discussion_focus(
+            "把中间水格往左挪一格，让右上角的箱子贴着水边推进。",
+            "zh-CN",
+        )
+
+        self.assertIn("试玩时，请直接看", focus)
+        self.assertIn("先向上绕开", focus)
+        self.assertIn("如果还是只有一条很显眼的走法", focus)
+
     def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
         client = FakeClient([
             "我会把右下目标与水塘做局部联动。这样能让水域影响第一次推动。"
