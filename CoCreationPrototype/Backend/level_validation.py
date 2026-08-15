@@ -307,6 +307,81 @@ def summarize_stage_changes(before_rows, after_rows):
     }
 
 
+def build_map_facts(rows, before_rows=None):
+    """Return compact, deterministic facts for language-model grounding.
+
+    Coordinates in this payload are deliberately one-based so they agree with the
+    numbered maps shown in prompts and with the UI's verified-diff wording.  These
+    are descriptive facts only: a ``gridDistance`` is Manhattan distance, never a
+    claim that a push route is available.
+    """
+    normalized = validate_rows(rows)
+    positions = {
+        tile: [(x + 1, y + 1) for y, row in enumerate(normalized)
+               for x, value in enumerate(row) if value == tile]
+        for tile in ("p", "s", "t", "@")
+    }
+    water = set(positions["@"])
+
+    def point(position):
+        column, row = position
+        return {"row": row, "column": column}
+
+    def adjacent_to_water(position):
+        column, row = position
+        return any(
+            (column + dx, row + dy) in water
+            for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0))
+        )
+
+    targets = [point(position) for position in positions["t"]]
+    boxes = []
+    for index, position in enumerate(positions["s"], start=1):
+        column, row = position
+        boxes.append({
+            "id": f"B{index}",
+            **point(position),
+            "orthogonallyAdjacentToWater": adjacent_to_water(position),
+            "gridDistancesToTargets": [
+                {
+                    "targetId": f"T{target_index}",
+                    "gridDistance": abs(column - target_column) + abs(row - target_row),
+                }
+                for target_index, (target_column, target_row) in enumerate(
+                    positions["t"], start=1
+                )
+            ],
+        })
+
+    facts = {
+        "coordinateSystem": "one-based row,column; row 1 is top and column 1 is left",
+        "player": {"id": "P", **point(positions["p"][0])},
+        "boxes": boxes,
+        "targets": [
+            {"id": f"T{index}", **target}
+            for index, target in enumerate(targets, start=1)
+        ],
+        "waterCells": [point(position) for position in positions["@"]],
+    }
+
+    if before_rows is not None:
+        before = validate_rows(before_rows)
+        entity_changes = {}
+        for tile, label in (("p", "player"), ("s", "boxes"), ("t", "targets")):
+            before_positions = set(_find_all(before, tile))
+            after_positions = set(_find_all(normalized, tile))
+            removed = sorted(before_positions - after_positions)
+            added = sorted(after_positions - before_positions)
+            if removed or added:
+                entity_changes[label] = {
+                    "removed": [point((x + 1, y + 1)) for x, y in removed],
+                    "added": [point((x + 1, y + 1)) for x, y in added],
+                }
+        facts["verifiedEntityChangesFromParent"] = entity_changes
+
+    return facts
+
+
 def _boundary_wall_cells(rows):
     pending = []
     visited = set()

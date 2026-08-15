@@ -20,7 +20,7 @@ from proposal_search import (
     parse_revision_plan,
     search_revision_plan,
 )
-from level_validation import validate_and_solve
+from level_validation import build_map_facts, validate_and_solve
 
 
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -128,6 +128,7 @@ def build_chat_messages(
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
+    map_facts = _map_facts_for_prompt(rows, stage_context)
     task = _build_task_instructions(assessment_only, stage_context)
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
     revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
@@ -313,6 +314,8 @@ def build_chat_messages(
         "free-form summary and proposal message with a deterministic before/after diff for "
         "the designer, so proposedRows itself must carry the intended revision. For "
         "deliver_revision, keep assistantMessage concise and frame the map as pending review.\n\n"
+        f"{_map_grounding_contract()}\n\n"
+        f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Current saved stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
@@ -343,6 +346,7 @@ def build_plain_chat_messages(
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
+    map_facts = _map_facts_for_prompt(rows, stage_context)
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
     revision_request_state = stage_context.get("revisionRequestState")
     revision_instruction = (
@@ -455,6 +459,8 @@ def build_plain_chat_messages(
         "and never imply a campaign progression.\n\n"
         f"{guidance_instruction}\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
+        f"{_map_grounding_contract()}\n\n"
+        f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Current saved Stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
@@ -484,6 +490,129 @@ def _llm_solver_evidence(solver_metrics):
         for field in allowed_fields
         if field in solver_metrics
     }
+
+
+def _map_facts_for_prompt(rows, stage_context):
+    facts = (stage_context or {}).get("mapFacts")
+    if not isinstance(facts, dict):
+        try:
+            facts = build_map_facts(rows)
+        except ValueError:
+            # Production Stages are validated before reaching the model.  Keeping this
+            # fallback lets isolated prompt/timeout tests use intentionally incomplete grids.
+            facts = {
+                "available": False,
+                "reason": "The supplied rows are not a complete validated Stage.",
+            }
+    return json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+
+
+def _map_grounding_contract():
+    return (
+        "Map-grounding rule: Deterministic Map Facts are authoritative. Use B1/B2, T1/T2, "
+        "P, or one-based (row,column) when identifying a particular entity. Do not invent "
+        "a current entity position or relation from a vague visual impression. In particular, "
+        "do not call a box/player/target upper-right, lower-left, near another entity, beside "
+        "water, or in a narrow passage unless the facts explicitly support that exact current "
+        "claim. gridDistance is Manhattan distance only, not a traversable route or a push "
+        "solution. If the facts do not establish a relation, state it as a question about a "
+        "future play moment rather than as a fact about the saved map."
+    )
+
+
+def _validate_map_grounding_texts(texts, rows):
+    """Reject a small set of high-impact, checkable spatial hallucinations.
+
+    Natural prose is intentionally not parsed wholesale.  This guard covers the claims that
+    most often made the visible feedback misleading: assigning an entity to a wrong corner,
+    saying that a box currently touches water, and saying that a current box/player is close
+    to a target when no such pair exists.  The prompt remains the primary grounding layer.
+    """
+    text = "\n".join(str(value or "") for value in texts).casefold()
+    if not text:
+        return
+
+    try:
+        facts = build_map_facts(rows)
+    except ValueError:
+        return
+    height = len(rows)
+    width = len(rows[0]) if rows else 0
+    entities = {
+        "box": facts["boxes"],
+        "target": facts["targets"],
+        "player": [facts["player"]],
+    }
+    regions = (
+        ("upper_right", ("右上角", "右上", "upper-right", "upper right"),
+         lambda item: item["row"] <= (height + 1) // 2 and item["column"] > width // 2),
+        ("upper_left", ("左上角", "左上", "upper-left", "upper left"),
+         lambda item: item["row"] <= (height + 1) // 2 and item["column"] <= width // 2),
+        ("lower_right", ("右下角", "右下", "lower-right", "lower right"),
+         lambda item: item["row"] > (height + 1) // 2 and item["column"] > width // 2),
+        ("lower_left", ("左下角", "左下", "lower-left", "lower left"),
+         lambda item: item["row"] > (height + 1) // 2 and item["column"] <= width // 2),
+    )
+    entity_patterns = {
+        "box": r"(?:箱子|箱|box(?:es)?|crates?)",
+        "target": r"(?:目标点|目标|终点|targets?|goals?)",
+        "player": r"(?:玩家起点|玩家|起点|players?)",
+    }
+
+    for entity_name, pattern in entity_patterns.items():
+        for _, labels, in_region in regions:
+            if any(in_region(item) for item in entities[entity_name]):
+                continue
+            for label in labels:
+                escaped = re.escape(label)
+                before = (
+                    rf"{escaped}(?:的)?(?:那(?:个)?|这(?:个)?|一(?:个)?)?\s*{pattern}"
+                )
+                after = (
+                    rf"{pattern}(?:在|位于|处在|挪到(?:了)?|移到(?:了)?|到了|"
+                    rf"in|at|is in)?\s*{escaped}"
+                )
+                if re.search(before, text) or re.search(after, text):
+                    raise ValueError(
+                        f"The reply assigns a {entity_name} to {label}, which conflicts with deterministic map facts."
+                    )
+
+    if not any(box["orthogonallyAdjacentToWater"] for box in facts["boxes"]):
+        current_box_water_patterns = (
+            r"(?:现在|当前).{0,18}(?:箱子|箱|它).{0,12}(?:贴着|紧贴|紧邻|挨着|靠着)(?:水|水边|水域)",
+            r"(?:箱子|箱).{0,16}(?:贴着|紧贴|紧邻|挨着|靠着)(?:水|水边|水域)",
+            r"(?:box(?:es)?|crate).{0,28}(?:next to|adjacent to|beside|against).{0,18}water",
+        )
+        if any(re.search(pattern, text) for pattern in current_box_water_patterns):
+            raise ValueError(
+                "The reply claims that a current box touches water, which conflicts with deterministic map facts."
+            )
+
+    target_positions = facts["targets"]
+    close_box_target = any(
+        abs(box["row"] - target["row"]) + abs(box["column"] - target["column"]) <= 2
+        for box in facts["boxes"] for target in target_positions
+    )
+    close_player_target = any(
+        abs(facts["player"]["row"] - target["row"])
+        + abs(facts["player"]["column"] - target["column"]) <= 2
+        for target in target_positions
+    )
+    closeness = r"(?:很近|靠近|紧挨|相邻|close to|near|adjacent to)"
+    if not close_box_target and (
+        re.search(rf"(?:箱子|箱).{{0,18}}(?:目标点|目标|终点).{{0,18}}{closeness}", text)
+        or re.search(rf"(?:目标点|目标|终点).{{0,18}}(?:箱子|箱).{{0,18}}{closeness}", text)
+    ):
+        raise ValueError(
+            "The reply claims that a current box is close to a target, which conflicts with deterministic map facts."
+        )
+    if not close_player_target and (
+        re.search(rf"(?:玩家|起点).{{0,18}}(?:目标点|目标|终点).{{0,18}}{closeness}", text)
+        or re.search(rf"(?:目标点|目标|终点).{{0,18}}(?:玩家|起点).{{0,18}}{closeness}", text)
+    ):
+        raise ValueError(
+            "The reply claims that the current player is close to a target, which conflicts with deterministic map facts."
+        )
 
 
 def generate_stage_assessment(
@@ -954,6 +1083,7 @@ def _build_revision_plan_messages(
     )
     movement_rule = _movement_requirement_prompt(movement_requirement)
     preservation_rule = _preserved_components_prompt(preserved_components)
+    map_facts = _map_facts_for_prompt(rows, stage_context)
     numbered_map = "\n".join(
         f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
     )
@@ -983,6 +1113,7 @@ def _build_revision_plan_messages(
         "solutionSteps, solutionPushes, or searchedStates and direction increase, decrease, or "
         "preserve. Use objective metrics only when the designer's direction clearly implies them. "
         "Always preserve outer_shell and unrelated_areas. Natural-language reasoning is internal. "
+        + _map_grounding_contract() + " "
         f"Interpret conversation in {response_language}."
     )
     user_prompt = (
@@ -990,6 +1121,7 @@ def _build_revision_plan_messages(
         f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule} {movement_rule} "
         f"{preservation_rule}\n\n"
         "Column ruler (one-based): 123456789012\n"
+        f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Recent Stage conversation JSON: {json.dumps(transcript, ensure_ascii=False)}"
@@ -1045,20 +1177,14 @@ def _movement_requirement_from_text(value):
 
 def _authorized_preserved_components(conversation, stage_context):
     messages = list(conversation or [])
-    latest_user = _latest_role_content(messages, "user")
-    latest_user_index = next(
-        (index for index in range(len(messages) - 1, -1, -1)
-         if messages[index].get("role") == "user"),
-        -1,
-    )
-    previous_assistant = _latest_role_content(
-        messages[:latest_user_index] if latest_user_index >= 0 else messages,
-        "assistant",
-    )
-    sources = (
-        latest_user,
-        previous_assistant,
-        str((stage_context or {}).get("authorizedRevisionBrief") or ""),
+    # Preservation is a designer-owned hard constraint.  An authorized brief can
+    # be distilled from an assistant proposal, so it must never be treated as a
+    # preservation request by itself (for example, an assistant's alternative
+    # "keep the target" must not make a later target move impossible).
+    sources = tuple(
+        str(message.get("content") or "")
+        for message in messages
+        if message.get("role") == "user"
     )
     rules = {
         "water": ("水域", "水塘", "水面", "water", "pond"),
@@ -1101,18 +1227,40 @@ def _is_explicit_revision_authorization(message):
 
 
 def _movement_direction_from_text(source, lowered):
-    phrases = (
-        (("右下", "下方偏右", "偏右下", "lower right", "down and right"), "lower_right"),
-        (("左下", "下方偏左", "偏左下", "lower left", "down and left"), "lower_left"),
-        (("右上", "上方偏右", "偏右上", "upper right", "up and right"), "upper_right"),
-        (("左上", "上方偏左", "偏左上", "upper left", "up and left"), "upper_left"),
-        (("向右", "右边", "靠右", " to the right", " rightward"), "right"),
-        (("向左", "左边", "靠左", " to the left", " leftward"), "left"),
-        (("向下", "下方", "靠下", " downward", " below"), "down"),
-        (("向上", "上方", "靠上", " upward", " above"), "up"),
+    # A location label such as "the upper-right target" is not a movement
+    # instruction.  Hard direction constraints require an explicit destination
+    # phrase, otherwise the semantic search remains free to select a legal local
+    # move that realizes the approved effect.
+    chinese_phrases = (
+        (("向右上", "往右上", "移到右上", "移动到右上", "挪到右上", "放到右上"), "upper_right"),
+        (("向左上", "往左上", "移到左上", "移动到左上", "挪到左上", "放到左上"), "upper_left"),
+        (("向右下", "往右下", "移到右下", "移动到右下", "挪到右下", "放到右下"), "lower_right"),
+        (("向左下", "往左下", "移到左下", "移动到左下", "挪到左下", "放到左下"), "lower_left"),
+        (("向右", "往右", "移到右边", "移动到右边", "挪到右边", "放到右边"), "right"),
+        (("向左", "往左", "移到左边", "移动到左边", "挪到左边", "放到左边"), "left"),
+        (("向下", "往下", "移到下方", "移动到下方", "挪到下方", "放到下方"), "down"),
+        (("向上", "往上", "移到上方", "移动到上方", "挪到上方", "放到上方"), "up"),
     )
-    for markers, direction in phrases:
-        if any(marker in source or marker in lowered for marker in markers):
+    for markers, direction in chinese_phrases:
+        if any(marker in source for marker in markers):
+            return direction
+
+    english_patterns = (
+        (r"\b(?:move|shift|relocate)\b.{0,48}\b(?:to|toward)\s+(?:the\s+)?upper[- ]right\b", "upper_right"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\b(?:to|toward)\s+(?:the\s+)?upper[- ]left\b", "upper_left"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\b(?:to|toward)\s+(?:the\s+)?lower[- ]right\b", "lower_right"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\b(?:to|toward)\s+(?:the\s+)?lower[- ]left\b", "lower_left"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\bup and right\b", "upper_right"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\bup and left\b", "upper_left"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\bdown and right\b", "lower_right"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\bdown and left\b", "lower_left"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\b(?:to|toward)\s+(?:the\s+)?right\b", "right"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\b(?:to|toward)\s+(?:the\s+)?left\b", "left"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\b(?:to|toward)\s+(?:the\s+)?down\b", "down"),
+        (r"\b(?:move|shift|relocate)\b.{0,48}\b(?:to|toward)\s+(?:the\s+)?up\b", "up"),
+    )
+    for pattern, direction in english_patterns:
+        if re.search(pattern, lowered):
             return direction
     return None
 
@@ -2081,6 +2229,7 @@ async def _generate_plain_with_model_fallback(
     started_at,
 ):
     last_error = None
+    validation_feedback = None
 
     for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
         remaining = PLAIN_CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
@@ -2105,12 +2254,16 @@ async def _generate_plain_with_model_fallback(
         )
 
         try:
+            attempt_messages = _plain_messages_with_validation_feedback(
+                messages,
+                validation_feedback,
+            )
             response = await asyncio.wait_for(
                 _request_completion(
                     api_key,
                     base_url,
                     model,
-                    messages,
+                    attempt_messages,
                     PLAIN_CHAT_MAX_TOKENS,
                     attempt_timeout,
                     structured=False,
@@ -2269,6 +2422,17 @@ async def _generate_plain_with_model_fallback(
                 body,
                 guidance.get("followUpQuestion"),
             )
+            grounding_texts = [
+                body,
+                guidance.get("followUpQuestion"),
+                guidance.get("intentHypothesis"),
+            ]
+            if guidance.get("proposalOffer"):
+                grounding_texts.extend(guidance["proposalOffer"].values())
+            grounding_texts.extend(
+                cue.get("text") for cue in guidance.get("uiCues") or []
+            )
+            _validate_map_grounding_texts(grounding_texts, rows)
             evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
             if evidence_signature and guidance["uiCues"]:
                 guidance["evidenceSignature"] = evidence_signature
@@ -2325,6 +2489,7 @@ async def _generate_plain_with_model_fallback(
             )
             return result
         except asyncio.TimeoutError:
+            failure_reason = None
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
                 "DeepSeek did not respond before the attempt timeout.",
@@ -2334,19 +2499,27 @@ async def _generate_plain_with_model_fallback(
                 504,
             )
         except Exception as exception:
+            failure_reason = _safe_validation_reason(exception)
             last_error = classify_exception(exception, request_id, attempt)
+            if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
+                validation_feedback = failure_reason
 
+        failure_fields = {
+            "requestId": request_id,
+            "task": task,
+            "model": model,
+            "attempt": attempt,
+            "code": last_error.code,
+            "retryable": last_error.retryable,
+            "latencyMs": int((time.monotonic() - started_at) * 1000),
+            "responseMode": "plain_text",
+            **response_fields,
+        }
+        if failure_reason:
+            failure_fields["validationReason"] = failure_reason
         _log_llm_event(
             "llm_attempt_failed",
-            requestId=request_id,
-            task=task,
-            model=model,
-            attempt=attempt,
-            code=last_error.code,
-            retryable=last_error.retryable,
-            latencyMs=int((time.monotonic() - started_at) * 1000),
-            responseMode="plain_text",
-            **response_fields,
+            **failure_fields,
         )
 
         if attempt == 1 and not _plain_fallback_allowed(last_error):
@@ -2458,6 +2631,7 @@ async def _generate_with_model_fallback(
                 assessment_only,
                 language,
                 stage_context,
+                rows,
             )
 
             if task == "map_proposal" and validated[2] is None:
@@ -2591,6 +2765,25 @@ def _messages_with_validation_feedback(messages, validation_feedback, task=None)
             message["content"] = f"{message.get('content', '')}\n\n{instruction}"
             return corrected
 
+    corrected.insert(0, {"role": "system", "content": instruction})
+    return corrected
+
+
+def _plain_messages_with_validation_feedback(messages, validation_feedback):
+    if not validation_feedback:
+        return messages
+
+    corrected = [dict(message) for message in messages]
+    instruction = (
+        "Your previous reply for this same request was rejected because it made a spatial "
+        f"claim that conflicts with deterministic map facts: {validation_feedback} Write a "
+        "fresh grounded reply. Use only verified entity IDs or coordinates for current map "
+        "relations, and do not mention this correction to the designer."
+    )
+    for message in corrected:
+        if message.get("role") == "system":
+            message["content"] = f"{message.get('content', '')}\n\n{instruction}"
+            return corrected
     corrected.insert(0, {"role": "system", "content": instruction})
     return corrected
 
@@ -2737,6 +2930,7 @@ def validate_chat_response(
     assessment_only=False,
     language="en",
     stage_context=None,
+    rows=None,
 ):
     if not isinstance(payload, dict):
         raise ValueError("The model response must be a JSON object.")
@@ -2928,6 +3122,22 @@ def validate_chat_response(
 
     if not isinstance(modification_summary, str):
         raise ValueError("modificationSummary must be a string.")
+
+    if rows is not None:
+        grounding_texts = [
+            assistant_message,
+            guidance.get("followUpQuestion"),
+            guidance.get("intentHypothesis"),
+            modification_summary,
+        ]
+        if guidance.get("proposalOffer"):
+            grounding_texts.extend(guidance["proposalOffer"].values())
+        grounding_texts.extend(
+            cue.get("text") for cue in guidance.get("uiCues") or []
+        )
+        for value in assessment.values():
+            grounding_texts.extend(value if isinstance(value, list) else [value])
+        _validate_map_grounding_texts(grounding_texts, rows)
 
     return (
         assistant_message,
@@ -5734,6 +5944,7 @@ def classify_exception(exception, request_id, attempts_used):
 def _plain_fallback_allowed(error):
     return error.code in {
         "MODEL_EMPTY_RESPONSE",
+        "MODEL_RESPONSE_INVALID",
         "MODEL_LOW_QUALITY_RESPONSE",
         "UPSTREAM_TIMEOUT",
         "UPSTREAM_CONNECTION_ERROR",

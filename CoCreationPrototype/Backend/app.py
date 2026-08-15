@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 from level_validation import (
     HEIGHT,
     WIDTH,
+    build_map_facts,
     LevelValidationError,
     describe_diff,
     summarize_verified_diff,
@@ -2124,9 +2125,10 @@ def build_llm_context(database, session_id, version):
         if version["parent_version_id"]
         else None
     )
+    parent_rows = load_json(parent["rows_json"]) if parent is not None else None
     change_summary = (
-        summarize_stage_changes(load_json(parent["rows_json"]), current_rows)
-        if parent is not None
+        summarize_stage_changes(parent_rows, current_rows)
+        if parent_rows is not None
         else None
     )
     conversation = [
@@ -2231,6 +2233,7 @@ def build_llm_context(database, session_id, version):
             "parentVersionId": version["parent_version_id"],
             "diff": load_json(version["diff_json"]),
             "changeSummary": change_summary,
+            "mapFacts": build_map_facts(current_rows, parent_rows),
             "recentGuidance": recent_guidance,
             "guidanceEvidenceSignature": guidance_evidence_signature,
             "openingTurnId": (

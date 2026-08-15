@@ -33,6 +33,20 @@ OPERATION_BASE_ROWS = [
 ]
 
 
+MAP_GROUNDING_ROWS = [
+    "  ######### ",
+    " ##...p..t# ",
+    " #..s.....# ",
+    " #.#......##",
+    "##.#...#...#",
+    "######.#####",
+    "#t........##",
+    "##@@@@.#s.# ",
+    " #@@@@...## ",
+    " #########  ",
+]
+
+
 def operation_payload(*operation_sets):
     return json.dumps({
         "candidates": [
@@ -161,6 +175,55 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.attempts_used, 1)
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIn("useful prose", result.assistant_message)
+
+    def test_map_facts_expose_exact_entities_and_verified_parent_changes(self):
+        before = list(MAP_GROUNDING_ROWS)
+        before[1] = " ##..p...t# "
+        facts = llm_client.build_map_facts(MAP_GROUNDING_ROWS, before)
+
+        self.assertEqual(facts["player"], {"id": "P", "row": 2, "column": 7})
+        self.assertEqual(
+            [(box["id"], box["row"], box["column"]) for box in facts["boxes"]],
+            [("B1", 3, 5), ("B2", 8, 9)],
+        )
+        self.assertFalse(any(box["orthogonallyAdjacentToWater"] for box in facts["boxes"]))
+        self.assertEqual(
+            facts["verifiedEntityChangesFromParent"]["player"],
+            {"removed": [{"row": 2, "column": 6}], "added": [{"row": 2, "column": 7}]},
+        )
+
+        prompt = llm_client.build_plain_chat_messages(
+            [], MAP_GROUNDING_ROWS, stage_context={"mapFacts": facts}
+        )[0]["content"]
+        self.assertIn("Deterministic Map Facts (authoritative)", prompt)
+        self.assertIn('"id":"B1","row":3,"column":5', prompt)
+        self.assertIn("Map-grounding rule", prompt)
+
+    def test_map_grounding_rejects_the_reported_wrong_corner_and_water_claim(self):
+        with self.assertRaisesRegex(ValueError, "upper-right"):
+            llm_client._validate_map_grounding_texts(
+                ["The upper-right box is next to water."], MAP_GROUNDING_ROWS
+            )
+
+        with self.assertRaisesRegex(ValueError, "touches water"):
+            llm_client._validate_map_grounding_texts(
+                ["The box is next to water."], MAP_GROUNDING_ROWS
+            )
+
+    def test_plain_reply_retries_once_after_a_map_grounding_error(self):
+        result, client = self.execute(
+            [
+                "The upper-right box is next to water.",
+                "B1 is at row 3, column 5, away from the water; I would watch its first push.",
+            ],
+            rows=MAP_GROUNDING_ROWS,
+        )
+
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
+        self.assertIn("spatial claim that conflicts with deterministic map facts", retry_prompt)
+        self.assertIn("row 3, column 5", result.assistant_message)
 
     def test_plain_reply_normalizes_stages_that_are_mistaken_for_separate_levels(self):
         result, _ = self.execute([
@@ -1406,6 +1469,46 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(
             requirement,
             {"operator": "move_target", "direction": "right"},
+        )
+
+    def test_location_label_does_not_become_a_hard_movement_direction(self):
+        conversation = [
+            {
+                "role": "assistant",
+                "content": "As a lighter option, keep the target in its current position.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "请根据这个方向生成一份可供审查的地图提案："
+                    "把右上角那个目标稍微挪开一点。"
+                ),
+            },
+        ]
+
+        self.assertIsNone(llm_client._authorized_movement_requirement(conversation))
+        self.assertEqual(
+            llm_client._authorized_preserved_components(
+                conversation,
+                {"authorizedRevisionBrief": "Keep the target in its current position."},
+            ),
+            frozenset(),
+        )
+
+    def test_explicit_destination_still_becomes_a_hard_movement_direction(self):
+        requirement = llm_client._authorized_movement_requirement([
+            {
+                "role": "user",
+                "content": (
+                    "请根据这个方向生成一份可供审查的地图提案："
+                    "把目标向右上移动一格。"
+                ),
+            },
+        ])
+
+        self.assertEqual(
+            requirement,
+            {"operator": "move_target", "direction": "upper_right"},
         )
 
     def test_revision_plan_protocol_never_asks_model_for_tile_operations(self):
