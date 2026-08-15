@@ -803,8 +803,21 @@ class LLMClientTests(unittest.TestCase):
             OPERATION_BASE_ROWS,
             "zh-CN",
         )
-        self.assertIn("小范围、可审查的改动", body)
-        self.assertIn("大幅重做", body)
+        self.assertIn("小范围更改、提供可审查的改动内容", body)
+        self.assertIn("较大的改动我建议由你亲手试一试", body)
+
+    def test_stage_one_opening_keeps_map_observation_but_compacts_process_guidance(self):
+        body = llm_client._ensure_stage_one_orientation(
+            "我觉得中间水域让箱子第一次靠近目标时需要重新判断路线。\n\n"
+            "你可以先试玩，或者直接在右侧面板里做局部调整。"
+            "你可以先从直觉说起；想验证时，右侧的试玩和局部编辑都可以随时接上。",
+            OPERATION_BASE_ROWS,
+            "zh-CN",
+        )
+
+        self.assertIn("中间水域让箱子第一次靠近目标", body)
+        self.assertEqual(body.count("你可以先说说你的第一反应或试玩当前关卡"), 1)
+        self.assertEqual(body.count("右侧面板进行局部编辑"), 1)
 
     def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
         client = FakeClient([
@@ -910,7 +923,7 @@ class LLMClientTests(unittest.TestCase):
                 {"stageNumber": 1, "source": "initial"},
             )
 
-        self.assertIn("small, reviewable changes", result.assistant_message)
+        self.assertIn("small, reviewable edits", result.assistant_message)
         self.assertEqual(result.attempts_used, 1)
 
     def test_length_truncation_uses_fallback_model(self):

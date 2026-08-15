@@ -48,7 +48,7 @@ PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v31-small-verified-revisions"
+PROMPT_VERSION = "cocreation-v32-concise-stage-one-guidance"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -344,9 +344,11 @@ def build_plain_chat_messages(
         "authored choices and offer a clearly subjective perspective. Do not inventory "
         "the map, use a workflow greeting, or ask for an overall experience category. "
         + (
-            "This is Stage 1: do not ask any question. Naturally mention that the designer "
-            "can share an impression, play the Stage, or try a local edit in the right panel; "
-            "present these as possibilities, not a checklist. "
+            "This is Stage 1: do not ask any question. Keep the map observation and your "
+            "own design feeling intact, but use only one compact concluding sentence for all "
+            "process guidance: the designer may share an impression or play, you support only "
+            "small reviewable edits, and a broad rebuild remains designer-led. Do not list or "
+            "repeat sharing, play, editing, and scope as separate sentences. "
             if _is_stage_one(stage_context)
             else ""
         )
@@ -4758,45 +4760,42 @@ def _questionless_body(message):
 
 def _ensure_stage_one_orientation(message, rows, language):
     text = str(message or "").strip()
-    lowered = text.casefold()
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
-        has_orientation = (
-            any(word in text for word in ("感受", "直觉", "反应", "想法"))
-            and "试玩" in text
-        )
-        options = (
-            "你可以先从直觉说起；想验证时，随时试玩就好。",
-            "这里不用先定好目标，先说哪处让你在意也行；之后再试玩验证。",
-            "接下来可以先聊第一反应，也可以先试玩，看看体验怎么变化。",
+        process_markers = ("试玩", "编辑器", "右侧", "局部调整", "局部编辑", "第一反应", "直觉说起")
+        map_markers = ("水", "墙", "箱", "目标", "玩家", "路线", "通道", "区域", "格")
+        compact_guidance = (
+            "你可以先说说你的第一反应或试玩当前关卡，之后不满意的话，你可以指出来，我们一起探讨商量然后制定方案，"
+            "或者你自己在右侧面板进行局部编辑；我只能协助进行小范围更改、提供可审查的改动内容以及帮助你梳理思路，"
+            "较大的改动我建议由你亲手试一试。"
         )
     else:
-        has_orientation = (
-            any(word in lowered for word in ("impression", "instinct", "reaction", "idea"))
-            and any(word in lowered for word in ("play", "try the stage"))
+        process_markers = ("play the stage", "right panel", "editor", "local edit", "first impression")
+        map_markers = ("water", "wall", "box", "target", "player", "route", "corridor", "area", "tile")
+        compact_guidance = (
+            "You can share a first reaction or play the Stage; I support only small, "
+            "reviewable edits and thinking through them, while a broad rebuild stays designer-led."
         )
-        options = (
-            "You can start with your first impression; when you want to test it, play the Stage.",
-            "There is no need to settle on a goal yet—share what catches your attention, then play when useful.",
-            "From here, you can talk through your first reaction or play the Stage and compare the feel.",
-        )
-    if not has_orientation:
-        serialized_rows = "".join(str(row) for row in (rows or []))
-        variant = sum(ord(character) for character in serialized_rows or text) % len(options)
-        text = f"{text}\n\n{options[variant]}"
 
-    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
-        has_scope = "小范围、可审查" in text and "大幅重做" in text
-        scope = (
-            "我能协助小范围、可审查的改动，也能陪你梳理思路；"
-            "大幅重做请先由你主导完成，我再帮你核对。"
-        )
-    else:
-        has_scope = "small, reviewable" in lowered and "larger rebuild" in lowered
-        scope = (
-            "I can help with small, reviewable changes and think through a direction; "
-            "for a larger rebuild, please lead the broad edit first and I will help check it."
-        )
-    return text if has_scope else f"{text}\n\n{scope}"
+    kept = []
+    for paragraph in (part.strip() for part in text.split("\n\n")):
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])\s*", paragraph)
+            if sentence.strip()
+        ]
+        remaining = [
+            sentence for sentence in sentences
+            if not (
+                any(marker in sentence.casefold() for marker in process_markers)
+                and not any(marker in sentence.casefold() for marker in map_markers)
+            )
+        ]
+        if remaining:
+            separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+            kept.append(separator.join(remaining))
+
+    body = "\n\n".join(kept).strip()
+    return f"{body}\n\n{compact_guidance}" if body else compact_guidance
 
 
 def _latest_user_states_direction(messages):
@@ -4876,12 +4875,11 @@ def _is_stage_one(stage_context):
 def _build_task_instructions(assessment_only, stage_context=None):
     if assessment_only:
         stage_one_instruction = (
-            "This is Stage 1. Do not ask a question. After your concrete observation, "
-            "naturally let the designer know they can share an impression, play this Stage, "
-            "or make a local edit in the right panel. Make the collaboration boundary explicit: "
-            "you can make only small, reviewable changes and offer suggestions or help think "
-            "through a direction; a larger rebuild should be made by the designer in the editor "
-            "first. Do not present those options as a list. "
+            "This is Stage 1. Do not ask a question. Keep your concrete map observation and "
+            "personal response at their natural length. Then use only one compact concluding "
+            "sentence for all process guidance: the designer may share an impression or play, "
+            "you make only small reviewable edits or help think through a direction, and a broad "
+            "rebuild remains designer-led. Do not repeat those points separately. "
             if _is_stage_one(stage_context)
             else ""
         )
