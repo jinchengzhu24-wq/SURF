@@ -121,6 +121,47 @@ class ProposalSearchTests(unittest.TestCase):
                 self.assertEqual(result.rows[0], rows[0])
                 self.assertEqual(result.rows[-1], rows[-1])
 
+    def test_water_to_wall_is_an_atomic_reviewable_composite(self):
+        rows = [
+            "############",
+            "#..........#",
+            "#..@@......#",
+            "#..........#",
+            "#...p......#",
+            "#...s.t....#",
+            "#..........#",
+            "#..........#",
+            "#..........#",
+            "############",
+        ]
+        plan = parse_revision_plan({
+            "strategies": [{
+                "effect": "reshape_water",
+                "focus": {"row": 3, "column": 4, "radius": 1},
+                "operators": ["remove_water", "add_wall"],
+                "preserve": [
+                    "outer_shell", "player", "boxes", "targets", "unrelated_areas",
+                ],
+                "editBudget": 2,
+                "metricGoals": [],
+            }]
+        })
+        baseline = validate_and_solve(rows).as_dict()
+        result = search_revision_plan(
+            rows,
+            plan,
+            validate_and_solve,
+            baseline_metrics=baseline,
+        )
+
+        self.assertTrue(any(
+            before == "@" and after == "#"
+            for before_row, after_row in zip(rows, result.rows)
+            for before, after in zip(before_row, after_row)
+        ))
+        self.assertEqual(result.operators, ("add_wall", "remove_water"))
+        self.assertGreater(validate_and_solve(result.rows).solution_steps, 0)
+
     def test_search_is_deterministic_and_never_exceeds_candidate_limit(self):
         plan = plan_for("narrow_route", "add_wall", edit_budget=3)
         baseline = validate_and_solve(BASE_ROWS).as_dict()

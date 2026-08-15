@@ -145,7 +145,17 @@ class SearchState:
 
     @property
     def operators(self):
-        return frozenset(primitive.operator for primitive in self.primitives)
+        operators = set()
+        for primitive in self.primitives:
+            if primitive.operator == "water_to_wall":
+                # This is an internal atomic realization of the two public
+                # semantic operators.  It exists so a reviewable request to
+                # seal a water tile as a wall does not have to expose an
+                # invalid intermediate floor map to the search.
+                operators.update({"remove_water", "add_wall"})
+            else:
+                operators.add(primitive.operator)
+        return frozenset(operators)
 
 
 @dataclass(frozen=True)
@@ -417,6 +427,22 @@ def _generate_primitives(
     water = _find_all(rows, "@")
     entity_anchors = [*positions["p"], *positions["s"], *positions["t"]]
     primitives = []
+    allowed_operators = set(strategy.operators)
+    if (
+        {"remove_water", "add_wall"}.issubset(allowed_operators)
+        and "water" not in set(preserved_components or ())
+        and "walls" not in set(preserved_components or ())
+    ):
+        # A water-to-wall request is a real one-cell replacement, not two
+        # unrelated edits.  Generate it atomically from the base Stage so the
+        # beam can preserve locality and edit-budget accounting.
+        for x, y in _candidate_cells(rows, strategy.focus, {"@"}):
+            primitives.append(Primitive(
+                "water_to_wall",
+                ((x, y, "@", "#"),),
+                True,
+                _focus_distance(strategy.focus, x, y),
+            ))
     for operator in strategy.operators:
         if movement_requirement and operator != movement_requirement["operator"]:
             continue
