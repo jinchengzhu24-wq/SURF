@@ -4694,7 +4694,12 @@ def _latest_user_explicitly_rejects(message):
 def _first_declarative_sentence(message):
     for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(message or "")):
         cleaned = sentence.strip()
-        if cleaned and not cleaned.endswith(("?", "？")):
+        if (
+            cleaned
+            and not cleaned.endswith(("?", "？"))
+            and re.sub(r"[\s，,。.!！]", "", cleaned).casefold()
+            not in {"当然", "可以", "好的", "好", "同意", "没问题", "ok", "okay", "yes"}
+        ):
             return cleaned
     return ""
 
@@ -4711,6 +4716,11 @@ def _revision_direction_sentence(message):
     for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(message or "")):
         cleaned = sentence.strip()
         lowered = cleaned.casefold()
+        if re.search(
+            r"(?:把|将).{0,24}(?:水|墙|箱子?|目标|通道|路线|区域).{0,32}(?:挪|移|调|缩|拉|留出|打开|收紧|改)",
+            cleaned,
+        ):
+            return cleaned
         if (
             cleaned
             and not cleaned.endswith(("?", "？"))

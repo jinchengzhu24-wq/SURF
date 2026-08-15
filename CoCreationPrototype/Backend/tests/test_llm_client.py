@@ -832,6 +832,17 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("小调整我可以帮你改", body)
         self.assertEqual(body.count("你可以先说说你的第一反应或试玩当前关卡"), 1)
 
+    def test_revision_card_uses_the_concrete_plan_not_a_confirmation_word(self):
+        visible = (
+            "当然，我会先处理右上角贴水的两个箱子。我的想法是：把中间那格水往左挪一格，"
+            "让箱子之间多出一条纵向通道。"
+        )
+
+        summary = llm_client._revision_direction_sentence(visible)
+
+        self.assertIn("把中间那格水往左挪一格", summary)
+        self.assertNotEqual(summary, "当然")
+
     def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
         client = FakeClient([
             "我会把右下目标与水塘做局部联动。这样能让水域影响第一次推动。"
