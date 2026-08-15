@@ -257,6 +257,9 @@ def build_chat_messages(
         "followUpQuestion is the LET'S DISCUSS card. It must be null, one concrete question, "
         "or one concise first-person design insight worth discussing. A declarative insight "
         "must name a concrete map or play judgment and must not duplicate assistantMessage. "
+        "Write an insight like a natural next observation from a design peer: begin with the "
+        "specific play moment, then say why it is worth watching. Avoid report-like lead-ins "
+        "such as '我在意的是', '我想把注意力放在', or '比单看格子摆放更能说明'. "
         "proposalOffer must be null or "
         'an object with exactly {"summary":"...","rationale":"..."}. '
         "uiCues must be an array of at most two unique objects with exactly type and "
@@ -3179,8 +3182,8 @@ def _refine_discussion_focus(focus, visible_content, language):
             )[:1000]
         if len(value) < 72:
             return (
-                f"我想先陪你验证一下：{value.rstrip('。')}。"
-                "别急着动大结构，先看第一次推箱时玩家会不会自然停一下想路线。"
+                f"不如先看这一点：{value.rstrip('。')}。"
+                "先别急着动大结构，看看第一次推箱时玩家会不会自然停下来想路线。"
             )[:1000]
         return value[:1000]
 
@@ -4001,11 +4004,11 @@ def _friendly_default_discussion_focus(rows, language, latest_user, recent_focus
     seed = sum(ord(character) for character in f"{serialized}{latest_user}")
     if language == "zh-CN":
         options = (
-            "我会留意第一次推箱时，玩家会不会自然停下来读一眼路线；这个瞬间能告诉我们该微调附近还是保留空间。",
-            "我在意的是箱子第一次靠近目标前的犹豫有没有真实出现；它比单看格子摆放更能说明路线是否有了分量。",
-            "我想把注意力放在玩家第一次决定先推哪个箱子的片刻；这个判断会决定下一步只动局部，还是回头整理路线。",
-            "对我来说，水边第一次推进时的回旋空间最值得观察；那里能看出水域是在参与路线，还是只停留在视觉上。",
-            "我会看玩家进入调整区域的第一步会不会重新判断顺序；这比额外移动多少更能说明这次变化是否有效。",
+            "我会留意第一次推箱时，玩家会不会自然停下来读一眼路线；这能帮我们判断附近该微调，还是该留出空间。",
+            "箱子第一次靠近目标时，玩家会不会停一下想下一步？我想先看这个，因为它最能看出路线有没有形成真实选择。",
+            "玩家第一次决定先推哪个箱子时，心里会不会有一点犹豫？这个瞬间能告诉我们下一步只动局部，还是回头整理路线。",
+            "水边第一次推进时，箱子还有没有回旋余地？看这里就能知道水是在参与路线，还是只停在视觉上。",
+            "玩家走进调整区域的第一步，会不会重新想一下推箱顺序？如果会，这次变化就真的参与到路线里了。",
         )
     else:
         options = (

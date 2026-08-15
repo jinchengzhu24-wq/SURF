@@ -217,7 +217,7 @@ class LLMClientTests(unittest.TestCase):
         ], language="zh-CN")
 
         focus = result.guidance["followUpQuestion"]
-        self.assertIn("先陪你验证一下", focus)
+        self.assertIn("不如先看这一点", focus)
         self.assertIn("第一次推动", focus)
         self.assertIn("第一次推箱", focus)
         self.assertNotIn("？", focus)
@@ -1473,6 +1473,24 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertIsNone(extracted)
+
+    def test_default_discussion_insights_use_play_moments_not_report_lead_ins(self):
+        focuses = {
+            llm_client._friendly_default_discussion_focus(
+                ["############"] * 10,
+                "zh-CN",
+                f"水边路线 {index}",
+                [],
+            )
+            for index in range(12)
+        }
+
+        self.assertGreaterEqual(len(focuses), 4)
+        for focus in focuses:
+            self.assertNotIn("我在意的是", focus)
+            self.assertNotIn("我想把注意力放在", focus)
+            self.assertNotIn("比单看格子摆放更能说明", focus)
+            self.assertTrue(any(marker in focus for marker in ("第一次", "水边", "调整区域")))
 
     def test_question_without_structured_follow_up_is_extracted(self):
         payload = {
