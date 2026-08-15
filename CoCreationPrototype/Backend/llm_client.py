@@ -188,7 +188,10 @@ def build_chat_messages(
         "a deterministic solver fact. When the designer explicitly reframes or challenges "
         "your judgment of difficulty, priority, or play effect, include a fresh, correctable "
         "intentHypothesis that states what you now understand they care about; do not leave "
-        "that disagreement only in the prose or discussion card.\n\n"
+        "that disagreement only in the prose or discussion card. An intentHypothesis must "
+        "infer the playable purpose behind the designer's stated operation; never merely copy "
+        "or prefix their wording (for example, turn a request to reshape water into a tentative "
+        "claim about how water should affect route reading or push decisions).\n\n"
         "Treat the saved Stage as read-only until the designer accepts a validated "
         "proposal in the interface. Treat natural requests such as '你帮我改', '你来改吧', "
         "'按这个思路改', 'can you change it', and 'go ahead and revise it' as explicit "
@@ -3790,6 +3793,11 @@ def _apply_deterministic_guidance_fallback(
     fallback_used = False
 
     difficulty_reframe = _user_reframes_difficulty_judgment(messages)
+    intent_hypothesis = _replace_echoed_intent_hypothesis(
+        intent_hypothesis,
+        latest_user,
+        language,
+    )
     if intent_hypothesis is None and (
         difficulty_reframe
         or (explicit_direction and not recent.get("intentHypothesis"))
@@ -4095,12 +4103,7 @@ def _natural_intent_candidate(
                 "我读到的倾向是，你更想先做出一个能亲手比较的局部变化。",
             )
         else:
-            excerpt = source[:120].rstrip("。！？?!")
-            options = (
-                f"我暂时把你的方向理解为：{excerpt}。",
-                f"听起来你更在意的是“{excerpt}”带来的实际游玩感受。",
-                f"我读到的倾向是，你希望后续设计真正回应“{excerpt}”。",
-            )
+            options = _semantic_intent_options(source, "zh-CN")
     elif explicit_agreement:
         options = (
             "It sounds to me like you are ready to put that idea into a concrete trial.",
@@ -4108,13 +4111,77 @@ def _natural_intent_candidate(
             "I read your preference as making this idea tangible enough to compare in play.",
         )
     else:
-        excerpt = source[:160].rstrip(".!?")
-        options = (
-            f"For now, I understand your direction as: {excerpt}.",
-            f"It sounds to me like the play effect behind “{excerpt}” matters most to you.",
-            f"I read your preference as wanting the next design step to answer “{excerpt}”.",
-        )
+        options = _semantic_intent_options(source, "en")
     return options[variant]
+
+
+def _replace_echoed_intent_hypothesis(hypothesis, latest_user, language):
+    """Keep intent cards interpretive rather than a prefixed copy of user text."""
+    if not hypothesis or not latest_user:
+        return hypothesis
+
+    source = _intent_comparison_text(latest_user, language)
+    candidate = _intent_comparison_text(hypothesis, language)
+    if len(source) < 5 or len(candidate) < 5:
+        return hypothesis
+
+    similarity = SequenceMatcher(None, source, candidate).ratio()
+    if source in candidate or similarity >= 0.82:
+        variant = sum(ord(character) for character in source) % 3
+        return _semantic_intent_options(str(latest_user), language)[variant]
+    return hypothesis
+
+
+def _intent_comparison_text(text, language):
+    value = re.sub(r"\s+", "", str(text or "")).strip("。！？?!：:”“\"' ")
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", value):
+        value = re.sub(
+            r"^(?:我暂时把你的方向理解为|听起来你更在意的是|我读到的倾向是|我猜你可能|我觉得你可能|我感觉你(?:可能|似乎))[:：]?",
+            "",
+            value,
+        )
+    else:
+        value = re.sub(
+            r"^(?:For now, I understand your direction as(?: wanting)?|It sounds to me like you|I read your preference as(?: wanting)?)[: ]*",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+    return value.casefold()
+
+
+def _semantic_intent_options(source, language):
+    value = str(source or "").casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", str(source or "")):
+        if "水" in source and any(marker in source for marker in ("形", "改", "变", "水域")):
+            return (
+                "我暂时理解的是，你想让水域真正重写玩家读路线和推进时机的方式，而不是只补一个局部缺口；如果我抓错重点，请纠正我。",
+                "听起来你更在意的是，水要从背景变成会迫使玩家重新判断绕行与推进的边界；这只是我当前的理解。",
+                "我读到的倾向是，你希望水域的布局改变箱子经过时的选择感，而不只是换一个视觉形状；若重点不是这里，请改正我。",
+            )
+        if "墙" in source:
+            return (
+                "我暂时理解的是，你想让墙体改变路线的取舍，而不只是增加一块阻挡；如果我抓错重点，请纠正我。",
+                "听起来你更在意的是，墙应当让玩家在推进前读出不同路径的后果；这只是我当前的理解。",
+                "我读到的倾向是，你希望障碍承担选择压力，而不是单纯拉长路线；若重点不是这里，请改正我。",
+            )
+        return (
+            "我暂时理解的是，你希望这次局部改动真的改变玩家读路线和作决定的方式，而不只是调整某个格子；如果我抓错重点，请纠正我。",
+            "听起来你更在意的是，下一步要能在游玩中感到明确差异，而不是停留在表面的布局变化；这只是我当前的理解。",
+            "我读到的倾向是，你希望这项调整影响实际的推进选择；若重点不是这里，请改正我。",
+        )
+
+    if "water" in value:
+        return (
+            "For now, I understand your direction as wanting water to reshape route reading and push timing, rather than merely change a local patch; please correct me if I have that wrong.",
+            "It sounds to me like you want water to become a boundary that makes rerouting and pushing worth judging, not background decoration; that is only my current reading.",
+            "I read your preference as wanting the water layout to change the choices around a box's passage, rather than only its visual shape; please correct me if that misses the point.",
+        )
+    return (
+        "For now, I understand your direction as wanting this local change to alter how the player reads the route and makes a decision, rather than merely changing a tile; please correct me if I have that wrong.",
+        "It sounds to me like the next change needs to create a felt difference in play, not just a surface-level layout adjustment; that is only my current reading.",
+        "I read your preference as wanting this adjustment to affect a real push decision; please correct me if that misses the point.",
+    )
 
 
 def _difficulty_stance(text):

@@ -746,6 +746,26 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNotNone(intent)
         self.assertIn("你", intent)
         self.assertIn("推", intent)
+
+    def test_tentative_intent_rephrases_an_echoed_water_instruction(self):
+        user_message = "我倒是认为得改动水域的形状"
+        result, _ = self.execute(
+            [
+                "我同意，水现在更像装饰而不是路线边界。\n"
+                "<GUIDANCE>INTENT: 我暂时把你的方向理解为：我倒是认为得改动水域的形状</GUIDANCE>"
+            ],
+            language="zh-CN",
+            conversation=[
+                {"role": "assistant", "content": "我原本认为补一个缺口就够。"},
+                {"role": "user", "content": user_message},
+            ],
+        )
+
+        intent = result.guidance["intentHypothesis"]
+        self.assertIsNotNone(intent)
+        self.assertNotIn(user_message, intent)
+        self.assertIn("水", intent)
+        self.assertTrue(any(marker in intent for marker in ("路线", "推进", "绕行", "选择")))
         self.assertNotIn("设计者", intent)
 
     def test_direction_question_goes_deeper_instead_of_asking_for_approval(self):
