@@ -13,11 +13,13 @@ public class MatchResultController : MonoBehaviour
 
     [Header("Your Challenge / Opponent Run")]
     [SerializeField] private Text ownChallengeAssistantText;
+    [SerializeField] private Text ownFeedbackText;
     [SerializeField] private Text opponentRunTimeText;
     [SerializeField] private Text opponentRunMovesText;
 
     [Header("Opponent Challenge / Your Run")]
     [SerializeField] private Text opponentChallengeAssistantText;
+    [SerializeField] private Text opponentFeedbackText;
     [SerializeField] private Text ownRunTimeText;
     [SerializeField] private Text ownRunMovesText;
 
@@ -107,9 +109,17 @@ public class MatchResultController : MonoBehaviour
             state.ownChallengeMetadata,
             ownChallengeAssistantText
         );
+        RenderOpponentExperience(
+            state.ownChallengeMetadata,
+            ownFeedbackText
+        );
         RenderMetadata(
             state.opponentChallengeMetadata,
             opponentChallengeAssistantText
+        );
+        RenderOpponentExperience(
+            state.opponentChallengeMetadata,
+            opponentFeedbackText
         );
         RenderResult(
             state.ownResult,
@@ -187,6 +197,19 @@ public class MatchResultController : MonoBehaviour
         );
     }
 
+    private static void RenderOpponentExperience(
+        OnlineChallengeMetadata metadata,
+        Text feedbackText)
+    {
+        string goal = metadata != null ? metadata.opponentExperienceGoal : "";
+        SetText(
+            feedbackText,
+            string.IsNullOrWhiteSpace(goal)
+                ? "DESIRED EXPERIENCE  --"
+                : "DESIRED EXPERIENCE\n" + goal.Trim()
+        );
+    }
+
     private static string FormatAssistantMode(string mode)
     {
         return mode == AIAssistantModeController.PartialCompletionApiMode
@@ -253,6 +276,7 @@ public class MatchResultController : MonoBehaviour
             ownChallengeAssistantText,
             "OwnChallengeAssistantText"
         );
+        ownFeedbackText = ResolveText(ownFeedbackText, "OwnFeedbackText");
         opponentRunTimeText = ResolveText(
             opponentRunTimeText,
             "OpponentRunTimeText"
@@ -264,6 +288,10 @@ public class MatchResultController : MonoBehaviour
         opponentChallengeAssistantText = ResolveText(
             opponentChallengeAssistantText,
             "OpponentChallengeAssistantText"
+        );
+        opponentFeedbackText = ResolveText(
+            opponentFeedbackText,
+            "OpponentFeedbackText"
         );
         ownRunTimeText = ResolveText(ownRunTimeText, "OwnRunTimeText");
         ownRunMovesText = ResolveText(ownRunMovesText, "OwnRunMovesText");
@@ -287,10 +315,12 @@ public class MatchResultController : MonoBehaviour
             null,
             ownChallengeAssistantText
         );
+        RenderOpponentExperience(null, ownFeedbackText);
         RenderMetadata(
             null,
             opponentChallengeAssistantText
         );
+        RenderOpponentExperience(null, opponentFeedbackText);
         RenderResult(null, opponentRunTimeText, opponentRunMovesText);
         RenderResult(null, ownRunTimeText, ownRunMovesText);
     }

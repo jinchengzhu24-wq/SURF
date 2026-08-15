@@ -96,13 +96,14 @@ class MatchmakingRecordTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200)
 
-    def submit_challenge(self, player, rows, assistant):
+    def submit_challenge(self, player, rows, assistant, opponent_experience_goal=""):
         return self.client.post(
             "/online/rooms/" + player["matchId"] + "/challenge",
             headers=self.headers(player),
             json={
                 "rows": rows,
                 "aiAssistantMode": assistant,
+                "opponentExperienceGoal": opponent_experience_goal,
             },
         )
 

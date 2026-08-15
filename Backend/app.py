@@ -123,6 +123,7 @@ class OnlineReadyRequest(BaseModel):
 class OnlineChallengeRequest(BaseModel):
     rows: list[str]
     aiAssistantMode: str = "description_generation"
+    opponentExperienceGoal: str = ""
 
 
 class OnlineResultRequest(BaseModel):
@@ -276,9 +277,7 @@ def serialize_online_room(room, player=None, include_token=False):
         player is not None
         and player.get("challengeRows") is not None
     ):
-        payload["ownChallengeMetadata"] = {
-            "aiAssistantMode": player["aiAssistantMode"],
-        }
+        payload["ownChallengeMetadata"] = serialize_online_challenge_metadata(player)
 
     if (
         player is not None
@@ -291,9 +290,7 @@ def serialize_online_room(room, player=None, include_token=False):
             if item["playerNumber"] != player["playerNumber"]
         )
         payload["opponentChallengeRows"] = list(opponent["challengeRows"])
-        payload["opponentChallengeMetadata"] = {
-            "aiAssistantMode": opponent["aiAssistantMode"],
-        }
+        payload["opponentChallengeMetadata"] = serialize_online_challenge_metadata(opponent)
 
     if player is not None and player.get("result") is not None:
         payload["ownResult"] = dict(player["result"])
@@ -309,6 +306,16 @@ def serialize_online_room(room, player=None, include_token=False):
             payload["opponentResult"] = dict(opponent["result"])
 
     return payload
+
+
+def serialize_online_challenge_metadata(player):
+    metadata = {"aiAssistantMode": player["aiAssistantMode"]}
+    experience_goal = str(player.get("opponentExperienceGoal") or "").strip()
+
+    if experience_goal:
+        metadata["opponentExperienceGoal"] = experience_goal
+
+    return metadata
 
 
 def validate_online_challenge_rows(rows):
@@ -351,6 +358,18 @@ def validate_online_ai_assistant_mode(ai_assistant_mode):
             status_code=400,
             detail="Unknown AI assistant mode",
         )
+
+
+def normalize_online_opponent_experience_goal(value):
+    goal = str(value or "").strip()
+
+    if len(goal) > 4000:
+        raise HTTPException(
+            status_code=400,
+            detail="Opponent experience goal must contain at most 4000 characters",
+        )
+
+    return goal
 
 
 def validate_online_result(payload):
@@ -691,6 +710,7 @@ def create_online_room():
             "ready": False,
             "challengeRows": None,
             "aiAssistantMode": None,
+            "opponentExperienceGoal": None,
             "result": None,
         }
         match_id = uuid.uuid4().hex
@@ -736,6 +756,7 @@ def join_online_room(payload: OnlineRoomJoinRequest):
             "ready": False,
             "challengeRows": None,
             "aiAssistantMode": None,
+            "opponentExperienceGoal": None,
             "result": None,
         }
         room["players"].append(player)
@@ -810,6 +831,9 @@ def submit_online_challenge(
     validate_online_ai_assistant_mode(payload.aiAssistantMode)
 
     submitted_rows = list(payload.rows)
+    opponent_experience_goal = normalize_online_opponent_experience_goal(
+        payload.opponentExperienceGoal
+    )
 
     with ONLINE_ROOMS_LOCK:
         room, player = require_online_room(
@@ -834,6 +858,8 @@ def submit_online_challenge(
             if (
                 existing_rows != submitted_rows
                 or player.get("aiAssistantMode") != payload.aiAssistantMode
+                or str(player.get("opponentExperienceGoal") or "")
+                != opponent_experience_goal
             ):
                 raise HTTPException(
                     status_code=409,
@@ -845,6 +871,7 @@ def submit_online_challenge(
 
         player["challengeRows"] = submitted_rows
         player["aiAssistantMode"] = payload.aiAssistantMode
+        player["opponentExperienceGoal"] = opponent_experience_goal
         both_submitted = all(
             item.get("challengeRows") is not None for item in room["players"]
         )
@@ -859,6 +886,7 @@ def submit_online_challenge(
             "challenge_submitted",
             player_number=player["playerNumber"],
             aiAssistantMode=payload.aiAssistantMode,
+            opponentExperienceGoal=opponent_experience_goal,
             rows=submitted_rows,
         )
         return serialize_online_room(room, player)
@@ -2138,6 +2166,7 @@ def build_matchmaking_records_payload(
         "serverReceivedAt",
         "ready",
         "aiAssistantMode",
+        "opponentExperienceGoal",
         "rows",
         "durationSeconds",
         "moveCount",
@@ -2231,6 +2260,9 @@ def build_matchmaking_records_payload(
                 "aiAssistantMode": normalize_survey_identifier(
                     event.get("aiAssistantMode")
                 ),
+                "opponentExperienceGoal": str(
+                    event.get("opponentExperienceGoal") or ""
+                ).strip(),
                 "rows": list(rows) if isinstance(rows, list) else [],
             }
         elif event_type == "result_submitted" and player is not None:

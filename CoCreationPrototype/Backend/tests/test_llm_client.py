@@ -873,6 +873,46 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertNotIn("response_format", client.chat.completions.calls[1])
 
+    def test_structured_stage_one_opening_receives_rows_for_scope_normalization(self):
+        payload = json.dumps({
+            "assistantMessage": "The central water area makes the first route split easy to read.",
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The solver found a valid route.",
+                "difficultyOpinion": "I think the opening is readable.",
+                "features": ["Central water"],
+                "suggestions": ["Try the opening route."],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        })
+
+        client = FakeClient([payload])
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_stage_assessment(
+                [],
+                ["############"] * 10,
+                "en",
+                {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
+                {},
+                "stage-structured-opening-test",
+                {"stageNumber": 1, "source": "initial"},
+            )
+
+        self.assertIn("small, reviewable changes", result.assistant_message)
+        self.assertEqual(result.attempts_used, 1)
+
     def test_length_truncation_uses_fallback_model(self):
         truncated = SimpleNamespace(
             choices=[SimpleNamespace(

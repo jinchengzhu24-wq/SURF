@@ -1286,6 +1286,10 @@ class CoCreationSessionTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.integration_token}"},
         )
         self.assertEqual(integration.json()["finalRows"], SAMPLE_ROWS)
+        self.assertEqual(
+            integration.json()["designerIntention"],
+            "I wanted a compact introductory puzzle.",
+        )
 
     def test_language_switch_is_persisted(self):
         response = self.client.patch(

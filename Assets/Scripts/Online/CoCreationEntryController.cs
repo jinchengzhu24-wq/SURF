@@ -236,7 +236,10 @@ public sealed class CoCreationEntryController : MonoBehaviour
                         && response.finalRows != null
                         && response.finalRows.Length == 10)
                     {
-                        HandleCompletedSession(response.finalRows);
+                        HandleCompletedSession(
+                            response.finalRows,
+                            response.designerIntention
+                        );
                         yield break;
                     }
                 }
@@ -246,7 +249,9 @@ public sealed class CoCreationEntryController : MonoBehaviour
         }
     }
 
-    private void HandleCompletedSession(string[] finalRows)
+    private void HandleCompletedSession(
+        string[] finalRows,
+        string designerIntention)
     {
         SetStatus(
             "Co-creation session complete. The confirmed Stage is synchronized.",
@@ -268,7 +273,8 @@ public sealed class CoCreationEntryController : MonoBehaviour
 
         OnlineMatchContext.StageChallenge(
             finalRows,
-            CoCreationDraftContext.InitialDraftMethod
+            CoCreationDraftContext.InitialDraftMethod,
+            designerIntention
         );
         CoCreationDraftContext.Clear();
         SceneManager.LoadScene(waitingSceneName);
@@ -353,4 +359,5 @@ public sealed class CoCreationIntegrationResponse
     public string status;
     public string finalVersionId;
     public string[] finalRows;
+    public string designerIntention;
 }

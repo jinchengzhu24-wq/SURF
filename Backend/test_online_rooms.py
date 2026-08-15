@@ -271,12 +271,14 @@ class OnlineRoomTests(unittest.TestCase):
         player_token,
         rows,
         ai_assistant_mode="description_generation",
+        opponent_experience_goal="",
     ):
         return self.client.post(
             "/online/rooms/" + match_id + "/challenge",
             json={
                 "rows": rows,
                 "aiAssistantMode": ai_assistant_mode,
+                "opponentExperienceGoal": opponent_experience_goal,
             },
             headers=self.auth_headers(player_token),
         )
@@ -364,6 +366,39 @@ class OnlineRoomTests(unittest.TestCase):
             {
                 "aiAssistantMode": "description_generation",
             },
+        )
+
+    def test_challenge_exchanges_final_opponent_experience_goal(self):
+        host, guest = self.ready_both_players()
+        host_goal = "I hope my opponent feels a careful route choice."
+        guest_goal = "I hope my opponent feels an early push trade-off."
+
+        self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+            opponent_experience_goal=host_goal,
+        )
+        response = self.submit_challenge(
+            host["matchId"],
+            guest["playerToken"],
+            SOLVABLE_ROWS_B,
+            ai_assistant_mode="partial_completion",
+            opponent_experience_goal=guest_goal,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        host_status = self.client.get(
+            "/online/rooms/" + host["matchId"],
+            headers=self.auth_headers(host["playerToken"]),
+        )
+        self.assertEqual(
+            host_status.json()["ownChallengeMetadata"]["opponentExperienceGoal"],
+            host_goal,
+        )
+        self.assertEqual(
+            host_status.json()["opponentChallengeMetadata"]["opponentExperienceGoal"],
+            guest_goal,
         )
 
     def test_legacy_competition_field_is_ignored(self):

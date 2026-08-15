@@ -149,7 +149,8 @@ GET   /api/integrations/sessions/{sessionId}
 ```json
 {
   "rows": ["..."],
-  "aiAssistantMode": "partial_completion"
+  "aiAssistantMode": "partial_completion",
+  "opponentExperienceGoal": "I hope my opponent feels a careful route choice."
 }
 ```
 

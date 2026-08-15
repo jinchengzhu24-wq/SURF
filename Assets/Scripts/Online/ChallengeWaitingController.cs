@@ -120,6 +120,7 @@ public class ChallengeWaitingController : MonoBehaviour
         yield return client.SubmitChallenge(
             OnlineMatchContext.PendingChallengeRows,
             OnlineMatchContext.PendingAiAssistantMode,
+            OnlineMatchContext.PendingOpponentExperienceGoal,
             state =>
             {
                 succeeded = true;

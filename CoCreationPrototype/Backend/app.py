@@ -1703,11 +1703,17 @@ def integration_status(
             "status": session["status"],
             "finalVersionId": session["final_version_id"],
             "finalRows": None,
+            "designerIntention": None,
         }
 
         if session["status"] == "completed" and session["final_version_id"]:
             version = get_version(database, session_id, session["final_version_id"])
             payload["finalRows"] = load_json(version["rows_json"])
+            intention = database.execute(
+                "SELECT content FROM designer_intentions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            payload["designerIntention"] = intention["content"] if intention else None
 
         return payload
 
