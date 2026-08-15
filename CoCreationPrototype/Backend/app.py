@@ -1305,8 +1305,13 @@ def _proposal_review_guidance(guidance, language):
             "right-hand editor; I will use your actual edit as our next shared evidence."
         )
     )
-    source["intentHypothesis"] = None
-    source["intentConfidence"] = None
+    # A first-person designer stance is still useful while reviewing a concrete
+    # proposal.  Keep its correctable intent card instead of hiding it merely
+    # because the proposal also has a manual-review card.
+    source["intentHypothesis"] = source.get("intentHypothesis") or None
+    source["intentConfidence"] = (
+        source.get("intentConfidence") if source.get("intentHypothesis") else None
+    )
     source["followUpQuestion"] = None
     source["proposalOffer"] = None
     source["uiCues"] = [

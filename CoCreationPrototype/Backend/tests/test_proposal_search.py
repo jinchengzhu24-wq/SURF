@@ -78,6 +78,12 @@ class ProposalSearchTests(unittest.TestCase):
                 }]
             })
 
+        with self.assertRaisesRegex(RevisionPlanError, "cannot realize its declared effect"):
+            plan_for("relocate_target", "add_wall")
+
+        with self.assertRaisesRegex(RevisionPlanError, "between 1 and 8"):
+            plan_for("narrow_route", "add_wall", edit_budget=9)
+
     def test_every_semantic_operator_returns_a_solved_map_and_preserves_counts(self):
         cases = [
             ("narrow_route", "add_wall", BASE_ROWS),
@@ -157,6 +163,48 @@ class ProposalSearchTests(unittest.TestCase):
         self.assertEqual(result.score["metricMatches"], 1)
         self.assertNotEqual(result.rows, checked_rows[0])
 
+    def test_unsatisfied_metric_goal_is_rejected_instead_of_selected(self):
+        def unchanged_metrics(_rows):
+            return SimpleNamespace(
+                solution_steps=10,
+                solution_pushes=1,
+                searched_states=1,
+            )
+
+        with self.assertRaises(ProposalSearchExhausted) as raised:
+            search_revision_plan(
+                BASE_ROWS,
+                plan_for(
+                    "narrow_route",
+                    "add_wall",
+                    metric_goals=[{
+                        "metric": "solutionSteps",
+                        "direction": "increase",
+                    }],
+                ),
+                unchanged_metrics,
+                baseline_metrics={"solutionSteps": 10},
+            )
+        self.assertGreater(
+            raised.exception.diagnostics["failureReasons"]["metric_goal_not_met"],
+            0,
+        )
+
+    def test_explicit_preservation_blocks_an_otherwise_valid_operator(self):
+        with self.assertRaises(ProposalSearchExhausted) as raised:
+            search_revision_plan(
+                BASE_ROWS,
+                plan_for("reshape_water", "add_water"),
+                validate_and_solve,
+                baseline_metrics=validate_and_solve(BASE_ROWS).as_dict(),
+                preserved_components={"water"},
+            )
+        self.assertEqual(
+            raised.exception.diagnostics["preservedComponents"],
+            ["water"],
+        )
+        self.assertEqual(raised.exception.diagnostics["constructedCandidates"], 0)
+
     def test_focus_and_edit_budget_protect_unrelated_cells(self):
         focus = {"row": 3, "column": 3, "radius": 1}
         result = search_revision_plan(
@@ -174,6 +222,52 @@ class ProposalSearchTests(unittest.TestCase):
         self.assertEqual(len(changed), 1)
         x, y = changed[0]
         self.assertLessEqual(max(abs(x - 2), abs(y - 2)), 1)
+
+    def test_hard_movement_requirement_never_selects_the_opposite_direction(self):
+        baseline = validate_and_solve(BASE_ROWS).as_dict()
+        result = search_revision_plan(
+            BASE_ROWS,
+            plan_for(
+                "relocate_target",
+                "move_target",
+                focus={"row": 6, "column": 8, "radius": 2},
+            ),
+            validate_and_solve,
+            baseline_metrics=baseline,
+            movement_requirement={"operator": "move_target", "direction": "right"},
+        )
+
+        before_x = BASE_ROWS[5].index("t")
+        after_x = next(
+            x
+            for row in result.rows
+            for x, tile in enumerate(row)
+            if tile == "t"
+        )
+        self.assertGreater(after_x, before_x)
+        self.assertEqual(
+            result.diagnostics["movementRequirement"],
+            {"operator": "move_target", "direction": "right"},
+        )
+
+    def test_hard_movement_requirement_exhausts_instead_of_reversing_direction(self):
+        with self.assertRaises(ProposalSearchExhausted) as raised:
+            search_revision_plan(
+                BASE_ROWS,
+                plan_for(
+                    "relocate_target",
+                    "move_target",
+                    focus={"row": 6, "column": 4, "radius": 1},
+                ),
+                validate_and_solve,
+                baseline_metrics=validate_and_solve(BASE_ROWS).as_dict(),
+                movement_requirement={"operator": "move_target", "direction": "right"},
+            )
+        self.assertEqual(
+            raised.exception.diagnostics["movementRequirement"],
+            {"operator": "move_target", "direction": "right"},
+        )
+        self.assertEqual(raised.exception.diagnostics["constructedCandidates"], 0)
 
     def test_solver_rejections_are_aggregated_in_search_diagnostics(self):
         calls = []

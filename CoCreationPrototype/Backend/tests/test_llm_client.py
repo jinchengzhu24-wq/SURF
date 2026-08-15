@@ -223,7 +223,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("？", focus)
         self.assertNotIn("GUIDANCE", result.assistant_message)
 
-    def test_plain_discuss_card_does_not_repeat_the_recent_focus(self):
+    def test_repeated_plain_discuss_card_is_omitted_when_no_new_focus_is_needed(self):
         content = (
             "这个版本的下半区多了一点回旋空间。\n"
             "<GUIDANCE>DISCUSS: 我更喜欢水边留下的路线犹豫，它让第一次推动的选择更有分量。</GUIDANCE>"
@@ -241,11 +241,7 @@ class LLMClientTests(unittest.TestCase):
         )
 
         focus = result.guidance["followUpQuestion"]
-        self.assertIsNotNone(focus)
-        self.assertNotEqual(
-            focus,
-            result.guidance.get("recentGuidance", {}).get("discussionFocus"),
-        )
+        self.assertIsNone(focus)
 
     def test_plain_reply_extracts_intent_card(self):
         result, _ = self.execute([
@@ -321,9 +317,9 @@ class LLMClientTests(unittest.TestCase):
             ["manual_edit", "warning"],
         )
 
-    def test_non_opening_replies_require_a_card_but_explicit_off_topic_does_not(self):
+    def test_non_opening_replies_do_not_force_a_discussion_card(self):
         result, _ = self.execute(["The route remains readable."])
-        self.assertIsNotNone(result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
 
         client = FakeClient(["当然，我们可以先聊点别的。"])
         with (
@@ -399,7 +395,7 @@ class LLMClientTests(unittest.TestCase):
                 self.assertTrue(result.assistant_message.startswith("Visible reply."))
                 self.assertIsNone(result.guidance["intentHypothesis"])
                 self.assertIsNone(result.guidance["proposalOffer"])
-                self.assertIsNotNone(result.guidance["followUpQuestion"])
+                self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_repeated_guidance_cards_are_suppressed_but_changed_intent_remains(self):
         content = (
@@ -467,7 +463,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("water-side route", result.assistant_message)
         self.assertEqual(result.attempts_used, 2)
         self.assertEqual(client.chat.completions.calls[1]["model"], "deepseek-v4-pro")
-        self.assertIsNotNone(result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_two_pure_generic_questions_return_low_quality_error(self):
         client = FakeClient(["What do you think?", "Is this direction okay?"])
@@ -491,7 +487,7 @@ class LLMClientTests(unittest.TestCase):
         result, _ = self.execute([reply])
 
         self.assertTrue(result.assistant_message.startswith(reply))
-        self.assertIsNotNone(result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_redundant_question_is_removed_after_an_explicit_direction(self):
         client = FakeClient([
@@ -692,7 +688,7 @@ class LLMClientTests(unittest.TestCase):
                 "question-dedup-test",
             )
 
-        self.assertIsNotNone(result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_generic_question_is_removed_when_declarative_body_exists(self):
         result, client = self.execute([
@@ -701,10 +697,10 @@ class LLMClientTests(unittest.TestCase):
         ])
 
         self.assertEqual(len(client.chat.completions.calls), 1)
-        self.assertIsNotNone(result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertNotIn("Does this direction work", result.assistant_message)
 
-    def test_clear_evaluation_gets_a_specific_question_when_model_omits_one(self):
+    def test_clear_first_person_evaluation_gets_an_intent_card_when_model_omits_one(self):
         client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
 
         with (
@@ -718,12 +714,8 @@ class LLMClientTests(unittest.TestCase):
                 language="zh-CN",
             )
 
-        question = result.guidance["followUpQuestion"]
-        self.assertIn("水边推进", question)
-        self.assertIn("路线", question)
-        self.assertIn("我想先陪你看", question)
-        self.assertNotIn("？", question)
-        self.assertIn("判断", question)
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_user_difficulty_reframe_gets_a_tentative_intent_card(self):
         result, _ = self.execute(
@@ -784,6 +776,35 @@ class LLMClientTests(unittest.TestCase):
         self.assertTrue(llm_client._latest_user_states_direction([
             {"role": "user", "content": "做点联动吧"},
         ]))
+
+    def test_any_first_person_stance_gets_a_correctable_intent_without_a_forced_discussion_card(self):
+        guidance = llm_client._ensure_required_guidance_card(
+            {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            [{"role": "user", "content": "我认为中间的水域仍然太像装饰。"}],
+            "zh-CN",
+            OPERATION_BASE_ROWS,
+            False,
+            {},
+        )
+        self.assertIsNotNone(guidance["intentHypothesis"])
+        self.assertEqual(guidance["intentConfidence"], "medium")
+        self.assertIsNone(guidance["followUpQuestion"])
+
+    def test_stage_one_opening_states_the_small_change_boundary(self):
+        body = llm_client._ensure_stage_one_orientation(
+            "我先看到水域让中间路线有了分隔。",
+            OPERATION_BASE_ROWS,
+            "zh-CN",
+        )
+        self.assertIn("只能帮你做一些较小、可审查的改动", body)
+        self.assertIn("大幅重做布局", body)
 
     def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
         client = FakeClient([
@@ -1189,6 +1210,51 @@ class LLMClientTests(unittest.TestCase):
         self.assertGreater(result.proposal_diagnostics["validCandidates"], 0)
         self.assertEqual(result.attempts_used, 1)
         self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_confirmed_assistant_direction_becomes_a_hard_search_requirement(self):
+        conversation = [
+            {
+                "role": "assistant",
+                "content": "我会把左上角的目标点往右下方挪，让它成为中期目标。",
+            },
+            {
+                "role": "user",
+                "content": "请根据这个方向生成一份可供审查的地图提案。",
+            },
+        ]
+        requirement = llm_client._authorized_movement_requirement(conversation)
+
+        self.assertEqual(
+            requirement,
+            {"operator": "move_target", "direction": "lower_right"},
+        )
+        messages = llm_client._build_revision_plan_messages(
+            conversation,
+            OPERATION_BASE_ROWS,
+            "zh-CN",
+            {"authorizedRevisionBrief": "拉开左上角箱子与目标点的距离"},
+            requirement,
+        )
+        self.assertIn(
+            "Hard verified movement requirement: the target must move lower right",
+            messages[1]["content"],
+        )
+
+    def test_direct_user_direction_overrides_an_older_assistant_direction(self):
+        requirement = llm_client._authorized_movement_requirement([
+            {
+                "role": "assistant",
+                "content": "Move the target to the left to open the route.",
+            },
+            {
+                "role": "user",
+                "content": "Please move the target to the right and generate a reviewable proposal.",
+            },
+        ])
+        self.assertEqual(
+            requirement,
+            {"operator": "move_target", "direction": "right"},
+        )
 
     def test_revision_plan_protocol_never_asks_model_for_tile_operations(self):
         client = FakeClient([revision_plan_payload()])
@@ -2057,7 +2123,8 @@ class LLMClientTests(unittest.TestCase):
                 stage_context={"stageNumber": 1, "source": "initial"},
             )
 
-        self.assertIn("水边推进", result.guidance["followUpQuestion"])
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_stage_opening_requires_archival_question_to_match_discussion(self):
         payload = {

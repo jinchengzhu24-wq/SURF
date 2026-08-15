@@ -48,7 +48,7 @@ PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v30-disagreement-intent"
+PROMPT_VERSION = "cocreation-v31-small-verified-revisions"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -697,11 +697,18 @@ def _generate_revision_search_proposal_sync(
     models = [proposal_model]
     if fallback_model != proposal_model:
         models.append(fallback_model)
+    movement_requirement = _authorized_movement_requirement(conversation)
+    preserved_components = _authorized_preserved_components(
+        conversation,
+        stage_context,
+    )
     messages = _build_revision_plan_messages(
         conversation,
         rows,
         language,
         stage_context,
+        movement_requirement,
+        preserved_components,
     )
     started_at = time.monotonic()
     _log_llm_event(
@@ -768,6 +775,8 @@ def _generate_revision_search_proposal_sync(
             validator,
             baseline_metrics=baseline_metrics,
             deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
+            movement_requirement=movement_requirement,
+            preserved_components=preserved_components,
         )
     except ProposalSearchExhausted as exception:
         # A syntactically valid plan can still name an operator/focus pair with
@@ -805,6 +814,8 @@ def _generate_revision_search_proposal_sync(
                         validator,
                         baseline_metrics=baseline_metrics,
                         deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
+                        movement_requirement=movement_requirement,
+                        preserved_components=preserved_components,
                     )
                     plan = corrected_plan
                     attempts_used += correction_attempts
@@ -867,6 +878,21 @@ def _generate_revision_search_proposal_sync(
         changedCellCount=search_result.score["changedCells"],
         search=search_result.diagnostics,
     )
+    latest_user = _latest_role_content(conversation, "user")
+    intent_hypothesis = (
+        _replace_echoed_intent_hypothesis(
+            _natural_intent_candidate(
+                latest_user,
+                language,
+                _latest_user_explicitly_agrees(latest_user),
+                difficulty_reframe=_user_reframes_difficulty_judgment(conversation),
+            ),
+            latest_user,
+            language,
+        )
+        if _user_states_first_person_view(latest_user)
+        else None
+    )
     return LLMExecutionResult(
         assistant_message=(
             "我整理了一份等待你审查的地图提案。"
@@ -881,8 +907,8 @@ def _generate_revision_search_proposal_sync(
         latency_ms=elapsed_ms,
         guidance={
             "move": "deliver_revision",
-            "intentHypothesis": None,
-            "intentConfidence": None,
+            "intentHypothesis": intent_hypothesis,
+            "intentConfidence": "medium" if intent_hypothesis else None,
             "followUpQuestion": None,
             "proposalOffer": None,
             "uiCues": [],
@@ -892,7 +918,14 @@ def _generate_revision_search_proposal_sync(
     )
 
 
-def _build_revision_plan_messages(conversation, rows, language, stage_context):
+def _build_revision_plan_messages(
+    conversation,
+    rows,
+    language,
+    stage_context,
+    movement_requirement=None,
+    preserved_components=None,
+):
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
     original_brief = str(stage_context.get("relaxationOriginalBrief") or "").strip()
@@ -903,6 +936,8 @@ def _build_revision_plan_messages(conversation, rows, language, stage_context):
         if stage_context.get("revisionRelaxed")
         else "Do not weaken or reinterpret the authorized direction."
     )
+    movement_rule = _movement_requirement_prompt(movement_requirement)
+    preservation_rule = _preserved_components_prompt(preserved_components)
     numbered_map = "\n".join(
         f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
     )
@@ -928,7 +963,7 @@ def _build_revision_plan_messages(conversation, rows, language, stage_context):
         "add_wall, remove_wall, move_player, move_box, move_target, add_water, remove_water. "
         "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
         "unrelated_areas. Never list an operator that edits a preserved component. editBudget is "
-        "an integer 1..24. metricGoals is an empty list or up to three distinct objects with metric "
+        "an integer 1..8. metricGoals is an empty list or up to three distinct objects with metric "
         "solutionSteps, solutionPushes, or searchedStates and direction increase, decrease, or "
         "preserve. Use objective metrics only when the designer's direction clearly implies them. "
         "Always preserve outer_shell and unrelated_areas. Natural-language reasoning is internal. "
@@ -936,7 +971,8 @@ def _build_revision_plan_messages(conversation, rows, language, stage_context):
     )
     user_prompt = (
         f"Authorized revision brief: {revision_brief!r}. "
-        f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule}\n\n"
+        f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule} {movement_rule} "
+        f"{preservation_rule}\n\n"
         "Column ruler (one-based): 123456789012\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
@@ -946,6 +982,156 @@ def _build_revision_plan_messages(conversation, rows, language, stage_context):
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+
+
+def _authorized_movement_requirement(conversation):
+    messages = list(conversation or [])
+    user_indexes = [
+        index for index, message in enumerate(messages)
+        if message.get("role") == "user"
+    ]
+    if not user_indexes:
+        return None
+    latest_user_index = user_indexes[-1]
+    latest_user = str(messages[latest_user_index].get("content") or "")
+    if not latest_user or not _is_explicit_revision_authorization(latest_user):
+        return None
+    direct_requirement = _movement_requirement_from_text(latest_user)
+    if direct_requirement is not None:
+        return direct_requirement
+    direction_source = _latest_role_content(messages[:latest_user_index], "assistant")
+    if not direction_source:
+        return None
+    return _movement_requirement_from_text(direction_source)
+
+
+def _movement_requirement_from_text(value):
+    source = str(value or "")
+    lowered = source.casefold()
+    if not source:
+        return None
+    if re.search(r"(?:不要|别|不(?:要|能)?|do not|don't)\s*.{0,12}(?:向|往|to |right|left|up|down)", lowered):
+        return None
+    operator = None
+    if "目标" in source or "target" in lowered:
+        operator = "move_target"
+    elif "箱" in source or "box" in lowered:
+        operator = "move_box"
+    elif any(marker in source for marker in ("玩家", "出生", "起点")) or "player" in lowered:
+        operator = "move_player"
+    if operator is None:
+        return None
+    direction = _movement_direction_from_text(source, lowered)
+    if direction is None:
+        return None
+    return {"operator": operator, "direction": direction}
+
+
+def _authorized_preserved_components(conversation, stage_context):
+    messages = list(conversation or [])
+    latest_user = _latest_role_content(messages, "user")
+    latest_user_index = next(
+        (index for index in range(len(messages) - 1, -1, -1)
+         if messages[index].get("role") == "user"),
+        -1,
+    )
+    previous_assistant = _latest_role_content(
+        messages[:latest_user_index] if latest_user_index >= 0 else messages,
+        "assistant",
+    )
+    sources = (
+        latest_user,
+        previous_assistant,
+        str((stage_context or {}).get("authorizedRevisionBrief") or ""),
+    )
+    rules = {
+        "water": ("水域", "水塘", "水面", "water", "pond"),
+        "walls": ("墙", "墙体", "wall"),
+        "player": ("玩家", "起点", "出生", "player", "start"),
+        "boxes": ("箱子", "箱", "box", "crate"),
+        "targets": ("目标", "终点", "目标点", "target", "goal"),
+    }
+    preserved = set()
+    for component, markers in rules.items():
+        if any(_text_explicitly_preserves_component(text, markers) for text in sources):
+            preserved.add(component)
+    return frozenset(preserved)
+
+
+def _text_explicitly_preserves_component(text, markers):
+    value = str(text or "")
+    lowered = value.casefold()
+    preservation_words = (
+        "不要动", "别动", "不改", "不改变", "保留", "保持", "维持", "不变",
+        "do not change", "don't change", "do not move", "don't move", "preserve",
+        "keep", "leave unchanged", "remain unchanged",
+    )
+    for marker in markers:
+        position = lowered.find(marker.casefold())
+        while position >= 0:
+            window = lowered[max(0, position - 18): position + len(marker) + 18]
+            if any(word in window for word in preservation_words):
+                return True
+            position = lowered.find(marker.casefold(), position + len(marker))
+    return False
+
+
+def _is_explicit_revision_authorization(message):
+    text = str(message or "").casefold()
+    return any(marker in text for marker in (
+        "请根据这个方向生成", "生成一份可供审查", "请助手具体生成", "帮我改", "你来改吧", "按这个思路改",
+        "generate a reviewable", "draft this revision", "go ahead and revise", "change it",
+    ))
+
+
+def _movement_direction_from_text(source, lowered):
+    phrases = (
+        (("右下", "下方偏右", "偏右下", "lower right", "down and right"), "lower_right"),
+        (("左下", "下方偏左", "偏左下", "lower left", "down and left"), "lower_left"),
+        (("右上", "上方偏右", "偏右上", "upper right", "up and right"), "upper_right"),
+        (("左上", "上方偏左", "偏左上", "upper left", "up and left"), "upper_left"),
+        (("向右", "右边", "靠右", " to the right", " rightward"), "right"),
+        (("向左", "左边", "靠左", " to the left", " leftward"), "left"),
+        (("向下", "下方", "靠下", " downward", " below"), "down"),
+        (("向上", "上方", "靠上", " upward", " above"), "up"),
+    )
+    for markers, direction in phrases:
+        if any(marker in source or marker in lowered for marker in markers):
+            return direction
+    return None
+
+
+def _movement_requirement_prompt(requirement):
+    if not requirement:
+        return ""
+    entity = {
+        "move_target": "target",
+        "move_box": "box",
+        "move_player": "player",
+    }[requirement["operator"]]
+    direction = requirement["direction"].replace("_", " ")
+    return (
+        f"Hard verified movement requirement: the {entity} must move {direction} relative to "
+        "its current cell. Use the corresponding move operator and choose a focus containing "
+        "that destination; no other operator may substitute for this requirement."
+    )
+
+
+def _preserved_components_prompt(components):
+    if not components:
+        return ""
+    labels = {
+        "water": "water",
+        "walls": "internal walls",
+        "player": "player",
+        "boxes": "boxes",
+        "targets": "targets",
+    }
+    named = ", ".join(labels[component] for component in sorted(components))
+    return (
+        f"Hard verified preservation requirement: do not change {named}, even if another "
+        "strategy would make that easier."
+    )
 
 
 async def _compile_revision_plan(
@@ -1982,7 +2168,11 @@ async def _generate_plain_with_model_fallback(
             if question and _question_repeats_recent_judgment(question, messages):
                 question = None
 
-            if not stage_opening and question is None:
+            if (
+                not stage_opening
+                and question is None
+                and _discussion_follow_up_is_needed(messages, language)
+            ):
                 question = _deterministic_key_question(
                     messages,
                     language,
@@ -2264,7 +2454,11 @@ async def _generate_with_model_fallback(
             latency_ms = int((time.monotonic() - started_at) * 1000)
             result = LLMExecutionResult(
                 assistant_message=_compose_assistant_message(
-                    validated[0],
+                    (
+                        _ensure_stage_one_orientation(validated[0], rows, language)
+                        if assessment_only and _is_stage_one(stage_context)
+                        else validated[0]
+                    ),
                     validated[4],
                     language,
                     assessment_only,
@@ -3965,6 +4159,20 @@ def _ensure_required_guidance_card(
         normalized["uiCues"] = []
         return normalized
 
+    if _user_states_first_person_view(latest_user):
+        hypothesis = normalized.get("intentHypothesis") or _natural_intent_candidate(
+            latest_user,
+            language,
+            _latest_user_explicitly_agrees(latest_user),
+            difficulty_reframe=_user_reframes_difficulty_judgment(messages),
+        )
+        normalized["intentHypothesis"] = _replace_echoed_intent_hypothesis(
+            hypothesis,
+            latest_user,
+            language,
+        )
+        normalized["intentConfidence"] = "medium"
+
     card_count = (
         int(bool(normalized.get("intentHypothesis")))
         + int(bool(normalized.get("followUpQuestion")))
@@ -3974,13 +4182,45 @@ def _ensure_required_guidance_card(
     if card_count:
         return normalized
 
-    normalized["followUpQuestion"] = _friendly_default_discussion_focus(
-        rows,
-        language,
-        latest_user,
-        _recent_discussion_focuses(stage_context),
-    )
+    if _discussion_follow_up_is_needed(messages, language):
+        normalized["followUpQuestion"] = _friendly_default_discussion_focus(
+            rows,
+            language,
+            latest_user,
+            _recent_discussion_focuses(stage_context),
+        )
     return normalized
+
+
+def _user_states_first_person_view(message):
+    text = str(message or "").strip()
+    lowered = text.casefold()
+    if not text:
+        return False
+    return (
+        any(marker in text for marker in (
+            "我认为", "我觉得", "我感觉", "在我看来", "我不认同", "我不同意",
+        ))
+        or bool(re.search(
+            r"\b(?:i think|i feel|i believe|in my view|from my perspective|i disagree)\b",
+            lowered,
+        ))
+    )
+
+
+def _discussion_follow_up_is_needed(messages, language):
+    latest_user = _latest_role_content(messages, "user")
+    lowered = latest_user.casefold()
+    if not latest_user or _user_states_first_person_view(latest_user):
+        return False
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", latest_user):
+        return any(marker in latest_user for marker in (
+            "你觉得", "怎么改", "如何改", "要不要", "是否", "会不会", "哪个",
+        ))
+    return bool(re.search(
+        r"\b(?:what do you think|how (?:would|should|could)|which|whether|should we)\b",
+        lowered,
+    ))
 
 
 def _user_explicitly_off_topic(message):
@@ -4539,11 +4779,25 @@ def _ensure_stage_one_orientation(message, rows, language):
             "There is no need to settle on a goal yet—share what catches your attention, then play or make a small local adjustment when useful.",
             "From here, you can talk through your first reaction, play the Stage, or nudge one local area in the right-hand editor and compare the feel.",
         )
-    if has_orientation:
-        return text
-    serialized_rows = "".join(str(row) for row in (rows or []))
-    variant = sum(ord(character) for character in serialized_rows or text) % len(options)
-    return f"{text}\n\n{options[variant]}"
+    if not has_orientation:
+        serialized_rows = "".join(str(row) for row in (rows or []))
+        variant = sum(ord(character) for character in serialized_rows or text) % len(options)
+        text = f"{text}\n\n{options[variant]}"
+
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        has_scope = "只能帮你" in text and any(marker in text for marker in ("小改动", "小范围", "较小"))
+        scope = (
+            "也先说明一下：我只能帮你做一些较小、可审查的改动，或陪你梳理思路和给建议；"
+            "如果想大幅重做布局，最好先由你在右侧编辑器自行完成，我再继续帮你核对和讨论。"
+        )
+    else:
+        has_scope = "small, reviewable" in lowered and "larger" in lowered
+        scope = (
+            "One boundary up front: I can help with small, reviewable changes, suggestions, "
+            "and thinking through a direction. For a larger rebuild, please make the broad edit "
+            "yourself in the right-hand editor first, then I can help you check and discuss it."
+        )
+    return text if has_scope else f"{text}\n\n{scope}"
 
 
 def _latest_user_states_direction(messages):
@@ -4625,7 +4879,10 @@ def _build_task_instructions(assessment_only, stage_context=None):
         stage_one_instruction = (
             "This is Stage 1. Do not ask a question. After your concrete observation, "
             "naturally let the designer know they can share an impression, play this Stage, "
-            "or make a local edit in the right panel. Do not present those options as a list. "
+            "or make a local edit in the right panel. Make the collaboration boundary explicit: "
+            "you can make only small, reviewable changes and offer suggestions or help think "
+            "through a direction; a larger rebuild should be made by the designer in the editor "
+            "first. Do not present those options as a list. "
             if _is_stage_one(stage_context)
             else ""
         )

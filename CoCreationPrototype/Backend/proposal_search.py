@@ -10,7 +10,10 @@ BEAM_DEPTH = 3
 PRIMITIVE_LIMIT = 32
 MAX_CONSTRUCTED_CANDIDATES = 64
 MAX_VALID_CANDIDATES = 8
-MAX_EDIT_BUDGET = 24
+# An LLM proposal is a reviewable local experiment, not a substitute for a
+# designer-led rebuild in the editor.  This is deliberately lower than the
+# legacy 24-tile schema allowance.
+MAX_EDIT_BUDGET = 8
 
 EFFECTS = {
     "open_route",
@@ -218,9 +221,15 @@ def _parse_strategy(payload, index):
     )
     if not usable_operators:
         raise RevisionPlanError(f"strategy {index} preserves every component it asks to edit.")
+    if not set(usable_operators).intersection(EFFECT_OPERATORS[effect]):
+        raise RevisionPlanError(
+            f"strategy {index} operators cannot realize its declared effect."
+        )
     edit_budget = payload["editBudget"]
     if isinstance(edit_budget, bool) or not isinstance(edit_budget, int) or not 1 <= edit_budget <= MAX_EDIT_BUDGET:
-        raise RevisionPlanError(f"strategy {index} editBudget must be between 1 and 24.")
+        raise RevisionPlanError(
+            f"strategy {index} editBudget must be between 1 and {MAX_EDIT_BUDGET}."
+        )
     metric_goals = payload["metricGoals"]
     if not isinstance(metric_goals, list) or len(metric_goals) > 3:
         raise RevisionPlanError(f"strategy {index} metricGoals are invalid.")
@@ -264,6 +273,8 @@ def search_revision_plan(
     proposal_validator,
     baseline_metrics=None,
     deadline=None,
+    movement_requirement=None,
+    preserved_components=None,
 ):
     search_started_at = time.monotonic()
     base_rows = tuple(base_rows)
@@ -279,6 +290,10 @@ def search_revision_plan(
         "deadlineReached": False,
         "failureReasons": {},
     }
+    if movement_requirement:
+        diagnostics["movementRequirement"] = dict(movement_requirement)
+    if preserved_components:
+        diagnostics["preservedComponents"] = sorted(set(preserved_components))
     verified = []
     seen_maps = {base_rows}
 
@@ -286,7 +301,13 @@ def search_revision_plan(
         if _deadline_reached(deadline):
             diagnostics["deadlineReached"] = True
             break
-        primitives = _generate_primitives(base_rows, strategy, baseline_metrics)
+        primitives = _generate_primitives(
+            base_rows,
+            strategy,
+            baseline_metrics,
+            movement_requirement,
+            preserved_components,
+        )
         beam = []
         for primitive in primitives[:PRIMITIVE_LIMIT]:
             state = _state_from_primitives(base_rows, (primitive,), strategy.edit_budget)
@@ -372,7 +393,13 @@ def search_revision_plan(
     )
 
 
-def _generate_primitives(rows, strategy, baseline_metrics):
+def _generate_primitives(
+    rows,
+    strategy,
+    baseline_metrics,
+    movement_requirement=None,
+    preserved_components=None,
+):
     shell = _connected_outer_shell(rows)
     trace_cells = _solution_trace_cells(rows, baseline_metrics.get("solution"))
     player = _find_one(rows, "p")
@@ -391,6 +418,10 @@ def _generate_primitives(rows, strategy, baseline_metrics):
     entity_anchors = [*positions["p"], *positions["s"], *positions["t"]]
     primitives = []
     for operator in strategy.operators:
+        if movement_requirement and operator != movement_requirement["operator"]:
+            continue
+        if _operator_changes_preserved_component(operator, preserved_components):
+            continue
         if operator in {"add_wall", "add_water"}:
             after = "#" if operator == "add_wall" else "@"
             anchors = (
@@ -425,7 +456,14 @@ def _generate_primitives(rows, strategy, baseline_metrics):
         elif operator == "move_player":
             source = positions["p"][0]
             for x, y in _candidate_cells(rows, strategy.focus, {"."}, [source]):
-                if (x, y) in reachable:
+                if (
+                    (x, y) in reachable
+                    and _movement_destination_matches(
+                        source,
+                        (x, y),
+                        movement_requirement,
+                    )
+                ):
                     primitives.append(Primitive(
                         operator,
                         ((source[0], source[1], "p", "."), (x, y, ".", "p")),
@@ -436,6 +474,12 @@ def _generate_primitives(rows, strategy, baseline_metrics):
             tile = "s" if operator == "move_box" else "t"
             for source in positions[tile]:
                 for x, y in _candidate_cells(rows, strategy.focus, {"."}, [source]):
+                    if not _movement_destination_matches(
+                        source,
+                        (x, y),
+                        movement_requirement,
+                    ):
+                        continue
                     primitives.append(Primitive(
                         operator,
                         ((source[0], source[1], tile, "."), (x, y, ".", tile)),
@@ -451,6 +495,32 @@ def _generate_primitives(rows, strategy, baseline_metrics):
         _primitive_key(item),
     ))
     return primitives
+
+
+def _operator_changes_preserved_component(operator, preserved_components):
+    preserved = set(preserved_components or ())
+    component = OPERATOR_COMPONENT.get(operator)
+    if component in preserved:
+        return True
+    return operator in {"add_wall", "remove_wall"} and "walls" in preserved
+
+
+def _movement_destination_matches(source, destination, requirement):
+    if not requirement:
+        return True
+    source_x, source_y = source
+    destination_x, destination_y = destination
+    direction = requirement["direction"]
+    return {
+        "right": destination_x > source_x,
+        "left": destination_x < source_x,
+        "up": destination_y < source_y,
+        "down": destination_y > source_y,
+        "upper_right": destination_x > source_x and destination_y < source_y,
+        "upper_left": destination_x < source_x and destination_y < source_y,
+        "lower_right": destination_x > source_x and destination_y > source_y,
+        "lower_left": destination_x < source_x and destination_y > source_y,
+    }.get(direction, False)
 
 
 def _candidate_cells(rows, focus, tiles, anchors=None):
@@ -526,6 +596,10 @@ def _evaluate_state(
     diagnostics,
     verified,
 ):
+    if not _state_realizes_effect(state, strategy):
+        diagnostics["staticRejectedCandidates"] += 1
+        _count_failure(diagnostics, "effect_not_realized")
+        return
     if not _cheap_structure_valid(state.rows):
         diagnostics["staticRejectedCandidates"] += 1
         _count_failure(diagnostics, "static_structure")
@@ -539,6 +613,9 @@ def _evaluate_state(
         return
     operators = tuple(sorted(state.operators))
     metric_matches = _metric_matches(strategy.metric_goals, baseline_metrics, validation)
+    if metric_matches != len(strategy.metric_goals):
+        _count_failure(diagnostics, "metric_goal_not_met")
+        return
     effect_match = int(bool(state.operators & EFFECT_OPERATORS[strategy.effect]))
     changed_cells = sum(
         before != after
@@ -554,6 +631,10 @@ def _evaluate_state(
         effect_match=effect_match,
         changed_cells=changed_cells,
     ))
+
+
+def _state_realizes_effect(state, strategy):
+    return bool(state.operators.intersection(EFFECT_OPERATORS[strategy.effect]))
 
 
 def _cheap_structure_valid(rows):
