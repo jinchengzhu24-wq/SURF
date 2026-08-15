@@ -803,8 +803,8 @@ class LLMClientTests(unittest.TestCase):
             OPERATION_BASE_ROWS,
             "zh-CN",
         )
-        self.assertIn("只能帮你做一些较小、可审查的改动", body)
-        self.assertIn("大幅重做布局", body)
+        self.assertIn("小范围、可审查的改动", body)
+        self.assertIn("大幅重做", body)
 
     def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
         client = FakeClient([

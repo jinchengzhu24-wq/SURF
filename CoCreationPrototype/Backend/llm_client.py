@@ -4763,23 +4763,21 @@ def _ensure_stage_one_orientation(message, rows, language):
         has_orientation = (
             any(word in text for word in ("感受", "直觉", "反应", "想法"))
             and "试玩" in text
-            and any(word in text for word in ("编辑", "调整", "修改"))
         )
         options = (
-            "你可以先从直觉说起；想验证时，右侧的试玩和局部编辑都可以随时接上。",
-            "这里不用先定好目标，先说哪处让你在意也行；之后可以试玩，或在右侧做一点局部调整。",
-            "接下来可以先聊第一反应，也可以先试玩，再用右侧编辑器动一小块看看体验怎么变化。",
+            "你可以先从直觉说起；想验证时，随时试玩就好。",
+            "这里不用先定好目标，先说哪处让你在意也行；之后再试玩验证。",
+            "接下来可以先聊第一反应，也可以先试玩，看看体验怎么变化。",
         )
     else:
         has_orientation = (
             any(word in lowered for word in ("impression", "instinct", "reaction", "idea"))
             and any(word in lowered for word in ("play", "try the stage"))
-            and any(word in lowered for word in ("edit", "adjust", "right panel"))
         )
         options = (
-            "You can start with your first impression; when you want to test it, play the Stage or try a small edit in the right panel.",
-            "There is no need to settle on a goal yet—share what catches your attention, then play or make a small local adjustment when useful.",
-            "From here, you can talk through your first reaction, play the Stage, or nudge one local area in the right-hand editor and compare the feel.",
+            "You can start with your first impression; when you want to test it, play the Stage.",
+            "There is no need to settle on a goal yet—share what catches your attention, then play when useful.",
+            "From here, you can talk through your first reaction or play the Stage and compare the feel.",
         )
     if not has_orientation:
         serialized_rows = "".join(str(row) for row in (rows or []))
@@ -4787,17 +4785,16 @@ def _ensure_stage_one_orientation(message, rows, language):
         text = f"{text}\n\n{options[variant]}"
 
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
-        has_scope = "只能帮你" in text and any(marker in text for marker in ("小改动", "小范围", "较小"))
+        has_scope = "小范围、可审查" in text and "大幅重做" in text
         scope = (
-            "也先说明一下：我只能帮你做一些较小、可审查的改动，或陪你梳理思路和给建议；"
-            "如果想大幅重做布局，最好先由你在右侧编辑器自行完成，我再继续帮你核对和讨论。"
+            "我能协助小范围、可审查的改动，也能陪你梳理思路；"
+            "大幅重做请先由你主导完成，我再帮你核对。"
         )
     else:
-        has_scope = "small, reviewable" in lowered and "larger" in lowered
+        has_scope = "small, reviewable" in lowered and "larger rebuild" in lowered
         scope = (
-            "One boundary up front: I can help with small, reviewable changes, suggestions, "
-            "and thinking through a direction. For a larger rebuild, please make the broad edit "
-            "yourself in the right-hand editor first, then I can help you check and discuss it."
+            "I can help with small, reviewable changes and think through a direction; "
+            "for a larger rebuild, please lead the broad edit first and I will help check it."
         )
     return text if has_scope else f"{text}\n\n{scope}"
 
