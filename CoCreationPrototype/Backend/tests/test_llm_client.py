@@ -819,6 +819,19 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(body.count("你可以先说说你的第一反应或试玩当前关卡"), 1)
         self.assertEqual(body.count("右侧面板进行局部编辑"), 1)
 
+    def test_stage_one_opening_removes_model_written_scope_paragraph(self):
+        body = llm_client._ensure_stage_one_orientation(
+            "我觉得右下角被水和墙夹住的箱子，会让处理顺序变得更敏感。\n\n"
+            "你可以先试玩，或者直接告诉我你对这个布局的第一印象；小调整我可以帮你改，"
+            "但大改方向还是由你来定。",
+            OPERATION_BASE_ROWS,
+            "zh-CN",
+        )
+
+        self.assertIn("右下角被水和墙夹住的箱子", body)
+        self.assertNotIn("小调整我可以帮你改", body)
+        self.assertEqual(body.count("你可以先说说你的第一反应或试玩当前关卡"), 1)
+
     def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
         client = FakeClient([
             "我会把右下目标与水塘做局部联动。这样能让水域影响第一次推动。"

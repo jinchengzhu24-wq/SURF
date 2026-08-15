@@ -345,10 +345,8 @@ def build_plain_chat_messages(
         "the map, use a workflow greeting, or ask for an overall experience category. "
         + (
             "This is Stage 1: do not ask any question. Keep the map observation and your "
-            "own design feeling intact, but use only one compact concluding sentence for all "
-            "process guidance: the designer may share an impression or play, you support only "
-            "small reviewable edits, and a broad rebuild remains designer-led. Do not list or "
-            "repeat sharing, play, editing, and scope as separate sentences. "
+            "own design feeling intact. Do not add any process, trial, editor, or scope guidance: "
+            "the backend appends the fixed closing guidance itself. "
             if _is_stage_one(stage_context)
             else ""
         )
@@ -4761,7 +4759,10 @@ def _questionless_body(message):
 def _ensure_stage_one_orientation(message, rows, language):
     text = str(message or "").strip()
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
-        process_markers = ("试玩", "编辑器", "右侧", "局部调整", "局部编辑", "第一反应", "直觉说起")
+        process_markers = (
+            "试玩", "编辑器", "右侧", "局部调整", "局部编辑", "第一反应", "直觉说起",
+            "小调整", "小改", "小范围", "大改", "大幅", "可审查", "梳理思路", "亲手试",
+        )
         map_markers = ("水", "墙", "箱", "目标", "玩家", "路线", "通道", "区域", "格")
         compact_guidance = (
             "你可以先说说你的第一反应或试玩当前关卡，之后不满意的话，你可以指出来，我们一起探讨商量然后制定方案，"
@@ -4769,7 +4770,10 @@ def _ensure_stage_one_orientation(message, rows, language):
             "较大的改动我建议由你亲手试一试。"
         )
     else:
-        process_markers = ("play the stage", "right panel", "editor", "local edit", "first impression")
+        process_markers = (
+            "play the stage", "right panel", "editor", "local edit", "first impression",
+            "small edit", "reviewable edit", "broad rebuild", "think through",
+        )
         map_markers = ("water", "wall", "box", "target", "player", "route", "corridor", "area", "tile")
         compact_guidance = (
             "You can share a first reaction or play the Stage; I support only small, "
@@ -4876,10 +4880,8 @@ def _build_task_instructions(assessment_only, stage_context=None):
     if assessment_only:
         stage_one_instruction = (
             "This is Stage 1. Do not ask a question. Keep your concrete map observation and "
-            "personal response at their natural length. Then use only one compact concluding "
-            "sentence for all process guidance: the designer may share an impression or play, "
-            "you make only small reviewable edits or help think through a direction, and a broad "
-            "rebuild remains designer-led. Do not repeat those points separately. "
+            "personal response at their natural length. Do not write process, trial, editor, or "
+            "scope guidance: the backend appends the one fixed closing paragraph itself. "
             if _is_stage_one(stage_context)
             else ""
         )
