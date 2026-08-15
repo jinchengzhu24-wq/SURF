@@ -2190,7 +2190,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result[4]["followUpQuestion"])
         self.assertIsNone(result[1]["satisfactionQuestion"])
 
-    def test_later_stage_opening_keeps_a_useful_question(self):
+    def test_later_stage_opening_drops_a_routine_question_without_uncertainty(self):
         payload = {
             "assistantMessage": "I notice the water makes the lower route feel deliberate.",
             "guidance": {
@@ -2219,7 +2219,48 @@ class LLMClientTests(unittest.TestCase):
             stage_context={"stageNumber": 2},
         )
 
-        self.assertIn("water-side corridor", result[4]["followUpQuestion"])
+        self.assertIsNone(result[4]["followUpQuestion"])
+        self.assertIsNone(result[1]["satisfactionQuestion"])
+
+    def test_later_stage_opening_summarizes_a_clear_chinese_tradeoff(self):
+        body = (
+            "中间那条原本被墙隔开的路现在打通了，左上角箱子到右下角目标的路线更直接，"
+            "但水塘仍会让玩家在中段谨慎处理。这个选择会直接影响关卡是清晰利落还是迂回烧脑的调性。"
+        )
+        generic_question = "当箱子第一次贴着调整后的水域边缘推进时，你最想观察哪一处转折？"
+        payload = {
+            "assistantMessage": body,
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": generic_question,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "求解器找到了可行路线。",
+                "difficultyOpinion": "在我看来，中段需要更谨慎地判断。",
+                "features": ["水塘与内墙"],
+                "suggestions": ["观察中段推箱顺序"],
+                "satisfactionQuestion": generic_question,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="zh-CN",
+            stage_context={"stageNumber": 2},
+        )
+
+        focus = result[4]["followUpQuestion"]
+        self.assertIn("清晰利落还是迂回烧脑", focus)
+        self.assertIn("试玩时", focus)
+        self.assertNotIn("最想观察哪一处转折", focus)
+        self.assertEqual(result[1]["satisfactionQuestion"], focus)
 
     def test_verified_human_edit_opening_adds_a_concrete_discussion_question(self):
         payload = {
@@ -2255,10 +2296,10 @@ class LLMClientTests(unittest.TestCase):
             stage_context=context,
         )
 
-        question = result[4]["followUpQuestion"]
-        self.assertIn("水域边缘", question)
-        self.assertIn("路线选择", question)
-        self.assertEqual(result[1]["satisfactionQuestion"], question)
+        focus = result[4]["followUpQuestion"]
+        self.assertIn("我会先把这版理解为", focus)
+        self.assertIn("试玩时", focus)
+        self.assertEqual(result[1]["satisfactionQuestion"], focus)
 
     def test_later_turn_in_stage_one_may_still_ask_a_concrete_question(self):
         client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
@@ -2278,7 +2319,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNotNone(result.guidance["intentHypothesis"])
         self.assertIsNone(result.guidance["followUpQuestion"])
 
-    def test_stage_opening_requires_archival_question_to_match_discussion(self):
+    def test_stage_opening_persists_the_normalized_discussion_card(self):
         payload = {
             "assistantMessage": (
                 "The water shapes the opening route. "
@@ -2303,8 +2344,10 @@ class LLMClientTests(unittest.TestCase):
             "modificationSummary": "",
         }
 
-        with self.assertRaisesRegex(ValueError, "must match"):
-            llm_client.validate_chat_response(payload, assessment_only=True)
+        result = llm_client.validate_chat_response(payload, assessment_only=True)
+
+        self.assertIn("My reading of this version", result[4]["followUpQuestion"])
+        self.assertEqual(result[1]["satisfactionQuestion"], result[4]["followUpQuestion"])
 
     def test_stage_opening_prompt_is_concrete_and_non_anchoring(self):
         messages = llm_client.build_chat_messages(

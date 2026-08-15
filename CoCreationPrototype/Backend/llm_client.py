@@ -2789,7 +2789,7 @@ def validate_chat_response(
 
             guidance["followUpQuestion"] = extracted_question
 
-    if not assessment_only and guidance["followUpQuestion"] is not None:
+    if guidance["followUpQuestion"] is not None:
         guidance["followUpQuestion"] = _refine_discussion_focus(
             guidance["followUpQuestion"],
             assistant_message,
@@ -2802,6 +2802,17 @@ def validate_chat_response(
             guidance["followUpQuestion"] = None
 
     if assessment_only and not stage_one_opening and guidance["followUpQuestion"] is None:
+        guidance["followUpQuestion"] = _perspective_discussion_focus(
+            assistant_message,
+            language,
+        )
+
+    if (
+        assessment_only
+        and not stage_one_opening
+        and guidance["followUpQuestion"] is None
+        and _reply_needs_clarifying_question(assistant_message, language)
+    ):
         deterministic_opening_question = _deterministic_stage_opening_question(
             stage_context,
             language,
@@ -2851,6 +2862,10 @@ def validate_chat_response(
             assessment["satisfactionQuestion"] = None
         elif deterministic_opening_question is not None:
             assessment["satisfactionQuestion"] = deterministic_opening_question
+
+        if assessment_only:
+            # Persist the normalized card, not the model's pre-normalization wording.
+            assessment["satisfactionQuestion"] = guidance["followUpQuestion"]
 
         if assessment_only and assessment["satisfactionQuestion"] is not None:
             satisfaction_marks = (
@@ -3430,7 +3445,10 @@ def _perspective_discussion_focus(visible_content, language):
     chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", str(visible_content or ""))
 
     if chinese:
-        marker = re.compile(r"(?:我(?:更)?倾向于认为|我倾向于觉得|在我看来|我觉得|我感觉)")
+        marker = re.compile(
+            r"(?:我(?:更)?倾向于认为|我倾向于觉得|在我看来|我觉得|我感觉|"
+            r"我(?:比较|更)?在意的是|我(?:更)?喜欢的是|我(?:更)?喜欢)"
+        )
         anchors = ("水", "墙", "箱", "目标", "通道", "路线", "开局", "推")
         for sentence in sentences:
             match = marker.search(sentence)
@@ -3442,6 +3460,19 @@ def _perspective_discussion_focus(visible_content, language):
             return (
                 f"我会先把这版理解为：{claim}。试玩时，重点看玩家第一次把箱子推到相关位置时，"
                 "会不会因为这个变化停下来重新判断顺序；这能验证上面的取舍是否真的落在操作上。"
+            )[:1000]
+        for sentence in sentences:
+            if (
+                not any(anchor in str(visible_content or "") for anchor in anchors)
+                or "还是" not in sentence
+                or not any(marker in sentence for marker in ("这个选择", "这次改动", "这个改动", "这会", "取舍"))
+            ):
+                continue
+            claim = sentence.rstrip("。！!？?")
+            return (
+                f"我会先把这版的重点放在这个取舍上：{claim}。试玩时，重点看玩家第一次把箱子推到"
+                "调整区域附近时，会不会因为水域、墙缝或目标位置停下来重新判断顺序；这能看出它是在形成"
+                "有效的中段判断，还是只增加了绕路。"
             )[:1000]
         return None
 
@@ -3461,6 +3492,21 @@ def _perspective_discussion_focus(visible_content, language):
             f"My reading of this version is: {claim}. During play, watch whether the first push "
             "at that changed area makes the player stop and reconsider the order; that will show "
             "whether this trade-off is actually present in play."
+        )[:1000]
+
+    for sentence in sentences:
+        lowered_sentence = sentence.casefold()
+        if (
+            not any(anchor in lowered_sentence for anchor in anchors)
+            or not any(marker in lowered_sentence for marker in ("this trade-off", "this choice", "this change"))
+            or " or " not in lowered_sentence
+        ):
+            continue
+        claim = sentence.rstrip(".!?")
+        return (
+            f"I would keep the focus on this trade-off: {claim}. During play, watch whether the "
+            "first push near the changed area makes the player reconsider the order; that will show "
+            "whether it creates a meaningful mid-game judgment rather than only a detour."
         )[:1000]
     return None
 
