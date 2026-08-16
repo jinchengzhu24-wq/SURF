@@ -13,6 +13,7 @@ from threading import Lock
 from typing import Literal
 from urllib.parse import quote
 
+import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import Cookie, FastAPI, Header, Request, Response
@@ -100,6 +101,14 @@ WEBGL_BASE_URL = os.getenv(
     "COCREATION_WEBGL_BASE_URL",
     "http://111.231.136.4:8000/game/",
 )
+ONLINE_MATCH_SYNC_URL = os.getenv(
+    "COCREATION_ONLINE_MATCH_SYNC_URL",
+    "",
+).rstrip("/")
+ONLINE_MATCH_SYNC_SECRET = os.getenv(
+    "COCREATION_INTENTION_SYNC_SECRET",
+    "",
+).strip()
 TOKEN_SECRET = os.getenv(
     "COCREATION_TOKEN_SECRET",
     "development-only-change-before-deployment",
@@ -1721,36 +1730,94 @@ def submit_intention(
         session = require_browser_session(database, session_id, access_cookie)
 
         if session["status"] == "completed":
-            return serialize_session(database, session_id)
-
-        if session["status"] != "awaiting_intention":
+            existing = database.execute(
+                "SELECT content FROM designer_intentions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            content = existing["content"] if existing else content
+        elif session["status"] != "awaiting_intention":
             raise ApiError(409, "SESSION_NOT_FINALIZED", "Finalize a Stage first.")
 
-        now = utc_now()
-        database.execute(
-            """
-            INSERT INTO designer_intentions(
-                id, session_id, content, language, idempotency_key, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                uuid.uuid4().hex,
-                session_id,
-                content,
-                session["language"],
-                payload.idempotencyKey,
-                now,
-            ),
-        )
-        database.execute(
-            """
-            UPDATE design_sessions
-            SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?
-            """,
-            (now, now, session_id),
-        )
-        record_event(database, session_id, "intention_submitted", {}, now)
+        else:
+            now = utc_now()
+            database.execute(
+                """
+                INSERT INTO designer_intentions(
+                    id, session_id, content, language, idempotency_key, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    session_id,
+                    content,
+                    session["language"],
+                    payload.idempotencyKey,
+                    now,
+                ),
+            )
+            database.execute(
+                """
+                UPDATE design_sessions
+                SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?
+                """,
+                (now, now, session_id),
+            )
+            record_event(database, session_id, "intention_submitted", {}, now)
+
+        match_id = str(session["match_id"] or "").strip()
+        player_number = session["player_number"]
+
+    synchronize_final_intention_with_online_match(
+        match_id,
+        player_number,
+        content,
+    )
+
+    with connect() as database:
         return serialize_session(database, session_id)
+
+
+def synchronize_final_intention_with_online_match(
+    match_id, player_number, content
+):
+    """Synchronize the saved 8010 intention to its linked online player."""
+    if not match_id:
+        return
+
+    if player_number not in (1, 2):
+        raise ApiError(
+            409,
+            "INVALID_MATCH_PLAYER",
+            "The linked online match player is invalid.",
+        )
+
+    # Standalone 8010 sessions (including local test sessions) have no online
+    # match service. Production config supplies both values below.
+    if not ONLINE_MATCH_SYNC_URL or not ONLINE_MATCH_SYNC_SECRET:
+        return
+
+    endpoint = (
+        f"{ONLINE_MATCH_SYNC_URL}/online/rooms/{quote(match_id, safe='')}/designer-intention"
+    )
+
+    try:
+        response = httpx.post(
+            endpoint,
+            headers={"X-CoCreation-Sync-Secret": ONLINE_MATCH_SYNC_SECRET},
+            json={
+                "playerNumber": player_number,
+                "opponentExperienceGoal": content,
+            },
+            timeout=5.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as error:
+        raise ApiError(
+            503,
+            "ONLINE_INTENTION_SYNC_UNAVAILABLE",
+            "The final design intention was saved but cannot yet be synchronized to the online match. Please retry.",
+            retryable=True,
+        ) from error
 
 
 @app.get("/api/integrations/sessions/{session_id}")

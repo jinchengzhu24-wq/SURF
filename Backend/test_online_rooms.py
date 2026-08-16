@@ -401,6 +401,40 @@ class OnlineRoomTests(unittest.TestCase):
             guest_goal,
         )
 
+    def test_synced_8010_intention_survives_an_empty_client_submission(self):
+        host, _ = self.ready_both_players()
+        goal = "I want my opponent to notice the route before pushing."
+
+        with patch.object(
+            backend,
+            "COCREATION_INTENTION_SYNC_SECRET",
+            "test-sync-secret",
+        ):
+            synchronized = self.client.post(
+                "/online/rooms/"
+                + host["matchId"]
+                + "/designer-intention",
+                json={
+                    "playerNumber": host["playerNumber"],
+                    "opponentExperienceGoal": goal,
+                },
+                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+            )
+
+        self.assertEqual(synchronized.status_code, 200)
+
+        submitted = self.submit_challenge(
+            host["matchId"],
+            host["playerToken"],
+            SOLVABLE_ROWS_A,
+        )
+
+        self.assertEqual(submitted.status_code, 200)
+        self.assertEqual(
+            submitted.json()["ownChallengeMetadata"]["opponentExperienceGoal"],
+            goal,
+        )
+
     def test_legacy_competition_field_is_ignored(self):
         host, _ = self.ready_both_players()
         response = self.client.post(

@@ -126,6 +126,11 @@ class OnlineChallengeRequest(BaseModel):
     opponentExperienceGoal: str = ""
 
 
+class OnlineDesignerIntentionSyncRequest(BaseModel):
+    playerNumber: int
+    opponentExperienceGoal: str
+
+
 class OnlineResultRequest(BaseModel):
     durationSeconds: float
     moveCount: int
@@ -133,6 +138,10 @@ class OnlineResultRequest(BaseModel):
 
 
 load_dotenv(BASE_DIR / ".env")
+COCREATION_INTENTION_SYNC_SECRET = os.environ.get(
+    "COCREATION_INTENTION_SYNC_SECRET",
+    "",
+).strip()
 
 
 def require_delete_password(request: Request):
@@ -370,6 +379,22 @@ def normalize_online_opponent_experience_goal(value):
         )
 
     return goal
+
+
+def require_cocreation_intention_sync_secret(request):
+    if not COCREATION_INTENTION_SYNC_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Co-creation intention synchronization is not configured",
+        )
+
+    supplied_secret = request.headers.get("X-CoCreation-Sync-Secret", "")
+
+    if not secrets.compare_digest(
+        supplied_secret,
+        COCREATION_INTENTION_SYNC_SECRET,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid co-creation sync secret")
 
 
 def validate_online_result(payload):
@@ -853,13 +878,21 @@ def submit_online_challenge(
             )
 
         existing_rows = player.get("challengeRows")
+        synchronized_goal = str(
+            player.get("opponentExperienceGoal") or ""
+        ).strip()
+        effective_experience_goal = (
+            opponent_experience_goal
+            if opponent_experience_goal or not synchronized_goal
+            else synchronized_goal
+        )
 
         if existing_rows is not None:
             if (
                 existing_rows != submitted_rows
                 or player.get("aiAssistantMode") != payload.aiAssistantMode
                 or str(player.get("opponentExperienceGoal") or "")
-                != opponent_experience_goal
+                != effective_experience_goal
             ):
                 raise HTTPException(
                     status_code=409,
@@ -871,7 +904,7 @@ def submit_online_challenge(
 
         player["challengeRows"] = submitted_rows
         player["aiAssistantMode"] = payload.aiAssistantMode
-        player["opponentExperienceGoal"] = opponent_experience_goal
+        player["opponentExperienceGoal"] = effective_experience_goal
         both_submitted = all(
             item.get("challengeRows") is not None for item in room["players"]
         )
@@ -886,9 +919,70 @@ def submit_online_challenge(
             "challenge_submitted",
             player_number=player["playerNumber"],
             aiAssistantMode=payload.aiAssistantMode,
-            opponentExperienceGoal=opponent_experience_goal,
+            opponentExperienceGoal=effective_experience_goal,
             rows=submitted_rows,
         )
+        return serialize_online_room(room, player)
+
+
+@app.post("/online/rooms/{match_id}/designer-intention")
+def synchronize_online_designer_intention(
+    match_id: str,
+    payload: OnlineDesignerIntentionSyncRequest,
+    request: Request,
+):
+    """Record the 8010 final intention without trusting a browser hand-off."""
+    require_cocreation_intention_sync_secret(request)
+    opponent_experience_goal = normalize_online_opponent_experience_goal(
+        payload.opponentExperienceGoal
+    )
+
+    if not opponent_experience_goal:
+        raise HTTPException(
+            status_code=400,
+            detail="Final designer intention is required",
+        )
+
+    if payload.playerNumber not in (1, 2):
+        raise HTTPException(status_code=400, detail="Invalid player number")
+
+    with ONLINE_ROOMS_LOCK:
+        cleanup_expired_online_rooms()
+        room = ONLINE_ROOMS.get(str(match_id or "").strip())
+
+        if room is None:
+            raise HTTPException(status_code=404, detail="Room not found")
+
+        player = next(
+            (
+                item
+                for item in room["players"]
+                if item["playerNumber"] == payload.playerNumber
+            ),
+            None,
+        )
+
+        if player is None:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        existing_goal = str(player.get("opponentExperienceGoal") or "").strip()
+
+        if existing_goal and existing_goal != opponent_experience_goal:
+            raise HTTPException(
+                status_code=409,
+                detail="Final designer intention is already frozen",
+            )
+
+        if not existing_goal:
+            player["opponentExperienceGoal"] = opponent_experience_goal
+            room["lastActivity"] = time.time()
+            append_online_match_event(
+                room,
+                "designer_intention_synchronized",
+                player_number=payload.playerNumber,
+                opponentExperienceGoal=opponent_experience_goal,
+            )
+
         return serialize_online_room(room, player)
 
 
