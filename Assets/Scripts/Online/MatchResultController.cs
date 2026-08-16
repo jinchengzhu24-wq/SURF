@@ -205,8 +205,8 @@ public class MatchResultController : MonoBehaviour
         SetText(
             feedbackText,
             string.IsNullOrWhiteSpace(goal)
-                ? "DESIRED EXPERIENCE  --"
-                : "DESIRED EXPERIENCE\n" + goal.Trim()
+                ? "DESIRED EXPERIENCE:  --"
+                : "DESIRED EXPERIENCE:\n" + goal.Trim()
         );
     }
 
