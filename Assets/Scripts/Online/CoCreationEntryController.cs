@@ -253,6 +253,23 @@ public sealed class CoCreationEntryController : MonoBehaviour
         string[] finalRows,
         string designerIntention)
     {
+        string normalizedDesignerIntention = (designerIntention ?? "").Trim();
+
+        // A completed 8010 session is not ready to become an online challenge
+        // until its final, designer-authored experience goal is present.  Do not
+        // silently submit an empty value: Match_Result would then have no way to
+        // distinguish a missing hand-off from an intentionally blank answer.
+        if (string.IsNullOrWhiteSpace(normalizedDesignerIntention))
+        {
+            ApplyFailure(
+                "The final design intention was not received. Return to the co-creation lab and submit it before continuing."
+            );
+            Debug.LogWarning(
+                "CoCreationEntryController: Completed session did not include a designer intention."
+            );
+            return;
+        }
+
         SetStatus(
             "Co-creation session complete. The confirmed Stage is synchronized.",
             ReadyStatusColor
@@ -274,7 +291,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
         OnlineMatchContext.StageChallenge(
             finalRows,
             CoCreationDraftContext.InitialDraftMethod,
-            designerIntention
+            normalizedDesignerIntention
         );
         CoCreationDraftContext.Clear();
         SceneManager.LoadScene(waitingSceneName);

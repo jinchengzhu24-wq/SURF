@@ -84,7 +84,7 @@ public static class OnlineMatchContext
 
         PendingChallengeRows = CloneRows(rows);
         PendingAiAssistantMode = aiAssistantMode ?? "";
-        PendingOpponentExperienceGoal = opponentExperienceGoal ?? "";
+        PendingOpponentExperienceGoal = (opponentExperienceGoal ?? "").Trim();
     }
 
     public static void ClearPendingChallenge()
