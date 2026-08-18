@@ -3,10 +3,22 @@
 当前线上地址：
 
 ```text
-http://111.231.136.4:8000/frontend/
-http://111.231.136.4:8000/game/
-http://111.231.136.4:8000/frontend/Images/Routing.png
+http://111.231.136.4/frontend/
+http://111.231.136.4/game/
+http://111.231.136.4/frontend/Images/Routing.png
 http://111.231.136.4/cocreation/
+```
+
+端口说明：`8000` 是 Nginx 转发的内部匹配、dashboard 和 WebGL 上游端口，`8010` 是 Nginx 转发的内部共创服务端口；用户访问时统一使用 Nginx 的 80 端口，因此公开地址不带 `:8000` 或 `:8010`。公开入口为 `http://111.231.136.4/game/`、`http://111.231.136.4/frontend/` 和 `http://111.231.136.4/cocreation/`。
+
+## 端口速查
+
+```text
+80    = HTTP 默认端口（Nginx 公网入口）
+443   = HTTPS 默认端口
+8000  = FastAPI 常用端口之一（匹配、dashboard 和 WebGL 上游服务）
+8010  = 共创服务使用的内部端口
+22    = SSH 常用端口
 ```
 
 服务器项目目录：
@@ -86,7 +98,7 @@ cd /root/SURF
 以后如果只更新了 Unity 游戏或 WebGL 页面模板，只需重新构建并上传 `WebGLBuild`，通常不需要重启后端。上传后访问：
 
 ```text
-http://111.231.136.4:8000/game/
+http://111.231.136.4/game/
 ```
 
 如仍显示旧版本，使用 `Ctrl + F5` 强制刷新。
@@ -112,7 +124,7 @@ scp D:\Sokoban_AI_Demo\Frontend\styles.css root@111.231.136.4:/root/SURF/Fronten
 上传完成后，直接刷新：
 
 ```text
-http://111.231.136.4:8000/frontend/
+http://111.231.136.4/frontend/
 ```
 
 如果浏览器仍显示旧样式，按：
@@ -279,8 +291,8 @@ bash deploy_scp
 重启后依次检查：
 
 ```text
-http://111.231.136.4:8000/health
-http://111.231.136.4:8000/ready
+http://111.231.136.4/health
+http://111.231.136.4/ready
 ```
 
 `/health` 表示进程可访问；`/ready` 还会检查 API Key、模型配置和日志目录。运维日志位于 `Backend/logs/backend.log`，单文件 5 MB，保留 5 份轮转文件。当前后端只能使用一个 Uvicorn worker。
