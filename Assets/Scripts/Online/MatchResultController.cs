@@ -23,16 +23,77 @@ public class MatchResultController : MonoBehaviour
     [SerializeField] private Text ownRunTimeText;
     [SerializeField] private Text ownRunMovesText;
 
+    [Header("Dynamic Feedback Text")]
+    [SerializeField] private string ownFeedbackLabel = "YOUR MESSAGE";
+    [SerializeField] private string opponentFeedbackLabel = "OPPONENT'S MESSAGE";
+    [Header("Runtime Values (Play Mode)")]
+    [SerializeField, TextArea(2, 6)]
+    private string ownFeedbackDynamicText = "";
+    [SerializeField, TextArea(2, 6)]
+    private string opponentFeedbackDynamicText = "";
+
     [Header("Actions")]
     [SerializeField] private Button backToLobbyButton;
 
     private OnlineMatchClient client;
     private bool leaving;
 
+    public string OwnFeedbackValue => ownFeedbackDynamicText;
+
+    public string OpponentFeedbackValue => opponentFeedbackDynamicText;
+
+    public void SetOwnFeedbackText(string value)
+    {
+        ownFeedbackDynamicText = (value ?? "").Trim();
+        ownFeedbackText = ResolveText(ownFeedbackText, "OwnFeedbackText");
+        SetText(
+            ownFeedbackText,
+            FormatFeedbackText(ownFeedbackLabel, ownFeedbackDynamicText)
+        );
+    }
+
+    public void SetOpponentFeedbackText(string value)
+    {
+        opponentFeedbackDynamicText = (value ?? "").Trim();
+        opponentFeedbackText = ResolveText(
+            opponentFeedbackText,
+            "OpponentFeedbackText"
+        );
+        SetText(
+            opponentFeedbackText,
+            FormatFeedbackText(
+                opponentFeedbackLabel,
+                opponentFeedbackDynamicText
+            )
+        );
+    }
+
+    public void SetFeedbackTexts(string ownValue, string opponentValue)
+    {
+        SetOwnFeedbackText(ownValue);
+        SetOpponentFeedbackText(opponentValue);
+    }
+
+    private void OnValidate()
+    {
+        SetText(
+            ownFeedbackText,
+            FormatFeedbackText(ownFeedbackLabel, ownFeedbackDynamicText)
+        );
+        SetText(
+            opponentFeedbackText,
+            FormatFeedbackText(
+                opponentFeedbackLabel,
+                opponentFeedbackDynamicText
+            )
+        );
+    }
+
     private void Start()
     {
         OnlineSceneUi.EnsureEventSystem();
         ResolveUi();
+        ConfigureResultTextLayout();
         WireUi();
         OnlineSceneUi.ConfigureRaycastTargets();
 
@@ -109,17 +170,15 @@ public class MatchResultController : MonoBehaviour
             state.ownChallengeMetadata,
             ownChallengeAssistantText
         );
-        RenderOpponentExperience(
-            state.ownChallengeMetadata,
-            ownFeedbackText
+        SetOwnFeedbackText(
+            GetOpponentExperienceGoal(state.ownChallengeMetadata)
         );
         RenderMetadata(
             state.opponentChallengeMetadata,
             opponentChallengeAssistantText
         );
-        RenderOpponentExperience(
-            state.opponentChallengeMetadata,
-            opponentFeedbackText
+        SetOpponentFeedbackText(
+            GetOpponentExperienceGoal(state.opponentChallengeMetadata)
         );
         RenderResult(
             state.ownResult,
@@ -197,17 +256,22 @@ public class MatchResultController : MonoBehaviour
         );
     }
 
-    private static void RenderOpponentExperience(
-        OnlineChallengeMetadata metadata,
-        Text feedbackText)
+    private static string GetOpponentExperienceGoal(
+        OnlineChallengeMetadata metadata)
     {
-        string goal = metadata != null ? metadata.opponentExperienceGoal : "";
-        SetText(
-            feedbackText,
-            string.IsNullOrWhiteSpace(goal)
-                ? "DESIRED EXPERIENCE:  --"
-                : "DESIRED EXPERIENCE:\n" + goal.Trim()
-        );
+        return metadata != null
+            ? (metadata.opponentExperienceGoal ?? "").Trim()
+            : "";
+    }
+
+    private static string FormatFeedbackText(string label, string value)
+    {
+        string normalizedLabel = string.IsNullOrWhiteSpace(label)
+            ? "MESSAGE"
+            : label.Trim();
+        return string.IsNullOrWhiteSpace(value)
+            ? normalizedLabel + ":  --"
+            : normalizedLabel + ":\n" + value.Trim();
     }
 
     private static string FormatAssistantMode(string mode)
@@ -309,18 +373,83 @@ public class MatchResultController : MonoBehaviour
         }
     }
 
+    private void ConfigureResultTextLayout()
+    {
+        ConfigureResultCardTextLayout(
+            opponentRunTimeText,
+            opponentRunMovesText,
+            ownFeedbackText
+        );
+        ConfigureResultCardTextLayout(
+            ownRunTimeText,
+            ownRunMovesText,
+            opponentFeedbackText
+        );
+    }
+
+    private static void ConfigureResultCardTextLayout(
+        Text timeText,
+        Text movesText,
+        Text feedbackText)
+    {
+        ConfigureTextRect(
+            timeText,
+            new Vector2(-190f, -4f),
+            new Vector2(310f, 55f)
+        );
+        ConfigureTextRect(
+            movesText,
+            new Vector2(155f, -4f),
+            new Vector2(380f, 55f)
+        );
+
+        if (feedbackText == null)
+        {
+            return;
+        }
+
+        ConfigureTextRect(
+            feedbackText,
+            new Vector2(0f, -113f),
+            new Vector2(690f, 145f)
+        );
+        feedbackText.alignment = TextAnchor.UpperLeft;
+        feedbackText.horizontalOverflow = HorizontalWrapMode.Wrap;
+        feedbackText.verticalOverflow = VerticalWrapMode.Truncate;
+        feedbackText.resizeTextForBestFit = true;
+        feedbackText.resizeTextMinSize = 18;
+        feedbackText.resizeTextMaxSize = Mathf.Max(
+            feedbackText.resizeTextMinSize,
+            feedbackText.fontSize
+        );
+    }
+
+    private static void ConfigureTextRect(
+        Text text,
+        Vector2 anchoredPosition,
+        Vector2 sizeDelta)
+    {
+        if (text == null)
+        {
+            return;
+        }
+
+        text.rectTransform.anchoredPosition = anchoredPosition;
+        text.rectTransform.sizeDelta = sizeDelta;
+    }
+
     private void RenderUnavailable()
     {
         RenderMetadata(
             null,
             ownChallengeAssistantText
         );
-        RenderOpponentExperience(null, ownFeedbackText);
+        SetOwnFeedbackText("");
         RenderMetadata(
             null,
             opponentChallengeAssistantText
         );
-        RenderOpponentExperience(null, opponentFeedbackText);
+        SetOpponentFeedbackText("");
         RenderResult(null, opponentRunTimeText, opponentRunMovesText);
         RenderResult(null, ownRunTimeText, ownRunMovesText);
     }

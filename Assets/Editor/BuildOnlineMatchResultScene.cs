@@ -50,6 +50,38 @@ public static class BuildOnlineMatchResultScene
         Debug.Log("Online Match_Result scene was built successfully.");
     }
 
+    [MenuItem("Tools/Online/Fix Match Result Text Layout")]
+    public static void FixResultTextLayout()
+    {
+        Scene previousActiveScene = SceneManager.GetActiveScene();
+        Scene scene = SceneManager.GetSceneByPath(ResultScenePath);
+        bool openedForFix = !scene.IsValid() || !scene.isLoaded;
+
+        if (openedForFix)
+        {
+            scene = EditorSceneManager.OpenScene(
+                ResultScenePath,
+                OpenSceneMode.Additive
+            );
+        }
+
+        SceneManager.SetActiveScene(scene);
+        ConfigureResultCardTextLayout(
+            FindNamedComponentInScene<Text>(scene, "OpponentRunTimeText"),
+            FindNamedComponentInScene<Text>(scene, "OpponentRunMovesText"),
+            FindNamedComponentInScene<Text>(scene, "OwnFeedbackText")
+        );
+        ConfigureResultCardTextLayout(
+            FindNamedComponentInScene<Text>(scene, "OwnRunTimeText"),
+            FindNamedComponentInScene<Text>(scene, "OwnRunMovesText"),
+            FindNamedComponentInScene<Text>(scene, "OpponentFeedbackText")
+        );
+        EditorSceneManager.MarkSceneDirty(scene);
+        EditorSceneManager.SaveScene(scene);
+        RestoreScene(previousActiveScene, scene, openedForFix);
+        Debug.Log("Match_Result text layout was fixed successfully.");
+    }
+
     private static void BuildResultScene()
     {
         Scene previousActiveScene = SceneManager.GetActiveScene();
@@ -149,7 +181,7 @@ public static class BuildOnlineMatchResultScene
             "AI MODE  DESCRIPTION-TO-LEVEL",
             22,
             Ink,
-            new Vector2(0f, 35f),
+            new Vector2(0f, 50f),
             new Vector2(690f, 48f),
             TextAnchor.MiddleLeft
         );
@@ -159,8 +191,8 @@ public static class BuildOnlineMatchResultScene
             "TIME  --",
             29,
             Orange,
-            new Vector2(0f, -55f),
-            new Vector2(690f, 55f),
+            new Vector2(-190f, -4f),
+            new Vector2(310f, 55f),
             TextAnchor.MiddleLeft
         );
         Text opponentMovesText = CreateText(
@@ -169,10 +201,21 @@ public static class BuildOnlineMatchResultScene
             "MOVES  -- / MIN --",
             29,
             Orange,
-            new Vector2(0f, -135f),
-            new Vector2(690f, 55f),
+            new Vector2(155f, -4f),
+            new Vector2(380f, 55f),
             TextAnchor.MiddleLeft
         );
+        Text ownFeedbackText = CreateText(
+            "OwnFeedbackText",
+            ownCard.rectTransform,
+            "YOUR MESSAGE:  --",
+            29,
+            Blue,
+            new Vector2(0f, -113f),
+            new Vector2(690f, 145f),
+            TextAnchor.UpperLeft
+        );
+        ConfigureFeedbackText(ownFeedbackText);
 
         Image opponentCard = CreatePanel(
             "OpponentChallengeResultCard",
@@ -214,7 +257,7 @@ public static class BuildOnlineMatchResultScene
             "AI MODE  PARTIAL-LEVEL COMPLETION",
             22,
             Ink,
-            new Vector2(0f, 35f),
+            new Vector2(0f, 50f),
             new Vector2(690f, 48f),
             TextAnchor.MiddleLeft
         );
@@ -224,8 +267,8 @@ public static class BuildOnlineMatchResultScene
             "TIME  00:42.37",
             29,
             Green,
-            new Vector2(0f, -55f),
-            new Vector2(690f, 55f),
+            new Vector2(-190f, -4f),
+            new Vector2(310f, 55f),
             TextAnchor.MiddleLeft
         );
         Text ownMovesText = CreateText(
@@ -234,10 +277,21 @@ public static class BuildOnlineMatchResultScene
             "MOVES  31 / MIN 24",
             29,
             Green,
-            new Vector2(0f, -135f),
-            new Vector2(690f, 55f),
+            new Vector2(155f, -4f),
+            new Vector2(380f, 55f),
             TextAnchor.MiddleLeft
         );
+        Text opponentFeedbackText = CreateText(
+            "OpponentFeedbackText",
+            opponentCard.rectTransform,
+            "OPPONENT'S MESSAGE:  --",
+            29,
+            Orange,
+            new Vector2(0f, -113f),
+            new Vector2(690f, 145f),
+            TextAnchor.UpperLeft
+        );
+        ConfigureFeedbackText(opponentFeedbackText);
 
         Button backButton = CreateButton(
             "BackToLobbyButton",
@@ -265,6 +319,7 @@ public static class BuildOnlineMatchResultScene
             "ownChallengeAssistantText",
             ownAssistantText
         );
+        SetReference(serializedController, "ownFeedbackText", ownFeedbackText);
         SetReference(
             serializedController,
             "opponentRunTimeText",
@@ -279,6 +334,11 @@ public static class BuildOnlineMatchResultScene
             serializedController,
             "opponentChallengeAssistantText",
             opponentAssistantText
+        );
+        SetReference(
+            serializedController,
+            "opponentFeedbackText",
+            opponentFeedbackText
         );
         SetReference(serializedController, "ownRunTimeText", ownTimeText);
         SetReference(serializedController, "ownRunMovesText", ownMovesText);
@@ -473,6 +533,37 @@ public static class BuildOnlineMatchResultScene
         text.verticalOverflow = VerticalWrapMode.Overflow;
         text.raycastTarget = false;
         return text;
+    }
+
+    private static void ConfigureResultCardTextLayout(
+        Text timeText,
+        Text movesText,
+        Text feedbackText)
+    {
+        if (timeText == null || movesText == null || feedbackText == null)
+        {
+            throw new System.InvalidOperationException(
+                "Match_Result is missing a result-card text element."
+            );
+        }
+
+        timeText.rectTransform.anchoredPosition = new Vector2(-190f, -4f);
+        timeText.rectTransform.sizeDelta = new Vector2(310f, 55f);
+        movesText.rectTransform.anchoredPosition = new Vector2(155f, -4f);
+        movesText.rectTransform.sizeDelta = new Vector2(380f, 55f);
+        feedbackText.rectTransform.anchoredPosition = new Vector2(0f, -113f);
+        feedbackText.rectTransform.sizeDelta = new Vector2(690f, 145f);
+        ConfigureFeedbackText(feedbackText);
+    }
+
+    private static void ConfigureFeedbackText(Text feedbackText)
+    {
+        feedbackText.alignment = TextAnchor.UpperLeft;
+        feedbackText.horizontalOverflow = HorizontalWrapMode.Wrap;
+        feedbackText.verticalOverflow = VerticalWrapMode.Truncate;
+        feedbackText.resizeTextForBestFit = true;
+        feedbackText.resizeTextMinSize = 18;
+        feedbackText.resizeTextMaxSize = Mathf.Max(18, feedbackText.fontSize);
     }
 
     private static Button CreateButton(

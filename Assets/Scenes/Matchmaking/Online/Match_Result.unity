@@ -1250,7 +1250,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: 'DESIRED EXPERIENCE:  --'
+  m_Text: 'OPPONENT''S MESSAGE:  --'
 --- !u!222 &1129136655
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -1329,7 +1329,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: 'DESIRED EXPERIENCE:  --'
+  m_Text: 'YOUR MESSAGE:  --'
 --- !u!222 &1137617300
 CanvasRenderer:
   m_ObjectHideFlags: 0
