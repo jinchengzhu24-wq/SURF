@@ -966,8 +966,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 352.22266, y: -67}
-  m_SizeDelta: {x: 355.5548, y: 34}
+  m_AnchoredPosition: {x: 365, y: -67}
+  m_SizeDelta: {x: 420, y: 34}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &225452794
 MonoBehaviour:
@@ -1002,7 +1002,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Extremely frustrated
+  m_Text: To a very great extent
 --- !u!222 &225452795
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -1046,7 +1046,7 @@ RectTransform:
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
   m_AnchoredPosition: {x: 365, y: -67}
-  m_SizeDelta: {x: 330, y: 34}
+  m_SizeDelta: {x: 420, y: 34}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &247304406
 MonoBehaviour:
@@ -1081,7 +1081,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Very satisfied
+  m_Text: To a very great extent
 --- !u!222 &247304407
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4155,7 +4155,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Not frustrated at all
+  m_Text: Not at all
 --- !u!222 &993120134
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4313,8 +4313,8 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: "Overall, how satisfied were you with the balance between the level\u2019s
-    challenge, fairness, and sense of achievement?"
+  m_Text: To what extent did this level exchange create a meaningful interaction
+    between you and the other player?
 --- !u!222 &1053215772
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4582,7 +4582,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 0, y: 51}
+  m_AnchoredPosition: {x: 0, y: 49}
   m_SizeDelta: {x: 1410, y: 52}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1201918159
@@ -4618,8 +4618,8 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: To what extent did this level require you to plan ahead, consider different
-    strategies, and think carefully before making moves?
+  m_Text: To what extent did your final level express what you wanted to communicate
+    to the other player?
 --- !u!222 &1201918160
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -6394,8 +6394,8 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: To what extent did you feel frustrated because you could not identify how
-    to progress, repeatedly became stuck, or had to restart the level?
+  m_Text: After playing the level of other player and reading their message, to what
+    extent did you understand what they wanted to communicate?
 --- !u!222 &1800934434
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -6653,7 +6653,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Very dissatisfied
+  m_Text: Not at all
 --- !u!222 &1871204318
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -6696,7 +6696,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 319.20264, y: -67}
+  m_AnchoredPosition: {x: 365, y: -67}
   m_SizeDelta: {x: 421.5948, y: 34}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1871373406
