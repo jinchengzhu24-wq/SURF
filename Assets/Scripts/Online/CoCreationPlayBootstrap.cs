@@ -12,7 +12,7 @@ using System.Runtime.InteropServices;
 [DefaultExecutionOrder(-500)]
 public sealed class CoCreationPlayBootstrap : MonoBehaviour
 {
-    private const string DefaultBackendBaseUrl = "http://111.231.136.4:8010";
+    private const string DefaultBackendBaseUrl = "http://111.231.136.4/cocreation";
 
     [SerializeField]
     private string backendBaseUrl = DefaultBackendBaseUrl;

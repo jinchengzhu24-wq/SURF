@@ -28,7 +28,7 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。`Draft` 只区分初稿方法；系统不向设计者分配“困难、友好、竞争、支持”等预设目标，也不把这些历史定义注入 LLM。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署在 `http://111.231.136.4:8010/` 与 `http://111.231.136.4:8000/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。前端脚本缓存键为 `cocreation-opponent-message-20260818-24`，样式缓存键为 `cocreation-return-unity-20260814-19`。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。前端脚本缓存键为 `cocreation-nginx-prefix-20260818-2`，样式缓存键为 `cocreation-return-unity-20260814-19`。
 
 2026-08-14 的地图改善提示词先更新为 `cocreation-v29-intent-search`：明确授权后，Pro 只把玩家方向编译成一至三个结构化 `RevisionStrategy`，不再输出地图 rows 或原子格子操作。后端使用语义算子、宽度 16/深度 3 的确定性局部搜索、最多 64 个内部候选、现有结构校验与 300,000 状态 Sokoban 求解器选择最多八个可解候选中的最优方案。模型阶段最多两次且总计不超过 26 秒，搜索在业务请求第 55 秒停止；完整请求仍受 60 秒墙钟限制。随后部署的 `cocreation-v30-disagreement-intent` 规定：玩家明确重新界定或反驳助手对难度、优先级或游玩效果的判断时，必须出现一张可纠正的暂定意图卡。`v31-zero-candidate-correction` 还会在首份合法计划因操作/焦点没有可编辑格子而构造零候选时，用现有的第二次 Pro 调用附带安全原因纠正计划。只有已有合法计划但确定性搜索找不到满足全部条件的可解修改时，才进入现有的局部效果放宽商量流程。Quality-Diversity / MAP-Elites 保留为后续候选多样性升级，不属于当前版本。本地和服务器 151 项测试、Python 编译及本地 JavaScript 语法检查通过；部署未改动数据库内容或 8000 服务。
 

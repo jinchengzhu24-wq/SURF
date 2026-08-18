@@ -2,6 +2,9 @@
 
 const MAX_MESSAGE_LENGTH = 2000;
 const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
+const API_PREFIX = window.location.pathname.startsWith("/cocreation")
+    ? "/cocreation"
+    : "";
 const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
 const DISCUSSION_FOCUS_LABEL = "LET'S DISCUSS / 一起聊聊";
 const GUIDANCE_CUE_LABELS = {
@@ -1191,7 +1194,10 @@ async function api(path, options = {}) {
     let response;
 
     try {
-        response = await fetch(path, request);
+        const requestPath = path.startsWith("/api/")
+            ? API_PREFIX + path
+            : path;
+        response = await fetch(requestPath, request);
     } catch (error) {
         if (error?.name === "AbortError") {
             const timeoutError = new Error(t("error_CLIENT_TIMEOUT"));

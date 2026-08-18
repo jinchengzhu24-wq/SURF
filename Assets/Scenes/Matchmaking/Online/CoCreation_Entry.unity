@@ -2803,7 +2803,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 78b17baafda22dd4b8aebff55bc35e68, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  coCreationUrl: http://111.231.136.4:8010/
+  coCreationUrl: http://111.231.136.4/cocreation/
   openLabButton: {fileID: 242612606}
   statusText: {fileID: 996307294}
 --- !u!4 &1117121757

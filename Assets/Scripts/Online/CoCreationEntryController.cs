@@ -8,7 +8,7 @@ using UnityEngine.UI;
 
 public sealed class CoCreationEntryController : MonoBehaviour
 {
-    private const string DefaultCoCreationUrl = "http://111.231.136.4:8010/";
+    private const string DefaultCoCreationUrl = "http://111.231.136.4/cocreation/";
     private static readonly Color ReadyStatusColor = new Color(0.36f, 0.36f, 0.36f, 1f);
     private static readonly Color WaitingStatusColor = new Color(0.60f, 0.40f, 0f, 1f);
     private static readonly Color ErrorStatusColor = new Color(0.71f, 0.14f, 0.09f, 1f);
@@ -139,7 +139,11 @@ public sealed class CoCreationEntryController : MonoBehaviour
                 ApplyFailure("Stage 1 upload failed. Select the button to retry.");
                 Debug.LogWarning(
                     "CoCreationEntryController: Session creation failed: "
-                    + request.error + " response=" + request.downloadHandler.text
+                    + " endpoint=" + endpoint
+                    + " result=" + request.result
+                    + " status=" + request.responseCode
+                    + " error=" + request.error
+                    + " response=" + request.downloadHandler.text
                 );
                 yield break;
             }
