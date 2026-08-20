@@ -244,6 +244,7 @@ const state = {
     chatError: null,
     chatStartedAt: 0,
     chatTimerId: null,
+    deadlineTimerId: null,
     pendingMessage: null,
     assessing: new Set(),
     translating: new Set(),
@@ -274,7 +275,7 @@ const chineseApiErrors = {
 };
 
 const elements = Object.fromEntries([
-    "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus",
+    "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
     "languageButton", "demoButton", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "chatScroll", "emptyChat", "messageList", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
@@ -297,7 +298,10 @@ elements.saveStageButton.addEventListener("click", saveManualStage);
 elements.discardDraftButton.addEventListener("click", discardDraft);
 elements.restoreStageButton.addEventListener("click", restoreSelectedStage);
 elements.playButton.addEventListener("click", playSelectedStage);
-elements.finalizeButton.addEventListener("click", () => elements.finalizeModal.hidden = false);
+elements.finalizeButton.addEventListener("click", () => {
+    if (deadlineExpired()) void finalizeSession();
+    else elements.finalizeModal.hidden = false;
+});
 elements.cancelFinalizeButton.addEventListener("click", () => elements.finalizeModal.hidden = true);
 elements.confirmFinalizeButton.addEventListener("click", finalizeSession);
 elements.intentionForm.addEventListener("submit", submitIntention);
@@ -378,6 +382,7 @@ function render() {
     applyTranslations();
     elements.methodPill.textContent = t(state.session.initialDraftMethod);
     renderStages();
+    renderDeadline();
     renderMessages();
     renderProposal();
     renderMap();
@@ -394,6 +399,7 @@ function renderStages() {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "stage-card";
+        button.disabled = deadlineExpired();
         if (version.versionId === state.selectedVersionId) button.classList.add("selected");
         if (version.versionId === state.session.currentVersionId) button.classList.add("current");
         button.addEventListener("click", () => selectVersion(version.versionId));
@@ -705,20 +711,46 @@ function renderSessionState() {
     elements.historyBanner.hidden = state.selectedVersionId === state.session.currentVersionId;
 }
 
+function deadlineExpired() { return Boolean(state.session?.deadlineExpired); }
+
+function renderDeadline() {
+    window.clearInterval(state.deadlineTimerId);
+    if (!state.session?.deadlineAt || state.session.status !== "active") {
+        elements.deadlineStatus.hidden = true;
+        return;
+    }
+    const update = () => {
+        const seconds = Math.max(0, Math.ceil((Date.parse(state.session.deadlineAt) - Date.now()) / 1000));
+        if (seconds <= 0) state.session.deadlineExpired = true;
+        const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
+        const remainder = String(seconds % 60).padStart(2, "0");
+        elements.deadlineStatus.hidden = false;
+        elements.deadlineStatus.className = `deadline-status ${deadlineExpired() ? "expired" : ""}`;
+        elements.deadlineStatus.textContent = deadlineExpired()
+            ? "TIME IS UP — SUBMIT THE CURRENT MAP AS THE FINAL STAGE."
+            : `TIME LEFT ${minutes}:${remainder}`;
+        updateControls();
+    };
+    update();
+    state.deadlineTimerId = window.setInterval(update, 1000);
+}
+
 function updateControls() {
     if (!state.session) {
         elements.demoButton.disabled = state.busy;
         return;
     }
 
+    const expired = deadlineExpired();
     const editable = canEditSelected();
     const pending = Boolean(currentPendingProposal());
     elements.saveStageButton.disabled = !editable || !state.dirty || state.busy;
     elements.discardDraftButton.disabled = !editable || !state.dirty || state.busy;
     elements.restoreStageButton.hidden = state.selectedVersionId === state.session.currentVersionId || state.session.status !== "active";
-    elements.restoreStageButton.disabled = state.busy;
-    elements.playButton.disabled = state.busy || state.dirty || pending || !selectedVersion();
-    elements.finalizeButton.disabled = state.busy || state.dirty || pending || state.selectedVersionId !== state.session.currentVersionId;
+    elements.restoreStageButton.disabled = state.busy || expired;
+    elements.playButton.disabled = state.busy || expired || state.dirty || pending || !selectedVersion();
+    elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
+    elements.languageButton.disabled = state.busy || expired;
     elements.messageInput.disabled = state.busy || !editable;
     elements.sendButton.disabled = state.busy || !editable || !elements.messageInput.value.trim();
     elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
@@ -912,7 +944,11 @@ async function finalizeSession() {
     await withBusy(async () => {
         state.session = await api(`/api/sessions/${state.sessionId}/finalize`, {
             method: "POST",
-            body: { baseVersionId: state.session.currentVersionId, idempotencyKey: uniqueId("finalize") }
+            body: {
+                baseVersionId: state.session.currentVersionId,
+                idempotencyKey: uniqueId("finalize"),
+                rows: deadlineExpired() ? state.draftRows : null
+            }
         });
         render();
         elements.intentionInput.focus();
@@ -1136,7 +1172,7 @@ function editTile(x, y) {
 }
 
 function canEditSelected() {
-    return state.session && state.session.status === "active" && state.selectedVersionId === state.session.currentVersionId;
+    return state.session && state.session.status === "active" && !deadlineExpired() && state.selectedVersionId === state.session.currentVersionId;
 }
 
 function currentPendingProposal() {

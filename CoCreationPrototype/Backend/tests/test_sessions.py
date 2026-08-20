@@ -1334,6 +1334,37 @@ class CoCreationSessionTests(unittest.TestCase):
             "I wanted a compact introductory puzzle.",
         )
 
+    def test_expired_deadline_locks_edits_and_finalizes_the_current_draft(self):
+        with repository.connect(immediate=True) as database:
+            database.execute(
+                "UPDATE design_sessions SET deadline_at = ? WHERE id = ?",
+                ("2000-01-01T00:00:00Z", self.session_id),
+            )
+
+        session = self.read_session()
+        self.assertTrue(session["deadlineExpired"])
+        self.assertEqual(session["remainingSeconds"], 0)
+
+        locked = self.client.patch(
+            f"/api/sessions/{self.session_id}/language",
+            json={"language": "zh-CN"},
+        )
+        self.assertEqual(locked.status_code, 409)
+        self.assertEqual(locked.json()["code"], "SESSION_DEADLINE_EXPIRED")
+
+        finalized = self.client.post(
+            f"/api/sessions/{self.session_id}/finalize",
+            json={
+                "baseVersionId": session["currentVersionId"],
+                "idempotencyKey": "deadline_finalize_001",
+                "rows": EDITED_ROWS,
+            },
+        )
+        self.assertEqual(finalized.status_code, 200, finalized.text)
+        self.assertEqual(finalized.json()["status"], "awaiting_intention")
+        self.assertEqual(finalized.json()["finalVersionId"], finalized.json()["currentVersionId"])
+        self.assertEqual(finalized.json()["versions"][-1]["source"], "human_edit")
+
     def test_language_switch_is_persisted(self):
         response = self.client.patch(
             f"/api/sessions/{self.session_id}/language",

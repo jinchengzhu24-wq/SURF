@@ -67,6 +67,7 @@ MAX_INTENTION_LENGTH = 4000
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_COOKIE_NAME = "sokoban_cocreation_access"
 PLAY_TICKET_LIFETIME = timedelta(minutes=5)
+COCREATION_DEADLINE = timedelta(minutes=10)
 INTERRUPTED_AFTER = timedelta(minutes=30)
 _message_locks = {}
 _message_locks_guard = Lock()
@@ -199,6 +200,7 @@ class ProposalDecisionRequest(StrictModel):
 class FinalizeRequest(StrictModel):
     baseVersionId: str
     idempotencyKey: str
+    rows: list[str] | None = None
 
 
 class IntentionRequest(StrictModel):
@@ -452,12 +454,14 @@ def exchange_browser_access(
         if session["bootstrap_used_at"] is not None:
             raise ApiError(409, "BOOTSTRAP_TOKEN_USED", "The session link was already used.")
 
-        now = utc_now()
+        now, deadline_at = start_deadline_if_missing(database, session)
         database.execute(
-            "UPDATE design_sessions SET bootstrap_used_at = ? WHERE id = ?",
-            (now, session_id),
+            """UPDATE design_sessions
+               SET bootstrap_used_at = ?, deadline_started_at = ?, deadline_at = ?
+               WHERE id = ?""",
+            (now, now, deadline_at, session_id),
         )
-        record_event(database, session_id, "browser_access_granted", {}, now)
+        record_event(database, session_id, "browser_access_granted", {"deadlineAt": deadline_at}, now)
 
     response.set_cookie(
         SESSION_COOKIE_NAME,
@@ -483,6 +487,7 @@ def read_session(
             session_id,
             access_cookie or session_token,
         )
+        start_deadline_if_missing(database, session)
         expire_interrupted_attempts(database, session_id)
         return serialize_session(database, session["id"])
 
@@ -494,7 +499,7 @@ def change_language(
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     with connect(immediate=True) as database:
-        session = require_browser_session(database, session_id, access_cookie)
+        session = require_active_session(database, session_id, access_cookie)
         now = utc_now()
         database.execute(
             "UPDATE design_sessions SET language = ?, updated_at = ? WHERE id = ?",
@@ -519,7 +524,7 @@ def translate_session_turns(
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     with connect(immediate=True) as database:
-        session = require_browser_session(database, session_id, access_cookie)
+        session = require_active_session(database, session_id, access_cookie)
         pending = _pending_assistant_translations(
             database,
             session_id,
@@ -533,7 +538,7 @@ def translate_session_turns(
     execution = translate_turns(pending, language, request.state.request_id)
 
     with connect(immediate=True) as database:
-        session = require_browser_session(database, session_id, access_cookie)
+        session = require_active_session(database, session_id, access_cookie)
 
         for translated in execution.translations:
             source = next(item for item in pending if item["turnId"] == translated["turnId"])
@@ -686,7 +691,7 @@ def assess_version(
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
     with connect() as database:
-        session = require_browser_session(database, session_id, access_cookie)
+        session = require_active_session(database, session_id, access_cookie)
         version = get_version(database, session_id, version_id)
 
         if version is None:
@@ -733,7 +738,7 @@ def assess_version(
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     with connect(immediate=True) as database:
-        session = require_browser_session(database, session_id, access_cookie)
+        session = require_active_session(database, session_id, access_cookie)
         existing = database.execute(
             "SELECT id FROM llm_assessments WHERE version_id = ?",
             (version_id,),
@@ -1535,7 +1540,7 @@ def create_play_attempt(
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
     with connect(immediate=True) as database:
-        session = require_browser_session(database, session_id, access_cookie)
+        session = require_active_session(database, session_id, access_cookie)
         version = get_version(database, session_id, version_id)
 
         if version is None:
@@ -1670,7 +1675,10 @@ def finalize_session(
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
     with connect(immediate=True) as database:
-        session = require_active_session(database, session_id, access_cookie)
+        session = require_browser_session(database, session_id, access_cookie)
+        if session["status"] != "active":
+            raise ApiError(409, "SESSION_LOCKED", "This co-creation session is no longer editable.")
+        deadline_expired = session_deadline_expired(session)
         require_current_base(session, payload.baseVersionId)
         pending = database.execute(
             """
@@ -1680,7 +1688,7 @@ def finalize_session(
             (session_id,),
         ).fetchone()[0]
 
-        if pending:
+        if pending and not deadline_expired:
             raise ApiError(409, "PENDING_PROPOSAL", "Decide the pending proposal first.")
 
         existing = database.execute(
@@ -1692,6 +1700,17 @@ def finalize_session(
         ).fetchone()
 
         if existing is None:
+            final_version_id = payload.baseVersionId
+            if deadline_expired and payload.rows is not None:
+                validation = _solve_or_api_error(payload.rows)
+                current = get_current_version(database, session)
+                if list(validation.rows) != load_json(current["rows_json"]):
+                    final_version_id = _insert_version(
+                        database, session, validation, "human_edit",
+                        "Designer edit saved at the co-creation deadline",
+                        "deadline-finalize:" + payload.idempotencyKey, current,
+                    )
+                    session = get_session(database, session_id)
             now = utc_now()
             database.execute(
                 """
@@ -1699,17 +1718,19 @@ def finalize_session(
                 SET status = 'awaiting_intention', final_version_id = ?,
                     finalized_at = ?, updated_at = ? WHERE id = ?
                 """,
-                (payload.baseVersionId, now, now, session_id),
+                (final_version_id, now, now, session_id),
             )
             _insert_decision(
                 database,
                 session_id,
-                payload.baseVersionId,
+                final_version_id,
                 None,
                 "finalize",
                 "",
                 payload.idempotencyKey,
             )
+            if deadline_expired:
+                record_event(database, session_id, "deadline_finalized", {"versionId": final_version_id}, now)
 
         return serialize_session(database, session_id)
 
@@ -2400,7 +2421,30 @@ def require_active_session(database, session_id, token):
     if session["status"] != "active":
         raise ApiError(409, "SESSION_LOCKED", "This co-creation session is no longer editable.")
 
+    if session_deadline_expired(session):
+        raise ApiError(409, "SESSION_DEADLINE_EXPIRED", "Time is up. Submit the current map as the final Stage now.")
     return session
+
+
+def session_deadline_expired(session):
+    deadline_at = session["deadline_at"]
+    return deadline_at is not None and parse_time(deadline_at) <= datetime.now(timezone.utc)
+
+
+def start_deadline_if_missing(database, session):
+    if session["deadline_at"] is not None:
+        return session["deadline_started_at"], session["deadline_at"]
+
+    now = utc_now()
+    deadline_at = iso_time(datetime.now(timezone.utc) + COCREATION_DEADLINE)
+    database.execute(
+        """UPDATE design_sessions
+           SET deadline_started_at = ?, deadline_at = ?, updated_at = ?
+           WHERE id = ? AND deadline_at IS NULL""",
+        (now, deadline_at, now, session["id"]),
+    )
+    record_event(database, session["id"], "deadline_started", {"deadlineAt": deadline_at}, now)
+    return now, deadline_at
 
 
 def require_current_base(session, base_version_id):

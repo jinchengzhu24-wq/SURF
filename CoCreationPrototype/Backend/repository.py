@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -20,6 +21,8 @@ CREATE TABLE IF NOT EXISTS design_sessions (
     integration_hash TEXT NOT NULL,
     bootstrap_hash TEXT NOT NULL,
     bootstrap_used_at TEXT,
+    deadline_started_at TEXT,
+    deadline_at TEXT,
     match_id TEXT,
     player_number INTEGER,
     initial_draft_method TEXT NOT NULL,
@@ -180,6 +183,8 @@ def initialize_database():
     try:
         database.executescript(SCHEMA)
         _ensure_column(database, "conversation_turns", "guidance_json", "TEXT")
+        _ensure_column(database, "design_sessions", "deadline_started_at", "TEXT")
+        _ensure_column(database, "design_sessions", "deadline_at", "TEXT")
         database.execute("PRAGMA journal_mode=WAL")
         database.execute("PRAGMA foreign_keys=ON")
         database.commit()
@@ -344,6 +349,10 @@ def serialize_session(database, session_id):
         "finalVersionId": session["final_version_id"],
         "createdAt": session["created_at"],
         "updatedAt": session["updated_at"],
+        "deadlineStartedAt": session["deadline_started_at"],
+        "deadlineAt": session["deadline_at"],
+        "deadlineExpired": _deadline_expired(session["deadline_at"]),
+        "remainingSeconds": _remaining_deadline_seconds(session["deadline_at"]),
         "versions": [
             {
                 "versionId": version["id"],
@@ -462,6 +471,20 @@ def _ensure_column(database, table_name, column_name, declaration):
         database.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {declaration}"
         )
+
+
+def _deadline_expired(value):
+    return value is not None and _parse_time(value) <= datetime.now(timezone.utc)
+
+
+def _remaining_deadline_seconds(value):
+    if value is None:
+        return None
+    return max(0, int((_parse_time(value) - datetime.now(timezone.utc)).total_seconds()))
+
+
+def _parse_time(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _serialize_attempt(attempt):

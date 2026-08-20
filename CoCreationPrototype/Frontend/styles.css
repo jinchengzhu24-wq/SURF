@@ -85,6 +85,8 @@ h1 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: -0.02em; }
 .language-button { padding: 0 11px; color: var(--text); cursor: pointer; }
 .language-button:hover { border-color: var(--brand); color: var(--brand-dark); background: var(--brand-soft); }
 .prototype-status { gap: 7px; padding: 0 11px; color: var(--muted); background: var(--surface-soft); }
+.deadline-status { max-width: 340px; padding: 7px 10px; border: 2px solid #806000; color: #684d00; background: var(--amber-soft); font-size: 11px; font-weight: 850; letter-spacing: .03em; text-align: center; }
+.deadline-status.expired { border-color: var(--red); color: #7a271a; background: var(--red-soft); }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px rgba(154, 103, 0, 0.12); }
 .prototype-status.ready .status-dot { background: var(--green); box-shadow: 0 0 0 3px rgba(24, 121, 78, 0.12); }
 .prototype-status.error .status-dot { background: var(--red); }

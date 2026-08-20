@@ -3698,7 +3698,7 @@ MonoBehaviour:
     m_PressedTrigger: Pressed
     m_SelectedTrigger: Selected
     m_DisabledTrigger: Disabled
-  m_Interactable: 1
+  m_Interactable: 0
   m_TargetGraphic: {fileID: 4100100005}
   m_OnClick:
     m_PersistentCalls:
@@ -3793,7 +3793,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Train
+  m_Text: Tutorial
 --- !u!1 &4100100102
 GameObject:
   m_ObjectHideFlags: 0
