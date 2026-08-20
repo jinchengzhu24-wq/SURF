@@ -8,6 +8,7 @@ public class OnlineLevelController : MonoBehaviour
 {
     private const string LobbySceneName = "Online_Lobby";
     private const string ResultSceneName = "Match_Result";
+    private const float ChallengeTimeLimitSeconds = 30f;
 
     [Header("Level")]
     [SerializeField] private LevelData levelData;
@@ -17,18 +18,23 @@ public class OnlineLevelController : MonoBehaviour
 
     [Header("UI")]
     [SerializeField] private Text roomCodeText;
+    [SerializeField] private Text countdownText;
     [SerializeField] private Text statusText;
     [SerializeField] private GameObject statusPanel;
     [SerializeField] private GameObject completePanel;
     [SerializeField] private Text completeHintText;
     [SerializeField] private Button leaveButton;
     [SerializeField] private Button completeLeaveButton;
+    [SerializeField] private GameObject failPanel;
+    [SerializeField] private Text failHintText;
+    [SerializeField] private Button failLeaveButton;
 
     private OnlineMatchClient client;
     private bool leaving;
     private bool transitioning;
     private bool runStarted;
     private bool runCompleted;
+    private bool runTimedOut;
     private bool resultSubmissionStarted;
     private bool resultSubmitted;
     private float runStartedAt;
@@ -67,12 +73,23 @@ public class OnlineLevelController : MonoBehaviour
             completePanel.SetActive(false);
         }
 
+        if (failPanel != null)
+        {
+            failPanel.SetActive(false);
+        }
+
         if (completeLeaveButton != null)
         {
             completeLeaveButton.interactable = false;
         }
 
+        if (failLeaveButton != null)
+        {
+            failLeaveButton.interactable = false;
+        }
+
         SetText(roomCodeText, "ROOM " + OnlineMatchContext.RoomCode);
+        UpdateCountdownText(ChallengeTimeLimitSeconds);
 
         if (!OnlineMatchContext.HasMatch
             || !OnlineMatchContext.HasOpponentChallenge)
@@ -100,6 +117,23 @@ public class OnlineLevelController : MonoBehaviour
         }
 
         LevelStudyRecorder.PlayerMoveRecorded -= HandlePlayerMove;
+    }
+
+    private void Update()
+    {
+        if (!runStarted || runCompleted)
+        {
+            return;
+        }
+
+        float elapsed = Time.realtimeSinceStartup - runStartedAt;
+        float remaining = Mathf.Max(0f, ChallengeTimeLimitSeconds - elapsed);
+        UpdateCountdownText(remaining);
+
+        if (remaining <= 0f)
+        {
+            HandleTimeExpired();
+        }
     }
 
     private IEnumerator PrepareLevel()
@@ -148,6 +182,7 @@ public class OnlineLevelController : MonoBehaviour
         runMoveCount = 0;
         runStartedAt = Time.realtimeSinceStartup;
         runStarted = true;
+        UpdateCountdownText(ChallengeTimeLimitSeconds);
 
         if (levelManager != null)
         {
@@ -168,6 +203,34 @@ public class OnlineLevelController : MonoBehaviour
         ) / 100f;
     }
 
+    private void HandleTimeExpired()
+    {
+        if (!runStarted || runCompleted)
+        {
+            return;
+        }
+
+        runCompleted = true;
+        runTimedOut = true;
+        runDurationSeconds = ChallengeTimeLimitSeconds;
+        UpdateCountdownText(0f);
+
+        if (levelManager != null)
+        {
+            levelManager.SetExternalPlayerInputEnabled(false);
+        }
+
+        SetPanelVisible(completePanel, false);
+        SetPanelVisible(failPanel, true);
+        SetPanelVisible(statusPanel, false);
+
+        if (!resultSubmissionStarted)
+        {
+            resultSubmissionStarted = true;
+            StartCoroutine(SubmitResultUntilSuccessful());
+        }
+    }
+
     private void HandlePlayerMove(bool pushedBox)
     {
         if (runStarted && !runCompleted)
@@ -179,6 +242,10 @@ public class OnlineLevelController : MonoBehaviour
     private void HandleLevelCompleted(LevelManager manager)
     {
         manager.MarkCompletionTransitionHandled();
+        if (runTimedOut)
+        {
+            return;
+        }
         SetPanelVisible(completePanel, true);
         SetPanelVisible(statusPanel, false);
 
@@ -200,20 +267,21 @@ public class OnlineLevelController : MonoBehaviour
     {
         while (!leaving && !transitioning)
         {
-            SetText(completeHintText, "SUBMITTING RESULT...");
+            SetText(ActiveHintText, "SUBMITTING RESULT...");
             bool succeeded = false;
 
             yield return client.SubmitResult(
                 runDurationSeconds,
                 runMoveCount,
                 minimumMoves,
+                runTimedOut ? "timed_out" : "completed",
                 state =>
                 {
                     succeeded = true;
                     OnlineMatchContext.ApplyState(state);
                 },
                 error => SetText(
-                    completeHintText,
+                    ActiveHintText,
                     "RESULT SUBMISSION FAILED. RETRYING...\n"
                     + error.ToUpperInvariant()
                 )
@@ -224,7 +292,7 @@ public class OnlineLevelController : MonoBehaviour
                 if (!Application.CanStreamedLevelBeLoaded(ResultSceneName))
                 {
                     SetText(
-                        completeHintText,
+                        ActiveHintText,
                         "MATCH RESULT SCENE IS NOT AVAILABLE."
                     );
                     yield break;
@@ -232,13 +300,14 @@ public class OnlineLevelController : MonoBehaviour
 
                 resultSubmitted = true;
                 SetText(
-                    completeHintText,
+                    ActiveHintText,
                     "RESULT SUBMITTED.\nSELECT LEAVE TO VIEW MATCH RESULTS."
                 );
 
-                if (completeLeaveButton != null)
+                Button resultLeaveButton = ActiveResultLeaveButton;
+                if (resultLeaveButton != null)
                 {
-                    completeLeaveButton.interactable = true;
+                    resultLeaveButton.interactable = true;
                 }
 
                 yield break;
@@ -273,6 +342,11 @@ public class OnlineLevelController : MonoBehaviour
             completeLeaveButton.interactable = false;
         }
 
+        if (failLeaveButton != null)
+        {
+            failLeaveButton.interactable = false;
+        }
+
         SceneManager.LoadScene(ResultSceneName);
     }
 
@@ -293,6 +367,11 @@ public class OnlineLevelController : MonoBehaviour
         if (completeLeaveButton != null)
         {
             completeLeaveButton.interactable = false;
+        }
+
+        if (failLeaveButton != null)
+        {
+            failLeaveButton.interactable = false;
         }
 
         if (client == null || !OnlineMatchContext.HasMatch)
@@ -319,42 +398,23 @@ public class OnlineLevelController : MonoBehaviour
     {
         SetPanelVisible(statusPanel, true);
         SetPanelVisible(completePanel, false);
+        SetPanelVisible(failPanel, false);
         SetText(statusText, message);
     }
 
     private void ResolveReferences()
     {
-        levelData = levelData != null ? levelData : FindObjectOfType<LevelData>();
-        levelLoader = levelLoader != null
-            ? levelLoader
-            : FindObjectOfType<LevelLoader>();
-        levelManager = levelManager != null
-            ? levelManager
-            : FindObjectOfType<LevelManager>();
-        levelSolver = levelSolver != null
-            ? levelSolver
-            : FindObjectOfType<LevelSolver>();
-        roomCodeText = roomCodeText != null
-            ? roomCodeText
-            : OnlineSceneUi.FindText("RoomCodeText");
-        statusText = statusText != null
-            ? statusText
-            : OnlineSceneUi.FindText("OnlineLevelStatusText");
-        statusPanel = statusPanel != null
-            ? statusPanel
-            : GameObject.Find("OnlineLevelStatusPanel");
-        completePanel = completePanel != null
-            ? completePanel
-            : GameObject.Find("ChallengeCompletePanel");
-        completeHintText = completeHintText != null
-            ? completeHintText
-            : OnlineSceneUi.FindText("CompleteHint");
-        leaveButton = leaveButton != null
-            ? leaveButton
-            : OnlineSceneUi.EnsureButton("LeaveMatchButton");
-        completeLeaveButton = completeLeaveButton != null
-            ? completeLeaveButton
-            : OnlineSceneUi.EnsureButton("CompleteLeaveMatchButton");
+        if (levelData == null || levelLoader == null || levelManager == null
+            || levelSolver == null || roomCodeText == null || countdownText == null
+            || statusText == null || statusPanel == null || completePanel == null
+            || completeHintText == null || leaveButton == null
+            || completeLeaveButton == null || failPanel == null
+            || failHintText == null || failLeaveButton == null)
+        {
+            Debug.LogError(
+                "OnlineLevelController requires all level and UI references to be assigned in the Inspector."
+            );
+        }
     }
 
     private void WireUi()
@@ -370,6 +430,13 @@ public class OnlineLevelController : MonoBehaviour
             completeLeaveButton.onClick.RemoveListener(LeaveMatch);
             completeLeaveButton.onClick.RemoveListener(OpenMatchResult);
             completeLeaveButton.onClick.AddListener(OpenMatchResult);
+        }
+
+        if (failLeaveButton != null)
+        {
+            failLeaveButton.onClick.RemoveListener(LeaveMatch);
+            failLeaveButton.onClick.RemoveListener(OpenMatchResult);
+            failLeaveButton.onClick.AddListener(OpenMatchResult);
         }
     }
 
@@ -455,5 +522,16 @@ public class OnlineLevelController : MonoBehaviour
         {
             text.text = value;
         }
+    }
+
+    private Text ActiveHintText => runTimedOut ? failHintText : completeHintText;
+
+    private Button ActiveResultLeaveButton =>
+        runTimedOut ? failLeaveButton : completeLeaveButton;
+
+    private void UpdateCountdownText(float remainingSeconds)
+    {
+        int seconds = Mathf.CeilToInt(Mathf.Max(0f, remainingSeconds));
+        SetText(countdownText, "TIME 00:" + seconds.ToString("00"));
     }
 }

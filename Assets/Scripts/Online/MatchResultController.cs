@@ -246,6 +246,16 @@ public class MatchResultController : MonoBehaviour
             return;
         }
 
+        if (result.outcome == "timed_out")
+        {
+            SetText(timeText, "TIMEOUT  " + FormatDuration(result.durationSeconds));
+            SetText(
+                movesText,
+                "MOVES  " + result.moveCount + " / MIN " + result.minimumMoves
+            );
+            return;
+        }
+
         SetText(timeText, "TIME  " + FormatDuration(result.durationSeconds));
         SetText(
             movesText,

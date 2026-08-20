@@ -290,6 +290,7 @@ class OnlineRoomTests(unittest.TestCase):
         duration_seconds=42.37,
         move_count=31,
         minimum_moves=24,
+        outcome="completed",
     ):
         return self.client.post(
             "/online/rooms/" + match_id + "/result",
@@ -297,6 +298,7 @@ class OnlineRoomTests(unittest.TestCase):
                 "durationSeconds": duration_seconds,
                 "moveCount": move_count,
                 "minimumMoves": minimum_moves,
+                "outcome": outcome,
             },
             headers=self.auth_headers(player_token),
         )
@@ -624,6 +626,24 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(repeated.status_code, 200)
         self.assertEqual(changed.status_code, 409)
 
+    def test_timed_out_result_allows_current_move_count(self):
+        host, guest = self.ready_both_players()
+        self.submit_challenge(host["matchId"], host["playerToken"], SOLVABLE_ROWS_A)
+        self.submit_challenge(host["matchId"], guest["playerToken"], SOLVABLE_ROWS_B)
+
+        response = self.submit_result(
+            host["matchId"],
+            host["playerToken"],
+            duration_seconds=30,
+            move_count=4,
+            minimum_moves=18,
+            outcome="timed_out",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ownResult"]["outcome"], "timed_out")
+        self.assertEqual(response.json()["ownResult"]["moveCount"], 4)
+
     def test_both_results_are_exchanged_by_player_identity(self):
         host, guest = self.ready_both_players()
         self.submit_challenge(
@@ -664,6 +684,7 @@ class OnlineRoomTests(unittest.TestCase):
                 "durationSeconds": 56.78,
                 "moveCount": 40,
                 "minimumMoves": 30,
+                "outcome": "completed",
             },
         )
         self.assertEqual(
@@ -672,6 +693,7 @@ class OnlineRoomTests(unittest.TestCase):
                 "durationSeconds": 12.34,
                 "moveCount": 20,
                 "minimumMoves": 18,
+                "outcome": "completed",
             },
         )
         self.assertEqual(

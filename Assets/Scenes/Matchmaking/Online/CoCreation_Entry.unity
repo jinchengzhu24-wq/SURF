@@ -2207,7 +2207,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: CO-CREATION LAB
+  m_Text: ' Creating level with AI'
 --- !u!222 &646156193
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2806,6 +2806,7 @@ MonoBehaviour:
   coCreationUrl: http://111.231.136.4/cocreation/
   openLabButton: {fileID: 242612606}
   statusText: {fileID: 996307294}
+  requestTimeoutSeconds: 15
 --- !u!4 &1117121757
 Transform:
   m_ObjectHideFlags: 0

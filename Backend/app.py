@@ -137,6 +137,7 @@ class OnlineResultRequest(BaseModel):
     durationSeconds: float
     moveCount: int
     minimumMoves: int
+    outcome: str = "completed"
 
 
 load_dotenv(BASE_DIR / ".env")
@@ -415,7 +416,13 @@ def validate_online_result(payload):
             detail="Result move counts must be non-negative",
         )
 
-    if payload.moveCount < payload.minimumMoves:
+    if payload.outcome not in {"completed", "timed_out"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Result outcome must be completed or timed_out",
+        )
+
+    if payload.outcome == "completed" and payload.moveCount < payload.minimumMoves:
         raise HTTPException(
             status_code=400,
             detail="Result move count cannot be lower than the theoretical minimum",
@@ -1006,6 +1013,7 @@ def submit_online_result(
         "durationSeconds": round(float(payload.durationSeconds), 2),
         "moveCount": int(payload.moveCount),
         "minimumMoves": int(payload.minimumMoves),
+        "outcome": payload.outcome,
     }
 
     with ONLINE_ROOMS_LOCK:
@@ -2385,6 +2393,7 @@ def build_matchmaking_records_payload(
         "durationSeconds",
         "moveCount",
         "minimumMoves",
+        "outcome",
     }
 
     def create_player(player_number):
@@ -2485,6 +2494,7 @@ def build_matchmaking_records_payload(
                 "durationSeconds": event.get("durationSeconds"),
                 "moveCount": event.get("moveCount"),
                 "minimumMoves": event.get("minimumMoves"),
+                "outcome": event.get("outcome", "completed"),
             }
         elif event_type == "player_left" and player is not None:
             player["leftAt"] = timestamp

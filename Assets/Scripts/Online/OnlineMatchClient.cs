@@ -125,6 +125,7 @@ public class OnlineMatchClient : MonoBehaviour
         float durationSeconds,
         int moveCount,
         int minimumMoves,
+        string outcome,
         Action<OnlineRoomState> onSuccess,
         Action<string> onFailure)
     {
@@ -132,7 +133,8 @@ public class OnlineMatchClient : MonoBehaviour
         {
             durationSeconds = durationSeconds,
             moveCount = moveCount,
-            minimumMoves = minimumMoves
+            minimumMoves = minimumMoves,
+            outcome = outcome
         };
         return SendRoomRequest(
             UnityWebRequest.kHttpVerbPOST,
@@ -312,6 +314,7 @@ public class OnlineMatchClient : MonoBehaviour
         public float durationSeconds;
         public int moveCount;
         public int minimumMoves;
+        public string outcome;
     }
 
     [Serializable]
