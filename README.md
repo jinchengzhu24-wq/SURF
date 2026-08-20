@@ -6,11 +6,7 @@
 
 ```text
 Menu
-  → Online_Lobby → Match_Briefing → Draft
-      ├─ Partial-Level Completion
-      │    → PC → PC_Design → PC_Level（生成并验证首版）
-      └─ Description-to-Level Generation
-           → DG → DG_Level（生成并验证首版）
+  → Online_Lobby → Match_Briefing → DG → DG_Level（生成并验证首版）
   → CoCreation_Entry（上传首版并创建 8010 会话）
   → 8010 Co-Creation Lab
       → Stage 1 = Unity 首版 rows
@@ -26,7 +22,7 @@ Menu
   → Questionnaire(Online) → Menu
 ```
 
-旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。`Draft` 只区分初稿方法；系统不向设计者分配“困难、友好、竞争、支持”等预设目标，也不把这些历史定义注入 LLM。
+旧 `Competition_Mode`、`AI_Asistant_Mode`、`Draft` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 中确认的关系、体验与最终难度只指导 8000 的首版生成，不会传入 8010 共创服务或其 LLM 上下文。
 
 8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。前端脚本缓存键为 `cocreation-nginx-prefix-20260818-2`，样式缓存键为 `cocreation-return-unity-20260814-19`。
 
@@ -46,20 +42,19 @@ Menu
 
 是否把 PC/DG 作为正式研究条件、是否设置最少共创轮数、问卷指标和最终研究问题仍未决定，不应提前固化。
 
-## PC_Level 与 DG_Level 的双重用途
+## 当前 DG 与保留的 PC 资产
 
-### 首版生成模式
+### 当前首版生成模式
 
-- `PC_Level` 读取 `PCDesignContext` 中的 `12×10` 草图，请求安全候选，并在 Unity 端重新校验及求解。
 - `DG_Level` 根据玩家描述获取 LLM 方案，通过模板生成和回退策略形成完整地图，并在 Unity 端验证。
-- 两条路径都保持中立，不传递或读取已废除的模式字段。
-- 首版验证成功后不要求玩家先通关；rows 与 `partial_completion` / `description_generation` 写入 `CoCreationDraftContext`，随后加载 `CoCreation_Entry`。
+- 当前在线流程只启用 DG；PC/PC_Design/PC_Level 作为保留资产，不在 Build Settings 或导航中开放。
+- 首版验证成功后不要求玩家先通关；DG rows 与 `description_generation` 写入 `CoCreationDraftContext`，随后加载 `CoCreation_Entry`。
 
 ### Stage 试玩模式
 
 - 网页创建五分钟、一次性 Play Ticket，URL 只携带 attempt ID 与票据，不携带 rows。
 - 8000 WebGL 的 Menu 启动组件换取完整 rows、来源、语言、提交 token 和返回 URL，并立即从地址栏清除票据。
-- `partial_completion` 加载 `PC_Level`，`description_generation` 加载 `DG_Level`。
+- 当前 `description_generation` 加载 `DG_Level`；保留的 `partial_completion` 不在当前构建流程中调用。
 - 试玩上下文存在时，PC/DG 的生成控制器停用；指定 rows 再经 Unity `LevelSolver(maxSearchStates=300000)` 后加载。
 - WASD 移动；`R` 重开地图，但累计移动、推动、重开和首次有效移动后的耗时不清零。
 - 通关后保留完成动画和淡出，提交 `completed` 指标后自动返回原 8010 会话；Unity 内不再提供主动提前返回按钮，浏览器返回、关闭或刷新按 `interrupted` 处理。
@@ -164,7 +159,7 @@ GET   /api/integrations/sessions/{sessionId}
 Assets/Scenes/Menu.unity
 Assets/Scenes/Matchmaking/Online/Online_Lobby.unity
 Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
-Assets/Scenes/Matchmaking/Draft.unity
+Assets/Scenes/Matchmaking/DG.unity
 Assets/Scenes/Matchmaking/PC.unity
 Assets/Scenes/Matchmaking/PC_Design.unity
 Assets/Scenes/Matchmaking/PC_Level.unity

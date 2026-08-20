@@ -29,6 +29,13 @@ public class LevelGenerationPreferences
 public class DescriptionGenerationSettings
 {
     public string styleDescription = "";
+    public string opponentRelationship = "";
+    public string opponentExperience = "";
+    public string aiSummary = "";
+    public string aiRationale = "";
+    public string aiRecommendedDifficulty = "";
+    public string aiRecommendationSource = "";
+    public string finalDifficulty = "";
     public LevelGenerationPreferences preferences =
         new LevelGenerationPreferences();
 }
@@ -96,4 +103,5 @@ public static class DescriptionGenerationContext
         PlayerPrefs.DeleteKey(SettingsPrefsKey);
         PlayerPrefs.Save();
     }
+
 }

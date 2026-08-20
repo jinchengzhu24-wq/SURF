@@ -375,6 +375,9 @@ public class LLMLevelDesignClient : MonoBehaviour
             generationPreferences = hasDescriptionSettings
                 ? descriptionSettings.preferences
                 : null,
+            dgContext = hasDescriptionSettings
+                ? descriptionSettings
+                : null,
             maxAttempts = maxAttempts
         };
     }
@@ -414,6 +417,7 @@ public class LLMLevelDesignClient : MonoBehaviour
         public string selectedHAPlan;
         public string styleDescription;
         public LevelGenerationPreferences generationPreferences;
+        public DescriptionGenerationSettings dgContext;
         public int maxAttempts;
     }
 }

@@ -1,6 +1,38 @@
 import json
 
 
+DG_GUIDE_SUMMARY_SYSTEM_PROMPT = (
+    "You are an assistant helping a player design a Sokoban level for a known opponent. "
+    "The relationship and desired opponent experience are fixed answer choices supplied "
+    "by the player. Do not ask questions, add choices, or invent map details. Return only "
+    "valid JSON with exactly summary, recommendedDifficulty, and rationale. "
+    "recommendedDifficulty must be Easy, Medium, Hard, or Random. Treat opponent "
+    "relationship as context for tone and care, and treat desired experience as the main "
+    "difficulty signal. Do not equate friendship with Easy or unfamiliarity with Hard. "
+    "summary must be one concise, tentative first-person reflection such as 'I get the "
+    "sense that you may...'; it must infer a possible playable intention rather than "
+    "restate or concatenate the selected labels. The reflection must remain correctable "
+    "and must not invent map tiles or layout details. rationale should state your own "
+    "brief first-person difficulty judgment. Write concise English ASCII strings."
+)
+
+
+def build_dg_guide_summary_messages(context):
+    payload = {
+        "opponentRelationship": context.get("opponentRelationship", ""),
+        "opponentExperience": context.get("opponentExperience", ""),
+    }
+    return [
+        {"role": "system", "content": DG_GUIDE_SUMMARY_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": "Offer a first-person, tentative reflection on the player's likely intended "
+            "experience and recommend a difficulty.\n"
+            + json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
+        },
+    ]
+
+
 ENGLISH_ONLY_OUTPUT_RULE = (
     "Understand user input written in any language, but translate its meaning "
     "internally and write every JSON string value in English using ASCII "
@@ -404,6 +436,7 @@ def build_level_plan_messages(
         + build_generation_preferences_prompt(
             creative_context.get("generationPreferences")
         )
+        + build_dg_context_prompt(creative_context.get("dgContext"))
         + build_prioritized_creative_context_prompt(
             creative_context,
             feature_constraints,
@@ -425,6 +458,24 @@ def build_level_plan_messages(
             "content": user_prompt,
         },
     ]
+
+
+def build_dg_context_prompt(dg_context=None):
+    if not isinstance(dg_context, dict) or not dg_context:
+        return ""
+    safe = {
+        "opponentRelationship": str(dg_context.get("opponentRelationship") or "")[:32],
+        "opponentExperience": str(dg_context.get("opponentExperience") or "")[:32],
+        "aiSummary": str(dg_context.get("aiSummary") or "")[:320],
+        "finalDifficulty": str(dg_context.get("finalDifficulty") or "")[:16],
+    }
+    return (
+        "DG guidance context is player-confirmed background. Use it to keep the "
+        "blueprint aligned with the intended experience, but generationPreferences "
+        "remain authoritative and do not infer exact tile placement from it.\n"
+        + json.dumps(safe, ensure_ascii=True, separators=(",", ":"))
+        + "\n"
+    )
 
 def build_generation_preferences_prompt(generation_preferences=None):
     preferences = generation_preferences or {}

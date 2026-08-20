@@ -38,6 +38,7 @@ if __package__:
     )
     from .prompt import (
         build_creative_idea_expansion_messages,
+        build_dg_guide_summary_messages,
         build_ha_revision_plan_edit_messages,
         build_ha_revision_plan_messages,
         build_human_adjustment_clarity_messages,
@@ -57,6 +58,7 @@ else:
     )
     from prompt import (
         build_creative_idea_expansion_messages,
+        build_dg_guide_summary_messages,
         build_ha_revision_plan_edit_messages,
         build_ha_revision_plan_messages,
         build_human_adjustment_clarity_messages,
@@ -527,7 +529,14 @@ class LevelPlanRequest(BaseModel):
     selectedHAPlan: str | None = ""
     styleDescription: str | None = ""
     generationPreferences: GenerationPreferences | None = None
+    dgContext: dict | None = None
     maxAttempts: int | None = DEFAULT_LLM_MAX_ATTEMPTS
+
+
+class DGGuideSummaryRequest(BaseModel):
+    opponentRelationship: str
+    opponentExperience: str
+    language: str | None = "en"
 
 
 class PCLevelGenerationRequest(BaseModel):
@@ -1955,6 +1964,117 @@ def generate_level_plan(
     response: Response,
 ):
     return execute_level_plan_request(payload, request, response)
+
+
+DG_RELATIONSHIPS = {
+    "friend": "a close friend",
+    "acquaintance": "an acquaintance",
+    "stranger": "a stranger",
+}
+DG_EXPERIENCES = {
+    "relaxed": ("Easy", "relaxed and approachable"),
+    "challenging_fair": ("Medium", "challenging but fair"),
+    "breakthrough": ("Hard", "several attempts followed by a breakthrough"),
+}
+DG_FIRST_PERSON_PREFIXES = (
+    "i get the sense that",
+    "my guess is that",
+    "i think",
+    "i feel",
+    "from my perspective",
+)
+
+
+def normalize_dg_reflection(summary):
+    summary = str(summary or "").strip()
+    if not summary:
+        return ""
+    if summary.lower().startswith(DG_FIRST_PERSON_PREFIXES):
+        return summary[:320]
+    return ("I get the sense that " + summary[:290]).strip()
+
+
+def build_dg_fallback_summary(relationship, experience, reason=""):
+    difficulty, _ = DG_EXPERIENCES[experience]
+    relationship_tone = {
+        "friend": "a caring shared challenge",
+        "acquaintance": "a clear and welcoming challenge",
+        "stranger": "a readable challenge that earns trust quickly",
+    }[relationship]
+    reflection = {
+        "relaxed": "I get the sense that you may want a calm opening where the other player can settle into the puzzle and feel capable early on.",
+        "challenging_fair": "I get the sense that you may want a few decisions to create real pressure, while still letting the other player understand why each solution works.",
+        "breakthrough": "I get the sense that you may be aiming for a patient struggle that turns into a satisfying moment of recognition rather than a punishing surprise.",
+    }[experience]
+    return {
+        "summary": reflection,
+        "recommendedDifficulty": difficulty,
+        "rationale": (
+            "I would begin with " + difficulty + " because it best supports " + relationship_tone
+            + " without treating the relationship itself as a difficulty setting."
+        ),
+        "source": "deterministic_fallback",
+        "fallbackReason": reason,
+    }
+
+
+def create_dg_guide_summary(context, request_id=""):
+    relationship = context["opponentRelationship"]
+    experience = context["opponentExperience"]
+    fallback = build_dg_fallback_summary(relationship, experience)
+
+    def validate(payload):
+        if not isinstance(payload, dict):
+            raise ValueError("DG guide response must be a JSON object")
+        summary = normalize_dg_reflection(payload.get("summary"))
+        rationale = str(payload.get("rationale") or "").strip()[:320]
+        difficulty = str(payload.get("recommendedDifficulty") or "").strip()
+        if not summary or not rationale:
+            raise ValueError("DG guide summary and rationale are required")
+        if difficulty not in {"Easy", "Medium", "Hard", "Random"}:
+            raise ValueError("DG guide difficulty is invalid")
+        return {
+            "summary": summary,
+            "recommendedDifficulty": difficulty,
+            "rationale": rationale,
+            "source": "llm",
+        }
+
+    try:
+        execution = execute_json_request(
+            task="dg_guide_summary",
+            messages=build_dg_guide_summary_messages(context),
+            validator=validate,
+            temperature=0.2,
+            timeout_seconds=SHORT_LLM_TIMEOUT_SECONDS,
+            max_attempts=1,
+            request_id=request_id,
+            validation_stage="dg_guide_validation",
+        )
+        return execution.value
+    except LLMServiceError as exception:
+        fallback["fallbackReason"] = exception.safe_message
+        return fallback
+
+
+@app.post("/dg/guide/summary")
+def dg_guide_summary(
+    payload: DGGuideSummaryRequest,
+    request: Request,
+    response: Response,
+):
+    relationship = payload.opponentRelationship.strip()
+    experience = payload.opponentExperience.strip()
+    if relationship not in DG_RELATIONSHIPS:
+        raise HTTPException(status_code=400, detail="Invalid DG opponent relationship.")
+    if experience not in DG_EXPERIENCES:
+        raise HTTPException(status_code=400, detail="Invalid DG opponent experience.")
+    result = create_dg_guide_summary(
+        {"opponentRelationship": relationship, "opponentExperience": experience},
+        request.state.request_id,
+    )
+    response.headers["X-DG-Guide-Source"] = result.get("source", "")
+    return result
 
 
 @app.post("/generate-pc-level")

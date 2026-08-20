@@ -21,18 +21,6 @@ EditorBuildSettings:
     path: Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
     guid: f967d951d91f2de47ae879e635169a1d
   - enabled: 1
-    path: Assets/Scenes/Matchmaking/Draft.unity
-    guid: 6a14a51acd3717e4e9c404b891d83d93
-  - enabled: 1
-    path: Assets/Scenes/Matchmaking/PC.unity
-    guid: e57657b5477fc294a911f162ec85ec03
-  - enabled: 1
-    path: Assets/Scenes/Matchmaking/PC_Design.unity
-    guid: 6cfbd6c9cd7b74947954cd1e5951772a
-  - enabled: 1
-    path: Assets/Scenes/Matchmaking/PC_Level.unity
-    guid: 2105203088265574abaa4edfc3b4aed8
-  - enabled: 1
     path: Assets/Scenes/Matchmaking/DG.unity
     guid: 5e1cf2b6852d40543a16d8c267acea8e
   - enabled: 1

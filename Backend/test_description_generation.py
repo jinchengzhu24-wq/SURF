@@ -120,6 +120,73 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("maxSolutionSteps", response.json()["detail"])
 
+    def test_dg_guide_returns_validated_llm_summary(self):
+        result = {
+            "summary": "You are designing for a close friend.",
+            "rationale": "The requested experience should drive difficulty.",
+            "recommendedDifficulty": "Medium",
+        }
+
+        def execute_json_request(**kwargs):
+            return LLMExecutionResult(
+                kwargs["validator"](result),
+                1,
+                "guide-request",
+            )
+
+        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
+            response = self.client.post(
+                "/dg/guide/summary",
+                json={
+                    "opponentRelationship": "friend",
+                    "opponentExperience": "challenging_fair",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recommendedDifficulty"], "Medium")
+        self.assertEqual(response.json()["source"], "llm")
+        self.assertTrue(response.json()["summary"].startswith("I get the sense that"))
+
+    def test_dg_guide_rejects_unknown_choice(self):
+        response = self.client.post(
+            "/dg/guide/summary",
+            json={
+                "opponentRelationship": "unknown",
+                "opponentExperience": "challenging_fair",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_dg_guide_uses_readable_fallback_after_llm_failure(self):
+        with patch.object(
+            backend,
+            "execute_json_request",
+            side_effect=backend.LLMServiceError(
+                "MODEL_UNAVAILABLE",
+                "dg_guide_summary",
+                "Model unavailable.",
+                "guide-request",
+                True,
+                1,
+                503,
+            ),
+        ):
+            response = self.client.post(
+                "/dg/guide/summary",
+                json={
+                    "opponentRelationship": "acquaintance",
+                    "opponentExperience": "breakthrough",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recommendedDifficulty"], "Hard")
+        self.assertEqual(response.json()["source"], "deterministic_fallback")
+        self.assertTrue(response.json()["summary"].startswith("I get the sense that"))
+        self.assertTrue(response.json()["rationale"].startswith("I would"))
+
     def test_custom_single_wall_range_is_supported(self):
         preferences = backend.normalize_generation_preferences(
             {

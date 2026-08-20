@@ -104,6 +104,20 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "BOOTSTRAP_TOKEN_USED")
 
+    def test_session_creation_rejects_removed_dg_context_field(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "description_generation",
+                "language": "en",
+                "idempotencyKey": "unity_no_dg_context",
+                "dgContextJson": '{"finalDifficulty":"Hard"}',
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+
     def test_new_stage_opening_persists_guidance(self):
         version_id = self.read_session()["currentVersionId"]
         execution = LLMExecutionResult(

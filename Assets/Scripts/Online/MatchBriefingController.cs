@@ -6,7 +6,7 @@ using UnityEngine.UI;
 public class MatchBriefingController : MonoBehaviour
 {
     private const string LobbySceneName = "Online_Lobby";
-    private const string DraftSceneName = "Draft";
+    private const string InitialSceneName = "DG";
 
     private OnlineMatchClient client;
     private Button readyButton;
@@ -145,8 +145,24 @@ public class MatchBriefingController : MonoBehaviour
         }
 
         transitioned = true;
-        SetFooter("Both players are ready. Opening the initial draft step...");
-        SceneManager.LoadScene(DraftSceneName);
+        if (!Application.CanStreamedLevelBeLoaded(InitialSceneName))
+        {
+            SetFooter("The DG scene is unavailable in Build Settings.");
+            Debug.LogError(
+                "MatchBriefingController: DG scene is not available in Build Settings."
+            );
+            transitioned = false;
+            return;
+        }
+
+        // Draft selection was removed; matchmaking now starts in DG.
+        PlayerPrefs.SetString(
+            AIAssistantModeController.SelectedModePrefsKey,
+            AIAssistantModeController.DescriptionGenerationOptionId
+        );
+        PlayerPrefs.Save();
+        SetFooter("Both players are ready. Opening the initial DG draft...");
+        SceneManager.LoadScene(InitialSceneName);
     }
 
     private void LeaveMatch()

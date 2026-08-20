@@ -8,6 +8,13 @@ This repository combines a Unity 2D Sokoban client with a Python service. Unity 
 
 ## Current Project Status (2026-08-11)
 
+### Current DG-only route and Unity authoring preference (2026-08-20)
+
+- The active online initial-draft route is `Menu -> Online_Lobby -> Match_Briefing -> DG -> DG_Level -> CoCreation_Entry`. `Draft` is retired. PC code and assets are retained for later work but have no active Build Settings entry, menu/navigation route, or current client integration.
+- DG asks the designer about opponent relationship and intended opponent experience, requests a short AI summary and difficulty suggestion, and lets the designer choose the final difficulty. These confirmed DG values may guide the 8000 first-draft generator only. They must not be sent to, persisted by, or exposed to the 8010 service or its LLM context.
+- When changing a Unity scene, use a connected Unity Editor through MCP. Do not hand-edit Unity scene, prefab, or serialized asset YAML while MCP is available.
+- UI changes must use static, scene-owned, serialized GameObjects and Inspector references. Do not inject temporary prefabs, create visible controls at runtime, or bind production UI through object-name/path discovery.
+
 ### Supervisor feedback direction (2026-08-03)
 
 `Assets/EssayBase/8-3/SURF_Feedback.pdf` is the source record, and `Assets/EssayBase/8-3/Feedback_Action_Plan.md` is the working interpretation and implementation plan. The next prototype should shift the research focus from researcher-defined, one-shot Competitive/Supportive generation to a persistent, multi-turn human-LLM co-creation loop around the same evolving level.
