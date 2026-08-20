@@ -6,6 +6,7 @@
 http://111.231.136.4/frontend/
 http://111.231.136.4/game/
 http://111.231.136.4/frontend/Images/Routing.png
+http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx
 http://111.231.136.4/cocreation/
 ```
 
@@ -291,6 +292,10 @@ bash deploy_scp
 重启后依次检查：
 
 ```text
+## Tutorial PPT 静态资源
+
+`Frontend/tutorial/Sokoban_Tutorial.pptx` 由现有 `/frontend/` 静态路由公开为 `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx`。只更新教程文件时，上传该目录即可，无需重启 8000 服务；Menu 按钮事件的改动需随下一次 WebGL 构建发布。
+
 http://111.231.136.4/health
 http://111.231.136.4/ready
 ```

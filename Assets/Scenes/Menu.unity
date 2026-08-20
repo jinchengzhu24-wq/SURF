@@ -192,9 +192,8 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: You can either describe your idea and let the AI build the complete level,
-    or construct part of the level yourself and ask the AI to complete and refine
-    it.
+  m_Text: You can let the AI build the initial draft for you and then cooperate with
+    the AI to complete and refine your final level.
 --- !u!222 &14688801
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -1563,10 +1562,10 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: 'WASD or UpDownLeftRight: Move / R: Restart Level
+  m_Text: 'WASD(fox) or UpDownLeftRight(frog): Move / R: Restart Level
 
-    Push boxes onto
-    targets
+    Push
+    boxes onto targets
 
 '
 --- !u!222 &1360280634
@@ -3582,6 +3581,7 @@ MonoBehaviour:
   creativeWorkshopSceneName: Questionnaire(Before)
   matchmakingSceneName: Online_Lobby
   studyDashboardUrl: http://111.231.136.4:8000/frontend/
+  tutorialUrl: http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx
 --- !u!1 &4100100002
 GameObject:
   m_ObjectHideFlags: 0
@@ -3698,18 +3698,18 @@ MonoBehaviour:
     m_PressedTrigger: Pressed
     m_SelectedTrigger: Selected
     m_DisabledTrigger: Disabled
-  m_Interactable: 0
+  m_Interactable: 1
   m_TargetGraphic: {fileID: 4100100005}
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
       - m_Target: {fileID: 4100100001}
         m_TargetAssemblyTypeName: MenuController, Assembly-CSharp
-        m_MethodName: StartGame
-        m_Mode: 1
+        m_MethodName: OpenTutorial
+        m_Mode: 0
         m_Arguments:
           m_ObjectArgument: {fileID: 0}
-          m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
+          m_ObjectArgumentAssemblyTypeName: 
           m_IntArgument: 0
           m_FloatArgument: 0
           m_StringArgument: 

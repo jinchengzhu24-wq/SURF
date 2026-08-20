@@ -11,6 +11,7 @@ public class MenuController : MonoBehaviour
     public string creativeWorkshopSceneName = "Questionnaire(Before)";
     public string matchmakingSceneName = "Online_Lobby";
     public string studyDashboardUrl = "http://111.231.136.4:8000/frontend/";
+    public string tutorialUrl = "http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx";
 
 #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
@@ -53,10 +54,19 @@ public class MenuController : MonoBehaviour
 
     public void OpenStudyDashboard()
     {
-        if (TryGetStudyDashboardUrl(out string dashboardUrl))
+        if (TryGetHttpUrl(studyDashboardUrl, "Study dashboard", out string dashboardUrl))
         {
             Debug.Log("MenuController: Opening study dashboard: " + dashboardUrl);
             Application.OpenURL(dashboardUrl);
+        }
+    }
+
+    public void OpenTutorial()
+    {
+        if (TryGetHttpUrl(tutorialUrl, "Tutorial", out string resolvedTutorialUrl))
+        {
+            Debug.Log("MenuController: Opening tutorial: " + resolvedTutorialUrl);
+            Application.OpenURL(resolvedTutorialUrl);
         }
     }
 
@@ -67,7 +77,7 @@ public class MenuController : MonoBehaviour
 #if UNITY_EDITOR
         UnityEditor.EditorApplication.isPlaying = false;
 #elif UNITY_WEBGL
-        if (TryGetStudyDashboardUrl(out string dashboardUrl))
+        if (TryGetHttpUrl(studyDashboardUrl, "Study dashboard", out string dashboardUrl))
         {
             Debug.Log("MenuController: Leaving WebGL game for study dashboard: " + dashboardUrl);
             SokobanNavigateCurrentPage(dashboardUrl);
@@ -77,25 +87,25 @@ public class MenuController : MonoBehaviour
 #endif
     }
 
-    private bool TryGetStudyDashboardUrl(out string dashboardUrl)
+    private bool TryGetHttpUrl(string configuredUrl, string label, out string resolvedUrl)
     {
-        dashboardUrl = studyDashboardUrl?.Trim();
+        resolvedUrl = configuredUrl?.Trim();
 
-        if (string.IsNullOrEmpty(dashboardUrl))
+        if (string.IsNullOrEmpty(resolvedUrl))
         {
-            Debug.LogWarning("MenuController: Study dashboard URL is empty.");
+            Debug.LogWarning("MenuController: " + label + " URL is empty.");
             return false;
         }
 
-        if (!System.Uri.TryCreate(dashboardUrl, System.UriKind.Absolute, out System.Uri uri)
+        if (!System.Uri.TryCreate(resolvedUrl, System.UriKind.Absolute, out System.Uri uri)
             || (uri.Scheme != System.Uri.UriSchemeHttp
                 && uri.Scheme != System.Uri.UriSchemeHttps))
         {
-            Debug.LogWarning("MenuController: Study dashboard URL is invalid: " + dashboardUrl);
+            Debug.LogWarning("MenuController: " + label + " URL is invalid: " + resolvedUrl);
             return false;
         }
 
-        dashboardUrl = uri.AbsoluteUri;
+        resolvedUrl = uri.AbsoluteUri;
         return true;
     }
 }
