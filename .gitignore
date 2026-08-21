@@ -71,5 +71,8 @@ crashlytics-build.properties
 /WebGLBuild/
 
 # Local documentation
-/README_SERVER.md
-/README_LLM_ERRORS.md
+/SERVER.md
+/LLM_ERRORS.md
+/Routing.md
+/Response.md
+

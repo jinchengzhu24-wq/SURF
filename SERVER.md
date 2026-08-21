@@ -8,6 +8,9 @@ http://111.231.136.4/game/
 http://111.231.136.4/frontend/Images/Routing.png
 http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx
 http://111.231.136.4/cocreation/
+
+https://v.wjx.cn/vm/YXvrnKg.aspx#
+https://v.wjx.cn/vm/O6tj8nu.aspx#
 ```
 
 端口说明：`8000` 是 Nginx 转发的内部匹配、dashboard 和 WebGL 上游端口，`8010` 是 Nginx 转发的内部共创服务端口；用户访问时统一使用 Nginx 的 80 端口，因此公开地址不带 `:8000` 或 `:8010`。公开入口为 `http://111.231.136.4/game/`、`http://111.231.136.4/frontend/` 和 `http://111.231.136.4/cocreation/`。
