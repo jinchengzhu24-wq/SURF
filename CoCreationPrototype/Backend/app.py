@@ -1827,7 +1827,7 @@ def synchronize_final_intention_with_online_match(
             headers={"X-CoCreation-Sync-Secret": ONLINE_MATCH_SYNC_SECRET},
             json={
                 "playerNumber": player_number,
-                "opponentExperienceGoal": content,
+                "designerIntention": content,
             },
             timeout=5.0,
         )

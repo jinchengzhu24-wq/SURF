@@ -101,15 +101,13 @@ public class OnlineMatchClient : MonoBehaviour
     public IEnumerator SubmitChallenge(
         string[] rows,
         string aiAssistantMode,
-        string opponentExperienceGoal,
         Action<OnlineRoomState> onSuccess,
         Action<string> onFailure)
     {
         OnlineChallengePayload payload = new OnlineChallengePayload
         {
             rows = CloneRows(rows),
-            aiAssistantMode = aiAssistantMode,
-            opponentExperienceGoal = opponentExperienceGoal
+            aiAssistantMode = aiAssistantMode
         };
         return SendRoomRequest(
             UnityWebRequest.kHttpVerbPOST,
@@ -305,7 +303,6 @@ public class OnlineMatchClient : MonoBehaviour
     {
         public string[] rows;
         public string aiAssistantMode;
-        public string opponentExperienceGoal;
     }
 
     [Serializable]

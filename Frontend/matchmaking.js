@@ -232,12 +232,10 @@ function renderMatch(match) {
     elements.selectedMatchMeta.textContent = "";
     const challenges = safeArray(match.players).filter(player => player.challenge).length;
     const results = safeArray(match.players).filter(player => player.result).length;
-    const surveys = safeArray(match.players).reduce((sum, player) => sum + safeArray(player.surveys).length, 0);
     [
         match.playerCount + " players",
         challenges + "/2 challenges",
         results + "/2 results",
-        surveys + "/2 questionnaires",
         "Created " + formatTimestamp(match.createdAt)
     ].forEach(value => elements.selectedMatchMeta.appendChild(textNode("span", value)));
 
@@ -266,16 +264,6 @@ function buildTimelineStages(match) {
         playerNumber: numeric(event.playerNumber),
         record: event
     }));
-    safeArray(match.players).forEach(player => {
-        safeArray(player.surveys).forEach((survey, index) => stages.push({
-            key: "survey:" + (clean(survey.responseId) || player.playerNumber + ":" + index),
-            type: "survey",
-            label: "P" + player.playerNumber + " questionnaire",
-            timestamp: getTimestamp(survey),
-            playerNumber: player.playerNumber,
-            record: survey
-        }));
-    });
     return stages.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
 }
 
@@ -286,6 +274,7 @@ function eventStageLabel(event) {
         player_joined: player + "joined",
         ready_changed: player + (event.ready ? "ready" : "not ready"),
         challenge_submitted: player + "challenge submitted",
+        designer_intention_synchronized: player + "design intention confirmed",
         result_submitted: player + "result submitted",
         player_left: player + "left",
         room_expired: "Room expired"
@@ -386,10 +375,6 @@ function renderInspector(stage) {
         return;
     }
     elements.inspectorTitle.textContent = stage.label;
-    if (stage.type === "survey") {
-        renderSurveyInspector(stage.record, stage.playerNumber);
-        return;
-    }
     const record = stage.record;
     const rows = [
         ["Event", titleCase(record.eventType)],
@@ -401,36 +386,15 @@ function renderInspector(stage) {
     if (record.eventType === "challenge_submitted") {
         rows.push(["AI assistant", formatMode(record.aiAssistantMode)]);
     }
+    if (record.eventType === "designer_intention_synchronized") {
+        rows.push(["Designer intention", record.designerIntention]);
+    }
     if (record.eventType === "result_submitted") {
         rows.push(["Play time", formatSeconds(record.durationSeconds)]);
         rows.push(["Moves", value(record.moveCount)]);
         rows.push(["Minimum moves", value(record.minimumMoves)]);
     }
     appendRecordGrid(rows);
-}
-
-function renderSurveyInspector(record, playerNumber) {
-    appendRecordGrid([
-        ["Player", "Player " + playerNumber],
-        ["Survey", record.surveyTitle || record.surveyId],
-        ["Duration", formatSeconds(record.durationSeconds)],
-        ["Recorded", formatTimestamp(getTimestamp(record))]
-    ]);
-    const section = createSection("Answers");
-    const answers = safeArray(record.answerDetails).length
-        ? record.answerDetails
-        : safeArray(record.answers);
-    if (!answers.length) section.appendChild(textNode("p", "No answers recorded."));
-    answers.forEach(answer => {
-        const card = document.createElement("div");
-        card.className = "answer-card";
-        card.append(
-            textNode("span", answer.questionText || answer.questionId || "Question " + value(answer.questionIndex)),
-            textNode("strong", answer.optionText || answer.optionLabel || answer.optionId || "-")
-        );
-        section.appendChild(card);
-    });
-    elements.inspectorBody.appendChild(section);
 }
 
 function renderComparison(match) {
@@ -467,6 +431,7 @@ function renderCompareChallenge(player) {
     table.className = "delta-table";
     [
         ["AI assistant", formatMode(challenge.aiAssistantMode)],
+        ["Designer intention", player.designerIntention || "-"],
         ["Played by", "Player " + challenge.playedByPlayerNumber],
         ["Play time", formatSeconds(result.durationSeconds)],
         ["Moves", value(result.moveCount)],
@@ -507,7 +472,7 @@ function deleteSelectedMatch() {
     if (!match) return;
     openDeleteDialog({
         title: "Delete ROOM " + (match.roomCode || "------") + "?",
-        description: "This removes the complete MatchMaking record and its linked questionnaires.",
+        description: "This removes the complete MatchMaking record.",
         scope: "Match " + match.matchId,
         confirmLabel: "Delete match",
         endpoint: "/delete-online-match",
@@ -521,8 +486,8 @@ function deleteSelectedMatch() {
 function clearAllRecords() {
     openDeleteDialog({
         title: "Clear all MatchMaking data?",
-        description: "This removes all recorded matches and linked online questionnaires. Train records are preserved.",
-        scope: "Match events, challenge maps, results, and online questionnaires",
+        description: "This removes all recorded matches. Survey records are preserved.",
+        scope: "Match events, challenge maps, and results",
         confirmLabel: "Clear MatchMaking data",
         endpoint: "/clear-matchmaking-records",
         payload: {},
@@ -716,7 +681,6 @@ function titleCase(input) {
 function formatMode(input) {
     const labels = {
         description_generation: "Description Generation",
-        partial_completion: "Partial Completion"
     };
     return labels[input] || titleCase(input);
 }

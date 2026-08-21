@@ -101,7 +101,6 @@ ONLINE_ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ONLINE_ROOM_CODE_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
 ONLINE_AI_ASSISTANT_MODES = {
     "description_generation",
-    "partial_completion",
 }
 ONLINE_ROOMS = {}
 ONLINE_ROOMS_LOCK = threading.Lock()
@@ -125,12 +124,11 @@ class OnlineReadyRequest(BaseModel):
 class OnlineChallengeRequest(BaseModel):
     rows: list[str]
     aiAssistantMode: str = "description_generation"
-    opponentExperienceGoal: str = ""
 
 
 class OnlineDesignerIntentionSyncRequest(BaseModel):
     playerNumber: int
-    opponentExperienceGoal: str
+    designerIntention: str
 
 
 class OnlineResultRequest(BaseModel):
@@ -322,10 +320,10 @@ def serialize_online_room(room, player=None, include_token=False):
 
 def serialize_online_challenge_metadata(player):
     metadata = {"aiAssistantMode": player["aiAssistantMode"]}
-    experience_goal = str(player.get("opponentExperienceGoal") or "").strip()
+    designer_intention = str(player.get("designerIntention") or "").strip()
 
-    if experience_goal:
-        metadata["opponentExperienceGoal"] = experience_goal
+    if designer_intention:
+        metadata["designerIntention"] = designer_intention
 
     return metadata
 
@@ -372,16 +370,16 @@ def validate_online_ai_assistant_mode(ai_assistant_mode):
         )
 
 
-def normalize_online_opponent_experience_goal(value):
-    goal = str(value or "").strip()
+def normalize_online_designer_intention(value):
+    intention = str(value or "").strip()
 
-    if len(goal) > 4000:
+    if len(intention) > 4000:
         raise HTTPException(
             status_code=400,
-            detail="Opponent experience goal must contain at most 4000 characters",
+            detail="Designer intention must contain at most 4000 characters",
         )
 
-    return goal
+    return intention
 
 
 def require_cocreation_intention_sync_secret(request):
@@ -751,7 +749,7 @@ def create_online_room():
             "ready": False,
             "challengeRows": None,
             "aiAssistantMode": None,
-            "opponentExperienceGoal": None,
+            "designerIntention": None,
             "result": None,
         }
         match_id = uuid.uuid4().hex
@@ -797,7 +795,7 @@ def join_online_room(payload: OnlineRoomJoinRequest):
             "ready": False,
             "challengeRows": None,
             "aiAssistantMode": None,
-            "opponentExperienceGoal": None,
+            "designerIntention": None,
             "result": None,
         }
         room["players"].append(player)
@@ -872,10 +870,6 @@ def submit_online_challenge(
     validate_online_ai_assistant_mode(payload.aiAssistantMode)
 
     submitted_rows = list(payload.rows)
-    opponent_experience_goal = normalize_online_opponent_experience_goal(
-        payload.opponentExperienceGoal
-    )
-
     with ONLINE_ROOMS_LOCK:
         room, player = require_online_room(
             match_id,
@@ -894,21 +888,10 @@ def submit_online_challenge(
             )
 
         existing_rows = player.get("challengeRows")
-        synchronized_goal = str(
-            player.get("opponentExperienceGoal") or ""
-        ).strip()
-        effective_experience_goal = (
-            opponent_experience_goal
-            if opponent_experience_goal or not synchronized_goal
-            else synchronized_goal
-        )
-
         if existing_rows is not None:
             if (
                 existing_rows != submitted_rows
                 or player.get("aiAssistantMode") != payload.aiAssistantMode
-                or str(player.get("opponentExperienceGoal") or "")
-                != effective_experience_goal
             ):
                 raise HTTPException(
                     status_code=409,
@@ -920,7 +903,6 @@ def submit_online_challenge(
 
         player["challengeRows"] = submitted_rows
         player["aiAssistantMode"] = payload.aiAssistantMode
-        player["opponentExperienceGoal"] = effective_experience_goal
         both_submitted = all(
             item.get("challengeRows") is not None for item in room["players"]
         )
@@ -935,7 +917,6 @@ def submit_online_challenge(
             "challenge_submitted",
             player_number=player["playerNumber"],
             aiAssistantMode=payload.aiAssistantMode,
-            opponentExperienceGoal=effective_experience_goal,
             rows=submitted_rows,
         )
         return serialize_online_room(room, player)
@@ -949,11 +930,11 @@ def synchronize_online_designer_intention(
 ):
     """Record the 8010 final intention without trusting a browser hand-off."""
     require_cocreation_intention_sync_secret(request)
-    opponent_experience_goal = normalize_online_opponent_experience_goal(
-        payload.opponentExperienceGoal
+    designer_intention = normalize_online_designer_intention(
+        payload.designerIntention
     )
 
-    if not opponent_experience_goal:
+    if not designer_intention:
         raise HTTPException(
             status_code=400,
             detail="Final designer intention is required",
@@ -981,22 +962,22 @@ def synchronize_online_designer_intention(
         if player is None:
             raise HTTPException(status_code=404, detail="Player not found")
 
-        existing_goal = str(player.get("opponentExperienceGoal") or "").strip()
+        existing_intention = str(player.get("designerIntention") or "").strip()
 
-        if existing_goal and existing_goal != opponent_experience_goal:
+        if existing_intention and existing_intention != designer_intention:
             raise HTTPException(
                 status_code=409,
                 detail="Final designer intention is already frozen",
             )
 
-        if not existing_goal:
-            player["opponentExperienceGoal"] = opponent_experience_goal
+        if not existing_intention:
+            player["designerIntention"] = designer_intention
             room["lastActivity"] = time.time()
             append_online_match_event(
                 room,
                 "designer_intention_synchronized",
                 player_number=payload.playerNumber,
-                opponentExperienceGoal=opponent_experience_goal,
+                designerIntention=designer_intention,
             )
 
         return serialize_online_room(room, player)
@@ -1290,19 +1271,9 @@ def get_survey_records_data():
 @app.get("/matchmaking-records-data")
 def get_matchmaking_records_data():
     events, malformed_count = read_online_match_events()
-    survey_responses, survey_malformed_count = read_survey_response_events()
-    online_surveys = [
-        response
-        for response in survey_responses
-        if normalize_survey_identifier(response.get("matchId"))
-        and normalize_survey_identifier(response.get("surveyId"))
-        == "online_post_match_survey"
-    ]
     return build_matchmaking_records_payload(
         events,
         malformed_count,
-        online_surveys,
-        survey_malformed_count,
     )
 
 
@@ -1858,31 +1829,22 @@ def delete_online_match(request: DeleteOnlineMatchRequest):
 
     with study_record_lock:
         match_events, _ = read_online_match_events()
-        survey_records, _ = read_survey_response_events()
         remaining_events = [
             event
             for event in match_events
             if normalize_survey_identifier(event.get("matchId")) != match_id
         ]
-        remaining_surveys = [
-            record
-            for record in survey_records
-            if normalize_survey_identifier(record.get("matchId")) != match_id
-        ]
         deleted_event_count = len(match_events) - len(remaining_events)
-        deleted_survey_count = len(survey_records) - len(remaining_surveys)
 
-        if deleted_event_count + deleted_survey_count == 0:
+        if deleted_event_count == 0:
             raise HTTPException(status_code=404, detail="Online match not found")
 
         write_jsonl_records(ONLINE_MATCH_LOG_FILE, remaining_events)
-        write_jsonl_records(SURVEY_LOG_FILE, remaining_surveys)
 
     return {
         "status": "ok",
         "matchId": match_id,
         "deletedEventCount": deleted_event_count,
-        "deletedSurveyCount": deleted_survey_count,
     }
 
 
@@ -1894,18 +1856,10 @@ def clear_matchmaking_records():
     STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     with study_record_lock:
-        survey_records, _ = read_survey_response_events()
-        remaining_surveys = [
-            record
-            for record in survey_records
-            if not normalize_survey_identifier(record.get("matchId"))
-        ]
         ONLINE_MATCH_LOG_FILE.write_text("", encoding="utf-8")
-        write_jsonl_records(SURVEY_LOG_FILE, remaining_surveys)
 
     return {
         "status": "ok",
-        "deletedSurveyCount": len(survey_records) - len(remaining_surveys),
     }
 
 
@@ -2374,8 +2328,6 @@ def read_online_match_events():
 def build_matchmaking_records_payload(
     events,
     malformed_count,
-    survey_responses,
-    survey_malformed_count=0,
 ):
     matches = {}
     allowed_event_fields = {
@@ -2388,7 +2340,7 @@ def build_matchmaking_records_payload(
         "serverReceivedAt",
         "ready",
         "aiAssistantMode",
-        "opponentExperienceGoal",
+        "designerIntention",
         "rows",
         "durationSeconds",
         "moveCount",
@@ -2405,8 +2357,7 @@ def build_matchmaking_records_payload(
             "leftAt": None,
             "challenge": None,
             "result": None,
-            "survey": None,
-            "surveys": [],
+            "designerIntention": "",
         }
 
     def get_match(match_id, room_code=""):
@@ -2483,11 +2434,12 @@ def build_matchmaking_records_payload(
                 "aiAssistantMode": normalize_survey_identifier(
                     event.get("aiAssistantMode")
                 ),
-                "opponentExperienceGoal": str(
-                    event.get("opponentExperienceGoal") or ""
-                ).strip(),
                 "rows": list(rows) if isinstance(rows, list) else [],
             }
+        elif event_type == "designer_intention_synchronized" and player is not None:
+            player["designerIntention"] = str(
+                event.get("designerIntention") or ""
+            ).strip()
         elif event_type == "result_submitted" and player is not None:
             player["result"] = {
                 "submittedAt": timestamp,
@@ -2499,55 +2451,12 @@ def build_matchmaking_records_payload(
         elif event_type == "player_left" and player is not None:
             player["leftAt"] = timestamp
 
-    normalized_surveys = sorted(
-        (
-            normalize_survey_response(response)
-            for response in survey_responses
-            if isinstance(response, dict)
-        ),
-        key=lambda response: str(
-            response.get("serverReceivedAt") or response.get("timestamp") or ""
-        ),
-    )
-
-    for response in normalized_surveys:
-        match_id = normalize_survey_identifier(response.get("matchId"))
-
-        if not match_id:
-            continue
-
-        try:
-            player_number = int(response.get("playerNumber") or 0)
-        except (TypeError, ValueError):
-            player_number = 0
-
-        if player_number not in (1, 2):
-            continue
-
-        match_record = get_match(
-            match_id,
-            normalize_survey_identifier(response.get("roomCode")),
-        )
-        player = match_record["players"][player_number]
-        player["surveys"].append(response)
-        player["survey"] = response
-        timestamp = normalize_survey_identifier(
-            response.get("serverReceivedAt") or response.get("timestamp")
-        )
-
-        if timestamp and (
-            not match_record["updatedAt"]
-            or timestamp > match_record["updatedAt"]
-        ):
-            match_record["updatedAt"] = timestamp
-
     result_records = []
     total_duration = 0.0
     duration_count = 0
     completed_count = 0
     cancelled_count = 0
     expired_count = 0
-    questionnaire_count = 0
 
     for match_record in matches.values():
         players = match_record["players"]
@@ -2591,7 +2500,6 @@ def build_matchmaking_records_payload(
             match_record["endedAt"] = match_record["updatedAt"]
 
         for player in players.values():
-            questionnaire_count += len(player["surveys"])
             result = player["result"]
 
             if result is not None and isinstance(
@@ -2625,12 +2533,10 @@ def build_matchmaking_records_payload(
             "cancelledCount": cancelled_count,
             "expiredCount": expired_count,
             "averageRunDurationSeconds": round(average_duration, 2),
-            "questionnaireCount": questionnaire_count,
             "malformedCount": int(malformed_count or 0),
         },
         "matches": result_records,
         "malformedCount": int(malformed_count or 0),
-        "surveyMalformedCount": int(survey_malformed_count or 0),
         "logFile": str(ONLINE_MATCH_LOG_FILE),
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }

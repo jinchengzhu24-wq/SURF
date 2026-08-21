@@ -171,14 +171,14 @@ public class MatchResultController : MonoBehaviour
             ownChallengeAssistantText
         );
         SetOwnFeedbackText(
-            GetOpponentExperienceGoal(state.ownChallengeMetadata)
+            GetDesignerIntention(state.ownChallengeMetadata)
         );
         RenderMetadata(
             state.opponentChallengeMetadata,
             opponentChallengeAssistantText
         );
         SetOpponentFeedbackText(
-            GetOpponentExperienceGoal(state.opponentChallengeMetadata)
+            GetDesignerIntention(state.opponentChallengeMetadata)
         );
         RenderResult(
             state.ownResult,
@@ -266,11 +266,11 @@ public class MatchResultController : MonoBehaviour
         );
     }
 
-    private static string GetOpponentExperienceGoal(
+    private static string GetDesignerIntention(
         OnlineChallengeMetadata metadata)
     {
         return metadata != null
-            ? (metadata.opponentExperienceGoal ?? "").Trim()
+            ? (metadata.designerIntention ?? "").Trim()
             : "";
     }
 

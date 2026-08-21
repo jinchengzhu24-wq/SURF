@@ -294,8 +294,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
 
         OnlineMatchContext.StageChallenge(
             finalRows,
-            CoCreationDraftContext.InitialDraftMethod,
-            normalizedDesignerIntention
+            CoCreationDraftContext.InitialDraftMethod
         );
         CoCreationDraftContext.Clear();
         SceneManager.LoadScene(waitingSceneName);

@@ -370,23 +370,22 @@ class OnlineRoomTests(unittest.TestCase):
             },
         )
 
-    def test_challenge_exchanges_final_opponent_experience_goal(self):
+    def test_challenge_exposes_synchronized_designer_intention(self):
         host, guest = self.ready_both_players()
         host_goal = "I hope my opponent feels a careful route choice."
-        guest_goal = "I hope my opponent feels an early push trade-off."
-
-        self.submit_challenge(
-            host["matchId"],
-            host["playerToken"],
-            SOLVABLE_ROWS_A,
-            opponent_experience_goal=host_goal,
-        )
+        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
+            synchronized = self.client.post(
+                "/online/rooms/" + host["matchId"] + "/designer-intention",
+                json={"playerNumber": host["playerNumber"], "designerIntention": host_goal},
+                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+            )
+        self.assertEqual(synchronized.status_code, 200)
+        self.submit_challenge(host["matchId"], host["playerToken"], SOLVABLE_ROWS_A)
         response = self.submit_challenge(
             host["matchId"],
             guest["playerToken"],
             SOLVABLE_ROWS_B,
-            ai_assistant_mode="partial_completion",
-            opponent_experience_goal=guest_goal,
+            ai_assistant_mode="description_generation",
         )
 
         self.assertEqual(response.status_code, 200)
@@ -395,12 +394,12 @@ class OnlineRoomTests(unittest.TestCase):
             headers=self.auth_headers(host["playerToken"]),
         )
         self.assertEqual(
-            host_status.json()["ownChallengeMetadata"]["opponentExperienceGoal"],
+            host_status.json()["ownChallengeMetadata"]["designerIntention"],
             host_goal,
         )
         self.assertEqual(
-            host_status.json()["opponentChallengeMetadata"]["opponentExperienceGoal"],
-            guest_goal,
+            host_status.json()["opponentChallengeMetadata"].get("designerIntention", ""),
+            "",
         )
 
     def test_synced_8010_intention_survives_an_empty_client_submission(self):
@@ -418,7 +417,7 @@ class OnlineRoomTests(unittest.TestCase):
                 + "/designer-intention",
                 json={
                     "playerNumber": host["playerNumber"],
-                    "opponentExperienceGoal": goal,
+                    "designerIntention": goal,
                 },
                 headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
             )
@@ -433,7 +432,7 @@ class OnlineRoomTests(unittest.TestCase):
 
         self.assertEqual(submitted.status_code, 200)
         self.assertEqual(
-            submitted.json()["ownChallengeMetadata"]["opponentExperienceGoal"],
+            submitted.json()["ownChallengeMetadata"]["designerIntention"],
             goal,
         )
 
@@ -477,11 +476,11 @@ class OnlineRoomTests(unittest.TestCase):
             host["playerToken"],
             SOLVABLE_ROWS_B,
         )
-        changed_method = self.submit_challenge(
+        repeated_method = self.submit_challenge(
             host["matchId"],
             host["playerToken"],
             SOLVABLE_ROWS_A,
-            ai_assistant_mode="partial_completion",
+            ai_assistant_mode="description_generation",
         )
 
         self.assertEqual(first.status_code, 200)
@@ -490,7 +489,7 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertNotIn("opponentChallengeRows", first.json())
         self.assertEqual(repeated.status_code, 200)
         self.assertEqual(changed.status_code, 409)
-        self.assertEqual(changed_method.status_code, 409)
+        self.assertEqual(repeated_method.status_code, 200)
 
     def test_both_challenges_are_exchanged_by_player_identity(self):
         host, guest = self.ready_both_players()
@@ -503,7 +502,7 @@ class OnlineRoomTests(unittest.TestCase):
             host["matchId"],
             guest["playerToken"],
             SOLVABLE_ROWS_B,
-            ai_assistant_mode="partial_completion",
+            ai_assistant_mode="description_generation",
         )
         host_status = self.client.get(
             "/online/rooms/" + host["matchId"],
@@ -531,7 +530,7 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(
             host_status.json()["opponentChallengeMetadata"],
             {
-                "aiAssistantMode": "partial_completion",
+                "aiAssistantMode": "description_generation",
             },
         )
 
@@ -655,7 +654,7 @@ class OnlineRoomTests(unittest.TestCase):
             host["matchId"],
             guest["playerToken"],
             SOLVABLE_ROWS_B,
-            ai_assistant_mode="partial_completion",
+            ai_assistant_mode="description_generation",
         )
         self.submit_result(
             host["matchId"],

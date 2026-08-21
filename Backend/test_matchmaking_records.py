@@ -133,7 +133,7 @@ class MatchmakingRecordTests(unittest.TestCase):
             self.submit_challenge(
                 guest,
                 SOLVABLE_ROWS_B,
-                "partial_completion",
+                "description_generation",
             ).status_code,
             200,
         )
@@ -219,7 +219,7 @@ class MatchmakingRecordTests(unittest.TestCase):
         self.assertIn("competitionMode", raw_log)
         self.assertNotIn("competitionMode", json.dumps(payload))
 
-    def test_online_questionnaire_is_joined_by_match_and_player(self):
+    def test_online_questionnaire_is_not_joined_by_matchmaking_records(self):
         host, _ = self.complete_match()
         survey = {
             "eventType": "survey-response",
@@ -242,10 +242,8 @@ class MatchmakingRecordTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
         payload = self.client.get("/matchmaking-records-data").json()
-        player = payload["matches"][0]["players"][0]
-        self.assertEqual(player["survey"]["responseId"], "survey-player-one")
-        self.assertEqual(player["survey"]["answerDetails"][0]["optionLabel"], "4")
-        self.assertEqual(payload["summary"]["questionnaireCount"], 1)
+        self.assertNotIn("survey", json.dumps(payload))
+        self.assertNotIn("questionnaireCount", payload["summary"])
 
     def test_invalid_token_does_not_create_a_tracking_event(self):
         host, _ = self.create_players()
@@ -276,7 +274,7 @@ class MatchmakingRecordTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["expiredCount"], 1)
         self.assertEqual(payload["malformedCount"], 1)
 
-    def test_delete_and_clear_preserve_train_surveys(self):
+    def test_delete_and_clear_preserve_survey_records(self):
         host, _ = self.complete_match()
         backend.write_jsonl_records(
             backend.SURVEY_LOG_FILE,
@@ -302,7 +300,10 @@ class MatchmakingRecordTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200)
         surveys, _ = backend.read_survey_response_events()
-        self.assertEqual([record["responseId"] for record in surveys], ["train-response"])
+        self.assertEqual(
+            [record["responseId"] for record in surveys],
+            ["train-response", "online-response"],
+        )
 
         second_host = self.client.post("/online/rooms").json()
         self.assertTrue(second_host["matchId"])
@@ -317,7 +318,10 @@ class MatchmakingRecordTests(unittest.TestCase):
         events, _ = backend.read_online_match_events()
         surveys, _ = backend.read_survey_response_events()
         self.assertEqual(events, [])
-        self.assertEqual([record["responseId"] for record in surveys], ["train-response"])
+        self.assertEqual(
+            [record["responseId"] for record in surveys],
+            ["train-response", "online-response"],
+        )
 
 
 if __name__ == "__main__":

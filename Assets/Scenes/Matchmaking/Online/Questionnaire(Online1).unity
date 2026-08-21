@@ -3753,7 +3753,7 @@ MonoBehaviour:
   playerNameCharacterLimit: 24
   backendBaseUrl: http://111.231.136.4:8000
   requestTimeoutSeconds: 5
-  logSurveyEvents: 1
+  logSurveyEvents: 0
 --- !u!4 &751327956
 Transform:
   m_ObjectHideFlags: 0

@@ -9,7 +9,6 @@ public static class OnlineMatchContext
     public static OnlineRoomState RoomState { get; private set; }
     public static string[] PendingChallengeRows { get; private set; }
     public static string PendingAiAssistantMode { get; private set; } = "";
-    public static string PendingOpponentExperienceGoal { get; private set; } = "";
     public static string[] OpponentChallengeRows { get; private set; }
     public static string PendingSurveyMatchId { get; private set; } = "";
     public static string PendingSurveyRoomCode { get; private set; } = "";
@@ -48,7 +47,6 @@ public static class OnlineMatchContext
         RoomState = state;
         PendingChallengeRows = null;
         PendingAiAssistantMode = "";
-        PendingOpponentExperienceGoal = "";
         OpponentChallengeRows = CloneRows(state.opponentChallengeRows);
     }
 
@@ -72,8 +70,7 @@ public static class OnlineMatchContext
 
     public static void StageChallenge(
         string[] rows,
-        string aiAssistantMode,
-        string opponentExperienceGoal = "")
+        string aiAssistantMode)
     {
         if (!HasMatch || rows == null || rows.Length == 0)
         {
@@ -84,14 +81,12 @@ public static class OnlineMatchContext
 
         PendingChallengeRows = CloneRows(rows);
         PendingAiAssistantMode = aiAssistantMode ?? "";
-        PendingOpponentExperienceGoal = (opponentExperienceGoal ?? "").Trim();
     }
 
     public static void ClearPendingChallenge()
     {
         PendingChallengeRows = null;
         PendingAiAssistantMode = "";
-        PendingOpponentExperienceGoal = "";
     }
 
     public static void StagePostMatchSurvey()
@@ -123,7 +118,6 @@ public static class OnlineMatchContext
         RoomState = null;
         PendingChallengeRows = null;
         PendingAiAssistantMode = "";
-        PendingOpponentExperienceGoal = "";
         OpponentChallengeRows = null;
     }
 
@@ -192,7 +186,7 @@ public class OnlinePlayerState
 public class OnlineChallengeMetadata
 {
     public string aiAssistantMode;
-    public string opponentExperienceGoal;
+    public string designerIntention;
 }
 
 [Serializable]

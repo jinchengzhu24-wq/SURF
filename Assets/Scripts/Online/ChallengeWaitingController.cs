@@ -112,16 +112,6 @@ public class ChallengeWaitingController : MonoBehaviour
             yield break;
         }
 
-        if (string.IsNullOrWhiteSpace(
-                OnlineMatchContext.PendingOpponentExperienceGoal))
-        {
-            SetStatus(
-                "FINAL DESIGN INTENTION IS MISSING. RETURN TO CO-CREATION AND SUBMIT IT BEFORE SENDING THE CHALLENGE."
-            );
-            SetPlayEnabled(false);
-            yield break;
-        }
-
         submitInFlight = true;
         SetStatus("SUBMITTING YOUR CHALLENGE...");
         SetPlayEnabled(false);
@@ -130,7 +120,6 @@ public class ChallengeWaitingController : MonoBehaviour
         yield return client.SubmitChallenge(
             OnlineMatchContext.PendingChallengeRows,
             OnlineMatchContext.PendingAiAssistantMode,
-            OnlineMatchContext.PendingOpponentExperienceGoal,
             state =>
             {
                 succeeded = true;
