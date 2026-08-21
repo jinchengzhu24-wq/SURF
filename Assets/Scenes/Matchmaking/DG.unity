@@ -2751,7 +2751,7 @@ MonoBehaviour:
     m_VerticalOverflow: 0
     m_LineSpacing: 1
   m_Text: Answer two quick questions. The AI will summarize your choices and suggest
-    a difficulty
+    a difficulty. Later you will receive a draft and improve it with AI.
 --- !u!222 &768015550
 CanvasRenderer:
   m_ObjectHideFlags: 0

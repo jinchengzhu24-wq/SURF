@@ -1,5 +1,6 @@
 import asyncio
 from difflib import SequenceMatcher
+import hashlib
 import json
 import os
 import re
@@ -2963,20 +2964,35 @@ def validate_chat_response(
             guidance["followUpQuestion"] = extracted_question
 
     if guidance["followUpQuestion"] is not None:
-        guidance["followUpQuestion"] = _refine_discussion_focus(
-            guidance["followUpQuestion"],
-            assistant_message,
-            language,
-        )
-        if _discussion_focus_repeats_recent(
-            guidance["followUpQuestion"],
-            stage_context,
+        if not (
+            _is_human_edit_stage_opening(assessment_only, stage_context)
+            and _is_human_edit_intent_question(
+                guidance["followUpQuestion"],
+                language,
+                stage_context,
+            )
         ):
-            guidance["followUpQuestion"] = None
+            guidance["followUpQuestion"] = _refine_discussion_focus(
+                guidance["followUpQuestion"],
+                assistant_message,
+                language,
+            )
+            if _discussion_focus_repeats_recent(
+                guidance["followUpQuestion"],
+                stage_context,
+            ):
+                guidance["followUpQuestion"] = None
 
     if assessment_only and not stage_one_opening and guidance["followUpQuestion"] is None:
         guidance["followUpQuestion"] = _perspective_discussion_focus(
             assistant_message,
+            language,
+        )
+
+    if _is_human_edit_stage_opening(assessment_only, stage_context):
+        guidance["followUpQuestion"] = _human_edit_intent_discussion_focus(
+            guidance.get("followUpQuestion"),
+            stage_context,
             language,
         )
 
@@ -4552,6 +4568,14 @@ def _ensure_required_guidance_card(
     if _is_stage_one(stage_context) and stage_opening:
         return normalized
 
+    if _is_human_edit_stage_opening(stage_opening, stage_context):
+        normalized["followUpQuestion"] = _human_edit_intent_discussion_focus(
+            normalized.get("followUpQuestion"),
+            stage_context,
+            language,
+        )
+        return normalized
+
     if _user_explicitly_off_topic(latest_user):
         normalized["intentHypothesis"] = None
         normalized["intentConfidence"] = None
@@ -5278,6 +5302,96 @@ def _is_stage_one(stage_context):
     return int((stage_context or {}).get("stageNumber") or 0) == 1
 
 
+def _is_human_edit_stage_opening(assessment_only, stage_context):
+    return (
+        assessment_only
+        and not _is_stage_one(stage_context)
+        and (stage_context or {}).get("source") == "human_edit"
+    )
+
+
+def _human_edit_intent_discussion_focus(existing_focus, stage_context, language):
+    """Keep a human-edited Stage opening focused on the designer's own intention."""
+    value = re.sub(r"\s+", " ", str(existing_focus or "")).strip()
+    if _is_human_edit_intent_question(value, language, stage_context):
+        return value
+
+    components = ((stage_context or {}).get("changeSummary") or {}).get("components") or []
+    labels = _localized_change_labels(components, language)
+    signature = json.dumps(
+        {
+            "stage": (stage_context or {}).get("stageNumber"),
+            "components": components,
+            "diff": (stage_context or {}).get("diff"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    variant = int(hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8], 16) % 3
+
+    if language == "zh-CN":
+        subject = "、".join(labels) if labels else "这处布局"
+        templates = (
+            f"我有点好奇，你这次调整{subject}时，最希望玩家在什么时刻感到路线变了？",
+            f"这处{subject}改动让我想多了解一点：你原本想让玩家的哪一次推箱判断发生变化？",
+            f"我很想听听你的想法：你保存这次{subject}修改时，心里最想加强哪种游玩感受？",
+        )
+    else:
+        subject = _join_english(labels) if labels else "this part of the layout"
+        templates = (
+            f"I’m curious: when you adjusted {subject}, what moment did you most want to change for the player?",
+            f"This change to {subject} makes me want to hear your thinking: which push or route judgment did you hope would feel different?",
+            f"I’d love to understand the thought behind this change to {subject}: what kind of play moment were you hoping to strengthen?",
+        )
+    return templates[variant]
+
+
+def _is_human_edit_intent_question(value, language, stage_context=None):
+    if value.count("?") + value.count("？") != 1:
+        return False
+
+    lowered = value.casefold()
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", value):
+        has_intent_marker = any(marker in value for marker in (
+            "想让", "希望", "意图", "想表达", "想加强", "想保留", "想带来", "想改变",
+        ))
+        component_markers = {
+            "outerShell": ("外壳", "边界"),
+            "water": ("水",),
+            "internalWalls": ("墙", "通道"),
+            "boxes": ("箱",),
+            "targets": ("目标",),
+            "player": ("玩家", "起点"),
+            "floorArea": ("地面", "空间", "布局"),
+        }
+    else:
+        has_intent_marker = bool(re.search(
+            r"\b(?:hope|hoped|want|wanted|intend|intended|aim|aimed|meaning|thinking|trying)\b",
+            lowered,
+        ))
+        component_markers = {
+            "outerShell": ("shell", "boundary", "edge"),
+            "water": ("water",),
+            "internalWalls": ("wall", "corridor", "route"),
+            "boxes": ("box", "crate"),
+            "targets": ("target", "goal"),
+            "player": ("player", "start"),
+            "floorArea": ("floor", "space", "layout"),
+        }
+
+    if not has_intent_marker:
+        return False
+
+    components = ((stage_context or {}).get("changeSummary") or {}).get("components") or []
+    relevant_markers = [
+        marker
+        for component in components
+        for marker in component_markers.get(component, ())
+    ]
+    return not relevant_markers or any(marker in lowered for marker in relevant_markers)
+
+
 def _build_task_instructions(assessment_only, stage_context=None):
     if assessment_only:
         stage_one_instruction = (
@@ -5285,6 +5399,15 @@ def _build_task_instructions(assessment_only, stage_context=None):
             "personal response at their natural length. Do not write process, trial, editor, or "
             "scope guidance: the backend appends the one fixed closing paragraph itself. "
             if _is_stage_one(stage_context)
+            else ""
+        )
+        human_edit_opening_instruction = (
+            "This is the first opening after a directly verified human edit. guidance.followUpQuestion "
+            "is required and must warmly invite the designer to explain what playable moment, feeling, "
+            "or judgment they hoped the verified change would create. Ground it in changeSummary, but do "
+            "not state their intention as fact, ask only about coordinates, or use a generic 'why did you "
+            "change it' question. Keep it separate from assistantMessage and vary its phrasing naturally. "
+            if (stage_context or {}).get("source") == "human_edit" and not _is_stage_one(stage_context)
             else ""
         )
         return (
@@ -5303,6 +5426,7 @@ def _build_task_instructions(assessment_only, stage_context=None):
             "solver moves, or offer or generate a changed map. Include the grounded "
             "structured assessment only as archival research data, not as the prose style. "
             + stage_one_instruction
+            + human_edit_opening_instruction
         )
 
     return (

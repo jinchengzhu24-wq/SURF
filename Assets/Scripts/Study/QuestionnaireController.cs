@@ -23,6 +23,11 @@ public class QuestionnaireController : MonoBehaviour
     public Button submitButton;
     public InputField playerNameInput;
 
+    [Header("External Questionnaire")]
+    [Tooltip("When set, this scene opens the survey in the browser and uses Submit as Leave.")]
+    public string externalSurveyUrl = "";
+    public Button externalSurveyLinkButton;
+
     [Header("Player Name Input")]
     public bool requirePlayerName = true;
     public bool startsSurveyPair;
@@ -42,6 +47,7 @@ public class QuestionnaireController : MonoBehaviour
     private QuestionnaireScoreSlider[] scoreSliders = new QuestionnaireScoreSlider[0];
     private float startedAt;
     private bool isSubmitting;
+    private bool externalSurveyOpened;
 
     private void Awake()
     {
@@ -120,7 +126,15 @@ public class QuestionnaireController : MonoBehaviour
         if (submitButton != null)
         {
             submitButton.onClick.RemoveAllListeners();
-            submitButton.onClick.AddListener(Submit);
+            submitButton.onClick.AddListener(
+                UsesExternalSurvey ? (UnityEngine.Events.UnityAction)Leave : Submit
+            );
+        }
+
+        if (externalSurveyLinkButton != null)
+        {
+            externalSurveyLinkButton.onClick.RemoveAllListeners();
+            externalSurveyLinkButton.onClick.AddListener(OpenExternalSurvey);
         }
 
         if (playerNameInput != null)
@@ -216,8 +230,34 @@ public class QuestionnaireController : MonoBehaviour
     {
         if (submitButton != null)
         {
-            submitButton.interactable = !isSubmitting && IsComplete();
+            submitButton.interactable = UsesExternalSurvey
+                ? externalSurveyOpened
+                : !isSubmitting && IsComplete();
         }
+    }
+
+    public void OpenExternalSurvey()
+    {
+        if (!TryGetHttpUrl(externalSurveyUrl, out string surveyUrl))
+        {
+            Debug.LogError("QuestionnaireController: External survey URL must use HTTP or HTTPS.");
+            return;
+        }
+
+        Application.OpenURL(surveyUrl);
+        externalSurveyOpened = true;
+        UpdateSubmitState();
+    }
+
+    public void Leave()
+    {
+        if (!UsesExternalSurvey || !externalSurveyOpened || isSubmitting)
+        {
+            return;
+        }
+
+        OnlineMatchContext.ClearPendingPostMatchSurvey();
+        SceneManager.LoadScene(IsBlank(nextSceneName) ? "Menu" : nextSceneName);
     }
 
     private bool IsComplete()
@@ -486,6 +526,31 @@ public class QuestionnaireController : MonoBehaviour
     private bool IsBlank(string value)
     {
         return string.IsNullOrEmpty(value) || value.Trim().Length == 0;
+    }
+
+    private bool UsesExternalSurvey
+    {
+        get { return !IsBlank(externalSurveyUrl); }
+    }
+
+    private static bool TryGetHttpUrl(string value, out string resolvedUrl)
+    {
+        resolvedUrl = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        Uri uri;
+        if (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            return false;
+        }
+
+        resolvedUrl = uri.AbsoluteUri;
+        return true;
     }
 }
 

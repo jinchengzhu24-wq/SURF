@@ -1046,7 +1046,7 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertNotIn("response_format", client.chat.completions.calls[1])
 
-    def test_later_human_edit_plain_opening_never_uses_the_stock_water_question(self):
+    def test_later_human_edit_plain_opening_asks_about_the_designer_intention(self):
         client = FakeClient([
             "   ",
             (
@@ -1072,12 +1072,12 @@ class LLMClientTests(unittest.TestCase):
                     "source": "human_edit",
                     "changeSummary": {"components": ["water", "internalWalls"]},
                 },
-            )
+        )
 
         focus = result.guidance["followUpQuestion"]
-        self.assertIn("T1", focus)
-        self.assertIn("入口", focus)
-        self.assertNotIn("水域边缘推进", focus)
+        self.assertIn("水域、内部墙体", focus)
+        self.assertTrue(any(marker in focus for marker in ("想让", "希望", "想加强")))
+        self.assertNotIn("试玩时", focus)
 
     def test_structured_stage_one_opening_receives_rows_for_scope_normalization(self):
         payload = json.dumps({
@@ -2396,7 +2396,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("最想观察哪一处转折", focus)
         self.assertEqual(result[1]["satisfactionQuestion"], focus)
 
-    def test_verified_human_edit_opening_adds_a_concrete_discussion_question(self):
+    def test_verified_human_edit_opening_asks_about_the_designer_intention(self):
         payload = {
             "assistantMessage": "我更喜欢这次水域和通路之间留下的回旋空间。",
             "guidance": {
@@ -2431,11 +2431,13 @@ class LLMClientTests(unittest.TestCase):
         )
 
         focus = result[4]["followUpQuestion"]
-        self.assertIn("我会先把这版理解为", focus)
-        self.assertIn("试玩时", focus)
+        self.assertIn("目标点", focus)
+        self.assertTrue(any(marker in focus for marker in ("想让", "希望", "想加强")))
+        self.assertNotIn("试玩时", focus)
+        self.assertEqual(focus.count("？"), 1)
         self.assertEqual(result[1]["satisfactionQuestion"], focus)
 
-    def test_human_edit_uncertainty_card_stays_with_the_stated_target_issue(self):
+    def test_human_edit_opening_replaces_a_non_intent_question_with_an_intent_question(self):
         payload = {
             "assistantMessage": (
                 "我唯一有点拿不准的是T1在(2,10)那个角落。"
@@ -2473,9 +2475,71 @@ class LLMClientTests(unittest.TestCase):
         )
 
         focus = result[4]["followUpQuestion"]
-        self.assertIn("T1", focus)
-        self.assertIn("入口", focus)
-        self.assertNotIn("水域边缘推进", focus)
+        self.assertIn("水域、内部墙体", focus)
+        self.assertTrue(any(marker in focus for marker in ("想让", "希望", "想加强")))
+        self.assertNotIn("T1", focus)
+        self.assertEqual(focus.count("？"), 1)
+
+    def test_human_edit_opening_preserves_a_friendly_intent_question_in_english(self):
+        payload = {
+            "assistantMessage": "I like how the changed player start makes the first route less immediate.",
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "I would love to hear your thinking: what did you hope this new player start would change for the first push?",
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The solver found a route.",
+                "difficultyOpinion": "To me, the opening now asks for more attention.",
+                "features": ["Changed player start"],
+                "suggestions": ["Observe the first push"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="en",
+            stage_context={
+                "stageNumber": 2,
+                "source": "human_edit",
+                "changeSummary": {"components": ["player"]},
+            },
+        )
+
+        focus = result[4]["followUpQuestion"]
+        self.assertIn("what did you hope", focus.casefold())
+        self.assertEqual(result[1]["satisfactionQuestion"], focus)
+
+    def test_plain_fallback_human_edit_opening_still_has_an_intent_question(self):
+        guidance = llm_client._ensure_required_guidance_card(
+            {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            [],
+            "en",
+            OPERATION_BASE_ROWS,
+            True,
+            {
+                "stageNumber": 3,
+                "source": "human_edit",
+                "changeSummary": {"components": ["water"]},
+            },
+        )
+
+        self.assertIn("water area", guidance["followUpQuestion"])
+        self.assertRegex(guidance["followUpQuestion"], r"\?$" )
 
     def test_no_blue_card_is_invented_when_the_reply_has_no_grounded_focus(self):
         guidance = llm_client._ensure_required_guidance_card(

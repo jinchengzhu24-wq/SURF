@@ -282,8 +282,7 @@ public class OnlineLevelController : MonoBehaviour
                 },
                 error => SetText(
                     ActiveHintText,
-                    "RESULT SUBMISSION FAILED. RETRYING...\n"
-                    + error.ToUpperInvariant()
+                    "RESULT SUBMISSION FAILED. RETRYING..."
                 )
             );
 
