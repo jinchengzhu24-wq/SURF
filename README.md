@@ -6,7 +6,7 @@
 
 ```text
 Menu
-  → Online_Lobby → Match_Briefing → DG → DG_Level（生成并验证首版）
+  → Questionnaire(Online1) → Online_Lobby → Match_Briefing → DG → DG_Level（生成并验证首版）
   → CoCreation_Entry（上传首版并创建 8010 会话）
   → 8010 Co-Creation Lab
       → Stage 1 = Unity 首版 rows
@@ -19,7 +19,7 @@ Menu
       → 填写设计意图
   → Unity 获得最终 rows
   → Challenge_Waiting → Online_Level → Match_Result
-  → Questionnaire(Online) → Menu
+  → Questionnaire(Online2) → Menu
 ```
 
 旧 `Competition_Mode`、`AI_Asistant_Mode`、`Draft` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 中确认的关系、体验与最终难度只指导 8000 的首版生成，不会传入 8010 共创服务或其 LLM 上下文。
@@ -171,7 +171,8 @@ Assets/Scenes/Matchmaking/Online/CoCreation_Entry.unity
 Assets/Scenes/Matchmaking/Online/Challenge_Waiting.unity
 Assets/Scenes/Matchmaking/Online/Online_Level.unity
 Assets/Scenes/Matchmaking/Online/Match_Result.unity
-Assets/Scenes/Matchmaking/Online/Questionnaire(Online).unity
+Assets/Scenes/Matchmaking/Online/Questionnaire(Online1).unity
+Assets/Scenes/Matchmaking/Online/Questionnaire(Online2).unity
 ```
 
 ## 验证

@@ -5,7 +5,7 @@ using UnityEngine.UI;
 
 public class MatchResultController : MonoBehaviour
 {
-    private const string QuestionnaireSceneName = "Questionnaire(Online)";
+    private const string QuestionnaireSceneName = "Questionnaire(Online2)";
 
     [Header("Header")]
     [SerializeField] private Text roomCodeText;
