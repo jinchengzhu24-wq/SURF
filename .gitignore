@@ -10,6 +10,7 @@
 [Rr]ecordings/
 
 # IDE and editor generated files
+.playwright-mcp/
 .vs/
 .vscode/
 *.csproj
@@ -75,4 +76,3 @@ crashlytics-build.properties
 /LLM_ERRORS.md
 /Routing.md
 /Response.md
-
