@@ -139,7 +139,11 @@ public sealed class DescriptionGenerationController : MonoBehaviour
                 try { response = JsonUtility.FromJson<GuideResponse>(request.downloadHandler.text); }
                 catch (Exception exception) { Debug.LogWarning("DG guide response parse failed: " + exception.Message); }
                 if (response != null && IsValidDifficulty(response.recommendedDifficulty) && !string.IsNullOrWhiteSpace(response.summary) && !string.IsNullOrWhiteSpace(response.rationale))
-                { ApplyGuideResponse(response); requestInFlight = false; yield break; }
+                {
+                    requestInFlight = false;
+                    ApplyGuideResponse(response);
+                    yield break;
+                }
             }
             // The deployed 8000 service may temporarily predate this optional guide route.
             // Continue with a deterministic, player-readable result instead of surfacing a
