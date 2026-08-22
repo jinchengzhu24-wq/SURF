@@ -11,7 +11,7 @@ public class MenuController : MonoBehaviour
     public string creativeWorkshopSceneName = "Questionnaire(Before)";
     public string matchmakingSceneName = "Online_Lobby";
     public string studyDashboardUrl = "http://111.231.136.4:8000/frontend/";
-    public string tutorialUrl = "http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx";
+    public string tutorialUrl = "http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf";
 
 #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]

@@ -9,7 +9,7 @@ This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, an
 - The active online route is `Menu -> Questionnaire(Online1) -> Online_Lobby -> Match_Briefing -> DG -> DG_Level -> CoCreation_Entry -> 8010 -> Challenge_Waiting -> Online_Level -> Match_Result -> Questionnaire(Online2) -> Menu`. Both online questionnaires are part of every match cycle: Online1 opens the pre-match WJX survey before the lobby, and Online2 opens the post-match WJX survey after results. Do not add a persistent skip flag.
 - `Draft` is retired. PC code, scenes, and backend capability are retained for later work but have no Build Settings entry, menu/navigation route, or current client integration. Do not restore them without a confirmed study-design revision.
 - DG asks about opponent relationship and intended experience, then receives an AI summary/difficulty suggestion. Confirmed DG context guides only the 8000 first-draft generator; it must never be sent to, persisted by, or exposed in the 8010 service or its LLM context.
-- Menu's `Tutorial` button opens the static PPT at `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx`. It opens/downloads in the browser and does not enter a Unity route.
+- Menu's `Tutorial` button opens the static bilingual PDF at `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`. It opens in the browser's PDF viewer and does not enter a Unity route.
 
 ## Unity Authoring
 

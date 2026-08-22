@@ -3581,7 +3581,7 @@ MonoBehaviour:
   creativeWorkshopSceneName: Questionnaire(Before)
   matchmakingSceneName: Questionnaire(Online1)
   studyDashboardUrl: http://111.231.136.4:8000/frontend/
-  tutorialUrl: http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx
+  tutorialUrl: http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf
 --- !u!1 &4100100002
 GameObject:
   m_ObjectHideFlags: 0

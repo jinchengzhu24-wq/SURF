@@ -181,9 +181,9 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online2).unity
 python -m unittest discover -s Backend -p "test_*.py"
 python -m unittest discover -s CoCreationPrototype/Backend/tests -p "test_*.py"
 node --check CoCreationPrototype/Frontend/app.js
-## Tutorial PPT
+## Tutorial PDF
 
-Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial.pptx`。PPT 由现有 8000 `/frontend/` 静态路由提供；浏览器会下载文件或交由本机 PowerPoint/兼容软件打开，不会离开当前 Unity Menu 页面。
+Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。双语 PDF 由现有 8000 `/frontend/` 静态路由提供，并在浏览器的 PDF 查看器中打开，不会离开当前 Unity Menu 页面。
 
 dotnet build Assembly-CSharp.csproj -v:minimal
 ```
