@@ -135,6 +135,7 @@ public class QuestionnaireController : MonoBehaviour
         {
             externalSurveyLinkButton.onClick.RemoveAllListeners();
             externalSurveyLinkButton.onClick.AddListener(OpenExternalSurvey);
+            externalSurveyLinkButton.interactable = !externalSurveyOpened;
         }
 
         if (playerNameInput != null)
@@ -238,6 +239,11 @@ public class QuestionnaireController : MonoBehaviour
 
     public void OpenExternalSurvey()
     {
+        if (externalSurveyOpened)
+        {
+            return;
+        }
+
         if (!TryGetHttpUrl(externalSurveyUrl, out string surveyUrl))
         {
             Debug.LogError("QuestionnaireController: External survey URL must use HTTP or HTTPS.");
@@ -246,6 +252,12 @@ public class QuestionnaireController : MonoBehaviour
 
         Application.OpenURL(surveyUrl);
         externalSurveyOpened = true;
+
+        if (externalSurveyLinkButton != null)
+        {
+            externalSurveyLinkButton.interactable = false;
+        }
+
         UpdateSubmitState();
     }
 
