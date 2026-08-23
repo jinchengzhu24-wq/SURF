@@ -110,6 +110,7 @@ ONLINE_MATCH_SYNC_SECRET = os.getenv(
     "COCREATION_INTENTION_SYNC_SECRET",
     "",
 ).strip()
+ONLINE_MATCH_SYNC_TIMEOUT_SECONDS = 5.0
 TOKEN_SECRET = os.getenv(
     "COCREATION_TOKEN_SECRET",
     "development-only-change-before-deployment",
@@ -608,25 +609,28 @@ def create_manual_version(
                     "IDEMPOTENCY_CONFLICT",
                     "The Stage save key was already used for different input.",
                 )
-            return serialize_session(database, session_id)
+            version_id = existing["id"]
+        else:
+            require_current_base(session, payload.baseVersionId)
+            current = get_current_version(database, session)
+            current_rows = load_json(current["rows_json"])
 
-        require_current_base(session, payload.baseVersionId)
-        current = get_current_version(database, session)
-        current_rows = load_json(current["rows_json"])
+            if list(validation.rows) == current_rows:
+                raise ApiError(400, "UNCHANGED_LEVEL", "Save requires at least one tile change.")
 
-        if list(validation.rows) == current_rows:
-            raise ApiError(400, "UNCHANGED_LEVEL", "Save requires at least one tile change.")
+            version_id = _insert_version(
+                database,
+                session,
+                validation,
+                "human_edit",
+                clean_optional(payload.summary, 1000) or "Designer saved an edited stage",
+                payload.idempotencyKey,
+                current,
+            )
+        session_payload = serialize_session(database, session_id)
 
-        _insert_version(
-            database,
-            session,
-            validation,
-            "human_edit",
-            clean_optional(payload.summary, 1000) or "Designer saved an edited stage",
-            payload.idempotencyKey,
-            current,
-        )
-        return serialize_session(database, session_id)
+    synchronize_version_with_online_match(session_id, version_id, "stage")
+    return session_payload
 
 
 @app.post("/api/sessions/{session_id}/versions/{version_id}/restore")
@@ -1019,7 +1023,10 @@ def _send_message_locked(
                     ),
                 )
 
-        return serialize_session(database, session_id)
+        session_payload = serialize_session(database, session_id)
+
+    synchronize_turn_with_online_match(session_id, payload.idempotencyKey)
+    return session_payload
 
 
 def _retry_exhausted_execution(language, exception):
@@ -1460,75 +1467,87 @@ def decide_proposal(
         ).fetchone()
 
         if existing_decision is not None:
-            return serialize_session(database, session_id)
+            version = database.execute(
+                """
+                SELECT version_id FROM designer_decisions
+                WHERE session_id = ? AND idempotency_key = ?
+                """,
+                (session_id, payload.idempotencyKey),
+            ).fetchone()
+            new_version_id = version["version_id"] if version else None
+            session_payload = serialize_session(database, session_id)
+        else:
+            require_current_base(session, payload.baseVersionId)
+            proposal = database.execute(
+                """
+                SELECT * FROM change_proposals WHERE id = ? AND session_id = ?
+                """,
+                (proposal_id, session_id),
+            ).fetchone()
 
-        require_current_base(session, payload.baseVersionId)
-        proposal = database.execute(
-            """
-            SELECT * FROM change_proposals WHERE id = ? AND session_id = ?
-            """,
-            (proposal_id, session_id),
-        ).fetchone()
+            if proposal is None:
+                raise ApiError(404, "PROPOSAL_NOT_FOUND", "The proposal was not found.")
 
-        if proposal is None:
-            raise ApiError(404, "PROPOSAL_NOT_FOUND", "The proposal was not found.")
+            if proposal["status"] != "pending":
+                raise ApiError(409, "PROPOSAL_ALREADY_DECIDED", "The proposal was already decided.")
 
-        if proposal["status"] != "pending":
-            raise ApiError(409, "PROPOSAL_ALREADY_DECIDED", "The proposal was already decided.")
+            if proposal["base_version_id"] != session["current_version_id"]:
+                raise ApiError(409, "VERSION_CONFLICT", "The proposal belongs to an older Stage.")
 
-        if proposal["base_version_id"] != session["current_version_id"]:
-            raise ApiError(409, "VERSION_CONFLICT", "The proposal belongs to an older Stage.")
+            now = utc_now()
+            new_version_id = None
+            verified_summary = None
 
-        now = utc_now()
-        new_version_id = None
-        verified_summary = None
+            if payload.decision == "accept":
+                proposed_rows = load_json(proposal["proposed_rows_json"])
+                current = get_current_version(database, session)
+                current_rows = load_json(current["rows_json"])
+                validation = _solve_changed_proposal_or_api_error(
+                    current_rows,
+                    proposed_rows,
+                )
+                verified_summary = summarize_verified_diff(
+                    current_rows,
+                    validation.rows,
+                    session["language"],
+                )
+                new_version_id = _insert_version(
+                    database,
+                    session,
+                    validation,
+                    "llm_accepted",
+                    verified_summary,
+                    "proposal:" + payload.idempotencyKey,
+                    current,
+                )
 
-        if payload.decision == "accept":
-            proposed_rows = load_json(proposal["proposed_rows_json"])
-            current = get_current_version(database, session)
-            current_rows = load_json(current["rows_json"])
-            validation = _solve_changed_proposal_or_api_error(
-                current_rows,
-                proposed_rows,
+            database.execute(
+                """
+                UPDATE change_proposals
+                SET status = ?, decided_at = ?, summary = COALESCE(?, summary)
+                WHERE id = ?
+                """,
+                (
+                    "accepted" if payload.decision == "accept" else "rejected",
+                    now,
+                    verified_summary,
+                    proposal_id,
+                ),
             )
-            verified_summary = summarize_verified_diff(
-                current_rows,
-                validation.rows,
-                session["language"],
-            )
-            new_version_id = _insert_version(
+            _insert_decision(
                 database,
-                session,
-                validation,
-                "llm_accepted",
-                verified_summary,
-                "proposal:" + payload.idempotencyKey,
-                current,
-            )
-
-        database.execute(
-            """
-            UPDATE change_proposals
-            SET status = ?, decided_at = ?, summary = COALESCE(?, summary)
-            WHERE id = ?
-            """,
-            (
-                "accepted" if payload.decision == "accept" else "rejected",
-                now,
-                verified_summary,
+                session_id,
+                new_version_id,
                 proposal_id,
-            ),
-        )
-        _insert_decision(
-            database,
-            session_id,
-            new_version_id,
-            proposal_id,
-            payload.decision,
-            clean_optional(payload.reason, 2000) or "",
-            payload.idempotencyKey,
-        )
-        return serialize_session(database, session_id)
+                payload.decision,
+                clean_optional(payload.reason, 2000) or "",
+                payload.idempotencyKey,
+            )
+            session_payload = serialize_session(database, session_id)
+
+    if new_version_id:
+        synchronize_version_with_online_match(session_id, new_version_id, "stage")
+    return session_payload
 
 
 @app.post("/api/sessions/{session_id}/versions/{version_id}/play-attempts")
@@ -1674,6 +1693,7 @@ def finalize_session(
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    deadline_stage_version_id = None
     with connect(immediate=True) as database:
         session = require_browser_session(database, session_id, access_cookie)
         if session["status"] != "active":
@@ -1710,6 +1730,7 @@ def finalize_session(
                         "Designer edit saved at the co-creation deadline",
                         "deadline-finalize:" + payload.idempotencyKey, current,
                     )
+                    deadline_stage_version_id = final_version_id
                     session = get_session(database, session_id)
             now = utc_now()
             database.execute(
@@ -1731,8 +1752,19 @@ def finalize_session(
             )
             if deadline_expired:
                 record_event(database, session_id, "deadline_finalized", {"versionId": final_version_id}, now)
+        else:
+            final_version_id = session["final_version_id"] or payload.baseVersionId
 
-        return serialize_session(database, session_id)
+        session_payload = serialize_session(database, session_id)
+
+    if deadline_stage_version_id:
+        synchronize_version_with_online_match(
+            session_id,
+            deadline_stage_version_id,
+            "stage",
+        )
+    synchronize_version_with_online_match(session_id, final_version_id, "final")
+    return session_payload
 
 
 @app.post("/api/sessions/{session_id}/intention")
@@ -1792,6 +1824,8 @@ def submit_intention(
         match_id,
         player_number,
         content,
+        "message:" + session_id + ":" + payload.idempotencyKey,
+        session_id,
     )
 
     with connect() as database:
@@ -1799,7 +1833,7 @@ def submit_intention(
 
 
 def synchronize_final_intention_with_online_match(
-    match_id, player_number, content
+    match_id, player_number, content, event_id="", session_id=""
 ):
     """Synchronize the saved 8010 intention to its linked online player."""
     if not match_id:
@@ -1828,8 +1862,10 @@ def synchronize_final_intention_with_online_match(
             json={
                 "playerNumber": player_number,
                 "designerIntention": content,
+                "eventId": event_id,
+                "sessionId": session_id,
             },
-            timeout=5.0,
+            timeout=ONLINE_MATCH_SYNC_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
     except httpx.HTTPError as error:
@@ -1839,6 +1875,122 @@ def synchronize_final_intention_with_online_match(
             "The final design intention was saved but cannot yet be synchronized to the online match. Please retry.",
             retryable=True,
         ) from error
+
+
+def synchronize_cocreation_event_with_online_match(session, event):
+    match_id = str(session["match_id"] or "").strip()
+    player_number = session["player_number"]
+
+    if not match_id:
+        return
+    if player_number not in (1, 2):
+        raise ApiError(
+            409,
+            "INVALID_MATCH_PLAYER",
+            "The linked online match player is invalid.",
+        )
+    if not ONLINE_MATCH_SYNC_URL or not ONLINE_MATCH_SYNC_SECRET:
+        return
+
+    endpoint = (
+        f"{ONLINE_MATCH_SYNC_URL}/online/rooms/{quote(match_id, safe='')}/cocreation-events"
+    )
+    payload = {"playerNumber": player_number, "sessionId": session["id"], **event}
+
+    try:
+        response = httpx.post(
+            endpoint,
+            headers={"X-CoCreation-Sync-Secret": ONLINE_MATCH_SYNC_SECRET},
+            json=payload,
+            timeout=ONLINE_MATCH_SYNC_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as error:
+        raise ApiError(
+            503,
+            "ONLINE_FLOW_SYNC_UNAVAILABLE",
+            "The co-creation change was saved but cannot yet be synchronized to the online match. Please retry.",
+            retryable=True,
+        ) from error
+
+
+def _displayed_cards(guidance):
+    guidance = guidance or {}
+    cards = []
+    follow_up = str(guidance.get("followUpQuestion") or "").strip()
+    if follow_up:
+        cards.append({"type": "discussion", "text": follow_up})
+    offer = guidance.get("proposalOffer") or {}
+    if isinstance(offer, dict):
+        offer_text = str(offer.get("summary") or offer.get("text") or "").strip()
+        if offer_text:
+            cards.append({"type": "proposal", "text": offer_text})
+    intent = str(guidance.get("intentHypothesis") or "").strip()
+    if intent:
+        cards.append({"type": "intent", "text": intent})
+    for cue in guidance.get("uiCues") or []:
+        if not isinstance(cue, dict):
+            continue
+        cue_type = str(cue.get("type") or "").strip()
+        cue_text = str(cue.get("text") or "").strip()
+        if cue_type and cue_text:
+            cards.append({"type": cue_type, "text": cue_text})
+    return cards
+
+
+def synchronize_version_with_online_match(session_id, version_id, event_type):
+    with connect() as database:
+        session = get_session(database, session_id)
+        version = get_version(database, session_id, version_id)
+        if session is None or version is None:
+            return
+        source = version["source"]
+        if event_type == "stage" and source not in {"human_edit", "llm_accepted"}:
+            return
+        event = {
+            "eventId": f"{event_type}:{version['id']}",
+            "eventType": event_type,
+            "versionId": version["id"],
+            "stageNumber": version["stage_number"],
+            "rows": load_json(version["rows_json"]),
+            "diff": load_json(version["diff_json"]),
+        }
+        if event_type == "stage":
+            event["source"] = "manual" if source == "human_edit" else "ai"
+    synchronize_cocreation_event_with_online_match(session, event)
+
+
+def synchronize_turn_with_online_match(session_id, request_id):
+    with connect() as database:
+        session = get_session(database, session_id)
+        if session is None:
+            return
+        user_turn = database.execute(
+            """
+            SELECT * FROM conversation_turns
+            WHERE session_id = ? AND request_id = ? AND role = 'user'
+            """,
+            (session_id, request_id),
+        ).fetchone()
+        assistant_turn = database.execute(
+            """
+            SELECT * FROM conversation_turns
+            WHERE session_id = ? AND request_id = ? AND role = 'assistant'
+            """,
+            (session_id, request_id),
+        ).fetchone()
+        if user_turn is None or assistant_turn is None:
+            return
+        event = {
+            "eventId": f"turn:{assistant_turn['id']}",
+            "eventType": "turn",
+            "versionId": assistant_turn["version_id"],
+            "userText": user_turn["content"],
+            "assistantText": assistant_turn["content"],
+            "language": assistant_turn["language"],
+            "cards": _displayed_cards(load_json(assistant_turn["guidance_json"])),
+        }
+    synchronize_cocreation_event_with_online_match(session, event)
 
 
 @app.get("/api/integrations/sessions/{session_id}")

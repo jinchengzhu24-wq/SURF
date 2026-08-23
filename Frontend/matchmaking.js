@@ -285,6 +285,18 @@ function renderMatch(match) {
 }
 
 function buildTimelineStages(match) {
+    const flowStages = safeArray(match.players).flatMap(player =>
+        safeArray(player.coCreationFlow).map((event, index) => ({
+            key: "flow:" + player.playerNumber + ":" + (clean(event.eventId) || index),
+            type: "flow",
+            label: flowStageLabel(event),
+            timestamp: getTimestamp(event),
+            warning: false,
+            playerNumber: player.playerNumber,
+            record: event
+        }))
+    );
+    if (flowStages.length) return flowStages.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
     const stages = safeArray(match.events).map((event, index) => ({
         key: "event:" + (clean(event.eventId) || index),
         type: "event",
@@ -295,6 +307,16 @@ function buildTimelineStages(match) {
         record: event
     }));
     return stages.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+}
+
+function flowStageLabel(event) {
+    const labels = {
+        stage: "Stage " + value(event.stageNumber) + " · " + (event.source === "ai" ? "AI" : "Manual"),
+        turn: "Q&A",
+        final: "Final Stage",
+        message: "Message"
+    };
+    return labels[event.eventType] || titleCase(event.eventType || "Flow event");
 }
 
 function eventStageLabel(event) {
@@ -314,11 +336,21 @@ function eventStageLabel(event) {
 
 function renderTimeline(match, stages) {
     elements.matchTimeline.textContent = "";
+    elements.matchTimeline.classList.add("player-flow-list");
     if (!stages.length) {
         elements.matchTimeline.appendChild(emptyNode("No match stages recorded."));
         return;
     }
-    stages.forEach((stage, index) => {
+    const groups = new Map([[1, []], [2, []]]);
+    stages.forEach(stage => groups.get(stage.playerNumber)?.push(stage));
+    groups.forEach((playerStages, playerNumber) => {
+        const lane = document.createElement("section");
+        lane.className = "player-flow";
+        lane.appendChild(textNode("h3", "Player " + playerNumber, "player-flow-title"));
+        const nodes = document.createElement("div");
+        nodes.className = "timeline player-flow-timeline";
+        if (!playerStages.length) nodes.appendChild(emptyNode("No co-creation records."));
+        playerStages.forEach((stage, index) => {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "timeline-node";
@@ -336,7 +368,10 @@ function renderTimeline(match, stages) {
             }
             renderMatch(match);
         });
-        elements.matchTimeline.appendChild(button);
+            nodes.appendChild(button);
+        });
+        lane.appendChild(nodes);
+        elements.matchTimeline.appendChild(lane);
     });
 }
 
@@ -409,9 +444,9 @@ function renderInspector(stage) {
     const rows = [
         ["Event", titleCase(record.eventType)],
         ["Player", record.playerNumber ? "Player " + record.playerNumber : "Room"],
-        ["Status after", titleCase(record.statusAfter)],
         ["Recorded", formatTimestamp(getTimestamp(record))]
     ];
+    if (record.statusAfter) rows.splice(2, 0, ["Status after", titleCase(record.statusAfter)]);
     if (record.eventType === "ready_changed") rows.push(["Ready", record.ready ? "Yes" : "No"]);
     if (record.eventType === "challenge_submitted") {
         rows.push(["AI assistant", formatMode(record.aiAssistantMode)]);
@@ -425,6 +460,46 @@ function renderInspector(stage) {
         rows.push(["Minimum moves", value(record.minimumMoves)]);
     }
     appendRecordGrid(rows);
+    if (["stage", "final"].includes(record.eventType)) {
+        appendFlowStageDetails(record);
+    }
+    if (record.eventType === "turn") appendFlowTurnDetails(record);
+    if (record.eventType === "message") appendFlowMessageDetails(record);
+}
+
+function appendFlowStageDetails(record) {
+    const section = createSection(record.eventType === "final" ? "Final map" : "Stage change");
+    if (record.source) section.appendChild(textNode("p", "Source: " + (record.source === "ai" ? "AI-assisted" : "Manual")));
+    const frame = document.createElement("div");
+    frame.className = "mini-map-frame";
+    const map = document.createElement("div");
+    map.className = "mini-map";
+    renderMap(map, safeArray(record.rows), true);
+    frame.appendChild(map);
+    section.appendChild(frame);
+    elements.inspectorBody.appendChild(section);
+}
+
+function appendFlowTurnDetails(record) {
+    const section = createSection("Conversation");
+    section.append(
+        textNode("h4", "Player"),
+        textNode("p", record.userText || "-"),
+        textNode("h4", "AI"),
+        textNode("p", record.assistantText || "-")
+    );
+    const cards = safeArray(record.cards);
+    if (cards.length) {
+        section.appendChild(textNode("h4", "Cards"));
+        cards.forEach(card => section.appendChild(textNode("p", "[" + value(card.type) + "] " + value(card.text))));
+    }
+    elements.inspectorBody.appendChild(section);
+}
+
+function appendFlowMessageDetails(record) {
+    const section = createSection("Message to opponent");
+    section.appendChild(textNode("p", record.message || "-"));
+    elements.inspectorBody.appendChild(section);
 }
 
 function renderComparison(match) {

@@ -1334,6 +1334,54 @@ class CoCreationSessionTests(unittest.TestCase):
             "I wanted a compact introductory puzzle.",
         )
 
+    def test_manual_stage_and_final_are_synchronized_as_compact_flow_events(self):
+        initial_version_id = self.read_session()["currentVersionId"]
+        with patch.object(backend, "synchronize_cocreation_event_with_online_match") as sync:
+            saved = self.client.post(
+                f"/api/sessions/{self.session_id}/versions",
+                json={
+                    "rows": EDITED_ROWS,
+                    "baseVersionId": initial_version_id,
+                    "idempotencyKey": "sync_manual_stage_001",
+                    "summary": "Move the player left.",
+                },
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            version_id = saved.json()["currentVersionId"]
+            finalized = self.client.post(
+                f"/api/sessions/{self.session_id}/finalize",
+                json={
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "sync_final_stage_001",
+                },
+            )
+
+        self.assertEqual(finalized.status_code, 200, finalized.text)
+        events = [call.args[1] for call in sync.call_args_list]
+        self.assertEqual(events[0]["eventType"], "stage")
+        self.assertEqual(events[0]["source"], "manual")
+        self.assertEqual(events[0]["rows"], EDITED_ROWS)
+        self.assertEqual(events[1]["eventType"], "final")
+        self.assertEqual(events[1]["versionId"], version_id)
+
+    def test_message_sync_uses_a_stable_message_event_id(self):
+        version_id = self.read_session()["currentVersionId"]
+        self.client.post(
+            f"/api/sessions/{self.session_id}/finalize",
+            json={"baseVersionId": version_id, "idempotencyKey": "message_final_001"},
+        )
+        with patch.object(backend, "synchronize_final_intention_with_online_match") as sync:
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/intention",
+                json={
+                    "content": "Notice the route before moving the box.",
+                    "idempotencyKey": "message_send_001",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(sync.call_args.args[3], "message:" + self.session_id + ":message_send_001")
+        self.assertEqual(sync.call_args.args[4], self.session_id)
+
     def test_expired_deadline_locks_edits_and_finalizes_the_current_draft(self):
         with repository.connect(immediate=True) as database:
             database.execute(

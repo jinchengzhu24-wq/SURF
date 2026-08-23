@@ -49,6 +49,11 @@ class MatchmakingRecordTests(unittest.TestCase):
             ),
             patch.object(
                 backend,
+                "ONLINE_MATCH_FLOW_DIR",
+                log_dir / "matches",
+            ),
+            patch.object(
+                backend,
                 "SURVEY_LOG_FILE",
                 log_dir / "survey_responses.jsonl",
             ),

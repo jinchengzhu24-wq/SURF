@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import uuid
@@ -96,6 +97,7 @@ CREATIVE_EXPANSION_CHOICE_LOG_FILE = STUDY_LOG_DIR / "creative_expansion_choices
 HA_PLAN_EVENT_LOG_FILE = STUDY_LOG_DIR / "ha_plan_events.jsonl"
 JOURNEY_EVENT_LOG_FILE = STUDY_LOG_DIR / "journey_events.jsonl"
 ONLINE_MATCH_LOG_FILE = STUDY_LOG_DIR / "online_match_events.jsonl"
+ONLINE_MATCH_FLOW_DIR = STUDY_LOG_DIR / "matches"
 ONLINE_ROOM_TTL_SECONDS = 30 * 60
 ONLINE_ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 ONLINE_ROOM_CODE_PATTERN = re.compile(r"^[A-Z0-9]{6}$")
@@ -134,6 +136,24 @@ class OnlineChallengeRequest(BaseModel):
 class OnlineDesignerIntentionSyncRequest(BaseModel):
     playerNumber: int
     designerIntention: str
+    eventId: str | None = ""
+    sessionId: str | None = ""
+
+
+class OnlineCoCreationFlowEventRequest(BaseModel):
+    eventId: str
+    playerNumber: int
+    eventType: str
+    sessionId: str
+    versionId: str | None = ""
+    stageNumber: int | None = None
+    source: str | None = ""
+    rows: list[str] | None = None
+    diff: list[dict] | None = None
+    userText: str | None = ""
+    assistantText: str | None = ""
+    language: str | None = ""
+    cards: list[dict] | None = None
 
 
 class OnlineResultRequest(BaseModel):
@@ -271,6 +291,168 @@ def append_online_match_event(
             log_file.write("\n")
 
     return event
+
+
+def online_match_flow_directory(match_id):
+    normalized = str(match_id or "").strip()
+
+    if not re.fullmatch(r"[a-f0-9]{32}", normalized):
+        raise HTTPException(status_code=400, detail="Invalid match ID")
+
+    return ONLINE_MATCH_FLOW_DIR / normalized
+
+
+def online_match_flow_file(match_id, player_number):
+    if player_number not in (1, 2):
+        raise HTTPException(status_code=400, detail="Invalid player number")
+
+    return online_match_flow_directory(match_id) / f"player-{player_number}.jsonl"
+
+
+def initialize_online_match_flow(room):
+    directory = online_match_flow_directory(room.get("matchId"))
+    directory.mkdir(parents=True, exist_ok=True)
+
+    for player_number in (1, 2):
+        online_match_flow_file(room.get("matchId"), player_number).touch(
+            exist_ok=True
+        )
+
+
+def normalize_cocreation_sync_id(value, label):
+    normalized = str(value or "").strip()
+
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{1,160}", normalized):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}")
+
+    return normalized
+
+
+def normalize_cocreation_cards(cards):
+    if cards is None:
+        return []
+
+    if not isinstance(cards, list) or len(cards) > 8:
+        raise HTTPException(status_code=400, detail="Invalid co-creation cards")
+
+    normalized = []
+    for card in cards:
+        if not isinstance(card, dict):
+            raise HTTPException(status_code=400, detail="Invalid co-creation card")
+
+        card_type = str(card.get("type") or "").strip()
+        text = str(card.get("text") or "").strip()
+        if (
+            not re.fullmatch(r"[a-z_]{1,40}", card_type)
+            or not text
+            or len(text) > 4000
+        ):
+            raise HTTPException(status_code=400, detail="Invalid co-creation card")
+        normalized.append({"type": card_type, "text": text})
+
+    return normalized
+
+
+def build_cocreation_flow_event(room, payload):
+    event_type = str(payload.eventType or "").strip()
+    if event_type not in {"stage", "turn", "final"}:
+        raise HTTPException(status_code=400, detail="Invalid co-creation event type")
+
+    event = {
+        "eventId": normalize_cocreation_sync_id(payload.eventId, "event ID"),
+        "eventType": event_type,
+        "matchId": str(room.get("matchId") or "").strip(),
+        "roomCode": str(room.get("roomCode") or "").strip(),
+        "playerNumber": int(payload.playerNumber),
+        "sessionId": normalize_cocreation_sync_id(payload.sessionId, "session ID"),
+        "serverReceivedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    player = next(
+        (
+            item for item in room.get("players", [])
+            if item.get("playerNumber") == payload.playerNumber
+        ),
+        None,
+    )
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    event["studySessionId"] = str(player.get("studySessionId") or "").strip()
+
+    if event_type in {"stage", "final"}:
+        if not payload.versionId or payload.stageNumber is None or payload.rows is None:
+            raise HTTPException(status_code=400, detail="Incomplete Stage event")
+        validate_online_challenge_rows(payload.rows)
+        event.update({
+            "versionId": normalize_cocreation_sync_id(payload.versionId, "version ID"),
+            "stageNumber": int(payload.stageNumber),
+            "rows": list(payload.rows),
+            "diff": list(payload.diff or []),
+        })
+        if event_type == "stage":
+            source = str(payload.source or "").strip()
+            if source not in {"manual", "ai"}:
+                raise HTTPException(status_code=400, detail="Invalid Stage source")
+            event["source"] = source
+
+    if event_type == "turn":
+        user_text = str(payload.userText or "").strip()
+        assistant_text = str(payload.assistantText or "").strip()
+        language = str(payload.language or "").strip()
+        if not user_text or not assistant_text or len(user_text) > 2000 or len(assistant_text) > 12000:
+            raise HTTPException(status_code=400, detail="Incomplete conversation turn")
+        if language not in {"en", "zh-CN"}:
+            raise HTTPException(status_code=400, detail="Invalid conversation language")
+        event.update({
+            "versionId": normalize_cocreation_sync_id(payload.versionId, "version ID"),
+            "userText": user_text,
+            "assistantText": assistant_text,
+            "language": language,
+            "cards": normalize_cocreation_cards(payload.cards),
+        })
+
+    return event
+
+
+def append_cocreation_flow_event(room, event):
+    path = online_match_flow_file(event["matchId"], event["playerNumber"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        existing, _ = read_jsonl_records(path)
+        existing_event = next(
+            (item for item in existing if item.get("eventId") == event["eventId"]),
+            None,
+        )
+        if existing_event is not None:
+            return existing_event, False
+        with path.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(event, ensure_ascii=False))
+            log_file.write("\n")
+    return event, True
+
+
+def append_cocreation_message(room, player_number, event_id, session_id, content):
+    player = next(
+        (
+            item for item in room.get("players", [])
+            if item.get("playerNumber") == player_number
+        ),
+        None,
+    )
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    event = {
+        "eventId": normalize_cocreation_sync_id(event_id, "event ID"),
+        "eventType": "message",
+        "matchId": str(room.get("matchId") or "").strip(),
+        "roomCode": str(room.get("roomCode") or "").strip(),
+        "playerNumber": player_number,
+        "sessionId": normalize_cocreation_sync_id(session_id, "session ID"),
+        "studySessionId": str(player.get("studySessionId") or "").strip(),
+        "message": normalize_online_designer_intention(content),
+        "serverReceivedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    return append_cocreation_flow_event(room, event)
 
 
 def require_online_room(match_id, player_token):
@@ -805,6 +987,7 @@ def create_online_room(payload: OnlineRoomCreateRequest | None = None):
             "lastActivity": time.time(),
         }
         ONLINE_ROOMS[match_id] = room
+        initialize_online_match_flow(room)
         append_online_match_event(room, "room_created", player_number=1)
         return serialize_online_room(room, player, include_token=True)
 
@@ -1016,6 +1199,9 @@ def synchronize_online_designer_intention(
                 detail="Final designer intention is already frozen",
             )
 
+        event_id = str(payload.eventId or "").strip()
+        session_id = str(payload.sessionId or "").strip()
+
         if not existing_intention:
             player["designerIntention"] = designer_intention
             room["lastActivity"] = time.time()
@@ -1026,7 +1212,39 @@ def synchronize_online_designer_intention(
                 designerIntention=designer_intention,
             )
 
+        if event_id and session_id:
+            append_cocreation_message(
+                room,
+                payload.playerNumber,
+                event_id,
+                session_id,
+                designer_intention,
+            )
+
         return serialize_online_room(room, player)
+
+
+@app.post("/online/rooms/{match_id}/cocreation-events")
+def synchronize_cocreation_flow_event(
+    match_id: str,
+    payload: OnlineCoCreationFlowEventRequest,
+    request: Request,
+):
+    """Append one idempotent, player-scoped co-creation research event."""
+    require_cocreation_intention_sync_secret(request)
+
+    if payload.playerNumber not in (1, 2):
+        raise HTTPException(status_code=400, detail="Invalid player number")
+
+    with ONLINE_ROOMS_LOCK:
+        cleanup_expired_online_rooms()
+        room = ONLINE_ROOMS.get(str(match_id or "").strip())
+        if room is None:
+            raise HTTPException(status_code=404, detail="Room not found")
+
+        event = build_cocreation_flow_event(room, payload)
+        stored_event, created = append_cocreation_flow_event(room, event)
+        return {"status": "ok", "recorded": created, "event": stored_event}
 
 
 @app.post("/online/rooms/{match_id}/result")
@@ -1882,10 +2100,15 @@ def delete_online_match(request: DeleteOnlineMatchRequest):
         ]
         deleted_event_count = len(match_events) - len(remaining_events)
 
-        if deleted_event_count == 0:
+        flow_directory = online_match_flow_directory(match_id)
+        flow_exists = flow_directory.exists()
+
+        if deleted_event_count == 0 and not flow_exists:
             raise HTTPException(status_code=404, detail="Online match not found")
 
         write_jsonl_records(ONLINE_MATCH_LOG_FILE, remaining_events)
+        if flow_exists:
+            shutil.rmtree(flow_directory)
 
     return {
         "status": "ok",
@@ -1903,6 +2126,8 @@ def clear_matchmaking_records():
 
     with study_record_lock:
         ONLINE_MATCH_LOG_FILE.write_text("", encoding="utf-8")
+        if ONLINE_MATCH_FLOW_DIR.exists():
+            shutil.rmtree(ONLINE_MATCH_FLOW_DIR)
 
     return {
         "status": "ok",
@@ -2371,6 +2596,12 @@ def read_online_match_events():
     return read_jsonl_records(ONLINE_MATCH_LOG_FILE)
 
 
+def read_online_match_flow_events(match_id, player_number):
+    if not re.fullmatch(r"[a-f0-9]{32}", str(match_id or "").strip()):
+        return [], 0
+    return read_jsonl_records(online_match_flow_file(match_id, player_number))
+
+
 def build_matchmaking_records_payload(
     events,
     malformed_count,
@@ -2406,6 +2637,7 @@ def build_matchmaking_records_payload(
             "result": None,
             "designerIntention": "",
             "studySessionId": "",
+            "coCreationFlow": [],
         }
 
     def get_match(match_id, room_code=""):
@@ -2513,6 +2745,40 @@ def build_matchmaking_records_payload(
 
     for match_record in matches.values():
         players = match_record["players"]
+
+        for player_number in (1, 2):
+            flow_events, flow_malformed_count = read_online_match_flow_events(
+                match_record["matchId"],
+                player_number,
+            )
+            malformed_count += flow_malformed_count
+            safe_flow_events = []
+            for event in flow_events:
+                if not isinstance(event, dict):
+                    continue
+                if event.get("eventType") not in {"stage", "turn", "final", "message"}:
+                    continue
+                safe_flow_events.append({
+                    key: value
+                    for key, value in event.items()
+                    if key in {
+                        "eventId", "eventType", "matchId", "roomCode",
+                        "playerNumber", "studySessionId", "sessionId",
+                        "serverReceivedAt", "versionId", "stageNumber",
+                        "source", "rows", "diff", "userText",
+                        "assistantText", "language", "cards", "message",
+                    }
+                })
+            safe_flow_events.sort(
+                key=lambda event: str(event.get("serverReceivedAt") or "")
+            )
+            players[player_number]["coCreationFlow"] = safe_flow_events
+            if safe_flow_events:
+                latest_timestamp = str(
+                    safe_flow_events[-1].get("serverReceivedAt") or ""
+                )
+                if latest_timestamp > str(match_record.get("updatedAt") or ""):
+                    match_record["updatedAt"] = latest_timestamp
 
         for creator_number, creator in players.items():
             if creator["challenge"] is not None:

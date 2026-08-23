@@ -48,6 +48,11 @@ class OnlineRoomTests(unittest.TestCase):
             ),
             patch.object(
                 backend,
+                "ONLINE_MATCH_FLOW_DIR",
+                log_dir / "matches",
+            ),
+            patch.object(
+                backend,
                 "SURVEY_LOG_FILE",
                 log_dir / "survey_responses.jsonl",
             ),
@@ -451,6 +456,61 @@ class OnlineRoomTests(unittest.TestCase):
             host_status.json()["opponentChallengeMetadata"].get("designerIntention", ""),
             "",
         )
+
+    def test_cocreation_flow_events_are_scoped_to_each_player_and_idempotent(self):
+        host = self.client.post(
+            "/online/rooms",
+            json={"studySessionId": "study-host"},
+        ).json()
+        guest = self.client.post(
+            "/online/rooms/join",
+            json={"roomCode": host["roomCode"], "studySessionId": "study-guest"},
+        ).json()
+        endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"
+        headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
+        stage = {
+            "eventId": "stage:version-host",
+            "eventType": "stage",
+            "playerNumber": 1,
+            "sessionId": "session-host",
+            "versionId": "version-host",
+            "stageNumber": 2,
+            "source": "manual",
+            "rows": SOLVABLE_ROWS_A,
+            "diff": [{"x": 4, "y": 4, "from": ".", "to": "p"}],
+        }
+        turn = {
+            "eventId": "turn:assistant-guest",
+            "eventType": "turn",
+            "playerNumber": 2,
+            "sessionId": "session-guest",
+            "versionId": "version-guest",
+            "userText": "Could this route feel fair?",
+            "assistantText": "I would keep the route visible.",
+            "language": "en",
+            "cards": [{"type": "discussion", "text": "What should stand out?"}],
+        }
+
+        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
+            first = self.client.post(endpoint, json=stage, headers=headers)
+            duplicate = self.client.post(endpoint, json=stage, headers=headers)
+            second = self.client.post(endpoint, json=turn, headers=headers)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertTrue(first.json()["recorded"])
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertFalse(duplicate.json()["recorded"])
+        self.assertEqual(second.status_code, 200, second.text)
+        host_events, _ = backend.read_online_match_flow_events(host["matchId"], 1)
+        guest_events, _ = backend.read_online_match_flow_events(host["matchId"], 2)
+        self.assertEqual([event["eventType"] for event in host_events], ["stage"])
+        self.assertEqual([event["eventType"] for event in guest_events], ["turn"])
+        self.assertEqual(host_events[0]["studySessionId"], "study-host")
+        self.assertEqual(guest_events[0]["studySessionId"], "study-guest")
+        dashboard = self.client.get("/matchmaking-records-data").json()
+        record = next(item for item in dashboard["matches"] if item["matchId"] == host["matchId"])
+        self.assertEqual(record["players"][0]["coCreationFlow"][0]["source"], "manual")
+        self.assertEqual(record["players"][1]["coCreationFlow"][0]["cards"][0]["type"], "discussion")
 
     def test_synced_8010_intention_survives_an_empty_client_submission(self):
         host, _ = self.ready_both_players()

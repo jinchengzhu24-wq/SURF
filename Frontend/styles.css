@@ -659,6 +659,33 @@ main {
     align-items: flex-start;
 }
 
+.player-flow {
+    min-width: 100%;
+}
+
+.player-flow-list {
+    display: block;
+    width: 100%;
+}
+
+.player-flow + .player-flow {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+}
+
+.player-flow-title {
+    margin: 0 0 8px;
+    color: var(--brand-dark);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.player-flow-timeline {
+    min-width: max-content;
+}
+
 .timeline-node {
     position: relative;
     width: 118px;
