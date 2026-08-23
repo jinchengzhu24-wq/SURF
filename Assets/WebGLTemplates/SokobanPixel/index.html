@@ -177,6 +177,34 @@
       var dashboardAccessSubmit = document.querySelector("#dashboard-access-submit");
       var dashboardAccessTarget = "http://111.231.136.4/frontend/";
 
+      function captureDashboardPasswordKey(event) {
+        if (dashboardAccessModal.hidden
+          || !event.target
+          || !dashboardAccessModal.contains(event.target)) {
+          return;
+        }
+
+        if (event.type === "keydown") {
+          if (event.key === "Backspace") {
+            dashboardAccessPassword.value = dashboardAccessPassword.value.slice(0, -1);
+          } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
+            dashboardAccessPassword.value += event.key;
+          } else if (event.key === "Enter") {
+            dashboardAccessForm.requestSubmit();
+          }
+
+          dashboardAccessPassword.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        dashboardAccessPassword.focus();
+      }
+
+      ["keydown", "keypress", "keyup"].forEach(function (eventName) {
+        window.addEventListener(eventName, captureDashboardPasswordKey, true);
+      });
+
       window.SokobanOpenDashboardGate = function (url) {
         dashboardAccessTarget = url || dashboardAccessTarget;
         dashboardAccessStatus.textContent = "";
