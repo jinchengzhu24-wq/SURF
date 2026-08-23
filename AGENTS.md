@@ -31,6 +31,7 @@ This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, an
 
 - Match room results use `completed` or `timed_out`; legacy results without an outcome are treated as completed. Do not regress idempotency, room identity, or result polling.
 - The public endpoints are `http://111.231.136.4/game/`, `/frontend/`, and `/cocreation/`; public links use port 80, not `:8000` or `:8010`.
+- WebGL Dashboard access is gated in the game page itself: the Menu `Server` button and footer `DATA DASHBOARD` button must validate the existing password before opening `/frontend/`; do not move the first prompt back into the 8000 page.
 - For an 8010-only deployment, back up its SQLite database, upload only changed `CoCreationPrototype` files, and restart `sokoban-cocreation`. Never use `/root/SURF/deploy_scp` for an 8010-only change.
 - For a WebGL update, rebuild with Unity `2022.3.62f2c1`, bump the WebGL template cache key when browser assets can be stale, upload `WebGLBuild/`, and verify the public index plus loader/data/framework/wasm responses. Uploading `Frontend/tutorial/` alone does not require an 8000 restart.
 - Do not commit `.env`, API keys, SQLite databases, research logs, Unity caches, or generated WebGL output. Preserve unrelated user changes in a dirty worktree.

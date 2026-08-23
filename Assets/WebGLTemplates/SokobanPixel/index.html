@@ -7,6 +7,75 @@
     <meta name="theme-color" content="#315a73">
     <title>{{{ PRODUCT_NAME }}} | WebGL Quest</title>
     <link rel="stylesheet" href="TemplateData/style.css?v=sokoban-pixel-2">
+    <style>
+      .dashboard-access-modal[hidden] { display: none; }
+      .dashboard-access-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: rgba(21, 30, 25, 0.78);
+      }
+      .dashboard-access-card {
+        width: min(460px, 100%);
+        border: 4px solid var(--wood-dark);
+        color: var(--ink);
+        background: var(--paper);
+        box-shadow: var(--pixel-shadow);
+      }
+      .dashboard-access-header {
+        padding: 18px 22px;
+        color: #fff5d1;
+        background: var(--wood);
+        border-bottom: 4px solid var(--wood-dark);
+      }
+      .dashboard-access-header h2 {
+        margin: 0;
+        font-size: clamp(18px, 3vw, 26px);
+        letter-spacing: 0.04em;
+      }
+      .dashboard-access-body { padding: 22px; }
+      .dashboard-access-body p { margin: 0 0 14px; line-height: 1.45; }
+      .dashboard-access-body label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 700;
+      }
+      .dashboard-access-body input {
+        width: 100%;
+        min-height: 46px;
+        padding: 8px 12px;
+        border: 3px solid var(--wood-dark);
+        color: var(--ink);
+        background: #fffdf4;
+      }
+      .dashboard-access-status {
+        min-height: 1.4em;
+        margin-top: 10px !important;
+        color: #9b3027;
+        font-size: 0.9em;
+      }
+      .dashboard-access-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 12px;
+        padding: 14px 22px 18px;
+        border-top: 4px solid var(--stone-mid);
+      }
+      .dashboard-access-actions button {
+        min-width: 112px;
+        min-height: 44px;
+        padding: 8px 14px;
+        border: 3px solid var(--wood-dark);
+        cursor: pointer;
+        font-weight: 700;
+      }
+      #dashboard-access-cancel { color: var(--ink); background: var(--stone-light); }
+      #dashboard-access-submit { color: #fff5d1; background: #b84c3e; }
+      .dashboard-access-actions button:disabled { cursor: wait; opacity: 0.6; }
+    </style>
   </head>
   <body>
     <main class="adventure-shell">
@@ -60,7 +129,8 @@
           <div class="footer-actions">
             <a
               class="pixel-button secondary"
-              href="http://111.231.136.4/frontend/?access=1"
+              href="http://111.231.136.4/frontend/"
+              data-dashboard-link
               target="_blank"
               rel="noopener noreferrer"
             >DATA DASHBOARD</a>
@@ -72,6 +142,24 @@
       </section>
     </main>
 
+    <div id="dashboard-access-modal" class="dashboard-access-modal" hidden>
+      <form id="dashboard-access-form" class="dashboard-access-card">
+        <div class="dashboard-access-header">
+          <h2>DASHBOARD ACCESS</h2>
+        </div>
+        <div class="dashboard-access-body">
+          <p>Enter the study dashboard password to continue.</p>
+          <label for="dashboard-access-password">Password</label>
+          <input id="dashboard-access-password" type="password" autocomplete="off" required>
+          <p id="dashboard-access-status" class="dashboard-access-status" role="alert" aria-live="assertive"></p>
+        </div>
+        <div class="dashboard-access-actions">
+          <button id="dashboard-access-cancel" type="button">CANCEL</button>
+          <button id="dashboard-access-submit" type="submit">CONTINUE</button>
+        </div>
+      </form>
+    </div>
+
     <script>
       var container = document.querySelector("#unity-container");
       var canvas = document.querySelector("#unity-canvas");
@@ -81,6 +169,67 @@
       var loadingPercent = document.querySelector("#unity-loading-percent");
       var fullscreenButton = document.querySelector("#unity-fullscreen-button");
       var warningBanner = document.querySelector("#unity-warning");
+      var dashboardAccessModal = document.querySelector("#dashboard-access-modal");
+      var dashboardAccessForm = document.querySelector("#dashboard-access-form");
+      var dashboardAccessPassword = document.querySelector("#dashboard-access-password");
+      var dashboardAccessStatus = document.querySelector("#dashboard-access-status");
+      var dashboardAccessCancel = document.querySelector("#dashboard-access-cancel");
+      var dashboardAccessSubmit = document.querySelector("#dashboard-access-submit");
+      var dashboardAccessTarget = "http://111.231.136.4/frontend/";
+
+      window.SokobanOpenDashboardGate = function (url) {
+        dashboardAccessTarget = url || dashboardAccessTarget;
+        dashboardAccessStatus.textContent = "";
+        dashboardAccessPassword.value = "";
+        dashboardAccessModal.hidden = false;
+        window.setTimeout(function () { dashboardAccessPassword.focus(); }, 0);
+      };
+
+      function closeDashboardAccessGate() {
+        if (dashboardAccessSubmit.disabled) return;
+        dashboardAccessModal.hidden = true;
+        dashboardAccessPassword.value = "";
+        dashboardAccessStatus.textContent = "";
+      }
+
+      dashboardAccessCancel.addEventListener("click", closeDashboardAccessGate);
+      dashboardAccessForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+
+        var password = dashboardAccessPassword.value;
+        if (!password) return;
+
+        dashboardAccessSubmit.disabled = true;
+        dashboardAccessCancel.disabled = true;
+        dashboardAccessStatus.textContent = "Checking password...";
+
+        var popup = window.open("about:blank", "_blank", "noopener,noreferrer");
+        fetch("http://111.231.136.4:8000/verify-dashboard-password", {
+          method: "POST",
+          headers: { "X-Delete-Password": password }
+        }).then(function (response) {
+          if (!response.ok) throw new Error("Incorrect password");
+          if (popup && !popup.closed) {
+            popup.location.href = dashboardAccessTarget;
+          } else {
+            window.location.href = dashboardAccessTarget;
+          }
+          dashboardAccessModal.hidden = true;
+        }).catch(function (error) {
+          if (popup && !popup.closed) popup.close();
+          dashboardAccessStatus.textContent = error.message || "Could not verify password.";
+          dashboardAccessSubmit.disabled = false;
+          dashboardAccessCancel.disabled = false;
+          dashboardAccessPassword.focus();
+        });
+      });
+
+      document.querySelectorAll("[data-dashboard-link]").forEach(function (link) {
+        link.addEventListener("click", function (event) {
+          event.preventDefault();
+          window.SokobanOpenDashboardGate(link.href);
+        });
+      });
 
       function unityShowBanner(message, type) {
         function updateBannerVisibility() {
@@ -105,7 +254,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=questionnaire-link-once-20260822-1";
+      var buildVersion = "?v=dashboard-gate-webgl-20260823-1";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,

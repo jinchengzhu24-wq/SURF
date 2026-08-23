@@ -16,6 +16,10 @@ public class MenuController : MonoBehaviour
 #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
     private static extern void SokobanNavigateCurrentPage(string url);
+
+    [DllImport("__Internal")]
+    private static extern void SokobanOpenDashboardGate(string url);
+
 #endif
 
     public void StartGame()
@@ -56,20 +60,17 @@ public class MenuController : MonoBehaviour
     {
         if (TryGetHttpUrl(studyDashboardUrl, "Study dashboard", out string dashboardUrl))
         {
-            string accessUrl = AppendDashboardAccessParameter(dashboardUrl);
-            Debug.Log("MenuController: Opening study dashboard access gate: " + accessUrl);
-            Application.OpenURL(accessUrl);
+            Debug.Log("MenuController: Opening study dashboard access gate in WebGL: " + dashboardUrl);
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+            SokobanOpenDashboardGate(dashboardUrl);
+#else
+            Application.OpenURL(dashboardUrl);
+#endif
         }
     }
 
-    private string AppendDashboardAccessParameter(string url)
-    {
-        string separator = url.Contains("?")
-            ? (url.EndsWith("?") || url.EndsWith("&") ? string.Empty : "&")
-            : "?";
 
-        return url + separator + "access=1";
-    }
 
 
     public void OpenTutorial()
@@ -90,8 +91,8 @@ public class MenuController : MonoBehaviour
 #elif UNITY_WEBGL
         if (TryGetHttpUrl(studyDashboardUrl, "Study dashboard", out string dashboardUrl))
         {
-            Debug.Log("MenuController: Leaving WebGL game for study dashboard: " + dashboardUrl);
-            SokobanNavigateCurrentPage(dashboardUrl);
+            Debug.Log("MenuController: Opening study dashboard access gate before leaving WebGL: " + dashboardUrl);
+            SokobanOpenDashboardGate(dashboardUrl);
         }
 #else
         Application.Quit();

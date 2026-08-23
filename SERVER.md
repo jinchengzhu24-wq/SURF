@@ -15,7 +15,7 @@ https://v.wjx.cn/vm/O6tj8nu.aspx#
 
 端口说明：`8000` 是 Nginx 转发的内部匹配、dashboard 和 WebGL 上游端口，`8010` 是 Nginx 转发的内部共创服务端口；用户访问时统一使用 Nginx 的 80 端口，因此公开地址不带 `:8000` 或 `:8010`。公开入口为 `http://111.231.136.4/game/`、`http://111.231.136.4/frontend/` 和 `http://111.231.136.4/cocreation/`。
 
-从 WebGL 进入 Dashboard 时，Menu 的 `Server` 按钮和页面底部的 `DATA DASHBOARD` 按钮都会打开 `/frontend/?access=1`。该参数会先显示 8000 的访问密码弹窗，复用 `DASHBOARD_DELETE_PASSWORD`；验证成功后才加载 Dashboard。Dashboard 内的删除/清空操作仍会再次要求原删除密码。直接访问不带 `access=1` 的 `/frontend/` 保持原行为。
+从 WebGL 进入 Dashboard 时，Menu 的 `Server` 按钮和页面底部的 `DATA DASHBOARD` 按钮都会先在 WebGL 页面内显示访问密码框；密码通过 8000 的 `/verify-dashboard-password` 校验成功后，才打开 `/frontend/`。取消或校验失败都不会跳转。Dashboard 内的删除/清空操作仍会再次要求原删除密码。直接访问 `/frontend/` 不经过 WebGL 入口时保持原行为。
 
 ## 端口速查
 
@@ -66,7 +66,7 @@ Frontend/styles.css
 Frontend/Images/
 ```
 
-如果修改了 WebGL 页面底部的 `DATA DASHBOARD` 链接，还需要用 Unity 重新构建并同步完整 `WebGLBuild/`；该链接来自 `Assets/WebGLTemplates/SokobanPixel/index.html`。
+如果修改了 WebGL 页面底部的 `DATA DASHBOARD` 链接或访问密码框，还需要用 Unity 重新构建并同步完整 `WebGLBuild/`；入口来自 `Assets/WebGLTemplates/SokobanPixel/index.html`，Menu 的 `Server` 按钮使用同一套 WebGL 访问框。
 
 以下文件只参与本地 Unity 开发或构建，不需要上传服务器：
 
