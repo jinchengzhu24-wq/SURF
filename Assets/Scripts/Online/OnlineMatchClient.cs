@@ -22,10 +22,14 @@ public class OnlineMatchClient : MonoBehaviour
         Action<OnlineRoomState> onSuccess,
         Action<string> onFailure)
     {
+        OnlineCreatePayload payload = new OnlineCreatePayload
+        {
+            studySessionId = CreativeWorkshopContext.GetOrCreateStudySessionId()
+        };
         return SendRoomRequest(
             UnityWebRequest.kHttpVerbPOST,
             "/online/rooms",
-            "{}",
+            JsonUtility.ToJson(payload),
             false,
             onSuccess,
             onFailure
@@ -39,7 +43,8 @@ public class OnlineMatchClient : MonoBehaviour
     {
         OnlineJoinPayload payload = new OnlineJoinPayload
         {
-            roomCode = roomCode
+            roomCode = roomCode,
+            studySessionId = CreativeWorkshopContext.GetOrCreateStudySessionId()
         };
         return SendRoomRequest(
             UnityWebRequest.kHttpVerbPOST,
@@ -287,9 +292,16 @@ public class OnlineMatchClient : MonoBehaviour
     }
 
     [Serializable]
+    private class OnlineCreatePayload
+    {
+        public string studySessionId;
+    }
+
+    [Serializable]
     private class OnlineJoinPayload
     {
         public string roomCode;
+        public string studySessionId;
     }
 
     [Serializable]

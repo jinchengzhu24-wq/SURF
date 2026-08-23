@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,6 +106,55 @@ class OnlineRoomTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_room_events_preserve_each_players_study_session_id(self):
+        host_session_id = "host-study-session"
+        guest_session_id = "guest-study-session"
+        host_response = self.client.post(
+            "/online/rooms",
+            json={"studySessionId": host_session_id},
+        )
+        self.assertEqual(host_response.status_code, 200)
+        host = host_response.json()
+        guest_response = self.client.post(
+            "/online/rooms/join",
+            json={
+                "roomCode": host["roomCode"],
+                "studySessionId": guest_session_id,
+            },
+        )
+        self.assertEqual(guest_response.status_code, 200)
+        guest = guest_response.json()
+
+        ready_url = "/online/rooms/" + host["matchId"] + "/ready"
+        self.client.post(
+            ready_url,
+            headers=self.auth_headers(host["playerToken"]),
+            json={"ready": True},
+        )
+        self.client.post(
+            ready_url,
+            headers=self.auth_headers(guest["playerToken"]),
+            json={"ready": True},
+        )
+
+        events = [
+            json.loads(line)
+            for line in backend.ONLINE_MATCH_LOG_FILE.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        self.assertEqual(events[0]["studySessionId"], host_session_id)
+        self.assertEqual(events[1]["studySessionId"], guest_session_id)
+        self.assertEqual(events[2]["studySessionId"], host_session_id)
+        self.assertEqual(events[3]["studySessionId"], guest_session_id)
+
+        records_response = self.client.get("/matchmaking-records-data")
+        self.assertEqual(records_response.status_code, 200)
+        records = records_response.json()["matches"]
+        record = next(item for item in records if item["matchId"] == host["matchId"])
+        self.assertEqual(record["players"][0]["studySessionId"], host_session_id)
+        self.assertEqual(record["players"][1]["studySessionId"], guest_session_id)
 
     def test_join_normalizes_room_code_and_rejects_third_player(self):
         host = self.create_room()

@@ -113,8 +113,13 @@ class PCSolvabilityError(ValueError):
         self.details = dict(details or {})
 
 
+class OnlineRoomCreateRequest(BaseModel):
+    studySessionId: str | None = ""
+
+
 class OnlineRoomJoinRequest(BaseModel):
     roomCode: str | None = ""
+    studySessionId: str | None = ""
 
 
 class OnlineReadyRequest(BaseModel):
@@ -167,6 +172,18 @@ def normalize_online_room_code(room_code):
         raise HTTPException(
             status_code=400,
             detail="Room code must contain exactly 6 letters or digits",
+        )
+
+    return normalized
+
+
+def normalize_study_session_id(study_session_id):
+    normalized = str(study_session_id or "").strip()
+
+    if len(normalized) > 64:
+        raise HTTPException(
+            status_code=400,
+            detail="Study session ID must contain at most 64 characters",
         )
 
     return normalized
@@ -229,6 +246,22 @@ def append_online_match_event(
             time.gmtime(),
         ),
     }
+
+    if player_number in (1, 2):
+        player = next(
+            (
+                item
+                for item in room.get("players", [])
+                if item.get("playerNumber") == player_number
+            ),
+            None,
+        )
+
+        if player is not None:
+            event["studySessionId"] = str(
+                player.get("studySessionId") or ""
+            ).strip()
+
     event.update(details)
     STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -740,11 +773,16 @@ def ready():
 
 
 @app.post("/online/rooms")
-def create_online_room():
+def create_online_room(payload: OnlineRoomCreateRequest | None = None):
+    study_session_id = normalize_study_session_id(
+        payload.studySessionId if payload is not None else ""
+    )
+
     with ONLINE_ROOMS_LOCK:
         cleanup_expired_online_rooms()
         player = {
             "playerNumber": 1,
+            "studySessionId": study_session_id,
             "token": secrets.token_urlsafe(32),
             "ready": False,
             "challengeRows": None,
@@ -768,6 +806,7 @@ def create_online_room():
 @app.post("/online/rooms/join")
 def join_online_room(payload: OnlineRoomJoinRequest):
     room_code = normalize_online_room_code(payload.roomCode)
+    study_session_id = normalize_study_session_id(payload.studySessionId)
 
     with ONLINE_ROOMS_LOCK:
         cleanup_expired_online_rooms()
@@ -791,6 +830,7 @@ def join_online_room(payload: OnlineRoomJoinRequest):
 
         player = {
             "playerNumber": 2,
+            "studySessionId": study_session_id,
             "token": secrets.token_urlsafe(32),
             "ready": False,
             "challengeRows": None,
@@ -2346,6 +2386,7 @@ def build_matchmaking_records_payload(
         "moveCount",
         "minimumMoves",
         "outcome",
+        "studySessionId",
     }
 
     def create_player(player_number):
@@ -2358,6 +2399,7 @@ def build_matchmaking_records_payload(
             "challenge": None,
             "result": None,
             "designerIntention": "",
+            "studySessionId": "",
         }
 
     def get_match(match_id, room_code=""):
@@ -2417,6 +2459,11 @@ def build_matchmaking_records_payload(
 
         player = match_record["players"].get(player_number)
         event_type = normalize_survey_identifier(event.get("eventType"))
+
+        if player is not None:
+            player["studySessionId"] = normalize_survey_identifier(
+                event.get("studySessionId")
+            ) or player["studySessionId"]
 
         if event_type == "room_created":
             match_record["createdAt"] = timestamp or match_record["createdAt"]

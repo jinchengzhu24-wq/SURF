@@ -13,6 +13,12 @@ public class QuestionnaireController : MonoBehaviour
     private const string SurveyResponsePath = "/record-survey-response";
     private const string PlayerNamePrefsKey = "SokobanSurveyPlayerName";
     private const int RequiredAnswerCount = 3;
+    private const string OnlinePreMatchSurveyId = "online_pre_match_survey";
+    private const string OnlinePostMatchSurveyId = "online_post_match_survey";
+    // WJX stores URL values in hidden text questions via its q{number} parameter.
+    // The two question numbers are intentionally fixed by the live WJX forms.
+    private const int OnlinePreMatchStudySessionQuestionNumber = 13;
+    private const int OnlinePostMatchStudySessionQuestionNumber = 17;
 
     [Header("Survey")]
     public string surveyId = "post_play_survey";
@@ -250,7 +256,12 @@ public class QuestionnaireController : MonoBehaviour
             return;
         }
 
-        Application.OpenURL(surveyUrl);
+        int studySessionQuestionNumber;
+        Application.OpenURL(
+            TryGetStudySessionQuestionNumber(out studySessionQuestionNumber)
+                ? AppendStudySessionIdParameter(surveyUrl, studySessionQuestionNumber)
+                : surveyUrl
+        );
         externalSurveyOpened = true;
 
         if (externalSurveyLinkButton != null)
@@ -563,6 +574,58 @@ public class QuestionnaireController : MonoBehaviour
 
         resolvedUrl = uri.AbsoluteUri;
         return true;
+    }
+
+    private bool TryGetStudySessionQuestionNumber(out int questionNumber)
+    {
+        if (string.Equals(surveyId, OnlinePreMatchSurveyId, StringComparison.Ordinal))
+        {
+            questionNumber = OnlinePreMatchStudySessionQuestionNumber;
+            return true;
+        }
+
+        if (string.Equals(surveyId, OnlinePostMatchSurveyId, StringComparison.Ordinal))
+        {
+            questionNumber = OnlinePostMatchStudySessionQuestionNumber;
+            return true;
+        }
+
+        questionNumber = 0;
+        return false;
+    }
+
+    private string AppendStudySessionIdParameter(
+        string surveyUrl,
+        int studySessionQuestionNumber)
+    {
+        string studySessionId = GetOrCreateSessionId();
+
+        if (IsBlank(studySessionId))
+        {
+            return surveyUrl;
+        }
+
+        Uri uri;
+
+        if (!Uri.TryCreate(surveyUrl, UriKind.Absolute, out uri))
+        {
+            return surveyUrl;
+        }
+
+        UriBuilder builder = new UriBuilder(uri);
+        string query = builder.Query.TrimStart('?');
+
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            query += "&";
+        }
+
+        string encodedStudySessionId = Uri.EscapeDataString(studySessionId);
+        builder.Query = query
+            + "studySessionId=" + encodedStudySessionId
+            + "&q" + studySessionQuestionNumber
+            + "=" + encodedStudySessionId;
+        return builder.Uri.AbsoluteUri;
     }
 }
 
