@@ -20,6 +20,9 @@ public class MenuController : MonoBehaviour
     [DllImport("__Internal")]
     private static extern void SokobanOpenDashboardGate(string url);
 
+    [DllImport("__Internal")]
+    private static extern void SokobanCloseCurrentTab();
+
 #endif
 
     public void StartGame()
@@ -89,11 +92,7 @@ public class MenuController : MonoBehaviour
 #if UNITY_EDITOR
         UnityEditor.EditorApplication.isPlaying = false;
 #elif UNITY_WEBGL
-        if (TryGetHttpUrl(studyDashboardUrl, "Study dashboard", out string dashboardUrl))
-        {
-            Debug.Log("MenuController: Opening study dashboard access gate before leaving WebGL: " + dashboardUrl);
-            SokobanOpenDashboardGate(dashboardUrl);
-        }
+        SokobanCloseCurrentTab();
 #else
         Application.Quit();
 #endif

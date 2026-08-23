@@ -10,6 +10,15 @@ mergeInto(LibraryManager.library, {
             window.open(url, "_blank", "noopener,noreferrer");
         }
     },
+    SokobanCloseCurrentTab: function () {
+        // Browsers only allow closing tabs that were opened by script. Try the
+        // standard close first, then the same-window workaround used by Edge.
+        window.close();
+        if (!window.closed) {
+            var currentWindow = window.open("", "_self");
+            if (currentWindow) currentWindow.close();
+        }
+    },
     SokobanClearCoCreationPlayQuery: function () {
         var url = new URL(window.location.href);
         url.searchParams.delete('cocreationAttempt');
