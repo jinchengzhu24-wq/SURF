@@ -28,8 +28,6 @@ const elements = {
     statAttention: document.getElementById("statAttention"),
     statDataHealth: document.getElementById("statDataHealth"),
     searchInput: document.getElementById("searchInput"),
-    statusFilter: document.getElementById("statusFilter"),
-    modeFilter: document.getElementById("modeFilter"),
     matchCount: document.getElementById("matchCount"),
     matchList: document.getElementById("matchList"),
     emptyDetail: document.getElementById("emptyDetail"),
@@ -67,8 +65,6 @@ function init() {
     elements.refreshButton.addEventListener("click", () => loadData(true));
     elements.clearButton.addEventListener("click", clearAllRecords);
     elements.searchInput.addEventListener("input", applyFilters);
-    elements.statusFilter.addEventListener("change", applyFilters);
-    elements.modeFilter.addEventListener("change", applyFilters);
     elements.deleteMatchButton.addEventListener("click", deleteSelectedMatch);
     elements.deleteDialogForm.addEventListener("submit", submitDeleteDialog);
     elements.deleteDialogCancel.addEventListener("click", closeDeleteDialog);
@@ -76,13 +72,6 @@ function init() {
         event.preventDefault();
         if (!state.deleteDialogBusy) closeDeleteDialog();
     });
-    document.querySelectorAll("[data-summary-filter]").forEach(button => {
-        button.addEventListener("click", () => {
-            elements.statusFilter.value = button.dataset.summaryFilter || "all";
-            applyFilters();
-        });
-    });
-
     if (requiresDashboardAccess()) {
         requestDashboardAccess();
         return;
@@ -166,12 +155,7 @@ function renderSummary() {
 
 function applyFilters() {
     const query = clean(elements.searchInput.value).toLowerCase();
-    const status = elements.statusFilter.value;
-    const mode = elements.modeFilter.value;
     state.filteredMatches = state.matches.filter(match => {
-        if (status === "attention" && !["cancelled", "expired"].includes(match.status)) return false;
-        if (!["all", "attention"].includes(status) && match.status !== status) return false;
-        if (mode !== "all" && !getMatchModes(match).has(mode)) return false;
         if (!query) return true;
         return [match.matchId, match.roomCode, shortId(match.matchId)]
             .join(" ")
@@ -180,15 +164,6 @@ function applyFilters() {
     });
     renderMatchList();
     keepOrSelectMatch();
-}
-
-function getMatchModes(match) {
-    const modes = new Set();
-    safeArray(match.players).forEach(player => {
-        const challenge = player.challenge || {};
-        if (clean(challenge.aiAssistantMode)) modes.add(challenge.aiAssistantMode);
-    });
-    return modes;
 }
 
 function renderMatchList() {

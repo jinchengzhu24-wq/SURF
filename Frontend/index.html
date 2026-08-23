@@ -52,21 +52,21 @@
             <div class="status-line" id="statusLine">Preparing dashboard...</div>
 
             <section class="summary" aria-label="MatchMaking summary">
-                <button class="stat" type="button" data-summary-filter="all">
+                <div class="stat">
                     <span>Matches</span><strong id="statMatches">0</strong><small>recorded rooms</small>
-                </button>
-                <button class="stat" type="button" data-summary-filter="completed">
+                </div>
+                <div class="stat">
                     <span>Completed</span><strong id="statCompleted">0</strong><small id="statCompletionRate">0% completion rate</small>
-                </button>
-                <button class="stat" type="button" data-summary-filter="all">
+                </div>
+                <div class="stat">
                     <span>Average play time</span><strong id="statAvg">-</strong><small>across submitted runs</small>
-                </button>
-                <button class="stat stat-alert" type="button" data-summary-filter="attention">
+                </div>
+                <div class="stat stat-alert">
                     <span>Needs attention</span><strong id="statAttention">0</strong><small id="statDataHealth">no data issues</small>
-                </button>
+                </div>
             </section>
 
-            <section class="controls" aria-label="Match filters">
+            <section class="controls" aria-label="Match search">
                 <label class="search-field">
                     <svg class="search-icon icon" viewBox="0 0 24 24" aria-hidden="true">
                         <circle cx="11" cy="11" r="7"></circle>
@@ -74,24 +74,6 @@
                     </svg>
                     <input id="searchInput" type="search" autocomplete="off" spellcheck="false"
                         placeholder="Search room code or Match ID">
-                </label>
-                <label class="select-field">
-                    <span>Status</span>
-                    <select id="statusFilter">
-                        <option value="all">All matches</option>
-                        <option value="completed">Completed</option>
-                        <option value="in_progress">In progress</option>
-                        <option value="cancelled">Cancelled</option>
-                        <option value="expired">Expired</option>
-                        <option value="attention">Needs attention</option>
-                    </select>
-                </label>
-                <label class="select-field">
-                    <span>Draft method</span>
-                    <select id="modeFilter">
-                        <option value="all">All methods</option>
-                        <option value="description_generation">Description Generation</option>
-                    </select>
                 </label>
             </section>
 
