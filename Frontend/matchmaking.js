@@ -255,13 +255,15 @@ function renderMatch(match) {
     renderTimeline(match, stages);
     renderChallengeTabs(match);
     renderSelectedChallenge(match);
-    renderInspector(stages.find(stage => stage.key === state.selectedStageKey) || null);
+    renderInspector(match, stages.find(stage => stage.key === state.selectedStageKey) || null);
     renderComparison(match);
 }
 
 function buildTimelineStages(match) {
     const flowStages = safeArray(match.players).flatMap(player =>
-        safeArray(player.coCreationFlow).map((event, index) => ({
+        safeArray(player.coCreationFlow)
+            .filter(event => event.eventType !== "opening")
+            .map((event, index) => ({
             key: "flow:" + player.playerNumber + ":" + (clean(event.eventId) || index),
             type: "flow",
             label: flowStageLabel(event),
@@ -269,7 +271,7 @@ function buildTimelineStages(match) {
             warning: false,
             playerNumber: player.playerNumber,
             record: event
-        }))
+            }))
     );
     if (flowStages.length) return flowStages.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
     const stages = safeArray(match.events).map((event, index) => ({
@@ -286,6 +288,7 @@ function buildTimelineStages(match) {
 
 function flowStageLabel(event) {
     const labels = {
+        first_stage: "First Stage",
         stage: "Stage " + value(event.stageNumber) + " · " + (event.source === "ai" ? "AI" : "Manual"),
         turn: "Q&A",
         final: "Final Stage",
@@ -407,7 +410,7 @@ function renderSelectedChallenge(match) {
     });
 }
 
-function renderInspector(stage) {
+function renderInspector(match, stage) {
     elements.inspectorBody.textContent = "";
     if (!stage) {
         elements.inspectorTitle.textContent = "Match details";
@@ -435,16 +438,55 @@ function renderInspector(stage) {
         rows.push(["Minimum moves", value(record.minimumMoves)]);
     }
     appendRecordGrid(rows);
-    if (["stage", "final"].includes(record.eventType)) {
-        appendFlowStageDetails(record);
+    if (["first_stage", "stage", "final"].includes(record.eventType)) {
+        appendFlowStageDetails(match, record);
     }
     if (record.eventType === "turn") appendFlowTurnDetails(record);
     if (record.eventType === "message") appendFlowMessageDetails(record);
 }
 
-function appendFlowStageDetails(record) {
-    const section = createSection(record.eventType === "final" ? "Final map" : "Stage change");
+function findOpeningForStage(match, record) {
+    const player = safeArray(match.players).find(item => item.playerNumber === record.playerNumber);
+    return safeArray(player && player.coCreationFlow).find(event =>
+        event.eventType === "opening" && event.versionId === record.versionId
+    ) || null;
+}
+
+function openingIsConsumed(match, opening) {
+    const player = safeArray(match.players).find(item => item.playerNumber === opening.playerNumber);
+    return safeArray(player && player.coCreationFlow).some(event =>
+        event.eventType === "turn" && event.openingAssistantTurnId === opening.assistantTurnId
+    );
+}
+
+function appendCards(section, cards, title = "Cards") {
+    const safeCards = safeArray(cards);
+    if (!safeCards.length) return;
+    section.appendChild(textNode("h4", title));
+    safeCards.forEach(card => section.appendChild(
+        textNode("p", "[" + value(card.type) + "] " + value(card.text))
+    ));
+}
+
+function appendOpeningDetails(section, opening) {
+    section.append(
+        textNode("h4", "AI opening evaluation"),
+        textNode("p", opening.assistantText || "-")
+    );
+    appendCards(section, opening.cards, "Opening cards");
+}
+
+function appendFlowStageDetails(match, record) {
+    const titles = {
+        first_stage: "First Stage map",
+        final: "Final map",
+        stage: "Stage change"
+    };
+    const section = createSection(titles[record.eventType] || "Stage map");
     if (record.source) section.appendChild(textNode("p", "Source: " + (record.source === "ai" ? "AI-assisted" : "Manual")));
+    if (record.initialDraftMethod) {
+        section.appendChild(textNode("p", "Initial draft: " + formatMode(record.initialDraftMethod)));
+    }
     const frame = document.createElement("div");
     frame.className = "mini-map-frame";
     const map = document.createElement("div");
@@ -452,22 +494,27 @@ function appendFlowStageDetails(record) {
     renderMap(map, safeArray(record.rows), true);
     frame.appendChild(map);
     section.appendChild(frame);
+    const opening = findOpeningForStage(match, record);
+    if (opening && !openingIsConsumed(match, opening)) appendOpeningDetails(section, opening);
     elements.inspectorBody.appendChild(section);
 }
 
 function appendFlowTurnDetails(record) {
     const section = createSection("Conversation");
+    if (record.openingAssistantText) {
+        section.append(
+            textNode("h4", "AI opening evaluation"),
+            textNode("p", record.openingAssistantText)
+        );
+        appendCards(section, record.openingCards, "Opening cards");
+    }
     section.append(
         textNode("h4", "Player"),
         textNode("p", record.userText || "-"),
         textNode("h4", "AI"),
         textNode("p", record.assistantText || "-")
     );
-    const cards = safeArray(record.cards);
-    if (cards.length) {
-        section.appendChild(textNode("h4", "Cards"));
-        cards.forEach(card => section.appendChild(textNode("p", "[" + value(card.type) + "] " + value(card.text))));
-    }
+    appendCards(section, record.cards);
     elements.inspectorBody.appendChild(section);
 }
 

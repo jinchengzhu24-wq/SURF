@@ -148,12 +148,18 @@ class OnlineCoCreationFlowEventRequest(BaseModel):
     versionId: str | None = ""
     stageNumber: int | None = None
     source: str | None = ""
+    initialDraftMethod: str | None = ""
     rows: list[str] | None = None
     diff: list[dict] | None = None
     userText: str | None = ""
     assistantText: str | None = ""
     language: str | None = ""
     cards: list[dict] | None = None
+    assistantTurnId: str | None = ""
+    openingAssistantTurnId: str | None = ""
+    openingAssistantText: str | None = ""
+    openingLanguage: str | None = ""
+    openingCards: list[dict] | None = None
 
 
 class OnlineResultRequest(BaseModel):
@@ -355,7 +361,7 @@ def normalize_cocreation_cards(cards):
 
 def build_cocreation_flow_event(room, payload):
     event_type = str(payload.eventType or "").strip()
-    if event_type not in {"stage", "turn", "final"}:
+    if event_type not in {"first_stage", "stage", "opening", "turn", "final"}:
         raise HTTPException(status_code=400, detail="Invalid co-creation event type")
 
     event = {
@@ -378,7 +384,7 @@ def build_cocreation_flow_event(room, payload):
         raise HTTPException(status_code=404, detail="Player not found")
     event["studySessionId"] = str(player.get("studySessionId") or "").strip()
 
-    if event_type in {"stage", "final"}:
+    if event_type in {"first_stage", "stage", "final"}:
         if not payload.versionId or payload.stageNumber is None or payload.rows is None:
             raise HTTPException(status_code=400, detail="Incomplete Stage event")
         validate_online_challenge_rows(payload.rows)
@@ -393,6 +399,37 @@ def build_cocreation_flow_event(room, payload):
             if source not in {"manual", "ai"}:
                 raise HTTPException(status_code=400, detail="Invalid Stage source")
             event["source"] = source
+        elif event_type == "first_stage":
+            initial_draft_method = str(payload.initialDraftMethod or "").strip()
+            if int(payload.stageNumber) != 1 or not re.fullmatch(
+                r"[a-z_]{1,64}", initial_draft_method
+            ):
+                raise HTTPException(status_code=400, detail="Invalid first Stage event")
+            event["initialDraftMethod"] = initial_draft_method
+
+    if event_type == "opening":
+        assistant_turn_id = normalize_cocreation_sync_id(
+            payload.assistantTurnId,
+            "assistant turn ID",
+        )
+        assistant_text = str(payload.assistantText or "").strip()
+        language = str(payload.language or "").strip()
+        if (
+            not payload.versionId
+            or payload.stageNumber is None
+            or not assistant_text
+            or len(assistant_text) > 12000
+            or language not in {"en", "zh-CN"}
+        ):
+            raise HTTPException(status_code=400, detail="Incomplete Stage opening")
+        event.update({
+            "versionId": normalize_cocreation_sync_id(payload.versionId, "version ID"),
+            "stageNumber": int(payload.stageNumber),
+            "assistantTurnId": assistant_turn_id,
+            "assistantText": assistant_text,
+            "language": language,
+            "cards": normalize_cocreation_cards(payload.cards),
+        })
 
     if event_type == "turn":
         user_text = str(payload.userText or "").strip()
@@ -409,6 +446,30 @@ def build_cocreation_flow_event(room, payload):
             "language": language,
             "cards": normalize_cocreation_cards(payload.cards),
         })
+        opening_turn_id = str(payload.openingAssistantTurnId or "").strip()
+        opening_text = str(payload.openingAssistantText or "").strip()
+        opening_language = str(payload.openingLanguage or "").strip()
+        opening_cards_supplied = payload.openingCards is not None
+        opening_supplied = any(
+            (opening_turn_id, opening_text, opening_language, opening_cards_supplied)
+        )
+        if opening_supplied:
+            if (
+                not opening_turn_id
+                or not opening_text
+                or len(opening_text) > 12000
+                or opening_language not in {"en", "zh-CN"}
+            ):
+                raise HTTPException(status_code=400, detail="Incomplete opening conversation")
+            event.update({
+                "openingAssistantTurnId": normalize_cocreation_sync_id(
+                    opening_turn_id,
+                    "opening assistant turn ID",
+                ),
+                "openingAssistantText": opening_text,
+                "openingLanguage": opening_language,
+                "openingCards": normalize_cocreation_cards(payload.openingCards),
+            })
 
     return event
 
@@ -2227,25 +2288,53 @@ def normalize_dg_reflection(summary):
     return ("I get the sense that " + summary[:290]).strip()
 
 
+def normalize_dg_rationale(rationale):
+    normalized = str(rationale or "").strip()[:320]
+    sentence_count = len(re.findall(r"[.!?](?:\s|$)", normalized))
+
+    if len(normalized) < 100 or sentence_count < 2:
+        raise ValueError(
+            "DG guide rationale must explain the experience and relationship in two sentences"
+        )
+    if not re.search(r"\bI\b", normalized):
+        raise ValueError("DG guide rationale must be a first-person judgment")
+    return normalized
+
+
 def build_dg_fallback_summary(relationship, experience, reason=""):
-    difficulty, _ = DG_EXPERIENCES[experience]
-    relationship_tone = {
-        "friend": "a caring shared challenge",
-        "acquaintance": "a clear and welcoming challenge",
-        "stranger": "a readable challenge that earns trust quickly",
+    difficulty = {
+        "friend": {"relaxed": "Easy", "challenging_fair": "Medium", "breakthrough": "Hard"},
+        "acquaintance": {"relaxed": "Easy", "challenging_fair": "Medium", "breakthrough": "Hard"},
+        "stranger": {"relaxed": "Easy", "challenging_fair": "Medium", "breakthrough": "Medium"},
+    }[relationship][experience]
+    relationship_reflection = {
+        "friend": "someone who can read the level as a shared challenge, while still needing the pressure to feel fair",
+        "acquaintance": "someone you want to challenge considerately without assuming they share your puzzle habits",
+        "stranger": "a first encounter where the intended challenge needs to earn trust through clear, readable consequences",
     }[relationship]
-    reflection = {
-        "relaxed": "I get the sense that you may want a calm opening where the other player can settle into the puzzle and feel capable early on.",
-        "challenging_fair": "I get the sense that you may want a few decisions to create real pressure, while still letting the other player understand why each solution works.",
-        "breakthrough": "I get the sense that you may be aiming for a patient struggle that turns into a satisfying moment of recognition rather than a punishing surprise.",
+    experience_reflection = {
+        "relaxed": "a calm, approachable route that lets them settle into the puzzle",
+        "challenging_fair": "meaningful decisions that create pressure without making the solution feel arbitrary",
+        "breakthrough": "a patient struggle that builds toward a satisfying moment of recognition rather than a punishing surprise",
     }[experience]
+    reflection = (
+        "I get the sense that you may be designing for " + relationship_reflection
+        + ", and hoping they experience " + experience_reflection + "."
+    )
+    experience_rationale = {
+        "relaxed": "I would keep the starting pressure light so the player can feel capable before any demanding planning is required.",
+        "challenging_fair": "I would use a moderate amount of planning pressure so that decisions matter while their consequences remain understandable.",
+        "breakthrough": "I would reserve enough planning pressure for the eventual insight to feel earned rather than immediate.",
+    }[experience]
+    relationship_rationale = {
+        "friend": "Because a friend may tolerate a more deliberate shared challenge, I recommend " + difficulty + " while still avoiding opaque or punishing traps.",
+        "acquaintance": "Because the player may not share the designer's assumptions, I recommend " + difficulty + " with especially clear feedback and recoverable reasoning.",
+        "stranger": "Because this first encounter has to establish trust, I recommend " + difficulty + " and would keep the intended pressure legible rather than relying on unexplained trial and error.",
+    }[relationship]
     return {
         "summary": reflection,
         "recommendedDifficulty": difficulty,
-        "rationale": (
-            "I would begin with " + difficulty + " because it best supports " + relationship_tone
-            + " without treating the relationship itself as a difficulty setting."
-        ),
+        "rationale": experience_rationale + " " + relationship_rationale,
         "source": "deterministic_fallback",
         "fallbackReason": reason,
     }
@@ -2260,11 +2349,11 @@ def create_dg_guide_summary(context, request_id=""):
         if not isinstance(payload, dict):
             raise ValueError("DG guide response must be a JSON object")
         summary = normalize_dg_reflection(payload.get("summary"))
-        rationale = str(payload.get("rationale") or "").strip()[:320]
+        rationale = normalize_dg_rationale(payload.get("rationale"))
         difficulty = str(payload.get("recommendedDifficulty") or "").strip()
-        if not summary or not rationale:
-            raise ValueError("DG guide summary and rationale are required")
-        if difficulty not in {"Easy", "Medium", "Hard", "Random"}:
+        if not summary:
+            raise ValueError("DG guide summary is required")
+        if difficulty not in {"Easy", "Medium", "Hard"}:
             raise ValueError("DG guide difficulty is invalid")
         return {
             "summary": summary,
@@ -2756,7 +2845,9 @@ def build_matchmaking_records_payload(
             for event in flow_events:
                 if not isinstance(event, dict):
                     continue
-                if event.get("eventType") not in {"stage", "turn", "final", "message"}:
+                if event.get("eventType") not in {
+                    "first_stage", "stage", "opening", "turn", "final", "message"
+                }:
                     continue
                 safe_flow_events.append({
                     key: value
@@ -2765,8 +2856,10 @@ def build_matchmaking_records_payload(
                         "eventId", "eventType", "matchId", "roomCode",
                         "playerNumber", "studySessionId", "sessionId",
                         "serverReceivedAt", "versionId", "stageNumber",
-                        "source", "rows", "diff", "userText",
-                        "assistantText", "language", "cards", "message",
+                        "source", "initialDraftMethod", "rows", "diff", "userText",
+                        "assistantText", "language", "cards", "assistantTurnId",
+                        "openingAssistantTurnId", "openingAssistantText",
+                        "openingLanguage", "openingCards", "message",
                     }
                 })
             safe_flow_events.sort(

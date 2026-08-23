@@ -155,14 +155,36 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     private GuideResponse BuildFallbackResponse()
     {
-        string difficulty = settings.opponentExperience == "relaxed" ? "Easy" : settings.opponentExperience == "breakthrough" ? "Hard" : "Medium";
-        string summary = settings.opponentExperience == "relaxed"
-            ? "I get the sense that you may want a calm opening where the other player can settle into the puzzle and feel capable early on."
-            : settings.opponentExperience == "breakthrough"
-                ? "I get the sense that you may be aiming for a patient struggle that turns into a satisfying moment of recognition rather than a punishing surprise."
-                : "I get the sense that you may want a few decisions to create real pressure, while still letting the other player understand why each solution works.";
-        string tone = settings.opponentRelationship == "friend" ? "a caring shared challenge" : settings.opponentRelationship == "acquaintance" ? "a clear and welcoming challenge" : "a readable challenge that earns trust quickly";
-        return new GuideResponse { summary = summary, rationale = "I would begin with " + difficulty + " because it best supports " + tone + " without treating the relationship itself as a difficulty setting.", recommendedDifficulty = difficulty, source = "deterministic_fallback" };
+        bool isFriend = settings.opponentRelationship == "friend";
+        bool isAcquaintance = settings.opponentRelationship == "acquaintance";
+        bool isBreakthrough = settings.opponentExperience == "breakthrough";
+        string difficulty = settings.opponentExperience == "relaxed"
+            ? "Easy"
+            : isBreakthrough && settings.opponentRelationship == "stranger"
+                ? "Medium"
+                : isBreakthrough ? "Hard" : "Medium";
+        string relationshipReflection = isFriend
+            ? "someone who can read the level as a shared challenge, while still needing the pressure to feel fair"
+            : isAcquaintance
+                ? "someone you want to challenge considerately without assuming they share your puzzle habits"
+                : "a first encounter where the intended challenge needs to earn trust through clear, readable consequences";
+        string experienceReflection = settings.opponentExperience == "relaxed"
+            ? "a calm, approachable route that lets them settle into the puzzle"
+            : isBreakthrough
+                ? "a patient struggle that builds toward a satisfying moment of recognition rather than a punishing surprise"
+                : "meaningful decisions that create pressure without making the solution feel arbitrary";
+        string summary = "I get the sense that you may be designing for " + relationshipReflection + ", and hoping they experience " + experienceReflection + ".";
+        string experienceRationale = settings.opponentExperience == "relaxed"
+            ? "I would keep the starting pressure light so the player can feel capable before any demanding planning is required."
+            : isBreakthrough
+                ? "I would reserve enough planning pressure for the eventual insight to feel earned rather than immediate."
+                : "I would use a moderate amount of planning pressure so that decisions matter while their consequences remain understandable.";
+        string relationshipRationale = isFriend
+            ? "Because a friend may tolerate a more deliberate shared challenge, I recommend " + difficulty + " while still avoiding opaque or punishing traps."
+            : isAcquaintance
+                ? "Because the player may not share the designer's assumptions, I recommend " + difficulty + " with especially clear feedback and recoverable reasoning."
+                : "Because this first encounter has to establish trust, I recommend " + difficulty + " and would keep the intended pressure legible rather than relying on unexplained trial and error.";
+        return new GuideResponse { summary = summary, rationale = experienceRationale + " " + relationshipRationale, recommendedDifficulty = difficulty, source = "deterministic_fallback" };
     }
 
     private void ApplyGuideResponse(GuideResponse response)
@@ -207,7 +229,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         if (statusText != null) statusText.text = "The DG result scene is unavailable.";
     }
     private static int DifficultyIndex(string value) => string.Equals(value, "Easy", StringComparison.OrdinalIgnoreCase) ? 0 : string.Equals(value, "Medium", StringComparison.OrdinalIgnoreCase) ? 1 : string.Equals(value, "Hard", StringComparison.OrdinalIgnoreCase) ? 2 : 3;
-    private static bool IsValidDifficulty(string value) => value == "Easy" || value == "Medium" || value == "Hard" || value == "Random";
+    private static bool IsValidDifficulty(string value) => value == "Easy" || value == "Medium" || value == "Hard";
     private static void SetButtonLabel(Button button, string value) { Text label = button.GetComponentInChildren<Text>(true); if (label != null) label.text = value; }
     [Serializable] private sealed class GuideRequest { public string opponentRelationship; public string opponentExperience; public string language; }
     [Serializable] private sealed class GuideResponse { public string summary; public string rationale; public string recommendedDifficulty; public string source; }

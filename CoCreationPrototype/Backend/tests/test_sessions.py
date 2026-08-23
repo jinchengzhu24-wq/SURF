@@ -159,6 +159,81 @@ class CoCreationSessionTests(unittest.TestCase):
             "partial_completion",
         )
 
+    def test_opening_and_first_user_turn_sync_as_three_part_record(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I notice a clear central route.",
+            1,
+            "opening-flow-request",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": "What should stand out first?",
+                "proposalOffer": None,
+            },
+        )
+        reply = LLMExecutionResult(
+            "I would keep that route visible.",
+            1,
+            "reply-flow-request",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+
+        with patch.object(
+            backend,
+            "synchronize_cocreation_event_with_online_match",
+        ) as sync, patch.object(
+            backend,
+            "generate_stage_assessment",
+            return_value=opening,
+        ), patch.object(
+            backend,
+            "generate_chat_reply",
+            return_value=reply,
+        ):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "opening_flow_001"},
+            )
+            self.assertEqual(assessed.status_code, 200, assessed.text)
+            messaged = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Could the route feel fair?",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "opening_flow_message_001",
+                },
+            )
+            second_message = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "What should I adjust next?",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "opening_flow_message_002",
+                },
+            )
+
+        self.assertEqual(messaged.status_code, 200, messaged.text)
+        self.assertEqual(second_message.status_code, 200, second_message.text)
+        events = [call.args[1] for call in sync.call_args_list]
+        self.assertEqual(events[0]["eventType"], "opening")
+        turn = next(event for event in events if event["eventType"] == "turn")
+        self.assertEqual(turn["openingAssistantText"], opening.assistant_message)
+        self.assertEqual(turn["userText"], "Could the route feel fair?")
+        self.assertEqual(turn["assistantText"], reply.assistant_message)
+        regular_turn = [event for event in events if event["eventType"] == "turn"][1]
+        self.assertNotIn("openingAssistantText", regular_turn)
+
     def test_legacy_database_receives_nullable_guidance_column(self):
         original_path = repository.DATABASE_PATH
 

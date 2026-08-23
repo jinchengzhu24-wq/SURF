@@ -429,6 +429,9 @@ def create_session(payload: CreateSessionRequest):
             access_token = derive_token("access", session_id)
             integration_token = derive_token("integration", session_id)
             bootstrap_token = derive_token("bootstrap", session_id)
+            version_id = existing_version["id"]
+
+    synchronize_version_with_online_match(session_id, version_id, "first_stage")
 
     return {
         "sessionId": session_id,
@@ -694,6 +697,8 @@ def assess_version(
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    existing_opening_sync = None
+    existing_session_payload = None
     with connect() as database:
         session = require_active_session(database, session_id, access_cookie)
         version = get_version(database, session_id, version_id)
@@ -702,12 +707,26 @@ def assess_version(
             raise ApiError(404, "VERSION_NOT_FOUND", "The selected Stage was not found.")
 
         existing = database.execute(
-            "SELECT id FROM llm_assessments WHERE version_id = ?",
+            """
+            SELECT assessment.id, opening_turn.id AS assistant_turn_id,
+                   opening_turn.content AS assistant_text,
+                   opening_turn.language, opening_turn.guidance_json
+            FROM llm_assessments AS assessment
+            JOIN conversation_turns AS opening_turn
+              ON opening_turn.id = assessment.assistant_turn_id
+            WHERE assessment.version_id = ?
+            """,
             (version_id,),
         ).fetchone()
 
         if existing is not None:
-            return serialize_session(database, session_id)
+            existing_opening_sync = {
+                "assistantTurnId": existing["assistant_turn_id"],
+                "assistantText": existing["assistant_text"],
+                "language": existing["language"],
+                "cards": _displayed_cards(load_json(existing["guidance_json"])),
+            }
+            existing_session_payload = serialize_session(database, session_id)
 
         accepted_opening = database.execute(
             """
@@ -724,11 +743,22 @@ def assess_version(
             (session_id, version_id),
         ).fetchone()
 
-        if accepted_opening is not None:
+        if existing_session_payload is not None:
+            pass
+        elif accepted_opening is not None:
             return serialize_session(database, session_id)
 
-        context = build_llm_context(database, session_id, version)
-        session_language = session["language"]
+        if existing_session_payload is None:
+            context = build_llm_context(database, session_id, version)
+            session_language = session["language"]
+
+    if existing_session_payload is not None:
+        synchronize_opening_with_online_match(
+            session_id,
+            version_id,
+            existing_opening_sync,
+        )
+        return existing_session_payload
 
     execution = generate_stage_assessment(
         context["conversation"],
@@ -741,10 +771,19 @@ def assess_version(
     )
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
+    opening_sync = None
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         existing = database.execute(
-            "SELECT id FROM llm_assessments WHERE version_id = ?",
+            """
+            SELECT assessment.id, opening_turn.id AS assistant_turn_id,
+                   opening_turn.content AS assistant_text,
+                   opening_turn.language, opening_turn.guidance_json
+            FROM llm_assessments AS assessment
+            JOIN conversation_turns AS opening_turn
+              ON opening_turn.id = assessment.assistant_turn_id
+            WHERE assessment.version_id = ?
+            """,
             (version_id,),
         ).fetchone()
 
@@ -777,7 +816,25 @@ def assess_version(
                 ),
             )
 
-        return serialize_session(database, session_id)
+            opening_sync = {
+                "assistantTurnId": turn_id,
+                "assistantText": execution.assistant_message,
+                "language": session["language"],
+                "cards": _displayed_cards(execution.guidance),
+            }
+        else:
+            opening_sync = {
+                "assistantTurnId": existing["assistant_turn_id"],
+                "assistantText": existing["assistant_text"],
+                "language": existing["language"],
+                "cards": _displayed_cards(load_json(existing["guidance_json"])),
+            }
+
+        session_payload = serialize_session(database, session_id)
+
+    if opening_sync is not None:
+        synchronize_opening_with_online_match(session_id, version_id, opening_sync)
+    return session_payload
 
 
 @app.post("/api/sessions/{session_id}/messages")
@@ -1947,6 +2004,10 @@ def synchronize_version_with_online_match(session_id, version_id, event_type):
         source = version["source"]
         if event_type == "stage" and source not in {"human_edit", "llm_accepted"}:
             return
+        if event_type == "first_stage" and (
+            source != "initial" or version["stage_number"] != 1
+        ):
+            return
         event = {
             "eventId": f"{event_type}:{version['id']}",
             "eventType": event_type,
@@ -1957,6 +2018,27 @@ def synchronize_version_with_online_match(session_id, version_id, event_type):
         }
         if event_type == "stage":
             event["source"] = "manual" if source == "human_edit" else "ai"
+        elif event_type == "first_stage":
+            event["initialDraftMethod"] = session["initial_draft_method"]
+    synchronize_cocreation_event_with_online_match(session, event)
+
+
+def synchronize_opening_with_online_match(session_id, version_id, opening):
+    with connect() as database:
+        session = get_session(database, session_id)
+        version = get_version(database, session_id, version_id)
+        if session is None or version is None:
+            return
+        event = {
+            "eventId": f"opening:{opening['assistantTurnId']}",
+            "eventType": "opening",
+            "versionId": version["id"],
+            "stageNumber": version["stage_number"],
+            "assistantTurnId": opening["assistantTurnId"],
+            "assistantText": opening["assistantText"],
+            "language": opening["language"],
+            "cards": opening["cards"],
+        }
     synchronize_cocreation_event_with_online_match(session, event)
 
 
@@ -1990,6 +2072,47 @@ def synchronize_turn_with_online_match(session_id, request_id):
             "language": assistant_turn["language"],
             "cards": _displayed_cards(load_json(assistant_turn["guidance_json"])),
         }
+        opening_turn = database.execute(
+            """
+            SELECT opening_turn.*
+            FROM llm_assessments AS assessment
+            JOIN conversation_turns AS opening_turn
+              ON opening_turn.id = assessment.assistant_turn_id
+            WHERE assessment.session_id = ?
+              AND assessment.version_id = ?
+              AND opening_turn.sequence_number < ?
+            ORDER BY opening_turn.sequence_number DESC
+            LIMIT 1
+            """,
+            (session_id, assistant_turn["version_id"], user_turn["sequence_number"]),
+        ).fetchone()
+        if opening_turn is not None:
+            earlier_user_turn = database.execute(
+                """
+                SELECT id FROM conversation_turns
+                WHERE session_id = ?
+                  AND version_id = ?
+                  AND role = 'user'
+                  AND sequence_number > ?
+                  AND sequence_number < ?
+                LIMIT 1
+                """,
+                (
+                    session_id,
+                    assistant_turn["version_id"],
+                    opening_turn["sequence_number"],
+                    user_turn["sequence_number"],
+                ),
+            ).fetchone()
+            if earlier_user_turn is None:
+                event.update({
+                    "openingAssistantTurnId": opening_turn["id"],
+                    "openingAssistantText": opening_turn["content"],
+                    "openingLanguage": opening_turn["language"],
+                    "openingCards": _displayed_cards(
+                        load_json(opening_turn["guidance_json"])
+                    ),
+                })
     synchronize_cocreation_event_with_online_match(session, event)
 
 

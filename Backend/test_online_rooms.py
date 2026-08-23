@@ -512,6 +512,46 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(record["players"][0]["coCreationFlow"][0]["source"], "manual")
         self.assertEqual(record["players"][1]["coCreationFlow"][0]["cards"][0]["type"], "discussion")
 
+    def test_first_stage_and_opening_are_preserved_for_dashboard_merging(self):
+        host = self.client.post(
+            "/online/rooms", json={"studySessionId": "study-host"}
+        ).json()
+        endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"
+        headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
+        first_stage = {
+            "eventId": "first_stage:version-host",
+            "eventType": "first_stage",
+            "playerNumber": 1,
+            "sessionId": "session-host",
+            "versionId": "version-host",
+            "stageNumber": 1,
+            "initialDraftMethod": "description_generation",
+            "rows": SOLVABLE_ROWS_A,
+            "diff": [],
+        }
+        opening = {
+            "eventId": "opening:assistant-host",
+            "eventType": "opening",
+            "playerNumber": 1,
+            "sessionId": "session-host",
+            "versionId": "version-host",
+            "stageNumber": 1,
+            "assistantTurnId": "assistant-host",
+            "assistantText": "I notice a clear route.",
+            "language": "en",
+            "cards": [{"type": "discussion", "text": "What should stand out?"}],
+        }
+        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
+            self.assertTrue(self.client.post(endpoint, json=first_stage, headers=headers).json()["recorded"])
+            self.assertTrue(self.client.post(endpoint, json=opening, headers=headers).json()["recorded"])
+
+        dashboard = self.client.get("/matchmaking-records-data").json()
+        record = next(item for item in dashboard["matches"] if item["matchId"] == host["matchId"])
+        flow = record["players"][0]["coCreationFlow"]
+        self.assertEqual([event["eventType"] for event in flow], ["first_stage", "opening"])
+        self.assertEqual(flow[0]["initialDraftMethod"], "description_generation")
+        self.assertEqual(flow[1]["assistantTurnId"], "assistant-host")
+
     def test_synced_8010_intention_survives_an_empty_client_submission(self):
         host, _ = self.ready_both_players()
         goal = "I want my opponent to notice the route before pushing."

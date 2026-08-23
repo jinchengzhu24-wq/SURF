@@ -123,7 +123,11 @@ class DescriptionGenerationApiTests(unittest.TestCase):
     def test_dg_guide_returns_validated_llm_summary(self):
         result = {
             "summary": "You are designing for a close friend.",
-            "rationale": "The requested experience should drive difficulty.",
+            "rationale": (
+                "I would use a moderate amount of planning pressure so decisions matter "
+                "while their consequences remain understandable. Because a friend can read "
+                "this as a shared challenge, I recommend Medium without using opaque traps."
+            ),
             "recommendedDifficulty": "Medium",
         }
 
@@ -147,6 +151,16 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["recommendedDifficulty"], "Medium")
         self.assertEqual(response.json()["source"], "llm")
         self.assertTrue(response.json()["summary"].startswith("I get the sense that"))
+
+    def test_dg_fallback_jointly_considers_relationship_and_experience(self):
+        friend = backend.build_dg_fallback_summary("friend", "breakthrough")
+        stranger = backend.build_dg_fallback_summary("stranger", "breakthrough")
+
+        self.assertEqual(friend["recommendedDifficulty"], "Hard")
+        self.assertEqual(stranger["recommendedDifficulty"], "Medium")
+        self.assertIn("shared challenge", friend["summary"])
+        self.assertIn("first encounter", stranger["summary"])
+        self.assertGreaterEqual(friend["rationale"].count("."), 2)
 
     def test_dg_guide_rejects_unknown_choice(self):
         response = self.client.post(
