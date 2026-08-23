@@ -13,6 +13,38 @@ TEST_DELETE_PASSWORD = "test-delete-password"
 
 
 class DashboardJourneyTests(unittest.TestCase):
+    def test_dashboard_password_verification_reuses_delete_password_without_mutation(self):
+        with (
+            patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": TEST_DELETE_PASSWORD}),
+            TestClient(backend.app) as client,
+        ):
+            success = client.post(
+                "/verify-dashboard-password",
+                headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
+            )
+            wrong = client.post(
+                "/verify-dashboard-password",
+                headers={"X-Delete-Password": "wrong"},
+            )
+
+        self.assertEqual(success.status_code, 200)
+        self.assertEqual(success.json(), {"ok": True})
+        self.assertEqual(wrong.status_code, 401)
+        self.assertEqual(wrong.json()["detail"], "Incorrect delete password")
+
+    def test_dashboard_password_verification_fails_closed_without_configured_password(self):
+        with (
+            patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": ""}),
+            TestClient(backend.app) as client,
+        ):
+            response = client.post(
+                "/verify-dashboard-password",
+                headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Delete password is not configured")
+
     def test_all_delete_routes_require_password(self):
         routes = [
             ("/delete-round", {"roundId": "round-a"}),

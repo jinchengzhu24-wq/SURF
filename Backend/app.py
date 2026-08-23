@@ -710,6 +710,12 @@ app.add_middleware(
 )
 
 
+@app.post("/verify-dashboard-password")
+def verify_dashboard_password(_authorized=Depends(require_delete_password)):
+    """Validate the existing dashboard password without changing any records."""
+    return {"ok": True}
+
+
 @app.middleware("http")
 async def attach_request_context(request: Request, call_next):
     request_id = new_request_id(request.headers.get("X-Request-ID", ""))

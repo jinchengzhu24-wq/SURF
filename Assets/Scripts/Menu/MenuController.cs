@@ -10,7 +10,7 @@ public class MenuController : MonoBehaviour
     public string targetSceneName = "Algorithm_Level";
     public string creativeWorkshopSceneName = "Questionnaire(Before)";
     public string matchmakingSceneName = "Online_Lobby";
-    public string studyDashboardUrl = "http://111.231.136.4:8000/frontend/";
+    public string studyDashboardUrl = "http://111.231.136.4/frontend/";
     public string tutorialUrl = "http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf";
 
 #if UNITY_WEBGL && !UNITY_EDITOR
@@ -56,10 +56,21 @@ public class MenuController : MonoBehaviour
     {
         if (TryGetHttpUrl(studyDashboardUrl, "Study dashboard", out string dashboardUrl))
         {
-            Debug.Log("MenuController: Opening study dashboard: " + dashboardUrl);
-            Application.OpenURL(dashboardUrl);
+            string accessUrl = AppendDashboardAccessParameter(dashboardUrl);
+            Debug.Log("MenuController: Opening study dashboard access gate: " + accessUrl);
+            Application.OpenURL(accessUrl);
         }
     }
+
+    private string AppendDashboardAccessParameter(string url)
+    {
+        string separator = url.Contains("?")
+            ? (url.EndsWith("?") || url.EndsWith("&") ? string.Empty : "&")
+            : "?";
+
+        return url + separator + "access=1";
+    }
+
 
     public void OpenTutorial()
     {

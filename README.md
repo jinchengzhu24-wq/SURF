@@ -141,6 +141,8 @@ GET   /api/integrations/sessions/{sessionId}
 
 8000 后端继续提供匿名两人房间、Ready、挑战交换、结果提交、问卷和 dashboard。房间位于单进程内存中，使用六位房间码、一秒轮询和 30 分钟惰性清理。
 
+WebGL 的 Menu `Server` 按钮和页面底部 `DATA DASHBOARD` 按钮都会先打开带 `access=1` 的 8000 Dashboard 入口，输入 `DASHBOARD_DELETE_PASSWORD` 验证成功后才加载数据；删除操作仍单独使用同一密码校验。
+
 挑战请求只包含：
 
 ```json

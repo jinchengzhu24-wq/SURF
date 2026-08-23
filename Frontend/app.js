@@ -67,7 +67,37 @@ init();
 function init() {
     wireLinks();
     wireEvents();
+
+    if (requiresDashboardAccess()) {
+        requestDashboardAccess();
+        return;
+    }
+
     loadData(false);
+}
+
+function requiresDashboardAccess() {
+    return new URLSearchParams(window.location.search).get("access") === "1";
+}
+
+function requestDashboardAccess() {
+    openDeleteDialog({
+        title: "Dashboard access required",
+        description: "Enter the dashboard password to continue.",
+        scope: "This opens the 8000 study dashboard.",
+        confirmLabel: "Continue",
+        endpoint: "/verify-dashboard-password",
+        payload: {},
+        progressText: "Checking dashboard password...",
+        successText: "Dashboard access granted.",
+        afterSuccess: clearDashboardAccessParameter
+    });
+}
+
+function clearDashboardAccessParameter() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("access");
+    window.history.replaceState(null, "", url.toString());
 }
 
 function resolveApiBase() {
