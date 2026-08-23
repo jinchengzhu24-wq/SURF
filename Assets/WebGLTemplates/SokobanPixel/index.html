@@ -240,7 +240,7 @@
           if (popup && !popup.closed) {
             popup.location.href = dashboardAccessTarget;
           } else {
-            window.location.href = dashboardAccessTarget;
+            throw new Error("Please allow popups to open the dashboard.");
           }
           dashboardAccessModal.hidden = true;
         }).catch(function (error) {
