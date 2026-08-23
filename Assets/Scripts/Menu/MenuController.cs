@@ -1,29 +1,12 @@
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-#if UNITY_WEBGL && !UNITY_EDITOR
-using System.Runtime.InteropServices;
-#endif
-
 public class MenuController : MonoBehaviour
 {
     public string targetSceneName = "Algorithm_Level";
     public string creativeWorkshopSceneName = "Questionnaire(Before)";
     public string matchmakingSceneName = "Online_Lobby";
-    public string studyDashboardUrl = "http://111.231.136.4/frontend/";
     public string tutorialUrl = "http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf";
-
-#if UNITY_WEBGL && !UNITY_EDITOR
-    [DllImport("__Internal")]
-    private static extern void SokobanNavigateCurrentPage(string url);
-
-    [DllImport("__Internal")]
-    private static extern void SokobanOpenDashboardGate(string url);
-
-    [DllImport("__Internal")]
-    private static extern void SokobanCloseCurrentTab();
-
-#endif
 
     public void StartGame()
     {
@@ -59,23 +42,6 @@ public class MenuController : MonoBehaviour
         SceneManager.LoadScene(sceneName);
     }
 
-    public void OpenStudyDashboard()
-    {
-        if (TryGetHttpUrl(studyDashboardUrl, "Study dashboard", out string dashboardUrl))
-        {
-            Debug.Log("MenuController: Opening study dashboard access gate in WebGL: " + dashboardUrl);
-
-#if UNITY_WEBGL && !UNITY_EDITOR
-            SokobanOpenDashboardGate(dashboardUrl);
-#else
-            Application.OpenURL(dashboardUrl);
-#endif
-        }
-    }
-
-
-
-
     public void OpenTutorial()
     {
         if (TryGetHttpUrl(tutorialUrl, "Tutorial", out string resolvedTutorialUrl))
@@ -83,19 +49,6 @@ public class MenuController : MonoBehaviour
             Debug.Log("MenuController: Opening tutorial: " + resolvedTutorialUrl);
             Application.OpenURL(resolvedTutorialUrl);
         }
-    }
-
-    public void QuitGame()
-    {
-        Debug.Log("MenuController: Quit game requested.");
-
-#if UNITY_EDITOR
-        UnityEditor.EditorApplication.isPlaying = false;
-#elif UNITY_WEBGL
-        SokobanCloseCurrentTab();
-#else
-        Application.Quit();
-#endif
     }
 
     private bool TryGetHttpUrl(string configuredUrl, string label, out string resolvedUrl)
