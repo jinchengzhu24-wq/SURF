@@ -231,7 +231,7 @@
         dashboardAccessCancel.disabled = true;
         dashboardAccessStatus.textContent = "Checking password...";
 
-        var popup = window.open("about:blank", "_blank", "noopener,noreferrer");
+        var popup = window.open("about:blank", "_blank");
         fetch("http://111.231.136.4:8000/verify-dashboard-password", {
           method: "POST",
           headers: { "X-Delete-Password": password }
