@@ -124,7 +124,7 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         result = {
             "summary": (
                 "You may be aiming for clear planning pressure in a readable space. "
-                "I would keep the interpretation open for your correction."
+                "That combination would let the opponent read nearby choices before tracing a longer return path."
             ),
             "difficultyRationale": (
                 "I would keep the first useful move readable while making some push order matter. "
@@ -203,8 +203,8 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(defaults["recommendedDifficulty"], "Medium")
         self.assertEqual(defaults["recommendedLayout"], "Balanced")
         self.assertIn("you want the opponent", focused["summary"])
-        self.assertIn("Tell me if I am reading", focused["summary"])
         self.assertIn("get moving with little inspection", focused["summary"])
+        self.assertNotIn("Tell me if I am reading", focused["summary"])
         self.assertNotEqual(focused["summary"], open_layout["summary"])
 
     def test_dg_fallback_rounds_mixed_preferences_up_like_unity(self):

@@ -26,7 +26,7 @@ DG_GUIDE_SUMMARY_SYSTEM_PROMPT = (
     "varied openings such as 'It sounds like' or 'My read is'. Show that you noticed at least "
     "one concrete clue from each difficulty answer and each layout answer, but translate those "
     "clues into a playable moment instead of listing codes, labels, or parameters. Be tentative "
-    "and easy to correct, and end with a gentle invitation to correct the interpretation. Do not "
+    "and do not present the interpretation as certain fact. Do not "
     "use a formulaic report, a recommendation label, or generic praise. Each rationale must be "
     "two concise first-person sentences: refer to the specific answers in its group, then explain "
     "why they support its recommendation. Discuss only solving pressure and space organization. "

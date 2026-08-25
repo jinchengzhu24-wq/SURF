@@ -308,7 +308,6 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         string summary = (
             "My read is that you want the opponent to " + firstMove + " and " + pushPlanning
             + ". On the map, you seem to prefer to " + space + " and " + route
-            + ". Tell me if I am reading the feeling you are aiming for correctly."
         );
         return summary.Length > 480 ? summary.Substring(0, 480).TrimEnd() : summary;
     }

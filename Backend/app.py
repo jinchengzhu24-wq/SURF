@@ -2551,7 +2551,6 @@ def build_dg_fallback_summary(context, reason=""):
         "summary": (
             "My read is that you want the opponent to " + first_move + " and " + push_planning
             + ". On the map, you seem to prefer to " + space + " and " + route
-            + ". Tell me if I am reading the feeling you are aiming for correctly."
         )[:480],
         "recommendedDifficulty": difficulty,
         "difficultyRationale": "I would balance the requested first-move inspection with how independently pushes can be considered. These choices lead me to recommend " + difficulty + " difficulty.",
