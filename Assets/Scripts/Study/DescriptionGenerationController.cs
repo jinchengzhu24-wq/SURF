@@ -306,8 +306,8 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         string space = SpacePhrase(settings.spacePreference);
         string route = RoutePhrase(settings.routeRhythmPreference);
         string summary = (
-            "My read is that you want the opponent to " + firstMove + " and " + pushPlanning
-            + ". On the map, you seem to prefer to " + space + " and " + route
+            "Your choices suggest a level where the first move can " + firstMove + " and pushes can " + pushPlanning
+            + ". For the space, the choices point toward " + space + " with routes that " + route + "."
         );
         return summary.Length > 480 ? summary.Substring(0, 480).TrimEnd() : summary;
     }
@@ -348,10 +348,10 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     {
         int firstScore = PreferenceScore(first);
         int secondScore = PreferenceScore(second);
-        if (firstScore < 0 && secondScore < 0) return 1;
+        if (firstScore < 0 && secondScore < 0) return DifficultyLabels.Length - 1;
         if (firstScore < 0) return secondScore;
         if (secondScore < 0) return firstScore;
-        return Mathf.RoundToInt((firstScore + secondScore) / 2f);
+        return firstScore == secondScore ? firstScore : 1;
     }
 
     private static int PreferenceScore(string value)
@@ -364,6 +364,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     private static string BuildDifficultyFallbackRationale(string difficulty)
     {
+        if (difficulty == "Random") return "I do not see a directional planning preference in the two answers, so I would leave Difficulty Random for Confirm.";
         if (difficulty == "Easy") return "I would keep the first useful actions readable and let most pushes be considered independently.";
         if (difficulty == "Hard") return "I would make several push decisions depend on earlier planning while keeping the map solvable and readable.";
         return "I would ask for some planning around push order while keeping the consequences understandable.";
@@ -371,6 +372,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     private static string BuildLayoutFallbackRationale(string layout)
     {
+        if (layout == "Random") return "I do not see a directional spatial preference in the two answers, so I would leave Layout Random for Confirm.";
         if (layout == "Compact") return "I would keep important positions close together so route choices are concentrated in one focused area.";
         if (layout == "Open") return "I would leave more space to inspect routes before the player commits to a key push.";
         return "I would connect a few distinct areas so the player alternates between direct progress and manageable detours.";

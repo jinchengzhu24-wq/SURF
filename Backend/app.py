@@ -547,12 +547,12 @@ def normalize_online_draft_metadata(payload):
 
     if (
         metadata["aiRecommendedDifficulty"]
-        and metadata["aiRecommendedDifficulty"] not in {"Easy", "Medium", "Hard"}
+        and metadata["aiRecommendedDifficulty"] not in {"Easy", "Medium", "Hard", "Random"}
     ):
         raise HTTPException(status_code=400, detail="Invalid Draft AI difficulty")
     if (
         metadata["aiRecommendedLayout"]
-        and metadata["aiRecommendedLayout"] not in {"Compact", "Balanced", "Open"}
+        and metadata["aiRecommendedLayout"] not in {"Compact", "Balanced", "Open", "Random"}
     ):
         raise HTTPException(status_code=400, detail="Invalid Draft AI layout")
     if (
@@ -2447,6 +2447,7 @@ DG_LAYOUT_ANSWERS = {
     "no_preference": None,
 }
 DG_FIRST_PERSON_PREFIXES = (
+    "your choices suggest",
     "i get the sense that",
     "it sounds like",
     "my read is that",
@@ -2476,9 +2477,9 @@ def normalize_dg_rationale(rationale, label):
     normalized = str(rationale or "").strip()[:320]
     sentence_count = len(re.findall(r"[.!?](?:\s|$)", normalized))
 
-    if len(normalized) < 100 or sentence_count < 2:
+    if len(normalized) < 30 or sentence_count != 1:
         raise ValueError(
-            f"DG guide {label} rationale must explain its recommendation in two sentences"
+            f"DG guide {label} rationale must explain its recommendation in one sentence"
         )
     if not re.search(r"\bI(?:['’](?:d|m|ve|ll))?\b", normalized, re.IGNORECASE):
         normalized = "I read this as: " + normalized
@@ -2489,9 +2490,14 @@ def dg_preference_score(first, second, choices):
     values = [choices[first], choices[second]]
     explicit = [value for value in values if value is not None]
     if not explicit:
-        return 1
-    # Match Unity's Mathf.RoundToInt for the two-answer average: .5 rounds up.
-    return int(math.floor((sum(explicit) / len(explicit)) + 0.5))
+        # Both answers are no_preference. Preserve that uncertainty as Random
+        # and let Confirm resolve it to a concrete value.
+        return None
+    if len(explicit) == 1 or explicit[0] == explicit[-1]:
+        return explicit[0]
+    # Mixed explicit answers use the neutral middle recommendation rather than
+    # allowing a high answer to outweigh a low answer.
+    return 1
 
 
 def dg_choice_phrase(value, phrases, empty_phrase):
@@ -2509,8 +2515,8 @@ def build_dg_fallback_summary(context, reason=""):
         context["routeRhythmPreference"],
         DG_LAYOUT_ANSWERS,
     )
-    difficulty = ("Easy", "Medium", "Hard")[difficulty_score]
-    layout = ("Compact", "Balanced", "Open")[layout_score]
+    difficulty = "Random" if difficulty_score is None else ("Easy", "Medium", "Hard")[difficulty_score]
+    layout = "Random" if layout_score is None else ("Compact", "Balanced", "Open")[layout_score]
     first_move = dg_choice_phrase(
         context["firstMovePreference"],
         {
@@ -2547,15 +2553,33 @@ def build_dg_fallback_summary(context, reason=""):
         },
         "leave the route rhythm open-ended",
     )
+    if difficulty == "Random":
+        difficulty_rationale = (
+            "I do not see a directional planning preference in the two answers, so I would leave Difficulty Random for Confirm."
+        )
+    else:
+        difficulty_rationale = (
+            "I connect the first-move choice to " + first_move + " and the push decisions to "
+            + push_planning + ", which supports " + difficulty + " planning complexity."
+        )
+    if layout == "Random":
+        layout_rationale = (
+            "I do not see a directional spatial preference in the two answers, so I would leave Layout Random for Confirm."
+        )
+    else:
+        layout_rationale = (
+            "I connect the space choice to " + space + " and the route choice to " + route
+            + ", which supports a " + layout + " layout."
+        )
     return {
         "summary": (
-            "My read is that you want the opponent to " + first_move + " and " + push_planning
-            + ". On the map, you seem to prefer to " + space + " and " + route
+            "Your choices suggest a level where the first move can " + first_move + " and pushes can " + push_planning
+            + ". For the space, the choices point toward " + space + " with routes that " + route + "."
         )[:480],
         "recommendedDifficulty": difficulty,
-        "difficultyRationale": "I would balance the requested first-move inspection with how independently pushes can be considered. These choices lead me to recommend " + difficulty + " difficulty.",
+        "difficultyRationale": difficulty_rationale,
         "recommendedLayout": layout,
-        "layoutRationale": "I would place important positions and routes according to the requested space and route rhythm. These choices lead me to recommend a " + layout + " layout.",
+        "layoutRationale": layout_rationale,
         "source": "deterministic_fallback",
         "fallbackReason": reason,
     }
@@ -2580,10 +2604,28 @@ def create_dg_guide_summary(context, request_id=""):
         layout = str(payload.get("recommendedLayout") or "").strip()
         if not summary:
             raise ValueError("DG guide summary is required")
-        if difficulty not in {"Easy", "Medium", "Hard"}:
+        if difficulty not in {"Easy", "Medium", "Hard", "Random"}:
             raise ValueError("DG guide difficulty is invalid")
-        if layout not in {"Compact", "Balanced", "Open"}:
+        if layout not in {"Compact", "Balanced", "Open", "Random"}:
             raise ValueError("DG guide layout is invalid")
+        difficulty_score = dg_preference_score(
+            context["firstMovePreference"],
+            context["pushPlanningPreference"],
+            DG_DIFFICULTY_ANSWERS,
+        )
+        layout_score = dg_preference_score(
+            context["spacePreference"],
+            context["routeRhythmPreference"],
+            DG_LAYOUT_ANSWERS,
+        )
+        expected_difficulty = (
+            "Random" if difficulty_score is None else ("Easy", "Medium", "Hard")[difficulty_score]
+        )
+        expected_layout = (
+            "Random" if layout_score is None else ("Compact", "Balanced", "Open")[layout_score]
+        )
+        if difficulty != expected_difficulty or layout != expected_layout:
+            raise ValueError("DG guide recommendation does not match the neutral answer rules")
         return {
             "summary": summary,
             "recommendedDifficulty": difficulty,

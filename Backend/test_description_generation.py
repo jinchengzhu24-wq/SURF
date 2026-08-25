@@ -123,17 +123,15 @@ class DescriptionGenerationApiTests(unittest.TestCase):
     def test_dg_guide_returns_validated_llm_summary(self):
         result = {
             "summary": (
-                "You may be aiming for clear planning pressure in a readable space. "
-                "That combination would let the opponent read nearby choices before tracing a longer return path."
+                "Your choices suggest readable planning in a connected space. "
+                "My read is that nearby decisions can lead into a manageable route between areas."
             ),
             "difficultyRationale": (
-                "I would keep the first useful move readable while making some push order matter. "
-                "I therefore recommend Medium difficulty."
+                "I connect some first-move inspection with some push-order planning, which supports Medium difficulty."
             ),
             "recommendedDifficulty": "Medium",
             "layoutRationale": (
-                "I would keep key positions distributed across connected areas with direct routes. "
-                "I therefore recommend a Balanced layout."
+                "I connect a few connected areas with mostly direct routes and some detours, which supports a Balanced layout."
             ),
             "recommendedLayout": "Balanced",
         }
@@ -160,7 +158,45 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["recommendedDifficulty"], "Medium")
         self.assertEqual(response.json()["recommendedLayout"], "Balanced")
         self.assertEqual(response.json()["source"], "llm")
-        self.assertTrue(response.json()["summary"].startswith("My read is that"))
+        self.assertTrue(response.json()["summary"].startswith("Your choices suggest"))
+
+    def test_dg_guide_accepts_random_recommendations_for_two_no_preference_answers(self):
+        result = {
+            "summary": (
+                "I am not hearing a strong preference for the solving pressure or the space. "
+                "My read is that a little variation would keep the level feeling open-ended."
+            ),
+            "difficultyRationale": (
+                "I do not see a directional planning preference in either difficulty answer, so I would leave Difficulty Random for Confirm."
+            ),
+            "recommendedDifficulty": "Random",
+            "layoutRationale": (
+                "I do not see a directional spatial preference in either layout answer, so I would leave Layout Random for Confirm."
+            ),
+            "recommendedLayout": "Random",
+        }
+
+        def execute_json_request(**kwargs):
+            return LLMExecutionResult(
+                kwargs["validator"](result),
+                1,
+                "guide-random-request",
+            )
+
+        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
+            response = self.client.post(
+                "/dg/guide/summary",
+                json={
+                    "firstMovePreference": "no_preference",
+                    "pushPlanningPreference": "no_preference",
+                    "spacePreference": "no_preference",
+                    "routeRhythmPreference": "no_preference",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recommendedDifficulty"], "Random")
+        self.assertEqual(response.json()["recommendedLayout"], "Random")
 
     def test_dg_prompt_explains_new_answer_meanings_and_no_preference(self):
         messages = backend.build_dg_guide_summary_messages({
@@ -171,10 +207,10 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         })
         system_prompt = messages[0]["content"]
 
-        self.assertIn("quick_start means little inspection before acting", system_prompt)
+        self.assertIn("quick_start means little inspection before the first move", system_prompt)
         self.assertIn("easy_to_adjust means most pushes can be considered independently", system_prompt)
-        self.assertIn("no_preference means no stated preference", system_prompt)
-        self.assertIn("use Medium difficulty and Balanced layout", system_prompt)
+        self.assertIn("one no_preference means ignore that answer", system_prompt)
+        self.assertIn("both answers are no_preference", system_prompt)
 
     def test_dg_fallback_combines_neutral_answers_by_parameter_group(self):
         focused = backend.build_dg_fallback_summary({
@@ -200,37 +236,35 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(focused["recommendedLayout"], "Compact")
         self.assertEqual(open_layout["recommendedDifficulty"], "Hard")
         self.assertEqual(open_layout["recommendedLayout"], "Open")
-        self.assertEqual(defaults["recommendedDifficulty"], "Medium")
-        self.assertEqual(defaults["recommendedLayout"], "Balanced")
-        self.assertIn("you want the opponent", focused["summary"])
+        self.assertEqual(defaults["recommendedDifficulty"], "Random")
+        self.assertEqual(defaults["recommendedLayout"], "Random")
+        self.assertIn("Your choices suggest", focused["summary"])
         self.assertIn("get moving with little inspection", focused["summary"])
         self.assertNotIn("Tell me if I am reading", focused["summary"])
         self.assertNotEqual(focused["summary"], open_layout["summary"])
 
-    def test_dg_fallback_rounds_mixed_preferences_up_like_unity(self):
+    def test_dg_fallback_uses_balanced_for_mixed_explicit_directions(self):
         result = backend.build_dg_fallback_summary({
-            "firstMovePreference": "quick_start",
-            "pushPlanningPreference": "consider_order",
-            "spacePreference": "focused_area",
-            "routeRhythmPreference": "occasional_detours",
+            "firstMovePreference": "observe_then_decide",
+            "pushPlanningPreference": "connected_pushes",
+            "spacePreference": "connected_areas",
+            "routeRhythmPreference": "long_routes",
         })
 
         self.assertEqual(result["recommendedDifficulty"], "Medium")
         self.assertEqual(result["recommendedLayout"], "Balanced")
 
-    def test_dg_rationale_accepts_contractions_and_adds_first_person_prefix_when_needed(self):
+    def test_dg_rationale_requires_one_sentence_and_adds_first_person_prefix_when_needed(self):
         self.assertIn(
             "I'd recommend Hard",
             backend.normalize_dg_rationale(
-                "The push order raises pressure across several decisions and makes early choices matter. "
-                "That is why I'd recommend Hard for this planning rhythm.",
+                "The push order raises planning complexity across several decisions, so I'd recommend Hard for this planning rhythm.",
                 "difficulty",
             ),
         )
         self.assertTrue(
             backend.normalize_dg_rationale(
-                "The wide routes support an Open layout and give the player room to inspect distant choices. "
-                "The space gives exploration and return paths room to breathe.",
+                "The wide routes support an Open layout and give the player room to inspect distant choices.",
                 "layout",
             ).startswith("I read this as: ")
         )
@@ -276,8 +310,8 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["recommendedDifficulty"], "Hard")
         self.assertEqual(response.json()["recommendedLayout"], "Open")
         self.assertEqual(response.json()["source"], "deterministic_fallback")
-        self.assertTrue(response.json()["summary"].startswith("My read is that"))
-        self.assertTrue(response.json()["difficultyRationale"].startswith("I would"))
+        self.assertTrue(response.json()["summary"].startswith("Your choices suggest"))
+        self.assertTrue(response.json()["difficultyRationale"].startswith("I connect"))
 
     def test_custom_single_wall_range_is_supported(self):
         preferences = backend.normalize_generation_preferences(
