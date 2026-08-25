@@ -288,6 +288,7 @@ function buildTimelineStages(match) {
 
 function flowStageLabel(event) {
     const labels = {
+        draft: "Draft",
         first_stage: "First Stage",
         stage: "Stage " + value(event.stageNumber) + " · " + (event.source === "ai" ? "AI" : "Manual"),
         turn: "Q&A",
@@ -426,6 +427,10 @@ function renderInspector(match, stage) {
     ];
     if (record.statusAfter) rows.splice(2, 0, ["Status after", titleCase(record.statusAfter)]);
     if (record.eventType === "ready_changed") rows.push(["Ready", record.ready ? "Yes" : "No"]);
+    if (record.eventType === "draft") {
+        rows.push(["Difficulty", value(record.finalDifficulty)]);
+        rows.push(["Layout", value(record.finalLayout)]);
+    }
     if (record.eventType === "challenge_submitted") {
         rows.push(["AI assistant", formatMode(record.aiAssistantMode)]);
     }

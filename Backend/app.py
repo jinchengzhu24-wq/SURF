@@ -128,6 +128,11 @@ class OnlineReadyRequest(BaseModel):
     ready: bool = True
 
 
+class OnlineDraftRequest(BaseModel):
+    finalDifficulty: str
+    finalLayout: str
+
+
 class OnlineChallengeRequest(BaseModel):
     rows: list[str]
     aiAssistantMode: str = "description_generation"
@@ -492,6 +497,46 @@ def append_cocreation_flow_event(room, event):
     return event, True
 
 
+def append_online_draft_event(room, player, final_difficulty, final_layout):
+    """Append one immutable pre-generation Draft node for this player."""
+    player_number = int(player["playerNumber"])
+    path = online_match_flow_file(room["matchId"], player_number)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with study_record_lock:
+        existing, _ = read_jsonl_records(path)
+        existing_event = next(
+            (item for item in existing if item.get("eventType") == "draft"),
+            None,
+        )
+        if existing_event is not None:
+            if (
+                existing_event.get("finalDifficulty") != final_difficulty
+                or existing_event.get("finalLayout") != final_layout
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Draft settings are already frozen",
+                )
+            return existing_event, False
+
+        event = {
+            "eventId": f"draft:{room['matchId']}:{player_number}",
+            "eventType": "draft",
+            "matchId": str(room.get("matchId") or "").strip(),
+            "roomCode": str(room.get("roomCode") or "").strip(),
+            "playerNumber": player_number,
+            "studySessionId": str(player.get("studySessionId") or "").strip(),
+            "serverReceivedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "finalDifficulty": final_difficulty,
+            "finalLayout": final_layout,
+        }
+        with path.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(event, ensure_ascii=False))
+            log_file.write("\n")
+    return event, True
+
+
 def append_cocreation_message(room, player_number, event_id, session_id, content):
     player = next(
         (
@@ -815,8 +860,10 @@ class LevelPlanRequest(BaseModel):
 
 
 class DGGuideSummaryRequest(BaseModel):
-    opponentRelationship: str
-    opponentExperience: str
+    firstMovePreference: str
+    pushPlanningPreference: str
+    spacePreference: str
+    routeRhythmPreference: str
     language: str | None = "en"
 
 
@@ -1145,6 +1192,36 @@ def set_online_ready(
             )
 
         return serialize_online_room(room, player)
+
+
+@app.post("/online/rooms/{match_id}/draft")
+def record_online_draft(
+    match_id: str,
+    payload: OnlineDraftRequest,
+    request: Request,
+):
+    final_difficulty = str(payload.finalDifficulty or "").strip()
+    final_layout = str(payload.finalLayout or "").strip()
+    if final_difficulty not in {"Easy", "Medium", "Hard"}:
+        raise HTTPException(status_code=400, detail="Invalid final difficulty")
+    if final_layout not in {"Compact", "Balanced", "Open"}:
+        raise HTTPException(status_code=400, detail="Invalid final layout")
+
+    with ONLINE_ROOMS_LOCK:
+        room, player = require_online_room(
+            match_id,
+            request.headers.get("X-Player-Token"),
+        )
+        if room["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Room has been cancelled")
+        stored_event, created = append_online_draft_event(
+            room,
+            player,
+            final_difficulty,
+            final_layout,
+        )
+        room["lastActivity"] = time.time()
+        return {"status": "ok", "recorded": created, "event": stored_event}
 
 
 @app.post("/online/rooms/{match_id}/challenge")
@@ -2260,15 +2337,23 @@ def generate_level_plan(
     return execute_level_plan_request(payload, request, response)
 
 
-DG_RELATIONSHIPS = {
-    "friend": "a close friend",
-    "acquaintance": "an acquaintance",
-    "stranger": "a stranger",
+DG_DIFFICULTY_ANSWERS = {
+    "quick_start": 0,
+    "observe_then_decide": 1,
+    "plan_ahead": 2,
+    "easy_to_adjust": 0,
+    "consider_order": 1,
+    "connected_pushes": 2,
+    "no_preference": None,
 }
-DG_EXPERIENCES = {
-    "relaxed": ("Easy", "relaxed and approachable"),
-    "challenging_fair": ("Medium", "challenging but fair"),
-    "breakthrough": ("Hard", "several attempts followed by a breakthrough"),
+DG_LAYOUT_ANSWERS = {
+    "focused_area": 0,
+    "connected_areas": 1,
+    "wide_area": 2,
+    "short_routes": 0,
+    "occasional_detours": 1,
+    "long_routes": 2,
+    "no_preference": None,
 }
 DG_FIRST_PERSON_PREFIXES = (
     "i get the sense that",
@@ -2288,77 +2373,88 @@ def normalize_dg_reflection(summary):
     return ("I get the sense that " + summary[:290]).strip()
 
 
-def normalize_dg_rationale(rationale):
+def normalize_dg_rationale(rationale, label):
     normalized = str(rationale or "").strip()[:320]
     sentence_count = len(re.findall(r"[.!?](?:\s|$)", normalized))
 
     if len(normalized) < 100 or sentence_count < 2:
         raise ValueError(
-            "DG guide rationale must explain the experience and relationship in two sentences"
+            f"DG guide {label} rationale must explain its recommendation in two sentences"
         )
     if not re.search(r"\bI\b", normalized):
         raise ValueError("DG guide rationale must be a first-person judgment")
     return normalized
 
 
-def build_dg_fallback_summary(relationship, experience, reason=""):
-    difficulty = {
-        "friend": {"relaxed": "Easy", "challenging_fair": "Medium", "breakthrough": "Hard"},
-        "acquaintance": {"relaxed": "Easy", "challenging_fair": "Medium", "breakthrough": "Hard"},
-        "stranger": {"relaxed": "Easy", "challenging_fair": "Medium", "breakthrough": "Medium"},
-    }[relationship][experience]
-    relationship_reflection = {
-        "friend": "someone who can read the level as a shared challenge, while still needing the pressure to feel fair",
-        "acquaintance": "someone you want to challenge considerately without assuming they share your puzzle habits",
-        "stranger": "a first encounter where the intended challenge needs to earn trust through clear, readable consequences",
-    }[relationship]
-    experience_reflection = {
-        "relaxed": "a calm, approachable route that lets them settle into the puzzle",
-        "challenging_fair": "meaningful decisions that create pressure without making the solution feel arbitrary",
-        "breakthrough": "a patient struggle that builds toward a satisfying moment of recognition rather than a punishing surprise",
-    }[experience]
-    reflection = (
-        "I get the sense that you may be designing for " + relationship_reflection
-        + ", and hoping they experience " + experience_reflection + "."
+def dg_preference_score(first, second, choices):
+    values = [choices[first], choices[second]]
+    explicit = [value for value in values if value is not None]
+    return 1 if not explicit else round(sum(explicit) / len(explicit))
+
+
+def build_dg_fallback_summary(context, reason=""):
+    difficulty_score = dg_preference_score(
+        context["firstMovePreference"],
+        context["pushPlanningPreference"],
+        DG_DIFFICULTY_ANSWERS,
     )
-    experience_rationale = {
-        "relaxed": "I would keep the starting pressure light so the player can feel capable before any demanding planning is required.",
-        "challenging_fair": "I would use a moderate amount of planning pressure so that decisions matter while their consequences remain understandable.",
-        "breakthrough": "I would reserve enough planning pressure for the eventual insight to feel earned rather than immediate.",
-    }[experience]
-    relationship_rationale = {
-        "friend": "Because a friend may tolerate a more deliberate shared challenge, I recommend " + difficulty + " while still avoiding opaque or punishing traps.",
-        "acquaintance": "Because the player may not share the designer's assumptions, I recommend " + difficulty + " with especially clear feedback and recoverable reasoning.",
-        "stranger": "Because this first encounter has to establish trust, I recommend " + difficulty + " and would keep the intended pressure legible rather than relying on unexplained trial and error.",
-    }[relationship]
+    layout_score = dg_preference_score(
+        context["spacePreference"],
+        context["routeRhythmPreference"],
+        DG_LAYOUT_ANSWERS,
+    )
+    difficulty = ("Easy", "Medium", "Hard")[difficulty_score]
+    layout = ("Compact", "Balanced", "Open")[layout_score]
+    planning_intention = (
+        "find an early foothold and feel able to adjust after most pushes",
+        "pause to connect a few decisions while still being able to read their consequences",
+        "settle into deliberate, interdependent push planning before committing",
+    )[difficulty_score]
+    spatial_intention = (
+        "keep their attention on a focused area where key positions stay close",
+        "move between a few connected areas with a steady route rhythm",
+        "survey a wider space and consider longer routes before a key push",
+    )[layout_score]
     return {
-        "summary": reflection,
+        "summary": "I get the sense that you may want the opponent to " + planning_intention + ", while you let them " + spatial_intention + ". Tell me if I have missed the feeling you are aiming for.",
         "recommendedDifficulty": difficulty,
-        "rationale": experience_rationale + " " + relationship_rationale,
+        "difficultyRationale": "I would set the puzzle pressure from how quickly a useful move should become clear and how much push order should matter. This leads me to recommend " + difficulty + " difficulty.",
+        "recommendedLayout": layout,
+        "layoutRationale": "I would organize the space from the desired distance between important positions and the route rhythm. This leads me to recommend a " + layout + " layout.",
         "source": "deterministic_fallback",
         "fallbackReason": reason,
     }
 
 
 def create_dg_guide_summary(context, request_id=""):
-    relationship = context["opponentRelationship"]
-    experience = context["opponentExperience"]
-    fallback = build_dg_fallback_summary(relationship, experience)
+    fallback = build_dg_fallback_summary(context)
 
     def validate(payload):
         if not isinstance(payload, dict):
             raise ValueError("DG guide response must be a JSON object")
         summary = normalize_dg_reflection(payload.get("summary"))
-        rationale = normalize_dg_rationale(payload.get("rationale"))
+        difficulty_rationale = normalize_dg_rationale(
+            payload.get("difficultyRationale"),
+            "difficulty",
+        )
+        layout_rationale = normalize_dg_rationale(
+            payload.get("layoutRationale"),
+            "layout",
+        )
         difficulty = str(payload.get("recommendedDifficulty") or "").strip()
+        layout = str(payload.get("recommendedLayout") or "").strip()
         if not summary:
             raise ValueError("DG guide summary is required")
         if difficulty not in {"Easy", "Medium", "Hard"}:
             raise ValueError("DG guide difficulty is invalid")
+        if layout not in {"Compact", "Balanced", "Open"}:
+            raise ValueError("DG guide layout is invalid")
         return {
             "summary": summary,
             "recommendedDifficulty": difficulty,
-            "rationale": rationale,
+            "difficultyRationale": difficulty_rationale,
+            "recommendedLayout": layout,
+            "layoutRationale": layout_rationale,
             "source": "llm",
         }
 
@@ -2385,16 +2481,20 @@ def dg_guide_summary(
     request: Request,
     response: Response,
 ):
-    relationship = payload.opponentRelationship.strip()
-    experience = payload.opponentExperience.strip()
-    if relationship not in DG_RELATIONSHIPS:
-        raise HTTPException(status_code=400, detail="Invalid DG opponent relationship.")
-    if experience not in DG_EXPERIENCES:
-        raise HTTPException(status_code=400, detail="Invalid DG opponent experience.")
-    result = create_dg_guide_summary(
-        {"opponentRelationship": relationship, "opponentExperience": experience},
-        request.state.request_id,
-    )
+    context = {
+        "firstMovePreference": payload.firstMovePreference.strip(),
+        "pushPlanningPreference": payload.pushPlanningPreference.strip(),
+        "spacePreference": payload.spacePreference.strip(),
+        "routeRhythmPreference": payload.routeRhythmPreference.strip(),
+    }
+    if (
+        context["firstMovePreference"] not in {"quick_start", "observe_then_decide", "plan_ahead", "no_preference"}
+        or context["pushPlanningPreference"] not in {"easy_to_adjust", "consider_order", "connected_pushes", "no_preference"}
+        or context["spacePreference"] not in {"focused_area", "connected_areas", "wide_area", "no_preference"}
+        or context["routeRhythmPreference"] not in {"short_routes", "occasional_detours", "long_routes", "no_preference"}
+    ):
+        raise HTTPException(status_code=400, detail="Invalid DG neutral answer.")
+    result = create_dg_guide_summary(context, request.state.request_id)
     response.headers["X-DG-Guide-Source"] = result.get("source", "")
     return result
 
@@ -2846,7 +2946,7 @@ def build_matchmaking_records_payload(
                 if not isinstance(event, dict):
                     continue
                 if event.get("eventType") not in {
-                    "first_stage", "stage", "opening", "turn", "final", "message"
+                    "draft", "first_stage", "stage", "opening", "turn", "final", "message"
                 }:
                     continue
                 safe_flow_events.append({
@@ -2859,7 +2959,7 @@ def build_matchmaking_records_payload(
                         "source", "initialDraftMethod", "rows", "diff", "userText",
                         "assistantText", "language", "cards", "assistantTurnId",
                         "openingAssistantTurnId", "openingAssistantText",
-                        "openingLanguage", "openingCards", "message",
+                        "openingLanguage", "openingCards", "message", "finalDifficulty", "finalLayout",
                     }
                 })
             safe_flow_events.sort(

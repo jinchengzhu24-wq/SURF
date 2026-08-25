@@ -92,6 +92,63 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.json()
 
+    def test_draft_requires_player_authentication_and_valid_final_values(self):
+        host = self.create_room()
+        endpoint = "/online/rooms/" + host["matchId"] + "/draft"
+
+        missing_auth = self.client.post(
+            endpoint,
+            json={"finalDifficulty": "Medium", "finalLayout": "Balanced"},
+        )
+        invalid_value = self.client.post(
+            endpoint,
+            headers=self.auth_headers(host["playerToken"]),
+            json={"finalDifficulty": "Random", "finalLayout": "Balanced"},
+        )
+
+        self.assertEqual(missing_auth.status_code, 401)
+        self.assertEqual(invalid_value.status_code, 400)
+
+    def test_draft_is_idempotent_and_rejects_different_confirmed_settings(self):
+        host = self.create_room()
+        endpoint = "/online/rooms/" + host["matchId"] + "/draft"
+        headers = self.auth_headers(host["playerToken"])
+        body = {"finalDifficulty": "Medium", "finalLayout": "Balanced"}
+
+        first = self.client.post(endpoint, headers=headers, json=body)
+        retry = self.client.post(endpoint, headers=headers, json=body)
+        conflict = self.client.post(
+            endpoint,
+            headers=headers,
+            json={"finalDifficulty": "Hard", "finalLayout": "Open"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(first.json()["recorded"])
+        self.assertEqual(first.json()["event"]["eventType"], "draft")
+        self.assertEqual(first.json()["event"]["studySessionId"], "")
+        self.assertNotIn("firstMovePreference", first.json()["event"])
+        self.assertNotIn("opponentRelationship", first.json()["event"])
+        self.assertFalse(retry.json()["recorded"])
+        self.assertEqual(retry.json()["event"], first.json()["event"])
+        self.assertEqual(conflict.status_code, 409)
+
+    def test_dashboard_aggregates_draft_fields(self):
+        host = self.create_room()
+        response = self.client.post(
+            "/online/rooms/" + host["matchId"] + "/draft",
+            headers=self.auth_headers(host["playerToken"]),
+            json={"finalDifficulty": "Easy", "finalLayout": "Compact"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+        dashboard = self.client.get("/matchmaking-records-data").json()
+        record = next(item for item in dashboard["matches"] if item["matchId"] == host["matchId"])
+        draft = record["players"][0]["coCreationFlow"][0]
+        self.assertEqual(draft["eventType"], "draft")
+        self.assertEqual(draft["finalDifficulty"], "Easy")
+        self.assertEqual(draft["finalLayout"], "Compact")
+
     def test_create_room_returns_host_identity_and_waiting_state(self):
         room = self.create_room()
 

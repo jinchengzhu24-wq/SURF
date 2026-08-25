@@ -33,6 +33,8 @@ public class QuestionnaireController : MonoBehaviour
     [Tooltip("When set, this scene opens the survey in the browser and uses Submit as Leave.")]
     public string externalSurveyUrl = "";
     public Button externalSurveyLinkButton;
+    [Tooltip("Optional first-survey-only Continue button that remains available without opening the external questionnaire.")]
+    public Button alwaysAvailableContinueButton;
 
     [Header("Player Name Input")]
     public bool requirePlayerName = true;
@@ -142,6 +144,13 @@ public class QuestionnaireController : MonoBehaviour
             externalSurveyLinkButton.onClick.RemoveAllListeners();
             externalSurveyLinkButton.onClick.AddListener(OpenExternalSurvey);
             externalSurveyLinkButton.interactable = !externalSurveyOpened;
+        }
+
+        if (alwaysAvailableContinueButton != null)
+        {
+            alwaysAvailableContinueButton.onClick.RemoveAllListeners();
+            alwaysAvailableContinueButton.onClick.AddListener(ContinueWithoutExternalSurvey);
+            alwaysAvailableContinueButton.interactable = true;
         }
 
         if (playerNameInput != null)
@@ -275,6 +284,19 @@ public class QuestionnaireController : MonoBehaviour
     public void Leave()
     {
         if (!UsesExternalSurvey || !externalSurveyOpened || isSubmitting)
+        {
+            return;
+        }
+
+        OnlineMatchContext.ClearPendingPostMatchSurvey();
+        SceneManager.LoadScene(IsBlank(nextSceneName) ? "Menu" : nextSceneName);
+    }
+
+    // This is deliberately bound only in Questionnaire(Online1). It follows the
+    // same next-scene route as Continue without requiring the browser hand-off.
+    public void ContinueWithoutExternalSurvey()
+    {
+        if (!UsesExternalSurvey || isSubmitting)
         {
             return;
         }

@@ -6,7 +6,7 @@
 
 ```text
 Menu
-  → Questionnaire(Online1) → Online_Lobby → Match_Briefing → DG → DG_Level（生成并验证首版）
+  → Questionnaire(Online1，可选择打开外部问卷或直接 Continue) → Online_Lobby → Match_Briefing → DG → DG_Level（生成并验证首版）
   → CoCreation_Entry（上传首版并创建 8010 会话）
   → 8010 Co-Creation Lab
       → Stage 1 = Unity 首版 rows
@@ -143,7 +143,7 @@ GET   /api/integrations/sessions/{sessionId}
 
 WebGL 页面底部的 `DATA DASHBOARD` 按钮会先在游戏页面内显示 Dashboard 访问密码框，密码通过 8000 的校验接口后才打开 Dashboard；取消或校验失败不会跳转。Dashboard 内的删除操作仍单独使用同一密码校验。
 
-在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
+在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。DG 确认初稿设置时，8000 会先追加一个不可变的 `draft` 节点，只记录最终 `finalDifficulty` 与 `finalLayout`，不记录四道中立引导题的原始答案。后续可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
 
 挑战请求只包含：
 

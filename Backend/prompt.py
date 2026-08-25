@@ -2,37 +2,35 @@ import json
 
 
 DG_GUIDE_SUMMARY_SYSTEM_PROMPT = (
-    "You are an assistant helping a player design a Sokoban level for a known opponent. "
-    "The relationship and desired opponent experience are fixed answer choices supplied "
-    "by the player. Do not ask questions, add choices, or invent map details. Return only "
-    "valid JSON with exactly summary, recommendedDifficulty, and rationale. "
-    "recommendedDifficulty must be Easy, Medium, or Hard. Make a joint judgment from "
-    "both inputs: the desired experience sets the intended pressure and emotional arc, "
-    "while the relationship changes how much ambiguity, repeated experimentation, and "
-    "implicit understanding are appropriate. Do not equate friendship with Easy or "
-    "unfamiliarity with Hard, and do not treat either answer as a fixed difficulty lookup. "
-    "summary must be one concise, tentative first-person reflection such as 'I get the "
-    "sense that you may...'; it must infer a possible playable intention from the "
-    "combination rather than restate or concatenate the selected labels. The reflection "
-    "must remain correctable and must not invent map tiles or layout details. rationale "
-    "must be two concise first-person sentences: first explain how the intended experience "
-    "shapes the pressure; then explain how the relationship affects fairness, readability, "
-    "or tolerance for experimentation and why that leads to the recommendation. Write "
-    "concise English ASCII strings."
+    "You are a warm, first-person Sokoban design peer. Four neutral answer codes describe "
+    "only desired planning pressure and spatial organization. Do not infer or mention a "
+    "relationship, identity, demographic, emotional bond, or research condition. Do not ask "
+    "questions, add choices, or invent map tiles. Return only valid JSON with exactly summary, "
+    "recommendedDifficulty, difficultyRationale, recommendedLayout, and layoutRationale. "
+    "recommendedDifficulty must be Easy, Medium, or Hard; recommendedLayout must be Compact, "
+    "Balanced, or Open. summary must be a concise, friendly, tentative first-person guess about "
+    "what playable moment the designer may want the opponent to experience, not a summary of "
+    "parameters or answer labels. Make it explicitly correctable (for example, 'I get the sense "
+    "that you may want...; tell me if I have missed it.'). Each "
+    "rationale must be two concise first-person sentences: explain the relevant answers, then "
+    "state why they support its recommendation. Discuss only solving pressure and space organization. "
+    "Write concise English ASCII strings."
 )
 
 
 def build_dg_guide_summary_messages(context):
     payload = {
-        "opponentRelationship": context.get("opponentRelationship", ""),
-        "opponentExperience": context.get("opponentExperience", ""),
+        "firstMovePreference": context.get("firstMovePreference", ""),
+        "pushPlanningPreference": context.get("pushPlanningPreference", ""),
+        "spacePreference": context.get("spacePreference", ""),
+        "routeRhythmPreference": context.get("routeRhythmPreference", ""),
     }
     return [
         {"role": "system", "content": DG_GUIDE_SUMMARY_SYSTEM_PROMPT},
         {
             "role": "user",
-            "content": "Offer a first-person, tentative reflection on the player's likely intended "
-            "experience and recommend a difficulty.\n"
+            "content": "As a design friend, guess the player's likely intended opponent experience in "
+            "a warm, correctable Summary. Then recommend a difficulty and layout separately.\n"
             + json.dumps(payload, ensure_ascii=True, separators=(",", ":")),
         },
     ]
@@ -469,15 +467,16 @@ def build_dg_context_prompt(dg_context=None):
     if not isinstance(dg_context, dict) or not dg_context:
         return ""
     safe = {
-        "opponentRelationship": str(dg_context.get("opponentRelationship") or "")[:32],
-        "opponentExperience": str(dg_context.get("opponentExperience") or "")[:32],
         "aiSummary": str(dg_context.get("aiSummary") or "")[:320],
+        "aiRecommendedDifficulty": str(dg_context.get("aiRecommendedDifficulty") or "")[:16],
+        "aiRecommendedLayout": str(dg_context.get("aiRecommendedLayout") or "")[:16],
         "finalDifficulty": str(dg_context.get("finalDifficulty") or "")[:16],
+        "finalLayout": str(dg_context.get("finalLayout") or "")[:16],
     }
     return (
-        "DG guidance context is player-confirmed background. Use it to keep the "
-        "blueprint aligned with the intended experience, but generationPreferences "
-        "remain authoritative and do not infer exact tile placement from it.\n"
+        "DG guidance context contains only player-confirmed initial map settings. "
+        "Use it to keep the blueprint aligned with planning pressure and spatial organization; "
+        "generationPreferences remain authoritative and do not infer exact tile placement from it.\n"
         + json.dumps(safe, ensure_ascii=True, separators=(",", ":"))
         + "\n"
     )

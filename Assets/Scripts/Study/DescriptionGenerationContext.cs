@@ -29,13 +29,18 @@ public class LevelGenerationPreferences
 public class DescriptionGenerationSettings
 {
     public string styleDescription = "";
-    public string opponentRelationship = "";
-    public string opponentExperience = "";
+    public string firstMovePreference = "";
+    public string pushPlanningPreference = "";
+    public string spacePreference = "";
+    public string routeRhythmPreference = "";
     public string aiSummary = "";
-    public string aiRationale = "";
+    public string aiDifficultyRationale = "";
+    public string aiLayoutRationale = "";
     public string aiRecommendedDifficulty = "";
+    public string aiRecommendedLayout = "";
     public string aiRecommendationSource = "";
     public string finalDifficulty = "";
+    public string finalLayout = "";
     public LevelGenerationPreferences preferences =
         new LevelGenerationPreferences();
 }

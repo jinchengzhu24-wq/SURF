@@ -9,15 +9,28 @@ using UnityEngine.UI;
 // The DG scene owns every visible control. This controller binds only serialized references.
 public sealed class DescriptionGenerationController : MonoBehaviour
 {
-    private const string GuideEndpoint = "http://111.231.136.4:8000/dg/guide/summary";
-    private static readonly string[] RelationshipValues = { "friend", "acquaintance", "stranger" };
-    private static readonly string[] ExperienceValues = { "relaxed", "challenging_fair", "breakthrough" };
+    private const string BackendBaseUrl = "http://111.231.136.4:8000";
+    private const string GuideEndpoint = BackendBaseUrl + "/dg/guide/summary";
     private static readonly string[] DifficultyLabels = { "Easy", "Medium", "Hard", "Random" };
-    private static readonly Preset[] Presets =
+    private static readonly string[] LayoutLabels = { "Compact", "Balanced", "Open", "Random" };
+    private static readonly DifficultyPreset[] DifficultyPresets =
     {
-        new Preset("Easy", 18, 32, 8, 14, 14, 24),
-        new Preset("Medium", 22, 42, 10, 22, 18, 34),
-        new Preset("Hard", 30, 50, 16, 28, 24, 40)
+        new DifficultyPreset("Easy", 18, 32, 8, 14, 14, 24),
+        new DifficultyPreset("Medium", 22, 42, 10, 22, 18, 34),
+        new DifficultyPreset("Hard", 30, 50, 16, 28, 24, 40)
+    };
+    private static readonly LayoutPreset[] LayoutPresets =
+    {
+        new LayoutPreset("Compact", "bottleneck_corridor", "edge_cluster", "side_choke", "side_pool", "center", 1, "vertical", "player_route", "required"),
+        new LayoutPreset("Balanced", "split_route", "split_pair", "central_baffle", "route_divider", "none", 0, "any", "visual_only", "preferred"),
+        new LayoutPreset("Open", "open_workshop", "split_pair", "central_baffle", "side_pool", "none", 0, "any", "visual_only", "preferred")
+    };
+    private static readonly Question[] Questions =
+    {
+        new Question("When the opponent first sees the map, how should they find a first useful move?", new[] { "Identify a reasonable move almost immediately", "Look over boxes, goals, and passages before deciding", "Plan several moves before acting", "I don't mind" }, new[] { "quick_start", "observe_then_decide", "plan_ahead", "no_preference" }),
+        new Question("When a box is ready to be pushed, how much planning should that decision need?", new[] { "Most pushes leave clear ways to adjust", "Some pushes require thinking about position and order", "Several pushes should interact and need a fuller plan", "I don't mind" }, new[] { "easy_to_adjust", "consider_order", "connected_pushes", "no_preference" }),
+        new Question("How would you like the playable space to feel as the opponent plans their route?", new[] { "Most important positions are close together in one focused area", "Important positions are spread across a few connected areas", "There is a wider area to inspect before committing to a route", "I don't mind" }, new[] { "focused_area", "connected_areas", "wide_area", "no_preference" }),
+        new Question("What route rhythm would you like?", new[] { "Short distances with closely linked decisions", "Direct progress with occasional detours", "Longer exploration or return paths before key pushes", "I don't mind" }, new[] { "short_routes", "occasional_detours", "long_routes", "no_preference" })
     };
 
     [Header("Navigation")]
@@ -25,47 +38,122 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     [Header("Request")]
     [SerializeField] private bool restoreSavedSettings;
     [SerializeField] private string guideEndpoint = GuideEndpoint;
+    [SerializeField] private string backendBaseUrl = BackendBaseUrl;
     [SerializeField] private int requestTimeoutSeconds = 15;
     [Header("Static Scene References")]
     [SerializeField] private Text progressText;
     [SerializeField] private Text summaryText;
-    [SerializeField] private Text rationaleText;
+    [SerializeField] private Text difficultyRationaleText;
+    [SerializeField] private Text layoutRationaleText;
     [SerializeField] private Text statusText;
     [SerializeField] private Text difficultyText;
+    [SerializeField] private Text layoutText;
     [SerializeField] private GameObject difficultyControls;
     [SerializeField] private Text questionText;
     [SerializeField] private Button[] optionButtons;
-    [Header("Static Question Copy")]
-    [TextArea(2, 3)] [SerializeField] private string relationshipQuestion = "What is your relationship with the opponent?";
-    [SerializeField] private string[] relationshipOptions = { "Close friend", "Acquaintance", "Stranger" };
-    [TextArea(2, 3)] [SerializeField] private string experienceQuestion = "What should the opponent feel after playing the level?";
-    [SerializeField] private string[] experienceOptions = { "Relaxed and approachable", "Challenging but fair", "Several attempts and a breakthrough" };
+    [SerializeField] private Button previousLayoutButton;
+    [SerializeField] private Button nextLayoutButton;
     [SerializeField] private Button previousDifficultyButton;
     [SerializeField] private Button nextDifficultyButton;
     [SerializeField] private Button confirmButton;
 
     private DescriptionGenerationSettings settings;
-    private int displayedDifficulty = 3;
+    private int displayedDifficulty;
+    private int displayedLayout;
     private int questionIndex;
     private bool summaryReady;
     private bool requestInFlight;
 
-    private sealed class Preset
+    private sealed class Question
+    {
+        public readonly string prompt;
+        public readonly string[] labels;
+        public readonly string[] values;
+
+        public Question(string prompt, string[] labels, string[] values)
+        {
+            this.prompt = prompt;
+            this.labels = labels;
+            this.values = values;
+        }
+    }
+
+    private sealed class DifficultyPreset
     {
         public readonly string label;
         private readonly int minSteps, maxSteps, minPushes, maxPushes, minPulls, maxPulls;
-        public Preset(string label, int minSteps, int maxSteps, int minPushes, int maxPushes, int minPulls, int maxPulls)
+
+        public DifficultyPreset(string label, int minSteps, int maxSteps, int minPushes, int maxPushes, int minPulls, int maxPulls)
         {
-            this.label = label; this.minSteps = minSteps; this.maxSteps = maxSteps;
-            this.minPushes = minPushes; this.maxPushes = maxPushes; this.minPulls = minPulls; this.maxPulls = maxPulls;
+            this.label = label;
+            this.minSteps = minSteps;
+            this.maxSteps = maxSteps;
+            this.minPushes = minPushes;
+            this.maxPushes = maxPushes;
+            this.minPulls = minPulls;
+            this.maxPulls = maxPulls;
         }
+
         public void Apply(LevelGenerationPreferences target)
         {
-            target.minSolutionSteps = minSteps; target.maxSolutionSteps = maxSteps;
-            target.minPushes = minPushes; target.maxPushes = maxPushes;
-            target.minReversePulls = minPulls; target.maxReversePulls = maxPulls;
+            target.minSolutionSteps = minSteps;
+            target.maxSolutionSteps = maxSteps;
+            target.minPushes = minPushes;
+            target.maxPushes = maxPushes;
+            target.minReversePulls = minPulls;
+            target.maxReversePulls = maxPulls;
         }
-        public bool Matches(LevelGenerationPreferences value) => value.minSolutionSteps == minSteps && value.maxSolutionSteps == maxSteps && value.minPushes == minPushes && value.maxPushes == maxPushes && value.minReversePulls == minPulls && value.maxReversePulls == maxPulls;
+
+        public bool Matches(LevelGenerationPreferences value)
+        {
+            return value.minSolutionSteps == minSteps && value.maxSolutionSteps == maxSteps
+                && value.minPushes == minPushes && value.maxPushes == maxPushes
+                && value.minReversePulls == minPulls && value.maxReversePulls == maxPulls;
+        }
+    }
+
+    private sealed class LayoutPreset
+    {
+        public readonly string label;
+        private readonly string archetype, targetLayout, obstacleStyle, waterStyle;
+        private readonly string corridorPlacement, corridorOrientation, corridorRole, corridorPriority;
+        private readonly int corridorWidth;
+
+        public LayoutPreset(string label, string archetype, string targetLayout, string obstacleStyle, string waterStyle, string corridorPlacement, int corridorWidth, string corridorOrientation, string corridorRole, string corridorPriority)
+        {
+            this.label = label;
+            this.archetype = archetype;
+            this.targetLayout = targetLayout;
+            this.obstacleStyle = obstacleStyle;
+            this.waterStyle = waterStyle;
+            this.corridorPlacement = corridorPlacement;
+            this.corridorWidth = corridorWidth;
+            this.corridorOrientation = corridorOrientation;
+            this.corridorRole = corridorRole;
+            this.corridorPriority = corridorPriority;
+        }
+
+        public void Apply(LevelGenerationPreferences target)
+        {
+            target.archetype = archetype;
+            target.targetLayout = targetLayout;
+            target.obstacleStyle = obstacleStyle;
+            target.waterStyle = waterStyle;
+            target.corridorPlacement = corridorPlacement;
+            target.corridorWidth = corridorWidth;
+            target.corridorOrientation = corridorOrientation;
+            target.corridorRole = corridorRole;
+            target.corridorPriority = corridorPriority;
+        }
+
+        public bool Matches(LevelGenerationPreferences value)
+        {
+            return value.archetype == archetype && value.targetLayout == targetLayout
+                && value.obstacleStyle == obstacleStyle && value.waterStyle == waterStyle
+                && value.corridorPlacement == corridorPlacement && value.corridorWidth == corridorWidth
+                && value.corridorOrientation == corridorOrientation && value.corridorRole == corridorRole
+                && value.corridorPriority == corridorPriority;
+        }
     }
 
     private void Start()
@@ -76,38 +164,54 @@ public sealed class DescriptionGenerationController : MonoBehaviour
             enabled = false;
             return;
         }
+
         DescriptionGenerationSettings saved = null;
         bool loaded = restoreSavedSettings && DescriptionGenerationContext.TryLoad(out saved);
-        settings = loaded && saved != null ? saved : NewSettings(1);
-        displayedDifficulty = loaded ? ResolveSavedDifficulty() : 3;
+        settings = loaded && saved != null ? saved : NewSettings();
+        displayedDifficulty = loaded ? ResolveSavedDifficulty() : 1;
+        displayedLayout = loaded ? ResolveSavedLayout() : 1;
         BindStaticControls();
         ShowQuestion(0);
     }
 
-    private bool HasValidStaticInterface() => questionText != null && summaryText != null && rationaleText != null && difficultyText != null && difficultyControls != null && previousDifficultyButton != null && nextDifficultyButton != null && confirmButton != null && HasThreeButtons(optionButtons) && HasThreeLabels(relationshipOptions) && HasThreeLabels(experienceOptions);
-    private static bool HasThreeButtons(Button[] buttons) => buttons != null && buttons.Length == 3 && buttons[0] != null && buttons[1] != null && buttons[2] != null;
-    private static bool HasThreeLabels(string[] labels) => labels != null && labels.Length == 3 && !string.IsNullOrWhiteSpace(labels[0]) && !string.IsNullOrWhiteSpace(labels[1]) && !string.IsNullOrWhiteSpace(labels[2]);
+    private bool HasValidStaticInterface()
+    {
+        return questionText != null && summaryText != null && difficultyRationaleText != null && layoutRationaleText != null
+            && difficultyText != null && layoutText != null && difficultyControls != null
+            && previousLayoutButton != null && nextLayoutButton != null && previousDifficultyButton != null
+            && nextDifficultyButton != null && confirmButton != null && optionButtons != null && optionButtons.Length == 4
+            && optionButtons[0] != null && optionButtons[1] != null && optionButtons[2] != null && optionButtons[3] != null;
+    }
 
     private void BindStaticControls()
     {
-        previousDifficultyButton.onClick.RemoveAllListeners(); previousDifficultyButton.onClick.AddListener(() => ChangeDifficulty(-1));
-        nextDifficultyButton.onClick.RemoveAllListeners(); nextDifficultyButton.onClick.AddListener(() => ChangeDifficulty(1));
-        confirmButton.onClick.RemoveAllListeners(); confirmButton.onClick.AddListener(SaveAndContinue);
-        UpdateDifficultyUi(); SetControlsInteractable(false);
+        previousDifficultyButton.onClick.RemoveAllListeners();
+        previousDifficultyButton.onClick.AddListener(() => ChangeDifficulty(-1));
+        nextDifficultyButton.onClick.RemoveAllListeners();
+        nextDifficultyButton.onClick.AddListener(() => ChangeDifficulty(1));
+        previousLayoutButton.onClick.RemoveAllListeners();
+        previousLayoutButton.onClick.AddListener(() => ChangeLayout(-1));
+        nextLayoutButton.onClick.RemoveAllListeners();
+        nextLayoutButton.onClick.AddListener(() => ChangeLayout(1));
+        confirmButton.onClick.RemoveAllListeners();
+        confirmButton.onClick.AddListener(SaveAndContinue);
+        UpdateParameterUi();
+        SetControlsInteractable(false);
     }
 
     private void ShowQuestion(int index)
     {
         questionIndex = index;
-        if (progressText != null) progressText.text = "Question " + (index + 1) + " of 2";
-        questionText.text = index == 0 ? relationshipQuestion : experienceQuestion;
+        Question question = Questions[index];
+        if (progressText != null) progressText.text = "Question " + (index + 1) + " of " + Questions.Length;
+        questionText.text = question.prompt;
         if (statusText != null) statusText.text = "Choose one option.";
-        string[] labels = index == 0 ? relationshipOptions : experienceOptions;
         for (int i = 0; i < optionButtons.Length; i++)
         {
             int answerIndex = i;
-            SetButtonLabel(optionButtons[i], labels[i]);
-            optionButtons[i].onClick.RemoveAllListeners(); optionButtons[i].onClick.AddListener(() => SelectAnswer(answerIndex));
+            SetButtonLabel(optionButtons[i], question.labels[i]);
+            optionButtons[i].onClick.RemoveAllListeners();
+            optionButtons[i].onClick.AddListener(() => SelectAnswer(answerIndex));
             optionButtons[i].interactable = true;
         }
         SetControlsInteractable(false);
@@ -115,122 +219,304 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     private void SelectAnswer(int index)
     {
-        if (questionIndex == 0) { settings.opponentRelationship = RelationshipValues[index]; ShowQuestion(1); return; }
-        settings.opponentExperience = ExperienceValues[index]; StartCoroutine(RequestSummary());
+        string value = Questions[questionIndex].values[index];
+        if (questionIndex == 0) settings.firstMovePreference = value;
+        else if (questionIndex == 1) settings.pushPlanningPreference = value;
+        else if (questionIndex == 2) settings.spacePreference = value;
+        else settings.routeRhythmPreference = value;
+
+        if (questionIndex + 1 < Questions.Length)
+        {
+            ShowQuestion(questionIndex + 1);
+            return;
+        }
+        StartCoroutine(RequestSummary());
     }
 
     private IEnumerator RequestSummary()
     {
         requestInFlight = true;
         SetOptionButtonsInteractable(false);
+        questionText.text = "AI is reviewing your initial-map preferences.";
         summaryText.text = "AI reflection is being prepared...";
-        rationaleText.text = "AI difficulty suggestion is being prepared...";
-        if (statusText != null) statusText.text = "AI is preparing a summary and difficulty suggestion...";
-        GuideRequest payload = new GuideRequest { opponentRelationship = settings.opponentRelationship, opponentExperience = settings.opponentExperience, language = "en" };
+        difficultyRationaleText.text = "AI difficulty suggestion is being prepared...";
+        layoutRationaleText.text = "AI layout suggestion is being prepared...";
+        if (statusText != null) statusText.text = "AI is preparing difficulty and layout suggestions...";
+        GuideRequest payload = new GuideRequest
+        {
+            firstMovePreference = settings.firstMovePreference,
+            pushPlanningPreference = settings.pushPlanningPreference,
+            spacePreference = settings.spacePreference,
+            routeRhythmPreference = settings.routeRhythmPreference,
+            language = "en"
+        };
         string endpoint = string.IsNullOrWhiteSpace(guideEndpoint) ? GuideEndpoint : guideEndpoint.Trim();
-        using (UnityWebRequest request = new UnityWebRequest(endpoint, "POST"))
+        using (UnityWebRequest request = new UnityWebRequest(endpoint, UnityWebRequest.kHttpVerbPOST))
         {
             request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(JsonUtility.ToJson(payload)));
-            request.downloadHandler = new DownloadHandlerBuffer(); request.SetRequestHeader("Content-Type", "application/json");
-            request.timeout = Mathf.Max(1, requestTimeoutSeconds); yield return request.SendWebRequest();
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+            yield return request.SendWebRequest();
             if (request.result == UnityWebRequest.Result.Success)
             {
                 GuideResponse response = null;
                 try { response = JsonUtility.FromJson<GuideResponse>(request.downloadHandler.text); }
                 catch (Exception exception) { Debug.LogWarning("DG guide response parse failed: " + exception.Message); }
-                if (response != null && IsValidDifficulty(response.recommendedDifficulty) && !string.IsNullOrWhiteSpace(response.summary) && !string.IsNullOrWhiteSpace(response.rationale))
+                if (IsValidGuideResponse(response))
                 {
                     requestInFlight = false;
                     ApplyGuideResponse(response);
                     yield break;
                 }
             }
-            // The deployed 8000 service may temporarily predate this optional guide route.
-            // Continue with a deterministic, player-readable result instead of surfacing a
-            // transport warning in the Unity console.
         }
         requestInFlight = false;
         ApplyGuideResponse(BuildFallbackResponse());
     }
 
+    private static bool IsValidGuideResponse(GuideResponse response)
+    {
+        return response != null && IsValidDifficulty(response.recommendedDifficulty) && IsValidLayout(response.recommendedLayout)
+            && !string.IsNullOrWhiteSpace(response.summary) && !string.IsNullOrWhiteSpace(response.difficultyRationale)
+            && !string.IsNullOrWhiteSpace(response.layoutRationale);
+    }
+
     private GuideResponse BuildFallbackResponse()
     {
-        bool isFriend = settings.opponentRelationship == "friend";
-        bool isAcquaintance = settings.opponentRelationship == "acquaintance";
-        bool isBreakthrough = settings.opponentExperience == "breakthrough";
-        string difficulty = settings.opponentExperience == "relaxed"
-            ? "Easy"
-            : isBreakthrough && settings.opponentRelationship == "stranger"
-                ? "Medium"
-                : isBreakthrough ? "Hard" : "Medium";
-        string relationshipReflection = isFriend
-            ? "someone who can read the level as a shared challenge, while still needing the pressure to feel fair"
-            : isAcquaintance
-                ? "someone you want to challenge considerately without assuming they share your puzzle habits"
-                : "a first encounter where the intended challenge needs to earn trust through clear, readable consequences";
-        string experienceReflection = settings.opponentExperience == "relaxed"
-            ? "a calm, approachable route that lets them settle into the puzzle"
-            : isBreakthrough
-                ? "a patient struggle that builds toward a satisfying moment of recognition rather than a punishing surprise"
-                : "meaningful decisions that create pressure without making the solution feel arbitrary";
-        string summary = "I get the sense that you may be designing for " + relationshipReflection + ", and hoping they experience " + experienceReflection + ".";
-        string experienceRationale = settings.opponentExperience == "relaxed"
-            ? "I would keep the starting pressure light so the player can feel capable before any demanding planning is required."
-            : isBreakthrough
-                ? "I would reserve enough planning pressure for the eventual insight to feel earned rather than immediate."
-                : "I would use a moderate amount of planning pressure so that decisions matter while their consequences remain understandable.";
-        string relationshipRationale = isFriend
-            ? "Because a friend may tolerate a more deliberate shared challenge, I recommend " + difficulty + " while still avoiding opaque or punishing traps."
-            : isAcquaintance
-                ? "Because the player may not share the designer's assumptions, I recommend " + difficulty + " with especially clear feedback and recoverable reasoning."
-                : "Because this first encounter has to establish trust, I recommend " + difficulty + " and would keep the intended pressure legible rather than relying on unexplained trial and error.";
-        return new GuideResponse { summary = summary, rationale = experienceRationale + " " + relationshipRationale, recommendedDifficulty = difficulty, source = "deterministic_fallback" };
+        int difficultyScore = ResolvePreferenceScore(settings.firstMovePreference, settings.pushPlanningPreference);
+        int layoutScore = ResolvePreferenceScore(settings.spacePreference, settings.routeRhythmPreference);
+        string difficulty = DifficultyLabels[difficultyScore];
+        string layout = LayoutLabels[layoutScore];
+        return new GuideResponse
+        {
+            summary = BuildFallbackIntentSummary(difficultyScore, layoutScore),
+            recommendedDifficulty = difficulty,
+            difficultyRationale = BuildDifficultyFallbackRationale(difficulty),
+            recommendedLayout = layout,
+            layoutRationale = BuildLayoutFallbackRationale(layout),
+            source = "deterministic_fallback"
+        };
+    }
+
+    private static string BuildFallbackIntentSummary(int difficultyScore, int layoutScore)
+    {
+        string planning = difficultyScore == 0
+            ? "find an early foothold and feel able to adjust after most pushes"
+            : difficultyScore == 2
+                ? "settle into deliberate, interdependent push planning before committing"
+                : "pause to connect a few decisions while still being able to read their consequences";
+        string space = layoutScore == 0
+            ? "keep their attention on a focused area where key positions stay close"
+            : layoutScore == 2
+                ? "survey a wider space and consider longer routes before a key push"
+                : "move between a few connected areas with a steady route rhythm";
+        return "I get the sense that you may want the opponent to " + planning + ", while you let them " + space + ". Tell me if I have missed the feeling you are aiming for.";
+    }
+
+    private static int ResolvePreferenceScore(string first, string second)
+    {
+        int firstScore = PreferenceScore(first);
+        int secondScore = PreferenceScore(second);
+        if (firstScore < 0 && secondScore < 0) return 1;
+        if (firstScore < 0) return secondScore;
+        if (secondScore < 0) return firstScore;
+        return Mathf.RoundToInt((firstScore + secondScore) / 2f);
+    }
+
+    private static int PreferenceScore(string value)
+    {
+        if (value == "quick_start" || value == "easy_to_adjust" || value == "focused_area" || value == "short_routes") return 0;
+        if (value == "observe_then_decide" || value == "consider_order" || value == "connected_areas" || value == "occasional_detours") return 1;
+        if (value == "plan_ahead" || value == "connected_pushes" || value == "wide_area" || value == "long_routes") return 2;
+        return -1;
+    }
+
+    private static string BuildDifficultyFallbackRationale(string difficulty)
+    {
+        if (difficulty == "Easy") return "I would keep the first useful actions readable and leave room to adjust most pushes.";
+        if (difficulty == "Hard") return "I would make several push decisions depend on earlier planning while keeping the map solvable and readable.";
+        return "I would ask for some planning around push order while keeping the consequences understandable.";
+    }
+
+    private static string BuildLayoutFallbackRationale(string layout)
+    {
+        if (layout == "Compact") return "I would keep important positions close together so route choices are concentrated in one focused area.";
+        if (layout == "Open") return "I would leave more space to inspect routes before the player commits to a key push.";
+        return "I would connect a few distinct areas so the player alternates between direct progress and manageable detours.";
     }
 
     private void ApplyGuideResponse(GuideResponse response)
     {
-        // The completed state must never retain question controls, including when a
-        // response arrives after a UI event has refreshed the question panel.
-        settings.aiSummary = response.summary.Trim(); settings.aiRationale = response.rationale.Trim();
-        settings.aiRecommendedDifficulty = response.recommendedDifficulty; settings.aiRecommendationSource = response.source ?? "llm";
+        settings.aiSummary = response.summary.Trim();
+        settings.aiDifficultyRationale = response.difficultyRationale.Trim();
+        settings.aiLayoutRationale = response.layoutRationale.Trim();
+        settings.aiRecommendedDifficulty = response.recommendedDifficulty;
+        settings.aiRecommendedLayout = response.recommendedLayout;
+        settings.aiRecommendationSource = response.source ?? "llm";
         displayedDifficulty = DifficultyIndex(settings.aiRecommendedDifficulty);
+        displayedLayout = LayoutIndex(settings.aiRecommendedLayout);
         summaryText.text = "AI summary: " + settings.aiSummary;
-        rationaleText.text = "AI suggestion: " + DifficultyLabels[displayedDifficulty] + "\n" + settings.aiRationale;
-        if (statusText != null) statusText.text = "Review the summary, adjust difficulty if needed, then confirm.";
-        summaryReady = true; UpdateDifficultyUi(); SetControlsInteractable(true);
+        difficultyRationaleText.text = "AI difficulty suggestion: " + DifficultyLabels[displayedDifficulty] + "\n" + settings.aiDifficultyRationale;
+        layoutRationaleText.text = "AI layout suggestion: " + LayoutLabels[displayedLayout] + "\n" + settings.aiLayoutRationale;
+        if (statusText != null) statusText.text = "Review the suggestions, adjust either setting if needed, then confirm.";
+        summaryReady = true;
+        UpdateParameterUi();
+        SetControlsInteractable(true);
     }
 
     private void ChangeDifficulty(int delta)
     {
         displayedDifficulty = (displayedDifficulty + delta + DifficultyLabels.Length) % DifficultyLabels.Length;
-        if (displayedDifficulty < Presets.Length) Presets[displayedDifficulty].Apply(settings.preferences);
-        settings.finalDifficulty = DifficultyLabels[displayedDifficulty]; UpdateDifficultyUi();
+        UpdateParameterUi();
     }
 
-    private void UpdateDifficultyUi() => difficultyText.text = DifficultyLabels[displayedDifficulty];
+    private void ChangeLayout(int delta)
+    {
+        displayedLayout = (displayedLayout + delta + LayoutLabels.Length) % LayoutLabels.Length;
+        UpdateParameterUi();
+    }
+
+    private void UpdateParameterUi()
+    {
+        difficultyText.text = DifficultyLabels[displayedDifficulty];
+        layoutText.text = LayoutLabels[displayedLayout];
+    }
+
     private void SetControlsInteractable(bool interactable)
     {
-        previousDifficultyButton.interactable = interactable; nextDifficultyButton.interactable = interactable;
+        previousDifficultyButton.interactable = interactable;
+        nextDifficultyButton.interactable = interactable;
+        previousLayoutButton.interactable = interactable;
+        nextLayoutButton.interactable = interactable;
         confirmButton.interactable = interactable && summaryReady && !requestInFlight;
     }
+
     private void SetOptionButtonsInteractable(bool interactable)
     {
         foreach (Button button in optionButtons) button.interactable = interactable;
     }
-    private static DescriptionGenerationSettings NewSettings(int presetIndex) { DescriptionGenerationSettings result = new DescriptionGenerationSettings(); Presets[presetIndex].Apply(result.preferences); return result; }
-    private int ResolveSavedDifficulty() { for (int i = 0; i < Presets.Length; i++) if (Presets[i].Matches(settings.preferences)) return i; return 3; }
+
+    private static DescriptionGenerationSettings NewSettings()
+    {
+        DescriptionGenerationSettings result = new DescriptionGenerationSettings();
+        DifficultyPresets[1].Apply(result.preferences);
+        LayoutPresets[1].Apply(result.preferences);
+        return result;
+    }
+
+    private int ResolveSavedDifficulty()
+    {
+        for (int i = 0; i < DifficultyPresets.Length; i++) if (DifficultyPresets[i].Matches(settings.preferences)) return i;
+        return 3;
+    }
+
+    private int ResolveSavedLayout()
+    {
+        for (int i = 0; i < LayoutPresets.Length; i++) if (LayoutPresets[i].Matches(settings.preferences)) return i;
+        return 3;
+    }
+
     private void SaveAndContinue()
     {
         if (!summaryReady || requestInFlight) return;
-        int selected = displayedDifficulty == 3 ? UnityEngine.Random.Range(0, Presets.Length) : displayedDifficulty;
-        Presets[selected].Apply(settings.preferences); settings.finalDifficulty = Presets[selected].label;
-        DescriptionGenerationContext.Save(settings);
-        if (!string.IsNullOrWhiteSpace(nextSceneName) && Application.CanStreamedLevelBeLoaded(nextSceneName)) { SceneManager.LoadScene(nextSceneName); return; }
-        if (statusText != null) statusText.text = "The DG result scene is unavailable.";
+        int difficultyIndex = displayedDifficulty == DifficultyPresets.Length ? UnityEngine.Random.Range(0, DifficultyPresets.Length) : displayedDifficulty;
+        int layoutIndex = displayedLayout == LayoutPresets.Length ? UnityEngine.Random.Range(0, LayoutPresets.Length) : displayedLayout;
+        DifficultyPresets[difficultyIndex].Apply(settings.preferences);
+        LayoutPresets[layoutIndex].Apply(settings.preferences);
+        settings.finalDifficulty = DifficultyPresets[difficultyIndex].label;
+        settings.finalLayout = LayoutPresets[layoutIndex].label;
+        StartCoroutine(RecordDraftAndContinue());
     }
-    private static int DifficultyIndex(string value) => string.Equals(value, "Easy", StringComparison.OrdinalIgnoreCase) ? 0 : string.Equals(value, "Medium", StringComparison.OrdinalIgnoreCase) ? 1 : string.Equals(value, "Hard", StringComparison.OrdinalIgnoreCase) ? 2 : 3;
-    private static bool IsValidDifficulty(string value) => value == "Easy" || value == "Medium" || value == "Hard";
-    private static void SetButtonLabel(Button button, string value) { Text label = button.GetComponentInChildren<Text>(true); if (label != null) label.text = value; }
-    [Serializable] private sealed class GuideRequest { public string opponentRelationship; public string opponentExperience; public string language; }
-    [Serializable] private sealed class GuideResponse { public string summary; public string rationale; public string recommendedDifficulty; public string source; }
+
+    private IEnumerator RecordDraftAndContinue()
+    {
+        requestInFlight = true;
+        SetControlsInteractable(false);
+        if (!OnlineMatchContext.HasMatch)
+        {
+            ShowDraftRecordFailure("No active online room is available to record Draft.");
+            yield break;
+        }
+
+        string baseUrl = string.IsNullOrWhiteSpace(backendBaseUrl) ? BackendBaseUrl : backendBaseUrl.TrimEnd('/');
+        string endpoint = baseUrl + "/online/rooms/" + UnityWebRequest.EscapeURL(OnlineMatchContext.MatchId) + "/draft";
+        DraftRequest payload = new DraftRequest { finalDifficulty = settings.finalDifficulty, finalLayout = settings.finalLayout };
+        using (UnityWebRequest request = new UnityWebRequest(endpoint, UnityWebRequest.kHttpVerbPOST))
+        {
+            request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(JsonUtility.ToJson(payload)));
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.SetRequestHeader("X-Player-Token", OnlineMatchContext.PlayerToken);
+            request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+            if (statusText != null) statusText.text = "Recording Draft settings...";
+            yield return request.SendWebRequest();
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                ShowDraftRecordFailure(BuildErrorMessage(request));
+                yield break;
+            }
+        }
+
+        requestInFlight = false;
+        // The neutral answers only inform this one recommendation.  The persisted
+        // context (and the 8000 Draft record) contains confirmed settings only.
+        settings.firstMovePreference = string.Empty;
+        settings.pushPlanningPreference = string.Empty;
+        settings.spacePreference = string.Empty;
+        settings.routeRhythmPreference = string.Empty;
+        DescriptionGenerationContext.Save(settings);
+        if (!string.IsNullOrWhiteSpace(nextSceneName) && Application.CanStreamedLevelBeLoaded(nextSceneName))
+        {
+            SceneManager.LoadScene(nextSceneName);
+            yield break;
+        }
+        ShowDraftRecordFailure("The DG result scene is unavailable.");
+    }
+
+    private void ShowDraftRecordFailure(string message)
+    {
+        requestInFlight = false;
+        if (statusText != null) statusText.text = "Draft was not recorded. Retry Confirm.";
+        summaryText.text = "Draft record failed: " + message;
+        SetControlsInteractable(true);
+    }
+
+    private static string BuildErrorMessage(UnityWebRequest request)
+    {
+        string body = request.downloadHandler == null ? "" : request.downloadHandler.text;
+        try
+        {
+            ErrorEnvelope envelope = JsonUtility.FromJson<ErrorEnvelope>(body);
+            if (envelope != null && !string.IsNullOrWhiteSpace(envelope.detail)) return envelope.detail;
+        }
+        catch (Exception) { }
+        return request.responseCode > 0 ? "Server request failed (HTTP " + request.responseCode + ")." : request.error;
+    }
+
+    private static int DifficultyIndex(string value)
+    {
+        for (int i = 0; i < DifficultyPresets.Length; i++) if (DifficultyPresets[i].label == value) return i;
+        return -1;
+    }
+
+    private static int LayoutIndex(string value)
+    {
+        for (int i = 0; i < LayoutPresets.Length; i++) if (LayoutPresets[i].label == value) return i;
+        return -1;
+    }
+
+    private static bool IsValidDifficulty(string value) => DifficultyIndex(value) >= 0;
+    private static bool IsValidLayout(string value) => LayoutIndex(value) >= 0;
+
+    private static void SetButtonLabel(Button button, string value)
+    {
+        Text label = button.GetComponentInChildren<Text>(true);
+        if (label != null) label.text = value;
+    }
+
+    [Serializable] private sealed class GuideRequest { public string firstMovePreference; public string pushPlanningPreference; public string spacePreference; public string routeRhythmPreference; public string language; }
+    [Serializable] private sealed class GuideResponse { public string summary; public string recommendedDifficulty; public string difficultyRationale; public string recommendedLayout; public string layoutRationale; public string source; }
+    [Serializable] private sealed class DraftRequest { public string finalDifficulty; public string finalLayout; }
+    [Serializable] private sealed class ErrorEnvelope { public string detail; }
 }

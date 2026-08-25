@@ -122,13 +122,17 @@ class DescriptionGenerationApiTests(unittest.TestCase):
 
     def test_dg_guide_returns_validated_llm_summary(self):
         result = {
-            "summary": "You are designing for a close friend.",
-            "rationale": (
-                "I would use a moderate amount of planning pressure so decisions matter "
-                "while their consequences remain understandable. Because a friend can read "
-                "this as a shared challenge, I recommend Medium without using opaque traps."
+            "summary": "You may be aiming for clear planning pressure in a readable space.",
+            "difficultyRationale": (
+                "I would keep the first useful move readable while making some push order matter. "
+                "I therefore recommend Medium difficulty."
             ),
             "recommendedDifficulty": "Medium",
+            "layoutRationale": (
+                "I would keep key positions distributed across connected areas with direct routes. "
+                "I therefore recommend a Balanced layout."
+            ),
+            "recommendedLayout": "Balanced",
         }
 
         def execute_json_request(**kwargs):
@@ -142,32 +146,57 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             response = self.client.post(
                 "/dg/guide/summary",
                 json={
-                    "opponentRelationship": "friend",
-                    "opponentExperience": "challenging_fair",
+                    "firstMovePreference": "observe_then_decide",
+                    "pushPlanningPreference": "consider_order",
+                    "spacePreference": "connected_areas",
+                    "routeRhythmPreference": "occasional_detours",
                 },
             )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["recommendedDifficulty"], "Medium")
+        self.assertEqual(response.json()["recommendedLayout"], "Balanced")
         self.assertEqual(response.json()["source"], "llm")
         self.assertTrue(response.json()["summary"].startswith("I get the sense that"))
 
-    def test_dg_fallback_jointly_considers_relationship_and_experience(self):
-        friend = backend.build_dg_fallback_summary("friend", "breakthrough")
-        stranger = backend.build_dg_fallback_summary("stranger", "breakthrough")
+    def test_dg_fallback_combines_neutral_answers_by_parameter_group(self):
+        focused = backend.build_dg_fallback_summary({
+            "firstMovePreference": "quick_start",
+            "pushPlanningPreference": "no_preference",
+            "spacePreference": "focused_area",
+            "routeRhythmPreference": "short_routes",
+        })
+        open_layout = backend.build_dg_fallback_summary({
+            "firstMovePreference": "no_preference",
+            "pushPlanningPreference": "connected_pushes",
+            "spacePreference": "wide_area",
+            "routeRhythmPreference": "long_routes",
+        })
+        defaults = backend.build_dg_fallback_summary({
+            "firstMovePreference": "no_preference",
+            "pushPlanningPreference": "no_preference",
+            "spacePreference": "no_preference",
+            "routeRhythmPreference": "no_preference",
+        })
 
-        self.assertEqual(friend["recommendedDifficulty"], "Hard")
-        self.assertEqual(stranger["recommendedDifficulty"], "Medium")
-        self.assertIn("shared challenge", friend["summary"])
-        self.assertIn("first encounter", stranger["summary"])
-        self.assertGreaterEqual(friend["rationale"].count("."), 2)
+        self.assertEqual(focused["recommendedDifficulty"], "Easy")
+        self.assertEqual(focused["recommendedLayout"], "Compact")
+        self.assertEqual(open_layout["recommendedDifficulty"], "Hard")
+        self.assertEqual(open_layout["recommendedLayout"], "Open")
+        self.assertEqual(defaults["recommendedDifficulty"], "Medium")
+        self.assertEqual(defaults["recommendedLayout"], "Balanced")
+        self.assertIn("you may want the opponent", focused["summary"])
+        self.assertIn("Tell me if I have missed", focused["summary"])
+        self.assertNotEqual(focused["summary"], open_layout["summary"])
 
     def test_dg_guide_rejects_unknown_choice(self):
         response = self.client.post(
-            "/dg/guide/summary",
-            json={
-                "opponentRelationship": "unknown",
-                "opponentExperience": "challenging_fair",
+                "/dg/guide/summary",
+                json={
+                    "firstMovePreference": "unknown",
+                    "pushPlanningPreference": "consider_order",
+                    "spacePreference": "connected_areas",
+                    "routeRhythmPreference": "occasional_detours",
             },
         )
 
@@ -190,16 +219,19 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             response = self.client.post(
                 "/dg/guide/summary",
                 json={
-                    "opponentRelationship": "acquaintance",
-                    "opponentExperience": "breakthrough",
+                    "firstMovePreference": "plan_ahead",
+                    "pushPlanningPreference": "connected_pushes",
+                    "spacePreference": "wide_area",
+                    "routeRhythmPreference": "long_routes",
                 },
             )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["recommendedDifficulty"], "Hard")
+        self.assertEqual(response.json()["recommendedLayout"], "Open")
         self.assertEqual(response.json()["source"], "deterministic_fallback")
         self.assertTrue(response.json()["summary"].startswith("I get the sense that"))
-        self.assertTrue(response.json()["rationale"].startswith("I would"))
+        self.assertTrue(response.json()["difficultyRationale"].startswith("I would"))
 
     def test_custom_single_wall_range_is_supported(self):
         preferences = backend.normalize_generation_preferences(
