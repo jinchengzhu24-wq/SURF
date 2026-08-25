@@ -27,10 +27,10 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     };
     private static readonly Question[] Questions =
     {
-        new Question("When the opponent first sees the map, how should they find a first useful move?", new[] { "Identify a reasonable move almost immediately", "Look over boxes, goals, and passages before deciding", "Plan several moves before acting", "I don't mind" }, new[] { "quick_start", "observe_then_decide", "plan_ahead", "no_preference" }),
-        new Question("When a box is ready to be pushed, how much planning should that decision need?", new[] { "Most pushes leave clear ways to adjust", "Some pushes require thinking about position and order", "Several pushes should interact and need a fuller plan", "I don't mind" }, new[] { "easy_to_adjust", "consider_order", "connected_pushes", "no_preference" }),
-        new Question("How would you like the playable space to feel as the opponent plans their route?", new[] { "Most important positions are close together in one focused area", "Important positions are spread across a few connected areas", "There is a wider area to inspect before committing to a route", "I don't mind" }, new[] { "focused_area", "connected_areas", "wide_area", "no_preference" }),
-        new Question("What route rhythm would you like?", new[] { "Short distances with closely linked decisions", "Direct progress with occasional detours", "Longer exploration or return paths before key pushes", "I don't mind" }, new[] { "short_routes", "occasional_detours", "long_routes", "no_preference" })
+        new Question("How much inspection should the map require before the first move?", new[] { "Little inspection before acting", "Some inspection of boxes, goals, and passages", "Broader inspection and planning before acting", "No preference" }, new[] { "quick_start", "observe_then_decide", "plan_ahead", "no_preference" }),
+        new Question("How much should box-push decisions depend on other pushes?", new[] { "Most pushes can be considered independently", "Some pushes depend on position or order", "Several pushes depend on one another", "No preference" }, new[] { "easy_to_adjust", "consider_order", "connected_pushes", "no_preference" }),
+        new Question("How should important positions be distributed across the playable space?", new[] { "Concentrated within one main area", "Distributed across a few connected areas", "Distributed across a wider area", "No preference" }, new[] { "focused_area", "connected_areas", "wide_area", "no_preference" }),
+        new Question("What route structure would you prefer?", new[] { "Short routes connecting nearby decisions", "Mostly direct routes with some detours", "Longer routes with exploration or return paths", "No preference" }, new[] { "short_routes", "occasional_detours", "long_routes", "no_preference" })
     };
 
     [Header("Navigation")]
@@ -302,7 +302,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     private static string BuildFallbackIntentSummary(int difficultyScore, int layoutScore)
     {
         string planning = difficultyScore == 0
-            ? "find an early foothold and feel able to adjust after most pushes"
+            ? "find an early foothold and consider most pushes independently"
             : difficultyScore == 2
                 ? "settle into deliberate, interdependent push planning before committing"
                 : "pause to connect a few decisions while still being able to read their consequences";
@@ -334,7 +334,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     private static string BuildDifficultyFallbackRationale(string difficulty)
     {
-        if (difficulty == "Easy") return "I would keep the first useful actions readable and leave room to adjust most pushes.";
+        if (difficulty == "Easy") return "I would keep the first useful actions readable and let most pushes be considered independently.";
         if (difficulty == "Hard") return "I would make several push decisions depend on earlier planning while keeping the map solvable and readable.";
         return "I would ask for some planning around push order while keeping the consequences understandable.";
     }

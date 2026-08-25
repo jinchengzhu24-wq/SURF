@@ -17,7 +17,7 @@ public class QuestionnaireController : MonoBehaviour
     private const string OnlinePostMatchSurveyId = "online_post_match_survey";
     // WJX stores URL values in hidden text questions via its q{number} parameter.
     // The two question numbers are intentionally fixed by the live WJX forms.
-    private const int OnlinePreMatchStudySessionQuestionNumber = 13;
+    private const int OnlinePreMatchStudySessionQuestionNumber = 5;
     private const int OnlinePostMatchStudySessionQuestionNumber = 17;
 
     [Header("Survey")]

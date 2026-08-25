@@ -159,6 +159,20 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["source"], "llm")
         self.assertTrue(response.json()["summary"].startswith("I get the sense that"))
 
+    def test_dg_prompt_explains_new_answer_meanings_and_no_preference(self):
+        messages = backend.build_dg_guide_summary_messages({
+            "firstMovePreference": "quick_start",
+            "pushPlanningPreference": "easy_to_adjust",
+            "spacePreference": "focused_area",
+            "routeRhythmPreference": "short_routes",
+        })
+        system_prompt = messages[0]["content"]
+
+        self.assertIn("quick_start means little inspection before acting", system_prompt)
+        self.assertIn("easy_to_adjust means most pushes can be considered independently", system_prompt)
+        self.assertIn("no_preference means no stated preference", system_prompt)
+        self.assertIn("use Medium difficulty and Balanced layout", system_prompt)
+
     def test_dg_fallback_combines_neutral_answers_by_parameter_group(self):
         focused = backend.build_dg_fallback_summary({
             "firstMovePreference": "quick_start",

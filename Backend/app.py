@@ -2406,7 +2406,7 @@ def build_dg_fallback_summary(context, reason=""):
     difficulty = ("Easy", "Medium", "Hard")[difficulty_score]
     layout = ("Compact", "Balanced", "Open")[layout_score]
     planning_intention = (
-        "find an early foothold and feel able to adjust after most pushes",
+        "find an early foothold and consider most pushes independently",
         "pause to connect a few decisions while still being able to read their consequences",
         "settle into deliberate, interdependent push planning before committing",
     )[difficulty_score]
@@ -2418,7 +2418,7 @@ def build_dg_fallback_summary(context, reason=""):
     return {
         "summary": "I get the sense that you may want the opponent to " + planning_intention + ", while you let them " + spatial_intention + ". Tell me if I have missed the feeling you are aiming for.",
         "recommendedDifficulty": difficulty,
-        "difficultyRationale": "I would set the puzzle pressure from how quickly a useful move should become clear and how much push order should matter. This leads me to recommend " + difficulty + " difficulty.",
+        "difficultyRationale": "I would set the puzzle pressure from how much inspection the first move needs and how strongly push decisions depend on one another. This leads me to recommend " + difficulty + " difficulty.",
         "recommendedLayout": layout,
         "layoutRationale": "I would organize the space from the desired distance between important positions and the route rhythm. This leads me to recommend a " + layout + " layout.",
         "source": "deterministic_fallback",

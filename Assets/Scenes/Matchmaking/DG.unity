@@ -479,8 +479,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: When the opponent first sees the map, how should they find a first useful
-    move?
+  m_Text: How much inspection should the map require before the first move?
 --- !u!1 &200601938
 GameObject:
   m_ObjectHideFlags: 0
@@ -2651,7 +2650,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Identify a reasonable move almost immediately
+  m_Text: Little inspection before acting
 --- !u!222 &508054741
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -3551,7 +3550,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Plan several moves before acting
+  m_Text: Broader inspection and planning before acting
 --- !u!222 &1055952691
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4151,7 +4150,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: "I don\u2019t mind"
+  m_Text: No preference
 --- !u!222 &1466115373
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4500,7 +4499,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Look over boxes, goals, and passages before deciding
+  m_Text: Some inspection of boxes, goals, and passages
 --- !u!222 &1836342901
 CanvasRenderer:
   m_ObjectHideFlags: 0
