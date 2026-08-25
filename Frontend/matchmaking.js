@@ -443,11 +443,45 @@ function renderInspector(match, stage) {
         rows.push(["Minimum moves", value(record.minimumMoves)]);
     }
     appendRecordGrid(rows);
+    if (record.eventType === "draft") appendDraftDetails(record);
     if (["first_stage", "stage", "final"].includes(record.eventType)) {
         appendFlowStageDetails(match, record);
     }
     if (record.eventType === "turn") appendFlowTurnDetails(record);
     if (record.eventType === "message") appendFlowMessageDetails(record);
+}
+
+function appendDraftDetails(record) {
+    const section = createSection("Draft research record");
+    const grid = document.createElement("div");
+    grid.className = "record-grid";
+    [
+        ["Metadata complete", record.draftMetadataComplete ? "Yes" : "No"],
+        ["Q1 answer", record.q1Answer],
+        ["Q2 answer", record.q2Answer],
+        ["Q3 answer", record.q3Answer],
+        ["Q4 answer", record.q4Answer],
+        ["AI recommended difficulty", record.aiRecommendedDifficulty],
+        ["AI recommended layout", record.aiRecommendedLayout],
+        ["AI recommendation source", record.aiRecommendationSource],
+        ["User final difficulty", record.finalDifficulty],
+        ["User final layout", record.finalLayout]
+    ].forEach(([label, rowValue]) => {
+        const row = document.createElement("div");
+        row.className = "record-row";
+        row.append(textNode("span", label), textNode("strong", value(rowValue)));
+        grid.appendChild(row);
+    });
+    section.appendChild(grid);
+    section.append(
+        textNode("h4", "AI Reflection"),
+        textNode("p", value(record.aiReflection)),
+        textNode("h4", "AI difficulty rationale"),
+        textNode("p", value(record.aiDifficultyRationale)),
+        textNode("h4", "AI layout rationale"),
+        textNode("p", value(record.aiLayoutRationale))
+    );
+    elements.inspectorBody.appendChild(section);
 }
 
 function findOpeningForStage(match, record) {

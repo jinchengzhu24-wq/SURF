@@ -310,3 +310,11 @@ http://111.231.136.4/ready
 `/health` 表示进程可访问；`/ready` 还会检查 API Key、模型配置和日志目录。运维日志位于 `Backend/logs/backend.log`，单文件 5 MB，保留 5 份轮转文件。当前后端只能使用一个 Uvicorn worker。
 
 完整错误码和排查方法见 `README_LLM_ERRORS.md`。
+
+## DG Draft research record
+
+The 8000 `POST /online/rooms/{match_id}/draft` record now keeps the four DG answer codes,
+the AI reflection and both recommendation rationales, the AI recommendation and source, and
+the user's final difficulty and layout. Older clients remain compatible; incomplete records
+are marked `draftMetadataComplete: false`. See the bilingual prompt specification in
+`Draft_prompt.md`.

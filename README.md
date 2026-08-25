@@ -22,7 +22,7 @@ Menu
   → Questionnaire(Online2) → Menu
 ```
 
-旧 `Competition_Mode`、`AI_Asistant_Mode`、`Draft` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 中确认的关系、体验与最终难度只指导 8000 的首版生成，不会传入 8010 共创服务或其 LLM 上下文。
+旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 的四道中立答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI reflection、AI 推荐和用户最终确认一起保存；这些答案不会传入 8010 共创服务或其 LLM 上下文。
 
 8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。前端脚本缓存键为 `cocreation-nginx-prefix-20260818-2`，样式缓存键为 `cocreation-return-unity-20260814-19`。
 
@@ -49,6 +49,7 @@ Menu
 ### 当前首版生成模式
 
 - `DG_Level` 根据玩家描述获取 LLM 方案，通过模板生成和回退策略形成完整地图，并在 Unity 端验证。
+- DG reflection 与 Draft 记录规范见 [Draft_prompt.md](Draft_prompt.md)。
 - 当前在线流程只启用 DG；PC/PC_Design/PC_Level 作为保留资产，不在 Build Settings 或导航中开放。
 - 首版验证成功后不要求玩家先通关；DG rows 与 `description_generation` 写入 `CoCreationDraftContext`，随后加载 `CoCreation_Entry`。
 
@@ -145,7 +146,7 @@ Online1 是问卷星中的双语匹配前筛选问卷：收集性别、年龄区
 
 WebGL 页面底部的 `DATA DASHBOARD` 按钮会先在游戏页面内显示 Dashboard 访问密码框，密码通过 8000 的校验接口后才打开 Dashboard；取消或校验失败不会跳转。Dashboard 内的删除操作仍单独使用同一密码校验。
 
-在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。DG 确认初稿设置时，8000 会先追加一个不可变的 `draft` 节点，只记录最终 `finalDifficulty` 与 `finalLayout`，不记录四道中立引导题的原始答案。后续可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
+在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。DG 确认初稿设置时，8000 会先追加一个不可变的 `draft` 节点，保存四道中立题的内部答案、AI reflection、难度/布局理由、AI 推荐值、推荐来源及用户最终 `finalDifficulty` 与 `finalLayout`。旧客户端缺少新增字段时仍兼容写入，并以 `draftMetadataComplete=false` 标记。后续可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
 
 挑战请求只包含：
 

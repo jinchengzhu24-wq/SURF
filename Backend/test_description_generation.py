@@ -122,7 +122,10 @@ class DescriptionGenerationApiTests(unittest.TestCase):
 
     def test_dg_guide_returns_validated_llm_summary(self):
         result = {
-            "summary": "You may be aiming for clear planning pressure in a readable space.",
+            "summary": (
+                "You may be aiming for clear planning pressure in a readable space. "
+                "I would keep the interpretation open for your correction."
+            ),
             "difficultyRationale": (
                 "I would keep the first useful move readable while making some push order matter. "
                 "I therefore recommend Medium difficulty."
@@ -157,7 +160,7 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["recommendedDifficulty"], "Medium")
         self.assertEqual(response.json()["recommendedLayout"], "Balanced")
         self.assertEqual(response.json()["source"], "llm")
-        self.assertTrue(response.json()["summary"].startswith("I get the sense that"))
+        self.assertTrue(response.json()["summary"].startswith("My read is that"))
 
     def test_dg_prompt_explains_new_answer_meanings_and_no_preference(self):
         messages = backend.build_dg_guide_summary_messages({
@@ -199,9 +202,21 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(open_layout["recommendedLayout"], "Open")
         self.assertEqual(defaults["recommendedDifficulty"], "Medium")
         self.assertEqual(defaults["recommendedLayout"], "Balanced")
-        self.assertIn("you may want the opponent", focused["summary"])
-        self.assertIn("Tell me if I have missed", focused["summary"])
+        self.assertIn("you want the opponent", focused["summary"])
+        self.assertIn("Tell me if I am reading", focused["summary"])
+        self.assertIn("get moving with little inspection", focused["summary"])
         self.assertNotEqual(focused["summary"], open_layout["summary"])
+
+    def test_dg_fallback_rounds_mixed_preferences_up_like_unity(self):
+        result = backend.build_dg_fallback_summary({
+            "firstMovePreference": "quick_start",
+            "pushPlanningPreference": "consider_order",
+            "spacePreference": "focused_area",
+            "routeRhythmPreference": "occasional_detours",
+        })
+
+        self.assertEqual(result["recommendedDifficulty"], "Medium")
+        self.assertEqual(result["recommendedLayout"], "Balanced")
 
     def test_dg_guide_rejects_unknown_choice(self):
         response = self.client.post(
@@ -244,7 +259,7 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["recommendedDifficulty"], "Hard")
         self.assertEqual(response.json()["recommendedLayout"], "Open")
         self.assertEqual(response.json()["source"], "deterministic_fallback")
-        self.assertTrue(response.json()["summary"].startswith("I get the sense that"))
+        self.assertTrue(response.json()["summary"].startswith("My read is that"))
         self.assertTrue(response.json()["difficultyRationale"].startswith("I would"))
 
     def test_custom_single_wall_range_is_supported(self):

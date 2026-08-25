@@ -131,6 +131,37 @@ class OnlineReadyRequest(BaseModel):
 class OnlineDraftRequest(BaseModel):
     finalDifficulty: str
     finalLayout: str
+    q1Answer: str | None = ""
+    q2Answer: str | None = ""
+    q3Answer: str | None = ""
+    q4Answer: str | None = ""
+    aiReflection: str | None = ""
+    aiDifficultyRationale: str | None = ""
+    aiLayoutRationale: str | None = ""
+    aiRecommendedDifficulty: str | None = ""
+    aiRecommendedLayout: str | None = ""
+    aiRecommendationSource: str | None = ""
+
+
+ONLINE_DRAFT_ANSWER_CHOICES = {
+    "q1Answer": {"quick_start", "observe_then_decide", "plan_ahead", "no_preference"},
+    "q2Answer": {"easy_to_adjust", "consider_order", "connected_pushes", "no_preference"},
+    "q3Answer": {"focused_area", "connected_areas", "wide_area", "no_preference"},
+    "q4Answer": {"short_routes", "occasional_detours", "long_routes", "no_preference"},
+}
+ONLINE_DRAFT_METADATA_KEYS = (
+    "q1Answer",
+    "q2Answer",
+    "q3Answer",
+    "q4Answer",
+    "aiReflection",
+    "aiDifficultyRationale",
+    "aiLayoutRationale",
+    "aiRecommendedDifficulty",
+    "aiRecommendedLayout",
+    "aiRecommendationSource",
+)
+ONLINE_DRAFT_RECOMMENDATION_SOURCES = {"llm", "deterministic_fallback"}
 
 
 class OnlineChallengeRequest(BaseModel):
@@ -497,7 +528,51 @@ def append_cocreation_flow_event(room, event):
     return event, True
 
 
-def append_online_draft_event(room, player, final_difficulty, final_layout):
+def normalize_online_draft_metadata(payload):
+    metadata = {}
+    for field in ONLINE_DRAFT_METADATA_KEYS:
+        value = str(getattr(payload, field, "") or "").strip()
+        if field in {"aiReflection", "aiDifficultyRationale", "aiLayoutRationale"}:
+            max_length = 480 if field == "aiReflection" else 320
+            if len(value) > max_length:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Draft {field} is too long",
+                )
+        metadata[field] = value
+
+    for field, choices in ONLINE_DRAFT_ANSWER_CHOICES.items():
+        if metadata[field] and metadata[field] not in choices:
+            raise HTTPException(status_code=400, detail=f"Invalid Draft {field}")
+
+    if (
+        metadata["aiRecommendedDifficulty"]
+        and metadata["aiRecommendedDifficulty"] not in {"Easy", "Medium", "Hard"}
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Draft AI difficulty")
+    if (
+        metadata["aiRecommendedLayout"]
+        and metadata["aiRecommendedLayout"] not in {"Compact", "Balanced", "Open"}
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Draft AI layout")
+    if (
+        metadata["aiRecommendationSource"]
+        and metadata["aiRecommendationSource"] not in ONLINE_DRAFT_RECOMMENDATION_SOURCES
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Draft AI recommendation source")
+
+    metadata_complete = all(metadata[field] for field in ONLINE_DRAFT_METADATA_KEYS)
+    return metadata, metadata_complete
+
+
+def append_online_draft_event(
+    room,
+    player,
+    final_difficulty,
+    final_layout,
+    metadata,
+    metadata_complete,
+):
     """Append one immutable pre-generation Draft node for this player."""
     player_number = int(player["playerNumber"])
     path = online_match_flow_file(room["matchId"], player_number)
@@ -510,13 +585,24 @@ def append_online_draft_event(room, player, final_difficulty, final_layout):
             None,
         )
         if existing_event is not None:
-            if (
-                existing_event.get("finalDifficulty") != final_difficulty
-                or existing_event.get("finalLayout") != final_layout
-            ):
+            existing_values = {
+                "finalDifficulty": str(existing_event.get("finalDifficulty") or "").strip(),
+                "finalLayout": str(existing_event.get("finalLayout") or "").strip(),
+                **{
+                    field: str(existing_event.get(field) or "").strip()
+                    for field in ONLINE_DRAFT_METADATA_KEYS
+                },
+            }
+            requested_values = {
+                "finalDifficulty": final_difficulty,
+                "finalLayout": final_layout,
+                **metadata,
+            }
+            existing_complete = bool(existing_event.get("draftMetadataComplete", False))
+            if existing_values != requested_values or existing_complete != metadata_complete:
                 raise HTTPException(
                     status_code=409,
-                    detail="Draft settings are already frozen",
+                    detail="Draft record is already frozen",
                 )
             return existing_event, False
 
@@ -530,6 +616,8 @@ def append_online_draft_event(room, player, final_difficulty, final_layout):
             "serverReceivedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "finalDifficulty": final_difficulty,
             "finalLayout": final_layout,
+            **metadata,
+            "draftMetadataComplete": metadata_complete,
         }
         with path.open("a", encoding="utf-8") as log_file:
             log_file.write(json.dumps(event, ensure_ascii=False))
@@ -1206,6 +1294,7 @@ def record_online_draft(
         raise HTTPException(status_code=400, detail="Invalid final difficulty")
     if final_layout not in {"Compact", "Balanced", "Open"}:
         raise HTTPException(status_code=400, detail="Invalid final layout")
+    draft_metadata, metadata_complete = normalize_online_draft_metadata(payload)
 
     with ONLINE_ROOMS_LOCK:
         room, player = require_online_room(
@@ -1219,6 +1308,8 @@ def record_online_draft(
             player,
             final_difficulty,
             final_layout,
+            draft_metadata,
+            metadata_complete,
         )
         room["lastActivity"] = time.time()
         return {"status": "ok", "recorded": created, "event": stored_event}
@@ -2357,6 +2448,9 @@ DG_LAYOUT_ANSWERS = {
 }
 DG_FIRST_PERSON_PREFIXES = (
     "i get the sense that",
+    "it sounds like",
+    "my read is that",
+    "i'm hearing that",
     "my guess is that",
     "i think",
     "i feel",
@@ -2369,8 +2463,13 @@ def normalize_dg_reflection(summary):
     if not summary:
         return ""
     if summary.lower().startswith(DG_FIRST_PERSON_PREFIXES):
-        return summary[:320]
-    return ("I get the sense that " + summary[:290]).strip()
+        normalized = summary[:480].strip()
+    else:
+        normalized = ("My read is that " + summary[:465]).strip()
+    sentence_count = len(re.findall(r"[.!?](?:\s|$)", normalized))
+    if sentence_count < 2 or sentence_count > 3:
+        raise ValueError("DG guide summary must be 2 or 3 sentences")
+    return normalized
 
 
 def normalize_dg_rationale(rationale, label):
@@ -2389,7 +2488,14 @@ def normalize_dg_rationale(rationale, label):
 def dg_preference_score(first, second, choices):
     values = [choices[first], choices[second]]
     explicit = [value for value in values if value is not None]
-    return 1 if not explicit else round(sum(explicit) / len(explicit))
+    if not explicit:
+        return 1
+    # Match Unity's Mathf.RoundToInt for the two-answer average: .5 rounds up.
+    return int(math.floor((sum(explicit) / len(explicit)) + 0.5))
+
+
+def dg_choice_phrase(value, phrases, empty_phrase):
+    return phrases.get(value) or empty_phrase
 
 
 def build_dg_fallback_summary(context, reason=""):
@@ -2405,22 +2511,52 @@ def build_dg_fallback_summary(context, reason=""):
     )
     difficulty = ("Easy", "Medium", "Hard")[difficulty_score]
     layout = ("Compact", "Balanced", "Open")[layout_score]
-    planning_intention = (
-        "find an early foothold and consider most pushes independently",
-        "pause to connect a few decisions while still being able to read their consequences",
-        "settle into deliberate, interdependent push planning before committing",
-    )[difficulty_score]
-    spatial_intention = (
-        "keep their attention on a focused area where key positions stay close",
-        "move between a few connected areas with a steady route rhythm",
-        "survey a wider space and consider longer routes before a key push",
-    )[layout_score]
+    first_move = dg_choice_phrase(
+        context["firstMovePreference"],
+        {
+            "quick_start": "get moving with little inspection",
+            "observe_then_decide": "look over boxes, goals, and passages before settling on a move",
+            "plan_ahead": "inspect the map broadly and plan before acting",
+        },
+        "leave the first move open-ended",
+    )
+    push_planning = dg_choice_phrase(
+        context["pushPlanningPreference"],
+        {
+            "easy_to_adjust": "treat most pushes as independent decisions",
+            "consider_order": "watch how position and order affect some pushes",
+            "connected_pushes": "connect several pushes into one fuller plan",
+        },
+        "leave push dependencies open-ended",
+    )
+    space = dg_choice_phrase(
+        context["spacePreference"],
+        {
+            "focused_area": "keep important positions in one focused area",
+            "connected_areas": "spread them across a few connected areas",
+            "wide_area": "give them room across a wider playable area",
+        },
+        "leave the position distribution open-ended",
+    )
+    route = dg_choice_phrase(
+        context["routeRhythmPreference"],
+        {
+            "short_routes": "use short routes between nearby decisions",
+            "occasional_detours": "keep progress mostly direct with occasional detours",
+            "long_routes": "include longer routes with exploration or returns",
+        },
+        "leave the route rhythm open-ended",
+    )
     return {
-        "summary": "I get the sense that you may want the opponent to " + planning_intention + ", while you let them " + spatial_intention + ". Tell me if I have missed the feeling you are aiming for.",
+        "summary": (
+            "My read is that you want the opponent to " + first_move + " and " + push_planning
+            + ". On the map, you seem to prefer to " + space + " and " + route
+            + ". Tell me if I am reading the feeling you are aiming for correctly."
+        )[:480],
         "recommendedDifficulty": difficulty,
-        "difficultyRationale": "I would set the puzzle pressure from how much inspection the first move needs and how strongly push decisions depend on one another. This leads me to recommend " + difficulty + " difficulty.",
+        "difficultyRationale": "I would balance the requested first-move inspection with how independently pushes can be considered. These choices lead me to recommend " + difficulty + " difficulty.",
         "recommendedLayout": layout,
-        "layoutRationale": "I would organize the space from the desired distance between important positions and the route rhythm. This leads me to recommend a " + layout + " layout.",
+        "layoutRationale": "I would place important positions and routes according to the requested space and route rhythm. These choices lead me to recommend a " + layout + " layout.",
         "source": "deterministic_fallback",
         "fallbackReason": reason,
     }
@@ -2960,6 +3096,9 @@ def build_matchmaking_records_payload(
                         "assistantText", "language", "cards", "assistantTurnId",
                         "openingAssistantTurnId", "openingAssistantText",
                         "openingLanguage", "openingCards", "message", "finalDifficulty", "finalLayout",
+                        "q1Answer", "q2Answer", "q3Answer", "q4Answer", "aiReflection",
+                        "aiDifficultyRationale", "aiLayoutRationale", "aiRecommendedDifficulty",
+                        "aiRecommendedLayout", "aiRecommendationSource", "draftMetadataComplete",
                     }
                 })
             safe_flow_events.sort(

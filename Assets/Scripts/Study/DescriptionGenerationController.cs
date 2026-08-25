@@ -290,7 +290,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         string layout = LayoutLabels[layoutScore];
         return new GuideResponse
         {
-            summary = BuildFallbackIntentSummary(difficultyScore, layoutScore),
+            summary = BuildFallbackIntentSummary(),
             recommendedDifficulty = difficulty,
             difficultyRationale = BuildDifficultyFallbackRationale(difficulty),
             recommendedLayout = layout,
@@ -299,19 +299,50 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         };
     }
 
-    private static string BuildFallbackIntentSummary(int difficultyScore, int layoutScore)
+    private string BuildFallbackIntentSummary()
     {
-        string planning = difficultyScore == 0
-            ? "find an early foothold and consider most pushes independently"
-            : difficultyScore == 2
-                ? "settle into deliberate, interdependent push planning before committing"
-                : "pause to connect a few decisions while still being able to read their consequences";
-        string space = layoutScore == 0
-            ? "keep their attention on a focused area where key positions stay close"
-            : layoutScore == 2
-                ? "survey a wider space and consider longer routes before a key push"
-                : "move between a few connected areas with a steady route rhythm";
-        return "I get the sense that you may want the opponent to " + planning + ", while you let them " + space + ". Tell me if I have missed the feeling you are aiming for.";
+        string firstMove = FirstMovePhrase(settings.firstMovePreference);
+        string pushPlanning = PushPlanningPhrase(settings.pushPlanningPreference);
+        string space = SpacePhrase(settings.spacePreference);
+        string route = RoutePhrase(settings.routeRhythmPreference);
+        string summary = (
+            "My read is that you want the opponent to " + firstMove + " and " + pushPlanning
+            + ". On the map, you seem to prefer to " + space + " and " + route
+            + ". Tell me if I am reading the feeling you are aiming for correctly."
+        );
+        return summary.Length > 480 ? summary.Substring(0, 480).TrimEnd() : summary;
+    }
+
+    private static string FirstMovePhrase(string value)
+    {
+        if (value == "quick_start") return "get moving with little inspection";
+        if (value == "observe_then_decide") return "look over boxes, goals, and passages before settling on a move";
+        if (value == "plan_ahead") return "inspect the map broadly and plan before acting";
+        return "leave the first move open-ended";
+    }
+
+    private static string PushPlanningPhrase(string value)
+    {
+        if (value == "easy_to_adjust") return "treat most pushes as independent decisions";
+        if (value == "consider_order") return "watch how position and order affect some pushes";
+        if (value == "connected_pushes") return "connect several pushes into one fuller plan";
+        return "leave push dependencies open-ended";
+    }
+
+    private static string SpacePhrase(string value)
+    {
+        if (value == "focused_area") return "keep important positions in one focused area";
+        if (value == "connected_areas") return "spread them across a few connected areas";
+        if (value == "wide_area") return "give them room across a wider playable area";
+        return "leave the position distribution open-ended";
+    }
+
+    private static string RoutePhrase(string value)
+    {
+        if (value == "short_routes") return "use short routes between nearby decisions";
+        if (value == "occasional_detours") return "keep progress mostly direct with occasional detours";
+        if (value == "long_routes") return "include longer routes with exploration or returns";
+        return "leave the route rhythm open-ended";
     }
 
     private static int ResolvePreferenceScore(string first, string second)
@@ -356,7 +387,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         settings.aiRecommendationSource = response.source ?? "llm";
         displayedDifficulty = DifficultyIndex(settings.aiRecommendedDifficulty);
         displayedLayout = LayoutIndex(settings.aiRecommendedLayout);
-        summaryText.text = "AI summary: " + settings.aiSummary;
+        summaryText.text = "AI reflection: " + settings.aiSummary;
         difficultyRationaleText.text = "AI difficulty suggestion: " + DifficultyLabels[displayedDifficulty] + "\n" + settings.aiDifficultyRationale;
         layoutRationaleText.text = "AI layout suggestion: " + LayoutLabels[displayedLayout] + "\n" + settings.aiLayoutRationale;
         if (statusText != null) statusText.text = "Review the suggestions, adjust either setting if needed, then confirm.";
@@ -441,7 +472,21 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
         string baseUrl = string.IsNullOrWhiteSpace(backendBaseUrl) ? BackendBaseUrl : backendBaseUrl.TrimEnd('/');
         string endpoint = baseUrl + "/online/rooms/" + UnityWebRequest.EscapeURL(OnlineMatchContext.MatchId) + "/draft";
-        DraftRequest payload = new DraftRequest { finalDifficulty = settings.finalDifficulty, finalLayout = settings.finalLayout };
+        DraftRequest payload = new DraftRequest
+        {
+            q1Answer = settings.firstMovePreference,
+            q2Answer = settings.pushPlanningPreference,
+            q3Answer = settings.spacePreference,
+            q4Answer = settings.routeRhythmPreference,
+            aiReflection = settings.aiSummary,
+            aiDifficultyRationale = settings.aiDifficultyRationale,
+            aiLayoutRationale = settings.aiLayoutRationale,
+            aiRecommendedDifficulty = settings.aiRecommendedDifficulty,
+            aiRecommendedLayout = settings.aiRecommendedLayout,
+            aiRecommendationSource = settings.aiRecommendationSource,
+            finalDifficulty = settings.finalDifficulty,
+            finalLayout = settings.finalLayout
+        };
         using (UnityWebRequest request = new UnityWebRequest(endpoint, UnityWebRequest.kHttpVerbPOST))
         {
             request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(JsonUtility.ToJson(payload)));
@@ -517,6 +562,21 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     [Serializable] private sealed class GuideRequest { public string firstMovePreference; public string pushPlanningPreference; public string spacePreference; public string routeRhythmPreference; public string language; }
     [Serializable] private sealed class GuideResponse { public string summary; public string recommendedDifficulty; public string difficultyRationale; public string recommendedLayout; public string layoutRationale; public string source; }
-    [Serializable] private sealed class DraftRequest { public string finalDifficulty; public string finalLayout; }
+    [Serializable]
+    private sealed class DraftRequest
+    {
+        public string q1Answer;
+        public string q2Answer;
+        public string q3Answer;
+        public string q4Answer;
+        public string aiReflection;
+        public string aiDifficultyRationale;
+        public string aiLayoutRationale;
+        public string aiRecommendedDifficulty;
+        public string aiRecommendedLayout;
+        public string aiRecommendationSource;
+        public string finalDifficulty;
+        public string finalLayout;
+    }
     [Serializable] private sealed class ErrorEnvelope { public string detail; }
 }

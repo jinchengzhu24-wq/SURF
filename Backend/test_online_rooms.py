@@ -35,6 +35,19 @@ SOLVABLE_ROWS_B = [
     "############",
 ]
 
+FULL_DRAFT_METADATA = {
+    "q1Answer": "quick_start",
+    "q2Answer": "easy_to_adjust",
+    "q3Answer": "focused_area",
+    "q4Answer": "short_routes",
+    "aiReflection": "My read is that the map should feel readable and focused.",
+    "aiDifficultyRationale": "I would keep the first move readable. This supports Easy difficulty.",
+    "aiLayoutRationale": "I would keep important positions close. This supports a Compact layout.",
+    "aiRecommendedDifficulty": "Easy",
+    "aiRecommendedLayout": "Compact",
+    "aiRecommendationSource": "llm",
+}
+
 
 class OnlineRoomTests(unittest.TestCase):
     def setUp(self):
@@ -113,7 +126,11 @@ class OnlineRoomTests(unittest.TestCase):
         host = self.create_room()
         endpoint = "/online/rooms/" + host["matchId"] + "/draft"
         headers = self.auth_headers(host["playerToken"])
-        body = {"finalDifficulty": "Medium", "finalLayout": "Balanced"}
+        body = {
+            **FULL_DRAFT_METADATA,
+            "finalDifficulty": "Medium",
+            "finalLayout": "Balanced",
+        }
 
         first = self.client.post(endpoint, headers=headers, json=body)
         retry = self.client.post(endpoint, headers=headers, json=body)
@@ -127,7 +144,9 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertTrue(first.json()["recorded"])
         self.assertEqual(first.json()["event"]["eventType"], "draft")
         self.assertEqual(first.json()["event"]["studySessionId"], "")
-        self.assertNotIn("firstMovePreference", first.json()["event"])
+        self.assertTrue(first.json()["event"]["draftMetadataComplete"])
+        self.assertEqual(first.json()["event"]["q1Answer"], "quick_start")
+        self.assertEqual(first.json()["event"]["aiReflection"], FULL_DRAFT_METADATA["aiReflection"])
         self.assertNotIn("opponentRelationship", first.json()["event"])
         self.assertFalse(retry.json()["recorded"])
         self.assertEqual(retry.json()["event"], first.json()["event"])
@@ -135,10 +154,15 @@ class OnlineRoomTests(unittest.TestCase):
 
     def test_dashboard_aggregates_draft_fields(self):
         host = self.create_room()
+        body = {
+            **FULL_DRAFT_METADATA,
+            "finalDifficulty": "Easy",
+            "finalLayout": "Compact",
+        }
         response = self.client.post(
             "/online/rooms/" + host["matchId"] + "/draft",
             headers=self.auth_headers(host["playerToken"]),
-            json={"finalDifficulty": "Easy", "finalLayout": "Compact"},
+            json=body,
         )
         self.assertEqual(response.status_code, 200)
 
@@ -148,6 +172,56 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(draft["eventType"], "draft")
         self.assertEqual(draft["finalDifficulty"], "Easy")
         self.assertEqual(draft["finalLayout"], "Compact")
+        self.assertEqual(draft["q3Answer"], "focused_area")
+        self.assertEqual(draft["aiRecommendedLayout"], "Compact")
+        self.assertTrue(draft["draftMetadataComplete"])
+
+    def test_old_draft_client_remains_compatible_but_is_marked_incomplete(self):
+        host = self.create_room()
+        response = self.client.post(
+            "/online/rooms/" + host["matchId"] + "/draft",
+            headers=self.auth_headers(host["playerToken"]),
+            json={"finalDifficulty": "Medium", "finalLayout": "Balanced"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        event = response.json()["event"]
+        self.assertFalse(event["draftMetadataComplete"])
+        self.assertEqual(event["q1Answer"], "")
+        self.assertEqual(event["aiReflection"], "")
+
+    def test_draft_rejects_invalid_metadata(self):
+        host = self.create_room()
+        endpoint = "/online/rooms/" + host["matchId"] + "/draft"
+        response = self.client.post(
+            endpoint,
+            headers=self.auth_headers(host["playerToken"]),
+            json={
+                **FULL_DRAFT_METADATA,
+                "q2Answer": "unknown",
+                "finalDifficulty": "Medium",
+                "finalLayout": "Balanced",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_draft_metadata_change_conflicts_even_when_final_values_match(self):
+        host = self.create_room()
+        endpoint = "/online/rooms/" + host["matchId"] + "/draft"
+        headers = self.auth_headers(host["playerToken"])
+        body = {
+            **FULL_DRAFT_METADATA,
+            "finalDifficulty": "Medium",
+            "finalLayout": "Balanced",
+        }
+        first = self.client.post(endpoint, headers=headers, json=body)
+        changed = dict(body)
+        changed["aiReflection"] = "A different reflection. This must conflict."
+        conflict = self.client.post(endpoint, headers=headers, json=changed)
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(conflict.status_code, 409)
 
     def test_create_room_returns_host_identity_and_waiting_state(self):
         room = self.create_room()
