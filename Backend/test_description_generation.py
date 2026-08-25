@@ -218,6 +218,23 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(result["recommendedDifficulty"], "Medium")
         self.assertEqual(result["recommendedLayout"], "Balanced")
 
+    def test_dg_rationale_accepts_contractions_and_adds_first_person_prefix_when_needed(self):
+        self.assertIn(
+            "I'd recommend Hard",
+            backend.normalize_dg_rationale(
+                "The push order raises pressure across several decisions and makes early choices matter. "
+                "That is why I'd recommend Hard for this planning rhythm.",
+                "difficulty",
+            ),
+        )
+        self.assertTrue(
+            backend.normalize_dg_rationale(
+                "The wide routes support an Open layout and give the player room to inspect distant choices. "
+                "The space gives exploration and return paths room to breathe.",
+                "layout",
+            ).startswith("I read this as: ")
+        )
+
     def test_dg_guide_rejects_unknown_choice(self):
         response = self.client.post(
                 "/dg/guide/summary",

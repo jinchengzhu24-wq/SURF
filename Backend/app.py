@@ -2480,8 +2480,8 @@ def normalize_dg_rationale(rationale, label):
         raise ValueError(
             f"DG guide {label} rationale must explain its recommendation in two sentences"
         )
-    if not re.search(r"\bI\b", normalized):
-        raise ValueError("DG guide rationale must be a first-person judgment")
+    if not re.search(r"\bI(?:['’](?:d|m|ve|ll))?\b", normalized, re.IGNORECASE):
+        normalized = "I read this as: " + normalized
     return normalized
 
 

@@ -22,6 +22,20 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_RESPONSE_EXCERPT_CHARS = 1000
 DEFAULT_RETRY_DELAY_SECONDS = 0.5
+ASCII_PUNCTUATION_TRANSLATION = str.maketrans({
+    "\u00a0": " ",
+    "\u2010": "-",
+    "\u2011": "-",
+    "\u2012": "-",
+    "\u2013": "-",
+    "\u2014": "-",
+    "\u2018": "'",
+    "\u2019": "'",
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2026": "...",
+    "\u2022": "-",
+})
 
 _client_lock = threading.Lock()
 _clients = {}
@@ -188,6 +202,17 @@ def validate_english_only_payload(value, path="$"):
             validate_english_only_payload(child, f"{path}[{index}]")
 
 
+def normalize_ascii_punctuation(value):
+    """Normalize common typography while preserving the ASCII-only contract."""
+    if isinstance(value, str):
+        return value.translate(ASCII_PUNCTUATION_TRANSLATION)
+    if isinstance(value, dict):
+        return {key: normalize_ascii_punctuation(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [normalize_ascii_punctuation(child) for child in value]
+    return value
+
+
 def execute_json_request(
     *,
     task,
@@ -265,7 +290,7 @@ def execute_json_request(
 
             response = client.chat.completions.create(**request_options)
             content = str(response.choices[0].message.content or "")
-            parsed = json.loads(content)
+            parsed = normalize_ascii_punctuation(json.loads(content))
             validate_english_only_payload(parsed)
             value = validator(parsed)
             elapsed_ms = round((time.perf_counter() - overall_started) * 1000)

@@ -117,6 +117,15 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertIn("English ASCII text only", repair_message)
         self.assertIn("$.nested.promptText", repair_message)
 
+    def test_common_typographic_punctuation_is_normalized(self):
+        client = FakeClient([
+            '{"summary":"A wider route— with a ' + chr(0x2019) + 'friend"}',
+        ])
+
+        result = self.execute(client, max_attempts=1)
+
+        self.assertEqual(result.value["summary"], "A wider route- with a 'friend")
+
     def test_repeated_non_english_strings_are_rejected(self):
         client = FakeClient(
             [
