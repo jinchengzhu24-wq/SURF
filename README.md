@@ -142,7 +142,7 @@ GET   /api/integrations/sessions/{sessionId}
 
 8000 后端继续提供匿名两人房间、Ready、挑战交换、结果提交、问卷和 dashboard。房间位于单进程内存中，使用六位房间码、一秒轮询和 30 分钟惰性清理。
 
-Online1 是问卷星中的双语匹配前筛选问卷：收集性别、年龄区间、既往推箱子经验及是否与另一组两位参与者均为陌生关系；隐藏的第 5 题 `studySessionId` 由 Unity 以 `q5` 参数写入。Online2 保持独立的赛后问卷。
+Online1 是问卷星中的双语匹配前筛选问卷：收集性别、年龄区间、既往推箱子经验及是否与另一组两位参与者均为陌生关系；隐藏的第 5 题 `studySessionId` 由 Unity 以 `q5` 参数写入。Online2 是独立的 21 题双语赛后问卷，隐藏的第 22 题 `studySessionId` 由 Unity 以 `q22` 参数写入。
 
 WebGL 页面底部的 `DATA DASHBOARD` 按钮会先在游戏页面内显示 Dashboard 访问密码框，密码通过 8000 的校验接口后才打开 Dashboard；取消或校验失败不会跳转。Dashboard 内的删除操作仍单独使用同一密码校验。
 

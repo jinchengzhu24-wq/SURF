@@ -442,6 +442,9 @@ function renderInspector(match, stage) {
         rows.push(["Moves", value(record.moveCount)]);
         rows.push(["Minimum moves", value(record.minimumMoves)]);
     }
+    if (record.eventType === "final") {
+        rows.push(["Co-creation time", formatClockDuration(record.coCreationDurationSeconds)]);
+    }
     appendRecordGrid(rows);
     if (record.eventType === "draft") appendDraftDetails(record);
     if (["first_stage", "stage", "final"].includes(record.eventType)) {
@@ -854,6 +857,14 @@ function formatMode(input) {
 function formatSeconds(input) {
     if (typeof input !== "number" || Number.isNaN(input)) return "-";
     return input.toFixed(1) + "s";
+}
+
+function formatClockDuration(input) {
+    if (typeof input !== "number" || Number.isNaN(input) || input < 0) return "-";
+    const totalSeconds = Math.min(600, Math.round(input));
+    const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+    const seconds = String(totalSeconds % 60).padStart(2, "0");
+    return minutes + ":" + seconds;
 }
 
 function formatTimestamp(input) {

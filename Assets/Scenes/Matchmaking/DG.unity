@@ -3116,7 +3116,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 1}
   m_AnchorMax: {x: 1, y: 1}
-  m_AnchoredPosition: {x: 15.357483, y: -190}
+  m_AnchoredPosition: {x: 15.357422, y: -190}
   m_SizeDelta: {x: -238.885, y: 96.6985}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &768015549
@@ -3153,7 +3153,7 @@ MonoBehaviour:
     m_VerticalOverflow: 0
     m_LineSpacing: 1
   m_Text: Answer four quick questions. The AI will summarize your choices and give
-    you a suggestion. Later you will receive a draft and improve it with AI.
+    you a suggestion. You can also adjust the parameter by yourself.
 --- !u!222 &768015550
 CanvasRenderer:
   m_ObjectHideFlags: 0

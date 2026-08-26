@@ -68,6 +68,7 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_COOKIE_NAME = "sokoban_cocreation_access"
 PLAY_TICKET_LIFETIME = timedelta(minutes=5)
 COCREATION_DEADLINE = timedelta(minutes=10)
+COCREATION_DEADLINE_SECONDS = int(COCREATION_DEADLINE.total_seconds())
 INTERRUPTED_AFTER = timedelta(minutes=30)
 _message_locks = {}
 _message_locks_guard = Lock()
@@ -2020,7 +2021,28 @@ def synchronize_version_with_online_match(session_id, version_id, event_type):
             event["source"] = "manual" if source == "human_edit" else "ai"
         elif event_type == "first_stage":
             event["initialDraftMethod"] = session["initial_draft_method"]
+        elif event_type == "final":
+            duration = calculate_cocreation_duration_seconds(session)
+            if duration is not None:
+                event["coCreationDurationSeconds"] = duration
     synchronize_cocreation_event_with_online_match(session, event)
+
+
+def calculate_cocreation_duration_seconds(session):
+    """Return the consumed portion of the ten-minute browser deadline."""
+    deadline_at = session["deadline_at"]
+    finalized_at = session["finalized_at"]
+    if not deadline_at or not finalized_at:
+        return None
+
+    remaining_seconds = max(
+        0,
+        int((parse_time(deadline_at) - parse_time(finalized_at)).total_seconds()),
+    )
+    return min(
+        COCREATION_DEADLINE_SECONDS,
+        max(0, COCREATION_DEADLINE_SECONDS - remaining_seconds),
+    )
 
 
 def synchronize_opening_with_online_match(session_id, version_id, opening):

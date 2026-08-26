@@ -1438,6 +1438,28 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(events[0]["rows"], EDITED_ROWS)
         self.assertEqual(events[1]["eventType"], "final")
         self.assertEqual(events[1]["versionId"], version_id)
+        self.assertIsInstance(events[1]["coCreationDurationSeconds"], int)
+        self.assertGreaterEqual(events[1]["coCreationDurationSeconds"], 0)
+        self.assertLessEqual(events[1]["coCreationDurationSeconds"], 600)
+
+    def test_cocreation_duration_uses_remaining_deadline_and_caps_at_timeout(self):
+        session = {
+            "deadline_at": "2026-08-26T10:10:00Z",
+            "finalized_at": "2026-08-26T10:06:37Z",
+        }
+        self.assertEqual(
+            backend.calculate_cocreation_duration_seconds(session),
+            397,
+        )
+
+        timed_out = {
+            "deadline_at": "2026-08-26T10:10:00Z",
+            "finalized_at": "2026-08-26T10:18:00Z",
+        }
+        self.assertEqual(
+            backend.calculate_cocreation_duration_seconds(timed_out),
+            600,
+        )
 
     def test_message_sync_uses_a_stable_message_event_id(self):
         version_id = self.read_session()["currentVersionId"]

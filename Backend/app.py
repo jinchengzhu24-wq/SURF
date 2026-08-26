@@ -196,6 +196,7 @@ class OnlineCoCreationFlowEventRequest(BaseModel):
     openingAssistantText: str | None = ""
     openingLanguage: str | None = ""
     openingCards: list[dict] | None = None
+    coCreationDurationSeconds: float | None = None
 
 
 class OnlineResultRequest(BaseModel):
@@ -400,6 +401,21 @@ def build_cocreation_flow_event(room, payload):
     if event_type not in {"first_stage", "stage", "opening", "turn", "final"}:
         raise HTTPException(status_code=400, detail="Invalid co-creation event type")
 
+    if payload.coCreationDurationSeconds is not None:
+        duration = float(payload.coCreationDurationSeconds)
+        if event_type != "final":
+            raise HTTPException(
+                status_code=400,
+                detail="Co-creation duration is only valid for the final event",
+            )
+        if not math.isfinite(duration) or duration < 0 or duration > 600:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid co-creation duration",
+            )
+    else:
+        duration = None
+
     event = {
         "eventId": normalize_cocreation_sync_id(payload.eventId, "event ID"),
         "eventType": event_type,
@@ -430,6 +446,8 @@ def build_cocreation_flow_event(room, payload):
             "rows": list(payload.rows),
             "diff": list(payload.diff or []),
         })
+        if event_type == "final" and duration is not None:
+            event["coCreationDurationSeconds"] = round(duration, 2)
         if event_type == "stage":
             source = str(payload.source or "").strip()
             if source not in {"manual", "ai"}:
@@ -3140,6 +3158,7 @@ def build_matchmaking_records_payload(
                         "q1Answer", "q2Answer", "q3Answer", "q4Answer", "aiReflection",
                         "aiDifficultyRationale", "aiLayoutRationale", "aiRecommendedDifficulty",
                         "aiRecommendedLayout", "aiRecommendationSource", "draftMetadataComplete",
+                        "coCreationDurationSeconds",
                     }
                 })
             safe_flow_events.sort(

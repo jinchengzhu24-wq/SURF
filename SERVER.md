@@ -318,3 +318,10 @@ the AI reflection and both recommendation rationales, the AI recommendation and 
 the user's final difficulty and layout. Older clients remain compatible; incomplete records
 are marked `draftMetadataComplete: false`. See the bilingual prompt specification in
 `Draft_prompt.md`.
+
+The 8010 co-creation `final` flow event also carries `coCreationDurationSeconds`, calculated
+from the existing ten-minute browser deadline as `600 - remainingSeconds` at final Stage
+confirmation and capped at 600 seconds after timeout. The 8000 dashboard shows this value as
+`Co-creation time` in the `Final map` details. Opponent-level play time remains the existing
+Match Result `result_submitted.durationSeconds` record and is shown in the Result submitted
+details and the corresponding challenge map details; it is not duplicated on Final map.

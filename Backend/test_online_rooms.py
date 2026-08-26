@@ -643,6 +643,58 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(record["players"][0]["coCreationFlow"][0]["source"], "manual")
         self.assertEqual(record["players"][1]["coCreationFlow"][0]["cards"][0]["type"], "discussion")
 
+    def test_final_flow_event_records_cocreation_duration_and_validates_scope(self):
+        host = self.client.post(
+            "/online/rooms", json={"studySessionId": "study-host"}
+        ).json()
+        endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"
+        headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
+        final = {
+            "eventId": "final:version-host",
+            "eventType": "final",
+            "playerNumber": 1,
+            "sessionId": "session-host",
+            "versionId": "version-host",
+            "stageNumber": 2,
+            "rows": SOLVABLE_ROWS_A,
+            "diff": [],
+            "coCreationDurationSeconds": 321,
+        }
+
+        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
+            response = self.client.post(endpoint, json=final, headers=headers)
+            invalid_value = self.client.post(
+                endpoint,
+                json={**final, "eventId": "final:invalid", "coCreationDurationSeconds": 601},
+                headers=headers,
+            )
+            invalid_event = self.client.post(
+                endpoint,
+                json={
+                    **final,
+                    "eventId": "stage:invalid-duration",
+                    "eventType": "stage",
+                    "source": "manual",
+                    "coCreationDurationSeconds": 10,
+                },
+                headers=headers,
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["event"]["coCreationDurationSeconds"],
+            321,
+        )
+        self.assertEqual(invalid_value.status_code, 400)
+        self.assertEqual(invalid_event.status_code, 400)
+
+        dashboard = self.client.get("/matchmaking-records-data").json()
+        record = next(item for item in dashboard["matches"] if item["matchId"] == host["matchId"])
+        self.assertEqual(
+            record["players"][0]["coCreationFlow"][0]["coCreationDurationSeconds"],
+            321,
+        )
+
     def test_first_stage_and_opening_are_preserved_for_dashboard_merging(self):
         host = self.client.post(
             "/online/rooms", json={"studySessionId": "study-host"}
