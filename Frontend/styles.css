@@ -568,6 +568,18 @@ main {
     font-size: 11px;
 }
 
+.match-id-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.match-id-line p {
+    min-width: 0;
+    margin-right: 0;
+}
+
 .status-chip {
     display: inline-flex;
     min-height: 24px;
@@ -953,6 +965,43 @@ main {
 .record-row strong {
     overflow-wrap: anywhere;
     font-weight: 650;
+}
+
+.id-control {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+}
+
+.id-value {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.copy-id-button {
+    display: inline-flex;
+    min-height: 22px;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    padding: 2px 6px;
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    color: var(--text);
+    background: var(--surface);
+    cursor: pointer;
+    font-size: 10px;
+    line-height: 1;
+}
+
+.copy-id-button:hover {
+    background: var(--surface-soft);
+}
+
+.copy-id-button:disabled {
+    cursor: default;
+    opacity: 0.72;
 }
 
 .option-card {

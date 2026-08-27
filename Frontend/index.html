@@ -8,7 +8,7 @@
         window.FRONTEND_ASSET_BASE = window.location.protocol === "file:"
             ? "."
             : (window.location.pathname.startsWith("/frontend/") ? "." : "/frontend");
-        document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/styles.css?v=dashboard-20260802-2">');
+        document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/styles.css?v=dashboard-20260827-1">');
     </script>
 </head>
 <body>
@@ -102,7 +102,11 @@
                                         <h2 id="selectedMatchTitle">Match</h2>
                                         <span class="status-chip" id="selectedMatchStatus">In progress</span>
                                     </div>
-                                    <p id="selectedMatchText">-</p>
+                                    <div class="match-id-line">
+                                        <p id="selectedMatchText">-</p>
+                                        <button class="copy-id-button" id="selectedMatchCopy" type="button"
+                                            title="Copy full Match ID" aria-label="Copy full Match ID" hidden>Copy</button>
+                                    </div>
                                     <div class="meta-line" id="selectedMatchMeta"></div>
                                 </div>
                                 <button class="danger-button" id="deleteMatchButton" type="button">Delete match</button>
@@ -204,7 +208,7 @@
 
     <script>
         const script = document.createElement("script");
-        script.src = window.FRONTEND_ASSET_BASE + "/matchmaking.js?v=player-flows-20260827-1";
+        script.src = window.FRONTEND_ASSET_BASE + "/matchmaking.js?v=player-flows-20260827-4";
         document.body.appendChild(script);
     </script>
 </body>

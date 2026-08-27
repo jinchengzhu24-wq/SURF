@@ -35,6 +35,7 @@ const elements = {
     selectedMatchTitle: document.getElementById("selectedMatchTitle"),
     selectedMatchStatus: document.getElementById("selectedMatchStatus"),
     selectedMatchText: document.getElementById("selectedMatchText"),
+    selectedMatchCopy: document.getElementById("selectedMatchCopy"),
     selectedMatchMeta: document.getElementById("selectedMatchMeta"),
     deleteMatchButton: document.getElementById("deleteMatchButton"),
     matchTimeline: document.getElementById("matchTimeline"),
@@ -65,6 +66,7 @@ function init() {
     elements.refreshButton.addEventListener("click", () => loadData(true));
     elements.clearButton.addEventListener("click", clearAllRecords);
     elements.searchInput.addEventListener("input", applyFilters);
+    elements.selectedMatchCopy.addEventListener("click", () => copyFullId(elements.selectedMatchCopy));
     elements.deleteMatchButton.addEventListener("click", deleteSelectedMatch);
     elements.deleteDialogForm.addEventListener("submit", submitDeleteDialog);
     elements.deleteDialogCancel.addEventListener("click", closeDeleteDialog);
@@ -157,7 +159,7 @@ function applyFilters() {
     const query = clean(elements.searchInput.value).toLowerCase();
     state.filteredMatches = state.matches.filter(match => {
         if (!query) return true;
-        return [match.matchId, match.roomCode, shortId(match.matchId)]
+        return [match.matchId, match.roomCode, compactId(match.matchId)]
             .join(" ")
             .toLowerCase()
             .includes(query);
@@ -185,7 +187,9 @@ function renderMatchList() {
             textNode("span", "ROOM " + (match.roomCode || "------"), "idea-hash"),
             textNode("span", formatShortDate(match.updatedAt))
         );
-        const snippet = textNode("p", "Match " + shortId(match.matchId), "idea-snippet");
+        const snippet = textNode("p", "Match " + compactId(match.matchId), "idea-snippet");
+        const fullMatchId = clean(match.matchId);
+        snippet.title = fullMatchId ? "Full Match ID: " + fullMatchId : "";
         const challenges = safeArray(match.players).filter(player => player.challenge).length;
         const results = safeArray(match.players).filter(player => player.result).length;
         const bottom = document.createElement("div");
@@ -233,7 +237,7 @@ function renderMatch(match) {
     elements.selectedMatchTitle.textContent = "ROOM " + (match.roomCode || "------");
     elements.selectedMatchStatus.textContent = statusLabel(match.status);
     elements.selectedMatchStatus.className = "status-chip " + statusClass(match.status);
-    elements.selectedMatchText.textContent = "Match ID " + match.matchId;
+    setMatchIdDisplay(match.matchId);
     elements.selectedMatchMeta.textContent = "";
     const challenges = safeArray(match.players).filter(player => player.challenge).length;
     const results = safeArray(match.players).filter(player => player.result).length;
@@ -419,10 +423,15 @@ function renderInspector(match, stage) {
     }
     elements.inspectorTitle.textContent = stage.label;
     const record = stage.record;
+    const players = safeArray(match && match.players);
+    const playerOne = players.find(player => player && player.playerNumber === 1);
+    const playerTwo = players.find(player => player && player.playerNumber === 2);
     const rows = [
         ["Event", titleCase(record.eventType)],
         ["Player", record.playerNumber ? "Player " + record.playerNumber : "Room"],
-        ["Recorded", formatTimestamp(getTimestamp(record))]
+        ["Recorded", formatTimestamp(getTimestamp(record))],
+        ["Player 1 Study session ID", playerOne && playerOne.studySessionId, true],
+        ["Player 2 Study session ID", playerTwo && playerTwo.studySessionId, true]
     ];
     if (record.statusAfter) rows.splice(2, 0, ["Status after", titleCase(record.statusAfter)]);
     if (record.eventType === "ready_changed") rows.push(["Ready", record.ready ? "Yes" : "No"]);
@@ -595,14 +604,17 @@ function renderCompareChallenge(player) {
     const table = document.createElement("table");
     table.className = "delta-table";
     [
+        ["Study session ID", player.studySessionId, true],
         ["Message", player.designerIntention || "-"],
         ["Played by", "Player " + challenge.playedByPlayerNumber],
         ["Play time", formatSeconds(result.durationSeconds)],
         ["Moves", value(result.moveCount)],
         ["Minimum", value(result.minimumMoves)]
-    ].forEach(([label, metricValue]) => {
+    ].forEach(([label, metricValue, copyable]) => {
         const row = document.createElement("tr");
-        row.append(textNode("td", label), textNode("td", metricValue));
+        const valueCell = document.createElement("td");
+        valueCell.appendChild(copyable ? createIdControl(label, metricValue) : textNode("span", metricValue));
+        row.append(textNode("td", label), valueCell);
         table.appendChild(row);
     });
     card.appendChild(table);
@@ -766,10 +778,13 @@ function appendRecordGrid(rows) {
     const section = createSection("Record details");
     const grid = document.createElement("div");
     grid.className = "record-grid";
-    rows.forEach(([label, rowValue]) => {
+    rows.forEach(([label, rowValue, copyable]) => {
         const row = document.createElement("div");
         row.className = "record-row";
-        row.append(textNode("span", label), textNode("strong", value(rowValue)));
+        row.append(
+            textNode("span", label),
+            copyable ? createIdControl(label, rowValue) : textNode("strong", value(rowValue))
+        );
         grid.appendChild(row);
     });
     section.appendChild(grid);
@@ -813,9 +828,82 @@ function value(input) {
     return String(input);
 }
 
-function shortId(input) {
+function compactId(input) {
     const text = clean(input);
     return text ? text.slice(0, 8) : "-";
+}
+
+function setMatchIdDisplay(matchId) {
+    const fullValue = clean(matchId);
+    elements.selectedMatchText.textContent = "Match ID " + compactId(fullValue);
+    elements.selectedMatchText.title = fullValue ? "Full Match ID: " + fullValue : "";
+    elements.selectedMatchCopy.textContent = elements.selectedMatchCopy.dataset.originalLabel || "Copy";
+    elements.selectedMatchCopy.disabled = false;
+    elements.selectedMatchCopy.hidden = !fullValue;
+    elements.selectedMatchCopy.dataset.fullValue = fullValue;
+    elements.selectedMatchCopy.title = fullValue ? "Copy full Match ID" : "";
+    elements.selectedMatchCopy.setAttribute("aria-label", "Copy full Match ID");
+}
+
+function createIdControl(label, rawValue) {
+    const fullValue = clean(rawValue);
+    if (!fullValue) return textNode("strong", "-");
+    const control = document.createElement("span");
+    control.className = "id-control";
+    const display = textNode("strong", compactId(fullValue), "id-value");
+    display.title = "Full " + label + ": " + fullValue;
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "copy-id-button";
+    copyButton.textContent = "Copy";
+    copyButton.title = "Copy full " + label;
+    copyButton.setAttribute("aria-label", "Copy full " + label);
+    copyButton.dataset.fullValue = fullValue;
+    copyButton.addEventListener("click", () => copyFullId(copyButton));
+    control.append(display, copyButton);
+    return control;
+}
+
+async function copyFullId(button) {
+    const fullValue = clean(button && button.dataset.fullValue);
+    if (!fullValue) return;
+    let copied = false;
+    try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+            await navigator.clipboard.writeText(fullValue);
+            copied = true;
+        }
+    } catch (error) {
+        copied = false;
+    }
+    if (!copied) copied = copyWithFallback(fullValue);
+    if (!copied) return;
+    const originalLabel = button.dataset.originalLabel || button.textContent;
+    button.dataset.originalLabel = originalLabel;
+    button.textContent = "Copied";
+    button.disabled = true;
+    window.setTimeout(() => {
+        button.textContent = originalLabel;
+        button.disabled = false;
+    }, 1200);
+}
+
+function copyWithFallback(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    let copied = false;
+    try {
+        copied = document.execCommand("copy");
+    } catch (error) {
+        copied = false;
+    }
+    textarea.remove();
+    return copied;
 }
 
 function getTimestamp(record) {
