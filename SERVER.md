@@ -319,6 +319,8 @@ the user's final difficulty and layout. Older clients remain compatible; incompl
 are marked `draftMetadataComplete: false`. See the bilingual prompt specification in
 `Draft_prompt.md`.
 
+DG 的 Difficulty 仅由 Q1/Q2 计算，Layout 仅由 Q3/Q4 计算。每组先按低/中/高方向得到确定性基准：相邻冲突取对应端点，跨两级冲突取中间档；单题 `no_preference` 使用另一题，两题均为 `no_preference` 才是 `Random`。只有两题明确冲突时，AI 可以在该基准上下调整一档；同方向或无偏好时不得调整。Draft 记录实际 AI 推荐值，基准值可由四个答案重新计算。
+
 The 8010 co-creation `final` flow event also carries `coCreationDurationSeconds`, calculated
 from the existing ten-minute browser deadline as `600 - remainingSeconds` at final Stage
 confirmation and capped at 600 seconds after timeout. The 8000 dashboard shows this value as

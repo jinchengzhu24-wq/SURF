@@ -211,6 +211,9 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertIn("easy_to_adjust means most pushes can be considered independently", system_prompt)
         self.assertIn("one no_preference means ignore that answer", system_prompt)
         self.assertIn("both answers are no_preference", system_prompt)
+        self.assertIn("low plus middle uses the low endpoint", system_prompt)
+        self.assertIn("Only for this conflict may the AI recommend", system_prompt)
+        self.assertNotIn("two explicit answers differ, use Medium", system_prompt)
 
     def test_dg_fallback_combines_neutral_answers_by_parameter_group(self):
         focused = backend.build_dg_fallback_summary({
@@ -243,7 +246,7 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertNotIn("Tell me if I am reading", focused["summary"])
         self.assertNotEqual(focused["summary"], open_layout["summary"])
 
-    def test_dg_fallback_uses_balanced_for_mixed_explicit_directions(self):
+    def test_dg_fallback_uses_endpoints_for_adjacent_explicit_directions(self):
         result = backend.build_dg_fallback_summary({
             "firstMovePreference": "observe_then_decide",
             "pushPlanningPreference": "connected_pushes",
@@ -251,8 +254,182 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             "routeRhythmPreference": "long_routes",
         })
 
-        self.assertEqual(result["recommendedDifficulty"], "Medium")
-        self.assertEqual(result["recommendedLayout"], "Balanced")
+        self.assertEqual(result["recommendedDifficulty"], "Hard")
+        self.assertEqual(result["recommendedLayout"], "Open")
+
+    def test_dg_score_and_allowed_scores_handle_conflicts(self):
+        difficulty = backend.DG_DIFFICULTY_ANSWERS
+        self.assertEqual(
+            backend.dg_preference_score("quick_start", "observe_then_decide", difficulty),
+            0,
+        )
+        self.assertEqual(
+            backend.dg_preference_score("observe_then_decide", "connected_pushes", difficulty),
+            2,
+        )
+        self.assertEqual(
+            backend.dg_preference_score("quick_start", "connected_pushes", difficulty),
+            1,
+        )
+        self.assertEqual(
+            backend.dg_preference_allowed_scores(
+                "observe_then_decide", "connected_pushes", difficulty
+            ),
+            {1, 2},
+        )
+        self.assertEqual(
+            backend.dg_preference_allowed_scores(
+                "quick_start", "connected_pushes", difficulty
+            ),
+            {0, 1, 2},
+        )
+        self.assertEqual(
+            backend.dg_preference_allowed_scores(
+                "quick_start", "no_preference", difficulty
+            ),
+            {0},
+        )
+        layout = backend.DG_LAYOUT_ANSWERS
+        self.assertEqual(
+            backend.dg_preference_score("focused_area", "connected_areas", layout),
+            0,
+        )
+        self.assertEqual(
+            backend.dg_preference_score("connected_areas", "wide_area", layout),
+            2,
+        )
+        self.assertEqual(
+            backend.dg_preference_allowed_scores(
+                "focused_area", "wide_area", layout
+            ),
+            {0, 1, 2},
+        )
+        self.assertIsNone(
+            backend.dg_preference_allowed_scores(
+                "no_preference", "no_preference", difficulty
+            )
+        )
+
+    def test_dg_guide_accepts_one_step_ai_adjustment_only_for_conflict(self):
+        result = {
+            "summary": (
+                "Your choices suggest a careful start with stronger connections between pushes. "
+                "My read is that a little more room for planning could fit this combination."
+            ),
+            "difficultyRationale": (
+                "I hear some inspection before acting and several dependent pushes, so I lean toward Medium while keeping the planning readable."
+            ),
+            "recommendedDifficulty": "Medium",
+            "layoutRationale": (
+                "I hear connected areas and longer routes, so I lean toward Balanced while keeping the space easy to follow."
+            ),
+            "recommendedLayout": "Balanced",
+        }
+
+        def execute_json_request(**kwargs):
+            return LLMExecutionResult(
+                kwargs["validator"](result),
+                1,
+                "guide-adjustment-request",
+            )
+
+        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
+            response = self.client.post(
+                "/dg/guide/summary",
+                json={
+                    "firstMovePreference": "observe_then_decide",
+                    "pushPlanningPreference": "connected_pushes",
+                    "spacePreference": "connected_areas",
+                    "routeRhythmPreference": "long_routes",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recommendedDifficulty"], "Medium")
+        self.assertEqual(response.json()["recommendedLayout"], "Balanced")
+        self.assertEqual(response.json()["source"], "llm")
+
+    def test_dg_guide_falls_back_when_ai_changes_a_non_conflict(self):
+        result = {
+            "summary": (
+                "Your choices suggest a straightforward start and independent pushes. "
+                "My read is that the map can stay focused and easy to read."
+            ),
+            "difficultyRationale": "I would choose Hard for this planning rhythm.",
+            "recommendedDifficulty": "Hard",
+            "layoutRationale": "I would choose Open for this spatial rhythm.",
+            "recommendedLayout": "Open",
+        }
+
+        def execute_json_request(**kwargs):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                kwargs["validator"](result)
+            raise backend.LLMServiceError(
+                "LLM_VALIDATION_FAILED",
+                "dg_guide_summary",
+                "Invalid recommendation.",
+                "guide-non-conflict-request",
+                True,
+                1,
+                502,
+            )
+
+        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
+            response = self.client.post(
+                "/dg/guide/summary",
+                json={
+                    "firstMovePreference": "quick_start",
+                    "pushPlanningPreference": "easy_to_adjust",
+                    "spacePreference": "focused_area",
+                    "routeRhythmPreference": "short_routes",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recommendedDifficulty"], "Easy")
+        self.assertEqual(response.json()["recommendedLayout"], "Compact")
+        self.assertEqual(response.json()["source"], "deterministic_fallback")
+
+    def test_dg_guide_falls_back_when_ai_resolves_random(self):
+        result = {
+            "summary": (
+                "Your choices do not point strongly in one direction for either setting. "
+                "My read is that leaving both choices open keeps the draft flexible."
+            ),
+            "difficultyRationale": "I would choose Easy for this planning rhythm.",
+            "recommendedDifficulty": "Easy",
+            "layoutRationale": "I would choose Compact for this spatial rhythm.",
+            "recommendedLayout": "Compact",
+        }
+
+        def execute_json_request(**kwargs):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                kwargs["validator"](result)
+            raise backend.LLMServiceError(
+                "LLM_VALIDATION_FAILED",
+                "dg_guide_summary",
+                "Invalid recommendation.",
+                "guide-random-conversion-request",
+                True,
+                1,
+                502,
+            )
+
+        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
+            response = self.client.post(
+                "/dg/guide/summary",
+                json={
+                    "firstMovePreference": "no_preference",
+                    "pushPlanningPreference": "no_preference",
+                    "spacePreference": "no_preference",
+                    "routeRhythmPreference": "no_preference",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["recommendedDifficulty"], "Random")
+        self.assertEqual(response.json()["recommendedLayout"], "Random")
+        self.assertEqual(response.json()["source"], "deterministic_fallback")
 
     def test_dg_rationale_requires_one_sentence_and_adds_first_person_prefix_when_needed(self):
         self.assertIn(

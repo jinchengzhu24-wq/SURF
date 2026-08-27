@@ -275,11 +275,12 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         ApplyGuideResponse(BuildFallbackResponse());
     }
 
-    private static bool IsValidGuideResponse(GuideResponse response)
+    private bool IsValidGuideResponse(GuideResponse response)
     {
         return response != null && IsValidDifficulty(response.recommendedDifficulty) && IsValidLayout(response.recommendedLayout)
             && !string.IsNullOrWhiteSpace(response.summary) && !string.IsNullOrWhiteSpace(response.difficultyRationale)
-            && !string.IsNullOrWhiteSpace(response.layoutRationale);
+            && !string.IsNullOrWhiteSpace(response.layoutRationale)
+            && IsAllowedGuideRecommendation(response);
     }
 
     private GuideResponse BuildFallbackResponse()
@@ -351,7 +352,10 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         if (firstScore < 0 && secondScore < 0) return DifficultyLabels.Length - 1;
         if (firstScore < 0) return secondScore;
         if (secondScore < 0) return firstScore;
-        return firstScore == secondScore ? firstScore : 1;
+        int low = Mathf.Min(firstScore, secondScore);
+        int high = Mathf.Max(firstScore, secondScore);
+        if (high - low == 1) return low == 0 ? low : high;
+        return 1;
     }
 
     private static int PreferenceScore(string value)
@@ -362,20 +366,61 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         return -1;
     }
 
-    private static string BuildDifficultyFallbackRationale(string difficulty)
+    private bool IsAllowedGuideRecommendation(GuideResponse response)
     {
-        if (difficulty == "Random") return "I do not see a directional planning preference in the two answers, so I would leave Difficulty Random for Confirm.";
-        if (difficulty == "Easy") return "I would keep the first useful actions readable and let most pushes be considered independently.";
-        if (difficulty == "Hard") return "I would make several push decisions depend on earlier planning while keeping the map solvable and readable.";
-        return "I would ask for some planning around push order while keeping the consequences understandable.";
+        int difficultyBaseline = ResolvePreferenceScore(settings.firstMovePreference, settings.pushPlanningPreference);
+        int layoutBaseline = ResolvePreferenceScore(settings.spacePreference, settings.routeRhythmPreference);
+        return IsAllowedRecommendation(
+            response.recommendedDifficulty,
+            difficultyBaseline,
+            settings.firstMovePreference,
+            settings.pushPlanningPreference,
+            DifficultyLabels
+        ) && IsAllowedRecommendation(
+            response.recommendedLayout,
+            layoutBaseline,
+            settings.spacePreference,
+            settings.routeRhythmPreference,
+            LayoutLabels
+        );
     }
 
-    private static string BuildLayoutFallbackRationale(string layout)
+    private static bool IsAllowedRecommendation(
+        string recommendation,
+        int baseline,
+        string first,
+        string second,
+        string[] labels
+    )
+    {
+        int recommendationIndex = Array.IndexOf(labels, recommendation);
+        if (baseline == labels.Length - 1) return recommendationIndex == labels.Length - 1;
+        if (recommendationIndex < 0 || recommendationIndex == labels.Length - 1) return false;
+        if (!HasExplicitConflict(first, second)) return recommendationIndex == baseline;
+        return Mathf.Abs(recommendationIndex - baseline) <= 1;
+    }
+
+    private static bool HasExplicitConflict(string first, string second)
+    {
+        int firstScore = PreferenceScore(first);
+        int secondScore = PreferenceScore(second);
+        return firstScore >= 0 && secondScore >= 0 && firstScore != secondScore;
+    }
+
+    private string BuildDifficultyFallbackRationale(string difficulty)
+    {
+        if (difficulty == "Random") return "I do not see a directional planning preference in the two answers, so I would leave Difficulty Random for Confirm.";
+        return "I connect the first-move preference to " + FirstMovePhrase(settings.firstMovePreference)
+            + " and the push preference to " + PushPlanningPhrase(settings.pushPlanningPreference)
+            + ", which supports " + difficulty + " planning complexity.";
+    }
+
+    private string BuildLayoutFallbackRationale(string layout)
     {
         if (layout == "Random") return "I do not see a directional spatial preference in the two answers, so I would leave Layout Random for Confirm.";
-        if (layout == "Compact") return "I would keep important positions close together so route choices are concentrated in one focused area.";
-        if (layout == "Open") return "I would leave more space to inspect routes before the player commits to a key push.";
-        return "I would connect a few distinct areas so the player alternates between direct progress and manageable detours.";
+        return "I connect the space preference to " + SpacePhrase(settings.spacePreference)
+            + " and the route preference to " + RoutePhrase(settings.routeRhythmPreference)
+            + ", which supports a " + layout + " layout.";
     }
 
     private void ApplyGuideResponse(GuideResponse response)

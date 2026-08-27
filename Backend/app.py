@@ -2505,17 +2505,43 @@ def normalize_dg_rationale(rationale, label):
 
 
 def dg_preference_score(first, second, choices):
-    values = [choices[first], choices[second]]
-    explicit = [value for value in values if value is not None]
+    explicit = [choices[first], choices[second]]
+    explicit = [value for value in explicit if value is not None]
     if not explicit:
         # Both answers are no_preference. Preserve that uncertainty as Random
         # and let Confirm resolve it to a concrete value.
         return None
     if len(explicit) == 1 or explicit[0] == explicit[-1]:
         return explicit[0]
-    # Mixed explicit answers use the neutral middle recommendation rather than
-    # allowing a high answer to outweigh a low answer.
+    # Adjacent directions use the ordered endpoints from the neutral rule:
+    # low+middle stays low, while middle+high stays high.  A two-step
+    # disagreement stays at the middle so neither extreme wins.
+    low, high = sorted(explicit)
+    if high - low == 1:
+        return low if low == 0 else high
     return 1
+
+
+def dg_preference_allowed_scores(first, second, choices):
+    """Return score values an LLM may recommend for one parameter group.
+
+    The deterministic score is always allowed.  Only two explicit answers in
+    different directions permit a one-step adjustment; no-preference and
+    matching answers remain fixed.  ``None`` means both answers are
+    no_preference and the caller must use Random.
+    """
+    values = [choices[first], choices[second]]
+    explicit = [value for value in values if value is not None]
+    if not explicit:
+        return None
+    if len(explicit) == 1 or explicit[0] == explicit[-1]:
+        return {explicit[0]}
+    baseline = dg_preference_score(first, second, choices)
+    return {
+        baseline,
+        max(0, baseline - 1),
+        min(2, baseline + 1),
+    }
 
 
 def dg_choice_phrase(value, phrases, empty_phrase):
@@ -2626,23 +2652,27 @@ def create_dg_guide_summary(context, request_id=""):
             raise ValueError("DG guide difficulty is invalid")
         if layout not in {"Compact", "Balanced", "Open", "Random"}:
             raise ValueError("DG guide layout is invalid")
-        difficulty_score = dg_preference_score(
+        difficulty_scores = dg_preference_allowed_scores(
             context["firstMovePreference"],
             context["pushPlanningPreference"],
             DG_DIFFICULTY_ANSWERS,
         )
-        layout_score = dg_preference_score(
+        layout_scores = dg_preference_allowed_scores(
             context["spacePreference"],
             context["routeRhythmPreference"],
             DG_LAYOUT_ANSWERS,
         )
-        expected_difficulty = (
-            "Random" if difficulty_score is None else ("Easy", "Medium", "Hard")[difficulty_score]
+        allowed_difficulties = (
+            {"Random"}
+            if difficulty_scores is None
+            else {("Easy", "Medium", "Hard")[score] for score in difficulty_scores}
         )
-        expected_layout = (
-            "Random" if layout_score is None else ("Compact", "Balanced", "Open")[layout_score]
+        allowed_layouts = (
+            {"Random"}
+            if layout_scores is None
+            else {("Compact", "Balanced", "Open")[score] for score in layout_scores}
         )
-        if difficulty != expected_difficulty or layout != expected_layout:
+        if difficulty not in allowed_difficulties or layout not in allowed_layouts:
             raise ValueError("DG guide recommendation does not match the neutral answer rules")
         return {
             "summary": summary,
