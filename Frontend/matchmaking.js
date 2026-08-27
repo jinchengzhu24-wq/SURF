@@ -28,6 +28,7 @@ const elements = {
     statAttention: document.getElementById("statAttention"),
     statDataHealth: document.getElementById("statDataHealth"),
     searchInput: document.getElementById("searchInput"),
+    searchButton: document.getElementById("searchButton"),
     matchCount: document.getElementById("matchCount"),
     matchList: document.getElementById("matchList"),
     emptyDetail: document.getElementById("emptyDetail"),
@@ -65,7 +66,7 @@ function init() {
     elements.docsLink.href = apiUrl("/docs");
     elements.refreshButton.addEventListener("click", () => loadData(true));
     elements.clearButton.addEventListener("click", clearAllRecords);
-    elements.searchInput.addEventListener("input", applyFilters);
+    elements.searchButton.addEventListener("click", applyFilters);
     elements.selectedMatchCopy.addEventListener("click", () => copyFullId(elements.selectedMatchCopy));
     elements.deleteMatchButton.addEventListener("click", deleteSelectedMatch);
     elements.deleteDialogForm.addEventListener("submit", submitDeleteDialog);
@@ -159,7 +160,11 @@ function applyFilters() {
     const query = clean(elements.searchInput.value).toLowerCase();
     state.filteredMatches = state.matches.filter(match => {
         if (!query) return true;
-        return [match.matchId, match.roomCode, compactId(match.matchId)]
+        const studySessionIds = safeArray(match.players).flatMap(player => [
+            player && player.studySessionId,
+            compactId(player && player.studySessionId)
+        ]);
+        return [match.matchId, match.roomCode, compactId(match.matchId), ...studySessionIds]
             .join(" ")
             .toLowerCase()
             .includes(query);
