@@ -305,7 +305,7 @@ function eventStageLabel(event) {
         player_joined: player + "joined",
         ready_changed: player + (event.ready ? "ready" : "not ready"),
         challenge_submitted: player + "challenge submitted",
-        designer_intention_synchronized: player + "design intention confirmed",
+        designer_intention_synchronized: player + "message confirmed",
         result_submitted: player + "result submitted",
         player_left: player + "left",
         room_expired: "Room expired"
@@ -398,7 +398,6 @@ function renderSelectedChallenge(match) {
     [
         ["Created by", "Player " + challenge.createdByPlayerNumber],
         ["Played by", "Player " + challenge.playedByPlayerNumber],
-        ["AI assistant", formatMode(challenge.aiAssistantMode)],
         ["Play time", formatSeconds(result.durationSeconds)],
         ["Moves", value(result.moveCount)],
         ["Minimum moves", value(result.minimumMoves)],
@@ -431,11 +430,8 @@ function renderInspector(match, stage) {
         rows.push(["Difficulty", value(record.finalDifficulty)]);
         rows.push(["Layout", value(record.finalLayout)]);
     }
-    if (record.eventType === "challenge_submitted") {
-        rows.push(["AI assistant", formatMode(record.aiAssistantMode)]);
-    }
     if (record.eventType === "designer_intention_synchronized") {
-        rows.push(["Designer intention", record.designerIntention]);
+        rows.push(["Message", record.designerIntention]);
     }
     if (record.eventType === "result_submitted") {
         rows.push(["Play time", formatSeconds(record.durationSeconds)]);
@@ -599,8 +595,7 @@ function renderCompareChallenge(player) {
     const table = document.createElement("table");
     table.className = "delta-table";
     [
-        ["AI assistant", formatMode(challenge.aiAssistantMode)],
-        ["Designer intention", player.designerIntention || "-"],
+        ["Message", player.designerIntention || "-"],
         ["Played by", "Player " + challenge.playedByPlayerNumber],
         ["Play time", formatSeconds(result.durationSeconds)],
         ["Moves", value(result.moveCount)],

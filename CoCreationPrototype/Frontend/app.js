@@ -653,7 +653,7 @@ function renderMap() {
             cell.type = "button";
             cell.className = `tile ${tileClass(tile)}`;
             cell.textContent = tileLabel(tile);
-            cell.title = t(tileName(tile));
+            cell.title = formatTileCoordinate(x, y);
             cell.disabled = !canEditSelected();
             if (version.diff.some(change => change.x === x && change.y === y)) cell.classList.add("changed");
             cell.addEventListener("click", () => editTile(x, y));
@@ -1440,5 +1440,6 @@ function t(key) { return translations[state.language][key] || translations.en[ke
 function makeButton(label, className, handler) { const button = document.createElement("button"); button.type = "button"; button.className = className; button.textContent = label; button.addEventListener("click", handler); return button; }
 function tileClass(tile) { return tile === "#" ? "tile-wall" : tile === "@" ? "tile-water" : tile === "p" ? "tile-player" : tile === "s" ? "tile-box" : tile === "t" ? "tile-target" : tile === "." ? "tile-floor" : "tile-empty"; }
 function tileName(tile) { return tile === "#" ? "wall" : tile === "@" ? "water" : tile === "p" ? "player" : tile === "s" ? "box" : tile === "t" ? "target" : tile === "." ? "floor" : "erase"; }
+function formatTileCoordinate(x, y) { return `(${y + 1}, ${x + 1})`; }
 function tileLabel(tile) { return ({ p: "P", s: "B", t: "T", "@": "~" })[tile] || ""; }
 function escapeHtml(value) { const span = document.createElement("span"); span.textContent = String(value ?? ""); return span.innerHTML; }

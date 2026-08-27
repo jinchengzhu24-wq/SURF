@@ -3366,7 +3366,7 @@ MonoBehaviour:
   restoreSavedSettings: 0
   guideEndpoint: http://111.231.136.4:8000/dg/guide/summary
   backendBaseUrl: http://111.231.136.4:8000
-  requestTimeoutSeconds: 15
+  requestTimeoutSeconds: 30
   progressText: {fileID: 0}
   summaryText: {fileID: 106558456}
   difficultyRationaleText: {fileID: 1503407151}

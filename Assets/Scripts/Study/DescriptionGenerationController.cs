@@ -39,7 +39,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     [SerializeField] private bool restoreSavedSettings;
     [SerializeField] private string guideEndpoint = GuideEndpoint;
     [SerializeField] private string backendBaseUrl = BackendBaseUrl;
-    [SerializeField] private int requestTimeoutSeconds = 15;
+    [SerializeField] private int requestTimeoutSeconds = 30;
     [Header("Static Scene References")]
     [SerializeField] private Text progressText;
     [SerializeField] private Text summaryText;
