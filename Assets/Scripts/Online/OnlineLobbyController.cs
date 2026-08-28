@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Runtime.InteropServices;
 using System.Text;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -21,6 +22,17 @@ public class OnlineLobbyController : MonoBehaviour
     private bool busy;
     private bool leavingScene;
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+    [DllImport("__Internal")]
+    private static extern void SokobanLobbySetOverlayVisible(int visible);
+
+    [DllImport("__Internal")]
+    private static extern void SokobanLobbySetRoomCode(string roomCode);
+
+    [DllImport("__Internal")]
+    private static extern void SokobanLobbySetJoinCode(string roomCode);
+#endif
+
     private void Start()
     {
         OnlineSceneUi.EnsureEventSystem();
@@ -28,6 +40,11 @@ public class OnlineLobbyController : MonoBehaviour
         ResolveUi();
         WireUi();
         OnlineSceneUi.ConfigureRaycastTargets();
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanLobbySetOverlayVisible(1);
+        SokobanLobbySetJoinCode("");
+#endif
 
         if (OnlineMatchContext.HasMatch)
         {
@@ -278,8 +295,18 @@ public class OnlineLobbyController : MonoBehaviour
             return;
         }
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanLobbySetOverlayVisible(0);
+#endif
         leavingScene = true;
         SceneManager.LoadScene(BriefingSceneName);
+    }
+
+    private void OnDestroy()
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanLobbySetOverlayVisible(0);
+#endif
     }
 
     private void HandleActionFailure(string error)
@@ -337,6 +364,31 @@ public class OnlineLobbyController : MonoBehaviour
         {
             generatedRoomCodeText.text = displayValue;
         }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanLobbySetRoomCode(displayValue);
+#endif
+    }
+
+    [UnityEngine.Scripting.Preserve]
+    public void SetNativeJoinRoomCode(string value)
+    {
+        string normalized = NormalizeRoomCode(value);
+
+        if (roomCodeInput != null && roomCodeInput.text != normalized)
+        {
+            roomCodeInput.SetTextWithoutNotify(normalized);
+        }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanLobbySetJoinCode(normalized);
+#endif
+    }
+
+    [UnityEngine.Scripting.Preserve]
+    public void SubmitNativeJoinRoomCode()
+    {
+        JoinRoom();
     }
 
     private void SetStatus(string message)

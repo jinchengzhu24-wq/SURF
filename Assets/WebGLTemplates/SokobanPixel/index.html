@@ -75,6 +75,51 @@
       #dashboard-access-cancel { color: var(--ink); background: var(--stone-light); }
       #dashboard-access-submit { color: #fff5d1; background: #b84c3e; }
       .dashboard-access-actions button:disabled { cursor: wait; opacity: 0.6; }
+
+      #sokoban-lobby-native-overlay[hidden] { display: none; }
+      #sokoban-lobby-native-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 20;
+        pointer-events: none;
+      }
+      #sokoban-lobby-native-overlay input {
+        position: absolute;
+        display: block;
+        box-sizing: border-box;
+        margin: 0;
+        border: 0;
+        border-radius: 0;
+        outline: none;
+        color: #424a53;
+        background: #e5ebee;
+        box-shadow: none;
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 40px;
+        font-weight: 700;
+        line-height: 1;
+        pointer-events: auto;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      #sokoban-lobby-native-overlay input:focus {
+        outline: 3px solid var(--gold-light);
+        outline-offset: -5px;
+      }
+      #sokoban-lobby-generated-room-code {
+        text-align: center;
+      }
+      #sokoban-lobby-generated-room-code:disabled {
+        cursor: default;
+        opacity: 1;
+      }
+      #sokoban-lobby-generated-room-code::placeholder {
+        color: #424a53;
+        opacity: 1;
+      }
+      #sokoban-lobby-join-room-code {
+        text-align: left;
+      }
     </style>
   </head>
   <body>
@@ -105,6 +150,28 @@
               tabindex="-1"
               aria-label="{{{ PRODUCT_NAME }}} game canvas"
             ></canvas>
+
+            <div id="sokoban-lobby-native-overlay" hidden aria-label="Online lobby browser inputs">
+              <input
+                id="sokoban-lobby-generated-room-code"
+                type="text"
+                readonly
+                disabled
+                autocomplete="off"
+                placeholder="ROOM CODE APPEARS HERE"
+                aria-label="Generated room code"
+              >
+              <input
+                id="sokoban-lobby-join-room-code"
+                type="text"
+                inputmode="text"
+                maxlength="6"
+                autocomplete="off"
+                autocapitalize="characters"
+                spellcheck="false"
+                aria-label="Room code to join"
+              >
+            </div>
 
             <div id="unity-loading-bar">
               <div class="loading-card">
@@ -176,6 +243,113 @@
       var dashboardAccessCancel = document.querySelector("#dashboard-access-cancel");
       var dashboardAccessSubmit = document.querySelector("#dashboard-access-submit");
       var dashboardAccessTarget = "http://111.231.136.4/frontend/";
+      var lobbyNativeOverlay = document.querySelector("#sokoban-lobby-native-overlay");
+      var lobbyGeneratedRoomCode = document.querySelector("#sokoban-lobby-generated-room-code");
+      var lobbyJoinRoomCode = document.querySelector("#sokoban-lobby-join-room-code");
+      var lobbyReferenceWidth = 1920;
+      var lobbyReferenceHeight = 1080;
+      var lobbyOverlayVisible = false;
+      window.SokobanUnityInstance = null;
+
+      function normalizeLobbyRoomCode(value) {
+        return (value || "")
+          .toUpperCase()
+          .replace(/[^A-Z0-9]/g, "")
+          .slice(0, 6);
+      }
+
+      function sendLobbyMessage(methodName, value) {
+        if (!window.SokobanUnityInstance) return;
+
+        try {
+          if (typeof value === "undefined") {
+            window.SokobanUnityInstance.SendMessage("OnlineLobbyController", methodName);
+          } else {
+            window.SokobanUnityInstance.SendMessage(
+              "OnlineLobbyController",
+              methodName,
+              value
+            );
+          }
+        } catch (error) {
+          // The Unity scene may be unloading while the browser input is active.
+        }
+      }
+
+      function positionLobbyNativeInputs() {
+        if (!lobbyNativeOverlay || !canvas || !lobbyOverlayVisible) return;
+
+        var overlayRect = lobbyNativeOverlay.getBoundingClientRect();
+        var canvasRect = canvas.getBoundingClientRect();
+        var scaleX = canvasRect.width / lobbyReferenceWidth;
+        var scaleY = canvasRect.height / lobbyReferenceHeight;
+        var offsetX = canvasRect.left - overlayRect.left;
+        var offsetY = canvasRect.top - overlayRect.top;
+
+        function placeInput(input, left, top, width, height, padding) {
+          input.style.left = (offsetX + left * scaleX) + "px";
+          input.style.top = (offsetY + top * scaleY) + "px";
+          input.style.width = (width * scaleX) + "px";
+          input.style.height = (height * scaleY) + "px";
+          input.style.fontSize = (40 * scaleY) + "px";
+          input.style.padding = "0 " + (padding * scaleX) + "px";
+        }
+
+        // These are the fixed reference-space rectangles from Online_Lobby.unity.
+        placeInput(lobbyGeneratedRoomCode, 285, 574, 570, 82, 18);
+        placeInput(lobbyJoinRoomCode, 1065, 574, 570, 82, 24);
+      }
+
+      window.SokobanSetLobbyOverlayVisible = function (visible) {
+        lobbyOverlayVisible = !!visible;
+        if (lobbyNativeOverlay) {
+          lobbyNativeOverlay.hidden = !lobbyOverlayVisible;
+        }
+        if (!lobbyOverlayVisible) {
+          if (document.activeElement === lobbyGeneratedRoomCode
+            || document.activeElement === lobbyJoinRoomCode) {
+            document.activeElement.blur();
+          }
+          return;
+        }
+
+        positionLobbyNativeInputs();
+      };
+
+      window.SokobanSetLobbyRoomCode = function (value) {
+        if (!lobbyGeneratedRoomCode) return;
+
+        var roomCode = value === "ROOM CODE APPEARS HERE" ? "" : (value || "");
+        lobbyGeneratedRoomCode.value = roomCode;
+        lobbyGeneratedRoomCode.disabled = !roomCode;
+        lobbyGeneratedRoomCode.setAttribute(
+          "aria-label",
+          roomCode ? "Generated room code" : "Room code will appear here"
+        );
+      };
+
+      window.SokobanSetLobbyJoinCode = function (value) {
+        if (!lobbyJoinRoomCode) return;
+        lobbyJoinRoomCode.value = normalizeLobbyRoomCode(value);
+      };
+
+      lobbyJoinRoomCode.addEventListener("input", function () {
+        var normalized = normalizeLobbyRoomCode(lobbyJoinRoomCode.value);
+        if (lobbyJoinRoomCode.value !== normalized) {
+          lobbyJoinRoomCode.value = normalized;
+        }
+        sendLobbyMessage("SetNativeJoinRoomCode", normalized);
+      });
+
+      lobbyJoinRoomCode.addEventListener("keydown", function (event) {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        event.stopPropagation();
+        sendLobbyMessage("SubmitNativeJoinRoomCode");
+      });
+
+      window.addEventListener("resize", positionLobbyNativeInputs);
+      document.addEventListener("fullscreenchange", positionLobbyNativeInputs);
 
       function captureDashboardPasswordKey(event) {
         if (dashboardAccessModal.hidden
@@ -282,7 +456,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=room-code-select-webgl-20260828-1";
+      var buildVersion = "?v=native-lobby-input-webgl-20260828-1";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,
@@ -328,6 +502,7 @@
           progressBarEmpty.setAttribute("aria-valuenow", percentage);
           loadingPercent.textContent = "Loading " + percentage + "%";
         }).then(function (unityInstance) {
+          window.SokobanUnityInstance = unityInstance;
           loadingBar.style.display = "none";
           fullscreenButton.onclick = function () {
             unityInstance.SetFullscreen(1);

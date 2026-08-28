@@ -7,5 +7,20 @@ mergeInto(LibraryManager.library, {
         url.searchParams.delete('cocreationAttempt');
         url.searchParams.delete('cocreationPlay');
         window.history.replaceState({}, document.title, url.toString());
+    },
+    SokobanLobbySetOverlayVisible: function (visible) {
+        if (window.SokobanSetLobbyOverlayVisible) {
+            window.SokobanSetLobbyOverlayVisible(visible !== 0);
+        }
+    },
+    SokobanLobbySetRoomCode: function (roomCodePointer) {
+        if (window.SokobanSetLobbyRoomCode) {
+            window.SokobanSetLobbyRoomCode(UTF8ToString(roomCodePointer));
+        }
+    },
+    SokobanLobbySetJoinCode: function (roomCodePointer) {
+        if (window.SokobanSetLobbyJoinCode) {
+            window.SokobanSetLobbyJoinCode(UTF8ToString(roomCodePointer));
+        }
     }
 });
