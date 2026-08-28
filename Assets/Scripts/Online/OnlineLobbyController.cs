@@ -14,6 +14,7 @@ public class OnlineLobbyController : MonoBehaviour
     private Button joinButton;
     private Button backButton;
     private InputField roomCodeInput;
+    private InputField generatedRoomCodeField;
     private Text generatedRoomCodeText;
     private Text footerHint;
     private Coroutine pollingCoroutine;
@@ -37,6 +38,7 @@ public class OnlineLobbyController : MonoBehaviour
         }
         else
         {
+            ShowGeneratedCode("");
             SetStatus("Create a room or enter a 6-digit room code.");
             SetRoomActionsInteractable(true);
         }
@@ -47,9 +49,18 @@ public class OnlineLobbyController : MonoBehaviour
         createButton = OnlineSceneUi.EnsureButton("CreateRoomButton");
         joinButton = OnlineSceneUi.EnsureButton("JoinRoomButton");
         backButton = OnlineSceneUi.EnsureButton("BackButton");
+        GameObject generatedFieldObject = GameObject.Find("GeneratedRoomCodeField");
+        generatedRoomCodeField = generatedFieldObject != null
+            ? generatedFieldObject.GetComponent<InputField>()
+            : null;
         generatedRoomCodeText =
             OnlineSceneUi.FindText("GeneratedRoomCodeFieldText");
         footerHint = OnlineSceneUi.FindText("FooterHint");
+
+        if (generatedRoomCodeField != null)
+        {
+            generatedRoomCodeField.readOnly = true;
+        }
 
         GameObject fieldObject = GameObject.Find("RoomCodeField");
         Text fieldText = OnlineSceneUi.FindText("RoomCodeFieldText");
@@ -200,6 +211,7 @@ public class OnlineLobbyController : MonoBehaviour
                     else if (state.status == "cancelled")
                     {
                         OnlineMatchContext.Clear();
+                        ShowGeneratedCode("");
                         SetStatus("The room was cancelled.");
                         SetRoomActionsInteractable(true);
                     }
@@ -273,6 +285,7 @@ public class OnlineLobbyController : MonoBehaviour
     private void HandleActionFailure(string error)
     {
         busy = false;
+        ShowGeneratedCode("");
         SetRoomActionsInteractable(true);
         SetStatus("Online request failed: " + error);
     }
@@ -308,11 +321,21 @@ public class OnlineLobbyController : MonoBehaviour
 
     private void ShowGeneratedCode(string roomCode)
     {
-        if (generatedRoomCodeText != null)
+        string displayValue = string.IsNullOrWhiteSpace(roomCode)
+            ? "ROOM CODE APPEARS HERE"
+            : roomCode;
+
+        if (generatedRoomCodeField != null)
         {
-            generatedRoomCodeText.text = string.IsNullOrWhiteSpace(roomCode)
-                ? "ROOM CODE APPEARS HERE"
-                : roomCode;
+            generatedRoomCodeField.SetTextWithoutNotify(displayValue);
+            generatedRoomCodeField.readOnly = true;
+            generatedRoomCodeField.interactable =
+                OnlineMatchContext.HasMatch
+                && !string.IsNullOrWhiteSpace(roomCode);
+        }
+        else if (generatedRoomCodeText != null)
+        {
+            generatedRoomCodeText.text = displayValue;
         }
     }
 
