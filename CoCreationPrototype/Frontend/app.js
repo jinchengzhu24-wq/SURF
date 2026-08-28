@@ -85,6 +85,7 @@ const translations = {
         llm_accepted: "Accepted AI proposal",
         restored: "Restored version",
         verified: "Verified solvable",
+        validationFailed: "Validation failed",
         steps: "steps",
         pushes: "pushes",
         editMode: "Editing the current Stage. Save explicitly to create a version.",
@@ -122,6 +123,16 @@ const translations = {
         errorDirtyPlay: "Save or discard the map draft before playing.",
         errorPendingPlay: "Accept or reject the pending map proposal before playing.",
         errorIntentRequired: "Please describe your design intention before completing the session.",
+        error_INVALID_LEVEL: "The map format is invalid.",
+        error_INVALID_HEIGHT: "The map must contain exactly 10 rows.",
+        error_INVALID_WIDTH: "Every map row must contain exactly 12 tiles.",
+        error_UNKNOWN_TILE: "The map contains an unsupported tile symbol.",
+        error_INVALID_PLAYER_COUNT: "The map must contain exactly one player.",
+        error_INVALID_BOX_COUNT: "The map must contain one or two boxes.",
+        error_MISMATCHED_TARGET_COUNT: "The number of targets must match the number of boxes.",
+        error_UNSOLVABLE_LEVEL: "The deterministic solver could not find a solution for this map.",
+        error_SEARCH_BUDGET_EXCEEDED: "Map validation reached its search budget before it could finish.",
+        error_OPEN_OUTER_WALL: "The outer boundary must be closed with wall (#) tiles; water cannot replace a wall.",
         error_CLIENT_TIMEOUT: "The assistant did not finish within the browser safety limit. You can retry without creating a duplicate message.",
         error_MODEL_EMPTY_RESPONSE: "The latest model attempt returned blank content, and no earlier attempt produced a valid result. Retry without creating a duplicate.",
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
@@ -188,6 +199,7 @@ const translations = {
         llm_accepted: "已接受 AI 提案",
         restored: "恢复的版本",
         verified: "已验证可解",
+        validationFailed: "验证未通过",
         steps: "步",
         pushes: "次推动",
         editMode: "正在编辑当前 Stage；只有明确保存后才会产生新版本。",
@@ -225,6 +237,16 @@ const translations = {
         errorDirtyPlay: "请先保存或放弃地图草稿，再开始试玩。",
         errorPendingPlay: "请先接受或拒绝待处理的地图提案，再开始试玩。",
         errorIntentRequired: "请先填写设计意图，再完成会话。",
+        error_INVALID_LEVEL: "地图格式无效，请检查编辑内容。",
+        error_INVALID_HEIGHT: "地图必须正好包含 10 行。",
+        error_INVALID_WIDTH: "地图每一行必须正好包含 12 个格子。",
+        error_UNKNOWN_TILE: "地图包含不支持的格子符号。",
+        error_INVALID_PLAYER_COUNT: "地图必须正好包含 1 个玩家。",
+        error_INVALID_BOX_COUNT: "地图必须包含 1 或 2 个箱子。",
+        error_MISMATCHED_TARGET_COUNT: "目标数量必须与箱子数量一致。",
+        error_UNSOLVABLE_LEVEL: "确定性求解器未能找到这张地图的可行解。",
+        error_SEARCH_BUDGET_EXCEEDED: "地图验证搜索已达到预算，暂时无法完成验证。",
+        error_OPEN_OUTER_WALL: "外部边界必须由墙（#）封闭，水域不能替代外墙。",
         playSyncFailed: "关卡已经通关，但本次试玩结果未能同步；该记录之后会标记为异常中断。",
         playLoadFailed: "所选 Stage 未能在 Unity 中加载，请检查该版本后重试。",
         translatedDisplay: "翻译内容",
@@ -239,6 +261,7 @@ const state = {
     selectedVersionId: "",
     draftRows: [],
     dirty: false,
+    validationError: null,
     selectedTile: ".",
     busy: false,
     chatBusy: false,
@@ -270,13 +293,43 @@ const chineseApiErrors = {
     PLAY_TICKET_USED: "试玩票据已经使用过。",
     PLAY_TICKET_EXPIRED: "试玩票据已过期，请返回工作台重新点击 Play。",
     INVALID_LEVEL: "地图格式无效，请检查编辑内容。",
-    UNSOLVABLE_LEVEL: "确定性求解器未能验证这张地图可解。",
-    OPEN_OUTER_WALL: "外墙存在破口：外围空白只能接触连续的墙（#），水域不能作为外墙。",
+    INVALID_HEIGHT: "地图必须正好包含 10 行。",
+    INVALID_WIDTH: "地图每一行必须正好包含 12 个格子。",
+    UNKNOWN_TILE: "地图包含不支持的格子符号。",
+    INVALID_PLAYER_COUNT: "地图必须正好包含 1 个玩家。",
+    INVALID_BOX_COUNT: "地图必须包含 1 或 2 个箱子。",
+    MISMATCHED_TARGET_COUNT: "目标数量必须与箱子数量一致。",
+    UNSOLVABLE_LEVEL: "确定性求解器未能找到这张地图的可行解。",
+    SEARCH_BUDGET_EXCEEDED: "地图验证搜索已达到预算，暂时无法完成验证。",
+    OPEN_OUTER_WALL: "外部边界必须由墙（#）封闭，水域不能替代外墙。",
     UPSTREAM_TIMEOUT: "LLM 响应超时，请稍后重试。",
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
     MODEL_EMPTY_RESPONSE: "最后一次模型尝试返回了空白内容，且此前尝试也未产生有效结果；可使用原消息安全重试，不会产生重复记录。",
     CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。"
+};
+
+const LEVEL_VALIDATION_ERROR_CODES = new Set([
+    "INVALID_LEVEL",
+    "INVALID_HEIGHT",
+    "INVALID_WIDTH",
+    "UNKNOWN_TILE",
+    "INVALID_PLAYER_COUNT",
+    "INVALID_BOX_COUNT",
+    "MISMATCHED_TARGET_COUNT",
+    "UNSOLVABLE_LEVEL",
+    "SEARCH_BUDGET_EXCEEDED",
+    "OPEN_OUTER_WALL"
+]);
+
+const validationTileNames = {
+    " ": { en: "outer void", zh: "外围空白" },
+    "#": { en: "wall (#)", zh: "墙（#）" },
+    ".": { en: "floor (.)", zh: "地面（.）" },
+    "@": { en: "water (@)", zh: "水域（@）" },
+    p: { en: "player (p)", zh: "玩家（p）" },
+    s: { en: "box (s)", zh: "箱子（s）" },
+    t: { en: "target (t)", zh: "目标（t）" }
 };
 
 const elements = Object.fromEntries([
@@ -668,7 +721,14 @@ function renderMap() {
     });
     renderToolbar();
     const validation = version.validation;
-    elements.validationCard.innerHTML = `
+    const failedValidation = state.dirty && isLevelValidationError(state.validationError);
+    elements.validationCard.className = `validation-card${failedValidation ? " invalid" : ""}`;
+    elements.validationCard.setAttribute("role", failedValidation ? "alert" : "status");
+    elements.validationCard.innerHTML = failedValidation
+        ? `
+        <strong>✗ ${escapeHtml(t("validationFailed"))}</strong>
+        <span>${escapeHtml(localizedErrorMessage(state.validationError))}</span>`
+        : `
         <strong>✓ ${escapeHtml(t("verified"))}</strong>
         <span>${validation.solutionSteps} ${escapeHtml(t("steps"))} · ${validation.solutionPushes} ${escapeHtml(t("pushes"))} · ${validation.searchedStates} states</span>`;
     elements.mapMode.textContent = state.session.status !== "active" ? t("lockedMode") : version.versionId === state.session.currentVersionId ? t("editMode") : t("readOnlyMode");
@@ -901,18 +961,28 @@ async function submitPendingMessage() {
 async function saveManualStage() {
     if (!state.dirty) return;
     await withBusy(async () => {
-        state.session = await api(`/api/sessions/${state.sessionId}/versions`, {
-            method: "POST",
-            body: {
-                rows: state.draftRows,
-                baseVersionId: state.session.currentVersionId,
-                idempotencyKey: uniqueId("manual"),
-                summary: state.language === "zh-CN" ? "设计者保存的地图修改" : "Designer-saved map edit"
+        state.validationError = null;
+        renderMap();
+        try {
+            state.session = await api(`/api/sessions/${state.sessionId}/versions`, {
+                method: "POST",
+                body: {
+                    rows: state.draftRows,
+                    baseVersionId: state.session.currentVersionId,
+                    idempotencyKey: uniqueId("manual"),
+                    summary: state.language === "zh-CN" ? "设计者保存的地图修改" : "Designer-saved map edit"
+                }
+            });
+            selectVersion(state.session.currentVersionId, false);
+            render();
+            await ensureAssessment(state.session.currentVersionId);
+        } catch (error) {
+            if (isLevelValidationError(error)) {
+                state.validationError = error;
+                renderMap();
             }
-        });
-        selectVersion(state.session.currentVersionId, false);
-        render();
-        await ensureAssessment(state.session.currentVersionId);
+            throw error;
+        }
     });
 }
 
@@ -1203,6 +1273,7 @@ function resetDraftFromSelection() {
     const version = selectedVersion();
     state.draftRows = version ? version.rows.slice() : [];
     state.dirty = false;
+    state.validationError = null;
 }
 
 function discardDraft() { resetDraftFromSelection(); renderMap(); updateControls(); }
@@ -1213,6 +1284,7 @@ function editTile(x, y) {
     row[x] = state.selectedTile;
     state.draftRows[y] = row.join("");
     state.dirty = state.draftRows.some((value, index) => value !== selectedVersion().rows[index]);
+    state.validationError = null;
     renderMap();
     updateControls();
 }
@@ -1297,7 +1369,8 @@ async function api(path, options = {}) {
     if (!response.ok) {
         const apiError = new Error(payload.message || t("errorGeneric"));
         apiError.code = payload.code || "REQUEST_FAILED";
-        apiError.retryable = Boolean(payload.retryable);
+        apiError.details = payload.details || null;
+        apiError.retryable = isLevelValidationError(apiError) ? false : Boolean(payload.retryable);
         throw apiError;
     }
     return payload;
@@ -1312,9 +1385,71 @@ function localizedErrorMessage(error) {
     const localized = state.language === "zh-CN"
         ? chineseApiErrors[error?.code]
         : translations.en[`error_${error?.code}`];
-    return localized
+    const message = localized
         || (state.language === "zh-CN" ? t("errorGeneric") : error?.message)
         || t("errorGeneric");
+    const details = formatValidationDetails(error);
+    return details ? `${message} ${details}` : message;
+}
+
+function isLevelValidationError(error) {
+    return LEVEL_VALIDATION_ERROR_CODES.has(error?.code);
+}
+
+function formatValidationDetails(error) {
+    if (!isLevelValidationError(error) || !error?.details || typeof error.details !== "object") return "";
+    const details = error.details;
+    const isChinese = state.language === "zh-CN";
+    const row = Number(details.row);
+    const column = Number(details.column);
+    const hasRow = Number.isInteger(row);
+    const hasColumn = Number.isInteger(column);
+    const rowLabel = hasRow ? (isChinese ? `第 ${row + (error.code === "OPEN_OUTER_WALL" ? 0 : 1)} 行` : `row ${row + (error.code === "OPEN_OUTER_WALL" ? 0 : 1)}`) : "";
+    const columnLabel = hasColumn ? (isChinese ? `第 ${column + (error.code === "OPEN_OUTER_WALL" ? 0 : 1)} 列` : `column ${column + (error.code === "OPEN_OUTER_WALL" ? 0 : 1)}`) : "";
+
+    if (error.code === "OPEN_OUTER_WALL" && hasRow && hasColumn) {
+        const tile = validationTileNames[details.tile]?.[isChinese ? "zh" : "en"] || String(details.tile ?? "?");
+        return isChinese
+            ? `（首个破口：${rowLabel}${columnLabel}，格子为 ${tile}）`
+            : `(first breach: ${rowLabel}, ${columnLabel}, tile ${tile})`;
+    }
+
+    if (error.code === "INVALID_WIDTH" && hasRow) {
+        return isChinese ? `（出错位置：${rowLabel}）` : `(problem row: ${rowLabel})`;
+    }
+
+    if (error.code === "UNKNOWN_TILE") {
+        const tiles = Array.isArray(details.tiles) ? details.tiles.join(", ") : String(details.tiles ?? "?");
+        return isChinese
+            ? `（${rowLabel || "地图中"}发现未知符号：${tiles}）`
+            : `(${rowLabel || "unknown location"}; unsupported symbols: ${tiles})`;
+    }
+
+    if (error.code === "INVALID_PLAYER_COUNT" || error.code === "INVALID_BOX_COUNT") {
+        const count = Number(details.count);
+        if (Number.isFinite(count)) return isChinese ? `（当前数量：${count}）` : `(current count: ${count})`;
+    }
+
+    if (error.code === "MISMATCHED_TARGET_COUNT") {
+        const boxes = Number(details.boxes);
+        const targets = Number(details.targets);
+        if (Number.isFinite(boxes) && Number.isFinite(targets)) {
+            return isChinese
+                ? `（箱子：${boxes}，目标：${targets}）`
+                : `(boxes: ${boxes}, targets: ${targets})`;
+        }
+    }
+
+    if (error.code === "UNSOLVABLE_LEVEL" || error.code === "SEARCH_BUDGET_EXCEEDED") {
+        const searchedStates = Number(details.searchedStates);
+        if (Number.isFinite(searchedStates)) {
+            return isChinese
+                ? `（已搜索状态：${searchedStates}）`
+                : `(searched states: ${searchedStates})`;
+        }
+    }
+
+    return "";
 }
 
 function showNotice(message, retryAction = null) {

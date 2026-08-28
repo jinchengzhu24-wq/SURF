@@ -290,6 +290,68 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(conflict.json()["code"], "VERSION_CONFLICT")
 
+    def test_manual_stage_validation_failure_returns_details_without_creating_version(self):
+        stage_one = self.read_session()["currentVersionId"]
+        open_wall_rows = list(SAMPLE_ROWS)
+        open_wall_rows[0] = "####.#######"
+
+        response = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": open_wall_rows,
+                "baseVersionId": stage_one,
+                "idempotencyKey": "manual_invalid_outer_wall_001",
+                "summary": "Open the outer wall",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["code"], "OPEN_OUTER_WALL")
+        self.assertEqual(
+            response.json()["details"],
+            {"row": 1, "column": 5, "tile": "."},
+        )
+        session = self.read_session()
+        self.assertEqual(session["currentVersionId"], stage_one)
+        self.assertEqual(len(session["versions"]), 1)
+
+    def test_manual_stage_validation_errors_cover_shape_counts_and_solvability(self):
+        stage_one = self.read_session()["currentVersionId"]
+        invalid_player_rows = list(SAMPLE_ROWS)
+        invalid_player_rows[4] = "#..........#"
+        invalid_width_rows = list(SAMPLE_ROWS)
+        invalid_width_rows[0] = "#############"
+        unsolvable_rows = list(SAMPLE_ROWS)
+        unsolvable_rows[1] = "#s.........#"
+        unsolvable_rows[5] = "#.....t....#"
+
+        cases = (
+            ("invalid_player", invalid_player_rows, "INVALID_PLAYER_COUNT"),
+            ("invalid_width", invalid_width_rows, "INVALID_WIDTH"),
+            ("unsolvable", unsolvable_rows, "UNSOLVABLE_LEVEL"),
+        )
+
+        for suffix, rows, code in cases:
+            with self.subTest(code=code):
+                response = self.client.post(
+                    f"/api/sessions/{self.session_id}/versions",
+                    json={
+                        "rows": rows,
+                        "baseVersionId": stage_one,
+                        "idempotencyKey": f"manual_invalid_{suffix}_001",
+                        "summary": "Invalid manual map",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 400, response.text)
+                payload = response.json()
+                self.assertEqual(payload["code"], code)
+                self.assertIsInstance(payload.get("details"), dict)
+
+        session = self.read_session()
+        self.assertEqual(session["currentVersionId"], stage_one)
+        self.assertEqual(len(session["versions"]), 1)
+
     def test_manual_stage_assessment_receives_deterministic_change_summary(self):
         stage_one = self.read_session()["currentVersionId"]
         saved = self.client.post(

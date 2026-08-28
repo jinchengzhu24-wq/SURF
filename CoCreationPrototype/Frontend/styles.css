@@ -1107,6 +1107,13 @@ main {
     box-shadow: inset 0 0 0 2px #dcebac;
 }
 
+.validation-card.invalid {
+    border-color: #713729;
+    color: #672a20;
+    background: #e2a58e;
+    box-shadow: inset 0 0 0 2px #f5c9b8;
+}
+
 .attempt-item.abandoned,
 .attempt-item.interrupted {
     border-color: #684513;

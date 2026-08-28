@@ -28,6 +28,7 @@ public class MenuController : MonoBehaviour
 
     public void OpenMatchmaking()
     {
+        LevelStudyRecorder.MarkMenuStartedFlow();
         LoadScene(matchmakingSceneName, "matchmaking");
     }
 
