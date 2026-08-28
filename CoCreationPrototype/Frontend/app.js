@@ -271,6 +271,7 @@ const chineseApiErrors = {
     PLAY_TICKET_EXPIRED: "试玩票据已过期，请返回工作台重新点击 Play。",
     INVALID_LEVEL: "地图格式无效，请检查编辑内容。",
     UNSOLVABLE_LEVEL: "确定性求解器未能验证这张地图可解。",
+    OPEN_OUTER_WALL: "外墙存在破口：外围空白只能接触连续的墙（#），水域不能作为外墙。",
     UPSTREAM_TIMEOUT: "LLM 响应超时，请稍后重试。",
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
     MODEL_EMPTY_RESPONSE: "最后一次模型尝试返回了空白内容，且此前尝试也未产生有效结果；可使用原消息安全重试，不会产生重复记录。",

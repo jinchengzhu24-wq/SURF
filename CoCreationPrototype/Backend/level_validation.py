@@ -164,7 +164,67 @@ def validate_rows(rows):
             {"boxes": box_count, "targets": target_count},
         )
 
+    _validate_outer_wall_closure(normalized)
+
     return tuple(normalized)
+
+
+def _validate_outer_wall_closure(rows):
+    """Ensure exterior void cannot enter the level through a non-wall tile.
+
+    A level may have an irregular outline, so spaces on the canvas perimeter are
+    valid exterior void. Only walls can stop that exterior region: water and
+    every other map tile are a breach when reachable from it.
+    """
+    exterior_void = deque()
+    visited = set()
+
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            if x not in (0, WIDTH - 1) and y not in (0, HEIGHT - 1):
+                continue
+
+            tile = rows[y][x]
+
+            if tile == "#":
+                continue
+
+            if tile != " ":
+                _raise_open_outer_wall(x, y, tile)
+
+            exterior_void.append((x, y))
+            visited.add((x, y))
+
+    while exterior_void:
+        x, y = exterior_void.popleft()
+
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            next_x, next_y = x + dx, y + dy
+
+            if not (0 <= next_x < WIDTH and 0 <= next_y < HEIGHT):
+                continue
+
+            if (next_x, next_y) in visited:
+                continue
+
+            next_tile = rows[next_y][next_x]
+
+            if next_tile == "#":
+                continue
+
+            if next_tile != " ":
+                _raise_open_outer_wall(next_x, next_y, next_tile)
+
+            visited.add((next_x, next_y))
+            exterior_void.append((next_x, next_y))
+
+
+def _raise_open_outer_wall(x, y, tile):
+    raise LevelValidationError(
+        "OPEN_OUTER_WALL",
+        "The outer wall must be closed with # wall tiles; water cannot close the boundary.",
+        {"row": y + 1, "column": x + 1, "tile": tile},
+    )
 
 
 def describe_diff(before_rows, after_rows):

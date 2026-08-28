@@ -35,8 +35,9 @@ This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, an
 - The Online Lobby uses static browser-native WebGL template inputs for room codes: the generated code is read-only and selectable for manual copying, while the join field accepts paste and normalizes a six-character alphanumeric code. These fields synchronize with Unity through `BrowserNavigation.jslib`; there is no `COPY CODE` button.
 - The 8000 dashboard keeps full Match IDs and Study Session IDs in the data model, displays their first eight characters with copy-full-value controls, and searches both players' complete or short Study Session IDs. Record details show both players' Study Session IDs on every flow node.
 - The 8010 `final` event records server-derived `coCreationDurationSeconds` in the 0–600 second range; opponent play time remains the 8000 `result_submitted.durationSeconds` field.
+- When a requested change is safely deployable to the server, deploy it autonomously after verification. Do not build WebGL autonomously; if a WebGL build is required, ask the user to build or provide it, then upload that build when requested.
 - For an 8010-only deployment, back up its SQLite database, upload only changed `CoCreationPrototype` files, and restart `sokoban-cocreation`. Never use `/root/SURF/deploy_scp` for an 8010-only change.
-- For a WebGL update, rebuild with Unity `2022.3.62f2c1`, bump the WebGL template cache key when browser assets can be stale, upload `WebGLBuild/`, and verify the public index plus loader/data/framework/wasm responses. Uploading `Frontend/tutorial/` alone does not require an 8000 restart.
+- For a WebGL update, use Unity `2022.3.62f2c1` only when the user has built or explicitly requested the build, bump the WebGL template cache key when browser assets can be stale, upload `WebGLBuild/`, and verify the public index plus loader/data/framework/wasm responses. Uploading `Frontend/tutorial/` alone does not require an 8000 restart.
 - Do not commit `.env`, API keys, SQLite databases, research logs, Unity caches, or generated WebGL output. Preserve unrelated user changes in a dirty worktree.
 
 ## Build, Test, and Style
