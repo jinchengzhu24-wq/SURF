@@ -1,0 +1,21 @@
+fileFormatVersion: 2
+guid: 9d2f1f0c8a7b4e0a9c3d5f6b7a8e1c2d
+TrueTypeFontImporter:
+  externalObjects: {}
+  serializedVersion: 4
+  fontSize: 16
+  forceTextureCase: -2
+  characterSpacing: 0
+  characterPadding: 1
+  includeFontData: 1
+  fontName: PortalnautsDefau
+  fontNames:
+  - PortalnautsDefau
+  - HarmonyOS Sans SC
+  fallbackFontReferences: []
+  customCharacters: 
+  fontRenderingMode: 0
+  ascentCalculationMode: 1
+  useLegacyBoundsCalculation: 0
+  shouldRoundAdvanceValue: 1
+  userData:

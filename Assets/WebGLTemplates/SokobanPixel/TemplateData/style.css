@@ -1,3 +1,9 @@
+@font-face {
+  font-family: "SokobanPixel";
+  src: url("Pixelnauts.ttf") format("truetype");
+  font-display: block;
+}
+
 :root {
   color-scheme: dark;
   --grass: #6f9d31;
