@@ -127,6 +127,7 @@ const translations = {
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
         playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again.",
         translatedDisplay: "Translated display",
+        translationInProgress: "Translating AI messages ({count} remaining)...",
         translationUnavailable: "Translation temporarily unavailable · showing original"
     },
     "zh-CN": {
@@ -227,6 +228,7 @@ const translations = {
         playSyncFailed: "关卡已经通关，但本次试玩结果未能同步；该记录之后会标记为异常中断。",
         playLoadFailed: "所选 Stage 未能在 Unity 中加载，请检查该版本后重试。",
         translatedDisplay: "翻译内容",
+        translationInProgress: "正在翻译 AI 消息（剩余 {count} 条）……",
         translationUnavailable: "译文暂不可用 · 当前显示原文"
     }
 };
@@ -249,6 +251,8 @@ const state = {
     assessing: new Set(),
     translating: new Set(),
     translationFailures: new Set(),
+    translationInProgress: false,
+    translationRemainingCount: 0,
     retryAction: null,
     language: "zh-CN"
 };
@@ -277,7 +281,7 @@ const chineseApiErrors = {
 const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
     "languageButton", "demoButton", "stageList", "stageCount", "methodPill", "historyBanner",
-    "returnCurrentButton", "chatScroll", "emptyChat", "messageList", "typingRow", "proposalArea",
+    "returnCurrentButton", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
     "sendButton", "characterCount", "selectedStageEyebrow", "mapGrid",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
@@ -388,6 +392,7 @@ function render() {
     renderMap();
     renderSessionState();
     renderChatRequestStatus();
+    renderTranslationStatus();
     updateControls();
 }
 
@@ -399,7 +404,7 @@ function renderStages() {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "stage-card";
-        button.disabled = deadlineExpired();
+        button.disabled = deadlineExpired() || state.translationInProgress;
         if (version.versionId === state.selectedVersionId) button.classList.add("selected");
         if (version.versionId === state.session.currentVersionId) button.classList.add("current");
         button.addEventListener("click", () => selectVersion(version.versionId));
@@ -750,7 +755,7 @@ function updateControls() {
     elements.restoreStageButton.disabled = state.busy || expired;
     elements.playButton.disabled = state.busy || expired || state.dirty || pending || !selectedVersion();
     elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
-    elements.languageButton.disabled = state.busy || expired;
+    elements.languageButton.disabled = state.busy || expired || state.translationInProgress;
     elements.messageInput.disabled = state.busy || !editable;
     elements.sendButton.disabled = state.busy || !editable || !elements.messageInput.value.trim();
     elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
@@ -771,6 +776,16 @@ function renderChatRequestStatus() {
         : localizedErrorMessage(state.chatError);
     elements.chatRetryButton.hidden = !failed || !state.chatError?.retryable || !state.pendingMessage;
     elements.chatRetryButton.textContent = t("retry");
+}
+
+function renderTranslationStatus() {
+    if (!elements.translationStatus) return;
+    const active = state.translationInProgress && state.translationRemainingCount > 0;
+    elements.translationStatus.hidden = !active;
+    if (active) {
+        elements.translationStatus.textContent = t("translationInProgress")
+            .replace("{count}", String(state.translationRemainingCount));
+    }
 }
 
 function chatWaitingMessage() {
@@ -1107,8 +1122,44 @@ function verifiedProposalSummary(diff) {
         : `Verified tile changes (${changes.length} total): ${details.join("; ")}. See the highlighted map cells for every location.`;
 }
 
+async function translateVisibleBatch(batch, targetLanguage) {
+    const turnIds = batch.map(turn => turn.turnId);
+    const requestKey = `${targetLanguage}:${turnIds.join(",")}`;
+    if (state.translating.has(requestKey)) return;
+    state.translating.add(requestKey);
+
+    try {
+        const translatedSession = await api(
+            `/api/sessions/${state.sessionId}/translations/${encodeURIComponent(targetLanguage)}`,
+            {
+                method: "POST",
+                body: { turnIds },
+                timeoutMs: 65000
+            }
+        );
+        const translatedById = new Map(
+            translatedSession.turns.map(turn => [turn.turnId, turn])
+        );
+        state.session.turns = state.session.turns.map(turn => {
+            const translated = translatedById.get(turn.turnId);
+            return translated ? { ...turn, translations: translated.translations } : turn;
+        });
+        turnIds.forEach(turnId => {
+            state.translationFailures.delete(`${turnId}:${targetLanguage}`);
+        });
+    } catch (error) {
+        turnIds.forEach(turnId => {
+            state.translationFailures.add(`${turnId}:${targetLanguage}`);
+        });
+    } finally {
+        state.translating.delete(requestKey);
+        state.translationRemainingCount = Math.max(0, state.translationRemainingCount - batch.length);
+        render();
+    }
+}
+
 async function ensureVisibleTranslations() {
-    if (!state.session) return;
+    if (!state.session || state.translationInProgress) return;
     const targetLanguage = state.language;
     const missing = selectedStageTurns().filter(
         turn => turn.role === "assistant"
@@ -1116,41 +1167,35 @@ async function ensureVisibleTranslations() {
             && !turn.translations?.[targetLanguage]
     );
 
-    for (let index = 0; index < missing.length; index += 8) {
-        const batch = missing.slice(index, index + 8);
-        const turnIds = batch.map(turn => turn.turnId);
-        const requestKey = `${targetLanguage}:${turnIds.join(",")}`;
-        if (state.translating.has(requestKey)) continue;
-        state.translating.add(requestKey);
-
-        try {
-            const translatedSession = await api(
-                `/api/sessions/${state.sessionId}/translations/${encodeURIComponent(targetLanguage)}`,
-                {
-                    method: "POST",
-                    body: { turnIds },
-                    timeoutMs: 65000
-                }
-            );
-            const translatedById = new Map(
-                translatedSession.turns.map(turn => [turn.turnId, turn])
-            );
-            state.session.turns = state.session.turns.map(turn => {
-                const translated = translatedById.get(turn.turnId);
-                return translated ? { ...turn, translations: translated.translations } : turn;
-            });
-            turnIds.forEach(turnId => {
-                state.translationFailures.delete(`${turnId}:${targetLanguage}`);
-            });
-        } catch (error) {
-            turnIds.forEach(turnId => {
-                state.translationFailures.add(`${turnId}:${targetLanguage}`);
-            });
-        } finally {
-            state.translating.delete(requestKey);
-            render();
-        }
+    if (!missing.length) {
+        state.translationRemainingCount = 0;
+        renderTranslationStatus();
+        updateControls();
+        return;
     }
+
+    const batches = [];
+    for (let index = 0; index < missing.length; index += 8) {
+        batches.push(missing.slice(index, index + 8));
+    }
+    state.translationInProgress = true;
+    state.translationRemainingCount = missing.length;
+    renderTranslationStatus();
+    updateControls();
+
+    let nextBatchIndex = 0;
+    const worker = async () => {
+        while (nextBatchIndex < batches.length) {
+            const batch = batches[nextBatchIndex];
+            nextBatchIndex += 1;
+            await translateVisibleBatch(batch, targetLanguage);
+        }
+    };
+    const workerCount = Math.min(2, batches.length);
+    await Promise.all(Array.from({ length: workerCount }, worker));
+    state.translationInProgress = false;
+    state.translationRemainingCount = 0;
+    render();
 }
 
 function resetDraftFromSelection() {
@@ -1187,6 +1232,7 @@ function createMiniMap(rows, diff, extraClass = "") {
     rows.forEach((row, y) => [...row].forEach((tile, x) => {
         const cell = document.createElement("i");
         cell.className = tileClass(tile);
+        cell.title = formatTileCoordinate(x, y);
         if (changed.has(`${x},${y}`)) cell.classList.add("changed");
         map.appendChild(cell);
     }));
@@ -1300,6 +1346,7 @@ function applyTranslations() {
     elements.languageButton.textContent = state.language === "en" ? "中文" : "English";
     updateCharacterCount();
     renderChatRequestStatus();
+    renderTranslationStatus();
 }
 
 function handleComposerInput() {
