@@ -4,11 +4,11 @@
 
 This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, and the independent 8010 co-creation service. Unity code is under `Assets/Scripts/`; scenes are under `Assets/Scenes/`; preserve every Unity asset's `.meta` file. `Backend/` is the 8000 service, `Frontend/` is its static dashboard, and `CoCreationPrototype/` contains the 8010 backend and frontend. `Library/`, `Temp/`, `Logs/`, generated solution files, and `WebGLBuild/` are generated output.
 
-## Current Product Baseline (2026-08-20)
+## Current Product Baseline (2026-08-28)
 
 - The active online route is `Menu -> Questionnaire(Online1) -> Online_Lobby -> Match_Briefing -> DG -> DG_Level -> CoCreation_Entry -> 8010 -> Challenge_Waiting -> Online_Level -> Match_Result -> Questionnaire(Online2) -> Menu`. Both online questionnaires are part of every match cycle: Online1 opens the pre-match WJX survey before the lobby, and Online2 opens the post-match WJX survey after results. Do not add a persistent skip flag.
-- `Draft` is retired. PC code, scenes, and backend capability are retained for later work but have no Build Settings entry, menu/navigation route, or current client integration. Do not restore them without a confirmed study-design revision.
-- DG asks about opponent relationship and intended experience, then receives an AI summary/difficulty suggestion. Confirmed DG context guides only the 8000 first-draft generator; it must never be sent to, persisted by, or exposed in the 8010 service or its LLM context.
+- The Unity `Draft` scene is retired; the immutable `draft` event remains an 8000 dashboard research record. PC code, scenes, and backend capability are retained for later work but have no Build Settings entry, menu/navigation route, or current client integration. Do not restore them without a confirmed study-design revision.
+- DG asks four neutral map-design questions (first-move inspection, push dependencies, space distribution, and route rhythm). AI returns a warm reflection plus difficulty and layout recommendations; Q1–Q2 infer difficulty and Q3–Q4 infer layout. Confirmed DG context guides only the 8000 first-draft generator; it must never be sent to, persisted by, or exposed in the 8010 service or its LLM context.
 - Menu's `Tutorial` button opens the static bilingual PDF at `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`. It opens in the browser's PDF viewer and does not enter a Unity route.
 
 ## Unity Authoring
@@ -32,6 +32,9 @@ This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, an
 - Match room results use `completed` or `timed_out`; legacy results without an outcome are treated as completed. Do not regress idempotency, room identity, or result polling.
 - The public endpoints are `http://111.231.136.4/game/`, `/frontend/`, and `/cocreation/`; public links use port 80, not `:8000` or `:8010`.
 - WebGL Dashboard access is gated in the game page itself: the footer `DATA DASHBOARD` button must validate the existing password before opening `/frontend/`; do not move the first prompt back into the 8000 page.
+- The Online Lobby uses static browser-native WebGL template inputs for room codes: the generated code is read-only and selectable for manual copying, while the join field accepts paste and normalizes a six-character alphanumeric code. These fields synchronize with Unity through `BrowserNavigation.jslib`; there is no `COPY CODE` button.
+- The 8000 dashboard keeps full Match IDs and Study Session IDs in the data model, displays their first eight characters with copy-full-value controls, and searches both players' complete or short Study Session IDs. Record details show both players' Study Session IDs on every flow node.
+- The 8010 `final` event records server-derived `coCreationDurationSeconds` in the 0–600 second range; opponent play time remains the 8000 `result_submitted.durationSeconds` field.
 - For an 8010-only deployment, back up its SQLite database, upload only changed `CoCreationPrototype` files, and restart `sokoban-cocreation`. Never use `/root/SURF/deploy_scp` for an 8010-only change.
 - For a WebGL update, rebuild with Unity `2022.3.62f2c1`, bump the WebGL template cache key when browser assets can be stale, upload `WebGLBuild/`, and verify the public index plus loader/data/framework/wasm responses. Uploading `Frontend/tutorial/` alone does not require an 8000 restart.
 - Do not commit `.env`, API keys, SQLite databases, research logs, Unity caches, or generated WebGL output. Preserve unrelated user changes in a dirty worktree.

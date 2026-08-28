@@ -17,6 +17,14 @@ https://v.wjx.cn/vm/O6tj8nu.aspx#
 
 从 WebGL 页面底部的 `DATA DASHBOARD` 按钮进入 Dashboard 时，会先在游戏页面内显示访问密码框；密码通过 8000 的 `/verify-dashboard-password` 校验成功后，才打开 `/frontend/`。取消或校验失败都不会跳转。Dashboard 内的删除/清空操作仍会再次要求原删除密码。直接访问 `/frontend/` 不经过 WebGL 入口时保持原行为。
 
+当前在线路线为 `Menu → Online1 → Online_Lobby → Match_Briefing → DG → DG_Level → CoCreation_Entry → 8010 → Challenge_Waiting → Online_Level → Match_Result → Online2`。Online1 的隐藏第 5 题使用 `q5=<studySessionId>`，Online2 的隐藏第 22 题使用 `q22=<studySessionId>`；问卷通过玩家 `studySessionId` 与 Dashboard 中的玩家记录人工核对，`matchId` 用于识别比赛。Unity Draft 场景已退役，但 8000 Dashboard 仍保留不可变的 `Draft` 研究记录节点。
+
+DG 目前使用四道中立地图问题：首步检查、推箱依赖、空间分布和路线结构。Q1/Q2 只推断 Difficulty，Q3/Q4 只推断 Layout；AI 会返回 reflection、理由和建议，完整链路写入 8000 Draft，不传入 8010。双 `no_preference` 时对应建议保持 `Random`；AI 仅可在明确冲突时将确定性基准上下调整一档。
+
+Online Lobby 的生成房间码位于静态浏览器只读输入框中，可选中后手动复制；加入房间输入框支持粘贴并规范化为六位字母数字码。两个输入框通过 `BrowserNavigation.jslib` 与 Unity 同步，不使用 `COPY CODE` 按钮。若修改此模板或其桥接代码，必须重新构建并上传完整 `WebGLBuild/`。
+
+8000 Dashboard 的 Match ID 和两位玩家 Study Session ID 默认显示前 8 位，复制按钮复制完整值，搜索支持完整值及短值；每个流程节点的 Record details 都显示两位玩家的 Study Session ID。Final map 显示共创耗时，Result submitted 和挑战地图详情继续显示对手游玩时长。Dashboard 不再显示已淘汰的 `AI assistant` 模式，`Designer intention` 的用户可见标签统一为 `Message`；兼容字段仍保留在后端原始记录中。
+
 ## 端口速查
 
 ```text
@@ -62,11 +70,12 @@ D:\Sokoban_AI_Demo
 ```text
 Frontend/index.html
 Frontend/app.js
+Frontend/matchmaking.js
 Frontend/styles.css
 Frontend/Images/
 ```
 
-如果修改了 WebGL 页面底部的 `DATA DASHBOARD` 链接或访问密码框，还需要用 Unity 重新构建并同步完整 `WebGLBuild/`；入口来自 `Assets/WebGLTemplates/SokobanPixel/index.html`。
+如果修改了 WebGL 页面底部的 `DATA DASHBOARD` 链接、访问密码框、房间码原生输入或其桥接，还需要用 Unity 重新构建并同步完整 `WebGLBuild/`；入口来自 `Assets/WebGLTemplates/SokobanPixel/index.html`。
 
 以下文件只参与本地 Unity 开发或构建，不需要上传服务器：
 
@@ -118,6 +127,7 @@ http://111.231.136.4/game/
 ```text
 Frontend/index.html
 Frontend/app.js
+Frontend/matchmaking.js
 Frontend/styles.css
 ```
 
@@ -126,6 +136,7 @@ Frontend/styles.css
 ```cmd
 scp D:\Sokoban_AI_Demo\Frontend\index.html root@111.231.136.4:/root/SURF/Frontend/index.html
 scp D:\Sokoban_AI_Demo\Frontend\app.js root@111.231.136.4:/root/SURF/Frontend/app.js
+scp D:\Sokoban_AI_Demo\Frontend\matchmaking.js root@111.231.136.4:/root/SURF/Frontend/matchmaking.js
 scp D:\Sokoban_AI_Demo\Frontend\styles.css root@111.231.136.4:/root/SURF/Frontend/styles.css
 ```
 
@@ -206,6 +217,7 @@ Backend/prompt.py
 Backend/requirements.txt
 Frontend/index.html
 Frontend/app.js
+Frontend/matchmaking.js
 Frontend/styles.css
 Frontend/Images
 WebGLBuild
@@ -235,6 +247,7 @@ scp D:\Sokoban_AI_Demo\Backend\requirements.txt root@111.231.136.4:/root/SURF/Ba
 ```cmd
 scp D:\Sokoban_AI_Demo\Frontend\index.html root@111.231.136.4:/root/SURF/Frontend/index.html
 scp D:\Sokoban_AI_Demo\Frontend\app.js root@111.231.136.4:/root/SURF/Frontend/app.js
+scp D:\Sokoban_AI_Demo\Frontend\matchmaking.js root@111.231.136.4:/root/SURF/Frontend/matchmaking.js
 scp D:\Sokoban_AI_Demo\Frontend\styles.css root@111.231.136.4:/root/SURF/Frontend/styles.css
 ```
 
@@ -267,6 +280,7 @@ cd /root/SURF
 
 - 只改了 `Frontend/index.html`
 - 只改了 `Frontend/app.js`
+- 只改了 `Frontend/matchmaking.js`
 - 只改了 `Frontend/styles.css`
 - 只重新构建并上传了 `WebGLBuild`
 
@@ -299,25 +313,25 @@ bash deploy_scp
 重启后依次检查：
 
 ```text
-## Tutorial PDF 静态资源
-
-`Frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf` 由现有 `/frontend/` 静态路由公开为 `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。浏览器会直接使用内置 PDF 查看器在线打开；只更新教程文件时，上传该目录即可，无需重启 8000 服务。Menu 按钮事件的改动需随下一次 WebGL 构建发布。
-
 http://111.231.136.4/health
 http://111.231.136.4/ready
 ```
 
 `/health` 表示进程可访问；`/ready` 还会检查 API Key、模型配置和日志目录。运维日志位于 `Backend/logs/backend.log`，单文件 5 MB，保留 5 份轮转文件。当前后端只能使用一个 Uvicorn worker。
 
-完整错误码和排查方法见 `README_LLM_ERRORS.md`。
+完整错误码和排查方法见 [Old_md/LLM_ERRORS.md](Old_md/LLM_ERRORS.md)。
+
+## Tutorial PDF 静态资源
+
+`Frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf` 由现有 `/frontend/` 静态路由公开为 `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。浏览器会直接使用内置 PDF 查看器在线打开；只更新教程文件时，上传该目录即可，无需重启 8000 服务。Menu 按钮事件的改动需随下一次 WebGL 构建发布。
 
 ## DG Draft research record
 
 The 8000 `POST /online/rooms/{match_id}/draft` record now keeps the four DG answer codes,
 the AI reflection and both recommendation rationales, the AI recommendation and source, and
 the user's final difficulty and layout. Older clients remain compatible; incomplete records
-are marked `draftMetadataComplete: false`. See the bilingual prompt specification in
-`Draft_prompt.md`.
+are marked `draftMetadataComplete: false`. See the current question list in
+`Draft_question.md` and the bilingual prompt specification in `Draft_prompt.md`.
 
 DG 的 Difficulty 仅由 Q1/Q2 计算，Layout 仅由 Q3/Q4 计算。每组先按低/中/高方向得到确定性基准：相邻冲突取对应端点，跨两级冲突取中间档；单题 `no_preference` 使用另一题，两题均为 `no_preference` 才是 `Random`。只有两题明确冲突时，AI 可以在该基准上下调整一档；同方向或无偏好时不得调整。Draft 记录实际 AI 推荐值，基准值可由四个答案重新计算。
 

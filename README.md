@@ -13,7 +13,7 @@ Menu
       → LLM 评价、连续聊天、手工编辑或 LLM 修改提案
       → 每次明确保存/接受才创建不可覆盖的新 Stage
       → 可选择任意已保存 Stage 并点击 Play
-          → 8000 WebGL → PC_Level 或 DG_Level 只读试玩
+          → 8000 WebGL → DG_Level 只读试玩（PC_Level 为保留路径，当前未启用）
           → 通关动画与结果同步 → 自动返回同一 8010 会话
       → 明确确认最终 Stage
       → 填写设计意图
@@ -22,17 +22,17 @@ Menu
   → Questionnaire(Online2) → Menu
 ```
 
-旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 的四道中立答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI reflection、AI 推荐和用户最终确认一起保存；这些答案不会传入 8010 共创服务或其 LLM 上下文。
+旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 当前询问四个中立的地图设计问题（首步检查、推箱依赖、空间分布、路线结构），前两题用于推断难度，后两题用于推断布局。AI 输出温暖的 AI reflection 以及难度/布局建议；四道答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI 推荐和用户最终确认一起保存，不会传入 8010 共创服务或其 LLM 上下文。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。前端脚本缓存键为 `cocreation-nginx-prefix-20260818-2`，样式缓存键为 `cocreation-return-unity-20260814-19`。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。当前 8010 前端脚本与样式缓存键均为 `cocreation-translation-parallel-20260828-1`；如再次更新静态资源，应同步递增该版本参数。
 
 8010 工作台在浏览器首次访问授权后开始 10 分钟倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
 
-2026-08-14 的地图改善提示词先更新为 `cocreation-v29-intent-search`：明确授权后，Pro 只把玩家方向编译成一至三个结构化 `RevisionStrategy`，不再输出地图 rows 或原子格子操作。后端使用语义算子、宽度 16/深度 3 的确定性局部搜索、最多 64 个内部候选、现有结构校验与 300,000 状态 Sokoban 求解器选择最多八个可解候选中的最优方案。模型阶段最多两次且总计不超过 26 秒，搜索在业务请求第 55 秒停止；完整请求仍受 60 秒墙钟限制。随后部署的 `cocreation-v30-disagreement-intent` 规定：玩家明确重新界定或反驳助手对难度、优先级或游玩效果的判断时，必须出现一张可纠正的暂定意图卡。`v31-zero-candidate-correction` 还会在首份合法计划因操作/焦点没有可编辑格子而构造零候选时，用现有的第二次 Pro 调用附带安全原因纠正计划。只有已有合法计划但确定性搜索找不到满足全部条件的可解修改时，才进入现有的局部效果放宽商量流程。Quality-Diversity / MAP-Elites 保留为后续候选多样性升级，不属于当前版本。本地和服务器 151 项测试、Python 编译及本地 JavaScript 语法检查通过；部署未改动数据库内容或 8000 服务。
+2026-08-14 的地图改善提示词先更新为 `cocreation-v29-intent-search`：明确授权后，Pro 只把玩家方向编译成一至三个结构化 `RevisionStrategy`，不再输出地图 rows 或原子格子操作。后端使用语义算子、宽度 16/深度 3 的确定性局部搜索、最多 64 个内部候选、现有结构校验与 300,000 状态 Sokoban 求解器选择最多八个可解候选中的最优方案。模型阶段最多两次且总计不超过 26 秒，搜索在业务请求第 55 秒停止；完整请求仍受 60 秒墙钟限制。随后部署的 `cocreation-v30-disagreement-intent` 规定：玩家明确重新界定或反驳助手对难度、优先级或游玩效果的判断时，必须出现一张可纠正的暂定意图卡。`v31-zero-candidate-correction` 还会在首份合法计划因操作/焦点没有可编辑格子而构造零候选时，用现有的第二次 Pro 调用附带安全原因纠正计划。只有已有合法计划但确定性搜索找不到满足全部条件的可解修改时，才进入现有的局部效果放宽商量流程。Quality-Diversity / MAP-Elites 保留为后续候选多样性升级，不属于当前版本。上述版本发布前的本地与服务器测试、Python 编译及本地 JavaScript 语法检查均通过；部署未改动数据库内容或 8000 服务。
 
 ## 共创规则
 
-- `Stage 1` 必须与 PC/DG 在 Unity 中通过格式检查及 `LevelSolver` 验证后的 rows 完全一致。
+- `Stage 1` 必须与 DG 在 Unity 中通过格式检查及 `LevelSolver` 验证后的 rows 完全一致。
 - 会话围绕同一个持续演化的关卡进行。聊天历史、版本、差异、评价、提案决定、试玩证据、最终版本和设计意图均持久化。
 - 手工修改只存在于浏览器草稿中，点击“保存为新 Stage”后才成为版本；历史 Stage 永不覆盖。
 - LLM 修改先以提案和差异预览呈现。提案必须相对基础 Stage 至少真实改变一个瓦片，且只有设计者接受并再次通过服务器求解与非空差异校验后才创建 Stage；零改动提案不能保存或接受。
@@ -49,7 +49,7 @@ Menu
 ### 当前首版生成模式
 
 - `DG_Level` 根据玩家描述获取 LLM 方案，通过模板生成和回退策略形成完整地图，并在 Unity 端验证。
-- DG reflection 与 Draft 记录规范见 [Draft_prompt.md](Draft_prompt.md)。
+- DG 四道问题见 [Draft_question.md](Draft_question.md)，reflection 与 Draft 记录规范见 [Draft_prompt.md](Draft_prompt.md)。
 - 当前在线流程只启用 DG；PC/PC_Design/PC_Level 作为保留资产，不在 Build Settings 或导航中开放。
 - 首版验证成功后不要求玩家先通关；DG rows 与 `description_generation` 写入 `CoCreationDraftContext`，随后加载 `CoCreation_Entry`。
 
@@ -58,7 +58,7 @@ Menu
 - 网页创建五分钟、一次性 Play Ticket，URL 只携带 attempt ID 与票据，不携带 rows。
 - 8000 WebGL 的 Menu 启动组件换取完整 rows、来源、语言、提交 token 和返回 URL，并立即从地址栏清除票据。
 - 当前 `description_generation` 加载 `DG_Level`；保留的 `partial_completion` 不在当前构建流程中调用。
-- 试玩上下文存在时，PC/DG 的生成控制器停用；指定 rows 再经 Unity `LevelSolver(maxSearchStates=300000)` 后加载。
+- 试玩上下文存在时，生成控制器停用；指定 rows 再经 Unity `LevelSolver(maxSearchStates=300000)` 后加载。
 - WASD 移动；`R` 重开地图，但累计移动、推动、重开和首次有效移动后的耗时不清零。
 - 通关后保留完成动画和淡出，提交 `completed` 指标后自动返回原 8010 会话；Unity 内不再提供主动提前返回按钮，浏览器返回、关闭或刷新按 `interrupted` 处理。
 - 试玩不会进入 `Challenge_Waiting`、`Match_Result` 或问卷。
@@ -79,7 +79,7 @@ LLM 使用理性、亲切、以第一人称为主的朋友式共创策略，并�
 
 蓝色与紫色卡片不会再把正文原句直接搬进去。紫卡使用短标题总结实际修改方向，并在下方独立展开预期的游玩影响和验证重点；蓝卡把问句或见解整理成可单独理解的讨论焦点，补充具体游玩瞬间以及它会影响的下一步设计判断。完整地图提案的模型阶段只编译 `RevisionPlan`：首次结构不合法，或合法计划因“操作类型与焦点区域没有可编辑格子”而构造零候选时，继续使用 Pro，并只附带安全的结构原因生成一次纠正计划；首次空白、超时或连接故障时才切到 Flash。地图构造、结构校验和求解全部由后端完成，不再把失败地图交给模型重画。
 
-LLM 每轮还会接收初稿方法与当前 Stage 来源，避免把生成器产物误说成玩家亲手设计。DG 首版只把上游描述和参数选择归因给玩家，具体墙体、水域、箱子、目标和玩家位置均作为生成结果讨论；由于 8010 当前不保存具体参数值，LLM 不得猜测参数。PC 首版只把箱子起点、目标和整体草图约束视为玩家输入，不能询问玩家为何放置生成水域、某个内部墙或玩家出生点。玩家在工作台保存的手工修改可以依据确定性 diff 归因；接受 LLM 提案和恢复历史版本则分别表述为共同接受的方向和重新查看旧版本。这些规则同时作用于首轮和后续对话。完整地图提案还会逐格对照当前 Stage：后端拒绝空 diff，prompt 要求修改摘要只能陈述 rows 中实际发生的更改，保存提案和接受提案时各有一次独立校验。
+LLM 每轮还会接收初稿方法与当前 Stage 来源，避免把生成器产物误说成玩家亲手设计。DG 首版只把上游描述和参数选择归因给玩家，具体墙体、水域、箱子、目标和玩家位置均作为生成结果讨论；由于 8010 当前不保存具体参数值，LLM 不得猜测参数。保留的 PC 首版路径只把箱子起点、目标和整体草图约束视为玩家输入，不能询问玩家为何放置生成水域、某个内部墙或玩家出生点。玩家在工作台保存的手工修改可以依据确定性 diff 归因；接受 LLM 提案和恢复历史版本则分别表述为共同接受的方向和重新查看旧版本。这些规则同时作用于首轮和后续对话。完整地图提案还会逐格对照当前 Stage：后端拒绝空 diff，prompt 要求修改摘要只能陈述 rows 中实际发生的更改，保存提案和接受提案时各有一次独立校验。
 
 当玩家适合直接实践自己的想法时，LLM 可以简短提示使用右侧地图编辑器并保存为新 Stage，但不把手工编辑说成必选步骤。手工 Stage 通过求解验证后，后端会相对父版本确定性识别外壳、水域、内部墙体、箱子位置、目标点、玩家位置及可用地面的变化；新 Stage 的回复先准确确认这些改动和可解状态，再由 LLM评价其设计影响并继续对话。
 
@@ -144,34 +144,33 @@ GET   /api/integrations/sessions/{sessionId}
 
 Online1 是问卷星中的双语匹配前筛选问卷：收集性别、年龄区间、既往推箱子经验及是否与另一组两位参与者均为陌生关系；隐藏的第 5 题 `studySessionId` 由 Unity 以 `q5` 参数写入。Online2 是独立的 21 题双语赛后问卷，隐藏的第 22 题 `studySessionId` 由 Unity 以 `q22` 参数写入。
 
+Online Lobby 的生成房间码显示在静态浏览器只读输入框中，可以选中后手动复制；加入房间输入框支持粘贴并规范化为六位字母数字码。两个输入框通过 WebGL 模板与 `BrowserNavigation.jslib` 同步到 Unity，不再提供 `COPY CODE` 按钮。
+
 WebGL 页面底部的 `DATA DASHBOARD` 按钮会先在游戏页面内显示 Dashboard 访问密码框，密码通过 8000 的校验接口后才打开 Dashboard；取消或校验失败不会跳转。Dashboard 内的删除操作仍单独使用同一密码校验。
 
 在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。DG 确认初稿设置时，8000 会先追加一个不可变的 `draft` 节点，保存四道中立题的内部答案、AI reflection、难度/布局理由、AI 推荐值、推荐来源及用户最终 `finalDifficulty` 与 `finalLayout`。旧客户端缺少新增字段时仍兼容写入，并以 `draftMetadataComplete=false` 标记。后续可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
 
-挑战请求只包含：
+8010 的 `final` 事件会记录 `coCreationDurationSeconds`，定义为首次打开共创网页到确认最终 Stage 的耗时，按服务器十分钟期限计算并限制在 0–600 秒；设计意图填写不计入。对手游玩时长仍来自 8000 `result_submitted.durationSeconds`，只在 Result submitted 和挑战地图详情中展示。Dashboard 的 Match ID 和两位玩家 `studySessionId` 默认显示前 8 位，旁边的复制按钮复制完整值，搜索支持完整值与短值。
+
+挑战提交当前只包含地图 rows 和兼容用的初稿模式字段：
 
 ```json
 {
   "rows": ["..."],
-  "aiAssistantMode": "partial_completion",
-  "opponentExperienceGoal": "I hope my opponent feels a careful route choice."
+  "aiAssistantMode": "description_generation"
 }
 ```
 
-旧客户端多传的 `competitionMode` 被兼容忽略，不验证、不存储、不返回。历史 JSONL 原件保留，但新事件和派生 dashboard 不暴露该字段。
+`aiAssistantMode` 仅为旧接口兼容字段，不在 dashboard 作为用户可见模式展示；当前在线路线固定为 `description_generation`。旧客户端多传的 `competitionMode` 或关系/体验字段被兼容忽略，不验证、不存储、不返回。历史 JSONL 原件保留，但新事件和派生 dashboard 不暴露这些字段。
 
 ## Build Settings
 
-共创与匹配所需场景：
+当前启用的共创与在线匹配场景：
 
 ```text
 Assets/Scenes/Menu.unity
 Assets/Scenes/Matchmaking/Online/Online_Lobby.unity
 Assets/Scenes/Matchmaking/Online/Match_Briefing.unity
-Assets/Scenes/Matchmaking/DG.unity
-Assets/Scenes/Matchmaking/PC.unity
-Assets/Scenes/Matchmaking/PC_Design.unity
-Assets/Scenes/Matchmaking/PC_Level.unity
 Assets/Scenes/Matchmaking/DG.unity
 Assets/Scenes/Matchmaking/DG_Level.unity
 Assets/Scenes/Matchmaking/Online/CoCreation_Entry.unity
@@ -182,26 +181,30 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online1).unity
 Assets/Scenes/Matchmaking/Online/Questionnaire(Online2).unity
 ```
 
+`PC.unity`、`PC_Design.unity` 和 `PC_Level.unity` 仍作为禁用的历史实现资产保留，不属于当前 Build Settings 或在线导航。
+
 ## 验证
 
 ```powershell
 python -m unittest discover -s Backend -p "test_*.py"
 python -m unittest discover -s CoCreationPrototype/Backend/tests -p "test_*.py"
 node --check CoCreationPrototype/Frontend/app.js
+dotnet build Assembly-CSharp.csproj -v:minimal
+```
+
 ## Tutorial PDF
 
 Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。双语 PDF 由现有 8000 `/frontend/` 静态路由提供，并在浏览器的 PDF 查看器中打开，不会离开当前 Unity Menu 页面。
 
-dotnet build Assembly-CSharp.csproj -v:minimal
-```
-
-完整手动回归应使用 Unity `2022.3.62f2c1`，分别走 PC 和 DG：
+完整手动回归应使用 Unity `2022.3.62f2c1`，按当前 DG 在线路线执行：
 
 1. 生成首版后进入 `CoCreation_Entry`，确认 8010 Stage 1 rows 完全一致。
 2. 连续创建至少三个 Stage，检查聊天、差异、历史恢复及中英文切换。
-3. 试玩最新与历史 Stage，确认分别进入正确 PC/DG 场景且没有重新调用生成接口。
+3. 试玩最新与历史 Stage，确认进入 `DG_Level` 且没有重新调用生成接口。
 4. 覆盖通关自动返回、`R` 重开、完成提交重试和浏览器异常中断，确认指标累计且 Stage 数量不变。
 5. 最终确认后填写意图；确认完成卡仅在在线匹配会话显示“返回 Unity 继续”，点击后聚焦原 Unity 标签页并关闭 8010 标签页，Unity 只在意图提交之后获得最终 rows 并进入 `Challenge_Waiting`。
 6. 双端继续完成挑战交换、`Online_Level`、`Match_Result` 和在线问卷。
+
+如需单独回归保留的 PC 路径，必须先在 Unity Build Settings 中重新启用相应场景；这不属于当前在线研究路线。
 
 部署时先备份 8010 SQLite，再更新并重启独立服务；随后用指定 Unity 版本重建 WebGL、更新缓存键并上传 8000 静态构建。不要把 `.env`、API Key、SQLite、研究日志或 `WebGLBuild/` 提交到 Git。
