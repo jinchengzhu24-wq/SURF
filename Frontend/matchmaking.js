@@ -408,6 +408,7 @@ function renderSelectedChallenge(match) {
         ["Created by", "Player " + challenge.createdByPlayerNumber],
         ["Played by", "Player " + challenge.playedByPlayerNumber],
         ["Play time", formatSeconds(result.durationSeconds)],
+        ["Restarts", value(result.restartCount)],
         ["Moves", value(result.moveCount)],
         ["Minimum moves", value(result.minimumMoves)],
         ["Move overhead", overhead === null ? "-" : "+" + overhead]
@@ -449,11 +450,13 @@ function renderInspector(match, stage) {
     }
     if (record.eventType === "result_submitted") {
         rows.push(["Play time", formatSeconds(record.durationSeconds)]);
+        rows.push(["Restarts", value(record.restartCount)]);
         rows.push(["Moves", value(record.moveCount)]);
         rows.push(["Minimum moves", value(record.minimumMoves)]);
     }
     if (record.eventType === "final") {
         rows.push(["Co-creation time", formatClockDuration(record.coCreationDurationSeconds)]);
+        rows.push(["Opponent restarts", value(record.opponentRestartCount)]);
     }
     appendRecordGrid(rows);
     if (record.eventType === "draft") appendDraftDetails(record);
@@ -613,6 +616,7 @@ function renderCompareChallenge(player) {
         ["Message", player.designerIntention || "-"],
         ["Played by", "Player " + challenge.playedByPlayerNumber],
         ["Play time", formatSeconds(result.durationSeconds)],
+        ["Restarts", value(result.restartCount)],
         ["Moves", value(result.moveCount)],
         ["Minimum", value(result.minimumMoves)]
     ].forEach(([label, metricValue, copyable]) => {

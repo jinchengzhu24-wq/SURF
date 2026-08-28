@@ -148,9 +148,9 @@ Online Lobby 的生成房间码显示在静态浏览器只读输入框中，可�
 
 WebGL 页面底部的 `DATA DASHBOARD` 按钮会先在游戏页面内显示 Dashboard 访问密码框，密码通过 8000 的校验接口后才打开 Dashboard；取消或校验失败不会跳转。Dashboard 内的删除操作仍单独使用同一密码校验。
 
-在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。DG 确认初稿设置时，8000 会先追加一个不可变的 `draft` 节点，保存四道中立题的内部答案、AI reflection、难度/布局理由、AI 推荐值、推荐来源及用户最终 `finalDifficulty` 与 `finalLayout`。旧客户端缺少新增字段时仍兼容写入，并以 `draftMetadataComplete=false` 标记。后续可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
+在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。只有玩家在 8010 成功产生 `first_stage` 后才正式落盘：DG 确认初稿设置时，Draft 只暂存在当前房间内存中，不写流程 JSONL；收到 `first_stage` 后才按 Draft → First Stage 顺序追加。未进入 8010、没有 `first_stage` 的玩家不会产生 Draft、Stage、Message、Final 等共创流程记录；历史上缺少 `first_stage` 的流程在 Dashboard 聚合时也整体隐藏，但共享房间/匹配事件保留。Draft 节点保存四道中立题的内部答案、AI reflection、难度/布局理由、AI 推荐值、推荐来源及用户最终 `finalDifficulty` 与 `finalLayout`。后续可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
 
-8010 的 `final` 事件会记录 `coCreationDurationSeconds`，定义为首次打开共创网页到确认最终 Stage 的耗时，按服务器十分钟期限计算并限制在 0–600 秒；设计意图填写不计入。对手游玩时长仍来自 8000 `result_submitted.durationSeconds`，只在 Result submitted 和挑战地图详情中展示。Dashboard 的 Match ID 和两位玩家 `studySessionId` 默认显示前 8 位，旁边的复制按钮复制完整值，搜索支持完整值与短值。
+8010 的 `final` 事件会记录 `coCreationDurationSeconds`，定义为首次打开共创网页到确认最终 Stage 的耗时，按服务器十分钟期限计算并限制在 0–600 秒；设计意图填写不计入。对手游玩 Final Stage 时按 `R` 重开的次数通过 8000 结果字段 `restartCount` 记录，在 Challenge maps、Compare player challenges 和 Final map 的 `Opponent restarts` 中展示；网络重试、重新进入场景和问卷重填不计入，旧结果缺少字段时显示 `-`。对手游玩时长仍来自 8000 `result_submitted.durationSeconds`，只在 Result submitted 和挑战地图详情中展示。Dashboard 的 Match ID 和两位玩家 `studySessionId` 默认显示前 8 位，旁边的复制按钮复制完整值，搜索支持完整值与短值。
 
 挑战提交当前只包含地图 rows 和兼容用的初稿模式字段：
 

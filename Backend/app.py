@@ -203,6 +203,7 @@ class OnlineResultRequest(BaseModel):
     durationSeconds: float
     moveCount: int
     minimumMoves: int
+    restartCount: int = 0
     outcome: str = "completed"
 
 
@@ -528,6 +529,15 @@ def build_cocreation_flow_event(room, payload):
     return event
 
 
+def has_cocreation_first_stage(match_id, player_number):
+    """Return whether this player's persisted co-creation flow has started."""
+    flow_events, _ = read_online_match_flow_events(match_id, player_number)
+    return any(
+        isinstance(event, dict) and event.get("eventType") == "first_stage"
+        for event in flow_events
+    )
+
+
 def append_cocreation_flow_event(room, event):
     path = online_match_flow_file(event["matchId"], event["playerNumber"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -643,6 +653,28 @@ def append_online_draft_event(
     return event, True
 
 
+def materialize_pending_draft(room, player):
+    """Persist a player's in-memory Draft immediately before first_stage."""
+    pending = player.get("pendingDraft")
+    if not isinstance(pending, dict):
+        return None, False
+
+    metadata = {
+        field: pending.get(field, "")
+        for field in ONLINE_DRAFT_METADATA_KEYS
+    }
+    stored_event, created = append_online_draft_event(
+        room,
+        player,
+        pending["finalDifficulty"],
+        pending["finalLayout"],
+        metadata,
+        bool(pending.get("draftMetadataComplete", False)),
+    )
+    player["pendingDraft"] = None
+    return stored_event, created
+
+
 def append_cocreation_message(room, player_number, event_id, session_id, content):
     player = next(
         (
@@ -653,6 +685,11 @@ def append_cocreation_message(room, player_number, event_id, session_id, content
     )
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
+    if not has_cocreation_first_stage(room["matchId"], player_number):
+        raise HTTPException(
+            status_code=409,
+            detail="Co-creation flow has not started",
+        )
     event = {
         "eventId": normalize_cocreation_sync_id(event_id, "event ID"),
         "eventType": "message",
@@ -835,10 +872,10 @@ def validate_online_result(payload):
             detail="Result duration must be a finite non-negative number",
         )
 
-    if payload.moveCount < 0 or payload.minimumMoves < 0:
+    if payload.moveCount < 0 or payload.minimumMoves < 0 or payload.restartCount < 0:
         raise HTTPException(
             status_code=400,
-            detail="Result move counts must be non-negative",
+            detail="Result move and restart counts must be non-negative",
         )
 
     if payload.outcome not in {"completed", "timed_out"}:
@@ -1191,6 +1228,7 @@ def create_online_room(payload: OnlineRoomCreateRequest | None = None):
             "aiAssistantMode": None,
             "designerIntention": None,
             "result": None,
+            "pendingDraft": None,
         }
         match_id = uuid.uuid4().hex
         room = {
@@ -1240,6 +1278,7 @@ def join_online_room(payload: OnlineRoomJoinRequest):
             "aiAssistantMode": None,
             "designerIntention": None,
             "result": None,
+            "pendingDraft": None,
         }
         room["players"].append(player)
         room["status"] = "briefing"
@@ -1321,16 +1360,35 @@ def record_online_draft(
         )
         if room["status"] == "cancelled":
             raise HTTPException(status_code=409, detail="Room has been cancelled")
-        stored_event, created = append_online_draft_event(
-            room,
-            player,
-            final_difficulty,
-            final_layout,
-            draft_metadata,
-            metadata_complete,
-        )
+        requested_draft = {
+            "finalDifficulty": final_difficulty,
+            "finalLayout": final_layout,
+            **draft_metadata,
+            "draftMetadataComplete": metadata_complete,
+        }
+        pending_draft = player.get("pendingDraft")
+        if pending_draft is not None and pending_draft != requested_draft:
+            raise HTTPException(
+                status_code=409,
+                detail="Draft settings are already pending",
+            )
+
+        # Draft is deliberately kept in the live room only. It becomes a
+        # durable research event when the corresponding first_stage arrives.
+        if has_cocreation_first_stage(match_id, player["playerNumber"]):
+            raise HTTPException(
+                status_code=409,
+                detail="Draft must be submitted before first_stage",
+            )
+        player["pendingDraft"] = requested_draft
+        stored_event, created = None, False
         room["lastActivity"] = time.time()
-        return {"status": "ok", "recorded": created, "event": stored_event}
+        return {
+            "status": "ok",
+            "recorded": created,
+            "pending": stored_event is None,
+            "event": stored_event,
+        }
 
 
 @app.post("/online/rooms/{match_id}/challenge")
@@ -1438,6 +1496,12 @@ def synchronize_online_designer_intention(
         if player is None:
             raise HTTPException(status_code=404, detail="Player not found")
 
+        if not has_cocreation_first_stage(match_id, payload.playerNumber):
+            raise HTTPException(
+                status_code=409,
+                detail="Co-creation flow has not started",
+            )
+
         existing_intention = str(player.get("designerIntention") or "").strip()
 
         if existing_intention and existing_intention != designer_intention:
@@ -1489,7 +1553,22 @@ def synchronize_cocreation_flow_event(
         if room is None:
             raise HTTPException(status_code=404, detail="Room not found")
 
+        if (
+            payload.eventType != "first_stage"
+            and not has_cocreation_first_stage(match_id, payload.playerNumber)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Co-creation flow has not started",
+            )
+
         event = build_cocreation_flow_event(room, payload)
+        if payload.eventType == "first_stage":
+            player = next(
+                item for item in room["players"]
+                if item["playerNumber"] == payload.playerNumber
+            )
+            materialize_pending_draft(room, player)
         stored_event, created = append_cocreation_flow_event(room, event)
         return {"status": "ok", "recorded": created, "event": stored_event}
 
@@ -1505,6 +1584,7 @@ def submit_online_result(
         "durationSeconds": round(float(payload.durationSeconds), 2),
         "moveCount": int(payload.moveCount),
         "minimumMoves": int(payload.minimumMoves),
+        "restartCount": int(payload.restartCount),
         "outcome": payload.outcome,
     }
 
@@ -3036,6 +3116,7 @@ def build_matchmaking_records_payload(
         "durationSeconds",
         "moveCount",
         "minimumMoves",
+        "restartCount",
         "outcome",
         "studySessionId",
     }
@@ -3147,6 +3228,8 @@ def build_matchmaking_records_payload(
                 "minimumMoves": event.get("minimumMoves"),
                 "outcome": event.get("outcome", "completed"),
             }
+            if "restartCount" in event:
+                player["result"]["restartCount"] = event.get("restartCount")
         elif event_type == "player_left" and player is not None:
             player["leftAt"] = timestamp
 
@@ -3166,31 +3249,36 @@ def build_matchmaking_records_payload(
                 player_number,
             )
             malformed_count += flow_malformed_count
+            has_first_stage = any(
+                isinstance(event, dict) and event.get("eventType") == "first_stage"
+                for event in flow_events
+            )
             safe_flow_events = []
-            for event in flow_events:
-                if not isinstance(event, dict):
-                    continue
-                if event.get("eventType") not in {
-                    "draft", "first_stage", "stage", "opening", "turn", "final", "message"
-                }:
-                    continue
-                safe_flow_events.append({
-                    key: value
-                    for key, value in event.items()
-                    if key in {
-                        "eventId", "eventType", "matchId", "roomCode",
-                        "playerNumber", "studySessionId", "sessionId",
-                        "serverReceivedAt", "versionId", "stageNumber",
-                        "source", "initialDraftMethod", "rows", "diff", "userText",
-                        "assistantText", "language", "cards", "assistantTurnId",
-                        "openingAssistantTurnId", "openingAssistantText",
-                        "openingLanguage", "openingCards", "message", "finalDifficulty", "finalLayout",
-                        "q1Answer", "q2Answer", "q3Answer", "q4Answer", "aiReflection",
-                        "aiDifficultyRationale", "aiLayoutRationale", "aiRecommendedDifficulty",
-                        "aiRecommendedLayout", "aiRecommendationSource", "draftMetadataComplete",
-                        "coCreationDurationSeconds",
-                    }
-                })
+            if has_first_stage:
+                for event in flow_events:
+                    if not isinstance(event, dict):
+                        continue
+                    if event.get("eventType") not in {
+                        "draft", "first_stage", "stage", "opening", "turn", "final", "message"
+                    }:
+                        continue
+                    safe_flow_events.append({
+                        key: value
+                        for key, value in event.items()
+                        if key in {
+                            "eventId", "eventType", "matchId", "roomCode",
+                            "playerNumber", "studySessionId", "sessionId",
+                            "serverReceivedAt", "versionId", "stageNumber",
+                            "source", "initialDraftMethod", "rows", "diff", "userText",
+                            "assistantText", "language", "cards", "assistantTurnId",
+                            "openingAssistantTurnId", "openingAssistantText",
+                            "openingLanguage", "openingCards", "message", "finalDifficulty", "finalLayout",
+                            "q1Answer", "q2Answer", "q3Answer", "q4Answer", "aiReflection",
+                            "aiDifficultyRationale", "aiLayoutRationale", "aiRecommendedDifficulty",
+                            "aiRecommendedLayout", "aiRecommendationSource", "draftMetadataComplete",
+                            "coCreationDurationSeconds", "opponentRestartCount",
+                        }
+                    })
             safe_flow_events.sort(
                 key=lambda event: str(event.get("serverReceivedAt") or "")
             )
@@ -3211,6 +3299,17 @@ def build_matchmaking_records_payload(
                 creator["challenge"]["runResult"] = (
                     dict(opponent_result) if opponent_result is not None else None
                 )
+
+        # Final flow events are authored by the player whose map was sent to
+        # the opponent.  Expose the opponent's restart count as a derived
+        # dashboard field without modifying the immutable flow JSONL.
+        for creator in players.values():
+            opponent_result = players[3 - creator["playerNumber"]]["result"]
+            for flow_event in creator["coCreationFlow"]:
+                if flow_event.get("eventType") != "final":
+                    continue
+                if opponent_result is not None and "restartCount" in opponent_result:
+                    flow_event["opponentRestartCount"] = opponent_result.get("restartCount")
 
         completed = all(players[number]["result"] is not None for number in (1, 2))
         event_types = {

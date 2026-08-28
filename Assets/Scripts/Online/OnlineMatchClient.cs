@@ -128,6 +128,7 @@ public class OnlineMatchClient : MonoBehaviour
         float durationSeconds,
         int moveCount,
         int minimumMoves,
+        int restartCount,
         string outcome,
         Action<OnlineRoomState> onSuccess,
         Action<string> onFailure)
@@ -137,6 +138,7 @@ public class OnlineMatchClient : MonoBehaviour
             durationSeconds = durationSeconds,
             moveCount = moveCount,
             minimumMoves = minimumMoves,
+            restartCount = restartCount,
             outcome = outcome
         };
         return SendRoomRequest(
@@ -323,6 +325,7 @@ public class OnlineMatchClient : MonoBehaviour
         public float durationSeconds;
         public int moveCount;
         public int minimumMoves;
+        public int restartCount;
         public string outcome;
     }
 

@@ -40,6 +40,7 @@ public class OnlineLevelController : MonoBehaviour
     private float runStartedAt;
     private float runDurationSeconds;
     private int runMoveCount;
+    private int runRestartCount;
     private int minimumMoves = -1;
 
     private void Awake()
@@ -59,6 +60,7 @@ public class OnlineLevelController : MonoBehaviour
         }
 
         LevelStudyRecorder.PlayerMoveRecorded += HandlePlayerMove;
+        LevelStudyRecorder.LevelRestarted += HandleLevelRestarted;
     }
 
     private void Start()
@@ -117,6 +119,7 @@ public class OnlineLevelController : MonoBehaviour
         }
 
         LevelStudyRecorder.PlayerMoveRecorded -= HandlePlayerMove;
+        LevelStudyRecorder.LevelRestarted -= HandleLevelRestarted;
     }
 
     private void Update()
@@ -180,6 +183,7 @@ public class OnlineLevelController : MonoBehaviour
         }
 
         runMoveCount = 0;
+        runRestartCount = 0;
         runStartedAt = Time.realtimeSinceStartup;
         runStarted = true;
         UpdateCountdownText(ChallengeTimeLimitSeconds);
@@ -239,6 +243,14 @@ public class OnlineLevelController : MonoBehaviour
         }
     }
 
+    private void HandleLevelRestarted()
+    {
+        if (runStarted && !runCompleted)
+        {
+            runRestartCount++;
+        }
+    }
+
     private void HandleLevelCompleted(LevelManager manager)
     {
         manager.MarkCompletionTransitionHandled();
@@ -274,6 +286,7 @@ public class OnlineLevelController : MonoBehaviour
                 runDurationSeconds,
                 runMoveCount,
                 minimumMoves,
+                runRestartCount,
                 runTimedOut ? "timed_out" : "completed",
                 state =>
                 {

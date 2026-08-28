@@ -195,5 +195,6 @@ public class OnlineMatchResult
     public float durationSeconds;
     public int moveCount;
     public int minimumMoves;
+    public int restartCount;
     public string outcome;
 }
