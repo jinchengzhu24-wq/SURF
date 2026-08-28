@@ -946,7 +946,7 @@ def _send_message_locked(
                 stage_context=context["stageContext"],
             )
         except LLMServiceError as exception:
-            execution = _proposal_relaxation_fallback_after_failure(
+            execution = _proposal_search_failure_execution(
                 session_id=session_id,
                 access_cookie=access_cookie,
                 base_version_id=payload.baseVersionId,
@@ -1252,7 +1252,7 @@ def _legacy_proposal_relaxation_fallback_after_failure(
     )
 
 
-def _proposal_relaxation_fallback_after_failure(
+def _proposal_search_failure_execution(
     *,
     session_id,
     access_cookie,
@@ -1287,10 +1287,10 @@ def _proposal_relaxation_fallback_after_failure(
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, base_version_id)
-        already_offered = database.execute(
+        already_recorded = database.execute(
             """
             SELECT 1 FROM audit_events
-            WHERE session_id = ? AND event_type = 'proposal_relaxation_offered'
+            WHERE session_id = ? AND event_type = 'proposal_search_failed'
               AND json_extract(payload_json, '$.baseVersionId') = ?
               AND json_extract(payload_json, '$.messageKey') = ?
               AND json_extract(payload_json, '$.briefHash') = ?
@@ -1298,52 +1298,44 @@ def _proposal_relaxation_fallback_after_failure(
             """,
             (session_id, base_version_id, idempotency_key, brief_hash),
         ).fetchone()
-        if already_offered is not None:
-            return None
-        now = utc_now()
-        record_event(database, session_id, "proposal_search_failed", failure_payload, now)
-        record_event(
-            database,
-            session_id,
-            "proposal_relaxation_offered",
-            {**failure_payload, "failedRequests": 1},
-            now,
-        )
+        if already_recorded is None:
+            record_event(
+                database,
+                session_id,
+                "proposal_search_failed",
+                failure_payload,
+                utc_now(),
+            )
 
-    relaxed_brief = _build_relaxed_revision_brief(original_brief)
     constructed = int(diagnostics.get("constructedCandidates") or 0)
     if language == "zh-CN":
         message = (
-            f"我已经按照刚才确认的方向完成了语义修改搜索，并检查了{constructed}个局部候选，"
-            "但还没有找到一份既满足全部要求、包含真实变化又能通过求解验证的地图。"
-            "当前 Stage 没有被修改，你也不需要原样反复点击重试。\n\n"
-            "我可以采用一次后备标准：保留你的核心方向、可解性、地图外壳、明确禁止事项和"
-            "未涉及区域，只把“同时实现全部次要效果”放宽为“先实现一个连贯、可试玩的局部效果”。"
-            "你愿意让我按这个边界继续吗？"
+            "\u6211\u5df2\u7ecf\u628a\u4f60\u7684\u65b9\u5411\u6574\u7406\u6210\u4fee\u6539\u8ba1\u5212\uff0c\u5e76\u68c0\u67e5\u4e86\u53ef\u7528\u7684\u5c40\u90e8\u5019\u9009\uff0c\u4f46\u6ca1\u6709\u627e\u5230\u4e00\u4efd\u65e2\u4ea7\u751f\u771f\u5b9e\u6539\u52a8\u53c8\u4fdd\u6301\u53ef\u89e3\u7684\u5730\u56fe\u3002"
+            "\u5f53\u524d Stage \u6ca1\u6709\u53d8\u5316\uff1b\u8fd9\u662f\u8fd9\u6b21\u4fee\u6539\u8bf7\u6c42\u7684\u53ef\u884c\u6027\u9650\u5236\uff0c\u4e0d\u662f\u5bf9\u4f60\u8bbe\u8ba1\u65b9\u5411\u7684\u5426\u5b9a\u3002"
+            "\u4f60\u53ef\u4ee5\u6cbf\u7740\u8fd9\u4e2a\u65b9\u5411\u5728\u53f3\u4fa7\u7f16\u8f91\u5668\u4eb2\u81ea\u8c03\u6574\uff0c\u4e5f\u53ef\u4ee5\u7ee7\u7eed\u548c\u6211\u5546\u8ba8\u5982\u4f55\u7f29\u5c0f\u6216\u91cd\u65b0\u8868\u8ff0\u4fee\u6539\u76ee\u6807\u3002"
+            "\u6ca1\u6709\u65b0\u7684\u660e\u786e\u6388\u6743\u548c\u53ef\u884c\u63d0\u6848\u524d\uff0c\u6211\u4e0d\u4f1a\u81ea\u52a8\u6539\u52a8\u5f53\u524d\u5730\u56fe\u3002"
         )
         warning = (
-            "确定性搜索没有找到同时满足当前全部条件的可解修改。这表示当前修改范围内的可行候选不足，"
-            "不代表你的设计方向有问题，也不会影响原有可解 Stage。"
+            f"\u786e\u5b9a\u6027\u641c\u7d22\u68c0\u67e5\u4e86{constructed}\u4e2a\u5c40\u90e8\u5019\u9009\uff0c\u4f46\u6ca1\u6709\u627e\u5230\u65e2\u4ea7\u751f\u771f\u5b9e\u6539\u52a8\u53c8\u4fdd\u6301\u53ef\u89e3\u7684\u65b9\u6848\u3002"
+            "\u5f53\u524d Stage \u4fdd\u6301\u4e0d\u53d8\u3002"
         )
     else:
         message = (
-            f"I completed the semantic revision search and checked {constructed} local candidates, "
-            "but none both satisfied the complete request, made a real change, and passed the solver. "
-            "The current Stage is unchanged, and repeating the same request is unnecessary.\n\n"
-            "I can use one fallback standard: preserve your core direction, solvability, outer shell, "
-            "explicit prohibitions, and unrelated areas, while realizing one coherent, play-testable "
-            "local effect instead of every secondary effect at once. May I continue on that basis?"
+            "I translated your direction into a revision plan and searched the available local candidates, "
+            "but none made the requested real changes while staying solvable. The current Stage is unchanged; "
+            "this is a feasibility limit of this request, not a judgment on your design direction. "
+            "You can adjust the map yourself in the editor, or we can discuss how to narrow or restate the revision goal. "
+            "I will not change the current map without a new authorized, feasible proposal."
         )
         warning = (
-            "Deterministic search found no solvable revision satisfying every current condition. "
-            "This indicates a narrow feasible search space, not a problem with your design direction, "
-            "and the original solvable Stage remains unchanged."
+            f"Deterministic search checked {constructed} local candidates but found no proposal that made a real change "
+            "and remained solvable. The current Stage remains unchanged."
         )
     return LLMExecutionResult(
         assistant_message=message,
         attempts_used=exception.attempts_used,
         request_id=exception.request_id,
-        model="deterministic-search-relaxation-offer",
+        model="deterministic-search-failure-guidance",
         latency_ms=0,
         guidance={
             "move": "challenge_tradeoff",
@@ -1352,17 +1344,16 @@ def _proposal_relaxation_fallback_after_failure(
             "followUpQuestion": None,
             "proposalOffer": None,
             "uiCues": [{"type": "warning", "text": warning}],
-            "relaxationOffer": {
-                "status": "awaiting_confirmation",
-                "originalBrief": original_brief,
-                "relaxedBrief": relaxed_brief,
-                "baseVersionId": base_version_id,
-                "briefHash": brief_hash,
-            },
+            "relaxationOffer": None,
         },
         revision_plan=revision_plan,
         proposal_diagnostics=diagnostics,
     )
+
+
+# Keep the old private name importable for integrations that inspected the
+# previous helper; new failures use the direct, non-relaxing behavior above.
+_proposal_relaxation_fallback_after_failure = _proposal_search_failure_execution
 
 
 def _build_relaxed_revision_brief(original_brief):

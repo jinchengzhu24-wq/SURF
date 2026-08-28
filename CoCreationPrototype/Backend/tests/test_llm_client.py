@@ -1979,6 +1979,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "PROPOSAL_SEARCH_EXHAUSTED")
+        self.assertFalse(raised.exception.retryable)
         self.assertEqual(raised.exception.attempts_used, 1)
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertGreater(len(validated_rows), 0)

@@ -655,18 +655,18 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(len(retried.json()["versions"]), 1)
         self.assertEqual(retried.json()["proposals"], [])
 
-    def test_exhausted_deterministic_search_offers_relaxed_suggestion_before_map_generation(self):
+    def test_exhausted_deterministic_search_returns_guidance_without_relaxation_offer(self):
         version_id = self.read_session()["currentVersionId"]
         request_payload = {
             "content": "Please revise the map by moving the target one cell to the right.",
             "baseVersionId": version_id,
-            "idempotencyKey": "strict_relaxation_message_001",
+            "idempotencyKey": "strict_search_failure_message_001",
         }
         invalid = LLMServiceError(
             "PROPOSAL_SEARCH_EXHAUSTED",
             "Deterministic search found no solvable map.",
             "invalid-proposal-request",
-            True,
+            False,
             1,
             502,
         )
@@ -678,26 +678,11 @@ class CoCreationSessionTests(unittest.TestCase):
             "validCandidates": 0,
             "failureReasons": {"UNSOLVABLE_LEVEL": 64},
         }
-        relaxed_execution = LLMExecutionResult(
-            "Here is the approved fallback proposal.",
-            1,
-            "relaxed-proposal-request",
-            proposed_rows=TARGET_SHIFT_ROWS,
-            model="mock-pro-model",
-            guidance={
-                "move": "deliver_revision",
-                "intentHypothesis": None,
-                "intentConfidence": None,
-                "followUpQuestion": None,
-                "proposalOffer": None,
-                "uiCues": [],
-            },
-        )
 
         with patch.object(
             backend,
             "generate_chat_reply",
-            side_effect=[invalid, relaxed_execution],
+            side_effect=invalid,
         ) as mocked:
             failed_generation = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -716,62 +701,20 @@ class CoCreationSessionTests(unittest.TestCase):
                 ["warning"],
             )
             self.assertIsNone(warning_turn["guidance"]["proposalOffer"])
-            self.assertEqual(
-                warning_turn["guidance"]["relaxationOffer"]["status"],
-                "awaiting_confirmation",
-            )
-            self.assertIn("64 local candidates", warning_turn["content"].lower())
+            self.assertIsNone(warning_turn["guidance"]["relaxationOffer"])
+            self.assertIn("adjust the map yourself", warning_turn["content"].lower())
+            self.assertIn("discuss", warning_turn["content"].lower())
             self.assertEqual(failed_generation.json()["proposals"], [])
 
-            confirmed = self.client.post(
+            repeated = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
-                json={
-                    "content": "Yes, you may use that fallback standard.",
-                    "baseVersionId": version_id,
-                    "idempotencyKey": "strict_relaxation_confirm_001",
-                },
+                json=request_payload,
             )
 
-            self.assertEqual(confirmed.status_code, 200, confirmed.text)
-            self.assertEqual(confirmed.json()["proposals"], [])
-            confirmation_turn = next(
-                turn for turn in confirmed.json()["turns"]
-                if turn["requestId"] == "strict_relaxation_confirm_001"
-                and turn["role"] == "assistant"
-            )
-            self.assertEqual(
-                confirmation_turn["guidance"]["relaxationOffer"]["status"],
-                "suggestion_ready",
-            )
-            self.assertIsNotNone(confirmation_turn["guidance"]["proposalOffer"])
-            self.assertIn(
-                "Relaxed requirement",
-                confirmation_turn["guidance"]["proposalOffer"]["rationale"],
-            )
-            self.assertIn("will not change the map yet", confirmation_turn["content"])
-
-            generated = self.client.post(
-                f"/api/sessions/{self.session_id}/messages",
-                json={
-                    "content": (
-                        "Please create a reviewable map proposal for this direction: "
-                        "Realize one local, play-testable effect first."
-                    ),
-                    "baseVersionId": version_id,
-                    "idempotencyKey": "strict_relaxation_generate_001",
-                },
-            )
-
-        self.assertEqual(generated.status_code, 200, generated.text)
-        self.assertEqual(len(generated.json()["proposals"]), 1)
-        self.assertEqual(mocked.call_count, 2)
-        generation_call = mocked.call_args_list[1]
-        state, brief = backend.classify_revision_request(
-            generation_call.args[0],
-            generation_call.kwargs["stage_context"],
-        )
-        self.assertEqual(state, "authorized_relaxed")
-        self.assertIn("one coherent, play-testable local effect", brief)
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(repeated.json()["proposals"], [])
+        self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(repeated.json()["turns"], failed_generation.json()["turns"])
         with repository.connect() as database:
             event_types = [
                 row[0]
@@ -781,7 +724,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 ).fetchall()
             ]
         self.assertEqual(event_types.count("proposal_search_failed"), 1)
-        self.assertEqual(event_types.count("proposal_relaxation_offered"), 1)
+        self.assertEqual(event_types.count("proposal_relaxation_offered"), 0)
 
     def test_transport_failures_never_trigger_relaxation_offer(self):
         version_id = self.read_session()["currentVersionId"]

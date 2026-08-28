@@ -21,6 +21,8 @@ https://v.wjx.cn/vm/O6tj8nu.aspx#
 
 DG 目前使用四道中立地图问题：首步检查、推箱依赖、空间分布和路线结构。Q1/Q2 只推断 Difficulty，Q3/Q4 只推断 Layout；AI 会返回 reflection、理由和建议，完整链路写入 8000 Draft，不传入 8010。双 `no_preference` 时对应建议保持 `Random`；AI 仅可在明确冲突时将确定性基准上下调整一档。
 
+8010 地图修改的失败分为两类：模型/传输错误（超时、连接失败、空响应、非法 JSON 等）第一次返回 `retryable=true`，前端用同一消息幂等键提供一次 Retry；再次失败后保存手动编辑/继续讨论的说明，不再提供 Retry。若已得到有效 `RevisionPlan`，但确定性搜索找不到同时满足要求且可解的候选，则返回 200 的助手说明和 `warning` 提示，不创建提案、不放宽要求、不改变当前 Stage，也不显示 Retry。说明会邀请玩家亲自在编辑器调整，或继续与 AI 商讨如何缩小或重新表述目标。零候选仍会先执行一次内部结构修正；旧会话已保存的 `relaxationOffer` 仍可按旧逻辑读取和确认，但新失败请求不再创建放宽流程。
+
 Online Lobby 的生成房间码位于静态浏览器只读输入框中，可选中后手动复制；加入房间输入框支持粘贴并规范化为六位字母数字码。两个输入框通过 `BrowserNavigation.jslib` 与 Unity 同步，不使用 `COPY CODE` 按钮。若修改此模板或其桥接代码，必须重新构建并上传完整 `WebGLBuild/`。
 
 8000 Dashboard 的 Match ID 和两位玩家 Study Session ID 默认显示前 8 位，复制按钮复制完整值，搜索支持完整值及短值；每个流程节点的 Record details 都显示两位玩家的 Study Session ID。Final map 显示共创耗时，Result submitted 和挑战地图详情继续显示对手游玩时长。Dashboard 不再显示已淘汰的 `AI assistant` 模式，`Designer intention` 的用户可见标签统一为 `Message`；兼容字段仍保留在后端原始记录中。

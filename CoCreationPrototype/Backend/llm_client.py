@@ -1003,7 +1003,7 @@ def _generate_revision_search_proposal_sync(
                 "PROPOSAL_SEARCH_EXHAUSTED",
                 "Deterministic search found no solvable map satisfying the revision plan.",
                 request_id,
-                True,
+                False,
                 attempts_used,
                 502,
             )
