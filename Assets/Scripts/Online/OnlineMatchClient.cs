@@ -24,7 +24,8 @@ public class OnlineMatchClient : MonoBehaviour
     {
         OnlineCreatePayload payload = new OnlineCreatePayload
         {
-            studySessionId = CreativeWorkshopContext.GetOrCreateStudySessionId()
+            studySessionId = CreativeWorkshopContext.GetOrCreateStudySessionId(),
+            menuStartedFlow = LevelStudyRecorder.IsOfficialRoundFlow
         };
         return SendRoomRequest(
             UnityWebRequest.kHttpVerbPOST,
@@ -44,7 +45,8 @@ public class OnlineMatchClient : MonoBehaviour
         OnlineJoinPayload payload = new OnlineJoinPayload
         {
             roomCode = roomCode,
-            studySessionId = CreativeWorkshopContext.GetOrCreateStudySessionId()
+            studySessionId = CreativeWorkshopContext.GetOrCreateStudySessionId(),
+            menuStartedFlow = LevelStudyRecorder.IsOfficialRoundFlow
         };
         return SendRoomRequest(
             UnityWebRequest.kHttpVerbPOST,
@@ -297,6 +299,7 @@ public class OnlineMatchClient : MonoBehaviour
     private class OnlineCreatePayload
     {
         public string studySessionId;
+        public bool menuStartedFlow;
     }
 
     [Serializable]
@@ -304,6 +307,7 @@ public class OnlineMatchClient : MonoBehaviour
     {
         public string roomCode;
         public string studySessionId;
+        public bool menuStartedFlow;
     }
 
     [Serializable]

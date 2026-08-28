@@ -138,27 +138,63 @@ async function loadData(manual) {
     }
 }
 
+function hasFirstStage(match) {
+    return safeArray(match && match.players).some(player =>
+        safeArray(player && player.coCreationFlow).some(event =>
+            event && event.eventType === "first_stage"
+        )
+    );
+}
+
+function getFirstStageMatches() {
+    return state.matches.filter(hasFirstStage);
+}
+
+function isCompletedMatch(match) {
+    if (!match || match.status !== "completed") return false;
+    const players = safeArray(match.players);
+    return [1, 2].every(playerNumber =>
+        players.some(player =>
+            player && player.playerNumber === playerNumber && player.result
+        )
+    );
+}
+
 function renderSummary() {
     const summary = state.payload.summary || {};
-    const total = numeric(summary.matchCount);
-    const completed = numeric(summary.completedCount);
-    const attention = numeric(summary.cancelledCount) + numeric(summary.expiredCount);
+    const visibleMatches = getFirstStageMatches();
+    const total = visibleMatches.length;
+    const completed = visibleMatches.filter(isCompletedMatch).length;
+    const attention = visibleMatches.filter(match =>
+        ["cancelled", "expired"].includes(match.status)
+    ).length;
     const malformed = numeric(summary.malformedCount);
+    const hidden = Math.max(0, state.matches.length - visibleMatches.length);
+    const durations = visibleMatches.flatMap(match =>
+        safeArray(match.players)
+            .map(player => player && player.result && player.result.durationSeconds)
+            .filter(duration => typeof duration === "number" && !Number.isNaN(duration))
+    );
+    const averageDuration = durations.length
+        ? durations.reduce((sum, duration) => sum + duration, 0) / durations.length
+        : null;
     elements.statMatches.textContent = total;
     elements.statCompleted.textContent = completed;
     elements.statCompletionRate.textContent = (total ? Math.round(completed / total * 100) : 0) + "% completion rate";
-    elements.statAvg.textContent = formatSeconds(summary.averageRunDurationSeconds);
+    elements.statAvg.textContent = formatSeconds(averageDuration);
     elements.statAttention.textContent = attention;
     elements.statDataHealth.textContent = malformed
         ? malformed + " malformed records"
-        : attention
-            ? attention + " cancelled or expired"
-            : "no data issues";
+        : hidden
+            ? hidden + " rooms without First Stage hidden"
+            : attention
+                ? attention + " cancelled or expired"
+                : "no data issues";
 }
 
 function applyFilters() {
     const query = clean(elements.searchInput.value).toLowerCase();
-    state.filteredMatches = state.matches.filter(match => {
+    state.filteredMatches = getFirstStageMatches().filter(match => {
         if (!query) return true;
         const studySessionIds = safeArray(match.players).flatMap(player => [
             player && player.studySessionId,
@@ -177,7 +213,11 @@ function renderMatchList() {
     elements.matchList.textContent = "";
     elements.matchCount.textContent = state.filteredMatches.length + " shown";
     if (!state.filteredMatches.length) {
-        elements.matchList.appendChild(emptyNode("No matching rooms."));
+        elements.matchList.appendChild(emptyNode(
+            state.matches.some(hasFirstStage)
+                ? "No matching First Stage flows."
+                : "No flows have reached First Stage."
+        ));
         return;
     }
 
@@ -761,12 +801,12 @@ function resetSelection() {
 }
 
 function getSelectedMatch() {
-    return state.matches.find(match => match.matchId === state.selectedMatchId) || null;
+    return state.filteredMatches.find(match => match.matchId === state.selectedMatchId) || null;
 }
 
 function restoreSelectionFromUrl() {
     const matchId = clean(new URLSearchParams(window.location.search).get("match"));
-    if (matchId && !state.selectedMatchId && state.matches.some(match => match.matchId === matchId)) {
+    if (matchId && !state.selectedMatchId && getFirstStageMatches().some(match => match.matchId === matchId)) {
         state.selectedMatchId = matchId;
     }
 }

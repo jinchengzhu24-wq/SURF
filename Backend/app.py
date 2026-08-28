@@ -117,11 +117,13 @@ class PCSolvabilityError(ValueError):
 
 class OnlineRoomCreateRequest(BaseModel):
     studySessionId: str | None = ""
+    menuStartedFlow: bool = False
 
 
 class OnlineRoomJoinRequest(BaseModel):
     roomCode: str | None = ""
     studySessionId: str | None = ""
+    menuStartedFlow: bool = False
 
 
 class OnlineReadyRequest(BaseModel):
@@ -294,6 +296,24 @@ def append_online_match_event(
     status_after=None,
     **details,
 ):
+    player = None
+    if player_number in (1, 2):
+        player = next(
+            (
+                item
+                for item in room.get("players", [])
+                if item.get("playerNumber") == player_number
+            ),
+            None,
+        )
+        if not bool(player and player.get("menuStartedFlow") is True):
+            return None
+    elif not any(
+        item.get("menuStartedFlow") is True
+        for item in room.get("players", [])
+    ):
+        return None
+
     event = {
         "eventId": uuid.uuid4().hex,
         "eventType": str(event_type or "").strip(),
@@ -311,20 +331,11 @@ def append_online_match_event(
         ),
     }
 
-    if player_number in (1, 2):
-        player = next(
-            (
-                item
-                for item in room.get("players", [])
-                if item.get("playerNumber") == player_number
-            ),
-            None,
-        )
-
-        if player is not None:
-            event["studySessionId"] = str(
-                player.get("studySessionId") or ""
-            ).strip()
+    if player is not None:
+        event["studySessionId"] = str(
+            player.get("studySessionId") or ""
+        ).strip()
+        event["menuStartedFlow"] = True
 
     event.update(details)
     STUDY_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -351,16 +362,6 @@ def online_match_flow_file(match_id, player_number):
         raise HTTPException(status_code=400, detail="Invalid player number")
 
     return online_match_flow_directory(match_id) / f"player-{player_number}.jsonl"
-
-
-def initialize_online_match_flow(room):
-    directory = online_match_flow_directory(room.get("matchId"))
-    directory.mkdir(parents=True, exist_ok=True)
-
-    for player_number in (1, 2):
-        online_match_flow_file(room.get("matchId"), player_number).touch(
-            exist_ok=True
-        )
 
 
 def normalize_cocreation_sync_id(value, label):
@@ -1222,6 +1223,7 @@ def create_online_room(payload: OnlineRoomCreateRequest | None = None):
         player = {
             "playerNumber": 1,
             "studySessionId": study_session_id,
+            "menuStartedFlow": payload.menuStartedFlow is True if payload else False,
             "token": secrets.token_urlsafe(32),
             "ready": False,
             "challengeRows": None,
@@ -1239,7 +1241,6 @@ def create_online_room(payload: OnlineRoomCreateRequest | None = None):
             "lastActivity": time.time(),
         }
         ONLINE_ROOMS[match_id] = room
-        initialize_online_match_flow(room)
         append_online_match_event(room, "room_created", player_number=1)
         return serialize_online_room(room, player, include_token=True)
 
@@ -1272,6 +1273,7 @@ def join_online_room(payload: OnlineRoomJoinRequest):
         player = {
             "playerNumber": 2,
             "studySessionId": study_session_id,
+            "menuStartedFlow": payload.menuStartedFlow is True,
             "token": secrets.token_urlsafe(32),
             "ready": False,
             "challengeRows": None,
@@ -1312,7 +1314,6 @@ def set_online_ready(
 
         if room["status"] == "cancelled":
             raise HTTPException(status_code=409, detail="Room has been cancelled")
-
         if len(room["players"]) < 2:
             raise HTTPException(
                 status_code=409,
@@ -1360,6 +1361,14 @@ def record_online_draft(
         )
         if room["status"] == "cancelled":
             raise HTTPException(status_code=409, detail="Room has been cancelled")
+        if player.get("menuStartedFlow") is not True:
+            return {
+                "status": "ok",
+                "recorded": False,
+                "pending": False,
+                "ignored": True,
+                "event": None,
+            }
         requested_draft = {
             "finalDifficulty": final_difficulty,
             "finalLayout": final_layout,
@@ -1496,6 +1505,9 @@ def synchronize_online_designer_intention(
         if player is None:
             raise HTTPException(status_code=404, detail="Player not found")
 
+        if player.get("menuStartedFlow") is not True:
+            return {"status": "ok", "recorded": False, "ignored": True}
+
         if not has_cocreation_first_stage(match_id, payload.playerNumber):
             raise HTTPException(
                 status_code=409,
@@ -1553,6 +1565,18 @@ def synchronize_cocreation_flow_event(
         if room is None:
             raise HTTPException(status_code=404, detail="Room not found")
 
+        player = next(
+            (
+                item for item in room["players"]
+                if item["playerNumber"] == payload.playerNumber
+            ),
+            None,
+        )
+        if player is None:
+            raise HTTPException(status_code=404, detail="Player not found")
+        if player.get("menuStartedFlow") is not True:
+            return {"status": "ok", "recorded": False, "ignored": True}
+
         if (
             payload.eventType != "first_stage"
             and not has_cocreation_first_stage(match_id, payload.playerNumber)
@@ -1564,10 +1588,6 @@ def synchronize_cocreation_flow_event(
 
         event = build_cocreation_flow_event(room, payload)
         if payload.eventType == "first_stage":
-            player = next(
-                item for item in room["players"]
-                if item["playerNumber"] == payload.playerNumber
-            )
             materialize_pending_draft(room, player)
         stored_event, created = append_cocreation_flow_event(room, event)
         return {"status": "ok", "recorded": created, "event": stored_event}
@@ -3119,6 +3139,7 @@ def build_matchmaking_records_payload(
         "restartCount",
         "outcome",
         "studySessionId",
+        "menuStartedFlow",
     }
 
     def create_player(player_number):
@@ -3132,6 +3153,7 @@ def build_matchmaking_records_payload(
             "result": None,
             "designerIntention": "",
             "studySessionId": "",
+            "menuStartedFlow": False,
             "coCreationFlow": [],
         }
 
@@ -3197,6 +3219,8 @@ def build_matchmaking_records_payload(
             player["studySessionId"] = normalize_survey_identifier(
                 event.get("studySessionId")
             ) or player["studySessionId"]
+            if event.get("menuStartedFlow") is True:
+                player["menuStartedFlow"] = True
 
         if event_type == "room_created":
             match_record["createdAt"] = timestamp or match_record["createdAt"]
@@ -3254,7 +3278,7 @@ def build_matchmaking_records_payload(
                 for event in flow_events
             )
             safe_flow_events = []
-            if has_first_stage:
+            if players[player_number]["menuStartedFlow"] and has_first_stage:
                 for event in flow_events:
                     if not isinstance(event, dict):
                         continue
@@ -3311,6 +3335,13 @@ def build_matchmaking_records_payload(
                 if opponent_result is not None and "restartCount" in opponent_result:
                     flow_event["opponentRestartCount"] = opponent_result.get("restartCount")
 
+        if not any(
+            player["menuStartedFlow"]
+            and player["coCreationFlow"]
+            for player in players.values()
+        ):
+            continue
+
         completed = all(players[number]["result"] is not None for number in (1, 2))
         event_types = {
             event.get("eventType")
@@ -3352,6 +3383,8 @@ def build_matchmaking_records_payload(
         match_record["playerCount"] = sum(
             1 for player in players.values() if player["joinedAt"]
         )
+        for player in players.values():
+            player.pop("menuStartedFlow", None)
         match_record["players"] = [players[1], players[2]]
         result_records.append(match_record)
 

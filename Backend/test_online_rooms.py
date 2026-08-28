@@ -93,14 +93,17 @@ class OnlineRoomTests(unittest.TestCase):
         return {"X-Player-Token": player_token}
 
     def create_room(self):
-        response = self.client.post("/online/rooms")
+        response = self.client.post(
+            "/online/rooms",
+            json={"menuStartedFlow": True},
+        )
         self.assertEqual(response.status_code, 200)
         return response.json()
 
     def join_room(self, room_code):
         response = self.client.post(
             "/online/rooms/join",
-            json={"roomCode": room_code},
+            json={"roomCode": room_code, "menuStartedFlow": True},
         )
         self.assertEqual(response.status_code, 200)
         return response.json()
@@ -196,6 +199,69 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(draft["aiRecommendedLayout"], "Compact")
         self.assertTrue(draft["draftMetadataComplete"])
 
+    def test_non_menu_player_events_are_discarded_without_breaking_sync(self):
+        host = self.client.post("/online/rooms").json()
+        self.assertTrue(host["matchId"])
+
+        draft = self.client.post(
+            "/online/rooms/" + host["matchId"] + "/draft",
+            headers=self.auth_headers(host["playerToken"]),
+            json={"finalDifficulty": "Easy", "finalLayout": "Compact"},
+        )
+        self.assertEqual(draft.status_code, 200)
+        self.assertTrue(draft.json()["ignored"])
+
+        first_stage = self.submit_first_stage(host["matchId"])
+        stage = {
+            "eventId": "stage:discarded",
+            "eventType": "stage",
+            "playerNumber": 1,
+            "sessionId": "session-test-1",
+            "versionId": "version-discarded",
+            "stageNumber": 2,
+            "source": "manual",
+            "rows": SOLVABLE_ROWS_A,
+            "diff": [],
+        }
+        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
+            later_stage = self.client.post(
+                "/online/rooms/" + host["matchId"] + "/cocreation-events",
+                json=stage,
+                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+            )
+
+        self.assertEqual(first_stage.status_code, 200)
+        self.assertTrue(first_stage.json()["ignored"])
+        self.assertEqual(later_stage.status_code, 200)
+        self.assertTrue(later_stage.json()["ignored"])
+        events, _ = backend.read_online_match_events()
+        flow, _ = backend.read_online_match_flow_events(host["matchId"], 1)
+        self.assertEqual(events, [])
+        self.assertEqual(flow, [])
+        self.assertFalse(backend.online_match_flow_directory(host["matchId"]).exists())
+        self.assertEqual(
+            self.client.get("/matchmaking-records-data").json()["matches"],
+            [],
+        )
+
+    def test_dashboard_keeps_only_the_menu_started_player_in_a_mixed_room(self):
+        host = self.create_room()
+        guest = self.client.post(
+            "/online/rooms/join",
+            json={"roomCode": host["roomCode"]},
+        ).json()
+
+        self.assertTrue(self.submit_first_stage(host["matchId"], 1).json()["recorded"])
+        ignored = self.submit_first_stage(host["matchId"], 2)
+        self.assertEqual(ignored.status_code, 200)
+        self.assertTrue(ignored.json()["ignored"])
+
+        dashboard = self.client.get("/matchmaking-records-data").json()
+        self.assertEqual(len(dashboard["matches"]), 1)
+        players = dashboard["matches"][0]["players"]
+        self.assertTrue(players[0]["coCreationFlow"])
+        self.assertEqual(players[1]["coCreationFlow"], [])
+
     def test_old_draft_client_remains_compatible_but_is_marked_incomplete(self):
         host = self.create_room()
         response = self.client.post(
@@ -266,7 +332,10 @@ class OnlineRoomTests(unittest.TestCase):
         guest_session_id = "guest-study-session"
         host_response = self.client.post(
             "/online/rooms",
-            json={"studySessionId": host_session_id},
+            json={
+                "studySessionId": host_session_id,
+                "menuStartedFlow": True,
+            },
         )
         self.assertEqual(host_response.status_code, 200)
         host = host_response.json()
@@ -275,6 +344,7 @@ class OnlineRoomTests(unittest.TestCase):
             json={
                 "roomCode": host["roomCode"],
                 "studySessionId": guest_session_id,
+                "menuStartedFlow": True,
             },
         )
         self.assertEqual(guest_response.status_code, 200)
@@ -303,6 +373,7 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(events[2]["studySessionId"], host_session_id)
         self.assertEqual(events[3]["studySessionId"], guest_session_id)
 
+        self.assertTrue(self.submit_first_stage(host["matchId"], 1).json()["recorded"])
         records_response = self.client.get("/matchmaking-records-data")
         self.assertEqual(records_response.status_code, 200)
         records = records_response.json()["matches"]
@@ -631,11 +702,15 @@ class OnlineRoomTests(unittest.TestCase):
     def test_cocreation_flow_events_are_scoped_to_each_player_and_idempotent(self):
         host = self.client.post(
             "/online/rooms",
-            json={"studySessionId": "study-host"},
+            json={"studySessionId": "study-host", "menuStartedFlow": True},
         ).json()
         guest = self.client.post(
             "/online/rooms/join",
-            json={"roomCode": host["roomCode"], "studySessionId": "study-guest"},
+            json={
+                "roomCode": host["roomCode"],
+                "studySessionId": "study-guest",
+                "menuStartedFlow": True,
+            },
         ).json()
         endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"
         headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
@@ -758,7 +833,8 @@ class OnlineRoomTests(unittest.TestCase):
 
     def test_final_flow_event_records_cocreation_duration_and_validates_scope(self):
         host = self.client.post(
-            "/online/rooms", json={"studySessionId": "study-host"}
+            "/online/rooms",
+            json={"studySessionId": "study-host", "menuStartedFlow": True},
         ).json()
         endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"
         headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
@@ -811,7 +887,8 @@ class OnlineRoomTests(unittest.TestCase):
 
     def test_first_stage_and_opening_are_preserved_for_dashboard_merging(self):
         host = self.client.post(
-            "/online/rooms", json={"studySessionId": "study-host"}
+            "/online/rooms",
+            json={"studySessionId": "study-host", "menuStartedFlow": True},
         ).json()
         endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"
         headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}

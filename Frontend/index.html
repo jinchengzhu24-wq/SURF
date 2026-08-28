@@ -49,13 +49,13 @@
 
             <section class="summary" aria-label="MatchMaking summary">
                 <div class="stat">
-                    <span>Matches</span><strong id="statMatches">0</strong><small>recorded rooms</small>
+                    <span>Matches</span><strong id="statMatches">0</strong><small>flows reached First Stage</small>
                 </div>
                 <div class="stat">
                     <span>Completed</span><strong id="statCompleted">0</strong><small id="statCompletionRate">0% completion rate</small>
                 </div>
                 <div class="stat">
-                    <span>Average play time</span><strong id="statAvg">-</strong><small>across submitted runs</small>
+                    <span>Average play time</span><strong id="statAvg">-</strong><small>across visible runs</small>
                 </div>
                 <div class="stat stat-alert">
                     <span>Needs attention</span><strong id="statAttention">0</strong><small id="statDataHealth">no data issues</small>
@@ -211,7 +211,7 @@
 
     <script>
         const script = document.createElement("script");
-        script.src = window.FRONTEND_ASSET_BASE + "/matchmaking.js?v=player-flows-20260828-1";
+        script.src = window.FRONTEND_ASSET_BASE + "/matchmaking.js?v=first-stage-filter-20260828-1";
         document.body.appendChild(script);
     </script>
 </body>

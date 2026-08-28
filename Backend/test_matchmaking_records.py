@@ -83,10 +83,13 @@ class MatchmakingRecordTests(unittest.TestCase):
         return {"X-Player-Token": player["playerToken"]}
 
     def create_players(self):
-        host = self.client.post("/online/rooms").json()
+        host = self.client.post(
+            "/online/rooms",
+            json={"menuStartedFlow": True},
+        ).json()
         guest = self.client.post(
             "/online/rooms/join",
-            json={"roomCode": host["roomCode"]},
+            json={"roomCode": host["roomCode"], "menuStartedFlow": True},
         ).json()
         return host, guest
 
@@ -126,6 +129,26 @@ class MatchmakingRecordTests(unittest.TestCase):
     def complete_match(self):
         host, guest = self.create_players()
         self.make_ready(host, guest)
+        first_stage = {
+            "eventId": "first_stage:matchmaking-host",
+            "eventType": "first_stage",
+            "playerNumber": 1,
+            "sessionId": "session-matchmaking-host",
+            "versionId": "version-matchmaking-host",
+            "stageNumber": 1,
+            "initialDraftMethod": "description_generation",
+            "rows": SOLVABLE_ROWS_A,
+            "diff": [],
+        }
+        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
+            self.assertEqual(
+                self.client.post(
+                    "/online/rooms/" + host["matchId"] + "/cocreation-events",
+                    json=first_stage,
+                    headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+                ).status_code,
+                200,
+            )
         self.assertEqual(
             self.submit_challenge(
                 host,
@@ -275,8 +298,8 @@ class MatchmakingRecordTests(unittest.TestCase):
             log_file.write("not-json\n")
 
         payload = self.client.get("/matchmaking-records-data").json()
-        self.assertEqual(payload["matches"][0]["status"], "expired")
-        self.assertEqual(payload["summary"]["expiredCount"], 1)
+        self.assertEqual(payload["matches"], [])
+        self.assertEqual(payload["summary"]["expiredCount"], 0)
         self.assertEqual(payload["malformedCount"], 1)
 
     def test_delete_and_clear_preserve_survey_records(self):
