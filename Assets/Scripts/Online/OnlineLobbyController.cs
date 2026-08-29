@@ -42,6 +42,9 @@ public class OnlineLobbyController : MonoBehaviour
         OnlineSceneUi.ConfigureRaycastTargets();
 
 #if UNITY_WEBGL && !UNITY_EDITOR
+        // The lobby uses native HTML inputs in the WebGL template. Unity's
+        // default global keyboard capture otherwise consumes their keystrokes.
+        WebGLInput.captureAllKeyboardInput = false;
         SokobanLobbySetOverlayVisible(1);
         SokobanLobbySetJoinCode("");
 #endif
@@ -297,6 +300,7 @@ public class OnlineLobbyController : MonoBehaviour
 
 #if UNITY_WEBGL && !UNITY_EDITOR
         SokobanLobbySetOverlayVisible(0);
+        WebGLInput.captureAllKeyboardInput = true;
 #endif
         leavingScene = true;
         SceneManager.LoadScene(BriefingSceneName);
@@ -306,6 +310,7 @@ public class OnlineLobbyController : MonoBehaviour
     {
 #if UNITY_WEBGL && !UNITY_EDITOR
         SokobanLobbySetOverlayVisible(0);
+        WebGLInput.captureAllKeyboardInput = true;
 #endif
     }
 
