@@ -1,5 +1,7 @@
+using System.Collections;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using UnityEngine.UI;
 
 public class MenuController : MonoBehaviour
 {
@@ -7,6 +9,20 @@ public class MenuController : MonoBehaviour
     public string creativeWorkshopSceneName = "Questionnaire(Before)";
     public string matchmakingSceneName = "Online_Lobby";
     public string tutorialUrl = "http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf";
+    public Image tryTransitionPanel;
+    public float tryTransitionFadeTime = 1f;
+
+    private bool tryTransitioning;
+
+    private void Start()
+    {
+        SetTryTransitionPanelAlpha(0f);
+
+        if (tryTransitionPanel != null)
+        {
+            tryTransitionPanel.raycastTarget = false;
+        }
+    }
 
     public void StartGame()
     {
@@ -16,13 +32,35 @@ public class MenuController : MonoBehaviour
 
     public void TryGame()
     {
-        if (string.IsNullOrEmpty(targetSceneName))
+        if (tryTransitioning || string.IsNullOrEmpty(targetSceneName))
         {
-            Debug.LogWarning("MenuController: Target scene name is empty.");
+            if (string.IsNullOrEmpty(targetSceneName))
+            {
+                Debug.LogWarning("MenuController: Target scene name is empty.");
+            }
+
             return;
         }
 
+        tryTransitioning = true;
         LevelStudyRecorder.BeginGameRound();
+
+        if (tryTransitionPanel == null)
+        {
+            Debug.LogWarning(
+                "MenuController: Try transition panel is missing; loading without a fade."
+            );
+            SceneManager.LoadScene(targetSceneName);
+            return;
+        }
+
+        tryTransitionPanel.raycastTarget = true;
+        StartCoroutine(LoadTrySceneAfterFade());
+    }
+
+    private IEnumerator LoadTrySceneAfterFade()
+    {
+        yield return FadeTryTransitionPanel(0f, 1f);
         SceneManager.LoadScene(targetSceneName);
     }
 
@@ -72,5 +110,40 @@ public class MenuController : MonoBehaviour
 
         resolvedUrl = uri.AbsoluteUri;
         return true;
+    }
+
+    private IEnumerator FadeTryTransitionPanel(float startAlpha, float endAlpha)
+    {
+        if (tryTransitionPanel == null)
+        {
+            yield break;
+        }
+
+        float duration = Mathf.Max(0.01f, tryTransitionFadeTime);
+        float timer = 0f;
+        SetTryTransitionPanelAlpha(startAlpha);
+
+        while (timer < duration)
+        {
+            timer += Time.unscaledDeltaTime;
+            SetTryTransitionPanelAlpha(
+                Mathf.Lerp(startAlpha, endAlpha, timer / duration)
+            );
+            yield return null;
+        }
+
+        SetTryTransitionPanelAlpha(endAlpha);
+    }
+
+    private void SetTryTransitionPanelAlpha(float alpha)
+    {
+        if (tryTransitionPanel == null)
+        {
+            return;
+        }
+
+        Color color = tryTransitionPanel.color;
+        color.a = Mathf.Clamp01(alpha);
+        tryTransitionPanel.color = color;
     }
 }
