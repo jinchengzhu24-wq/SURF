@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=cocreation-translation-parallel-20260828-3">
+    <link rel="stylesheet" href="./styles.css?v=cocreation-translation-parallel-20260830-5">
 </head>
 <body>
     <div class="app">
@@ -39,6 +39,7 @@
                 <h2 data-i18n="openFromUnity">Create a first level in Unity, then continue here.</h2>
                 <p data-i18n="landingBody">The lab keeps every accepted Stage, conversation and play attempt together. No predefined design goal is assigned.</p>
                 <button class="primary-button" id="demoButton" type="button" data-i18n="startDemo">Start a sample session</button>
+                <p class="demo-generation-status" id="demoGenerationStatus" role="status" aria-live="polite" hidden data-i18n="demoGenerationStatus">Creating a sample map with the algorithm…</p>
             </section>
 
             <section class="workspace" id="workspace" hidden aria-label="Co-creation workspace">
@@ -166,6 +167,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=cocreation-translation-parallel-20260828-3"></script>
+    <script src="./app.js?v=cocreation-translation-parallel-20260830-5"></script>
 </body>
 </html>

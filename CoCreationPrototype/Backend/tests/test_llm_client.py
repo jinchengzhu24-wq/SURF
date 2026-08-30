@@ -2642,6 +2642,19 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("How does this generated result compare", guidance)
         self.assertIn("what surprised them", guidance)
 
+    def test_algorithm_demo_provenance_does_not_attribute_generated_tiles(self):
+        guidance = llm_client._build_draft_provenance_guidance(
+            {
+                "source": "initial",
+                "initialDraftMethod": "algorithm_demo",
+            }
+        )
+
+        self.assertIn("standalone algorithm-generated demo draft", guidance)
+        self.assertIn("created every exact visible tile placement", guidance)
+        self.assertIn("Never attribute any visible tile", guidance)
+        self.assertIn("do not infer a hidden design intention", guidance)
+
     def test_pc_initial_provenance_separates_sketch_from_completion(self):
         guidance = llm_client._build_draft_provenance_guidance(
             {

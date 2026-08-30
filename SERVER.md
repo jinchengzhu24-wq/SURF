@@ -5,7 +5,6 @@
 ```text
 http://111.231.136.4/frontend/
 http://111.231.136.4/game/
-http://111.231.136.4/frontend/Images/Routing.png
 http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf
 http://111.231.136.4/cocreation/
 
@@ -345,3 +344,16 @@ confirmation and capped at 600 seconds after timeout. The 8000 dashboard shows t
 `Co-creation time` in the `Final map` details. Opponent-level play time remains the existing
 Match Result `result_submitted.durationSeconds` record and is shown in the Result submitted
 details and the corresponding challenge map details; it is not duplicated on Final map.
+
+## 8010 直访问单次测试模式
+
+直接访问 `http://111.231.136.4/cocreation/` 时，页面显示“创建示例会话” landing，不读取
+旧的浏览器 `localStorage` 会话，也不加载上一轮的对话、Stage 或地图记录。点击按钮后立即显示
+“正在使用算法创建示例地图……”，8010 后端参考 Unity `Algorithm_Level` 的结构模板、
+墙体/水域布局和反向拉箱流程生成 10×12、两箱、两目标的可解地图，并开始首轮 AI 对话；
+刷新带有当前会话 hash 的 URL 可以继续测试。
+演示会话只保存在 8010，不调用 8000 同步接口，不创建十分钟 deadline，也不写入正式匹配的
+`coCreationDurationSeconds`。演示页面没有倒计时，完成后不显示“返回 Unity 继续”。
+每次新演示会话创建成功后只保留最新一轮演示记录；正式 Unity 会话和正式研究数据不受影响，
+新地图或新会话失败时保留上一轮记录。当前静态资源缓存键为
+`cocreation-translation-parallel-20260830-5`。

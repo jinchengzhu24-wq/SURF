@@ -37,6 +37,7 @@ const translations = {
         openFromUnity: "Create a first level in Unity, then continue here.",
         landingBody: "The lab keeps every accepted Stage, conversation and play attempt together. No predefined design goal is assigned.",
         startDemo: "Start a sample session",
+        demoGenerationStatus: "Creating a sample map with the algorithm…",
         versionHistory: "Version history",
         stages: "Stages",
         conversation: "Co-creation conversation",
@@ -111,6 +112,7 @@ const translations = {
         seconds: "seconds",
         partial_completion: "Partial-level completion",
         description_generation: "Description generation",
+        algorithm_demo: "Algorithm demo",
         floor: "Floor",
         wall: "Wall",
         water: "Water",
@@ -151,6 +153,7 @@ const translations = {
         openFromUnity: "请先在 Unity 创建第一版关卡，再进入这里继续共创。",
         landingBody: "实验室会把每个已接受 Stage、完整对话和试玩记录关联保存，不会为你分配预设设计目标。",
         startDemo: "创建示例会话",
+        demoGenerationStatus: "正在使用算法创建示例地图……",
         versionHistory: "版本历史",
         stages: "Stages",
         conversation: "共创对话",
@@ -225,6 +228,7 @@ const translations = {
         seconds: "秒",
         partial_completion: "部分关卡补全",
         description_generation: "描述生成",
+        algorithm_demo: "算法示例",
         floor: "地面",
         wall: "墙",
         water: "水",
@@ -334,7 +338,7 @@ const validationTileNames = {
 
 const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
-    "languageButton", "demoButton", "stageList", "stageCount", "methodPill", "historyBanner",
+    "languageButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
     "sendButton", "characterCount", "selectedStageEyebrow", "mapGrid",
@@ -370,7 +374,7 @@ initialize();
 
 async function initialize() {
     const hash = readHash();
-    state.sessionId = hash.session || localStorage.getItem(SESSION_STORAGE_KEY) || "";
+    state.sessionId = hash.session || "";
 
     if (!state.sessionId) {
         showLanding();
@@ -402,19 +406,26 @@ async function initialize() {
 }
 
 async function createDemoSession() {
+    const showGenerationStatus = () => {
+        elements.demoGenerationStatus.hidden = false;
+        elements.demoGenerationStatus.textContent = t("demoGenerationStatus");
+    };
+    const hideGenerationStatus = () => {
+        elements.demoGenerationStatus.hidden = true;
+        elements.demoGenerationStatus.textContent = "";
+    };
+    showGenerationStatus();
     await withBusy(async () => {
-        const sample = await api("/api/sample");
-        const created = await api("/api/sessions", {
+        showGenerationStatus();
+        const created = await api("/api/demo-sessions", {
             method: "POST",
             body: {
-                rows: sample.rows,
-                initialDraftMethod: "description_generation",
                 language: state.language,
                 idempotencyKey: uniqueId("demo")
             }
         });
         window.location.assign(created.launchUrl);
-    });
+    }, hideGenerationStatus);
 }
 
 async function refreshSession() {
@@ -773,7 +784,7 @@ function renderSessionState() {
     // A completed session always offers the return action.  Some local or
     // legacy sessions do not carry online-room metadata, but they may still
     // have been opened by Unity and therefore retain a valid opener tab.
-    elements.returnUnityButton.hidden = status !== "completed";
+    elements.returnUnityButton.hidden = status !== "completed" || state.session.demoMode;
     elements.historyBanner.hidden = state.selectedVersionId === state.session.currentVersionId;
 }
 
@@ -1324,13 +1335,16 @@ function showLanding() {
     applyTranslations();
 }
 
-async function withBusy(action) {
+async function withBusy(action, onError = null) {
     if (state.busy) return;
     state.busy = true;
     hideNotice();
     updateControls();
     try { await action(); }
-    catch (error) { showError(error, () => withBusy(action)); }
+    catch (error) {
+        if (onError) onError();
+        showError(error, () => withBusy(action, onError));
+    }
     finally { state.busy = false; updateControls(); }
 }
 

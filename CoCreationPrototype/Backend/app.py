@@ -33,6 +33,7 @@ from level_validation import (
     summarize_stage_changes,
     validate_and_solve,
 )
+from demo_level_generator import generate_demo_level
 from llm_client import (
     LLMExecutionResult,
     LLMServiceError,
@@ -46,6 +47,7 @@ from llm_client import (
 from repository import (
     DATABASE_PATH,
     connect,
+    delete_demo_sessions,
     dump_json,
     get_current_version,
     get_session,
@@ -156,6 +158,11 @@ class CreateSessionRequest(StrictModel):
     idempotencyKey: str
     matchId: str | None = None
     playerNumber: int | None = None
+
+
+class DemoSessionRequest(StrictModel):
+    language: Literal["en", "zh-CN"] = "zh-CN"
+    idempotencyKey: str
 
 
 class BrowserAccessRequest(StrictModel):
@@ -339,13 +346,65 @@ def legacy_chat(payload: LegacyChatRequest, request: Request, response: Response
 @app.post("/api/sessions")
 def create_session(payload: CreateSessionRequest):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
-    validation = _solve_or_api_error(payload.rows)
+    session_id, version_id, bootstrap_token, integration_token = _create_session_record(
+        rows=payload.rows,
+        initial_draft_method=payload.initialDraftMethod,
+        language=payload.language,
+        idempotency_key=payload.idempotencyKey,
+        match_id=payload.matchId,
+        player_number=payload.playerNumber,
+    )
+    synchronize_version_with_online_match(session_id, version_id, "first_stage")
+
+    return {
+        "sessionId": session_id,
+        "launchUrl": build_launch_url(session_id, bootstrap_token),
+        "integrationToken": integration_token,
+    }
+
+
+@app.post("/api/demo-sessions")
+def create_demo_session(payload: DemoSessionRequest):
+    _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    generated = generate_demo_level()
+    session_id, _version_id, bootstrap_token, _integration_token = _create_session_record(
+        rows=list(generated.rows),
+        initial_draft_method="algorithm_demo",
+        language=payload.language,
+        idempotency_key=payload.idempotencyKey,
+        demo_mode=True,
+        initial_summary="Algorithm-generated demo map",
+        generation_seed=generated.seed,
+        generation_attempts=generated.attempts,
+        generation_summary=generated.generation_summary,
+    )
+
+    return {
+        "sessionId": session_id,
+        "launchUrl": build_launch_url(session_id, bootstrap_token, mode="demo"),
+    }
+
+
+def _create_session_record(
+    rows,
+    initial_draft_method,
+    language,
+    idempotency_key,
+    match_id=None,
+    player_number=None,
+    demo_mode=False,
+    initial_summary="Initial draft from Unity",
+    generation_seed=None,
+    generation_attempts=None,
+    generation_summary=None,
+):
+    validation = _solve_or_api_error(rows)
     created_at = utc_now()
 
     with connect(immediate=True) as database:
         existing = database.execute(
             "SELECT * FROM design_sessions WHERE creation_key = ?",
-            (payload.idempotencyKey,),
+            (idempotency_key,),
         ).fetchone()
 
         if existing is None:
@@ -358,21 +417,22 @@ def create_session(payload: CreateSessionRequest):
                 """
                 INSERT INTO design_sessions(
                     id, creation_key, access_hash, integration_hash,
-                    bootstrap_hash, match_id, player_number,
+                    bootstrap_hash, demo_mode, match_id, player_number,
                     initial_draft_method, language, status,
                     current_version_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
                 """,
                 (
                     session_id,
-                    payload.idempotencyKey,
+                    idempotency_key,
                     hash_token(access_token),
                     hash_token(integration_token),
                     hash_token(bootstrap_token),
-                    clean_optional(payload.matchId, 128),
-                    payload.playerNumber if payload.playerNumber in (1, 2) else None,
-                    payload.initialDraftMethod,
-                    payload.language,
+                    1 if demo_mode else 0,
+                    clean_optional(match_id, 128),
+                    player_number if player_number in (1, 2) else None,
+                    initial_draft_method,
+                    language,
                     version_id,
                     created_at,
                     created_at,
@@ -390,22 +450,32 @@ def create_session(payload: CreateSessionRequest):
                     version_id,
                     session_id,
                     dump_json(list(validation.rows)),
-                    "Initial draft from Unity",
+                    initial_summary,
                     dump_json(validation.as_dict()),
-                    "initial:" + payload.idempotencyKey,
+                    "initial:" + idempotency_key,
                     created_at,
                 ),
             )
+            event_payload = {
+                "versionId": version_id,
+                "initialDraftMethod": initial_draft_method,
+                "demoMode": bool(demo_mode),
+            }
+            if generation_seed is not None:
+                event_payload["generationSeed"] = generation_seed
+            if generation_attempts is not None:
+                event_payload["generationAttempts"] = generation_attempts
+            if generation_summary is not None:
+                event_payload["generationSummary"] = generation_summary
             record_event(
                 database,
                 session_id,
                 "session_created",
-                {
-                    "versionId": version_id,
-                    "initialDraftMethod": payload.initialDraftMethod,
-                },
+                event_payload,
                 created_at,
             )
+            if demo_mode:
+                delete_demo_sessions(database, keep_session_id=session_id)
         else:
             session_id = existing["id"]
             existing_version = database.execute(
@@ -416,11 +486,19 @@ def create_session(payload: CreateSessionRequest):
                 (session_id,),
             ).fetchone()
 
-            if (
-                existing["initial_draft_method"] != payload.initialDraftMethod
-                or existing_version is None
-                or load_json(existing_version["rows_json"]) != list(validation.rows)
-            ):
+            same_demo_request = (
+                demo_mode
+                and bool(existing["demo_mode"])
+                and existing["initial_draft_method"] == initial_draft_method
+            )
+            same_regular_request = (
+                not demo_mode
+                and not bool(existing["demo_mode"])
+                and existing["initial_draft_method"] == initial_draft_method
+                and existing_version is not None
+                and load_json(existing_version["rows_json"]) == list(validation.rows)
+            )
+            if existing_version is None or not (same_demo_request or same_regular_request):
                 raise ApiError(
                     409,
                     "IDEMPOTENCY_CONFLICT",
@@ -432,13 +510,7 @@ def create_session(payload: CreateSessionRequest):
             bootstrap_token = derive_token("bootstrap", session_id)
             version_id = existing_version["id"]
 
-    synchronize_version_with_online_match(session_id, version_id, "first_stage")
-
-    return {
-        "sessionId": session_id,
-        "launchUrl": build_launch_url(session_id, bootstrap_token),
-        "integrationToken": integration_token,
-    }
+    return session_id, version_id, bootstrap_token, integration_token
 
 
 @app.post("/api/sessions/{session_id}/browser-access")
@@ -459,14 +531,21 @@ def exchange_browser_access(
         if session["bootstrap_used_at"] is not None:
             raise ApiError(409, "BOOTSTRAP_TOKEN_USED", "The session link was already used.")
 
-        now, deadline_at = start_deadline_if_missing(database, session)
+        deadline_started_at, deadline_at = start_deadline_if_missing(database, session)
+        accessed_at = deadline_started_at or utc_now()
         database.execute(
             """UPDATE design_sessions
                SET bootstrap_used_at = ?, deadline_started_at = ?, deadline_at = ?
                WHERE id = ?""",
-            (now, now, deadline_at, session_id),
+            (accessed_at, deadline_started_at, deadline_at, session_id),
         )
-        record_event(database, session_id, "browser_access_granted", {"deadlineAt": deadline_at}, now)
+        record_event(
+            database,
+            session_id,
+            "browser_access_granted",
+            {"deadlineAt": deadline_at},
+            accessed_at,
+        )
 
     response.set_cookie(
         SESSION_COOKIE_NAME,
@@ -1868,14 +1947,16 @@ def submit_intention(
 
         match_id = str(session["match_id"] or "").strip()
         player_number = session["player_number"]
+        is_demo_session = bool(session["demo_mode"])
 
-    synchronize_final_intention_with_online_match(
-        match_id,
-        player_number,
-        content,
-        "message:" + session_id + ":" + payload.idempotencyKey,
-        session_id,
-    )
+    if not is_demo_session:
+        synchronize_final_intention_with_online_match(
+            match_id,
+            player_number,
+            content,
+            "message:" + session_id + ":" + payload.idempotencyKey,
+            session_id,
+        )
 
     with connect() as database:
         return serialize_session(database, session_id)
@@ -1927,6 +2008,9 @@ def synchronize_final_intention_with_online_match(
 
 
 def synchronize_cocreation_event_with_online_match(session, event):
+    if bool(session["demo_mode"]):
+        return
+
     match_id = str(session["match_id"] or "").strip()
     player_number = session["player_number"]
 
@@ -1992,6 +2076,8 @@ def synchronize_version_with_online_match(session_id, version_id, event_type):
         session = get_session(database, session_id)
         version = get_version(database, session_id, version_id)
         if session is None or version is None:
+            return
+        if bool(session["demo_mode"]):
             return
         source = version["source"]
         if event_type == "stage" and source not in {"human_edit", "llm_accepted"}:
@@ -2444,7 +2530,7 @@ def _translated_guidance(source_guidance, translated):
 
 def build_llm_context(database, session_id, version):
     session = database.execute(
-        "SELECT initial_draft_method, language FROM design_sessions WHERE id = ?",
+        "SELECT initial_draft_method, language, demo_mode FROM design_sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
     turns = database.execute(
@@ -2605,6 +2691,7 @@ def build_llm_context(database, session_id, version):
             "initialDraftMethod": (
                 session["initial_draft_method"] if session is not None else None
             ),
+            "demoMode": bool(session["demo_mode"]) if session is not None else False,
             "summary": version["summary"],
             "parentVersionId": version["parent_version_id"],
             "diff": load_json(version["diff_json"]),
@@ -2720,6 +2807,9 @@ def session_deadline_expired(session):
 
 
 def start_deadline_if_missing(database, session):
+    if bool(session["demo_mode"]):
+        return None, None
+
     if session["deadline_at"] is not None:
         return session["deadline_started_at"], session["deadline_at"]
 
@@ -2844,10 +2934,10 @@ def token_matches(token, expected_hash):
     return secrets.compare_digest(hash_token(token), expected_hash)
 
 
-def build_launch_url(session_id, bootstrap_token):
+def build_launch_url(session_id, bootstrap_token, mode="unity"):
     return (
         f"{PUBLIC_BASE_URL}/#session={quote(session_id)}"
-        f"&bootstrap={quote(bootstrap_token)}"
+        f"&bootstrap={quote(bootstrap_token)}&mode={quote(mode)}"
     )
 
 

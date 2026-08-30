@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS design_sessions (
     integration_hash TEXT NOT NULL,
     bootstrap_hash TEXT NOT NULL,
     bootstrap_used_at TEXT,
+    demo_mode INTEGER NOT NULL DEFAULT 0,
     deadline_started_at TEXT,
     deadline_at TEXT,
     match_id TEXT,
@@ -183,6 +184,7 @@ def initialize_database():
     try:
         database.executescript(SCHEMA)
         _ensure_column(database, "conversation_turns", "guidance_json", "TEXT")
+        _ensure_column(database, "design_sessions", "demo_mode", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(database, "design_sessions", "deadline_started_at", "TEXT")
         _ensure_column(database, "design_sessions", "deadline_at", "TEXT")
         database.execute("PRAGMA journal_mode=WAL")
@@ -217,6 +219,34 @@ def get_session(database, session_id):
         "SELECT * FROM design_sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
+
+
+def delete_demo_sessions(database, keep_session_id=None):
+    """Delete standalone demo sessions while preserving formal Unity sessions."""
+    demo_rows = database.execute(
+        "SELECT id FROM design_sessions WHERE demo_mode = 1 AND id != COALESCE(?, '')",
+        (keep_session_id,),
+    ).fetchall()
+    session_ids = [row["id"] for row in demo_rows]
+    if not session_ids:
+        return 0
+
+    placeholders = ", ".join("?" for _ in session_ids)
+    delete_statements = (
+        "DELETE FROM designer_decisions WHERE session_id IN ({})",
+        "DELETE FROM designer_intentions WHERE session_id IN ({})",
+        "DELETE FROM play_attempts WHERE session_id IN ({})",
+        "DELETE FROM change_proposals WHERE session_id IN ({})",
+        "DELETE FROM llm_assessments WHERE session_id IN ({})",
+        "DELETE FROM turn_translations WHERE session_id IN ({})",
+        "DELETE FROM conversation_turns WHERE session_id IN ({})",
+        "DELETE FROM level_versions WHERE session_id IN ({})",
+        "DELETE FROM audit_events WHERE session_id IN ({})",
+        "DELETE FROM design_sessions WHERE id IN ({})",
+    )
+    for statement in delete_statements:
+        database.execute(statement.format(placeholders), session_ids)
+    return len(session_ids)
 
 
 def get_version(database, session_id, version_id):
@@ -342,6 +372,7 @@ def serialize_session(database, session_id):
         "sessionId": session["id"],
         "status": session["status"],
         "language": session["language"],
+        "demoMode": bool(session["demo_mode"]),
         "initialDraftMethod": session["initial_draft_method"],
         "matchId": session["match_id"],
         "playerNumber": session["player_number"],

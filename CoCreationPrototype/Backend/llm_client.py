@@ -5467,6 +5467,17 @@ def _build_draft_provenance_guidance(stage_context):
             "revisiting that version; do not infer who originally placed a specific tile."
         )
 
+    if source == "initial" and initial_method == "algorithm_demo":
+        return (
+            "This is a standalone algorithm-generated demo draft. The server algorithm "
+            "created every exact visible tile placement, including the player, both boxes, "
+            "both targets, walls, and water. Never attribute any visible tile or layout "
+            "choice to the designer, and do not infer a hidden design intention. The first "
+            "turn should discuss only observable structure, routes, and push relationships; "
+            "treat these as generated outcomes and, when useful, invite the designer to say "
+            "how the result feels or what they would like to explore next."
+        )
+
     if source == "initial" and initial_method == "description_generation":
         return (
             "This is a DG initial draft. The designer supplied an upstream description "

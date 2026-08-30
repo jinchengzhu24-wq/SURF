@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import sys
 import tempfile
@@ -85,6 +86,25 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(exchange.status_code, 200, exchange.text)
         return payload["sessionId"], payload["integrationToken"]
 
+    def create_and_open_demo_session(self, creation_key):
+        response = self.client.post(
+            "/api/demo-sessions",
+            json={
+                "language": "en",
+                "idempotencyKey": creation_key,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        fragment = parse_qs(urlparse(payload["launchUrl"]).fragment)
+        self.assertEqual(fragment["mode"][0], "demo")
+        exchange = self.client.post(
+            f"/api/sessions/{payload['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        self.assertEqual(exchange.status_code, 200, exchange.text)
+        return payload["sessionId"]
+
     def read_session(self):
         response = self.client.get(f"/api/sessions/{self.session_id}")
         self.assertEqual(response.status_code, 200, response.text)
@@ -103,6 +123,99 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "BOOTSTRAP_TOKEN_USED")
+
+    def test_demo_session_has_no_deadline_and_skips_online_sync(self):
+        with patch.object(backend, "synchronize_version_with_online_match") as sync:
+            demo_session_id = self.create_and_open_demo_session("demo_no_deadline_001")
+
+        sync.assert_not_called()
+        response = self.client.get(f"/api/sessions/{demo_session_id}")
+        self.assertEqual(response.status_code, 200, response.text)
+        session = response.json()
+
+        self.assertTrue(session["demoMode"])
+        self.assertEqual(session["initialDraftMethod"], "algorithm_demo")
+        self.assertIsNone(session["matchId"])
+        self.assertIsNone(session["playerNumber"])
+        self.assertIsNone(session["deadlineStartedAt"])
+        self.assertIsNone(session["deadlineAt"])
+        self.assertFalse(session["deadlineExpired"])
+        self.assertIsNone(session["remainingSeconds"])
+        self.assertEqual(len(session["versions"]), 1)
+        self.assertEqual(session["versions"][0]["source"], "initial")
+
+        with repository.connect() as database:
+            events = [
+                row
+                for row in database.execute(
+                    "SELECT event_type, payload_json FROM audit_events WHERE session_id = ?",
+                    (demo_session_id,),
+                ).fetchall()
+            ]
+        self.assertNotIn("deadline_started", [event["event_type"] for event in events])
+        created_event = next(
+            event for event in events if event["event_type"] == "session_created"
+        )
+        audit_payload = json.loads(created_event["payload_json"])
+        self.assertIsInstance(audit_payload["generationSeed"], int)
+        self.assertGreaterEqual(audit_payload["generationAttempts"], 1)
+        self.assertIn("qualityScore", audit_payload["generationSummary"])
+        self.assertIn("waterAreas", audit_payload["generationSummary"])
+
+    def test_new_demo_session_removes_only_previous_demo_data(self):
+        first_demo_id = self.create_and_open_demo_session("demo_cleanup_001")
+        with repository.connect(immediate=True) as database:
+            repository.record_event(
+                database,
+                first_demo_id,
+                "test_marker",
+                {"value": "old"},
+                "2026-08-30T00:00:00Z",
+            )
+
+        second_demo_id = self.create_and_open_demo_session("demo_cleanup_002")
+        self.assertNotEqual(first_demo_id, second_demo_id)
+
+        with repository.connect() as database:
+            old_session = database.execute(
+                "SELECT id FROM design_sessions WHERE id = ?",
+                (first_demo_id,),
+            ).fetchone()
+            demo_count = database.execute(
+                "SELECT COUNT(*) FROM design_sessions WHERE demo_mode = 1"
+            ).fetchone()[0]
+            old_versions = database.execute(
+                "SELECT COUNT(*) FROM level_versions WHERE session_id = ?",
+                (first_demo_id,),
+            ).fetchone()[0]
+            formal_session = database.execute(
+                "SELECT id FROM design_sessions WHERE id = ? AND demo_mode = 0",
+                (self.session_id,),
+            ).fetchone()
+
+        self.assertIsNone(old_session)
+        self.assertEqual(demo_count, 1)
+        self.assertEqual(old_versions, 0)
+        self.assertIsNotNone(formal_session)
+
+    def test_demo_generation_failure_keeps_previous_demo_session(self):
+        first_demo_id = self.create_and_open_demo_session("demo_failure_001")
+
+        with patch.object(backend, "generate_demo_level", side_effect=RuntimeError("generation failed")):
+            with self.assertRaises(RuntimeError):
+                backend.create_demo_session(
+                    backend.DemoSessionRequest(
+                        language="en",
+                        idempotencyKey="demo_failure_002",
+                    )
+                )
+
+        with repository.connect() as database:
+            retained = database.execute(
+                "SELECT id FROM design_sessions WHERE id = ? AND demo_mode = 1",
+                (first_demo_id,),
+            ).fetchone()
+        self.assertIsNotNone(retained)
 
     def test_session_creation_rejects_removed_dg_context_field(self):
         response = self.client.post(

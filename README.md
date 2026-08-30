@@ -24,9 +24,9 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 当前询问四个中立的地图设计问题（首步检查、推箱依赖、空间分布、路线结构），前两题用于推断难度，后两题用于推断布局。AI 输出温暖的 AI reflection 以及难度/布局建议；四道答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI 推荐和用户最终确认一起保存，不会传入 8010 共创服务或其 LLM 上下文。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。当前 8010 前端脚本与样式缓存键均为 `cocreation-translation-parallel-20260828-3`；如再次更新静态资源，应同步递增该版本参数。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。当前 8010 前端脚本与样式缓存键均为 `cocreation-translation-parallel-20260830-5`；如再次更新静态资源，应同步递增该版本参数。
 
-8010 工作台在浏览器首次访问授权后开始 10 分钟倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
+正式 Unity 共创会话在浏览器首次访问授权后开始 10 分钟倒计时。直访问示例会话不创建 deadline、不倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
 
 2026-08-14 的地图改善提示词先更新为 `cocreation-v29-intent-search`：明确授权后，Pro 只把玩家方向编译成一至三个结构化 `RevisionStrategy`，不再输出地图 rows 或原子格子操作。后端使用语义算子、宽度 16/深度 3 的确定性局部搜索、最多 64 个内部候选、现有结构校验与 300,000 状态 Sokoban 求解器选择最多八个可解候选中的最优方案。模型阶段最多两次且总计不超过 26 秒，搜索在业务请求第 55 秒停止；完整请求仍受 60 秒墙钟限制。随后部署的 `cocreation-v30-disagreement-intent` 规定：玩家明确重新界定或反驳助手对难度、优先级或游玩效果的判断时，必须出现一张可纠正的暂定意图卡。`v31-zero-candidate-correction` 还会在首份合法计划因操作/焦点没有可编辑格子而构造零候选时，用现有的第二次 Pro 调用附带安全原因纠正计划。只有已有合法计划但确定性搜索找不到满足全部条件的可解修改时，才进入现有的局部效果放宽商量流程。Quality-Diversity / MAP-Elites 保留为后续候选多样性升级，不属于当前版本。上述版本发布前的本地与服务器测试、Python 编译及本地 JavaScript 语法检查均通过；部署未改动数据库内容或 8000 服务。
 
@@ -114,6 +114,7 @@ python CoCreationPrototype/Backend/app.py
 
 ```text
 POST  /api/sessions
+POST  /api/demo-sessions
 POST  /api/sessions/{sessionId}/browser-access
 GET   /api/sessions/{sessionId}
 PATCH /api/sessions/{sessionId}/language
@@ -208,3 +209,16 @@ Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Soko
 如需单独回归保留的 PC 路径，必须先在 Unity Build Settings 中重新启用相应场景；这不属于当前在线研究路线。
 
 部署时先备份 8010 SQLite，再更新并重启独立服务；随后用指定 Unity 版本重建 WebGL、更新缓存键并上传 8000 静态构建。不要把 `.env`、API Key、SQLite、研究日志或 `WebGLBuild/` 提交到 Git。
+
+## 8010 直访问单次测试模式
+
+直接访问 `/cocreation/` 时，页面只显示“创建示例会话” landing，不读取旧的
+`localStorage` 会话，也不会请求上一轮会话、对话、Stage 或地图记录。点击按钮后立即显示
+“正在使用算法创建示例地图……”，再由 8010 后端参考 Unity `Algorithm_Level` 的结构模板、
+墙体/水域布局和反向拉箱流程生成 10×12、两箱、两目标的可解地图，然后自动开始首轮 assessment。
+刷新当前演示会话 URL 可以继续当前测试；演示完成后不显示“返回 Unity 继续”。
+演示数据只写入 8010，不调用 8000 同步接口，不启动十分钟 deadline，也不记录正式匹配的
+`coCreationDurationSeconds`。每次新演示会话在新地图验证和新会话创建成功后，清理上一轮
+演示会话及其关联的对话、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。若地图
+生成或会话创建失败，上一轮演示记录保持不变。前端静态资源缓存键为
+`cocreation-translation-parallel-20260830-5`。
