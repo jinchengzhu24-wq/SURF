@@ -29,6 +29,35 @@ EDITED_ROWS = list(SAMPLE_ROWS)
 EDITED_ROWS[4] = "#..p.......#"
 TARGET_SHIFT_ROWS = list(SAMPLE_ROWS)
 TARGET_SHIFT_ROWS[5] = "#...s..t...#"
+PLAYER_MOVE_OPERATIONS = [
+    {"row": 5, "column": 5, "to": "."},
+    {"row": 5, "column": 4, "to": "p"},
+]
+PLAYER_MOVE_CONTRACT = {
+    "schemaVersion": 1,
+    "authorizedBrief": "Move the player start left.",
+    "revisionPlan": {
+        "strategies": [{
+            "effect": "relocate_start",
+            "focus": None,
+            "operators": ["move_player"],
+            "preserve": ["outer_shell", "unrelated_areas"],
+            "editBudget": 2,
+            "metricGoals": [],
+        }],
+    },
+    "strategies": [{
+        "strategyIndex": 1,
+        "effect": "relocate_start",
+        "focus": None,
+        "allowedOperators": ["move_player"],
+        "preserve": ["outer_shell", "unrelated_areas"],
+        "minimumChangedCells": 2,
+        "maximumChangedCells": 2,
+        "metricGoals": [],
+    }],
+    "explicitlyRelaxedByDesigner": False,
+}
 
 
 class CoCreationSessionTests(unittest.TestCase):
@@ -139,7 +168,7 @@ class CoCreationSessionTests(unittest.TestCase):
         payload = repository.load_json(event["payload_json"])
         self.assertEqual(payload["schemaVersion"], 1)
         self.assertEqual(payload["fromAgent"], "blueprint_planning")
-        self.assertEqual(payload["toAgent"], "co_creation")
+        self.assertEqual(payload["toAgent"], "co_creation_chat")
         self.assertEqual(payload["artifactType"], "validated_initial_stage")
         self.assertEqual(payload["status"], "confirmed")
         self.assertEqual(
@@ -1205,7 +1234,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 "constructedCandidates": 12,
                 "validCandidates": 4,
                 "selectedOperators": ["move_player"],
+                "selectedStrategyIndex": 1,
+                "changedCellCount": 2,
             },
+            revision_contract=PLAYER_MOVE_CONTRACT,
+            revision_operations=PLAYER_MOVE_OPERATIONS,
         )
 
         with patch.object(backend, "generate_chat_reply", return_value=execution):
@@ -1431,6 +1464,12 @@ class CoCreationSessionTests(unittest.TestCase):
             revision_plan={
                 "strategies": [{"effect": "relocate_start", "operators": ["move_player"]}]
             },
+            revision_contract=PLAYER_MOVE_CONTRACT,
+            revision_operations=PLAYER_MOVE_OPERATIONS,
+            proposal_diagnostics={
+                "selectedStrategyIndex": 1,
+                "changedCellCount": 2,
+            },
         )
 
         with patch.object(backend, "generate_chat_reply", return_value=execution):
@@ -1457,11 +1496,19 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 200, rejected.text)
 
         with repository.connect() as database:
+            chat_handoff = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'agent_handoff'
+                  AND json_extract(payload_json, '$.artifactType') = 'revision_plan'
+                """,
+                (self.session_id,),
+            ).fetchone()
             handoff = database.execute(
                 """
                 SELECT payload_json FROM audit_events
                 WHERE session_id = ? AND event_type = 'agent_handoff'
-                  AND json_extract(payload_json, '$.artifactType') = 'validated_revision_proposal'
+                  AND json_extract(payload_json, '$.artifactType') = 'revision_operations'
                 """,
                 (self.session_id,),
             ).fetchone()
@@ -1484,8 +1531,16 @@ class CoCreationSessionTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(handoff)
+        self.assertIsNotNone(chat_handoff)
+        chat_handoff_payload = repository.load_json(chat_handoff["payload_json"])
+        self.assertEqual(chat_handoff_payload["fromAgent"], "co_creation_chat")
+        self.assertEqual(chat_handoff_payload["toAgent"], "co_creation_revision")
+        self.assertEqual(
+            chat_handoff_payload["artifact"]["executionContract"]["schemaVersion"],
+            1,
+        )
         handoff_payload = repository.load_json(handoff["payload_json"])
-        self.assertEqual(handoff_payload["fromAgent"], "co_creation")
+        self.assertEqual(handoff_payload["fromAgent"], "co_creation_revision")
         self.assertEqual(handoff_payload["toAgent"], "deterministic_validator")
         self.assertEqual(handoff_payload["status"], "confirmed")
         self.assertEqual(handoff_payload["artifact"]["proposalId"], proposal_id)

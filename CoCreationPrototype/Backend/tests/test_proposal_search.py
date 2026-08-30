@@ -81,8 +81,8 @@ class ProposalSearchTests(unittest.TestCase):
         with self.assertRaisesRegex(RevisionPlanError, "cannot realize its declared effect"):
             plan_for("relocate_target", "add_wall")
 
-        with self.assertRaisesRegex(RevisionPlanError, "between 1 and 8"):
-            plan_for("narrow_route", "add_wall", edit_budget=9)
+        with self.assertRaisesRegex(RevisionPlanError, "between 1 and 12"):
+            plan_for("narrow_route", "add_wall", edit_budget=13)
 
     def test_every_semantic_operator_returns_a_solved_map_and_preserves_counts(self):
         cases = [

@@ -40,6 +40,7 @@ from llm_client import (
     PROMPT_VERSION,
     PROPOSAL_GENERATION_ATTEMPTS,
     classify_revision_request,
+    execute_revision_operations,
     generate_chat_reply,
     generate_stage_assessment,
     translate_turns,
@@ -154,7 +155,7 @@ def record_intent_hypothesis(
 
     payload = {
         "schemaVersion": AGENT_HANDOFF_SCHEMA_VERSION,
-        "agent": "co_creation",
+        "agent": "co_creation_chat",
         "artifactType": "intentHypothesis",
         "versionId": version_id,
         "turnId": turn_id,
@@ -570,7 +571,7 @@ def _create_session_record(
                     database,
                     session_id,
                     "blueprint_planning",
-                    "co_creation",
+                    "co_creation_chat",
                     "validated_initial_stage",
                     {
                         "versionId": version_id,
@@ -1207,6 +1208,10 @@ def _send_message_locked(
         proposal_id = None
 
         if execution.proposed_rows is not None:
+            _execute_revision_candidate_or_api_error(
+                load_json(current["rows_json"]),
+                execution,
+            )
             proposal_validation = _solve_changed_proposal_or_api_error(
                 load_json(current["rows_json"]),
                 execution.proposed_rows,
@@ -1243,6 +1248,32 @@ def _send_message_locked(
                 execution,
             )
 
+            if execution.revision_plan:
+                revision_contract = execution.revision_contract or {}
+                record_agent_handoff(
+                    database,
+                    session_id,
+                    "co_creation_chat",
+                    "co_creation_revision",
+                    "revision_plan",
+                    {
+                        "baseVersionId": payload.baseVersionId,
+                        "authorizedBrief": revision_contract.get("authorizedBrief"),
+                        "revisionPlan": execution.revision_plan,
+                        "executionContract": revision_contract,
+                        "attempts": execution.proposal_diagnostics.get(
+                            "planAttempts"
+                        ),
+                    },
+                    evidence=[
+                        {
+                            "type": "explicit_revision_authorization",
+                            "status": "confirmed",
+                        }
+                    ],
+                    status="confirmed",
+                )
+
             if execution.revision_plan and execution.proposed_rows is not None:
                 record_event(
                     database,
@@ -1252,6 +1283,8 @@ def _send_message_locked(
                         "baseVersionId": payload.baseVersionId,
                         "messageKey": payload.idempotencyKey,
                         "revisionPlan": execution.revision_plan,
+                        "executionContract": execution.revision_contract,
+                        "operations": execution.revision_operations,
                         "search": execution.proposal_diagnostics,
                     },
                     utc_now(),
@@ -1283,13 +1316,27 @@ def _send_message_locked(
                 record_agent_handoff(
                     database,
                     session_id,
-                    "co_creation",
+                    "co_creation_revision",
                     "deterministic_validator",
-                    "validated_revision_proposal",
+                    "revision_operations",
                     {
                         "proposalId": proposal_id,
                         "baseVersionId": payload.baseVersionId,
                         "revisionPlan": execution.revision_plan,
+                        "executionContract": execution.revision_contract,
+                        "strategyIndex": execution.proposal_diagnostics.get(
+                            "selectedStrategyIndex"
+                        ),
+                        "operations": execution.revision_operations,
+                        "changedCellCount": execution.proposal_diagnostics.get(
+                            "changedCellCount"
+                        ),
+                        "candidateCount": execution.proposal_diagnostics.get(
+                            "candidateCount"
+                        ),
+                        "attempts": execution.proposal_diagnostics.get(
+                            "modifierAttempts"
+                        ),
                     },
                     evidence=[
                         {
@@ -1303,6 +1350,33 @@ def _send_message_locked(
                         },
                     ],
                     status="confirmed",
+                )
+            elif execution.revision_plan:
+                diagnostics = execution.proposal_diagnostics or {}
+                record_agent_handoff(
+                    database,
+                    session_id,
+                    "co_creation_revision",
+                    "deterministic_validator",
+                    "revision_operations",
+                    {
+                        "baseVersionId": payload.baseVersionId,
+                        "revisionPlan": execution.revision_plan,
+                        "executionContract": execution.revision_contract,
+                        "operations": execution.revision_operations,
+                        "retryAttempts": diagnostics.get("attempts")
+                        or diagnostics.get("modifierAttempts"),
+                        "failureReason": diagnostics.get("modifierFailure"),
+                    },
+                    evidence=[
+                        {
+                            "type": "deterministic_validation",
+                            "status": "rejected",
+                            "reason": diagnostics.get("modifierFailure")
+                            or "No executable candidate satisfied the contract.",
+                        }
+                    ],
+                    status="rejected",
                 )
 
             record_intent_hypothesis(
@@ -1498,7 +1572,7 @@ def _proposal_search_failure_execution(
     exception,
 ):
     if (
-        revision_state != "authorized"
+        revision_state not in {"authorized", "authorized_relaxed"}
         or exception.code != "PROPOSAL_SEARCH_EXHAUSTED"
         or not str(revision_brief or "").strip()
     ):
@@ -1507,6 +1581,7 @@ def _proposal_search_failure_execution(
     original_brief = str(revision_brief).strip()
     brief_hash = hashlib.sha256(original_brief.encode("utf-8")).hexdigest()[:20]
     revision_plan = getattr(exception, "revision_plan", {}) or {}
+    revision_contract = getattr(exception, "revision_contract", {}) or {}
     diagnostics = getattr(exception, "proposal_diagnostics", {}) or {}
     failure_payload = {
         "baseVersionId": base_version_id,
@@ -1515,6 +1590,7 @@ def _proposal_search_failure_execution(
         "code": exception.code,
         "attemptsUsed": exception.attempts_used,
         "revisionPlan": revision_plan,
+        "executionContract": revision_contract,
         "search": diagnostics,
     }
 
@@ -1581,6 +1657,7 @@ def _proposal_search_failure_execution(
             "relaxationOffer": None,
         },
         revision_plan=revision_plan,
+        revision_contract=revision_contract,
         proposal_diagnostics=diagnostics,
     )
 
@@ -3105,6 +3182,42 @@ def _solve_changed_proposal_or_api_error(base_rows, proposed_rows):
         return _validate_changed_proposal(base_rows, proposed_rows)
     except LevelValidationError as error:
         raise ApiError(400, error.code, str(error), details=error.details) from error
+
+
+def _execute_revision_candidate_or_api_error(base_rows, execution):
+    """Re-apply the modifier output before a proposal can enter persistence."""
+    contract = execution.revision_contract or {}
+    operations = execution.revision_operations or []
+    if not contract:
+        return
+    if not operations:
+        raise ApiError(
+            502,
+            "REVISION_EXECUTION_INVALID",
+            "The level revision assistant returned no executable operations.",
+        )
+    selected_index = (execution.proposal_diagnostics or {}).get(
+        "selectedStrategyIndex"
+    )
+    try:
+        executed_rows = execute_revision_operations(
+            base_rows,
+            operations,
+            contract,
+            selected_index,
+        )
+    except (TypeError, ValueError, KeyError) as error:
+        raise ApiError(
+            502,
+            "REVISION_EXECUTION_INVALID",
+            "The level revision assistant output failed the execution contract.",
+        ) from error
+    if list(executed_rows) != list(execution.proposed_rows or []):
+        raise ApiError(
+            502,
+            "REVISION_EXECUTION_MISMATCH",
+            "The executable operations did not produce the proposed map.",
+        )
 
 
 def _validate_identifier(value, field_name):

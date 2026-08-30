@@ -50,7 +50,7 @@ MAP_GROUNDING_ROWS = [
 def operation_payload(*operation_sets):
     return json.dumps({
         "candidates": [
-            {"operations": operations}
+            {"strategyIndex": 1, "operations": operations}
             for operations in operation_sets
         ]
     })
@@ -83,8 +83,14 @@ def revision_plan_payload(
 
 
 TARGET_SHIFT_OPERATIONS = [
-    {"row": 6, "column": 7, "from": "t", "to": "."},
-    {"row": 6, "column": 8, "from": ".", "to": "t"},
+    {"row": 6, "column": 7, "to": "."},
+    {"row": 6, "column": 8, "to": "t"},
+]
+
+WATER_ADD_OPERATIONS = [
+    {"row": 2, "column": 6, "to": "@"},
+    {"row": 2, "column": 7, "to": "@"},
+    {"row": 3, "column": 6, "to": "@"},
 ]
 
 
@@ -1144,7 +1150,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
         response = revision_plan_payload()
-        client = FakeClient([response])
+        client = FakeClient([response, operation_payload(TARGET_SHIFT_OPERATIONS)])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1172,9 +1178,9 @@ class LLMClientTests(unittest.TestCase):
             operators=["add_water"],
             focus={"row": 3, "column": 7, "radius": 1},
             preserve=["outer_shell", "player", "boxes", "targets", "unrelated_areas"],
-            edit_budget=1,
+            edit_budget=3,
         )
-        client = FakeClient([response])
+        client = FakeClient([response, operation_payload(WATER_ADD_OPERATIONS)])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1203,9 +1209,9 @@ class LLMClientTests(unittest.TestCase):
             operators=["add_water"],
             focus={"row": 3, "column": 7, "radius": 1},
             preserve=["outer_shell", "player", "boxes", "targets", "unrelated_areas"],
-            edit_budget=1,
+            edit_budget=3,
         )
-        client = FakeClient([response])
+        client = FakeClient([response, operation_payload(WATER_ADD_OPERATIONS)])
         conversation = [
             {
                 "role": "assistant",
@@ -1235,9 +1241,9 @@ class LLMClientTests(unittest.TestCase):
             operators=["add_water"],
             focus={"row": 3, "column": 7, "radius": 1},
             preserve=["outer_shell", "player", "boxes", "targets", "unrelated_areas"],
-            edit_budget=1,
+            edit_budget=3,
         )
-        client = FakeClient([response])
+        client = FakeClient([response, operation_payload(WATER_ADD_OPERATIONS)])
         conversation = [
             {
                 "role": "assistant",
@@ -1384,7 +1390,11 @@ class LLMClientTests(unittest.TestCase):
 
     def test_structurally_invalid_revision_plan_retries_with_pro_for_correction(self):
         invalid = json.dumps({"strategies": []})
-        client = FakeClient([invalid, revision_plan_payload()])
+        client = FakeClient([
+            invalid,
+            revision_plan_payload(),
+            operation_payload(TARGET_SHIFT_OPERATIONS),
+        ])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1399,10 +1409,10 @@ class LLMClientTests(unittest.TestCase):
                 "proposal-pro-correction-test",
             )
 
-        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(result.attempts_used, 3)
         self.assertEqual(
             [call["model"] for call in client.chat.completions.calls],
-            ["deepseek-v4-pro", "deepseek-v4-pro"],
+            ["deepseek-v4-pro", "deepseek-v4-pro", "deepseek-v4-pro"],
         )
         self.assertIn(
             "strategies must contain one to three items",
@@ -1410,14 +1420,11 @@ class LLMClientTests(unittest.TestCase):
         )
 
     def test_zero_candidate_revision_plan_retries_with_safe_search_feedback(self):
-        no_expandable_cells = revision_plan_payload(
-            effect="adjust_internal_walls",
-            operators=["remove_wall"],
-            focus={"row": 5, "column": 5, "radius": 1},
-            preserve=["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
-            edit_budget=2,
-        )
-        client = FakeClient([no_expandable_cells, revision_plan_payload()])
+        client = FakeClient([
+            revision_plan_payload(),
+            json.dumps({"candidates": []}),
+            operation_payload(TARGET_SHIFT_OPERATIONS),
+        ])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1430,14 +1437,17 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result.proposed_rows)
-        self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(len(client.chat.completions.calls), 2)
-        correction_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
-        self.assertIn("could not produce any legal local edit", correction_prompt)
-        self.assertIn("Do not return map rows or tile operations", correction_prompt)
+        self.assertEqual(result.attempts_used, 3)
+        self.assertEqual(len(client.chat.completions.calls), 3)
+        correction_prompt = client.chat.completions.calls[2]["messages"][0]["content"]
+        self.assertIn("candidates must contain one to three", correction_prompt)
+        self.assertIn("authorized brief", correction_prompt)
 
     def test_revision_plan_search_returns_only_selected_verified_map(self):
-        client = FakeClient([revision_plan_payload()])
+        client = FakeClient([
+            revision_plan_payload(),
+            operation_payload(TARGET_SHIFT_OPERATIONS),
+        ])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1454,8 +1464,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNotNone(result.proposed_rows)
         self.assertEqual(result.revision_plan["strategies"][0]["effect"], "relocate_target")
         self.assertGreater(result.proposal_diagnostics["validCandidates"], 0)
-        self.assertEqual(result.attempts_used, 1)
-        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
 
     def test_confirmed_assistant_direction_becomes_a_hard_search_requirement(self):
         conversation = [
@@ -1543,7 +1553,10 @@ class LLMClientTests(unittest.TestCase):
         )
 
     def test_revision_plan_protocol_never_asks_model_for_tile_operations(self):
-        client = FakeClient([revision_plan_payload()])
+        client = FakeClient([
+            revision_plan_payload(),
+            operation_payload(TARGET_SHIFT_OPERATIONS),
+        ])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -1558,10 +1571,13 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result.proposed_rows)
-        system_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
-        self.assertIn("Do not generate map rows", system_prompt)
-        self.assertIn("Do not generate", system_prompt)
-        self.assertNotIn('"to":"#"', system_prompt)
+        plan_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+        modifier_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
+        self.assertIn("Do not generate map rows", plan_prompt)
+        self.assertIn("Do not generate", plan_prompt)
+        self.assertNotIn('"to":"#"', plan_prompt)
+        self.assertIn("level revision assistant", modifier_prompt)
+        self.assertIn("execution contract", modifier_prompt)
 
     def test_verbose_brief_with_multiple_regions_does_not_require_every_region(self):
         rows = llm_client._apply_map_operations(
@@ -1595,14 +1611,66 @@ class LLMClientTests(unittest.TestCase):
                 "Keep the map unchanged.",
             )
 
-    def test_semantic_search_keeps_outer_shell_immutable(self):
-        client = FakeClient([revision_plan_payload(
+    def test_modifier_executor_enforces_contract_and_rejects_complete_map_style_output(self):
+        plan = llm_client.parse_revision_plan(json.loads(revision_plan_payload(
             effect="narrow_route",
             operators=["add_wall"],
-            focus={"row": 1, "column": 1, "radius": 3},
+            focus={"row": 3, "column": 3, "radius": 1},
             preserve=["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
-            edit_budget=2,
-        )])
+            edit_budget=3,
+        )))
+        contract = llm_client._build_revision_execution_contract(
+            plan,
+            "Narrow the upper-left route.",
+        )
+
+        result = llm_client.execute_revision_operations(
+            OPERATION_BASE_ROWS,
+            [
+                {"row": 2, "column": 2, "to": "#"},
+                {"row": 2, "column": 3, "to": "#"},
+                {"row": 3, "column": 2, "to": "#"},
+            ],
+            contract,
+            1,
+        )
+        self.assertEqual(result[1], "###........#")
+
+        with self.assertRaisesRegex(ValueError, "only row, column, and to"):
+            llm_client.execute_revision_operations(
+                OPERATION_BASE_ROWS,
+                [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+                contract,
+                1,
+            )
+
+        with self.assertRaisesRegex(ValueError, "outside the revision focus"):
+            llm_client.execute_revision_operations(
+                OPERATION_BASE_ROWS,
+                [
+                    {"row": 2, "column": 2, "to": "#"},
+                    {"row": 2, "column": 3, "to": "#"},
+                    {"row": 4, "column": 5, "to": "#"},
+                ],
+                contract,
+                1,
+            )
+
+    def test_semantic_search_keeps_outer_shell_immutable(self):
+        client = FakeClient([
+            revision_plan_payload(
+                effect="narrow_route",
+                operators=["add_wall"],
+                focus={"row": 1, "column": 1, "radius": 3},
+                preserve=["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                edit_budget=3,
+            ),
+            operation_payload([
+                {"row": 2, "column": 2, "to": "#"},
+                {"row": 2, "column": 3, "to": "#"},
+                {"row": 3, "column": 2, "to": "#"},
+            ]),
+        ])
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
             patch.object(llm_client, "_create_async_client", return_value=client),
@@ -1956,7 +2024,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("改完的版本", normalized)
 
     def test_invalid_proposal_uses_fallback_then_fails(self):
-        client = FakeClient([revision_plan_payload()])
+        client = FakeClient([
+            revision_plan_payload(),
+            operation_payload(TARGET_SHIFT_OPERATIONS),
+            operation_payload(TARGET_SHIFT_OPERATIONS),
+        ])
         validated_rows = []
 
         def reject_proposal(rows):
@@ -1980,8 +2052,8 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "PROPOSAL_SEARCH_EXHAUSTED")
         self.assertFalse(raised.exception.retryable)
-        self.assertEqual(raised.exception.attempts_used, 1)
-        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(raised.exception.attempts_used, 3)
+        self.assertEqual(len(client.chat.completions.calls), 3)
         self.assertGreater(len(validated_rows), 0)
         self.assertIn("constructedCandidates", raised.exception.proposal_diagnostics)
 

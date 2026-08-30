@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from openai import (
@@ -35,7 +35,12 @@ PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS = 18.0
 PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS = 8.0
 PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS = 26.0
 PROPOSAL_SEARCH_DEADLINE_SECONDS = 55.0
-# Compatibility for older diagnostics; the operation-candidate path is no longer invoked.
+# The authorized revision now has two bounded LLM phases: a semantic plan and
+# concrete operation candidates.  Both use the existing proposal model config.
+REVISION_CONTRACT_SCHEMA_VERSION = 1
+REVISION_MIN_CHANGED_CELLS = 3
+REVISION_MAX_CHANGED_CELLS = 12
+# Compatibility for older diagnostics and integrations that imported these names.
 PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
 CHAT_MAX_TOKENS = 1400
 PLAIN_CHAT_TIMEOUT_SECONDS = 25.0
@@ -43,13 +48,12 @@ PLAIN_PRIMARY_TIMEOUT_SECONDS = 15.0
 PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
 PROPOSAL_PLAN_MAX_TOKENS = 1400
-# Kept as a compatibility alias for external diagnostics that imported the old name.
-PROPOSAL_OPERATION_MAX_TOKENS = PROPOSAL_PLAN_MAX_TOKENS
+PROPOSAL_OPERATION_MAX_TOKENS = 1400
 PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v32-concise-stage-one-guidance"
+PROMPT_VERSION = "cocreation-v33-two-agent-revision"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -76,6 +80,8 @@ class LLMExecutionResult:
     latency_ms: int = 0
     guidance: dict = field(default_factory=dict)
     revision_plan: dict = field(default_factory=dict)
+    revision_contract: dict = field(default_factory=dict)
+    revision_operations: list[dict] = field(default_factory=list)
     proposal_diagnostics: dict = field(default_factory=dict)
 
 
@@ -834,6 +840,7 @@ def _generate_revision_search_proposal_sync(
     stage_context,
     baseline_metrics=None,
 ):
+    started_at = time.monotonic()
     proposal_model = (
         os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
         or DEFAULT_PROPOSAL_MODEL
@@ -856,15 +863,14 @@ def _generate_revision_search_proposal_sync(
         movement_requirement,
         preserved_components,
     )
-    started_at = time.monotonic()
     _log_llm_event(
         "llm_request_started",
         requestId=request_id,
-        task="map_proposal",
+        task="revision_plan",
         primaryModel=models[0],
         fallbackModel=models[1] if len(models) > 1 else None,
         timeoutSeconds=CHAT_TIMEOUT_SECONDS,
-        responseMode="revision_plan_search",
+        responseMode="revision_plan",
     )
     try:
         plan, attempts_used, model = asyncio.run(
@@ -885,12 +891,12 @@ def _generate_revision_search_proposal_sync(
         _log_llm_event(
             "llm_request_completed",
             requestId=request_id,
-            task="map_proposal",
+            task="revision_plan",
             outcome="error",
             code="UPSTREAM_TIMEOUT",
             attemptsUsed=PROPOSAL_GENERATION_ATTEMPTS,
             latencyMs=elapsed_ms,
-            responseMode="revision_plan_search",
+            responseMode="revision_plan",
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
@@ -904,126 +910,80 @@ def _generate_revision_search_proposal_sync(
         _log_llm_event(
             "llm_request_completed",
             requestId=request_id,
-            task="map_proposal",
+            task="revision_plan",
             outcome="error",
             code=exception.code,
             attemptsUsed=exception.attempts_used,
             latencyMs=int((time.monotonic() - started_at) * 1000),
-            responseMode="revision_plan_search",
+            responseMode="revision_plan",
         )
         raise
 
-    validator = proposal_validator or validate_and_solve
-    try:
-        search_result = search_revision_plan(
-            rows,
-            plan,
-            validator,
-            baseline_metrics=baseline_metrics,
-            deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
-            movement_requirement=movement_requirement,
-            preserved_components=preserved_components,
+    revision_contract = _build_revision_execution_contract(
+        plan,
+        stage_context.get("authorizedRevisionBrief") if stage_context else "",
+        stage_context,
+    )
+    remaining_seconds = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+    if remaining_seconds <= 0:
+        error = LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not create executable revision operations before the 60 second limit.",
+            request_id,
+            True,
+            attempts_used,
+            504,
         )
-    except ProposalSearchExhausted as exception:
-        # A syntactically valid plan can still name an operator/focus pair with
-        # no legal cells to expand.  Spend the existing second Pro attempt on
-        # a correction informed by that safe structural fact rather than
-        # making the designer press Retry and hope for a different plan.
-        correction_succeeded = False
-        if (
-            attempts_used < PROPOSAL_GENERATION_ATTEMPTS
-            and exception.diagnostics.get("constructedCandidates", 0) == 0
-        ):
-            correction_reason = _revision_search_correction_reason(exception.diagnostics)
-            remaining = PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS - (time.monotonic() - started_at)
-            if remaining > 0:
-                try:
-                    corrected_plan, correction_attempts, corrected_model = asyncio.run(
-                        asyncio.wait_for(
-                            _compile_revision_plan(
-                                api_key=api_key,
-                                base_url=base_url,
-                                models=models,
-                                messages=messages,
-                                request_id=request_id,
-                                started_at=started_at,
-                                max_attempts=1,
-                                initial_validation_feedback=correction_reason,
-                                first_attempt_timeout=PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS,
-                            ),
-                            timeout=remaining,
-                        )
-                    )
-                    corrected_search = search_revision_plan(
-                        rows,
-                        corrected_plan,
-                        validator,
-                        baseline_metrics=baseline_metrics,
-                        deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
-                        movement_requirement=movement_requirement,
-                        preserved_components=preserved_components,
-                    )
-                    plan = corrected_plan
-                    attempts_used += correction_attempts
-                    model = corrected_model
-                    search_result = corrected_search
-                    correction_succeeded = True
-                except ProposalSearchExhausted as corrected_exception:
-                    exception = corrected_exception
-                    attempts_used += 1
-                except asyncio.TimeoutError as timeout_exception:
-                    raise LLMServiceError(
-                        "UPSTREAM_TIMEOUT",
-                        "DeepSeek did not correct the revision plan before the proposal time limit.",
-                        request_id,
-                        True,
-                        attempts_used + 1,
-                        504,
-                    ) from timeout_exception
-                except LLMServiceError as correction_exception:
-                    correction_exception.attempts_used += attempts_used
-                    raise correction_exception
-            else:
-                exception.diagnostics["correctionSkipped"] = "llm_phase_deadline"
+        error.revision_plan = plan.as_dict()
+        error.revision_contract = revision_contract
+        raise error
 
-        if not correction_succeeded:
-            elapsed_ms = int((time.monotonic() - started_at) * 1000)
-            _log_llm_event(
-                "llm_request_completed",
-                requestId=request_id,
-                task="map_proposal",
-                outcome="error",
-                code="PROPOSAL_SEARCH_EXHAUSTED",
-                attemptsUsed=attempts_used,
-                latencyMs=elapsed_ms,
-                responseMode="revision_plan_search",
-                search=exception.diagnostics,
+    operation_messages = _build_map_operation_messages(
+        revision_contract,
+        rows,
+        language,
+        stage_context,
+        baseline_metrics,
+    )
+    try:
+        operation_result = asyncio.run(
+            asyncio.wait_for(
+                _generate_map_operation_candidates(
+                    api_key=api_key,
+                    base_url=base_url,
+                    models=models,
+                    messages=operation_messages,
+                    base_rows=rows,
+                    request_id=request_id,
+                    language=language,
+                    proposal_validator=proposal_validator,
+                    revision_contract=revision_contract,
+                    baseline_metrics=baseline_metrics,
+                    started_at=started_at,
+                ),
+                timeout=remaining_seconds,
             )
-            error = LLMServiceError(
-                "PROPOSAL_SEARCH_EXHAUSTED",
-                "Deterministic search found no solvable map satisfying the revision plan.",
-                request_id,
-                False,
-                attempts_used,
-                502,
-            )
-            error.revision_plan = plan.as_dict()
-            error.proposal_diagnostics = exception.diagnostics
-            raise error from exception
+        )
+    except asyncio.TimeoutError as exception:
+        error = LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "DeepSeek did not create executable revision operations before the 60 second limit.",
+            request_id,
+            True,
+            attempts_used + PROPOSAL_GENERATION_ATTEMPTS,
+            504,
+        )
+        error.revision_plan = plan.as_dict()
+        error.revision_contract = revision_contract
+        raise error from exception
+    except LLMServiceError as exception:
+        exception.attempts_used += attempts_used
+        exception.revision_plan = plan.as_dict()
+        exception.revision_contract = revision_contract
+        raise
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
-    _log_llm_event(
-        "llm_request_completed",
-        requestId=request_id,
-        task="map_proposal",
-        outcome="success",
-        model=model,
-        attemptsUsed=attempts_used,
-        latencyMs=elapsed_ms,
-        responseMode="revision_plan_search",
-        changedCellCount=search_result.score["changedCells"],
-        search=search_result.diagnostics,
-    )
+    guidance = dict(operation_result.guidance)
     latest_user = _latest_role_content(conversation, "user")
     intent_hypothesis = (
         _replace_echoed_intent_hypothesis(
@@ -1039,28 +999,32 @@ def _generate_revision_search_proposal_sync(
         if _user_states_first_person_view(latest_user)
         else None
     )
-    return LLMExecutionResult(
-        assistant_message=(
-            "我整理了一份等待你审查的地图提案。"
-            if language == "zh-CN"
-            else "I prepared a map proposal for your review."
-        ),
-        attempts_used=attempts_used,
-        request_id=request_id,
-        proposed_rows=list(search_result.rows),
-        modification_summary="",
-        model=model,
+    guidance["intentHypothesis"] = intent_hypothesis
+    guidance["intentConfidence"] = "medium" if intent_hypothesis else None
+    diagnostics = dict(operation_result.proposal_diagnostics)
+    diagnostics["planAttempts"] = attempts_used
+    diagnostics["modifierAttempts"] = operation_result.attempts_used
+    diagnostics["revisionContract"] = revision_contract
+    _log_llm_event(
+        "llm_request_completed",
+        requestId=request_id,
+        task="map_proposal",
+        outcome="success",
+        model=operation_result.model,
+        attemptsUsed=attempts_used + operation_result.attempts_used,
+        latencyMs=elapsed_ms,
+        responseMode="two_agent_revision",
+        changedCellCount=diagnostics.get("changedCellCount"),
+        candidateCount=diagnostics.get("candidateCount"),
+    )
+    return replace(
+        operation_result,
+        attempts_used=attempts_used + operation_result.attempts_used,
         latency_ms=elapsed_ms,
-        guidance={
-            "move": "deliver_revision",
-            "intentHypothesis": intent_hypothesis,
-            "intentConfidence": "medium" if intent_hypothesis else None,
-            "followUpQuestion": None,
-            "proposalOffer": None,
-            "uiCues": [],
-        },
+        guidance=guidance,
         revision_plan=plan.as_dict(),
-        proposal_diagnostics=search_result.diagnostics,
+        revision_contract=revision_contract,
+        proposal_diagnostics=diagnostics,
     )
 
 
@@ -1097,11 +1061,12 @@ def _build_revision_plan_messages(
         if message.get("role") in {"user", "assistant"}
     ]
     system_prompt = (
-        "You compile a designer-authorized revision for one saved 12x10 Sokoban Stage into a "
-        "small semantic RevisionPlan. Do not generate map rows, coordinates to edit, or tile "
-        "operations. The application owns all cell changes, structural validation, search, and "
-        "solvability. Preserve the authorized direction and every explicit prohibition. Treat "
-        "unmentioned areas as protected. Return JSON only with exactly one key, strategies, "
+        "You are the Sokoban co-creation chat assistant. Compile a designer-authorized revision "
+        "for one saved 12x10 Stage into a detailed, executable semantic RevisionPlan. Do not "
+        "generate map rows, coordinates to edit, or tile operations; a separate level revision "
+        "assistant will execute this plan. The application owns all cell changes, structural "
+        "validation, and solvability. Preserve the authorized direction and every explicit "
+        "prohibition. Treat unmentioned areas as protected. Return JSON only with exactly one key, strategies, "
         "containing one to three objects. Every strategy has exactly: effect, focus, operators, "
         "preserve, editBudget, metricGoals. effect is one of open_route, narrow_route, "
         "adjust_internal_walls, relocate_start, relocate_box, relocate_target, reshape_water, "
@@ -1110,10 +1075,14 @@ def _build_revision_plan_messages(
         "add_wall, remove_wall, move_player, move_box, move_target, add_water, remove_water. "
         "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
         "unrelated_areas. Never list an operator that edits a preserved component. editBudget is "
-        "an integer 1..8. metricGoals is an empty list or up to three distinct objects with metric "
+        "an integer 2..12; use at least 3 for structural changes and 2 only when relocating one "
+        "entity. metricGoals is an empty list or up to three distinct objects with metric "
         "solutionSteps, solutionPushes, or searchedStates and direction increase, decrease, or "
         "preserve. Use objective metrics only when the designer's direction clearly implies them. "
-        "Always preserve outer_shell and unrelated_areas. Natural-language reasoning is internal. "
+        "Always preserve outer_shell and unrelated_areas. Choose a concrete focus for a local "
+        "request, select operators that can realize the effect, and use metricGoals when the "
+        "designer clearly requests a measurable change. The first strategy is preferred and any "
+        "later strategies are strict alternatives, not permission to weaken the request. Natural-language reasoning is internal. "
         + _map_grounding_contract() + " "
         f"Interpret conversation in {response_language}."
     )
@@ -1372,6 +1341,7 @@ async def _compile_revision_plan(
             failure_reason = _safe_validation_reason(exception)
             last_error = classify_exception(exception, request_id, attempt)
             if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
+                last_error.safe_message = failure_reason[:1200]
                 validation_feedback = failure_reason[:1200]
         if attempt == 1:
             first_failure_code = last_error.code
@@ -1446,8 +1416,9 @@ def _generate_map_proposal_sync(
     models = [proposal_model]
     if fallback_model != proposal_model:
         models.append(fallback_model)
+    legacy_contract = _build_legacy_revision_execution_contract(stage_context)
     messages = _build_map_operation_messages(
-        conversation,
+        legacy_contract,
         rows,
         language,
         stage_context,
@@ -1472,8 +1443,10 @@ def _generate_map_proposal_sync(
                     messages=messages,
                     base_rows=rows,
                     request_id=request_id,
+                    language=language,
                     proposal_validator=proposal_validator,
-                    stage_context=stage_context,
+                    revision_contract=legacy_contract,
+                    baseline_metrics=None,
                     started_at=started_at,
                 ),
                 timeout=CHAT_TIMEOUT_SECONDS,
@@ -1501,56 +1474,111 @@ def _generate_map_proposal_sync(
         ) from exception
 
 
-def _build_map_operation_messages(conversation, rows, language, stage_context):
+def _build_legacy_revision_execution_contract(stage_context=None):
+    return {
+        "schemaVersion": REVISION_CONTRACT_SCHEMA_VERSION,
+        "authorizedBrief": str(
+            (stage_context or {}).get("authorizedRevisionBrief") or ""
+        ).strip()[:1200],
+        "revisionPlan": {"strategies": []},
+        "strategies": [{
+            "strategyIndex": 1,
+            "effect": "adjust_internal_walls",
+            "focus": None,
+            "allowedOperators": [
+                "add_wall",
+                "remove_wall",
+                "move_player",
+                "move_box",
+                "move_target",
+                "add_water",
+                "remove_water",
+            ],
+            "preserve": ["outer_shell", "unrelated_areas"],
+            "minimumChangedCells": 1,
+            "maximumChangedCells": REVISION_MAX_CHANGED_CELLS,
+            "metricGoals": [],
+        }],
+        "explicitlyRelaxedByDesigner": False,
+    }
+
+
+def _build_revision_execution_contract(plan, authorized_brief, stage_context=None):
+    relocation_effects = {
+        "relocate_start",
+        "relocate_box",
+        "relocate_target",
+    }
+    strategies = []
+    for index, strategy in enumerate(plan.strategies, start=1):
+        maximum_changed_cells = min(REVISION_MAX_CHANGED_CELLS, strategy.edit_budget)
+        strategy_data = strategy.as_dict()
+        entity_operators = {"move_player", "move_box", "move_target"}
+        minimum_changed_cells = (
+            2
+            if strategy.effect in relocation_effects
+            or set(strategy_data["operators"]).issubset(entity_operators)
+            else REVISION_MIN_CHANGED_CELLS
+        )
+        strategies.append({
+            "strategyIndex": index,
+            "effect": strategy_data["effect"],
+            "focus": strategy_data["focus"],
+            "allowedOperators": strategy_data["operators"],
+            "preserve": strategy_data["preserve"],
+            "minimumChangedCells": minimum_changed_cells,
+            "maximumChangedCells": maximum_changed_cells,
+            "metricGoals": strategy_data["metricGoals"],
+        })
+    return {
+        "schemaVersion": REVISION_CONTRACT_SCHEMA_VERSION,
+        "authorizedBrief": str(authorized_brief or "").strip()[:1200],
+        "revisionPlan": plan.as_dict(),
+        "strategies": strategies,
+        "explicitlyRelaxedByDesigner": bool((stage_context or {}).get("revisionRelaxed")),
+    }
+
+
+def _build_map_operation_messages(
+    revision_contract,
+    rows,
+    language,
+    stage_context,
+    baseline_metrics=None,
+):
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
-    revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
-    original_brief = str(stage_context.get("relaxationOriginalBrief") or "").strip()
-    relaxation_rule = (
-        "This is a designer-approved fallback. Preserve the original core direction, but "
-        "the proposal only needs to realize one coherent, play-testable local effect instead "
-        "of every secondary effect at once. Solvability, the outer shell, explicit prohibitions, "
-        "and every untouched cell remain non-negotiable."
-        if stage_context.get("revisionRelaxed")
-        else "Do not weaken or reinterpret the authorized direction."
-    )
     numbered_map = "\n".join(
         f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
     )
-    transcript = [
-        {
-            "role": message.get("role"),
-            "content": str(message.get("content") or "")[:2000],
-        }
-        for message in conversation[-12:]
-        if message.get("role") in {"user", "assistant"}
-    ]
+    map_facts = _map_facts_for_prompt(rows, stage_context)
+    solver_evidence = _llm_solver_evidence(baseline_metrics or {})
     system_prompt = (
-        "You create reviewable edit candidates for one saved 12x10 Sokoban Stage. The saved "
-        "map is immutable; return only cell operations and let the application construct the "
-        "complete map. The designer's authorized revision brief is authoritative. Use the same "
-        "preserve-unlisted rule as a strict change contract: change only the smallest coherent "
-        "set of causally necessary cells, and never add an unrelated improvement merely to make "
-        "the diff non-empty. Every candidate must make a real change that serves the brief. "
-        "Never edit void cells or the connected outer-shell wall. Keep exactly one player and "
-        "one or two matching box/target pairs. Produce up to three meaningfully distinct candidates "
-        "in preferred order so deterministic validation can select the first solvable one. "
-        "Coordinates are one-based. Each operation must state only row, column, and a different "
-        "supported destination tile in to; the server reads the real current tile itself. Do not "
-        "emit a from field. A moved player, box, or target normally requires paired operations "
-        "that clear the old cell and place the tile on a current floor cell. Return JSON only with "
-        "exactly this shape: {\"candidates\":[{\"operations\":[{\"row\":1,\"column\":1,"
-        "\"to\":\"#\"}]}]}. candidates must contain "
-        "one to three items; every operations array must contain one to 24 unique cells. Allowed "
-        "tiles are space, #, ., @, p, s, and t, although space/outer-shell edits are forbidden. "
+        "You are the Sokoban co-creation level revision assistant. The saved 12x10 Stage is "
+        "immutable input. Execute only the supplied execution contract; do not reinterpret the "
+        "designer's request, invent a broader goal, or use any conversation outside the contract. "
+        "Return only concrete cell-operation candidates. The application constructs the complete "
+        "map, enforces the contract, checks structure, and runs the deterministic solver. "
+        "Every candidate must make a meaningful, coherent local change within the contract. Do "
+        "not add unrelated cells just to make a diff. Never edit void cells or the connected outer "
+        "shell. Never modify preserved components or cells outside the strategy focus. Keep the "
+        "map structurally valid with exactly one player and matching box/target pairs. Produce up "
+        "to three distinct candidates, each tagged with its strategyIndex. Coordinates are one-based. "
+        "Each operation must contain only row, column, and to; the server reads the real before tile. "
+        "A moved player, box, or target requires paired operations that clear the old cell and place "
+        "the entity on a current floor cell. Return JSON only with exactly this shape: "
+        "{\"candidates\":[{\"strategyIndex\":1,\"operations\":[{\"row\":5,"
+        "\"column\":6,\"to\":\"#\"}]}]}. Each operations array contains one to 24 unique "
+        "cells. Allowed destination tiles are space, #, ., @, p, s, and t; space edits are forbidden. "
         f"Natural-language reasoning is internal; any unavoidable text must use {response_language}."
     )
     user_prompt = (
-        f"Authorized revision brief: {revision_brief!r}. "
-        f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule}\n\n"
+        "The following contract is authoritative and is the only revision instruction:\n"
+        f"{json.dumps(revision_contract, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "Column ruler (one-based): 123456789012\n"
+        f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
-        f"Recent Stage conversation JSON: {json.dumps(transcript, ensure_ascii=False)}"
+        f"Deterministic solver evidence (authoritative): {json.dumps(solver_evidence, ensure_ascii=False)}"
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -1566,19 +1594,18 @@ async def _generate_map_operation_candidates(
     messages,
     base_rows,
     request_id,
+    language,
     proposal_validator,
-    stage_context,
+    revision_contract,
+    baseline_metrics,
     started_at,
 ):
     last_error = None
     validation_feedback = None
-    attempted_models = [models[0]]
-    if len(models) > 1:
-        attempted_models.append(models[1])
-    else:
+    attempted_candidate_count = 0
+    attempted_models = list(models[:PROPOSAL_GENERATION_ATTEMPTS])
+    while len(attempted_models) < PROPOSAL_GENERATION_ATTEMPTS:
         attempted_models.append(models[0])
-    attempted_models.append(models[0])
-    brief = str(stage_context.get("authorizedRevisionBrief") or "")
 
     for attempt, configured_model in enumerate(attempted_models, start=1):
         model = models[0] if validation_feedback is not None else configured_model
@@ -1621,17 +1648,24 @@ async def _generate_map_operation_candidates(
             if not content.strip():
                 raise EmptyModelResponse("The model returned an empty response.")
             payload = json.loads(content)
-            selected_rows, selected_index, candidate_count = _select_operation_candidate(
+            if isinstance(payload, dict) and isinstance(payload.get("candidates"), list):
+                attempted_candidate_count = max(
+                    attempted_candidate_count,
+                    len(payload["candidates"]),
+                )
+            selected_rows, selected_index, candidate_count, selected_operations = _select_operation_candidate(
                 payload,
                 base_rows,
-                brief,
+                revision_contract,
                 proposal_validator,
+                baseline_metrics,
             )
             latency_ms = int((time.monotonic() - started_at) * 1000)
+            changed_cell_count = _changed_cell_count(base_rows, selected_rows)
             result = LLMExecutionResult(
                 assistant_message=(
                     "我整理了一份等待你审查的地图提案。"
-                    if language_from_context(stage_context) == "zh-CN"
+                    if language == "zh-CN"
                     else "I prepared a map proposal for your review."
                 ),
                 attempts_used=attempt,
@@ -1648,6 +1682,18 @@ async def _generate_map_operation_candidates(
                     "proposalOffer": None,
                     "uiCues": [],
                 },
+                revision_contract=revision_contract,
+                revision_operations=selected_operations,
+                proposal_diagnostics={
+                    "candidateCount": candidate_count,
+                    "validCandidates": 1,
+                    "constructedCandidates": candidate_count,
+                    "selectedCandidateIndex": selected_index,
+                    "selectedStrategyIndex": _candidate_strategy_index(
+                        payload, selected_index
+                    ),
+                    "changedCellCount": changed_cell_count,
+                },
             )
             _log_llm_event(
                 "llm_request_completed",
@@ -1660,12 +1706,7 @@ async def _generate_map_operation_candidates(
                 responseMode="operation_candidates",
                 candidateCount=candidate_count,
                 selectedCandidateIndex=selected_index,
-                changedCellCount=sum(
-                    1
-                    for before_row, after_row in zip(base_rows, selected_rows)
-                    for before, after in zip(before_row, after_row)
-                    if before != after
-                ),
+                changedCellCount=changed_cell_count,
                 **response_fields,
             )
             return result
@@ -1683,6 +1724,7 @@ async def _generate_map_operation_candidates(
             failure_reason = _safe_validation_reason(exception)
             last_error = classify_exception(exception, request_id, attempt)
             if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
+                last_error.safe_message = failure_reason[:1200]
                 validation_feedback = failure_reason[:1200]
         failure_fields = {
             "requestId": request_id,
@@ -1711,6 +1753,24 @@ async def _generate_map_operation_candidates(
         latencyMs=int((time.monotonic() - started_at) * 1000),
         responseMode="operation_candidates",
     )
+    if last_error.code == "MODEL_RESPONSE_INVALID":
+        error = LLMServiceError(
+            "PROPOSAL_SEARCH_EXHAUSTED",
+            "The level revision assistant produced no executable candidate satisfying the revision contract.",
+            request_id,
+            False,
+            last_error.attempts_used,
+            502,
+        )
+        error.proposal_diagnostics = {
+            "modifierFailure": str(last_error.safe_message)[:1200],
+            "attempts": last_error.attempts_used,
+            "constructedCandidates": attempted_candidate_count,
+            "validCandidates": 0,
+            "candidateCount": attempted_candidate_count,
+        }
+        error.revision_contract = revision_contract
+        raise error from last_error
     raise last_error
 
 
@@ -1732,7 +1792,13 @@ def _operation_messages_with_feedback(messages, validation_feedback):
     return corrected
 
 
-def _select_operation_candidate(payload, base_rows, revision_brief, proposal_validator):
+def _select_operation_candidate(
+    payload,
+    base_rows,
+    revision_contract,
+    proposal_validator,
+    baseline_metrics=None,
+):
     if not isinstance(payload, dict):
         raise ValueError("The map proposal must be a JSON object.")
     candidates = payload.get("candidates")
@@ -1740,25 +1806,103 @@ def _select_operation_candidate(payload, base_rows, revision_brief, proposal_val
         raise ValueError("candidates must contain one to three operation candidates.")
     failures = []
     canonical = set()
+    strategies = revision_contract.get("strategies") or []
+    if not strategies:
+        raise ValueError("The revision contract must contain at least one strategy.")
     for index, candidate in enumerate(candidates, start=1):
         try:
-            if not isinstance(candidate, dict):
+            if not isinstance(candidate, dict) or set(candidate) != {"strategyIndex", "operations"}:
                 raise ValueError("candidate must be an object")
+            strategy_index = candidate["strategyIndex"]
+            if (
+                isinstance(strategy_index, bool)
+                or not isinstance(strategy_index, int)
+                or not 1 <= strategy_index <= len(strategies)
+            ):
+                raise ValueError("candidate strategyIndex is invalid")
+            strategy = strategies[strategy_index - 1]
             operations = candidate.get("operations")
-            rows = _apply_map_operations(base_rows, operations, revision_brief)
+            rows = execute_revision_operations(
+                base_rows,
+                operations,
+                revision_contract,
+                strategy_index,
+            )
             signature = tuple(rows)
             if signature in canonical:
                 raise ValueError("candidate duplicates an earlier operation result")
             canonical.add(signature)
+            changed_cells = _changed_cell_count(base_rows, rows)
+            if not (
+                strategy["minimumChangedCells"]
+                <= changed_cells
+                <= strategy["maximumChangedCells"]
+            ):
+                raise ValueError(
+                    "candidate changed "
+                    f"{changed_cells} cells; expected "
+                    f"{strategy['minimumChangedCells']}..{strategy['maximumChangedCells']}"
+                )
             if proposal_validator is not None:
-                proposal_validator(rows)
-            return rows, index, len(candidates)
+                validation = proposal_validator(rows)
+            else:
+                validation = validate_and_solve(rows)
+            _validate_metric_goals(
+                strategy.get("metricGoals") or [],
+                baseline_metrics or {},
+                validation,
+            )
+            return rows, index, len(candidates), list(operations)
         except Exception as exception:
             failures.append(f"candidate {index}: {_safe_validation_reason(exception)}")
     raise ValueError("; ".join(failures)[:1200])
 
 
-def _apply_map_operations(base_rows, operations, revision_brief):
+def _candidate_strategy_index(payload, candidate_index):
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(candidates, list) or not 1 <= candidate_index <= len(candidates):
+        return None
+    candidate = candidates[candidate_index - 1]
+    return candidate.get("strategyIndex") if isinstance(candidate, dict) else None
+
+
+def execute_revision_operations(base_rows, operations, revision_contract, strategy_index):
+    """Apply one modifier-agent candidate under the immutable execution contract."""
+    if not isinstance(operations, list) or any(
+        not isinstance(operation, dict)
+        or set(operation) != {"row", "column", "to"}
+        for operation in operations
+    ):
+        raise ValueError("modifier operations must contain only row, column, and to")
+    strategies = (revision_contract or {}).get("strategies") or []
+    if (
+        isinstance(strategy_index, bool)
+        or not isinstance(strategy_index, int)
+        or not 1 <= strategy_index <= len(strategies)
+    ):
+        raise ValueError("the selected revision strategy is invalid")
+    strategy = strategies[strategy_index - 1]
+    rows = _apply_map_operations(
+        base_rows,
+        operations,
+        strategy_contract=strategy,
+    )
+    changed_cells = _changed_cell_count(base_rows, rows)
+    minimum = int(strategy.get("minimumChangedCells") or 0)
+    maximum = int(strategy.get("maximumChangedCells") or REVISION_MAX_CHANGED_CELLS)
+    if not minimum <= changed_cells <= maximum:
+        raise ValueError(
+            f"candidate changed {changed_cells} cells; expected {minimum}..{maximum}"
+        )
+    return rows
+
+
+def _apply_map_operations(
+    base_rows,
+    operations,
+    revision_brief=None,
+    strategy_contract=None,
+):
     if not isinstance(operations, list) or not 1 <= len(operations) <= PROPOSAL_OPERATION_LIMIT:
         raise ValueError("operations must contain one to 24 cell changes")
     allowed_tiles = set(" #.@pst")
@@ -1801,8 +1945,111 @@ def _apply_map_operations(base_rows, operations, revision_brief):
         normalized.append((x, y, before, after))
     if not normalized:
         raise ValueError("operations must contain at least one real tile change")
-    _validate_operation_intent_scope(normalized, revision_brief)
+    if strategy_contract is not None:
+        _validate_operation_contract(normalized, strategy_contract)
+    else:
+        _validate_operation_intent_scope(normalized, revision_brief)
     return ["".join(row) for row in mutable]
+
+
+def _operation_kind(before, after):
+    return {
+        (".", "#"): "add_wall",
+        ("#", "."): "remove_wall",
+        ("p", "."): "move_player",
+        (".", "p"): "move_player",
+        ("s", "."): "move_box",
+        (".", "s"): "move_box",
+        ("t", "."): "move_target",
+        (".", "t"): "move_target",
+        (".", "@"): "add_water",
+        ("@", "."): "remove_water",
+    }.get((before, after))
+
+
+def _changed_cell_count(before_rows, after_rows):
+    return sum(
+        before != after
+        for before_row, after_row in zip(before_rows, after_rows)
+        for before, after in zip(before_row, after_row)
+    )
+
+
+def _validate_operation_contract(operations, strategy):
+    effect_operators = {
+        "open_route": {"remove_wall", "remove_water"},
+        "narrow_route": {"add_wall", "add_water"},
+        "adjust_internal_walls": {"add_wall", "remove_wall"},
+        "relocate_start": {"move_player"},
+        "relocate_box": {"move_box"},
+        "relocate_target": {"move_target"},
+        "reshape_water": {"add_water", "remove_water"},
+        "change_box_order": {"move_box", "move_target", "add_wall", "remove_wall"},
+    }
+    component_by_operator = {
+        "move_player": "player",
+        "move_box": "boxes",
+        "move_target": "targets",
+        "add_water": "water",
+        "remove_water": "water",
+    }
+    allowed = set(strategy.get("allowedOperators") or [])
+    preserved = set(strategy.get("preserve") or [])
+    observed = set()
+    positions = []
+    operator_counts = {}
+    for x, y, before, after in operations:
+        operator = _operation_kind(before, after)
+        if operator is None:
+            raise ValueError(f"unsupported tile transition {before!r} to {after!r}")
+        if operator not in allowed:
+            raise ValueError(f"operation {operator} is outside the revision contract")
+        component = component_by_operator.get(operator)
+        if component and component in preserved:
+            raise ValueError(f"operation changes preserved component {component}")
+        if operator in {"add_wall", "remove_wall"} and "walls" in preserved:
+            raise ValueError("operation changes preserved walls")
+        focus = strategy.get("focus")
+        if focus is not None:
+            if max(
+                abs((focus["column"] - 1) - x),
+                abs((focus["row"] - 1) - y),
+            ) > focus["radius"]:
+                raise ValueError("operation is outside the revision focus")
+        observed.add(operator)
+        positions.append((x, y))
+        operator_counts[operator] = operator_counts.get(operator, 0) + 1
+
+    expected = effect_operators.get(strategy.get("effect"), set())
+    if not observed.intersection(expected):
+        raise ValueError("operations do not realize the planned effect")
+    for operator in ("move_player", "move_box", "move_target"):
+        if operator_counts.get(operator, 0) % 2:
+            raise ValueError(f"{operator} requires paired source and destination operations")
+    if len(set(positions)) != len(positions):
+        raise ValueError("the revision contract cannot contain duplicate changed cells")
+
+
+def _validate_metric_goals(goals, baseline_metrics, validation):
+    values = {
+        "solutionSteps": getattr(validation, "solution_steps", None),
+        "solutionPushes": getattr(validation, "solution_pushes", None),
+        "searchedStates": getattr(validation, "searched_states", None),
+    }
+    for goal in goals:
+        metric = goal.get("metric")
+        before = baseline_metrics.get(metric)
+        after = values.get(metric)
+        if before is None or after is None:
+            raise ValueError(f"metric goal {metric} cannot be verified")
+        direction = goal.get("direction")
+        matched = {
+            "increase": after > before,
+            "decrease": after < before,
+            "preserve": after == before,
+        }.get(direction, False)
+        if not matched:
+            raise ValueError(f"metric goal {metric} {direction} was not met")
 
 
 def _connected_outer_shell(rows):

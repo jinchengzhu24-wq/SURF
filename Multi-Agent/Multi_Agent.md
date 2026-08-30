@@ -1,10 +1,11 @@
 # Multi-Agent
 
-| Agent | 服务 | 作用 | 主要输出 |
+| Agent | 服务 | 作用 | 输入 → 输出 |
 |---|---|---|---|
-| Draft首版理解助手 | 8000 | 理解四道 DG 问题，形成首版设计理解 | `dgContext` |
-| 关卡蓝图规划助手 | 8000 | 将确认后的设计理解转换为关卡蓝图 | `LevelDesignPlan` |
-| 共创助手 | 8010 | 基于 Stage 进行共创对话，在授权后提出修改 | `intentHypothesis`、`RevisionPlan` |
+| Draft首版理解助手 | 8000 | 理解四道 DG 问题，形成首版设计理解 | DG 回答 → `dgContext` |
+| 关卡蓝图规划助手 | 8000 | 将确认后的设计理解转换为可生成蓝图 | `dgContext` → `LevelDesignPlan` |
+| 共创聊天助手 | 8010 | 理解共创要求、澄清意图，并生成已授权的语义计划 | 对话、Stage、地图事实 → `RevisionPlan`、`executionContract` |
+| 共创关卡修改助手 | 8010 | 严格按计划输出局部格子操作，不重新解释意图 | `RevisionPlan`、`executionContract`、Stage、求解器事实 → 操作候选 |
 
 ## 传递关系
 
@@ -16,29 +17,28 @@ DG 回答
 → LevelDesignPlan
 → Unity 生成器与求解器
 → 验证地图
-→ 共创助手
-→ RevisionPlan
-→ 确定性验证
+→ 共创聊天助手
+→ RevisionPlan + executionContract
+→ 共创关卡修改助手
+→ 具体操作候选
+→ 确定性执行与 validate_and_solve()
 → 玩家确认
 → 新 Stage
 ```
 
-系统通过 `audit_events` 或 8000 现有结构化运行日志记录 Agent 之间的交接：
+8010 的交接记录为：
 
 ```text
-draft_understanding → blueprint_planning
-blueprint_planning → co_creation
-co_creation → deterministic_validator
+co_creation_chat → co_creation_revision → deterministic_validator
 ```
 
-每条交接包含 `schemaVersion`、来源、目标、产物、证据和状态。状态可为 `proposed`、`confirmed` 或 `rejected`。`intentHypothesis` 始终是 AI 的可修正推测，不自动成为玩家最终意图；所有地图修改必须通过确定性验证。
+交接记录包含产物、证据、重试、操作、变化数量、验证结果和 `proposed`、`confirmed` 或 `rejected` 状态。`intentHypothesis` 始终是可拒绝的 AI 推测，不自动成为玩家最终意图。未经明确授权、契约校验和确定性验证，不保存地图修改。
 
-8000 只负责 DG 理解和蓝图规划；8010 只接收当前 Stage、地图事实、求解器结果和共创对话，不接收研究者目标、实验条件或未经确认的 DG 上下文。直访问示例会话直接由 8010 的算法地图生成器创建，不经过 8000；其交接记录随该 Demo 会话清理。
+8000 的 `dgContext`、研究者目标和实验条件不得进入 8010。直访问示例会话直接进入 8010，不经过 8000；其交接记录随旧 Demo 会话清理。确定性执行器、地图生成器和求解器不是独立 Agent。独立的 Intent、Layout、Difficulty、Evaluator、Coordinator Agent：暂无。
 
-现有应用流程承担协调职责。独立的 Intent Agent、Layout Agent、Difficulty Agent、Evaluator Agent、Coordinator Agent：暂无。确定性生成器和求解器不是独立 Agent。
-
-各 Prompt：
+正式流程 Prompt：
 
 - [Draft首版理解助手（8000）.md](Draft首版理解助手（8000）.md)
 - [关卡蓝图规划助手（8000）.md](关卡蓝图规划助手（8000）.md)
-- [共创助手（8010）.md](共创助手（8010）.md)
+- [共创聊天助手（8010）.md](共创聊天助手（8010）.md)
+- [共创关卡修改助手（8010）.md](共创关卡修改助手（8010）.md)

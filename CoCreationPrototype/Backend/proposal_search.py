@@ -10,10 +10,9 @@ BEAM_DEPTH = 3
 PRIMITIVE_LIMIT = 32
 MAX_CONSTRUCTED_CANDIDATES = 64
 MAX_VALID_CANDIDATES = 8
-# An LLM proposal is a reviewable local experiment, not a substitute for a
-# designer-led rebuild in the editor.  This is deliberately lower than the
-# legacy 24-tile schema allowance.
-MAX_EDIT_BUDGET = 8
+# A revision is a meaningful but bounded local experiment.  The operation
+# agent uses this same upper bound for its machine-checkable edit contract.
+MAX_EDIT_BUDGET = 12
 
 EFFECTS = {
     "open_route",
