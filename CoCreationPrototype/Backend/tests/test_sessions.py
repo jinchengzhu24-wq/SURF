@@ -124,6 +124,30 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "BOOTSTRAP_TOKEN_USED")
 
+    def test_formal_session_records_blueprint_to_cocreation_handoff(self):
+        with repository.connect() as database:
+            event = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'agent_handoff'
+                ORDER BY id
+                """,
+                (self.session_id,),
+            ).fetchone()
+
+        self.assertIsNotNone(event)
+        payload = repository.load_json(event["payload_json"])
+        self.assertEqual(payload["schemaVersion"], 1)
+        self.assertEqual(payload["fromAgent"], "blueprint_planning")
+        self.assertEqual(payload["toAgent"], "co_creation")
+        self.assertEqual(payload["artifactType"], "validated_initial_stage")
+        self.assertEqual(payload["status"], "confirmed")
+        self.assertEqual(
+            payload["artifact"]["versionId"],
+            self.read_session()["currentVersionId"],
+        )
+        self.assertEqual(payload["evidence"][0]["type"], "deterministic_solver")
+
     def test_demo_session_has_no_deadline_and_skips_online_sync(self):
         with patch.object(backend, "synchronize_version_with_online_match") as sync:
             demo_session_id = self.create_and_open_demo_session("demo_no_deadline_001")
@@ -1386,6 +1410,103 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(
             chat_mock.call_args.kwargs["stage_context"]["openingTurnId"],
             proposal_turn["turnId"],
+        )
+
+    def test_intent_hypothesis_and_validator_handoff_keep_player_control(self):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "I prepared a focused map proposal for your review.",
+            1,
+            "hypothesis-proposal-request",
+            proposed_rows=EDITED_ROWS,
+            modification_summary="Move the player start left.",
+            model="mock-model",
+            guidance={
+                "move": "deliver_revision",
+                "intentHypothesis": "I think you want the first route choice to feel more deliberate.",
+                "intentConfidence": "medium",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+            revision_plan={
+                "strategies": [{"effect": "relocate_start", "operators": ["move_player"]}]
+            },
+        )
+
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            proposed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Move the player one cell left.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "hypothesis_proposal_001",
+                },
+            )
+
+        self.assertEqual(proposed.status_code, 200, proposed.text)
+        proposal_id = proposed.json()["proposals"][0]["proposalId"]
+        rejected = self.client.post(
+            f"/api/sessions/{self.session_id}/proposals/{proposal_id}/decision",
+            json={
+                "decision": "reject",
+                "baseVersionId": version_id,
+                "idempotencyKey": "hypothesis_reject_001",
+                "reason": "This does not reflect what I meant.",
+            },
+        )
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+
+        with repository.connect() as database:
+            handoff = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'agent_handoff'
+                  AND json_extract(payload_json, '$.artifactType') = 'validated_revision_proposal'
+                """,
+                (self.session_id,),
+            ).fetchone()
+            hypotheses = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'intent_hypothesis'
+                ORDER BY id
+                """,
+                (self.session_id,),
+            ).fetchall()
+            current_version = repository.get_current_version(
+                database,
+                repository.get_session(database, self.session_id),
+            )
+            llm_context = backend.build_llm_context(
+                database,
+                self.session_id,
+                current_version,
+            )
+
+        self.assertIsNotNone(handoff)
+        handoff_payload = repository.load_json(handoff["payload_json"])
+        self.assertEqual(handoff_payload["fromAgent"], "co_creation")
+        self.assertEqual(handoff_payload["toAgent"], "deterministic_validator")
+        self.assertEqual(handoff_payload["status"], "confirmed")
+        self.assertEqual(handoff_payload["artifact"]["proposalId"], proposal_id)
+        self.assertEqual(
+            handoff_payload["evidence"][0]["validation"]["solvable"],
+            True,
+        )
+
+        self.assertEqual(len(hypotheses), 2)
+        proposed_payload = repository.load_json(hypotheses[0]["payload_json"])
+        rejected_payload = repository.load_json(hypotheses[1]["payload_json"])
+        self.assertEqual(proposed_payload["status"], "proposed")
+        self.assertEqual(proposed_payload["artifact"]["confidence"], "medium")
+        self.assertEqual(
+            proposed_payload["artifact"]["hypothesis"],
+            "I think you want the first route choice to feel more deliberate.",
+        )
+        self.assertEqual(rejected_payload["status"], "rejected")
+        self.assertEqual(rejected_payload["proposalId"], proposal_id)
+        self.assertIsNone(
+            llm_context["stageContext"]["recentGuidance"]["intentHypothesis"]
         )
 
     def test_unchanged_llm_proposal_is_rejected_before_it_can_be_saved(self):

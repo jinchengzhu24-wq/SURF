@@ -107,6 +107,34 @@ ONLINE_AI_ASSISTANT_MODES = {
 ONLINE_ROOMS = {}
 ONLINE_ROOMS_LOCK = threading.Lock()
 
+
+AGENT_HANDOFF_SCHEMA_VERSION = 1
+
+
+def log_agent_handoff(
+    from_agent,
+    to_agent,
+    artifact_type,
+    artifact,
+    evidence=None,
+    status="proposed",
+    request_id="",
+):
+    """Record the 8000-side structured handoff in the existing runtime log."""
+    log_event(
+        "INFO",
+        "agent_handoff",
+        requestId=request_id,
+        schemaVersion=AGENT_HANDOFF_SCHEMA_VERSION,
+        fromAgent=from_agent,
+        toAgent=to_agent,
+        artifactType=artifact_type,
+        artifact=artifact or {},
+        evidence=evidence or [],
+        status=status,
+    )
+
+
 class PCSolvabilityError(ValueError):
     def __init__(self, reason_code, message, searched_states=0, details=None):
         super().__init__(message)
@@ -2820,6 +2848,21 @@ def dg_guide_summary(
     ):
         raise HTTPException(status_code=400, detail="Invalid DG neutral answer.")
     result = create_dg_guide_summary(context, request.state.request_id)
+    log_agent_handoff(
+        "draft_understanding",
+        "blueprint_planning",
+        "dgContext",
+        {
+            "dgContext": context,
+            "guideSummary": result,
+        },
+        evidence=[
+            {"type": "dg_answers", "fields": list(context.keys())},
+            {"type": "summary_source", "source": result.get("source", "")},
+        ],
+        status="confirmed",
+        request_id=request.state.request_id,
+    )
     response.headers["X-DG-Guide-Source"] = result.get("source", "")
     return result
 
@@ -2873,6 +2916,21 @@ def execute_level_plan_request(
         data,
         request.state.request_id,
         max_attempts,
+    )
+    log_agent_handoff(
+        "blueprint_planning",
+        "unity_generator",
+        "LevelDesignPlan",
+        {"levelDesignPlan": execution.value},
+        evidence=[
+            {"type": "blueprint_validation", "status": "passed"},
+            {
+                "type": "dgContext",
+                "present": bool(data.get("dgContext")),
+            },
+        ],
+        status="confirmed",
+        request_id=request.state.request_id,
     )
     apply_llm_execution_headers(response, execution)
     return execution.value

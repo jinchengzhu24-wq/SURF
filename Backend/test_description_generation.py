@@ -55,6 +55,35 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             "open_workshop",
         )
 
+    def test_level_plan_records_blueprint_handoff_in_existing_runtime_log(self):
+        execution = LLMExecutionResult(
+            copy.deepcopy(backend.DEFAULT_PLAN),
+            1,
+            "blueprint-handoff-request",
+        )
+
+        with patch.object(backend, "create_level_plan", return_value=execution), patch.object(
+            backend, "log_event"
+        ) as logger:
+            response = self.client.post(
+                "/generate-level-plan",
+                json={"dgContext": {"recommendedDifficulty": "Medium"}},
+                headers={"X-Request-ID": "blueprint-handoff-request"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        handoff = next(
+            call for call in logger.call_args_list if call.args[1] == "agent_handoff"
+        )
+        self.assertEqual(handoff.kwargs["fromAgent"], "blueprint_planning")
+        self.assertEqual(handoff.kwargs["toAgent"], "unity_generator")
+        self.assertEqual(handoff.kwargs["artifactType"], "LevelDesignPlan")
+        self.assertEqual(
+            handoff.kwargs["artifact"]["levelDesignPlan"],
+            backend.DEFAULT_PLAN,
+        )
+        self.assertTrue(handoff.kwargs["evidence"][1]["present"])
+
     def test_manual_parameters_override_conflicting_description(self):
         context = {
             "styleDescription": "Create a level with no water.",
@@ -159,6 +188,45 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["recommendedLayout"], "Balanced")
         self.assertEqual(response.json()["source"], "llm")
         self.assertTrue(response.json()["summary"].startswith("Your choices suggest"))
+
+    def test_dg_guide_records_draft_to_blueprint_handoff(self):
+        result = {
+            "summary": "Your choices suggest readable planning in a connected space. My read is that nearby decisions can lead into a manageable route between areas.",
+            "difficultyRationale": "I connect some first-move inspection with some push-order planning, which supports Medium difficulty.",
+            "recommendedDifficulty": "Medium",
+            "layoutRationale": "I connect a few connected areas with mostly direct routes and some detours, which supports a Balanced layout.",
+            "recommendedLayout": "Balanced",
+        }
+
+        def execute_json_request(**kwargs):
+            return LLMExecutionResult(kwargs["validator"](result), 1, "dg-handoff-request")
+
+        with patch.object(
+            backend, "execute_json_request", side_effect=execute_json_request
+        ), patch.object(backend, "log_event") as logger:
+            response = self.client.post(
+                "/dg/guide/summary",
+                json={
+                    "firstMovePreference": "observe_then_decide",
+                    "pushPlanningPreference": "consider_order",
+                    "spacePreference": "connected_areas",
+                    "routeRhythmPreference": "occasional_detours",
+                },
+                headers={"X-Request-ID": "dg-handoff-request"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        handoff = next(
+            call for call in logger.call_args_list if call.args[1] == "agent_handoff"
+        )
+        self.assertEqual(handoff.kwargs["fromAgent"], "draft_understanding")
+        self.assertEqual(handoff.kwargs["toAgent"], "blueprint_planning")
+        self.assertEqual(handoff.kwargs["artifactType"], "dgContext")
+        self.assertEqual(
+            handoff.kwargs["artifact"]["dgContext"]["spacePreference"],
+            "connected_areas",
+        )
+        self.assertEqual(handoff.kwargs["status"], "confirmed")
 
     def test_dg_guide_accepts_random_recommendations_for_two_no_preference_answers(self):
         result = {

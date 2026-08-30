@@ -75,6 +75,9 @@ INTERRUPTED_AFTER = timedelta(minutes=30)
 _message_locks = {}
 _message_locks_guard = Lock()
 
+AGENT_HANDOFF_SCHEMA_VERSION = 1
+AGENT_HANDOFF_STATUSES = {"proposed", "confirmed", "rejected"}
+
 SAMPLE_ROWS = [
     "############",
     "#..........#",
@@ -95,6 +98,94 @@ SAMPLE_LEGEND = {
     "s": "box",
     "t": "target",
 }
+
+
+def record_agent_handoff(
+    database,
+    session_id,
+    from_agent,
+    to_agent,
+    artifact_type,
+    artifact=None,
+    evidence=None,
+    status="proposed",
+    created_at=None,
+):
+    """Persist one small, inspectable handoff without changing the public API."""
+    if status not in AGENT_HANDOFF_STATUSES:
+        raise ValueError(f"Unsupported agent handoff status: {status}")
+
+    record_event(
+        database,
+        session_id,
+        "agent_handoff",
+        {
+            "schemaVersion": AGENT_HANDOFF_SCHEMA_VERSION,
+            "fromAgent": from_agent,
+            "toAgent": to_agent,
+            "artifactType": artifact_type,
+            "artifact": artifact or {},
+            "evidence": evidence or [],
+            "status": status,
+        },
+        created_at or utc_now(),
+    )
+
+
+def record_intent_hypothesis(
+    database,
+    session_id,
+    version_id,
+    turn_id,
+    guidance,
+    source,
+    status="proposed",
+    proposal_id=None,
+    reason="",
+    created_at=None,
+):
+    """Keep an AI intent interpretation separate from the designer's final report."""
+    guidance = guidance or {}
+    hypothesis = str(guidance.get("intentHypothesis") or "").strip()
+    if not hypothesis:
+        return
+    if status not in AGENT_HANDOFF_STATUSES:
+        raise ValueError(f"Unsupported intent hypothesis status: {status}")
+
+    payload = {
+        "schemaVersion": AGENT_HANDOFF_SCHEMA_VERSION,
+        "agent": "co_creation",
+        "artifactType": "intentHypothesis",
+        "versionId": version_id,
+        "turnId": turn_id,
+        "artifact": {
+            "hypothesis": hypothesis,
+            "confidence": guidance.get("intentConfidence"),
+        },
+        "evidence": [
+            {"type": "stage", "versionId": version_id},
+            {"type": "conversation_turn", "turnId": turn_id, "source": source},
+        ],
+        "status": status,
+    }
+    evidence_signature = guidance.get("evidenceSignature")
+    if evidence_signature:
+        payload["evidence"].append(
+            {"type": "guidance_evidence_signature", "value": evidence_signature}
+        )
+    if proposal_id:
+        payload["proposalId"] = proposal_id
+    if reason:
+        payload["reason"] = reason
+
+    record_event(
+        database,
+        session_id,
+        "intent_hypothesis",
+        payload,
+        created_at or utc_now(),
+    )
+
 
 load_dotenv(BACKEND_DIR / ".env")
 PUBLIC_BASE_URL = os.getenv(
@@ -474,6 +565,27 @@ def _create_session_record(
                 event_payload,
                 created_at,
             )
+            if not demo_mode:
+                record_agent_handoff(
+                    database,
+                    session_id,
+                    "blueprint_planning",
+                    "co_creation",
+                    "validated_initial_stage",
+                    {
+                        "versionId": version_id,
+                        "initialDraftMethod": initial_draft_method,
+                    },
+                    evidence=[
+                        {
+                            "type": "deterministic_solver",
+                            "status": "passed",
+                            "validation": validation.as_dict(),
+                        }
+                    ],
+                    status="confirmed",
+                    created_at=created_at,
+                )
             if demo_mode:
                 delete_demo_sessions(database, keep_session_id=session_id)
         else:
@@ -895,6 +1007,14 @@ def assess_version(
                     utc_now(),
                 ),
             )
+            record_intent_hypothesis(
+                database,
+                session_id,
+                version_id,
+                turn_id,
+                execution.guidance,
+                "stage_assessment",
+            )
 
             opening_sync = {
                 "assistantTurnId": turn_id,
@@ -1084,6 +1204,7 @@ def _send_message_locked(
         require_current_base(session, payload.baseVersionId)
         current = get_current_version(database, session)
         proposal_validation = None
+        proposal_id = None
 
         if execution.proposed_rows is not None:
             proposal_validation = _solve_changed_proposal_or_api_error(
@@ -1159,6 +1280,40 @@ def _send_message_locked(
                         utc_now(),
                     ),
                 )
+                record_agent_handoff(
+                    database,
+                    session_id,
+                    "co_creation",
+                    "deterministic_validator",
+                    "validated_revision_proposal",
+                    {
+                        "proposalId": proposal_id,
+                        "baseVersionId": payload.baseVersionId,
+                        "revisionPlan": execution.revision_plan,
+                    },
+                    evidence=[
+                        {
+                            "type": "deterministic_solver",
+                            "status": "passed",
+                            "validation": proposal_validation.as_dict(),
+                        },
+                        {
+                            "type": "verified_diff",
+                            "diff": describe_diff(current_rows, proposal_validation.rows),
+                        },
+                    ],
+                    status="confirmed",
+                )
+
+            record_intent_hypothesis(
+                database,
+                session_id,
+                payload.baseVersionId,
+                assistant_turn_id,
+                execution.guidance,
+                "conversation_reply",
+                proposal_id=proposal_id,
+            )
 
         session_payload = serialize_session(database, session_id)
 
@@ -1622,6 +1777,16 @@ def decide_proposal(
             if proposal["base_version_id"] != session["current_version_id"]:
                 raise ApiError(409, "VERSION_CONFLICT", "The proposal belongs to an older Stage.")
 
+            proposal_turn = database.execute(
+                "SELECT guidance_json FROM conversation_turns WHERE id = ?",
+                (proposal["assistant_turn_id"],),
+            ).fetchone()
+            proposal_guidance = (
+                load_json(proposal_turn["guidance_json"])
+                if proposal_turn is not None
+                else None
+            )
+
             now = utc_now()
             new_version_id = None
             verified_summary = None
@@ -1671,6 +1836,18 @@ def decide_proposal(
                 clean_optional(payload.reason, 2000) or "",
                 payload.idempotencyKey,
             )
+            if payload.decision == "reject":
+                record_intent_hypothesis(
+                    database,
+                    session_id,
+                    proposal["base_version_id"],
+                    proposal["assistant_turn_id"],
+                    proposal_guidance,
+                    "proposal_review",
+                    status="rejected",
+                    proposal_id=proposal_id,
+                    reason=clean_optional(payload.reason, 2000) or "",
+                )
             session_payload = serialize_session(database, session_id)
 
     if new_version_id:
@@ -2613,16 +2790,48 @@ def build_llm_context(database, session_id, version):
         ),
         "uiCues": {},
     }
+    hypothesis_status_by_turn = {}
+    hypothesis_status_events = []
+    for event in database.execute(
+        """
+        SELECT payload_json FROM audit_events
+        WHERE session_id = ? AND event_type = 'intent_hypothesis'
+        ORDER BY id
+        """,
+        (session_id,),
+    ).fetchall():
+        event_payload = load_json(event["payload_json"]) or {}
+        event_turn_id = event_payload.get("turnId")
+        if event_turn_id:
+            hypothesis_status_by_turn[event_turn_id] = event_payload.get("status")
+            hypothesis_status_events.append(event_payload.get("status"))
+
+    latest_hypothesis_status = (
+        hypothesis_status_events[-1] if hypothesis_status_events else None
+    )
+
     guidance_sources = [
-        load_json(turn["guidance_json"]) or {}
+        (load_json(turn["guidance_json"]) or {}, turn["id"])
         for turn in turns
         if turn["id"] not in superseded_assessment_turn_ids
     ]
 
     if accepted_opening is not None:
-        guidance_sources.append(load_json(accepted_opening["guidance_json"]) or {})
+        guidance_sources.append(
+            (
+                load_json(accepted_opening["guidance_json"]) or {},
+                accepted_opening["assistant_turn_id"],
+            )
+        )
 
-    for guidance in guidance_sources:
+    for guidance, guidance_turn_id in guidance_sources:
+        if (
+            latest_hypothesis_status == "rejected"
+            or hypothesis_status_by_turn.get(guidance_turn_id) == "rejected"
+        ):
+            guidance = dict(guidance)
+            guidance["intentHypothesis"] = None
+            guidance["intentConfidence"] = None
         discussion_focus = guidance.get("followUpQuestion")
         if discussion_focus:
             if recent_guidance["discussionFocus"] is None:

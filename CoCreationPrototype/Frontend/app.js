@@ -424,8 +424,25 @@ async function createDemoSession() {
                 idempotencyKey: uniqueId("demo")
             }
         });
-        window.location.assign(created.launchUrl);
+        await openCreatedSession(created.launchUrl);
     }, hideGenerationStatus);
+}
+
+async function openCreatedSession(launchUrl) {
+    const destination = new URL(launchUrl, window.location.href);
+    if (destination.origin !== window.location.origin) {
+        window.location.assign(destination.href);
+        return;
+    }
+
+    // A hash-only navigation does not reload this SPA. Update the address and
+    // initialize the new session explicitly so the map appears immediately.
+    window.history.replaceState(
+        null,
+        "",
+        `${destination.pathname}${destination.search}${destination.hash}`
+    );
+    await initialize();
 }
 
 async function refreshSession() {

@@ -356,4 +356,4 @@ details and the corresponding challenge map details; it is not duplicated on Fin
 `coCreationDurationSeconds`。演示页面没有倒计时，完成后不显示“返回 Unity 继续”。
 每次新演示会话创建成功后只保留最新一轮演示记录；正式 Unity 会话和正式研究数据不受影响，
 新地图或新会话失败时保留上一轮记录。当前静态资源缓存键为
-`cocreation-translation-parallel-20260830-5`。
+`cocreation-translation-parallel-20260830-6`。
