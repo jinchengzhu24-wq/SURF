@@ -67,6 +67,9 @@ GUIDANCE_MOVES = {
 INTENT_CONFIDENCE_LEVELS = {"low", "medium", "high"}
 UI_CUE_TYPES = {"manual_edit", "warning", "tradeoff"}
 GUIDANCE_REQUEST_MODES = {"revision_advice", "discussion", "none"}
+DISAGREEMENT_STATUSES = {"active", "resolved"}
+DISAGREEMENT_SUBJECTS = {"ai_revision", "human_edit", "user_request"}
+DISAGREEMENT_RESOLUTIONS = {"user", "ai", "compromise", "retain_current"}
 
 
 @dataclass(frozen=True)
@@ -204,13 +207,13 @@ def build_chat_messages(
         "distill an interpretation already supported by assistantMessage: never introduce a "
         "different map element, design goal, or operation only inside the intent card.\n\n"
         "Treat the saved Stage as read-only until the designer accepts a validated "
-        "proposal in the interface. Treat natural requests such as '你帮我改', '你来改吧', "
-        "'按这个思路改', 'can you change it', and 'go ahead and revise it' as explicit "
-        "authorization when the preceding conversation supplies the direction. You may "
+        "proposal in the interface. Natural requests such as '你帮我改', '你来改吧', "
+        "'按这个思路改', 'can you change it', and 'go ahead and revise it' first produce "
+        "a conceptual purple REVISION card. Ordinary chat must never generate map rows. "
+        "Only the structured execute_revision card action authorizes the two-agent revision "
+        "pipeline and proposedRows. You may "
         "proactively offer one concrete revision "
-        "direction and rationale, but that offer must not contain proposedRows. Generate "
-        "proposedRows only when the designer's latest message explicitly requests a map "
-        "change or explicitly agrees to a previously offered revision direction. Never "
+        "direction and rationale, but that offer must not contain proposedRows. Never "
         "claim a proposal has been accepted, saved, or verified. Before proposedRows exist, "
         "never say the map has been changed, finished, or is ready to play. When proposedRows "
         "exist, describe them as a reviewable proposal that still awaits the designer's "
@@ -260,13 +263,17 @@ def build_chat_messages(
         '{"assistantMessage":"...","guidance":'
         '{"move":"observe_stage","intentHypothesis":null,'
         '"intentConfidence":null,"followUpQuestion":null,'
-        '"proposalOffer":null,"uiCues":[]},"assessment":null,"proposedRows":null,'
+        '"proposalOffer":null,"disagreement":null,"uiCues":[]},"assessment":null,"proposedRows":null,'
         '"modificationSummary":""}.\n'
         "guidance.move must be one of observe_stage, clarify_intent, "
         "offer_perspective, challenge_tradeoff, reflect_on_play, offer_revision, "
         "or deliver_revision. intentConfidence must be null, low, medium, or high. "
-        "followUpQuestion is the LET'S DISCUSS card. It must be null, one concrete question, "
-        "or one concise first-person design insight worth discussing. A declarative insight "
+        "followUpQuestion is a legacy discussion field. In a new response it must be null "
+        "unless an active disagreement is being continued; ordinary questions belong in "
+        "assistantMessage. The LET'S DISCUSS card is represented by disagreement, which "
+        "must be null or an object with status, subject, userPosition, aiPosition, "
+        "coreDisagreement, nextQuestion, and resolution. It must be null, one concrete "
+        "question, or one concise first-person design insight worth discussing. A declarative insight "
         "must name a concrete map or play judgment and must not duplicate assistantMessage. "
         "Use plain, specific language for both assistantMessage and the discussion card: name "
         "the relevant tiles, the first push or route moment to watch, the decision a player may "
@@ -362,13 +369,14 @@ def build_plain_chat_messages(
         stage_opening=stage_opening,
     )
     guidance_mode_instruction = _guidance_mode_instruction(guidance_mode)
+    action_instruction = _plain_action_instruction(stage_context)
     revision_request_state = stage_context.get("revisionRequestState")
     revision_instruction = (
         "The designer asked you to modify the map, but neither this message nor the recent "
         "conversation contains a concrete revision direction. Do not invent one and do not "
-        "claim to edit anything. Give a short declarative explanation and output only one "
-        "contextual MANUAL_EDIT card that helps the designer point out or try the unclear area; "
-        "do not output DISCUSS, INTENT, WARNING, or proposal fields. "
+        "claim to edit anything. Give a short explanation of what remains unclear and output "
+        "one tentative INTENT card that states the narrowest correctable hypothesis about what "
+        "they may care about. Do not output a proposal, WARNING, or LET'S DISCUSS card. "
         if revision_request_state == "needs_direction"
         else ""
     )
@@ -393,11 +401,10 @@ def build_plain_chat_messages(
             "After the visible reply, you may append one optional machine-readable block "
             "as one final line using exactly this compact form:\n"
             "<GUIDANCE>DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
-            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ...</GUIDANCE>\n"
-            "Omit any field that is not warranted, and omit the entire block when no card "
-            "would improve the collaboration only when the designer explicitly changes to a "
-            "topic unrelated to this project. Apart from that off-topic exception and the very "
-            "first Stage 1 opening, every reply must produce at least one card. Visible cards "
+            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || DISAGREEMENT: {JSON}</GUIDANCE>\n"
+            "Omit any field that is not warranted, and omit the entire block whenever no card "
+            "is warranted, including an ordinary project question or factual answer. The very "
+            "first Stage 1 opening also has no metadata block. Visible cards "
             "belong to exactly one of two "
             "families. The discussion family may use any non-empty combination of DISCUSS, "
             "WARNING, and INTENT, for a maximum of three cards. The action family is exactly "
@@ -426,9 +433,11 @@ def build_plain_chat_messages(
             "specific map elements and a concrete push moment. Keep ordinary uncertainty, "
             "route trade-offs, and aesthetic opinions in the visible reply. A warning should "
             "sound like a natural first-person aside, not a formal alert or stock phrase. "
-            "Use DISCUSS at a useful later decision point for either one concrete, vivid "
-            "question or one concise first-person design insight. A DISCUSS insight must add "
-            "a judgment rather than repeat the visible reply. "
+            "Use DISCUSS only when the four-part DISAGREEMENT object describes a genuine "
+            "unresolved decision: userPosition, aiPosition, coreDisagreement, and nextQuestion. "
+            "Ordinary questions stay in assistantMessage. An active disagreement cannot include "
+            "a proposal. A resolved disagreement may lead to a new conceptual proposal, except "
+            "retain_current, which ends without a proposal. "
             "Use MANUAL_EDIT alone when the designer's direction is too unclear to turn into a "
             "proposal, or pair it with a concrete proposal so designer and LLM can compare the "
             "same local idea. Name the area, what to observe, and why, without prescribing exact "
@@ -475,7 +484,7 @@ def build_plain_chat_messages(
         "There is exactly one level in this session; every Stage is only a saved version of "
         "that same level. Never describe a Stage as a first, second, next, or later level, "
         "and never imply a campaign progression.\n\n"
-        f"{guidance_mode_instruction}\n{guidance_instruction}\n"
+        f"{guidance_mode_instruction}\n{action_instruction}\n{guidance_instruction}\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         f"{_map_grounding_contract()}\n\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
@@ -712,16 +721,30 @@ def generate_chat_reply(
     )
     effective_stage_context = dict(stage_context or {})
     effective_stage_context["responseLanguage"] = language
+    explicit_action = effective_stage_context.get("explicitAction") or "none"
+
+    if explicit_action == "execute_revision":
+        revision_state = "authorized"
+        source_offer = effective_stage_context.get("sourceProposalOffer") or {}
+        revision_brief = " ".join(
+            str(source_offer.get(field) or "").strip()
+            for field in ("summary", "rationale")
+        ).strip() or revision_brief
+    elif explicit_action in {"challenge_revision", "alternative_revision"}:
+        revision_state, revision_brief = "not_request", None
 
     if not assessment_only and revision_state != "not_request":
         effective_stage_context["revisionRequestState"] = revision_state
     if revision_brief:
         effective_stage_context["authorizedRevisionBrief"] = revision_brief
 
-    proposal_request = not assessment_only and revision_state in {
-        "authorized",
-        "authorized_relaxed",
-    }
+    proposal_request = not assessment_only and (
+        explicit_action == "execute_revision"
+        or (
+            not effective_stage_context.get("deferRevisionExecution")
+            and revision_state in {"authorized", "authorized_relaxed"}
+        )
+    )
 
     if revision_state == "authorized_relaxed":
         effective_stage_context["revisionRelaxed"] = True
@@ -2268,7 +2291,10 @@ def translate_turns(items, target_language, request_id):
                 "\"body\":\"...\",\"followUpQuestion\":null,"
                 "\"intentHypothesis\":null,\"proposalOfferSummary\":null,"
                 "\"proposalOfferRationale\":null,\"uiCueTexts\":[],"
-                "\"proposalSummary\":null}]}."
+                "\"proposalSummary\":null,\"disagreement\":null}]}."
+                " When the source item has a disagreement object, preserve its status, subject, "
+                "and resolution, and translate only its userPosition, aiPosition, "
+                "coreDisagreement, and nextQuestion fields."
             ),
         },
         {
@@ -2563,6 +2589,11 @@ async def _generate_plain_with_model_fallback(
                 stage_context,
                 stage_opening,
             )
+            disagreement = _extract_plain_disagreement(
+                content,
+                language,
+                stage_context,
+            )
             intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = (
                 _apply_deterministic_guidance_fallback(
                     messages,
@@ -2598,6 +2629,7 @@ async def _generate_plain_with_model_fallback(
                 visible_content,
                 ui_cues,
             )
+            visible_content_had_question = "?" in visible_content or "？" in visible_content
             body, question, pure_low_quality = _extract_plain_message_question(
                 visible_content,
                 language,
@@ -2641,15 +2673,60 @@ async def _generate_plain_with_model_fallback(
                     language,
                 )
 
+            if (stage_context or {}).get("discussionCardMode") == "disagreement_only":
+                if disagreement is None and not (stage_context or {}).get("activeDisagreement"):
+                    if question:
+                        body = "\n\n".join(
+                            part for part in (body.strip(), question.strip()) if part
+                        )
+                    elif visible_content_had_question and body.strip() != visible_content.strip():
+                        # New ordinary questions belong in the visible prose. The legacy
+                        # extractor intentionally drops a low-information question from a
+                        # declarative paragraph; restore that question when no structured
+                        # disagreement is active instead of silently losing the turn's ask.
+                        body = visible_content.strip()
+                    question = None
+                elif disagreement is not None and disagreement.get("status") == "active":
+                    question = None
+
+            active_context_disagreement = (stage_context or {}).get("activeDisagreement")
+            if (
+                disagreement is None
+                and isinstance(active_context_disagreement, dict)
+                and active_context_disagreement.get("status") == "active"
+                and proposal_offer is None
+            ):
+                disagreement = active_context_disagreement
+
+            if (
+                disagreement is None
+                and (stage_context or {}).get("discussionCardMode") == "disagreement_only"
+                and (stage_context or {}).get("revisionRequestState") in {
+                    "authorized", "needs_direction"
+                }
+            ):
+                warning_text = next(
+                    (
+                        cue.get("text")
+                        for cue in ui_cues
+                        if cue.get("type") == "warning"
+                    ),
+                    None,
+                )
+                if warning_text:
+                    disagreement = _disagreement_from_warning(
+                        warning_text,
+                        language,
+                        stage_context,
+                        user_position=_latest_role_content(messages, "user"),
+                    )
+
             if (stage_context or {}).get("revisionRequestState") == "needs_direction":
                 body = _unclear_revision_reply(language)
                 question = None
-                intent_hypothesis = None
+                intent_hypothesis = _unclear_revision_intent(language)
                 proposal_offer = None
-                ui_cues = [{
-                    "type": "manual_edit",
-                    "text": _unclear_revision_manual_edit(language),
-                }]
+                ui_cues = []
                 guidance_fallback_used = True
 
             guidance = {
@@ -2659,9 +2736,14 @@ async def _generate_plain_with_model_fallback(
                     proposal_offer,
                 ),
                 "intentHypothesis": intent_hypothesis,
-                "intentConfidence": "medium" if intent_hypothesis else None,
+                "intentConfidence": (
+                    "low"
+                    if (stage_context or {}).get("revisionRequestState") == "needs_direction"
+                    else "medium" if intent_hypothesis else None
+                ),
                 "followUpQuestion": question,
                 "proposalOffer": proposal_offer,
+                "disagreement": disagreement,
                 "uiCues": ui_cues[:2],
             }
             guidance = _apply_guidance_card_policy(guidance)
@@ -3133,7 +3215,10 @@ def validate_translation_response(payload, source_items):
     translated_by_id = {}
 
     for index, translation in enumerate(translations):
-        if not isinstance(translation, dict) or set(translation) != expected_fields:
+        item_expected_fields = expected_fields | (
+            {"disagreement"} if "disagreement" in source_items[index] else set()
+        )
+        if not isinstance(translation, dict) or set(translation) != item_expected_fields:
             raise ValueError(f"Translation item {index} does not match the required fields.")
 
         turn_id = translation["turnId"]
@@ -3177,12 +3262,42 @@ def validate_translation_response(payload, source_items):
             )
             for cue_index, translated_text in enumerate(translated_cues)
         ]
+        if "disagreement" in item_expected_fields:
+            source_disagreement = source.get("disagreement")
+            translated_disagreement = translation.get("disagreement")
+            if source_disagreement is None:
+                if translated_disagreement is not None:
+                    raise ValueError(
+                        f"translations[{index}].disagreement must remain null."
+                    )
+            else:
+                normalized["disagreement"] = _validate_translated_disagreement(
+                    translated_disagreement,
+                    source_disagreement,
+                    f"translations[{index}].disagreement",
+                )
         translated_by_id[turn_id] = normalized
 
     if set(translated_by_id) != set(source_by_id):
         raise ValueError("Translation output omitted one or more requested turns.")
 
     return [translated_by_id[item["turnId"]] for item in source_items]
+
+
+def _validate_translated_disagreement(value, source, field_name):
+    if not isinstance(value, dict) or set(value) != set(source):
+        raise ValueError(f"{field_name} must preserve the disagreement fields.")
+    for field in ("status", "subject", "resolution"):
+        if value.get(field) != source.get(field):
+            raise ValueError(f"{field_name}.{field} must remain unchanged.")
+    result = {field: value[field] for field in ("status", "subject", "resolution")}
+    for field in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion"):
+        result[field] = _validate_translated_text(
+            value.get(field),
+            source.get(field),
+            f"{field_name}.{field}",
+        )
+    return result
 
 
 def _validate_translated_text(value, source_value, field_name, allow_empty=False):
@@ -3258,7 +3373,31 @@ def validate_chat_response(
     assistant_message = _normalize_single_level_language(
         _clean_text(payload.get("assistantMessage"), "assistantMessage")
     )
-    guidance = _validate_guidance(payload.get("guidance"), assessment_only, language)
+    guidance = _validate_guidance(
+        payload.get("guidance"),
+        assessment_only,
+        language,
+        stage_context,
+    )
+    if (
+        assessment_only
+        and _is_human_edit_stage_opening(assessment_only, stage_context)
+        and guidance.get("disagreement") is None
+    ):
+        warning_text = next(
+            (
+                cue.get("text")
+                for cue in guidance.get("uiCues") or []
+                if cue.get("type") in {"warning", "tradeoff"}
+            ),
+            None,
+        )
+        if warning_text:
+            guidance["disagreement"] = _disagreement_from_warning(
+                warning_text,
+                language,
+                stage_context,
+            )
     if guidance.get("proposalOffer") is not None:
         guidance["proposalOffer"] = _distill_proposal_offer(
             guidance["proposalOffer"],
@@ -3326,6 +3465,16 @@ def validate_chat_response(
             stage_context,
             language,
         )
+
+    if (
+        assessment_only
+        and (stage_context or {}).get("discussionCardMode") == "disagreement_only"
+        and not (
+            isinstance(guidance.get("disagreement"), dict)
+            and guidance["disagreement"].get("status") == "active"
+        )
+    ):
+        guidance["followUpQuestion"] = None
 
     if assessment_only:
         assistant_message = _format_stage_opening_paragraphs(assistant_message)
@@ -3446,6 +3595,16 @@ def validate_chat_response(
         ]
         if guidance.get("proposalOffer"):
             grounding_texts.extend(guidance["proposalOffer"].values())
+        if guidance.get("disagreement"):
+            grounding_texts.extend(
+                guidance["disagreement"].get(field)
+                for field in (
+                    "userPosition",
+                    "aiPosition",
+                    "coreDisagreement",
+                    "nextQuestion",
+                )
+            )
         grounding_texts.extend(
             cue.get("text") for cue in guidance.get("uiCues") or []
         )
@@ -4199,6 +4358,25 @@ def _extract_plain_guidance(content, language, stage_context, stage_opening=Fals
     return visible, intent, proposal_offer, ui_cues[:2]
 
 
+def _extract_plain_disagreement(content, language, stage_context=None):
+    """Parse the optional structured disagreement from the legacy plain-text path."""
+    marker = re.search(
+        r"DISAGREEMENT\s*:\s*(\{.*?\})(?:\s*\|\||\s*</GUIDANCE>)",
+        str(content or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if marker is None:
+        return None
+    try:
+        value = json.loads(marker.group(1))
+    except (TypeError, json.JSONDecodeError):
+        return None
+    try:
+        return _validate_disagreement(value, language)
+    except ValueError:
+        return None
+
+
 def _warning_text_is_evidence_grounded(text, language):
     lowered = str(text or "").casefold()
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", lowered):
@@ -4208,10 +4386,15 @@ def _warning_text_is_evidence_grounded(text, language):
             "死锁", "卡住", "误读", "重复", "顺序", "退路",
         )
     else:
-        anchors = ("water", "box", "crate", "target", "wall", "corridor", "route", "entrance", "escape", "push")
+        anchors = (
+            "water", "box", "crate", "target", "wall", "corridor", "route",
+            "entrance", "escape", "push", "player", "opening", "position",
+            "only", "block",
+        )
         risks = (
             "may", "might", "concern", "risk", "worth", "i notice", "i am uneasy",
             "deadlock", "stuck", "misread", "repeat", "order", "escape",
+            "close", "block", "trap", "lock",
         )
     return any(word in lowered for word in anchors) and any(word in lowered for word in risks)
 
@@ -4702,6 +4885,52 @@ def _proposal_body_has_playable_support(body, language):
         for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(body or ""))
         if sentence.strip() and not _proposal_card_is_meta_language(sentence)
     ]
+
+
+def _plain_action_instruction(stage_context):
+    context = stage_context or {}
+    action = context.get("explicitAction") or "none"
+    offer = context.get("sourceProposalOffer") or {}
+    offer_text = " ".join(
+        str(offer.get(field) or "").strip()
+        for field in ("summary", "rationale")
+    ).strip()
+    if action == "challenge_revision":
+        return (
+            "CARD ACTION: challenge_revision. This is only the first invitation to discuss the cited "
+            f"proposal ({offer_text}). Write ordinary prose that restates it, explains its reason and "
+            "target play moment, and asks the designer to give a concrete objection. Do not emit any "
+            "GUIDANCE fields, including DISCUSS, WARNING, or proposal fields."
+        )
+    if action == "alternative_revision":
+        return (
+            "CARD ACTION: alternative_revision. The cited proposal is "
+            f"{offer_text}. Offer a different conceptual local treatment with a different summary and "
+            "playable rationale. Do not emit map rows or a disagreement."
+        )
+    if context.get("challengeContext"):
+        return (
+            "CARD STATE: the designer has now supplied a reason in response to a prior purple-card "
+            "challenge. Judge that reason against the cited proposal and the concrete map evidence. "
+            "If you still disagree, emit an active DISAGREEMENT object and no proposal. If the "
+            "designer's reason persuades you, or the exchange reaches an AI-led or compromise "
+            "resolution, emit a resolved DISAGREEMENT and a new conceptual proposal. If both sides "
+            "retain the current map, use resolution retain_current and omit the proposal."
+        )
+    if context.get("activeDisagreement"):
+        return (
+            "CARD STATE: an unresolved disagreement is active. Use DISAGREEMENT as an object with "
+            "status active/resolved, subject, userPosition, aiPosition, coreDisagreement, "
+            "nextQuestion, and resolution. Keep it active unless the latest reason truly resolves "
+            "the issue; do not use an ordinary DISCUSS field as a substitute."
+        )
+    if context.get("discussionCardMode") == "disagreement_only":
+        return (
+            "CARD STATE: there is no active disagreement. Keep ordinary questions in the visible "
+            "reply and omit DISCUSS/followUpQuestion. Only emit DISAGREEMENT when you can state a "
+            "specific unresolved design decision supported by map evidence."
+        )
+    return ""
     text = " ".join(sentences).strip().casefold()
     if len(text) < (18 if language == "zh-CN" else 35):
         return False
@@ -5151,14 +5380,8 @@ def _apply_deterministic_guidance_fallback(
     needs_direction = (stage_context or {}).get("revisionRequestState") == "needs_direction"
     needs_action_companion = proposal_offer is not None
 
-    if "manual_edit" not in cue_by_type and (
-        needs_direction or needs_action_companion
-    ):
-        manual_edit = (
-            _unclear_revision_manual_edit(language)
-            if needs_direction
-            else _contextual_manual_edit(rows, language)
-        )
+    if "manual_edit" not in cue_by_type and needs_action_companion:
+        manual_edit = _contextual_manual_edit(rows, language)
         if manual_edit and not _cue_repeats_current_evidence(
             "manual_edit", manual_edit, recent, evidence_signature
         ):
@@ -5272,6 +5495,12 @@ def _deterministic_revision_advice_offer(messages, visible_content, language):
 def _apply_guidance_card_policy(guidance):
     """Normalize guidance into one of the approved one-to-three card families."""
     normalized = dict(guidance or {})
+    disagreement = normalized.get("disagreement")
+    if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+        normalized["proposalOffer"] = None
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
+        normalized["followUpQuestion"] = None
     cues = [
         dict(cue)
         for cue in normalized.get("uiCues") or []
@@ -5286,6 +5515,10 @@ def _apply_guidance_card_policy(guidance):
         (cue for cue in cues if cue.get("type") == "manual_edit"),
         None,
     )
+
+    if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+        normalized["uiCues"] = [cue for cue in (warning, manual) if cue is not None]
+        return normalized
 
     if normalized.get("proposalOffer") is not None:
         normalized["intentHypothesis"] = None
@@ -5324,6 +5557,15 @@ def _ensure_required_guidance_card(
         stage_context,
         stage_opening=stage_opening,
     )
+
+    active_disagreement = (stage_context or {}).get("activeDisagreement")
+    if (
+        normalized.get("disagreement") is None
+        and isinstance(active_disagreement, dict)
+        and active_disagreement.get("status") == "active"
+        and not normalized.get("proposalOffer")
+    ):
+        normalized["disagreement"] = active_disagreement
 
     if _is_stage_one(stage_context) and stage_opening:
         return normalized
@@ -5377,6 +5619,14 @@ def _ensure_required_guidance_card(
 
     if guidance_mode == "discussion":
         normalized["proposalOffer"] = None
+        if (stage_context or {}).get("discussionCardMode") == "disagreement_only":
+            normalized["followUpQuestion"] = None
+            normalized["uiCues"] = [
+                dict(cue)
+                for cue in normalized.get("uiCues") or []
+                if cue.get("type") in {"warning", "tradeoff"} and cue.get("text")
+            ][:1]
+            return normalized
         normalized["followUpQuestion"] = normalized.get("followUpQuestion") or (
             _friendly_default_discussion_focus(
                 rows,
@@ -5449,6 +5699,19 @@ def classify_guidance_request(conversation, stage_context=None, stage_opening=Fa
         return "none"
 
     context = stage_context or {}
+    explicit_action = context.get("explicitAction") or "none"
+    if explicit_action == "challenge_revision":
+        return "none"
+    if explicit_action == "alternative_revision":
+        return "revision_advice"
+    if context.get("activeDisagreement"):
+        return "disagreement"
+    if context.get("challengeContext"):
+        return "disagreement"
+    if context.get("deferRevisionExecution") and context.get("revisionRequestState") in {
+        "authorized", "authorized_relaxed"
+    }:
+        return "revision_advice"
     if context.get("revisionRequestState") not in (None, "not_request"):
         return "none"
 
@@ -5456,8 +5719,8 @@ def classify_guidance_request(conversation, stage_context=None, stage_opening=Fa
     if not latest_user or _user_explicitly_off_topic(latest_user):
         return "none"
 
-    # Keep the existing authorization/needs-direction path authoritative.  A request such as
-    # "help me change it" must remain MANUAL_EDIT-only rather than becoming an unsolicited plan.
+    # Keep the existing authorization/needs-direction path authoritative. A directionless
+    # change request is handled as a tentative intent, not as an unsolicited plan.
     revision_state, _ = _classify_revision_request(conversation, context)
     if revision_state != "not_request":
         return "none"
@@ -5499,11 +5762,20 @@ def _guidance_mode_instruction(guidance_mode):
     if guidance_mode == "discussion":
         return (
             "Deterministic request routing classified the latest user request as DISCUSSION: the "
-            "designer is asking for ideas without stating a concrete direction. You must include "
-            "one DISCUSS card as a grounded question or first-person design insight that helps the "
-            "designer discover a direction from this saved Stage. Use only observable map facts and "
+            "designer is asking for ideas without stating a concrete direction. Keep the answer in "
+            "ordinary assistantMessage prose and do not create a new blue DISCUSS card or legacy "
+            "followUpQuestion for this ordinary request. Use only observable map facts and "
             "playable moments. Do not output proposal fields or MANUAL_EDIT, and do not decide a map "
-            "change on the designer's behalf."
+            "change on the designer's behalf. A blue card requires a separate structured active "
+            "disagreement about a concrete decision."
+        )
+    if guidance_mode == "disagreement":
+        return (
+            "Deterministic routing found an unresolved design disagreement. Use the four-field "
+            "DISAGREEMENT object to summarize the user's position, your current position, the "
+            "core disagreement, and the next question. Keep status active until the latest user "
+            "reason genuinely resolves the issue. Do not output a proposalOffer while active; "
+            "ordinary questions without a real disagreement stay in assistantMessage."
         )
     return ""
 
@@ -5677,16 +5949,16 @@ def _friendly_default_discussion_focus(rows, language, latest_user, recent_focus
     return available_options[seed % len(available_options)]
 
 
-def _unclear_revision_manual_edit(language):
+def _unclear_revision_intent(language):
     if language == "zh-CN":
         return (
-            "我还没读准你最想动哪一块。你可以先在右侧编辑器标出或轻微调整最在意的"
-            "局部；保存后，我会沿着这个真实变化继续和你一起判断。"
+            "我暂时理解为你想让关卡的某个局部更符合你的预期，但还不能确定是路线、"
+            "推箱顺序还是空间关系；这个理解可以由你纠正。"
         )
     return (
-        "I have not yet understood which part you most want to change. You can mark or "
-        "lightly adjust the area that concerns you most in the right-hand editor; after it "
-        "is saved, I can continue from that actual change with you."
+        "For now, I understand that you want some local part of the level to better match "
+        "your expectation, but I cannot yet tell whether you mean the route, push order, "
+        "or spatial relationship; please correct this hypothesis."
     )
 
 
@@ -6395,11 +6667,14 @@ def _build_task_instructions(assessment_only, stage_context=None):
             else ""
         )
         human_edit_opening_instruction = (
-            "This is the first opening after a directly verified human edit. guidance.followUpQuestion "
-            "is required and must warmly invite the designer to explain what playable moment, feeling, "
-            "or judgment they hoped the verified change would create. Ground it in changeSummary, but do "
-            "not state their intention as fact, ask only about coordinates, or use a generic 'why did you "
-            "change it' question. Keep it separate from assistantMessage and vary its phrasing naturally. "
+            "This is the first opening after a directly verified human edit. Ground the response in "
+            "changeSummary, before/after map facts, solver evidence, and any supplied play evidence. "
+            "A safe edit should be confirmed and analyzed in ordinary prose without manufacturing a "
+            "disagreement or warning. If concrete evidence supports a mechanical risk or a conflict "
+            "with the designer's stated goal, include exactly one evidence-backed warning and an active "
+            "human_edit disagreement with all four summaries; never undo or overwrite the edit. Do not "
+            "state the designer's intention as fact. A follow-up question is optional for this opening "
+            "and must not be used as a blue card unless a structured disagreement is active. "
             if (stage_context or {}).get("source") == "human_edit" and not _is_stage_one(stage_context)
             else ""
         )
@@ -6422,6 +6697,40 @@ def _build_task_instructions(assessment_only, stage_context=None):
             + human_edit_opening_instruction
         )
 
+    context = stage_context or {}
+    explicit_action = context.get("explicitAction") or "none"
+    action_instruction = ""
+    if explicit_action == "challenge_revision":
+        action_instruction = (
+            "This is the first response after the designer clicked challenge_revision on a purple card. "
+            "Use ordinary prose only: restate the cited proposal, explain why it was suggested and which "
+            "play moment it targets, then invite the designer to state the precise disagreement and reason. "
+            "Do not output proposalOffer, disagreement, followUpQuestion, uiCues, or map rows."
+        )
+    elif explicit_action == "alternative_revision":
+        action_instruction = (
+            "The designer requested an alternative to the supplied purple proposal. Return a conceptual "
+            "offer_revision with a clearly different local treatment and playable rationale. Do not output "
+            "map rows or a disagreement card. The alternative must not merely rename the original proposal."
+        )
+    elif explicit_action == "execute_revision":
+        action_instruction = (
+            "The designer explicitly authorized the cited purple proposal through execute_revision. "
+            "The caller, not ordinary chat, controls the two-agent map execution and validation pipeline."
+        )
+    elif context.get("activeDisagreement"):
+        action_instruction = (
+            "An unresolved disagreement is active. Keep the disagreement summary current. Return an active "
+            "disagreement unless the latest designer message gives a reason that resolves it. Do not output "
+            "a purple proposal while status is active. If consensus is reached, use resolved with resolution "
+            "user, ai, compromise, or retain_current; retain_current must not create a map proposal."
+        )
+    elif context.get("deferRevisionExecution"):
+        action_instruction = (
+            "This ordinary web chat request may describe a direct map change, but it is not an execution action. "
+            "Analyze the direction and produce a conceptual REVISION card only; never return map rows."
+        )
+
     return (
         "Continue as a rational, warm design friend with an independent first-person view. "
         "Address the latest message without restating it, vary your opening and paragraph "
@@ -6431,7 +6740,8 @@ def _build_task_instructions(assessment_only, stage_context=None):
         "stand. Do not agree reflexively. assessment should "
         "normally be null. Use offer_revision without "
         "proposedRows for an unsolicited revision idea; use deliver_revision with a "
-        "complete proposedRows map only after explicit designer authorization."
+        "complete proposedRows map only after explicit designer authorization. "
+        + action_instruction
     )
 
 
@@ -6514,7 +6824,7 @@ def _build_draft_provenance_guidance(stage_context):
     )
 
 
-def _validate_guidance(payload, assessment_only, language="en"):
+def _validate_guidance(payload, assessment_only, language="en", stage_context=None):
     if payload is None:
         raise ValueError("guidance is required.")
 
@@ -6528,7 +6838,7 @@ def _validate_guidance(payload, assessment_only, language="en"):
         "followUpQuestion",
         "proposalOffer",
     }
-    allowed_fields = required_fields | {"uiCues"}
+    allowed_fields = required_fields | {"uiCues", "disagreement"}
 
     if not required_fields.issubset(payload) or not set(payload).issubset(allowed_fields):
         raise ValueError("guidance contains unexpected or missing fields.")
@@ -6623,6 +6933,18 @@ def _validate_guidance(payload, assessment_only, language="en"):
         if cue_type in seen_cue_types:
             raise ValueError("guidance.uiCues cannot repeat a type.")
 
+        if (
+            cue_type in {"warning", "tradeoff"}
+            and (stage_context or {}).get("discussionCardMode") == "disagreement_only"
+            and not _warning_text_is_evidence_grounded(
+                str(cue.get("text") or ""),
+                language,
+            )
+        ):
+            raise ValueError(
+                "A new warning must cite a concrete map or play interaction."
+            )
+
         seen_cue_types.add(cue_type)
         normalized_cues.append(
             {
@@ -6641,11 +6963,40 @@ def _validate_guidance(payload, assessment_only, language="en"):
     if move == "challenge_tradeoff" and not risk_cue_types:
         raise ValueError("challenge_tradeoff requires a warning uiCue.")
 
+    disagreement = _validate_disagreement(payload.get("disagreement"), language)
+    if disagreement and disagreement["status"] == "active":
+        if proposal_offer is not None:
+            raise ValueError("An active disagreement cannot contain a proposalOffer.")
+        if move == "offer_revision":
+            raise ValueError("An active disagreement cannot use offer_revision.")
+        if not risk_cue_types and disagreement["subject"] in {
+            "ai_revision", "human_edit", "user_request"
+        }:
+            # A blue card is the unresolved decision; a red card is optional for
+            # ordinary disagreements, but risk claims must remain evidence-backed.
+            pass
+    if disagreement and disagreement["status"] == "resolved" and disagreement["resolution"] == "retain_current":
+        if proposal_offer is not None:
+            raise ValueError("retain_current cannot contain a proposalOffer.")
+
     if assessment_only:
         if move != "observe_stage":
             raise ValueError("A Stage opening must use observe_stage.")
-        if intent_hypothesis is not None or proposal_offer is not None or normalized_cues:
+        human_edit_disagreement = (
+            disagreement is not None
+            and disagreement["status"] == "active"
+            and disagreement["subject"] == "human_edit"
+        )
+        human_edit_risk_review = (
+            _is_human_edit_stage_opening(assessment_only, stage_context)
+            and bool(risk_cue_types)
+        )
+        if intent_hypothesis is not None or proposal_offer is not None or (
+            normalized_cues and not (human_edit_disagreement or human_edit_risk_review)
+        ):
             raise ValueError("A Stage opening cannot infer intention or offer a revision.")
+        if human_edit_disagreement and not risk_cue_types:
+            raise ValueError("A human-edit disagreement opening requires a warning uiCue.")
 
     return {
         "move": move,
@@ -6653,7 +7004,81 @@ def _validate_guidance(payload, assessment_only, language="en"):
         "intentConfidence": intent_confidence,
         "followUpQuestion": follow_up_question,
         "proposalOffer": proposal_offer,
+        "disagreement": disagreement,
         "uiCues": normalized_cues,
+    }
+
+
+def _validate_disagreement(value, language):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("guidance.disagreement must be an object or null.")
+
+    required = {
+        "status",
+        "subject",
+        "userPosition",
+        "aiPosition",
+        "coreDisagreement",
+        "nextQuestion",
+        "resolution",
+    }
+    if set(value) != required:
+        raise ValueError("guidance.disagreement contains unexpected or missing fields.")
+    status = value.get("status")
+    subject = value.get("subject")
+    resolution = value.get("resolution")
+    if status not in DISAGREEMENT_STATUSES:
+        raise ValueError("guidance.disagreement.status is invalid.")
+    if subject not in DISAGREEMENT_SUBJECTS:
+        raise ValueError("guidance.disagreement.subject is invalid.")
+    if status == "active" and resolution is not None:
+        raise ValueError("An active disagreement must have a null resolution.")
+    if status == "resolved" and resolution not in DISAGREEMENT_RESOLUTIONS:
+        raise ValueError("A resolved disagreement requires a valid resolution.")
+
+    normalized = {"status": status, "subject": subject}
+    for field_name in (
+        "userPosition",
+        "aiPosition",
+        "coreDisagreement",
+        "nextQuestion",
+    ):
+        normalized[field_name] = _normalize_single_level_language(
+            _clean_text(value.get(field_name), f"guidance.disagreement.{field_name}")
+        )[:1200]
+    normalized["resolution"] = resolution
+    return normalized
+
+
+def _disagreement_from_warning(warning_text, language, stage_context, user_position=None):
+    warning = str(warning_text or "").strip()
+    context = stage_context or {}
+    change_summary = context.get("changeSummary") or {}
+    components = ", ".join(str(item) for item in change_summary.get("components") or [])
+    if language == "zh-CN":
+        user_position = user_position or (
+            f"用户刚刚完成了{components or '这处地图'}的手动修改，并希望保留这次调整。"
+        )
+        ai_position = f"我担心这次修改在具体游玩时刻带来问题：{warning}"
+        core = "是否保留当前手动修改，以及如何在不牺牲可解性和设计目标的前提下实现用户想要的效果。"
+        next_question = "这次修改最想保留的游玩效果是什么？如果保留当前布局，如何处理我指出的具体风险？"
+    else:
+        user_position = user_position or (
+            f"The designer just saved a manual change to {components or 'this part of the map'} and wants to keep it."
+        )
+        ai_position = f"I am concerned that the change creates a concrete play problem: {warning}"
+        core = "Whether to keep the current manual edit and how to preserve its intended effect without sacrificing solvability or the stated design goal."
+        next_question = "Which play effect is most important to preserve, and how should we address the concrete risk I observed?"
+    return {
+        "status": "active",
+        "subject": "human_edit" if context.get("source") == "human_edit" else "user_request",
+        "userPosition": user_position[:1200],
+        "aiPosition": ai_position[:1200],
+        "coreDisagreement": core[:1200],
+        "nextQuestion": next_question[:1200],
+        "resolution": None,
     }
 
 

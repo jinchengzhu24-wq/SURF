@@ -78,6 +78,17 @@ _message_locks_guard = Lock()
 
 AGENT_HANDOFF_SCHEMA_VERSION = 1
 AGENT_HANDOFF_STATUSES = {"proposed", "confirmed", "rejected"}
+MESSAGE_ACTIONS = {
+    "none",
+    "execute_revision",
+    "challenge_revision",
+    "alternative_revision",
+}
+CARD_ACTION_EVENTS = {
+    "execute_revision": "revision_execution_requested",
+    "challenge_revision": "proposal_challenge_started",
+    "alternative_revision": "alternative_revision_requested",
+}
 
 SAMPLE_ROWS = [
     "############",
@@ -289,6 +300,13 @@ class MessageRequest(StrictModel):
     content: str
     baseVersionId: str
     idempotencyKey: str
+    action: Literal[
+        "none",
+        "execute_revision",
+        "challenge_revision",
+        "alternative_revision",
+    ] = "none"
+    sourceTurnId: str | None = None
 
 
 class ProposalDecisionRequest(StrictModel):
@@ -427,6 +445,7 @@ def legacy_chat(payload: LegacyChatRequest, request: Request, response: Response
         SAMPLE_ROWS,
         request.state.request_id,
         solver_metrics=validation.as_dict(),
+        stage_context={"deferRevisionExecution": True},
     )
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
     return {
@@ -944,6 +963,7 @@ def assess_version(
         if existing_session_payload is None:
             context = build_llm_context(database, session_id, version)
             session_language = session["language"]
+            context["stageContext"]["discussionCardMode"] = "disagreement_only"
 
     if existing_session_payload is not None:
         synchronize_opening_with_online_match(
@@ -962,6 +982,16 @@ def assess_version(
         request.state.request_id,
         stage_context=context["stageContext"],
     )
+    execution = _ensure_human_edit_disagreement_execution(
+        execution,
+        context["stageContext"],
+        session_language,
+    )
+    execution = _normalize_manual_edit_review_execution(
+        execution,
+        context["stageContext"],
+    )
+    execution = _mark_new_discussion_guidance(execution, context["stageContext"])
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     opening_sync = None
@@ -1016,6 +1046,31 @@ def assess_version(
                 execution.guidance,
                 "stage_assessment",
             )
+            if version["source"] == "human_edit":
+                record_event(
+                    database,
+                    session_id,
+                    "human_edit_reviewed",
+                    {
+                        "versionId": version_id,
+                        "turnId": turn_id,
+                        "diff": load_json(version["diff_json"]),
+                        "changeSummary": context["stageContext"].get("changeSummary"),
+                        "hasWarning": any(
+                            cue.get("type") in {"warning", "tradeoff"}
+                            for cue in execution.guidance.get("uiCues", [])
+                        ),
+                        "disagreement": execution.guidance.get("disagreement"),
+                    },
+                    utc_now(),
+                )
+            _record_disagreement_event(
+                database,
+                session_id,
+                version_id,
+                turn_id,
+                execution.guidance,
+            )
 
             opening_sync = {
                 "assistantTurnId": turn_id,
@@ -1047,6 +1102,7 @@ def send_message(
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    _validate_message_action_payload(payload)
     content = payload.content.strip()
 
     if not content or len(content) > MAX_MESSAGE_LENGTH:
@@ -1091,6 +1147,23 @@ def _send_message_locked(
                 "The message key was already used for different content or Stage.",
             )
 
+        prior_action = _action_for_message_key(database, session_id, payload.idempotencyKey)
+        if prior_action is not None and prior_action != (
+            payload.action,
+            payload.sourceTurnId,
+        ):
+            raise ApiError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "The message key was already used for a different card action.",
+            )
+        if prior_user is not None and payload.action != "none" and prior_action is None:
+            raise ApiError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "The message key was already used by an ordinary message.",
+            )
+
         prior_assistant = database.execute(
             """
             SELECT * FROM conversation_turns
@@ -1104,6 +1177,15 @@ def _send_message_locked(
 
         require_current_base(session, payload.baseVersionId)
 
+        source_offer = None
+        if payload.action != "none":
+            _, source_offer = _source_revision_offer(
+                database,
+                session_id,
+                payload.baseVersionId,
+                payload.sourceTurnId,
+            )
+
         if prior_user is None:
             insert_turn(
                 database,
@@ -1115,15 +1197,49 @@ def _send_message_locked(
                 None,
             )
 
+        if payload.action != "none" and prior_action is None:
+            _record_card_action(database, session_id, payload, source_offer)
+
         retrying_failed_message = prior_user is not None
         current = get_current_version(database, session)
         context = build_llm_context(database, session_id, current)
         language = session["language"]
+        stage_context = context["stageContext"]
+        stage_context["discussionCardMode"] = "disagreement_only"
+        stage_context["explicitAction"] = payload.action
+        stage_context["actionSourceTurnId"] = payload.sourceTurnId
+        stage_context["sourceProposalOffer"] = source_offer
+        stage_context["deferRevisionExecution"] = payload.action != "execute_revision"
+        if payload.action != "none" and stage_context.get("activeDisagreement"):
+            raise ApiError(
+                409,
+                "DISAGREEMENT_ACTIVE",
+                "Resolve the active design disagreement before choosing another revision card.",
+            )
+        if payload.action == "challenge_revision":
+            stage_context["challengeRevision"] = {
+                "sourceTurnId": payload.sourceTurnId,
+                "proposalOffer": source_offer,
+            }
+        elif payload.action == "alternative_revision":
+            stage_context["alternativeRevision"] = {
+                "sourceTurnId": payload.sourceTurnId,
+                "proposalOffer": source_offer,
+            }
 
     revision_state, revision_brief = classify_revision_request(
         context["conversation"],
         context["stageContext"],
     )
+    if payload.action == "execute_revision":
+        revision_state = "authorized"
+        revision_brief = " ".join(
+            str(source_offer.get(field) or "").strip()
+            for field in ("summary", "rationale")
+        ).strip()
+    elif payload.action in {"challenge_revision", "alternative_revision"}:
+        revision_state, revision_brief = "not_request", None
+    context["stageContext"]["revisionRequestState"] = revision_state
     if revision_state == "relaxation_confirmed":
         execution = _relaxed_revision_suggestion_execution(
             context["stageContext"],
@@ -1198,6 +1314,31 @@ def _send_message_locked(
                         },
                         utc_now(),
                     )
+    if payload.action == "challenge_revision":
+        execution = _sanitize_challenge_execution(execution, source_offer, language)
+    elif payload.action != "execute_revision" and execution.proposed_rows is not None:
+        # The only web path allowed to create a map proposal is the explicit
+        # purple-card execution action.  Discard unsolicited legacy rows here.
+        execution = replace(
+            execution,
+            proposed_rows=None,
+            revision_plan={},
+            revision_contract={},
+            revision_operations=[],
+            proposal_diagnostics={},
+        )
+    if payload.action == "alternative_revision":
+        execution = _ensure_alternative_revision_execution(
+            execution,
+            source_offer,
+            language,
+        )
+    if payload.action == "none" and context["stageContext"].get("source") == "human_edit":
+        execution = _normalize_manual_edit_review_execution(
+            execution,
+            context["stageContext"],
+        )
+    execution = _mark_new_discussion_guidance(execution, context["stageContext"])
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     with connect(immediate=True) as database:
@@ -1388,6 +1529,13 @@ def _send_message_locked(
                 "conversation_reply",
                 proposal_id=proposal_id,
             )
+            _record_disagreement_event(
+                database,
+                session_id,
+                payload.baseVersionId,
+                assistant_turn_id,
+                execution.guidance,
+            )
 
         session_payload = serialize_session(database, session_id)
 
@@ -1419,6 +1567,7 @@ def _retry_exhausted_execution(language, exception):
             "intentConfidence": None,
             "followUpQuestion": None,
             "proposalOffer": None,
+            "disagreement": None,
             "uiCues": [],
         },
     )
@@ -2304,9 +2453,15 @@ def synchronize_cocreation_event_with_online_match(session, event):
 def _displayed_cards(guidance):
     guidance = guidance or {}
     cards = []
-    follow_up = str(guidance.get("followUpQuestion") or "").strip()
-    if follow_up:
-        cards.append({"type": "discussion", "text": follow_up})
+    disagreement = guidance.get("disagreement")
+    if not (
+        isinstance(disagreement, dict) and disagreement.get("status") == "active"
+    ) and not guidance.get("discussionCardMode"):
+        # Legacy turns have no structured disagreement and retain their historical
+        # follow-up rendering.  New turns use disagreement exclusively.
+        follow_up = str(guidance.get("followUpQuestion") or "").strip()
+        if follow_up:
+            cards.append({"type": "discussion", "text": follow_up})
     offer = guidance.get("proposalOffer") or {}
     if isinstance(offer, dict):
         offer_text = str(offer.get("summary") or offer.get("text") or "").strip()
@@ -2322,6 +2477,12 @@ def _displayed_cards(guidance):
         cue_text = str(cue.get("text") or "").strip()
         if cue_type and cue_text:
             cards.append({"type": cue_type, "text": cue_text})
+    if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+        cards.append({
+            "type": "discussion",
+            "text": disagreement.get("coreDisagreement") or disagreement.get("nextQuestion"),
+            "disagreement": disagreement,
+        })
     return cards
 
 
@@ -2754,6 +2915,7 @@ def _pending_assistant_translations(database, session_id, language, turn_ids):
                 "proposalOfferRationale": proposal_offer.get("rationale"),
                 "uiCueTexts": [cue.get("text") for cue in ui_cues],
                 "proposalSummary": row["summary"],
+                "disagreement": guidance.get("disagreement"),
                 "guidance": guidance,
             }
         )
@@ -2779,7 +2941,61 @@ def _translated_guidance(source_guidance, translated):
         {**cue, "text": translated_cues[index]}
         for index, cue in enumerate(guidance.get("uiCues") or [])
     ]
+    translated_disagreement = translated.get("disagreement")
+    if translated_disagreement is not None and guidance.get("disagreement") is not None:
+        guidance["disagreement"] = {
+            **guidance["disagreement"],
+            **translated_disagreement,
+        }
     return guidance
+
+
+def _ancestor_designer_context(database, session_id, version, limit=8):
+    """Return only designer-authored context from ancestor Stages for manual review."""
+    ancestor_ids = []
+    parent_id = version["parent_version_id"]
+    while parent_id and len(ancestor_ids) < 24:
+        ancestor_ids.append(parent_id)
+        ancestor = get_version(database, session_id, parent_id)
+        parent_id = ancestor["parent_version_id"] if ancestor is not None else None
+
+    if not ancestor_ids:
+        return []
+
+    placeholders = ",".join("?" for _ in ancestor_ids)
+    rows = database.execute(
+        f"""
+        SELECT version_id, content, sequence_number
+        FROM conversation_turns
+        WHERE session_id = ? AND role = 'user'
+          AND version_id IN ({placeholders})
+        ORDER BY sequence_number DESC
+        """,
+        (session_id, *ancestor_ids),
+    ).fetchall()
+    result = []
+    for row in rows:
+        content = str(row["content"] or "").strip()
+        if not content or not _looks_like_designer_goal(content):
+            continue
+        result.append({"versionId": row["version_id"], "content": content[:1200]})
+        if len(result) >= limit:
+            break
+    result.reverse()
+    return result
+
+
+def _looks_like_designer_goal(content):
+    text = str(content or "").casefold()
+    if "?" in text or "？" in text:
+        return False
+    return bool(
+        re.search(
+            r"(?:我希望|我想|我更|保持|不要|增加|减少|让|改|调整|公平|难度|可读|路线|箱子|目标|墙|水域|"
+            r"i\s+(?:want|prefer|would like)|keep|avoid|make|change|adjust|fair|difficulty|readable|route|box|target|wall|water)",
+            text,
+        )
+    )
 
 
 def build_llm_context(database, session_id, version):
@@ -2789,7 +3005,7 @@ def build_llm_context(database, session_id, version):
     ).fetchone()
     turns = database.execute(
         """
-        SELECT id, role, content, guidance_json FROM conversation_turns
+        SELECT id, role, content, request_id, sequence_number, guidance_json FROM conversation_turns
         WHERE session_id = ? AND version_id = ?
         ORDER BY sequence_number DESC LIMIT 24
         """,
@@ -2847,6 +3063,12 @@ def build_llm_context(database, session_id, version):
         if parent_rows is not None
         else None
     )
+    prior_designer_context = _ancestor_designer_context(
+        database,
+        session_id,
+        version,
+        limit=8,
+    )
     conversation = [
         {"role": turn["role"], "content": turn["content"]}
         for turn in reversed(turns)
@@ -2857,6 +3079,7 @@ def build_llm_context(database, session_id, version):
         "discussionFocusHistory": [],
         "intentHypothesis": None,
         "proposalOffer": None,
+        "activeDisagreement": None,
         "relaxationOffer": next(
             (
                 (load_json(turn["guidance_json"]) or {}).get("relaxationOffer")
@@ -2901,6 +3124,7 @@ def build_llm_context(database, session_id, version):
             )
         )
 
+    latest_disagreement_seen = False
     for guidance, guidance_turn_id in guidance_sources:
         if (
             latest_hypothesis_status == "rejected"
@@ -2925,6 +3149,15 @@ def build_llm_context(database, session_id, version):
             recent_guidance["intentHypothesis"] = guidance["intentHypothesis"]
         if recent_guidance["proposalOffer"] is None and guidance.get("proposalOffer"):
             recent_guidance["proposalOffer"] = guidance["proposalOffer"]
+        if not latest_disagreement_seen and "disagreement" in guidance:
+            latest_disagreement_seen = True
+            disagreement = guidance.get("disagreement")
+            recent_guidance["activeDisagreement"] = (
+                disagreement
+                if isinstance(disagreement, dict)
+                and disagreement.get("status") == "active"
+                else None
+            )
         for cue in guidance.get("uiCues") or []:
             cue_type = cue.get("type")
             if cue_type == "tradeoff":
@@ -2945,6 +3178,55 @@ def build_llm_context(database, session_id, version):
             break
 
     latest_user_direction = _latest_substantive_design_direction(turns)
+    challenge_rows = database.execute(
+        """
+        SELECT payload_json FROM audit_events
+        WHERE session_id = ? AND event_type = 'proposal_challenge_started'
+        ORDER BY id DESC LIMIT 12
+        """,
+        (session_id,),
+    ).fetchall()
+    challenge_context = None
+    for challenge_row in challenge_rows:
+        candidate = load_json(challenge_row["payload_json"]) or {}
+        if candidate.get("baseVersionId") == version["id"] or candidate.get("versionId") == version["id"]:
+            challenge_user = next(
+                (
+                    turn
+                    for turn in turns
+                    if turn["role"] == "user"
+                    and turn["request_id"] == candidate.get("messageKey")
+                ),
+                None,
+            )
+            if challenge_user is not None:
+                challenge_assistant = next(
+                    (
+                        turn
+                        for turn in turns
+                        if turn["role"] == "assistant"
+                        and turn["request_id"] == candidate.get("messageKey")
+                    ),
+                    None,
+                )
+                challenge_boundary = (
+                    challenge_assistant["sequence_number"]
+                    if challenge_assistant is not None
+                    else challenge_user["sequence_number"]
+                )
+                later_assistant = any(
+                    turn["role"] == "assistant"
+                    and turn["sequence_number"] > challenge_boundary
+                    for turn in turns
+                )
+                later_user = any(
+                    turn["role"] == "user"
+                    and turn["sequence_number"] > challenge_boundary
+                    for turn in turns
+                )
+                if not later_assistant and later_user:
+                    challenge_context = candidate
+            break
     evidence_payload = {
         "versionId": version["id"],
         "play": dict(latest_play) if latest_play is not None else None,
@@ -2980,10 +3262,15 @@ def build_llm_context(database, session_id, version):
             "demoMode": bool(session["demo_mode"]) if session is not None else False,
             "summary": version["summary"],
             "parentVersionId": version["parent_version_id"],
+            "beforeRows": parent_rows if version["source"] == "human_edit" else None,
+            "afterRows": current_rows if version["source"] == "human_edit" else None,
             "diff": load_json(version["diff_json"]),
             "changeSummary": change_summary,
             "mapFacts": build_map_facts(current_rows, parent_rows),
             "recentGuidance": recent_guidance,
+            "activeDisagreement": recent_guidance["activeDisagreement"],
+            "challengeContext": challenge_context,
+            "priorDesignerContext": prior_designer_context,
             "guidanceEvidenceSignature": guidance_evidence_signature,
             "openingTurnId": (
                 accepted_opening["assistant_turn_id"]
@@ -3119,6 +3406,309 @@ def require_current_base(session, base_version_id):
             "The current Stage changed. Refresh before continuing.",
             details={"currentVersionId": session["current_version_id"]},
         )
+
+
+def _validate_message_action_payload(payload):
+    action = payload.action or "none"
+    if action not in MESSAGE_ACTIONS:
+        raise ApiError(400, "INVALID_MESSAGE_ACTION", "The message action is invalid.")
+
+    source_turn_id = payload.sourceTurnId
+    if action == "none" and source_turn_id:
+        raise ApiError(
+            400,
+            "INVALID_MESSAGE_ACTION",
+            "A source turn is only valid for a card action.",
+        )
+    if action != "none":
+        if not source_turn_id:
+            raise ApiError(
+                400,
+                "INVALID_MESSAGE_ACTION",
+                "A card action requires its source turn.",
+            )
+        _validate_identifier(source_turn_id, "sourceTurnId")
+
+
+def _source_revision_offer(database, session_id, version_id, source_turn_id):
+    source = database.execute(
+        """
+        SELECT id, role, version_id, guidance_json
+        FROM conversation_turns
+        WHERE session_id = ? AND id = ?
+        """,
+        (session_id, source_turn_id),
+    ).fetchone()
+    if source is None or source["role"] != "assistant" or source["version_id"] != version_id:
+        raise ApiError(
+            409,
+            "INVALID_CARD_SOURCE",
+            "The selected revision card is no longer attached to the current Stage.",
+        )
+
+    guidance = load_json(source["guidance_json"]) or {}
+    offer = guidance.get("proposalOffer")
+    if not isinstance(offer, dict) or not str(offer.get("summary") or "").strip():
+        raise ApiError(
+            409,
+            "INVALID_CARD_SOURCE",
+            "The selected turn does not contain an executable revision direction.",
+        )
+    return source, offer
+
+
+def _record_card_action(database, session_id, payload, offer):
+    event_payload = {
+        "messageKey": payload.idempotencyKey,
+        "idempotencyKey": payload.idempotencyKey,
+        "requestId": payload.idempotencyKey,
+        "action": payload.action,
+        "sourceTurnId": payload.sourceTurnId,
+        "baseVersionId": payload.baseVersionId,
+        "versionId": payload.baseVersionId,
+        "proposalSummary": offer.get("summary"),
+        "proposalRationale": offer.get("rationale"),
+    }
+    # Keep one common audit vocabulary for consumers that do not need to know
+    # which purple-card branch was selected, while retaining the more specific
+    # event used by existing analytics.
+    record_event(
+        database,
+        session_id,
+        "card_action_requested",
+        event_payload,
+        utc_now(),
+    )
+    record_event(
+        database,
+        session_id,
+        CARD_ACTION_EVENTS[payload.action],
+        event_payload,
+        utc_now(),
+    )
+
+
+def _action_for_message_key(database, session_id, message_key):
+    row = database.execute(
+        """
+        SELECT event_type, payload_json
+        FROM audit_events
+        WHERE session_id = ?
+          AND json_extract(payload_json, '$.messageKey') = ?
+          AND event_type IN ('card_action_requested',
+                             'revision_execution_requested',
+                             'proposal_challenge_started',
+                             'alternative_revision_requested')
+        ORDER BY id DESC LIMIT 1
+        """,
+        (session_id, message_key),
+    ).fetchone()
+    if row is None:
+        return None
+    payload = load_json(row["payload_json"]) or {}
+    return payload.get("action"), payload.get("sourceTurnId")
+
+
+def _sanitize_challenge_execution(execution, offer, language):
+    summary = str(offer.get("summary") or "").strip()
+    rationale = str(offer.get("rationale") or "").strip()
+    if language == "zh-CN":
+        body = (
+            f"我先把这份方案说清楚：建议是“{summary}”。我提出它，是因为{rationale} "
+            "我想改善的是相关箱子第一次接近这段路线时的判断，而不是只改变外观。"
+            "你具体不认同方案中的哪一部分？是修改方向、游玩效果，还是我对当前地图的判断？请告诉我你的理由。"
+        )
+    else:
+        body = (
+            f"Let me make the proposal explicit: “{summary}.” I suggested it because {rationale} "
+            "The play moment I want to improve is the relevant box's first approach to this route, "
+            "not just its appearance. Which part do you disagree with—the revision direction, the "
+            "intended play effect, or my reading of the current map? Please tell me why."
+        )
+    return replace(
+        execution,
+        assistant_message=body,
+        proposed_rows=None,
+        revision_plan={},
+        revision_contract={},
+        revision_operations=[],
+        proposal_diagnostics={},
+        guidance={
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+        },
+    )
+
+
+def _ensure_alternative_revision_execution(execution, original_offer, language):
+    guidance = dict(execution.guidance or {})
+    offer = guidance.get("proposalOffer")
+    original_text = " ".join(
+        str(original_offer.get(field) or "").strip()
+        for field in ("summary", "rationale")
+    )
+    original_summary = str(original_offer.get("summary") or "").strip().casefold()
+    original_rationale = str(original_offer.get("rationale") or "").strip().casefold()
+    if not isinstance(offer, dict) or not str(offer.get("summary") or "").strip():
+        if language == "zh-CN":
+            offer = {
+                "summary": "改用另一段局部绕行路线",
+                "rationale": (
+                    "我避开原方案的处理方式，把变化放在相邻的路线关系上；重点观察箱子第一次进入绕行区域时，"
+                    "玩家是否获得新的判断，而不是只增加移动距离。"
+                ),
+            }
+        else:
+            offer = {
+                "summary": "Use a different local detour around the route",
+                "rationale": (
+                    "I am avoiding the original treatment and changing the neighboring route relationship instead; "
+                    "the test is whether the box's first entry creates a new judgment rather than only more steps."
+                ),
+            }
+    candidate_summary = str(offer.get("summary") or "").strip().casefold()
+    candidate_rationale = str(offer.get("rationale") or "").strip().casefold()
+    if (
+        " ".join(str(value or "") for value in offer.values()).strip() == original_text.strip()
+        or candidate_summary == original_summary
+        or candidate_rationale == original_rationale
+    ):
+        if language == "zh-CN":
+            offer = {
+                "summary": "把关键推动顺序改成另一种局部取舍",
+                "rationale": (
+                    "这次不重复原来的布局方向，而是改变箱子接近目标时的先后关系；试玩时确认新的顺序是否仍然可读且可解。"
+                ),
+            }
+        else:
+            offer = {
+                "summary": "Use a different local trade-off in the push order",
+                "rationale": (
+                    "This avoids the original layout direction and changes the order in which the box approaches the target; "
+                    "play should confirm that the new order remains readable and solvable."
+                ),
+            }
+    guidance["move"] = "offer_revision"
+    guidance["intentHypothesis"] = None
+    guidance["intentConfidence"] = None
+    guidance["followUpQuestion"] = None
+    guidance["disagreement"] = None
+    guidance["proposalOffer"] = offer
+    return replace(
+        execution,
+        proposed_rows=None,
+        revision_plan={},
+        revision_contract={},
+        revision_operations=[],
+        proposal_diagnostics={},
+        guidance=guidance,
+    )
+
+
+def _normalize_manual_edit_review_execution(execution, stage_context):
+    """Keep safe manual-edit openings in ordinary prose; retain evidence-backed disputes."""
+    if (stage_context or {}).get("source") != "human_edit":
+        return execution
+    guidance = dict(execution.guidance or {})
+    disagreement = guidance.get("disagreement")
+    if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+        return execution
+    if (stage_context or {}).get("discussionCardMode") != "disagreement_only":
+        return execution
+    guidance["followUpQuestion"] = None
+    guidance["disagreement"] = None
+    return replace(execution, guidance=guidance)
+
+
+def _ensure_human_edit_disagreement_execution(execution, stage_context, language):
+    """Turn an evidence-backed manual-edit warning into the required blue card."""
+    context = stage_context or {}
+    if context.get("source") != "human_edit":
+        return execution
+
+    guidance = dict(execution.guidance or {})
+    existing = guidance.get("disagreement")
+    if isinstance(existing, dict) and existing.get("status") in {"active", "resolved"}:
+        return execution
+
+    warning = next(
+        (
+            cue.get("text")
+            for cue in guidance.get("uiCues") or []
+            if isinstance(cue, dict)
+            and cue.get("type") in {"warning", "tradeoff"}
+            and str(cue.get("text") or "").strip()
+        ),
+        None,
+    )
+    if not warning:
+        return execution
+
+    # llm_client already validates warning grounding.  This fallback only fills
+    # the missing disagreement envelope; it never invents a warning or changes
+    # the saved human-edit Stage.
+    from llm_client import _disagreement_from_warning
+
+    guidance["disagreement"] = _disagreement_from_warning(
+        warning,
+        language,
+        context,
+    )
+    return replace(execution, guidance=guidance)
+
+
+def _mark_new_discussion_guidance(execution, stage_context):
+    if (stage_context or {}).get("discussionCardMode") != "disagreement_only":
+        return execution
+    guidance = dict(execution.guidance or {})
+    guidance["discussionCardMode"] = "disagreement_only"
+    return replace(execution, guidance=guidance)
+
+
+def _record_disagreement_event(database, session_id, version_id, turn_id, guidance):
+    disagreement = (guidance or {}).get("disagreement")
+    if not isinstance(disagreement, dict):
+        return
+    status = disagreement.get("status")
+    if status not in {"active", "resolved"}:
+        return
+    previous = database.execute(
+        """
+        SELECT event_type FROM audit_events
+        WHERE session_id = ?
+          AND event_type IN ('disagreement_started', 'disagreement_updated',
+                             'disagreement_resolved')
+          AND json_extract(payload_json, '$.versionId') = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (session_id, version_id),
+    ).fetchone()
+    if status == "active":
+        event_type = (
+            "disagreement_updated"
+            if previous is not None and previous["event_type"] != "disagreement_resolved"
+            else "disagreement_started"
+        )
+    else:
+        event_type = "disagreement_resolved"
+    record_event(
+        database,
+        session_id,
+        event_type,
+        {
+            "versionId": version_id,
+            "turnId": turn_id,
+            "subject": disagreement.get("subject"),
+            "resolution": disagreement.get("resolution"),
+            "disagreement": disagreement,
+        },
+        utc_now(),
+    )
 
 
 def expire_interrupted_attempts(database, session_id):

@@ -1241,13 +1241,42 @@ class CoCreationSessionTests(unittest.TestCase):
             revision_operations=PLAYER_MOVE_OPERATIONS,
         )
 
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
-            proposed = self.client.post(
+        offer_execution = LLMExecutionResult(
+            "I see a focused revision direction.",
+            1,
+            "proposal-offer-request",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Move the player start left",
+                    "rationale": "This changes the first route choice while preserving the box-target relationship.",
+                },
+                "uiCues": [],
+            },
+        )
+
+        with patch.object(backend, "generate_chat_reply", side_effect=[offer_execution, execution]):
+            offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
                     "content": "Move the player one cell left.",
                     "baseVersionId": version_id,
+                    "idempotencyKey": "proposal_offer_001",
+                },
+            )
+            source_turn = offered.json()["turns"][-1]
+            proposed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please generate this plan.",
+                    "baseVersionId": version_id,
                     "idempotencyKey": "proposal_message_001",
+                    "action": "execute_revision",
+                    "sourceTurnId": source_turn["turnId"],
                 },
             )
 
@@ -1295,9 +1324,11 @@ class CoCreationSessionTests(unittest.TestCase):
         repeated = self.client.post(
             f"/api/sessions/{self.session_id}/messages",
             json={
-                "content": "Move the player one cell left.",
+                "content": "Please generate this plan.",
                 "baseVersionId": version_id,
                 "idempotencyKey": "proposal_message_001",
+                "action": "execute_revision",
+                "sourceTurnId": source_turn["turnId"],
             },
         )
         self.assertEqual(repeated.status_code, 200, repeated.text)
@@ -1472,13 +1503,41 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
-            proposed = self.client.post(
+        offer_execution = LLMExecutionResult(
+            "I see a focused revision direction.",
+            1,
+            "hypothesis-offer-request",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Move the player start left",
+                    "rationale": "This changes the first route choice while preserving the box-target relationship.",
+                },
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", side_effect=[offer_execution, execution]):
+            offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
                     "content": "Move the player one cell left.",
                     "baseVersionId": version_id,
+                    "idempotencyKey": "hypothesis_offer_001",
+                },
+            )
+            source_turn = offered.json()["turns"][-1]
+            proposed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please generate this plan.",
+                    "baseVersionId": version_id,
                     "idempotencyKey": "hypothesis_proposal_001",
+                    "action": "execute_revision",
+                    "sourceTurnId": source_turn["turnId"],
                 },
             )
 
@@ -1582,17 +1641,45 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
+        offer_execution = LLMExecutionResult(
+            "I have a concrete plan to review.",
+            1,
+            "unchanged-offer-request",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Review the current player start",
+                    "rationale": "The plan should make a small, testable change to the opening route.",
+                },
+                "uiCues": [],
+            },
+        )
         with patch.object(
             backend,
             "generate_chat_reply",
-            return_value=unchanged_execution,
+            side_effect=[offer_execution, unchanged_execution],
         ):
+            offered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please propose a concrete revision.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "unchanged_offer_001",
+                },
+            )
+            source_turn = offered.json()["turns"][-1]
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
                     "content": "Please make that concrete revision.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "unchanged_proposal_message_001",
+                    "action": "execute_revision",
+                    "sourceTurnId": source_turn["turnId"],
                 },
             )
 
@@ -1626,13 +1713,41 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        offer_execution = LLMExecutionResult(
+            "I have a concrete plan to review.",
+            1,
+            "tamper-offer-request",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Move the player start left",
+                    "rationale": "This changes the opening route while keeping the puzzle solvable.",
+                },
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", side_effect=[offer_execution, execution]):
+            offered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please propose a concrete revision.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "tamper_offer_001",
+                },
+            )
+            source_turn = offered.json()["turns"][-1]
             proposed = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
                     "content": "Please revise the map.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "proposal_to_tamper_001",
+                    "action": "execute_revision",
+                    "sourceTurnId": source_turn["turnId"],
                 },
             )
 
@@ -1905,6 +2020,398 @@ class CoCreationSessionTests(unittest.TestCase):
 
         self.assertEqual(cached.status_code, 200, cached.text)
         cached_mock.assert_not_called()
+
+    def test_bidirectional_revision_actions_are_visible_and_audited(self):
+        version_id = self.read_session()["currentVersionId"]
+        offer_execution = LLMExecutionResult(
+            "I see one focused direction worth comparing.",
+            1,
+            "revision-offer-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Make the first push create a detour choice",
+                    "rationale": "The player should compare the central route with a local detour.",
+                },
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=offer_execution):
+            offered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please suggest a concrete route revision.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "bidirectional-offer-001",
+                },
+            )
+        self.assertEqual(offered.status_code, 200, offered.text)
+        source_turn = offered.json()["turns"][-1]
+        self.assertEqual(source_turn["guidance"]["proposalOffer"]["summary"], "Make the first push create a detour choice")
+        self.assertEqual(offered.json()["proposals"], [])
+
+        challenge_execution = LLMExecutionResult(
+            "ignored by the deterministic challenge wrapper",
+            1,
+            "challenge-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": source_turn["guidance"]["proposalOffer"],
+                "uiCues": [],
+            },
+            proposed_rows=EDITED_ROWS,
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
+            challenged = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Challenge this plan: Make the first push create a detour choice",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "bidirectional-challenge-001",
+                    "action": "challenge_revision",
+                    "sourceTurnId": source_turn["turnId"],
+                },
+            )
+        self.assertEqual(challenged.status_code, 200, challenged.text)
+        challenge_turn = challenged.json()["turns"][-1]
+        self.assertEqual(challenge_turn["role"], "assistant")
+        self.assertIsNone(challenge_turn["guidance"]["proposalOffer"])
+        self.assertIsNone(challenge_turn["guidance"]["disagreement"])
+        self.assertEqual(challenged.json()["proposals"], [])
+
+        alternative_execution = LLMExecutionResult(
+            "I would try a different local treatment.",
+            1,
+            "alternative-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Change the box approach order instead",
+                    "rationale": "This changes the decision before the first push without copying the detour treatment.",
+                },
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=alternative_execution):
+            alternative = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Try another plan: Make the first push create a detour choice",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "bidirectional-alternative-001",
+                    "action": "alternative_revision",
+                    "sourceTurnId": source_turn["turnId"],
+                },
+            )
+        self.assertEqual(alternative.status_code, 200, alternative.text)
+        self.assertEqual(
+            alternative.json()["turns"][-1]["guidance"]["proposalOffer"]["summary"],
+            "Change the box approach order instead",
+        )
+        self.assertEqual(alternative.json()["proposals"], [])
+
+        execute_execution = LLMExecutionResult(
+            "ignored because the proposal wrapper replaces this text",
+            1,
+            "execute-001",
+            model="mock-model",
+            proposed_rows=EDITED_ROWS,
+            revision_plan={"strategies": [{"effect": "relocate_start"}]},
+            revision_contract=PLAYER_MOVE_CONTRACT,
+            revision_operations=PLAYER_MOVE_OPERATIONS,
+            proposal_diagnostics={"selectedStrategyIndex": 1, "changedCellCount": 2},
+            guidance={
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execute_execution):
+            executed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please generate the first purple plan.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "bidirectional-execute-001",
+                    "action": "execute_revision",
+                    "sourceTurnId": source_turn["turnId"],
+                },
+            )
+        self.assertEqual(executed.status_code, 200, executed.text)
+        self.assertEqual(len(executed.json()["proposals"]), 1)
+        self.assertEqual(executed.json()["versions"][0]["versionId"], version_id)
+
+        with repository.connect() as database:
+            event_types = [
+                row["event_type"]
+                for row in database.execute(
+                    "SELECT event_type FROM audit_events WHERE session_id = ?",
+                    (self.session_id,),
+                ).fetchall()
+            ]
+        self.assertIn("card_action_requested", event_types)
+        self.assertIn("proposal_challenge_started", event_types)
+        self.assertIn("alternative_revision_requested", event_types)
+        self.assertIn("revision_execution_requested", event_types)
+
+    def test_card_action_rejects_stale_or_non_revision_source_turn(self):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "A normal reply.",
+            1,
+            "normal-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            ordinary = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Tell me what stands out.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "non-card-source-001",
+                },
+            )
+        self.assertEqual(ordinary.status_code, 200, ordinary.text)
+        user_turn = ordinary.json()["turns"][0]["turnId"]
+        rejected = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Challenge this plan.",
+                "baseVersionId": version_id,
+                "idempotencyKey": "invalid-card-source-001",
+                "action": "challenge_revision",
+                "sourceTurnId": user_turn,
+            },
+        )
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(rejected.json()["code"], "INVALID_CARD_SOURCE")
+
+    def test_challenge_reason_keeps_or_resolves_structured_disagreement(self):
+        version_id = self.read_session()["currentVersionId"]
+        offer = {
+            "summary": "Make the first push create a detour choice",
+            "rationale": "The player should compare the central route with a local detour.",
+        }
+        offer_execution = LLMExecutionResult(
+            "I see one focused direction worth comparing.",
+            1,
+            "challenge-reason-offer-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": offer,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=offer_execution):
+            offered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please suggest a concrete route revision.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "challenge-reason-offer-001",
+                },
+            )
+        source_turn = offered.json()["turns"][-1]
+
+        challenge_execution = LLMExecutionResult(
+            "I want to hear your specific concern.",
+            1,
+            "challenge-reason-start-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
+            challenged = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Challenge this plan.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "challenge-reason-start-001",
+                    "action": "challenge_revision",
+                    "sourceTurnId": source_turn["turnId"],
+                },
+            )
+        self.assertEqual(challenged.status_code, 200, challenged.text)
+
+        active = {
+            "status": "active",
+            "subject": "ai_revision",
+            "userPosition": "Do not add a detour; the direct opening is intentional.",
+            "aiPosition": "The direct opening may hide the first route judgment.",
+            "coreDisagreement": "Whether to prioritize a direct opening or a visible detour decision.",
+            "nextQuestion": "Which first-push judgment should the player have to make?",
+            "resolution": None,
+        }
+        active_execution = LLMExecutionResult(
+            "I still see a disagreement about the opening decision.",
+            1,
+            "challenge-reason-active-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": active,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=active_execution) as active_mock:
+            still_active = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "I want the opening to stay direct because the player should commit early.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "challenge-reason-active-001",
+                },
+            )
+        self.assertEqual(still_active.status_code, 200, still_active.text)
+        self.assertIsNotNone(active_mock.call_args.kwargs["stage_context"]["challengeContext"])
+        self.assertEqual(still_active.json()["turns"][-1]["guidance"]["disagreement"]["status"], "active")
+
+        resolved = dict(active)
+        resolved["status"] = "resolved"
+        resolved["resolution"] = "user"
+        resolved_execution = LLMExecutionResult(
+            "I accept that the direct opening is the design priority.",
+            1,
+            "challenge-reason-resolved-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Keep the direct opening and sharpen its first commitment",
+                    "rationale": "This follows your reason while making the early commitment easier to read.",
+                },
+                "disagreement": resolved,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=resolved_execution):
+            resolved_response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Keep the direct opening, but make the commitment easier to read.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "challenge-reason-resolved-001",
+                },
+            )
+        self.assertEqual(resolved_response.status_code, 200, resolved_response.text)
+        latest = resolved_response.json()["turns"][-1]["guidance"]
+        self.assertEqual(latest["disagreement"]["resolution"], "user")
+        self.assertIsNotNone(latest["proposalOffer"])
+
+    def test_active_disagreement_cards_keep_warning_and_four_summaries(self):
+        disagreement = {
+            "status": "active",
+            "subject": "human_edit",
+            "userPosition": "Keep B2 one cell lower to create a detour.",
+            "aiPosition": "That position may close B1's only entry route.",
+            "coreDisagreement": "Whether the extra detour is worth risking the entry route.",
+            "nextQuestion": "Which play effect should the compromise preserve?",
+            "resolution": None,
+        }
+        cards = backend._displayed_cards({
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": "legacy question",
+            "proposalOffer": None,
+            "uiCues": [{"type": "warning", "text": "B1 may lose its only entry route."}],
+            "disagreement": disagreement,
+            "discussionCardMode": "disagreement_only",
+        })
+        self.assertEqual([card["type"] for card in cards], ["warning", "discussion"])
+        self.assertEqual(cards[-1]["disagreement"], disagreement)
+
+    def test_manual_edit_warning_gets_discussion_without_replacing_stage(self):
+        version_id = self.read_session()["currentVersionId"]
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": version_id,
+                "idempotencyKey": "manual-risk-stage-001",
+                "summary": "Move player left",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        stage_id = saved.json()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "I notice the change may close the box's escape route.",
+            1,
+            "manual-risk-review-001",
+            model="mock-model",
+            assessment={
+                "solutionSummary": "The map remains solvable.",
+                "difficultyOpinion": "In my view, the opening is tighter.",
+                "features": ["Changed player start"],
+                "suggestions": ["Discuss the first route"],
+                "satisfactionQuestion": None,
+            },
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [{
+                    "type": "warning",
+                    "text": "The moved player can close the box's only escape route beside the wall.",
+                }],
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=execution):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{stage_id}/assessments",
+                json={"idempotencyKey": "manual-risk-assessment-001"},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+        opening = assessed.json()["turns"][-1]
+        self.assertEqual(opening["guidance"]["disagreement"]["status"], "active")
+        self.assertEqual(
+            [card["type"] for card in backend._displayed_cards(opening["guidance"])],
+            ["warning", "discussion"],
+        )
+        self.assertEqual(assessed.json()["currentVersionId"], stage_id)
 
 
 if __name__ == "__main__":

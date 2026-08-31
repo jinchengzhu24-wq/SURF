@@ -615,7 +615,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("never ask the designer to approve the preference", messages[0]["content"])
         self.assertIn("<GUIDANCE>", messages[0]["content"])
         self.assertIn("recentGuidance", messages[0]["content"])
-        self.assertIn("every reply must produce at least one card", messages[0]["content"])
+        self.assertIn("whenever no card is warranted", messages[0]["content"])
         self.assertIn("never produce four cards", messages[0]["content"])
         self.assertIn("two to four compact paragraphs", messages[0]["content"])
         self.assertIn("Give observations room to breathe", messages[0]["content"])
@@ -864,6 +864,19 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertNotIn("Does this direction work", result.assistant_message)
+
+    def test_ordinary_question_stays_in_body_when_new_discussion_cards_are_disabled(self):
+        result, _ = self.execute(
+            [
+                "The lower box now has a more deliberate approach. "
+                "Which first push should carry the route judgment?"
+            ],
+            stage_context={"discussionCardMode": "disagreement_only"},
+        )
+
+        self.assertIsNone(result.guidance["disagreement"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertIn("Which first push should carry the route judgment?", result.assistant_message)
 
     def test_clear_first_person_evaluation_gets_an_intent_card_when_model_omits_one(self):
         client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
@@ -1524,7 +1537,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(state, "not_request")
         self.assertIsNone(brief)
 
-    def test_unclear_revision_request_is_manual_edit_only(self):
+    def test_unclear_revision_request_is_tentative_intent_only(self):
         result, _ = self.execute(
             [
                 "I can help, but I still need to understand the area you mean.\n"
@@ -1536,13 +1549,11 @@ class LLMClientTests(unittest.TestCase):
             conversation=[{"role": "user", "content": "Can you change it?"}],
         )
 
-        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertEqual(result.guidance["intentConfidence"], "low")
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertEqual(
-            [cue["type"] for cue in result.guidance["uiCues"]],
-            ["manual_edit"],
-        )
+        self.assertEqual(result.guidance["uiCues"], [])
         self.assertIn("I would be guessing on your behalf", result.assistant_message)
 
     def test_explicit_map_proposal_rejects_text_only_result(self):

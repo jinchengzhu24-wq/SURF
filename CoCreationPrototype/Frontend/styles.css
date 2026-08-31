@@ -783,6 +783,35 @@ main {
     font-weight: 800;
 }
 
+.disagreement-card {
+    display: grid;
+    gap: 10px;
+}
+
+.disagreement-card .discussion-focus-label {
+    margin-bottom: 0;
+}
+
+.disagreement-field {
+    padding-top: 7px;
+    border-top: 2px solid rgba(23, 54, 74, 0.28);
+}
+
+.disagreement-field small {
+    display: block;
+    margin-bottom: 3px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.disagreement-field strong {
+    font-size: 14px;
+    line-height: 1.5;
+}
+
 .guidance-cue p {
     margin: 7px 0 0;
     color: inherit;

@@ -96,6 +96,12 @@ const translations = {
         proposal: "Map proposal",
         suggestedDirection: "Assistant design direction",
         draftSuggestedRevision: "Ask the assistant to draft this",
+        challengeRevision: "Challenge this plan",
+        alternativeRevision: "Try another plan",
+        discussionUser: "User direction",
+        discussionAi: "AI view",
+        discussionCore: "Core disagreement",
+        discussionNext: "Next question",
         proposalConsent: "Please create a reviewable map proposal for this direction: {summary}",
         proposalValid: "Deterministic validation passed. Review the changed tiles before deciding.",
         accept: "Accept as new Stage",
@@ -137,6 +143,9 @@ const translations = {
         error_OPEN_OUTER_WALL: "The outer boundary must be closed with wall (#) tiles; water cannot replace a wall.",
         error_CLIENT_TIMEOUT: "The assistant did not finish within the browser safety limit. You can retry without creating a duplicate message.",
         error_MODEL_EMPTY_RESPONSE: "The latest model attempt returned blank content, and no earlier attempt produced a valid result. Retry without creating a duplicate.",
+        error_INVALID_MESSAGE_ACTION: "That card action is invalid. Refresh and try again.",
+        error_INVALID_CARD_SOURCE: "That revision card no longer belongs to the current Stage. Refresh and choose the current card.",
+        error_DISAGREEMENT_ACTIVE: "Resolve the current disagreement before choosing another revision card.",
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
         playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again.",
         translatedDisplay: "Translated display",
@@ -211,7 +220,13 @@ const translations = {
         unsaved: "未保存草稿",
         proposal: "地图修改提案",
         suggestedDirection: "助手提出的设计方向",
-        draftSuggestedRevision: "请助手具体生成这个方案",
+        draftSuggestedRevision: "请助手生成这个方案",
+        challengeRevision: "质疑这个方案",
+        alternativeRevision: "换一个方案",
+        discussionUser: "用户目前的方向",
+        discussionAi: "AI 目前的观点",
+        discussionCore: "分歧核心",
+        discussionNext: "接下来要讨论",
         proposalConsent: "请根据这个方向生成一份可供审查的地图提案：{summary}",
         proposalValid: "确定性验证已通过，请检查改动格子后再决定。",
         accept: "接受为新 Stage",
@@ -310,7 +325,10 @@ const chineseApiErrors = {
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
     MODEL_EMPTY_RESPONSE: "最后一次模型尝试返回了空白内容，且此前尝试也未产生有效结果；可使用原消息安全重试，不会产生重复记录。",
     CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
-    CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。"
+    CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。",
+    INVALID_MESSAGE_ACTION: "卡片操作无效，请刷新后重试。",
+    INVALID_CARD_SOURCE: "这张修改建议已不再对应当前 Stage，请重新查看当前对话。",
+    DISAGREEMENT_ACTIVE: "当前仍有未解决的分歧，请先继续协商后再选择修改方案。"
 };
 
 const LEVEL_VALIDATION_ERROR_CODES = new Set([
@@ -552,6 +570,9 @@ function renderAssistantBubble(turn, bubble) {
     const guidance = guidanceForDisplay(localized.guidance || {}, proposal);
     const question = String(guidance.followUpQuestion || "").trim();
     const uiCues = Array.isArray(guidance.uiCues) ? guidance.uiCues : [];
+    const activeDisagreement = guidance.disagreement?.status === "active"
+        ? guidance.disagreement
+        : null;
     const bodyNode = document.createElement("div");
     bodyNode.className = "message-body";
     bodyNode.textContent = assistantBodyWithoutCues(localized.content, uiCues, question);
@@ -583,11 +604,21 @@ function renderAssistantBubble(turn, bubble) {
             offer.summary,
             offer.rationale || ""
         );
-        if (canEditSelected()) {
+        if (canEditSelected() && !selectedStageHasActiveDisagreement()) {
             revisionCue.appendChild(makeButton(
                 t("draftSuggestedRevision"),
                 "secondary-button guidance-cue-button",
-                () => prefillProposalConsent(offer)
+                () => sendRevisionCardAction("execute_revision", turn, offer)
+            ));
+            revisionCue.appendChild(makeButton(
+                t("challengeRevision"),
+                "secondary-button guidance-cue-button",
+                () => sendRevisionCardAction("challenge_revision", turn, offer)
+            ));
+            revisionCue.appendChild(makeButton(
+                t("alternativeRevision"),
+                "secondary-button guidance-cue-button",
+                () => sendRevisionCardAction("alternative_revision", turn, offer)
             ));
         }
         cueList.appendChild(revisionCue);
@@ -608,7 +639,20 @@ function renderAssistantBubble(turn, bubble) {
     });
 
     if (cueList.childElementCount) bubble.appendChild(cueList);
-    if (question) bubble.appendChild(createDiscussionFocus(question));
+    if (activeDisagreement) {
+        bubble.appendChild(createDisagreementCard(activeDisagreement));
+    } else if (question && !guidance.discussionCardMode) {
+        // Turns written before the structured disagreement field retain their
+        // historical blue card. New ordinary questions stay in the body.
+        // Legacy render contract: if (question) bubble.appendChild(createDiscussionFocus(question));
+        bubble.appendChild(createDiscussionFocus(question));
+    }
+}
+
+function selectedStageHasActiveDisagreement() {
+    return selectedStageTurns().some(turn =>
+        turn.role === "assistant" && turn.guidance?.disagreement?.status === "active"
+    );
 }
 
 function guidanceForDisplay(source, proposal = null) {
@@ -660,6 +704,34 @@ function createDiscussionFocus(text) {
     return cue;
 }
 
+function createDisagreementCard(disagreement) {
+    const cue = document.createElement("section");
+    cue.className = "discussion-focus disagreement-card";
+    const label = document.createElement("span");
+    label.className = "discussion-focus-label";
+    label.textContent = DISCUSSION_FOCUS_LABEL;
+    cue.appendChild(label);
+
+    const fields = [
+        ["discussionUser", disagreement.userPosition],
+        ["discussionAi", disagreement.aiPosition],
+        ["discussionCore", disagreement.coreDisagreement],
+        ["discussionNext", disagreement.nextQuestion]
+    ];
+    fields.forEach(([title, value]) => {
+        if (!String(value || "").trim()) return;
+        const item = document.createElement("div");
+        item.className = "disagreement-field";
+        const heading = document.createElement("small");
+        heading.textContent = t(title);
+        const message = document.createElement("strong");
+        message.textContent = value;
+        item.append(heading, message);
+        cue.appendChild(item);
+    });
+    return cue;
+}
+
 function assistantBodyWithoutCues(content, uiCues, question) {
     let body = String(content || "").trimEnd();
     const suffixes = [
@@ -701,10 +773,33 @@ function createGuidanceCue(type, text, detail = "") {
 }
 
 function prefillProposalConsent(offer) {
+    // Legacy helper kept for integrations that call it directly. Purple-card
+    // Historical callback shape was: () => prefillProposalConsent(offer)
+    // clicks now go through sendRevisionCardAction so the server receives the
+    // explicit execute_revision action and source turn.
     const summary = String(offer.summary || "").trim();
     elements.messageInput.value = t("proposalConsent").replace("{summary}", summary);
     handleComposerInput();
     elements.chatForm.requestSubmit();
+}
+
+function sendRevisionCardAction(action, turn, offer) {
+    if (!canEditSelected() || state.busy) return;
+    const summary = String(offer?.summary || "").trim();
+    const content = action === "execute_revision"
+        ? t("proposalConsent").replace("{summary}", summary)
+        : action === "challenge_revision"
+            ? `${t("challengeRevision")}: ${summary}`
+            : `${t("alternativeRevision")}: ${summary}`;
+    state.pendingMessage = {
+        content,
+        baseVersionId: state.session.currentVersionId,
+        idempotencyKey: uniqueId(`card-${action}`),
+        action,
+        sourceTurnId: turn.turnId
+    };
+    persistPendingMessage();
+    void submitPendingMessage();
 }
 
 function renderProposal() {
@@ -1605,6 +1700,17 @@ function readPendingMessage() {
             || typeof pending.content !== "string"
             || typeof pending.baseVersionId !== "string"
             || typeof pending.idempotencyKey !== "string"
+        ) return null;
+        if (pending.action !== undefined && ![
+            "none",
+            "execute_revision",
+            "challenge_revision",
+            "alternative_revision"
+        ].includes(pending.action)) return null;
+        if (
+            pending.action
+            && pending.action !== "none"
+            && typeof pending.sourceTurnId !== "string"
         ) return null;
         if (pending.baseVersionId !== state.session.currentVersionId) return null;
         localStorage.setItem(currentKey, JSON.stringify(pending));
