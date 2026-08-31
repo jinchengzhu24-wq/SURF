@@ -24,7 +24,7 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 当前询问四个中立的地图设计问题（首步检查、推箱依赖、空间分布、路线结构），前两题用于推断难度，后两题用于推断布局。AI 输出温暖的 AI reflection 以及难度/布局建议；四道答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI 推荐和用户最终确认一起保存，不会传入 8010 共创服务或其 LLM 上下文。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。当前 8010 前端脚本与样式缓存键为 `cocreation-bidirectional-challenge-20260831-1`。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。当前 8010 前端脚本与样式缓存键为 `cocreation-bidirectional-challenge-20260831-2`。
 
 正式 Unity 共创会话在浏览器首次访问授权后开始 10 分钟倒计时。直访问示例会话不创建 deadline、不倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
 
@@ -140,6 +140,10 @@ python CoCreationPrototype/Backend/app.py
 - `COCREATION_DATABASE_PATH`
 - `COCREATION_ALLOWED_ORIGINS`
 
+### REVISION 卡片的最新方案限制
+
+同一个当前 Stage 中可以保留多条紫色 `REVISION` 建议，但只有按 `conversation_turns.sequence_number` 判定的最近一条有效 `proposalOffer` 可以执行、质疑或换方案。较早紫卡仍显示在对话历史中，但三个按钮禁用并提示仅最新方案可操作。普通 assistant 正文不会使紫卡失效；后端会再次校验 `sourceTurnId`，因此旧标签页或直接请求也不能绕过该限制。历史 Stage 仍只读，地图提案的接受/拒绝动作不受此规则影响。
+
 ## 8010 API
 
 ```text
@@ -251,4 +255,4 @@ Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Soko
 `coCreationDurationSeconds`。每次新演示会话在新地图验证和新会话创建成功后，清理上一轮
 演示会话及其关联的对话、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。若地图
 生成或会话创建失败，上一轮演示记录保持不变。前端静态资源缓存键为
-`cocreation-bidirectional-challenge-20260831-1`。
+`cocreation-bidirectional-challenge-20260831-2`。

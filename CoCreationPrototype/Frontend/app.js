@@ -98,6 +98,7 @@ const translations = {
         draftSuggestedRevision: "Ask the assistant to draft this",
         challengeRevision: "Challenge this plan",
         alternativeRevision: "Try another plan",
+        staleRevisionCard: "Only the latest revision card can be acted on.",
         discussionUser: "User direction",
         discussionAi: "AI view",
         discussionCore: "Core disagreement",
@@ -223,6 +224,7 @@ const translations = {
         draftSuggestedRevision: "请助手生成这个方案",
         challengeRevision: "质疑这个方案",
         alternativeRevision: "换一个方案",
+        staleRevisionCard: "仅最新方案可操作",
         discussionUser: "用户目前的方向",
         discussionAi: "AI 目前的观点",
         discussionCore: "分歧核心",
@@ -327,7 +329,7 @@ const chineseApiErrors = {
     CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。",
     INVALID_MESSAGE_ACTION: "卡片操作无效，请刷新后重试。",
-    INVALID_CARD_SOURCE: "这张修改建议已不再对应当前 Stage，请重新查看当前对话。",
+    INVALID_CARD_SOURCE: "这张修改建议无效、已过期或不再对应当前 Stage，请重新查看最新方案。",
     DISAGREEMENT_ACTIVE: "当前仍有未解决的分歧，请先继续协商后再选择修改方案。"
 };
 
@@ -605,21 +607,30 @@ function renderAssistantBubble(turn, bubble) {
             offer.rationale || ""
         );
         if (canEditSelected() && !selectedStageHasActiveDisagreement()) {
-            revisionCue.appendChild(makeButton(
-                t("draftSuggestedRevision"),
-                "secondary-button guidance-cue-button",
-                () => sendRevisionCardAction("execute_revision", turn, offer)
-            ));
-            revisionCue.appendChild(makeButton(
-                t("challengeRevision"),
-                "secondary-button guidance-cue-button",
-                () => sendRevisionCardAction("challenge_revision", turn, offer)
-            ));
-            revisionCue.appendChild(makeButton(
-                t("alternativeRevision"),
-                "secondary-button guidance-cue-button",
-                () => sendRevisionCardAction("alternative_revision", turn, offer)
-            ));
+            const actionable = isLatestRevisionOfferTurn(turn);
+            [
+                ["execute_revision", "draftSuggestedRevision"],
+                ["challenge_revision", "challengeRevision"],
+                ["alternative_revision", "alternativeRevision"]
+            ].forEach(([action, labelKey]) => {
+                revisionCue.appendChild(makeButton(
+                    t(labelKey),
+                    `secondary-button guidance-cue-button${actionable ? "" : " guidance-cue-button-stale"}`,
+                    actionable
+                        ? () => sendRevisionCardAction(action, turn, offer)
+                        : null,
+                    {
+                        disabled: !actionable,
+                        title: actionable ? "" : t("staleRevisionCard")
+                    }
+                ));
+            });
+            if (!actionable) {
+                const staleNote = document.createElement("small");
+                staleNote.className = "guidance-cue-stale-note";
+                staleNote.textContent = t("staleRevisionCard");
+                revisionCue.appendChild(staleNote);
+            }
         }
         cueList.appendChild(revisionCue);
     } else if (proposal && proposal.summary) {
@@ -653,6 +664,22 @@ function selectedStageHasActiveDisagreement() {
     return selectedStageTurns().some(turn =>
         turn.role === "assistant" && turn.guidance?.disagreement?.status === "active"
     );
+}
+
+function isRevisionOfferTurn(turn) {
+    const offer = turn?.guidance?.proposalOffer;
+    return Boolean(turn?.role === "assistant"
+        && offer
+        && typeof offer === "object"
+        && String(offer.summary || "").trim());
+}
+
+function latestRevisionOfferTurn() {
+    return selectedStageTurns().slice().reverse().find(isRevisionOfferTurn) || null;
+}
+
+function isLatestRevisionOfferTurn(turn) {
+    return latestRevisionOfferTurn()?.turnId === turn?.turnId;
 }
 
 function guidanceForDisplay(source, proposal = null) {
@@ -785,6 +812,11 @@ function prefillProposalConsent(offer) {
 
 function sendRevisionCardAction(action, turn, offer) {
     if (!canEditSelected() || state.busy) return;
+    if (!isLatestRevisionOfferTurn(turn)) {
+        showNotice(t("staleRevisionCard"));
+        render();
+        return;
+    }
     const summary = String(offer?.summary || "").trim();
     const content = action === "execute_revision"
         ? t("proposalConsent").replace("{summary}", summary)
@@ -1070,6 +1102,22 @@ async function submitPendingMessage() {
         updateCharacterCount();
         render();
     } catch (error) {
+        if (
+            error?.code === "INVALID_CARD_SOURCE"
+            && pending.action
+            && pending.action !== "none"
+        ) {
+            clearPendingMessage();
+            elements.messageInput.value = "";
+            localStorage.removeItem(composerKey());
+            updateCharacterCount();
+            try {
+                await refreshSession();
+            } catch (_refreshError) {
+                // Keep the original stale-card error visible if the refresh
+                // itself cannot complete.
+            }
+        }
         state.chatStatus = "error";
         state.chatError = error;
     } finally {
@@ -1757,7 +1805,19 @@ function uniqueId(prefix) {
 }
 
 function t(key) { return translations[state.language][key] || translations.en[key] || key; }
-function makeButton(label, className, handler) { const button = document.createElement("button"); button.type = "button"; button.className = className; button.textContent = label; button.addEventListener("click", handler); return button; }
+function makeButton(label, className, handler, options = {}) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    if (options.disabled) {
+        button.disabled = true;
+        button.setAttribute("aria-disabled", "true");
+    }
+    if (options.title) button.title = options.title;
+    if (handler && !options.disabled) button.addEventListener("click", handler);
+    return button;
+}
 function tileClass(tile) { return tile === "#" ? "tile-wall" : tile === "@" ? "tile-water" : tile === "p" ? "tile-player" : tile === "s" ? "tile-box" : tile === "t" ? "tile-target" : tile === "." ? "tile-floor" : "tile-empty"; }
 function tileName(tile) { return tile === "#" ? "wall" : tile === "@" ? "water" : tile === "p" ? "player" : tile === "s" ? "box" : tile === "t" ? "target" : tile === "." ? "floor" : "erase"; }
 function formatTileCoordinate(x, y) { return `(${y + 1}, ${x + 1})`; }

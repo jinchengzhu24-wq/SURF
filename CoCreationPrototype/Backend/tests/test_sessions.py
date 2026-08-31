@@ -2121,6 +2121,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "Change the box approach order instead",
         )
         self.assertEqual(alternative.json()["proposals"], [])
+        latest_source_turn = alternative.json()["turns"][-1]
 
         execute_execution = LLMExecutionResult(
             "ignored because the proposal wrapper replaces this text",
@@ -2149,7 +2150,7 @@ class CoCreationSessionTests(unittest.TestCase):
                     "baseVersionId": version_id,
                     "idempotencyKey": "bidirectional-execute-001",
                     "action": "execute_revision",
-                    "sourceTurnId": source_turn["turnId"],
+                    "sourceTurnId": latest_source_turn["turnId"],
                 },
             )
         self.assertEqual(executed.status_code, 200, executed.text)
@@ -2168,6 +2169,172 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertIn("proposal_challenge_started", event_types)
         self.assertIn("alternative_revision_requested", event_types)
         self.assertIn("revision_execution_requested", event_types)
+
+    def test_only_latest_revision_offer_can_trigger_card_actions(self):
+        version_id = self.read_session()["currentVersionId"]
+        older_offer = LLMExecutionResult(
+            "An older direction.",
+            1,
+            "latest-card-old-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Use the left route as the main choice",
+                    "rationale": "It creates an earlier route decision.",
+                },
+                "uiCues": [],
+            },
+        )
+        latest_offer = LLMExecutionResult(
+            "A newer direction.",
+            1,
+            "latest-card-new-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Use the central route as the main choice",
+                    "rationale": "It creates a different route decision.",
+                },
+                "uiCues": [],
+            },
+        )
+        with repository.connect(immediate=True) as database:
+            session = repository.get_session(database, self.session_id)
+            older_turn_id = backend.insert_turn(
+                database,
+                session,
+                "assistant",
+                older_offer.assistant_message,
+                version_id,
+                older_offer.request_id,
+                older_offer,
+            )
+            latest_turn_id = backend.insert_turn(
+                database,
+                session,
+                "assistant",
+                latest_offer.assistant_message,
+                version_id,
+                latest_offer.request_id,
+                latest_offer,
+            )
+
+        before = self.read_session()
+        before_turn_count = len(before["turns"])
+        before_event_count = None
+        with repository.connect() as database:
+            before_event_count = database.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE session_id = ?",
+                (self.session_id,),
+            ).fetchone()[0]
+
+        for index, action in enumerate(
+            ("execute_revision", "challenge_revision", "alternative_revision"),
+            start=1,
+        ):
+            with patch.object(backend, "generate_chat_reply") as generate_reply:
+                rejected = self.client.post(
+                    f"/api/sessions/{self.session_id}/messages",
+                    json={
+                        "content": f"Use the older card ({action}).",
+                        "baseVersionId": version_id,
+                        "idempotencyKey": f"stale-card-action-{index}",
+                        "action": action,
+                        "sourceTurnId": older_turn_id,
+                    },
+                )
+            self.assertEqual(rejected.status_code, 409, rejected.text)
+            self.assertEqual(rejected.json()["code"], "INVALID_CARD_SOURCE")
+            generate_reply.assert_not_called()
+
+        after = self.read_session()
+        self.assertEqual(len(after["turns"]), before_turn_count)
+        with repository.connect() as database:
+            after_event_count = database.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE session_id = ?",
+                (self.session_id,),
+            ).fetchone()[0]
+        self.assertEqual(after_event_count, before_event_count)
+
+        with repository.connect() as database:
+            source, offer = backend._source_revision_offer(
+                database,
+                self.session_id,
+                version_id,
+                latest_turn_id,
+            )
+        self.assertEqual(source["id"], latest_turn_id)
+        self.assertEqual(offer["summary"], "Use the central route as the main choice")
+
+    def test_normal_assistant_turn_does_not_make_latest_revision_offer_stale(self):
+        version_id = self.read_session()["currentVersionId"]
+        offer = LLMExecutionResult(
+            "A concrete direction.",
+            1,
+            "latest-card-normal-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Keep the first route readable",
+                    "rationale": "This preserves the intended first decision.",
+                },
+                "uiCues": [],
+            },
+        )
+        ordinary = LLMExecutionResult(
+            "The current route is readable.",
+            1,
+            "latest-card-normal-reply-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", side_effect=[offer, ordinary]):
+            offered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Suggest a route revision.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "latest-card-normal-offer-001",
+                },
+            )
+            source_turn_id = offered.json()["turns"][-1]["turnId"]
+            ordinary_reply = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Why is that route readable?",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "latest-card-normal-reply-001",
+                },
+            )
+        self.assertEqual(ordinary_reply.status_code, 200, ordinary_reply.text)
+        with repository.connect() as database:
+            source, offer = backend._source_revision_offer(
+                database,
+                self.session_id,
+                version_id,
+                source_turn_id,
+            )
+        self.assertEqual(source["id"], source_turn_id)
+        self.assertEqual(offer["summary"], "Keep the first route readable")
 
     def test_card_action_rejects_stale_or_non_revision_source_turn(self):
         version_id = self.read_session()["currentVersionId"]

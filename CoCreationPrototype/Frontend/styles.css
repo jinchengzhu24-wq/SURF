@@ -855,6 +855,21 @@ main {
     margin-top: 7px;
 }
 
+.guidance-cue-button-stale,
+.guidance-cue-button-stale:disabled {
+    cursor: not-allowed;
+    opacity: 0.52;
+}
+
+.guidance-cue-stale-note {
+    display: block;
+    margin-top: 7px;
+    color: #5d536b;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
 .proposal-area,
 .chat-request-status,
 .composer,

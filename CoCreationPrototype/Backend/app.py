@@ -3430,6 +3430,38 @@ def _validate_message_action_payload(payload):
         _validate_identifier(source_turn_id, "sourceTurnId")
 
 
+def _revision_offer_from_json(guidance_json):
+    try:
+        guidance = load_json(guidance_json) or {}
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(guidance, dict):
+        return None
+    offer = guidance.get("proposalOffer")
+    if not isinstance(offer, dict) or not str(offer.get("summary") or "").strip():
+        return None
+    return offer
+
+
+def _latest_revision_offer_source(database, session_id, version_id):
+    sources = database.execute(
+        """
+        SELECT id, guidance_json
+        FROM conversation_turns
+        WHERE session_id = ?
+          AND version_id = ?
+          AND role = 'assistant'
+        ORDER BY sequence_number DESC
+        """,
+        (session_id, version_id),
+    ).fetchall()
+    for source in sources:
+        offer = _revision_offer_from_json(source["guidance_json"])
+        if offer is not None:
+            return source, offer
+    return None, None
+
+
 def _source_revision_offer(database, session_id, version_id, source_turn_id):
     source = database.execute(
         """
@@ -3446,13 +3478,24 @@ def _source_revision_offer(database, session_id, version_id, source_turn_id):
             "The selected revision card is no longer attached to the current Stage.",
         )
 
-    guidance = load_json(source["guidance_json"]) or {}
-    offer = guidance.get("proposalOffer")
-    if not isinstance(offer, dict) or not str(offer.get("summary") or "").strip():
+    offer = _revision_offer_from_json(source["guidance_json"])
+    if offer is None:
         raise ApiError(
             409,
             "INVALID_CARD_SOURCE",
             "The selected turn does not contain an executable revision direction.",
+        )
+
+    latest_source, _ = _latest_revision_offer_source(
+        database,
+        session_id,
+        version_id,
+    )
+    if latest_source is None or source["id"] != latest_source["id"]:
+        raise ApiError(
+            409,
+            "INVALID_CARD_SOURCE",
+            "Only the latest revision card in the current Stage can be acted on.",
         )
     return source, offer
 
