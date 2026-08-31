@@ -28,6 +28,8 @@ Online Lobby 的生成房间码位于静态浏览器只读输入框中，可选�
 
 8000 Dashboard 的 Match ID 和两位玩家 Study Session ID 默认显示前 8 位，复制按钮复制完整值，搜索支持完整值及短值；每个流程节点的 Record details 都显示两位玩家的 Study Session ID。Final map 显示共创耗时，Result submitted 和挑战地图详情继续显示对手游玩时长。Dashboard 不再显示已淘汰的 `AI assistant` 模式，`Designer intention` 的用户可见标签统一为 `Message`；兼容字段仍保留在后端原始记录中。
 
+8010 普通聊天会对明显的求助请求做确定性卡片路由：已有具体体验目标或修改方向、并请求建议、方案或修改方法时，优先返回 `proposalOffer` 修改建议卡；没有明确方向、表现出迷茫并请求思路时，优先返回 `followUpQuestion` 聊聊卡。两者同时满足时修改建议优先。“帮我改”但没有方向仍沿用 `MANUAL_EDIT` 引导；修改建议卡不会自动改图，只有用户继续明确授权后才进入地图提案和确定性验证。该分类仅用于选择现有卡片，不新增公开 API 字段；服务日志只记录分类名称和最终卡片类型。
+
 ## 端口速查
 
 ```text

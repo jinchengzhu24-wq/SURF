@@ -451,6 +451,105 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("箱子", offer["summary"])
         self.assertNotIn("“好”", offer["rationale"])
 
+    def test_revision_direction_ignores_transition_meta_language(self):
+        meta = "\u8fd9\u4e2a\u5224\u65ad\u4f1a\u76f4\u63a5\u5f71\u54cd\u6211\u63a5\u4e0b\u6765\u5efa\u8bae\u600e\u4e48\u8c03\u6574\u8def\u7ebf\u3002"
+        concrete = (
+            "\u5982\u679c\u60f3\u8ba9\u6574\u4f53\u65f6\u95f4\u62c9\u957f\uff0c\u53ef\u4ee5\u628a B2 \u7684\u8def\u7ebf\u7a0d\u5fae\u7ed5\u4e00\u70b9\uff0c"
+            "\u8ba9\u73a9\u5bb6\u5148\u7ecf\u8fc7\u4e2d\u8f6c\u4f4d\u518d\u7ee7\u7eed\u63a8\u3002"
+        )
+
+        direction = llm_client._revision_direction_sentence(meta + "\n" + concrete)
+
+        self.assertEqual(direction, concrete)
+        self.assertFalse(llm_client._proposal_card_is_meta_language(direction))
+        for transition in (
+            "\u63a5\u4e0b\u6765\u6211\u5efa\u8bae\u5148\u770b\u8def\u7ebf\u3002",
+            "\u6211\u4f1a\u6839\u636e\u8fd9\u4e2a\u5224\u65ad\u8c03\u6574\u8def\u7ebf\u3002",
+            "\u6211\u6ce8\u610f\u5230\u4f60\u8fdb\u884c\u4e86\u4fee\u6539\u3002",
+        ):
+            self.assertTrue(llm_client._proposal_card_is_meta_language(transition))
+            self.assertEqual(llm_client._revision_direction_sentence(transition), "")
+
+    def test_invalid_proposal_card_is_retried_and_repaired_in_the_same_reply(self):
+        meta = "\u8fd9\u4e2a\u5224\u65ad\u4f1a\u76f4\u63a5\u5f71\u54cd\u6211\u63a5\u4e0b\u6765\u5efa\u8bae\u600e\u4e48\u8c03\u6574\u8def\u7ebf"
+        body = (
+            "\u5982\u679c\u60f3\u8ba9\u6574\u4f53\u65f6\u95f4\u62c9\u957f\uff0c\u6211\u5efa\u8bae\u628a\u5173\u952e\u7bb1\u5b50\u7684\u8def\u7ebf\u7a0d\u5fae\u7ed5\u4e00\u70b9\uff0c"
+            "\u8ba9\u73a9\u5bb6\u5148\u7ecf\u8fc7\u4e2d\u8f6c\u4f4d\u518d\u7ee7\u7eed\u63a8\u3002\n\n"
+            + meta
+        )
+        invalid = (
+            body
+            + "\n<GUIDANCE>\nPROPOSAL_SUMMARY: "
+            + meta
+            + "\nPROPOSAL_RATIONALE: \u5177\u4f53\u505a\u6cd5\u662f\uff1a"
+            + meta
+            + "\u3002\u6211\u6ce8\u610f\u5230\u4f60\u8fdb\u884c\u4e86\u4fee\u6539\u3002\n</GUIDANCE>"
+        )
+        conversation = [{
+            "role": "user",
+            "content": "\u6211\u5e0c\u671b\u8ba9\u7528\u6237\u53ef\u4ee5\u82b1\u66f4\u591a\u65f6\u95f4\u6765\u6e38\u73a9\uff0c\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848",
+        }]
+
+        result, client = self.execute(
+            [invalid, invalid],
+            rows=MAP_GROUNDING_ROWS,
+            conversation=conversation,
+            language="zh-CN",
+        )
+
+        offer = result.guidance["proposalOffer"]
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertIsNotNone(offer)
+        self.assertNotIn(meta, offer["summary"])
+        self.assertIn("\u7ed5\u884c", offer["summary"])
+        self.assertIn("\u8def\u7ebf", offer["rationale"])
+        self.assertIn("\u5173\u952e\u7bb1\u5b50", result.assistant_message)
+        self.assertEqual(result.guidance["move"], "offer_revision")
+
+    def test_composing_a_reply_removes_repeated_card_text_but_keeps_analysis(self):
+        body = (
+            "\u6211\u4f1a\u5148\u770b\u5173\u952e\u7bb1\u5b50\u7684\u7b2c\u4e00\u6b21\u63a8\u8fdb\uff0c\u56e0\u4e3a\u8fd9\u91cc\u80fd\u770b\u51fa\u8def\u7ebf\u662f\u5426\u771f\u7684\u53d8\u5f97\u66f4\u6709\u9009\u62e9\u3002\n\n"
+            "\u8ba9\u5173\u952e\u7bb1\u5b50\u8def\u7ebf\u5f62\u6210\u7ed5\u884c\u9009\u62e9\u3002"
+        )
+        summary = "\u8ba9\u5173\u952e\u7bb1\u5b50\u8def\u7ebf\u5f62\u6210\u7ed5\u884c\u9009\u62e9"
+        message = llm_client._compose_assistant_message(
+            body,
+            {
+                "move": "offer_revision",
+                "proposalOffer": {
+                    "summary": summary,
+                    "rationale": "\u8ba9\u73a9\u5bb6\u5728\u63a8\u7bb1\u524d\u6bd4\u8f83\u76f4\u8def\u548c\u7ed5\u884c\u8def\u7ebf\u3002",
+                },
+                "uiCues": [],
+            },
+            "zh-CN",
+            False,
+            {},
+        )
+
+        self.assertIn("\u7b2c\u4e00\u6b21\u63a8\u8fdb", message)
+        self.assertEqual(message.count(summary), 0)
+
+        embedded = (
+            "\u8ba9\u5173\u952e\u7bb1\u5b50\u8def\u7ebf\u5f62\u6210\u7ed5\u884c\u9009\u62e9\uff0c\u5e76\u4e14\u8ba9\u73a9\u5bb6\u5728\u7b2c\u4e00\u6b21\u63a8\u8fdb\u524d\u8bfb\u61c2\u4e2d\u8f6c\u4f4d\u3002"
+        )
+        embedded_message = llm_client._compose_assistant_message(
+            embedded,
+            {
+                "move": "offer_revision",
+                "proposalOffer": {
+                    "summary": summary,
+                    "rationale": "\u8ba9\u73a9\u5bb6\u5728\u63a8\u7bb1\u524d\u6bd4\u8f83\u76f4\u8def\u548c\u7ed5\u884c\u8def\u7ebf\u3002",
+                },
+                "uiCues": [],
+            },
+            "zh-CN",
+            False,
+            {},
+        )
+        self.assertIn("\u4e2d\u8f6c\u4f4d", embedded_message)
+
     def test_malformed_guidance_is_hidden_without_failing_reply(self):
         for reply in (
             "Visible reply.\n<GUIDANCE>\nINTENT: You want a tighter route",
@@ -842,6 +941,102 @@ class LLMClientTests(unittest.TestCase):
         self.assertTrue(llm_client._latest_user_states_direction([
             {"role": "user", "content": "做点联动吧"},
         ]))
+
+    def test_guidance_request_classifier_prefers_revision_advice_for_a_concrete_goal(self):
+        messages = (
+            "给我一个方案，我想让玩家花更多时间绕过障碍物。",
+            "I want the player to spend more time detouring around obstacles; can you suggest a plan?",
+        )
+
+        for message in messages:
+            with self.subTest(message=message):
+                self.assertEqual(
+                    llm_client.classify_guidance_request([
+                        {"role": "user", "content": message},
+                    ]),
+                    "revision_advice",
+                )
+
+    def test_guidance_request_classifier_routes_open_ended_help_to_discussion(self):
+        messages = (
+            "我有点迷茫，不知道这关怎么改，给我点思路。",
+            "你觉得水域应该怎么改？",
+            "I am not sure where to start. Can you give me some ideas?",
+            "How would you change the route?",
+        )
+
+        for message in messages:
+            with self.subTest(message=message):
+                self.assertEqual(
+                    llm_client.classify_guidance_request([
+                        {"role": "user", "content": message},
+                    ]),
+                    "discussion",
+                )
+
+    def test_guidance_request_classifier_keeps_undirected_edit_command_on_existing_path(self):
+        self.assertEqual(
+            llm_client.classify_guidance_request([
+                {"role": "user", "content": "帮我改"},
+            ]),
+            "none",
+        )
+
+    def test_concrete_advice_request_gets_a_proposal_card_when_model_omits_metadata(self):
+        result, client = self.execute(
+            [
+                "我会先看这张图的路线节奏，再说明可以怎样调整。",
+                "我会先看这张图的路线节奏，再说明可以怎样调整。",
+            ],
+            rows=MAP_GROUNDING_ROWS,
+            language="zh-CN",
+            conversation=[{
+                "role": "user",
+                "content": "给我一个方案，我想让玩家花更多时间绕过障碍物。",
+            }],
+        )
+
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(result.guidance["move"], "offer_revision")
+        self.assertIsNotNone(result.guidance["proposalOffer"])
+        self.assertIn("绕行", result.guidance["proposalOffer"]["summary"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertTrue(any(
+            cue["type"] == "manual_edit"
+            for cue in result.guidance["uiCues"]
+        ))
+        self.assertIn(
+            "REVISION_ADVICE",
+            client.chat.completions.calls[0]["messages"][0]["content"],
+        )
+        self.assertIn(
+            "required guidance card",
+            client.chat.completions.calls[1]["messages"][0]["content"],
+        )
+
+    def test_open_ended_help_gets_a_grounded_discussion_card_when_model_omits_metadata(self):
+        result, client = self.execute(
+            ["我可以先陪你看看这张图。"],
+            rows=MAP_GROUNDING_ROWS,
+            language="zh-CN",
+            conversation=[{
+                "role": "user",
+                "content": "我有点迷茫，不知道这关怎么改，给我点思路。",
+            }],
+        )
+
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(result.guidance["move"], "clarify_intent")
+        self.assertIsNone(result.guidance["proposalOffer"])
+        self.assertTrue(result.guidance["followUpQuestion"])
+        self.assertFalse(any(
+            cue["type"] == "manual_edit"
+            for cue in result.guidance["uiCues"]
+        ))
+        self.assertIn(
+            "DISCUSSION",
+            client.chat.completions.calls[0]["messages"][0]["content"],
+        )
 
     def test_any_first_person_stance_gets_a_correctable_intent_without_a_forced_discussion_card(self):
         guidance = llm_client._ensure_required_guidance_card(
@@ -2614,7 +2809,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("water area", guidance["followUpQuestion"])
         self.assertRegex(guidance["followUpQuestion"], r"\?$" )
 
-    def test_no_blue_card_is_invented_when_the_reply_has_no_grounded_focus(self):
+    def test_open_ended_map_question_gets_a_discussion_card(self):
         guidance = llm_client._ensure_required_guidance_card(
             {
                 "move": "observe_stage",
@@ -2631,7 +2826,9 @@ class LLMClientTests(unittest.TestCase):
             {"stageNumber": 2},
         )
 
-        self.assertIsNone(guidance["followUpQuestion"])
+        self.assertTrue(guidance["followUpQuestion"])
+        self.assertEqual(guidance["move"], "clarify_intent")
+        self.assertIsNone(guidance["proposalOffer"])
 
     def test_later_turn_in_stage_one_may_still_ask_a_concrete_question(self):
         client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])

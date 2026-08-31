@@ -66,6 +66,7 @@ GUIDANCE_MOVES = {
 }
 INTENT_CONFIDENCE_LEVELS = {"low", "medium", "high"}
 UI_CUE_TYPES = {"manual_edit", "warning", "tradeoff"}
+GUIDANCE_REQUEST_MODES = {"revision_advice", "discussion", "none"}
 
 
 @dataclass(frozen=True)
@@ -355,6 +356,12 @@ def build_plain_chat_messages(
     stage_context = stage_context or {}
     map_facts = _map_facts_for_prompt(rows, stage_context)
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
+    guidance_mode = classify_guidance_request(
+        conversation,
+        stage_context,
+        stage_opening=stage_opening,
+    )
+    guidance_mode_instruction = _guidance_mode_instruction(guidance_mode)
     revision_request_state = stage_context.get("revisionRequestState")
     revision_instruction = (
         "The designer asked you to modify the map, but neither this message nor the recent "
@@ -409,7 +416,11 @@ def build_plain_chat_messages(
             "natural thought rather than a slogan. PROPOSAL_SUMMARY should be a short title-like "
             "synthesis of the actual design move, never a bare confirmation such as '好', '可以', "
             "'ok', or 'yes'; PROPOSAL_RATIONALE should independently expand "
-            "the expected playable effect and what the designer can judge from it. Add "
+            "the expected playable effect and what the designer can judge from it. A transition "
+            "about what I will suggest next, what a judgment will affect, or what I noticed the "
+            "designer changed is not a proposal summary or rationale. In the action family, keep "
+            "at least one complete visible analysis paragraph that supports the card; do not repeat "
+            "the card text as the visible reply. Add "
             "WARNING only with strong evidence: explicit play "
             "difficulty, or a mechanically explainable interaction between at least two "
             "specific map elements and a concrete push moment. Keep ordinary uncertainty, "
@@ -464,7 +475,7 @@ def build_plain_chat_messages(
         "There is exactly one level in this session; every Stage is only a saved version of "
         "that same level. Never describe a Stage as a first, second, next, or later level, "
         "and never imply a campaign progression.\n\n"
-        f"{guidance_instruction}\n"
+        f"{guidance_mode_instruction}\n{guidance_instruction}\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         f"{_map_grounding_contract()}\n\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
@@ -2167,6 +2178,11 @@ def _generate_plain_chat_sync(
         stage_context,
         stage_opening=stage_opening,
     )
+    guidance_mode = classify_guidance_request(
+        conversation,
+        stage_context,
+        stage_opening=stage_opening,
+    )
     task = "stage_assessment_fallback" if stage_opening else "chat"
     started_at = time.monotonic()
     _log_llm_event(
@@ -2177,6 +2193,7 @@ def _generate_plain_chat_sync(
         fallbackModel=models[1] if len(models) > 1 else None,
         timeoutSeconds=PLAIN_CHAT_TIMEOUT_SECONDS,
         responseMode="plain_text",
+        guidanceMode=guidance_mode,
     )
 
     try:
@@ -2195,6 +2212,7 @@ def _generate_plain_chat_sync(
                     play_summary=play_summary,
                     stage_opening=stage_opening,
                     stage_context=stage_context,
+                    guidance_mode=guidance_mode,
                     started_at=started_at,
                 ),
                 timeout=PLAIN_CHAT_TIMEOUT_SECONDS,
@@ -2474,6 +2492,7 @@ async def _generate_plain_with_model_fallback(
     play_summary,
     stage_opening,
     stage_context,
+    guidance_mode,
     started_at,
 ):
     last_error = None
@@ -2556,6 +2575,8 @@ async def _generate_plain_with_model_fallback(
                     ui_cues,
                     rows,
                     play_summary,
+                    guidance_mode=guidance_mode,
+                    allow_required_fallback=attempt >= len(models[:CHAT_MAX_ATTEMPTS]),
                 )
             )
             if proposal_offer is not None:
@@ -2564,6 +2585,14 @@ async def _generate_plain_with_model_fallback(
                     visible_content,
                     _latest_role_content(messages[:-1], "assistant"),
                     language,
+                )
+            if (
+                guidance_mode == "revision_advice"
+                and proposal_offer is None
+                and attempt < len(models[:CHAT_MAX_ATTEMPTS])
+            ):
+                raise ValueError(
+                    "REVISION_ADVICE requires a substantive proposalOffer card."
                 )
             visible_content = _remove_extracted_warning_sentence(
                 visible_content,
@@ -2643,12 +2672,56 @@ async def _generate_plain_with_model_fallback(
                 rows,
                 stage_opening,
                 stage_context,
+                visible_content=visible_content,
+                guidance_mode=guidance_mode,
             )
             body = _deduplicate_assistant_body(body)
             body = _remove_guidance_from_body(
                 body,
                 guidance.get("followUpQuestion"),
             )
+            proposal_binding_issue = _proposal_offer_binding_issue(
+                guidance.get("proposalOffer"),
+                body,
+                messages,
+                language,
+            )
+            # In the explicit advice route this is a hard contract. Ordinary chat may still
+            # expose a model-authored proposal for backwards compatibility; the distiller above
+            # already removes bare confirmations and transition metadata from that family.
+            binding_is_required = guidance_mode == "revision_advice"
+            if proposal_binding_issue and binding_is_required:
+                if attempt < len(models[:CHAT_MAX_ATTEMPTS]):
+                    raise ValueError(
+                        f"proposalOffer binding failed: {proposal_binding_issue}"
+                    )
+
+                repaired = _repair_conceptual_proposal_binding(
+                    messages,
+                    body,
+                    guidance.get("proposalOffer"),
+                    visible_content,
+                    rows,
+                    language,
+                    stage_context,
+                )
+                if repaired["proposalOffer"] is not None:
+                    body = repaired["body"]
+                    guidance["move"] = "offer_revision"
+                    guidance["intentHypothesis"] = None
+                    guidance["intentConfidence"] = None
+                    guidance["followUpQuestion"] = None
+                    guidance["proposalOffer"] = repaired["proposalOffer"]
+                    guidance["uiCues"] = repaired["uiCues"]
+                else:
+                    body = repaired["body"]
+                    guidance["move"] = "clarify_intent"
+                    guidance["intentHypothesis"] = None
+                    guidance["intentConfidence"] = None
+                    guidance["proposalOffer"] = None
+                    guidance["followUpQuestion"] = repaired["followUpQuestion"]
+                    guidance["uiCues"] = repaired["uiCues"]
+                guidance_fallback_used = True
             grounding_texts = [
                 body,
                 guidance.get("followUpQuestion"),
@@ -2700,6 +2773,7 @@ async def _generate_plain_with_model_fallback(
                 attemptsUsed=attempt,
                 latencyMs=latency_ms,
                 responseMode="plain_text",
+                guidanceMode=guidance_mode,
                 guidanceFallbackUsed=guidance_fallback_used,
                 intentCard=bool(guidance.get("intentHypothesis")),
                 questionCard=bool(guidance.get("followUpQuestion")),
@@ -3001,12 +3075,22 @@ def _plain_messages_with_validation_feedback(messages, validation_feedback):
         return messages
 
     corrected = [dict(message) for message in messages]
-    instruction = (
-        "Your previous reply for this same request was rejected because it made a spatial "
-        f"claim that conflicts with deterministic map facts: {validation_feedback} Write a "
-        "fresh grounded reply. Use only verified entity IDs or coordinates for current map "
-        "relations, and do not mention this correction to the designer."
-    )
+    if "REVISION_ADVICE" in validation_feedback or "proposalOffer" in validation_feedback:
+        instruction = (
+            "Your previous reply for this same request was rejected because it omitted the "
+            f"required guidance card: {validation_feedback} Write a fresh reply with a "
+            "substantive PROPOSAL_SUMMARY and PROPOSAL_RATIONALE in the trailing GUIDANCE "
+            "block, plus the required MANUAL_EDIT companion card. Keep it conceptual: do not "
+            "output map rows, tile operations, or claim that the map changed. Do not mention "
+            "this correction to the designer."
+        )
+    else:
+        instruction = (
+            "Your previous reply for this same request was rejected because it made a spatial "
+            f"claim that conflicts with deterministic map facts: {validation_feedback} Write a "
+            "fresh grounded reply. Use only verified entity IDs or coordinates for current map "
+            "relations, and do not mention this correction to the designer."
+        )
     for message in corrected:
         if message.get("role") == "system":
             message["content"] = f"{message.get('content', '')}\n\n{instruction}"
@@ -4299,9 +4383,38 @@ def _guidance_reuses_visible_sentence(card_text, visible_content):
     return False
 
 
+def _proposal_card_is_meta_language(value):
+    text = " ".join(str(value or "").split()).strip().casefold()
+    if not text:
+        return False
+
+    chinese_patterns = (
+        r"这个判断.{0,30}(?:影响|决定).{0,35}(?:接下来|下一步).{0,30}(?:建议|方案|调整|怎么)",
+        r"(?:接下来|下一步)(?:我|我们)?(?:会|将|再)?(?:建议|调整|讨论)",
+        r"(?:我会|我将)根据(?:这个|该)(?:判断|结论|想法).{0,50}(?:建议|方案|调整|修改|路线|怎么)",
+        r"我注意到你.{0,35}(?:进行|做)了?(?:修改|调整)",
+        r"这个改动.{0,30}(?:影响|决定)我(?:接下来|下一步)",
+    )
+    if any(re.search(pattern, text) for pattern in chinese_patterns):
+        return True
+
+    english_patterns = (
+        r"\bthis judgment.{0,40}(?:affect|determine).{0,35}(?:next|following).{0,30}(?:suggest|recommend|adjust)",
+        r"\b(?:next|then)\s+(?:i|we)\s+(?:will|would|can)\s+(?:suggest|recommend|adjust|discuss)",
+        r"\b(?:i|we)\s+will\s+base\s+(?:my|our)\s+(?:next|following)\s+"
+        r"(?:suggestion|recommendation|adjustment)",
+        r"\bi noticed that you (?:changed|modified|adjusted)",
+        r"\bthis change.{0,30}(?:affect|determine)\s+(?:my|our)\s+(?:next|following)",
+    )
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in english_patterns)
+
+
 def _proposal_summary_is_substantive(summary, language):
     value = re.sub(r"\s+", "", str(summary or "")).casefold()
     if not value:
+        return False
+
+    if _proposal_card_is_meta_language(summary):
         return False
 
     confirmations = {
@@ -4326,7 +4439,18 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
 
     original_summary = str(proposal_offer.get("summary") or "").strip()
     original_rationale = str(proposal_offer.get("rationale") or "").strip()
+    summary_was_meta_language = _proposal_card_is_meta_language(original_summary)
+    rationale_was_meta_language = _proposal_card_is_meta_language(original_rationale)
+    if summary_was_meta_language:
+        original_summary = ""
+    if rationale_was_meta_language:
+        original_rationale = ""
     visible_action = _revision_direction_sentence(visible_content)
+    # A transition sentence is not a proposal. If the visible reply has no concrete
+    # design sentence to replace it, let the caller choose a discussion fallback instead
+    # of inventing a revision card from metadata.
+    if (summary_was_meta_language or rationale_was_meta_language) and not visible_action:
+        return None
     if visible_action and not _proposal_summary_has_concrete_action(original_summary, language):
         original_summary = visible_action
     if _proposal_summary_is_substantive(original_summary, language):
@@ -4481,11 +4605,14 @@ def _proposal_summary_has_concrete_action(summary, language):
     value = str(summary or "").strip()
     if not value:
         return False
+    if _proposal_card_is_meta_language(value):
+        return False
     lowered = value.casefold()
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", value):
         return bool(re.search(r"\(\s*\d+\s*,\s*\d+\s*\)", value)) or any(
             word in value for word in (
                 "移", "挪", "调", "改", "加", "减", "删", "缩", "拉开", "收紧", "打开", "封住",
+                "让", "形成", "制造",
             )
         )
     return bool(re.search(r"\b(?:row|column|tile)\s*\d+", lowered)) or any(
@@ -4549,6 +4676,274 @@ def _ensure_proposal_offer_explanation(offer, visible_content, language):
     elif not chinese and not rationale.lower().startswith("concrete change:"):
         rationale = f"Concrete change: {summary}. {rationale}"
     return {"summary": summary, "rationale": rationale[:1000]}
+
+
+def _proposal_rationale_has_playable_effect(rationale, language):
+    text = str(rationale or "").strip().casefold()
+    if not text or _proposal_card_is_meta_language(text):
+        return False
+
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        markers = (
+            "玩家", "游玩", "试玩", "观察", "判断", "路线", "推箱", "推动",
+            "选择", "顺序", "可读", "体验", "停留", "时间",
+        )
+    else:
+        markers = (
+            "player", "play", "playtest", "observe", "judge", "route", "push",
+            "choice", "order", "read", "experience", "time",
+        )
+    return any(marker in text for marker in markers)
+
+
+def _proposal_body_has_playable_support(body, language):
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(body or ""))
+        if sentence.strip() and not _proposal_card_is_meta_language(sentence)
+    ]
+    text = " ".join(sentences).strip().casefold()
+    if len(text) < (18 if language == "zh-CN" else 35):
+        return False
+
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        anchors = (
+            "水", "箱", "目标", "墙", "通道", "路线", "推动", "推箱", "空间",
+            "难度", "时间", "游玩", "障碍",
+        )
+        actions = (
+            "移动", "调整", "挪", "改", "增加", "减少", "绕", "形成", "让", "使",
+            "重排", "保留", "延长", "停留", "多花",
+        )
+        effects = (
+            "玩家", "游玩", "试玩", "观察", "判断", "路线", "选择", "顺序", "体验",
+            "时间", "停留", "推",
+        )
+    else:
+        anchors = (
+            "water", "box", "crate", "target", "wall", "corridor", "route", "push",
+            "space", "difficulty", "time", "play", "obstacle",
+        )
+        actions = (
+            "move", "adjust", "shift", "change", "add", "remove", "detour", "make",
+            "let", "rearrange", "preserve", "extend", "slow",
+        )
+        effects = (
+            "player", "play", "playtest", "observe", "judge", "route", "choice", "order",
+            "experience", "time", "push",
+        )
+    return any(marker in text for marker in anchors) and any(
+        marker in text for marker in actions
+    ) and any(marker in text for marker in effects)
+
+
+def _proposal_offer_binding_issue(proposal_offer, body, messages, language):
+    if not proposal_offer:
+        return None
+
+    summary = str(proposal_offer.get("summary") or "").strip()
+    rationale = str(proposal_offer.get("rationale") or "").strip()
+    if _proposal_card_is_meta_language(summary):
+        return "the summary is transition language rather than a design action"
+    if not _proposal_summary_is_substantive(summary, language):
+        return "the summary does not state a substantive map or play direction"
+    if not _proposal_summary_has_concrete_action(summary, language):
+        return "the summary does not state a concrete design action"
+    if not _proposal_rationale_has_playable_effect(rationale, language):
+        return "the rationale does not state a playable effect or observation"
+    if _guidance_reuses_visible_sentence(summary, body):
+        return "the summary repeats a sentence from the visible reply"
+    if _guidance_reuses_visible_sentence(rationale, body):
+        return "the rationale repeats a sentence from the visible reply"
+    if not _proposal_body_has_playable_support(body, language):
+        return "the visible reply contains no complete supporting design analysis"
+    return None
+
+
+def _remove_proposal_text_from_body(body, proposal_offer):
+    result = str(body or "").strip()
+    for field in ("summary", "rationale"):
+        card_text = str((proposal_offer or {}).get(field) or "").strip()
+        if card_text and _guidance_reuses_visible_sentence(card_text, result):
+            result = _remove_exact_guidance_from_body(result, card_text)
+    return result
+
+
+def _remove_exact_guidance_from_body(value, guidance_text):
+    """Remove only a complete duplicated card sentence or paragraph.
+
+    Similarity checks intentionally accept a card that is a shortened form of a sentence,
+    but rendering cleanup must not delete the surrounding analysis in that case.
+    """
+    body = _deduplicate_assistant_body(value)
+    guidance = str(guidance_text or "").strip()
+    if not body or not guidance:
+        return body
+
+    def normalize(text):
+        return re.sub(r"[^\w\u3400-\u9fff]+", "", str(text or "").casefold())
+
+    normalized_guidance = normalize(guidance)
+    paragraphs = []
+    for paragraph in body.split("\n\n"):
+        if normalize(paragraph) == normalized_guidance:
+            continue
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", paragraph)
+            if sentence.strip()
+        ]
+        kept = [
+            sentence
+            for sentence in sentences
+            if normalize(sentence) != normalized_guidance
+        ]
+        if kept:
+            separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+            paragraphs.append(separator.join(kept))
+
+    return "\n\n".join(paragraphs).strip() or body
+
+
+def _has_revision_material(messages, visible_content):
+    user_messages = [
+        str(message.get("content") or "").strip()
+        for message in reversed(messages or [])
+        if message.get("role") == "user" and str(message.get("content") or "").strip()
+    ][:3]
+    return any(
+        _contains_user_design_direction(message)
+        for message in user_messages
+    ) or bool(_revision_direction_sentence(visible_content))
+
+
+def _deterministic_revision_advice_body(messages, visible_content, language):
+    corpus = " ".join(
+        part for part in (
+            _latest_role_content(messages, "user"),
+            visible_content,
+        ) if str(part or "").strip()
+    ).casefold()
+    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", corpus)
+
+    if chinese:
+        if any(marker in corpus for marker in ("时间", "游玩", "停留", "延长", "慢下来", "更久", "太快")):
+            return (
+                "我会把重点放在关键箱子的第一次推进：让玩家需要在直接路线和绕行路线之间做一次判断。"
+                "这样游玩时间的增加来自路线和推箱顺序，而不只是多走几步；试玩时可以观察这次停顿是否真的出现。"
+            )
+        if any(marker in corpus for marker in ("障碍", "绕过", "绕行", "路线")):
+            return (
+                "我会让关键障碍附近出现一次需要比较的路线选择；试玩时看玩家是否先读出绕行关系，"
+                "而不是只因为路变长才多走几步。"
+            )
+        if "水" in corpus:
+            return (
+                "我会让箱子靠近水域时必须重新读取可站位置和绕行空间；试玩时观察水是否改变了推进选择，"
+                "而不是只增加水面的面积。"
+            )
+        if any(marker in corpus for marker in ("箱", "目标", "推动", "顺序")):
+            return (
+                "我会把调整集中在相关箱子接近目标前的推进关系上，让玩家需要判断先后顺序；"
+                "试玩时确认变化真正影响了推箱，而不是只改变位置。"
+            )
+        return (
+            "我会把刚才的体验目标落到当前路线的一次局部取舍上；试玩时观察玩家第一次推动是否需要比较两种走法。"
+        )
+
+    if any(marker in corpus for marker in ("time", "play", "stay", "longer", "slow", "too quickly")):
+        return (
+            "I would focus on the first push of the key box and make the player compare a direct route"
+            " with a detour. The extra time should come from judging route and push order, not only from walking farther."
+        )
+    if any(marker in corpus for marker in ("obstacle", "detour", "route")):
+        return (
+            "I would make the space around the key obstacle create one route comparison; play should show"
+            " the player reading the detour rather than merely walking farther."
+        )
+    if "water" in corpus:
+        return (
+            "I would make the box reread standing space and detour room beside the water; play should show"
+            " whether water changes the push choice rather than only increasing its area."
+        )
+    if any(marker in corpus for marker in ("box", "target", "push", "order")):
+        return (
+            "I would focus the change on the box's approach to the target so the player must judge push order;"
+            " play should confirm a changed relationship rather than a visual move."
+        )
+    return (
+        "I would turn the stated experience goal into one local route trade-off; play should show whether"
+        " the first push requires a comparison between two choices."
+    )
+
+
+def _repair_conceptual_proposal_binding(
+    messages,
+    body,
+    proposal_offer,
+    visible_content,
+    rows,
+    language,
+    stage_context,
+):
+    cleaned_body = _remove_proposal_text_from_body(body, proposal_offer)
+    fallback_offer = (
+        _deterministic_revision_advice_offer(messages, visible_content, language)
+        if _has_revision_material(messages, visible_content)
+        else None
+    )
+    recent_cues = ((stage_context or {}).get("recentGuidance") or {}).get("uiCues") or {}
+    if isinstance(recent_cues, dict):
+        recent_cues = recent_cues.values()
+    warnings = [
+        dict(cue)
+        for cue in recent_cues
+        if isinstance(cue, dict)
+        if cue.get("type") in {"warning", "tradeoff"} and cue.get("text")
+    ][:1]
+
+    if fallback_offer is not None:
+        if not _proposal_body_has_playable_support(cleaned_body, language):
+            supporting_body = _deterministic_revision_advice_body(
+                messages,
+                visible_content,
+                language,
+            )
+            cleaned_body = "\n\n".join(
+                part for part in (cleaned_body, supporting_body) if part
+            ).strip()
+        return {
+            "body": cleaned_body,
+            "proposalOffer": fallback_offer,
+            "followUpQuestion": None,
+            "uiCues": [
+                {"type": "manual_edit", "text": _contextual_manual_edit(rows, language)},
+                *warnings,
+            ][:2],
+        }
+
+    if not cleaned_body:
+        cleaned_body = (
+            "我还没有找到足够可靠的具体修改方向，先从一个可观察的游玩瞬间开始。"
+            if language == "zh-CN"
+            else "I have not found a reliable concrete revision direction yet, so I would start from one observable play moment."
+        )
+    latest_user = _latest_role_content(messages, "user")
+    question = _friendly_default_discussion_focus(
+        rows,
+        language,
+        latest_user,
+        ((stage_context or {}).get("recentGuidance") or {}).get(
+            "discussionFocusHistory",
+            [],
+        ),
+    )
+    return {
+        "body": cleaned_body,
+        "proposalOffer": None,
+        "followUpQuestion": question,
+        "uiCues": warnings,
+    }
 
 
 def _semantics_preserving_proposal_offer(summary, rationale, visible_content, language):
@@ -4642,16 +5037,34 @@ def _apply_deterministic_guidance_fallback(
     ui_cues,
     rows,
     play_summary,
+    guidance_mode=None,
+    allow_required_fallback=False,
 ):
     if stage_opening:
         return intent_hypothesis, proposal_offer, [], False
 
+    guidance_mode = guidance_mode or classify_guidance_request(
+        messages,
+        stage_context,
+    )
     latest_user = _latest_role_content(messages, "user")
     explicit_direction = _latest_user_states_direction(messages)
     explicit_agreement = _latest_user_explicitly_agrees(latest_user)
     recent = (stage_context or {}).get("recentGuidance") or {}
     evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
     fallback_used = False
+
+    if (
+        guidance_mode == "revision_advice"
+        and proposal_offer is None
+        and allow_required_fallback
+    ):
+        proposal_offer = _deterministic_revision_advice_offer(
+            messages,
+            visible_content,
+            language,
+        )
+        fallback_used = proposal_offer is not None
 
     difficulty_reframe = _user_reframes_difficulty_judgment(messages)
     intent_hypothesis = _replace_echoed_intent_hypothesis(
@@ -4763,6 +5176,99 @@ def _apply_deterministic_guidance_fallback(
     return intent_hypothesis, proposal_offer, ordered_cues, fallback_used
 
 
+def _deterministic_revision_advice_offer(messages, visible_content, language):
+    """Create a safe conceptual offer when the model omitted the required advice card."""
+    if not _has_revision_material(messages, visible_content):
+        return None
+
+    latest_user = _latest_role_content(messages, "user")
+    corpus = " ".join(
+        part for part in (latest_user, visible_content) if str(part or "").strip()
+    ).casefold()
+    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", corpus)
+
+    if chinese:
+        if any(marker in corpus for marker in ("时间", "游玩", "停留", "延长", "慢下来", "更久", "太快")):
+            summary = "让关键箱子路线形成绕行选择"
+            rationale = (
+                "围绕当前最直接的箱子路线做局部调整，让玩家在第一次推进前比较直接路线和绕行路线；"
+                "试玩时确认游玩时间的增加来自路线判断，而不只是增加移动步数。"
+            )
+        elif any(marker in corpus for marker in ("绕过障碍", "绕行", "障碍物")):
+            summary = "让障碍形成需要绕行的路线选择"
+            rationale = (
+                "围绕当前关卡的可通行区域做局部调整，让玩家在第一次接近障碍时需要比较绕行路线；"
+                "再通过试玩判断它带来的是实际路线选择，而不只是增加移动距离。"
+            )
+        elif any(marker in corpus for marker in ("水域", "水边", "水") ) and any(
+            marker in corpus for marker in ("路线", "通道", "推进", "箱")
+        ):
+            summary = "让水域参与箱子的路线判断"
+            rationale = (
+                "把调整集中在水域与相关路线的局部关系上，让箱子第一次经过这里时必须重新读取绕行"
+                "空间与推进顺序；试玩时确认水域是否真正改变了选择。"
+            )
+        elif any(marker in corpus for marker in ("难度", "挑战", "压力", "更难")):
+            summary = "把难度落到一次真实的路线取舍"
+            rationale = (
+                "优先调整会影响关键推动顺序的局部空间，而不是单纯增加障碍数量；试玩时观察玩家是否"
+                "在第一次关键推动前停下来判断，并确认难度来自取舍而不是误读。"
+            )
+        elif any(marker in corpus for marker in ("箱子", "目标", "推动", "顺序")):
+            summary = "重新组织箱子与目标的推进顺序"
+            rationale = (
+                "围绕相关箱子接近目标前的局部路线进行调整，让玩家需要判断先后顺序；试玩时确认"
+                "这个变化确实影响推箱关系，而不是只改变位置。"
+            )
+        else:
+            summary = "把当前方向落实为可比较的局部调整"
+            rationale = (
+                "把改动集中在当前讨论的局部，并用第一次路线选择或关键推动来判断体验是否真的改变，"
+                "而不是只产生视觉差异。"
+            )
+    else:
+        if any(marker in corpus for marker in ("time", "playtime", "stay", "longer", "slow", "too quickly")):
+            summary = "Make the key box route create a detour choice"
+            rationale = (
+                "Keep the change local around the most direct box route so the first push makes the player"
+                " compare a direct path with a detour; play should confirm that extra time comes from route judgment."
+            )
+        elif any(marker in corpus for marker in ("detour", "obstacle", "绕行")):
+            summary = "Make the obstacles create a meaningful detour choice"
+            rationale = (
+                "Keep the change local around the traversable space so the first approach to the obstacle"
+                " requires a route comparison; play should confirm a real choice rather than extra walking."
+            )
+        elif "water" in corpus and any(
+            marker in corpus for marker in ("route", "corridor", "push", "box")
+        ):
+            summary = "Make water shape the box's route choice"
+            rationale = (
+                "Keep the adjustment local to the water and its neighboring route so the first pass makes"
+                " the player reread detour space and push order; play should confirm that water changes choice."
+            )
+        elif any(marker in corpus for marker in ("difficulty", "challenge", "pressure")):
+            summary = "Put difficulty into one real route trade-off"
+            rationale = (
+                "Adjust the local space that affects a key push order instead of merely adding obstacles;"
+                " play should show a meaningful pause and choice rather than confusion."
+            )
+        elif any(marker in corpus for marker in ("box", "crate", "target", "push order")):
+            summary = "Reframe the box-to-target push order"
+            rationale = (
+                "Keep the change around the relevant approach so the player must judge which push comes"
+                " first; play should confirm a changed push relationship rather than a visual move."
+            )
+        else:
+            summary = "Turn the direction into a comparable local revision"
+            rationale = (
+                "Keep the change local to the discussion and judge it through the first route choice or"
+                " key push, so the result changes play rather than only appearance."
+            )
+
+    return {"summary": summary, "rationale": rationale}
+
+
 def _apply_guidance_card_policy(guidance):
     """Normalize guidance into one of the approved one-to-three card families."""
     normalized = dict(guidance or {})
@@ -4808,9 +5314,16 @@ def _ensure_required_guidance_card(
     rows,
     stage_opening,
     stage_context,
+    visible_content="",
+    guidance_mode=None,
 ):
     normalized = dict(guidance or {})
     latest_user = _latest_role_content(messages, "user")
+    guidance_mode = guidance_mode or classify_guidance_request(
+        messages,
+        stage_context,
+        stage_opening=stage_opening,
+    )
 
     if _is_stage_one(stage_context) and stage_opening:
         return normalized
@@ -4829,6 +5342,58 @@ def _ensure_required_guidance_card(
         normalized["followUpQuestion"] = None
         normalized["proposalOffer"] = None
         normalized["uiCues"] = []
+        return normalized
+
+    if guidance_mode == "revision_advice":
+        proposal_offer = normalized.get("proposalOffer") or (
+            _deterministic_revision_advice_offer(
+                messages,
+                visible_content,
+                language,
+            )
+        )
+        if proposal_offer:
+            normalized["move"] = "offer_revision"
+            normalized["proposalOffer"] = proposal_offer
+            normalized["intentHypothesis"] = None
+            normalized["intentConfidence"] = None
+            normalized["followUpQuestion"] = None
+            cues = [
+                dict(cue)
+                for cue in normalized.get("uiCues") or []
+                if cue.get("type") in {"warning", "tradeoff", "manual_edit"}
+                and cue.get("text")
+            ]
+            if not any(cue.get("type") == "manual_edit" for cue in cues):
+                cues.append({
+                    "type": "manual_edit",
+                    "text": _contextual_manual_edit(rows, language),
+                })
+            normalized["uiCues"] = [
+                cue for cue in cues
+                if cue.get("type") in {"warning", "tradeoff", "manual_edit"}
+            ][:2]
+            return normalized
+
+    if guidance_mode == "discussion":
+        normalized["proposalOffer"] = None
+        normalized["followUpQuestion"] = normalized.get("followUpQuestion") or (
+            _friendly_default_discussion_focus(
+                rows,
+                language,
+                latest_user,
+                ((stage_context or {}).get("recentGuidance") or {}).get(
+                    "discussionFocusHistory",
+                    [],
+                ),
+            )
+        )
+        normalized["move"] = "clarify_intent"
+        normalized["uiCues"] = [
+            dict(cue)
+            for cue in normalized.get("uiCues") or []
+            if cue.get("type") in {"warning", "tradeoff"} and cue.get("text")
+        ][:1]
         return normalized
 
     if _user_states_first_person_view(latest_user):
@@ -4873,6 +5438,173 @@ def _user_states_first_person_view(message):
     )
 
 
+def classify_guidance_request(conversation, stage_context=None, stage_opening=False):
+    """Classify when the visible guidance should prefer action or discussion.
+
+    This is intentionally a small deterministic gate around the model's prose.  It does not
+    decide the user's intention or authorize a revision; it only selects the existing card
+    family for an obvious request for help.
+    """
+    if stage_opening:
+        return "none"
+
+    context = stage_context or {}
+    if context.get("revisionRequestState") not in (None, "not_request"):
+        return "none"
+
+    latest_user = _latest_role_content(conversation, "user")
+    if not latest_user or _user_explicitly_off_topic(latest_user):
+        return "none"
+
+    # Keep the existing authorization/needs-direction path authoritative.  A request such as
+    # "help me change it" must remain MANUAL_EDIT-only rather than becoming an unsolicited plan.
+    revision_state, _ = _classify_revision_request(conversation, context)
+    if revision_state != "not_request":
+        return "none"
+
+    user_messages = [
+        str(message.get("content") or "").strip()
+        for message in reversed(conversation)
+        if message.get("role") == "user" and str(message.get("content") or "").strip()
+    ][:3]
+    advice_request = any(
+        _guidance_advice_request(message)
+        for message in user_messages
+    )
+    has_direction = any(
+        _contains_user_design_direction(message)
+        for message in user_messages
+    )
+
+    if advice_request and has_direction:
+        return "revision_advice"
+    if advice_request and (
+        _guidance_confusion_request(latest_user) or not has_direction
+    ):
+        return "discussion"
+    return "none"
+
+
+def _guidance_mode_instruction(guidance_mode):
+    if guidance_mode == "revision_advice":
+        return (
+            "Deterministic request routing classified the latest user request as REVISION_ADVICE: "
+            "the designer has stated a meaningful design direction and is asking for a suggestion "
+            "or plan. You must include both PROPOSAL_SUMMARY and PROPOSAL_RATIONALE, then include "
+            "MANUAL_EDIT as the companion card. The proposal is conceptual and contains no map rows "
+            "or tile operations; it must describe a concrete local design move and the playable effect "
+            "to judge. Do not output DISCUSS or INTENT in this action family, and do not claim that "
+            "the map was changed."
+        )
+    if guidance_mode == "discussion":
+        return (
+            "Deterministic request routing classified the latest user request as DISCUSSION: the "
+            "designer is asking for ideas without stating a concrete direction. You must include "
+            "one DISCUSS card as a grounded question or first-person design insight that helps the "
+            "designer discover a direction from this saved Stage. Use only observable map facts and "
+            "playable moments. Do not output proposal fields or MANUAL_EDIT, and do not decide a map "
+            "change on the designer's behalf."
+        )
+    return ""
+
+
+def _guidance_advice_request(message):
+    text = str(message or "").strip().casefold()
+    if not text:
+        return False
+
+    chinese_markers = (
+        "建议", "方案", "思路", "怎么改", "如何改", "怎么调整", "如何调整",
+        "有什么办法", "帮我想", "给我点想法", "给点思路", "你会怎么",
+        "请你分析", "说说修改", "怎么开始",
+    )
+    if any(marker in text for marker in chinese_markers):
+        return True
+
+    return bool(re.search(
+        r"\b(?:suggestion(?:s)?|advice|plan|idea(?:s)?|brainstorm|how (?:to|should|would|could)|"
+        r"what (?:would|could|do) you suggest|what would you change|help me think|"
+        r"give me (?:an? )?(?:idea|direction|plan))\b",
+        text,
+    ))
+
+
+def _guidance_confusion_request(message):
+    text = str(message or "").strip().casefold()
+    if not text:
+        return False
+
+    chinese_markers = (
+        "迷茫", "不知道", "没想法", "没有想法", "没思路", "没有思路",
+        "没有方向", "不知道从哪里", "不确定从哪里", "怎么开始", "不知该",
+    )
+    if any(marker in text for marker in chinese_markers):
+        return True
+
+    return bool(re.search(
+        r"\b(?:i(?:'m| am) )?(?:not sure|uncertain|confused|lost|stuck|no idea)|"
+        r"\b(?:i )?don'?t know where to start\b",
+        text,
+    ))
+
+
+def _contains_user_design_direction(message):
+    text = str(message or "").strip().casefold()
+    if not text:
+        return False
+
+    # A bare open question such as "How would you change the route?" asks for ideas but does
+    # not establish a direction.  A statement plus a question, such as "I want water to shape
+    # the route; how would you change it?", remains a concrete direction.
+    has_question = "?" in text or "？" in text
+    if has_question and not re.search(
+        r"(?:我想|我希望|我更想|我的目标|希望让|想让|需要让|我倾向于|"
+        r"\bi (?:want|would like|hope|prefer)|\bmy goal is\b|\bmake the player\b|"
+        r"\blet the player\b)",
+        text,
+        re.IGNORECASE,
+    ):
+        return False
+
+    if _contains_concrete_revision_direction(text):
+        return True
+
+    chinese_direction_leads = (
+        "我想", "我希望", "我更想", "我的目标", "希望让", "想让", "需要让",
+        "我倾向于", "强调", "突出", "增强", "强化", "弱化", "改善",
+    )
+    chinese_effects = (
+        "绕过障碍", "绕行", "路线", "通道", "推箱", "推动顺序", "推进顺序",
+        "难度", "节奏", "选择", "空间", "水域", "墙", "箱子", "目标", "压力",
+        "犹豫", "停顿", "挑战", "更难", "更简单", "可读", "时间", "游玩", "停留", "延长",
+    )
+    if any(marker in text for marker in chinese_direction_leads) and any(
+        marker in text for marker in chinese_effects
+    ):
+        return True
+
+    english_leads = re.search(
+        r"\b(?:i want|i would like|i hope|i prefer|my goal is|make the player|"
+        r"let the player|increase|reduce|strengthen|weaken|preserve|avoid)\b",
+        text,
+        re.IGNORECASE,
+    )
+    english_effects = (
+        "detour", "obstacle", "route", "corridor", "push order", "difficulty", "challenge",
+        "rhythm", "choice", "space", "water", "wall", "box", "target", "pressure",
+        "hesitation",
+    )
+    if english_leads and any(marker in text for marker in english_effects):
+        return True
+
+    return not has_question and bool(re.search(
+        r"\b(?:add|remove|move|change|adjust|reshape|rearrange)\b.{0,40}\b(?:wall|water|"
+        r"box|target|route|corridor|obstacle|space)\b",
+        text,
+        re.IGNORECASE,
+    ))
+
+
 def _discussion_follow_up_is_needed(messages, language):
     latest_user = _latest_role_content(messages, "user")
     lowered = latest_user.casefold()
@@ -4907,30 +5639,42 @@ def _user_explicitly_off_topic(message):
 def _friendly_default_discussion_focus(rows, language, latest_user, recent_focuses):
     serialized = "".join(str(row) for row in (rows or []))
     seed = sum(ord(character) for character in f"{serialized}{latest_user}")
+    has_water = "@" in serialized
+    has_boxes = serialized.count("s") > 0
+    has_multiple_boxes = serialized.count("s") > 1
+    has_targets = serialized.count("t") > 0
     if language == "zh-CN":
         options = (
-            "我会留意第一次推箱时，玩家会不会自然停下来读一眼路线；这能帮我们判断附近该微调，还是该留出空间。",
-            "箱子第一次靠近目标时，玩家会不会停一下想下一步？我想先看这个，因为它最能看出路线有没有形成真实选择。",
-            "玩家第一次决定先推哪个箱子时，心里会不会有一点犹豫？这个瞬间能告诉我们下一步只动局部，还是回头整理路线。",
-            "水边第一次推进时，箱子还有没有回旋余地？看这里就能知道水是在参与路线，还是只停在视觉上。",
-            "玩家走进调整区域的第一步，会不会重新想一下推箱顺序？如果会，这次变化就真的参与到路线里了。",
+            ("我会留意第一次推箱时，玩家会不会自然停下来读一眼路线；这能帮我们判断附近该微调，还是该留出空间。", True),
+            ("箱子第一次靠近目标时，玩家会不会停一下想下一步？我想先看这个，因为它最能看出路线有没有形成真实选择。", has_boxes and has_targets),
+            ("玩家第一次决定先推哪个箱子时，心里会不会有一点犹豫？这个瞬间能告诉我们下一步只动局部，还是回头整理路线。", has_multiple_boxes),
+            ("水边第一次推进时，箱子还有没有回旋余地？看这里就能知道水是在参与路线，还是只停在视觉上。", has_water and has_boxes),
+            ("玩家走进调整区域的第一步，会不会重新想一下推箱顺序？如果会，这次变化就真的参与到路线里了。", has_boxes),
         )
     else:
         options = (
-            "I would watch whether the first push makes the player pause to read the route; that moment tells us whether to tune nearby space or preserve it.",
-            "To me, the hesitation before a box first approaches its target is worth watching; it says more about route weight than the tile arrangement alone.",
-            "I would focus on the first moment the player chooses which box to push; that judgment decides whether the next revision stays local or revisits the route.",
-            "The first push beside the water is the moment I would watch; it shows whether water is shaping the route or remaining visual scenery.",
-            "I would look at whether the first step into the adjusted area makes the player reread the order; that matters more than merely adding movement.",
+            ("I would watch whether the first push makes the player pause to read the route; that moment tells us whether to tune nearby space or preserve it.", True),
+            ("To me, the hesitation before a box first approaches its target is worth watching; it says more about route weight than the tile arrangement alone.", has_boxes and has_targets),
+            ("I would focus on the first moment the player chooses which box to push; that judgment decides whether the next revision stays local or revisits the route.", has_multiple_boxes),
+            ("The first push beside the water is the moment I would watch; it shows whether water is shaping the route or remaining visual scenery.", has_water and has_boxes),
+            ("I would look at whether the first step into the adjusted area makes the player reread the order; that matters more than merely adding movement.", has_boxes),
         )
+    available_options = [candidate for candidate, available in options if available]
+    # Isolated prompt tests and development fallbacks sometimes use an intentionally
+    # incomplete grid.  Preserve the original variety there; production Stages have map
+    # facts and are filtered to avoid mentioning unavailable entities.
+    if not (has_water or has_boxes or has_targets):
+        available_options = [candidate for candidate, _ in options]
+    if not available_options:
+        available_options = [options[0][0]]
     for offset in range(len(options)):
-        candidate = options[(seed + offset) % len(options)]
+        candidate = available_options[(seed + offset) % len(available_options)]
         if not any(
             _guidance_text_matches(candidate, recent_focus)
             for recent_focus in (recent_focuses or [])
         ):
             return candidate
-    return options[seed % len(options)]
+    return available_options[seed % len(available_options)]
 
 
 def _unclear_revision_manual_edit(language):
@@ -5373,14 +6117,16 @@ def _revision_direction_sentence(message):
         "water", "box", "crate", "target", "goal", "wall", "corridor", "route", "opening",
     )
     actions = (
-        "移动", "调整", "重排", "增加", "减少", "移除", "拉开", "收紧", "加一块", "改",
-        "move", "adjust", "rearrange", "add", "reduce", "remove", "separate", "tighten", "change",
+        "移动", "调整", "重排", "重组", "增加", "减少", "移除", "拉开", "收紧", "加一块", "绕", "改",
+        "move", "adjust", "rearrange", "reorganize", "add", "reduce", "remove", "separate", "detour", "tighten", "change",
     )
     for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(message or "")):
         cleaned = sentence.strip()
         lowered = cleaned.casefold()
+        if _proposal_card_is_meta_language(cleaned):
+            continue
         if re.search(
-            r"(?:把|将).{0,24}(?:水|墙|箱子?|目标|通道|路线|区域).{0,32}(?:挪|移|调|缩|拉|留出|打开|收紧|改)",
+            r"(?:把|将).{0,24}(?:水|墙|箱子?|目标|通道|路线|区域).{0,32}(?:挪|移|调|缩|拉|留出|打开|收紧|绕|改)",
             cleaned,
         ):
             return cleaned
@@ -6096,9 +6842,13 @@ def _compose_assistant_message(
     ui_cues = guidance.get("uiCues") or []
     additions = [cue["text"] for cue in ui_cues if cue.get("text")]
     follow_up = guidance.get("followUpQuestion")
+    proposal_offer = guidance.get("proposalOffer") or {}
 
     for addition in [*additions, follow_up]:
         message = _remove_guidance_from_body(message, addition)
+
+    for addition in [proposal_offer.get("summary"), proposal_offer.get("rationale")]:
+        message = _remove_exact_guidance_from_body(message, addition)
 
     if follow_up:
         additions.append(follow_up)

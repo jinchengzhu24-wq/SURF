@@ -4,12 +4,13 @@
 
 This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, and the independent 8010 co-creation service. Unity code is under `Assets/Scripts/`; scenes are under `Assets/Scenes/`; preserve every Unity asset's `.meta` file. `Backend/` is the 8000 service, `Frontend/` is its static dashboard, and `CoCreationPrototype/` contains the 8010 backend and frontend. `Library/`, `Temp/`, `Logs/`, generated solution files, and `WebGLBuild/` are generated output.
 
-## Current Product Baseline (2026-08-28)
+## Current Product Baseline (2026-08-31)
 
 - The active online route is `Menu -> Questionnaire(Online1) -> Online_Lobby -> Match_Briefing -> DG -> DG_Level -> CoCreation_Entry -> 8010 -> Challenge_Waiting -> Online_Level -> Match_Result -> Questionnaire(Online2) -> Menu`. Both online questionnaires are part of every match cycle: Online1 opens the pre-match WJX survey before the lobby, and Online2 opens the post-match WJX survey after results. Do not add a persistent skip flag.
 - The Unity `Draft` scene is retired; the immutable `draft` event remains an 8000 dashboard research record. PC code, scenes, and backend capability are retained for later work but have no Build Settings entry, menu/navigation route, or current client integration. Do not restore them without a confirmed study-design revision.
 - DG asks four neutral map-design questions (first-move inspection, push dependencies, space distribution, and route rhythm). AI returns a warm reflection plus difficulty and layout recommendations; Q1–Q2 infer difficulty and Q3–Q4 infer layout. Confirmed DG context guides only the 8000 first-draft generator; it must never be sent to, persisted by, or exposed in the 8010 service or its LLM context.
 - Menu's `Tutorial` button opens the static bilingual PDF at `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`. It opens in the browser's PDF viewer and does not enter a Unity route.
+- The documented Agent roles are `Draft首版理解助手` and `关卡蓝图规划助手` on 8000, plus `共创聊天助手` and `共创关卡修改助手` inside 8010. The deterministic generator, executor, validator, and Sokoban solver are not Agents.
 
 ## Unity Authoring
 
@@ -25,7 +26,11 @@ This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, an
 - A co-creation session contains one level. `Stage 1`, `Stage 2`, and later names are immutable versions of that level, never separate levels or progression.
 - Preserve turns, versions, proposals, decisions, play evidence, timing, final rows, intention, and opponent outcomes. A level is sent to the opponent only after explicit final confirmation.
 - The LLM is a warm, first-person design peer. Its interpretations of intention must be tentative and correctable; it must not attribute generator-placed DG tiles to the designer, claim unsaved edits were made, or create/accept a map proposal without explicit authorization and deterministic validation.
-- The 8010 workbench begins a persistent 10-minute deadline on first browser access. After expiry, chat/edit/save/restore/play/proposal/language actions are locked; only final Stage submission remains. A valid unsaved local draft may be atomically saved as the final `human_edit` Stage when submitted.
+- The 8010 workbench for formal Unity sessions begins a persistent 10-minute deadline on first browser access. After expiry, chat/edit/save/restore/play/proposal/language actions are locked; only final Stage submission remains. A valid unsaved local draft may be atomically saved as the final `human_edit` Stage when submitted. Direct `/cocreation/` demo sessions have no deadline and remain available for the current test.
+- The 8010 flow is a two-role handoff: `共创聊天助手` understands the request, asks for clarification, and produces an authorized semantic `RevisionPlan` plus `executionContract`; `共创关卡修改助手` receives only that contract, the current Stage, deterministic map facts, and solver metrics, then returns local operations. It must not receive full chat history, 8000 `dgContext`, researcher goals, experimental conditions, or unconfirmed intent hypotheses.
+- For ordinary chat, classify help requests deterministically before rendering existing guidance cards. A concrete design direction plus a request for advice, a plan, or how to revise routes to `proposalOffer` (`revision_advice`); confusion without a concrete direction plus a request for ideas routes to `followUpQuestion` (`discussion`). If both apply, `proposalOffer` takes precedence. A directionless “help me change it” keeps the existing `MANUAL_EDIT` flow. Cards are conceptual guidance only and never authorize or apply a map change.
+- After explicit authorization, revisions must follow `RevisionPlan → executionContract → operation candidates → atomic deterministic execution → structure checks and validate_and_solve() → player confirmation`. The original Stage remains unchanged when the contract or validation fails. LLM retries are bounded and must not silently relax the designer's requirements.
+- Direct demo sessions show the landing page on a base `/cocreation/` visit, create an `algorithm_demo` 10×12 map using the Algorithm_Level-inspired two-box/two-target, water, structure-template, and reverse-pull generation flow, store records only in 8010, and retain only the latest demo session. They do not sync to 8000 or write formal matching records.
 
 ## Online Match and Deployment Rules
 
