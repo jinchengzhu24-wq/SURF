@@ -17,9 +17,11 @@ from openai import (
 )
 
 from proposal_search import (
+    Focus,
     ProposalSearchExhausted,
     parse_revision_plan,
     search_revision_plan,
+    validate_revision_plan_against_map,
 )
 from level_validation import build_map_facts, validate_and_solve
 
@@ -38,7 +40,7 @@ PROPOSAL_SEARCH_DEADLINE_SECONDS = 55.0
 # The authorized revision now has two bounded LLM phases: a semantic plan and
 # concrete operation candidates.  Both use the existing proposal model config.
 REVISION_CONTRACT_SCHEMA_VERSION = 1
-REVISION_MIN_CHANGED_CELLS = 3
+REVISION_MIN_CHANGED_CELLS = 1
 REVISION_MAX_CHANGED_CELLS = 12
 # Compatibility for older diagnostics and integrations that imported these names.
 PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
@@ -292,7 +294,11 @@ def build_chat_messages(
         "specific play moment, then say why it is worth watching. Avoid report-like lead-ins "
         "such as '我在意的是', '我想把注意力放在', or '比单看格子摆放更能说明'. "
         "proposalOffer must be null or "
-        'an object with exactly {"summary":"...","rationale":"..."}. '
+        'an object with summary, rationale, and optional executionBrief. executionBrief is a '
+        'machine-only object with schemaVersion 1, effect, anchors, focus, requiredTransitions, '
+        'allowedOperators, preserve, and playObjective. If the exchange names an exact coordinate '
+        'or from/to tile change, include it in requiredTransitions exactly; never substitute a nearby '
+        'cell. The server will reject a brief whose coordinate or from tile conflicts with the saved map. '
         "uiCues must be an array of at most two unique objects with exactly type and "
         "text; type must be manual_edit or warning. The legacy tradeoff type is accepted "
         "by the application for historical data but must not be generated. "
@@ -401,7 +407,7 @@ def build_plain_chat_messages(
             "After the visible reply, you may append one optional machine-readable block "
             "as one final line using exactly this compact form:\n"
             "<GUIDANCE>DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
-            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || DISAGREEMENT: {JSON}</GUIDANCE>\n"
+            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || EXECUTION_BRIEF: {JSON} || DISAGREEMENT: {JSON}</GUIDANCE>\n"
             "Omit any field that is not warranted, and omit the entire block whenever no card "
             "is warranted, including an ordinary project question or factual answer. The very "
             "first Stage 1 opening also has no metadata block. Visible cards "
@@ -534,6 +540,43 @@ def _map_facts_for_prompt(rows, stage_context):
     return json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
 
 
+def _editable_focus_facts(rows, focus):
+    if not isinstance(focus, dict):
+        return json.dumps({"focus": None, "cells": []}, ensure_ascii=False)
+    center_row = int(focus.get("row", 0))
+    center_column = int(focus.get("column", 0))
+    radius = int(focus.get("radius", 0))
+    allowed_destinations = {
+        ".": ["#", "@", "p", "s", "t"],
+        "#": ["."],
+        "@": ["."],
+        "p": ["."],
+        "s": ["."],
+        "t": ["."],
+    }
+    cells = []
+    for row_index, row in enumerate(rows, start=1):
+        for column_index, tile in enumerate(row, start=1):
+            if tile == " " or max(
+                abs(center_row - row_index), abs(center_column - column_index)
+            ) > radius:
+                continue
+            cells.append({
+                "row": row_index,
+                "column": column_index,
+                "tile": tile,
+                "allowedTo": allowed_destinations.get(tile, []),
+            })
+    return json.dumps(
+        {
+            "focus": {"row": center_row, "column": center_column, "radius": radius},
+            "cells": cells,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def _map_grounding_contract():
     return (
         "Map-grounding rule: Deterministic Map Facts are authoritative. Use B1/B2, T1/T2, "
@@ -558,6 +601,8 @@ def _validate_map_grounding_texts(texts, rows):
     text = "\n".join(str(value or "") for value in texts).casefold()
     if not text:
         return
+
+    _validate_coordinate_claims(text, rows)
 
     try:
         facts = build_map_facts(rows)
@@ -640,6 +685,125 @@ def _validate_map_grounding_texts(texts, rows):
         raise ValueError(
             "The reply claims that the current player is close to a target, which conflicts with deterministic map facts."
         )
+
+
+def _tile_from_claim(value):
+    value = str(value or "").casefold()
+    return {
+        "#": "#", "墙": "#", "墙体": "#", "wall": "#",
+        ".": ".", "地板": ".", "空地": ".", "floor": ".", "ground": ".",
+        "@": "@", "水": "@", "水域": "@", "water": "@",
+        "p": "p", "玩家": "p", "起点": "p", "player": "p", "start": "p",
+        "s": "s", "箱": "s", "箱子": "s", "box": "s", "crate": "s",
+        "t": "t", "目标": "t", "目标点": "t", "target": "t", "goal": "t",
+    }.get(value)
+
+
+def _validate_coordinate_claims(text, rows):
+    """Check explicit coordinate/tile statements before they reach a proposal card."""
+    if not rows:
+        return
+    claim_pattern = re.compile(
+        r"\(\s*(\d+)\s*[,，]\s*(\d+)\s*\)\s*"
+        r"(?:是|为|属于|is|was|contains|contains the|has)\s*"
+        r"(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|"
+        r"wall|floor|ground|water|box|crate|target|goal|player|start|#|\.|@|p|s|t)",
+        flags=re.IGNORECASE,
+    )
+    transition_pattern = re.compile(
+        r"\(\s*(\d+)\s*[,，]\s*(\d+)\s*\)\s*"
+        r".{0,18}?(?:从|由|from)\s*(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|"
+        r"wall|floor|ground|water|box|crate|target|goal|player|start|#|\.|@|p|s|t)\s*"
+        r"(?:变成|改成|换成|变为|to|into|becomes?)\s*"
+        r"(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|"
+        r"wall|floor|ground|water|box|crate|target|goal|player|start|#|\.|@|p|s|t)",
+        flags=re.IGNORECASE,
+    )
+    height = len(rows)
+    for match in claim_pattern.finditer(text):
+        row, column = int(match.group(1)), int(match.group(2))
+        expected = _tile_from_claim(match.group(3))
+        if not (1 <= row <= height and 1 <= column <= len(rows[row - 1])):
+            raise ValueError("The reply refers to a coordinate outside the saved Stage.")
+        actual = rows[row - 1][column - 1]
+        if expected is not None and actual != expected:
+            raise ValueError(
+                f"The reply claims row {row}, column {column} is {expected!r}, "
+                f"but deterministic map facts say it is {actual!r}."
+            )
+    for match in transition_pattern.finditer(text):
+        row, column = int(match.group(1)), int(match.group(2))
+        before = _tile_from_claim(match.group(3))
+        after = _tile_from_claim(match.group(4))
+        if not (1 <= row <= height and 1 <= column <= len(rows[row - 1])):
+            raise ValueError("The reply refers to a coordinate outside the saved Stage.")
+        actual = rows[row - 1][column - 1]
+        if before is not None and actual != before:
+            raise ValueError(
+                f"The reply claims row {row}, column {column} starts as {before!r}, "
+                f"but deterministic map facts say it is {actual!r}."
+            )
+
+
+def _execution_brief_from_text(text, rows):
+    """Recover a precise brief only when the visible text states one explicitly."""
+    source = str(text or "")
+    transitions = []
+    pattern = re.compile(
+        r"\(\s*(\d+)\s*[,，]\s*(\d+)\s*\)\s*"
+        r".{0,18}?(?:从|由|from)\s*(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|"
+        r"wall|floor|ground|water|box|crate|target|goal|player|start|#|\.|@|p|s|t)\s*"
+        r"(?:变成|改成|换成|变为|to|into|becomes?)\s*"
+        r"(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|"
+        r"wall|floor|ground|water|box|crate|target|goal|player|start|#|\.|@|p|s|t)",
+        flags=re.IGNORECASE,
+    )
+    operator_map = {
+        (".", "#"): "add_wall", ("#", "."): "remove_wall",
+        (".", "@"): "add_water", ("@", "."): "remove_water",
+        ("p", "."): "move_player", ("s", "."): "move_box", ("t", "."): "move_target",
+    }
+    for match in pattern.finditer(source):
+        row, column = int(match.group(1)), int(match.group(2))
+        before = _tile_from_claim(match.group(3))
+        after = _tile_from_claim(match.group(4))
+        operator = operator_map.get((before, after))
+        if operator is None:
+            continue
+        transitions.append({"row": row, "column": column, "from": before, "to": after})
+    if not transitions:
+        return None
+    changed_components = {
+        "add_wall": "walls", "remove_wall": "walls",
+        "add_water": "water", "remove_water": "water",
+        "move_player": "player", "move_box": "boxes", "move_target": "targets",
+    }
+    operators = list(dict.fromkeys(operator_map.get((item["from"], item["to"])) for item in transitions))
+    preserve = ["outer_shell", "unrelated_areas", "boxes", "targets", "player", "water", "walls"]
+    for operator in operators:
+        component = changed_components[operator]
+        if component in preserve:
+            preserve.remove(component)
+    first = transitions[0]
+    return _validate_execution_brief({
+        "schemaVersion": 1,
+        "effect": (
+            "open_route" if any(item in {"remove_wall", "remove_water"} for item in operators)
+            else "narrow_route" if any(item in {"add_wall", "add_water"} for item in operators)
+            else "relocate_start" if "move_player" in operators
+            else "relocate_box" if "move_box" in operators
+            else "relocate_target"
+        ),
+        "anchors": [
+            anchor for anchor in ("P", "B1", "B2", "T1", "T2")
+            if re.search(rf"\b{re.escape(anchor)}\b", source, re.IGNORECASE)
+        ],
+        "focus": {"row": first["row"], "column": first["column"], "radius": 1},
+        "requiredTransitions": transitions,
+        "allowedOperators": operators,
+        "preserve": preserve,
+        "playObjective": "route_choice",
+    }, rows)
 
 
 def generate_stage_assessment(
@@ -730,6 +894,10 @@ def generate_chat_reply(
             str(source_offer.get(field) or "").strip()
             for field in ("summary", "rationale")
         ).strip() or revision_brief
+        if source_offer.get("executionBrief"):
+            effective_stage_context["authorizedExecutionBrief"] = source_offer[
+                "executionBrief"
+            ]
     elif explicit_action in {"challenge_revision", "alternative_revision"}:
         revision_state, revision_brief = "not_request", None
 
@@ -953,11 +1121,44 @@ def _generate_revision_search_proposal_sync(
         )
         raise
 
-    revision_contract = _build_revision_execution_contract(
+    plan = _bind_execution_brief_to_plan(
         plan,
-        stage_context.get("authorizedRevisionBrief") if stage_context else "",
-        stage_context,
+        stage_context.get("authorizedExecutionBrief") if stage_context else None,
     )
+    try:
+        revision_contract = _build_revision_execution_contract(
+            plan,
+            stage_context.get("authorizedRevisionBrief") if stage_context else "",
+            stage_context,
+        )
+    except ValueError as exception:
+        error = LLMServiceError(
+            "REVISION_CONTRACT_INVALID",
+            str(exception),
+            request_id,
+            False,
+            attempts_used,
+            422,
+        )
+        error.revision_plan = plan.as_dict()
+        error.revision_contract = {}
+        error.proposal_diagnostics = {"category": "contract_conflict"}
+        raise error from exception
+    try:
+        validate_revision_plan_against_map(rows, plan)
+    except ValueError as exception:
+        error = LLMServiceError(
+            "REVISION_CONTRACT_INVALID",
+            str(exception),
+            request_id,
+            False,
+            attempts_used,
+            422,
+        )
+        error.revision_plan = plan.as_dict()
+        error.revision_contract = revision_contract
+        error.proposal_diagnostics = {"category": "coordinate_or_contract_conflict"}
+        raise error from exception
     remaining_seconds = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
     if remaining_seconds <= 0:
         error = LLMServiceError(
@@ -1014,7 +1215,37 @@ def _generate_revision_search_proposal_sync(
         exception.attempts_used += attempts_used
         exception.revision_plan = plan.as_dict()
         exception.revision_contract = revision_contract
-        raise
+        if exception.code != "PROPOSAL_SEARCH_EXHAUSTED":
+            raise
+        try:
+            fallback = _deterministic_revision_fallback(
+                rows=rows,
+                plan=plan,
+                revision_contract=revision_contract,
+                request_id=request_id,
+                language=language,
+                proposal_validator=proposal_validator,
+                baseline_metrics=baseline_metrics,
+                movement_requirement=movement_requirement,
+                preserved_components=preserved_components,
+                started_at=started_at,
+            )
+        except ProposalSearchExhausted as search_exception:
+            diagnostics = dict(getattr(exception, "proposal_diagnostics", {}) or {})
+            diagnostics["deterministicFallback"] = search_exception.diagnostics
+            exception.proposal_diagnostics = diagnostics
+            raise exception
+        fallback_diagnostics = dict(fallback.proposal_diagnostics or {})
+        fallback_diagnostics["modifierFailure"] = (
+            getattr(exception, "proposal_diagnostics", {}) or {}
+        ).get("modifierFailure")
+        operation_result = replace(
+            fallback,
+            attempts_used=exception.attempts_used,
+            revision_plan=plan.as_dict(),
+            revision_contract=revision_contract,
+            proposal_diagnostics=fallback_diagnostics,
+        )
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     guidance = dict(operation_result.guidance)
@@ -1062,6 +1293,59 @@ def _generate_revision_search_proposal_sync(
     )
 
 
+def _bind_execution_brief_to_plan(plan, execution_brief):
+    """Make explicit card coordinates survive the semantic-agent handoff."""
+    if not isinstance(execution_brief, dict):
+        return plan
+    transitions = tuple(
+        (
+            item["row"],
+            item["column"],
+            item["from"],
+            item["to"],
+        )
+        for item in execution_brief.get("requiredTransitions") or []
+    )
+    if not transitions and not execution_brief.get("effect"):
+        return plan
+    first = plan.strategies[0]
+    focus_payload = execution_brief.get("focus")
+    focus = first.focus
+    if isinstance(focus_payload, dict):
+        focus = Focus(
+            focus_payload["row"],
+            focus_payload["column"],
+            focus_payload["radius"],
+        )
+    operators = tuple(execution_brief.get("allowedOperators") or first.operators)
+    preserve = frozenset(
+        set(execution_brief.get("preserve") or first.preserve)
+        | {"outer_shell", "unrelated_areas"}
+    )
+    minimum = max(1, len(transitions))
+    if transitions and any(
+        (before, after) in {
+            ("p", "."), (".", "p"), ("s", "."), (".", "s"),
+            ("t", "."), (".", "t"),
+        }
+        for _, _, before, after in transitions
+    ):
+        minimum = max(2, minimum)
+    edit_budget = max(first.edit_budget, minimum)
+    bound_first = replace(
+        first,
+        effect=execution_brief.get("effect") or first.effect,
+        focus=focus,
+        operators=operators,
+        preserve=preserve,
+        edit_budget=min(12, edit_budget),
+        required_transitions=transitions or first.required_transitions,
+        anchor_entities=tuple(execution_brief.get("anchors") or first.anchor_entities),
+        play_objective=execution_brief.get("playObjective") or first.play_objective,
+    )
+    return replace(plan, strategies=(bound_first, *plan.strategies[1:]))
+
+
 def _build_revision_plan_messages(
     conversation,
     rows,
@@ -1072,6 +1356,7 @@ def _build_revision_plan_messages(
 ):
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
+    execution_brief = stage_context.get("authorizedExecutionBrief") or {}
     original_brief = str(stage_context.get("relaxationOriginalBrief") or "").strip()
     relaxation_rule = (
         "This is a designer-approved fallback. Preserve the original core direction, but one "
@@ -1083,6 +1368,7 @@ def _build_revision_plan_messages(
     movement_rule = _movement_requirement_prompt(movement_requirement)
     preservation_rule = _preserved_components_prompt(preserved_components)
     map_facts = _map_facts_for_prompt(rows, stage_context)
+    edit_facts = _editable_focus_facts(rows, execution_brief.get("focus"))
     numbered_map = "\n".join(
         f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
     )
@@ -1108,8 +1394,15 @@ def _build_revision_plan_messages(
         "1..10, column 1..12, radius 1..3. operators contains one to three distinct values from "
         "add_wall, remove_wall, move_player, move_box, move_target, add_water, remove_water. "
         "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
-        "unrelated_areas. Never list an operator that edits a preserved component. editBudget is "
-        "an integer 2..12; use at least 3 for structural changes and 2 only when relocating one "
+        "walls, unrelated_areas. Never list an operator that edits a preserved component. "
+        "Each strategy may also include requiredTransitions (a list of exact one-based "
+        "row/column/from/to changes), anchorEntities (P, B1, B2, T1, T2), and playObjective. "
+        "When the authorized brief names an exact coordinate or tile transition, requiredTransitions "
+        "is mandatory and hard: do not replace it with a nearby cell or another operator. "
+        "focus must contain every required transition. editBudget is an integer 1..12; a single "
+        "structural tile change may use budget 1, while moving a player, box, or target requires "
+        "two paired cells. Set the budget to the smallest honest upper bound, never a range that "
+        "cannot be satisfied. "
         "entity. metricGoals is an empty list or up to three distinct objects with metric "
         "solutionSteps, solutionPushes, or searchedStates and direction increase, decrease, or "
         "preserve. Use objective metrics only when the designer's direction clearly implies them. "
@@ -1122,10 +1415,13 @@ def _build_revision_plan_messages(
     )
     user_prompt = (
         f"Authorized revision brief: {revision_brief!r}. "
+        f"Structured execution brief (authoritative when present): "
+        f"{json.dumps(execution_brief, ensure_ascii=False, separators=(',', ':'))}. "
         f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule} {movement_rule} "
         f"{preservation_rule}\n\n"
         "Column ruler (one-based): 123456789012\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
+        f"Focus editable-cell facts (authoritative):\n{edit_facts}\n\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Recent Stage conversation JSON: {json.dumps(transcript, ensure_ascii=False)}"
@@ -1548,12 +1844,24 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
         maximum_changed_cells = min(REVISION_MAX_CHANGED_CELLS, strategy.edit_budget)
         strategy_data = strategy.as_dict()
         entity_operators = {"move_player", "move_box", "move_target"}
-        minimum_changed_cells = (
-            2
-            if strategy.effect in relocation_effects
-            or set(strategy_data["operators"]).issubset(entity_operators)
-            else REVISION_MIN_CHANGED_CELLS
-        )
+        required_transitions = strategy_data.get("requiredTransitions") or []
+        required_operators = {
+            _operation_kind(item["from"], item["to"])
+            for item in required_transitions
+        }
+        if required_transitions:
+            minimum_changed_cells = (
+                max(2, len(required_transitions))
+                if required_operators.intersection(entity_operators)
+                else len(required_transitions)
+            )
+        else:
+            minimum_changed_cells = (
+                2
+                if strategy.effect in relocation_effects
+                or set(strategy_data["operators"]).intersection(entity_operators)
+                else REVISION_MIN_CHANGED_CELLS
+            )
         strategies.append({
             "strategyIndex": index,
             "effect": strategy_data["effect"],
@@ -1563,14 +1871,24 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
             "minimumChangedCells": minimum_changed_cells,
             "maximumChangedCells": maximum_changed_cells,
             "metricGoals": strategy_data["metricGoals"],
+            "requiredTransitions": required_transitions,
+            "anchorEntities": strategy_data.get("anchorEntities") or [],
+            "playObjective": strategy_data.get("playObjective"),
         })
-    return {
+    contract = {
         "schemaVersion": REVISION_CONTRACT_SCHEMA_VERSION,
         "authorizedBrief": str(authorized_brief or "").strip()[:1200],
         "revisionPlan": plan.as_dict(),
         "strategies": strategies,
         "explicitlyRelaxedByDesigner": bool((stage_context or {}).get("revisionRelaxed")),
     }
+    for strategy in contract["strategies"]:
+        if strategy["minimumChangedCells"] > strategy["maximumChangedCells"]:
+            raise ValueError(
+                "revision contract has an impossible changed-cell range: "
+                f"{strategy['minimumChangedCells']}..{strategy['maximumChangedCells']}"
+            )
+    return contract
 
 
 def _build_map_operation_messages(
@@ -1585,6 +1903,16 @@ def _build_map_operation_messages(
         f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
     )
     map_facts = _map_facts_for_prompt(rows, stage_context)
+    focus_facts = [
+        {
+            "strategyIndex": strategy.get("strategyIndex"),
+            "cells": json.loads(
+                _editable_focus_facts(rows, strategy.get("focus"))
+            ).get("cells", []),
+        }
+        for strategy in revision_contract.get("strategies") or []
+        if strategy.get("focus") is not None
+    ]
     solver_evidence = _llm_solver_evidence(baseline_metrics or {})
     system_prompt = (
         "You are the Sokoban co-creation level revision assistant. The saved 12x10 Stage is "
@@ -1597,11 +1925,14 @@ def _build_map_operation_messages(
         "shell. Never modify preserved components or cells outside the strategy focus. Keep the "
         "map structurally valid with exactly one player and matching box/target pairs. Produce up "
         "to three distinct candidates, each tagged with its strategyIndex. Coordinates are one-based. "
-        "Each operation must contain only row, column, and to; the server reads the real before tile. "
+        "Each operation must contain row, column, and to, and may include from as a claim that the "
+        "server will verify against the real before tile. Required transitions are hard constraints: "
+        "implement every one exactly before considering optional edits. Never replace a required "
+        "remove_wall with a box/player move. "
         "A moved player, box, or target requires paired operations that clear the old cell and place "
         "the entity on a current floor cell. Return JSON only with exactly this shape: "
         "{\"candidates\":[{\"strategyIndex\":1,\"operations\":[{\"row\":5,"
-        "\"column\":6,\"to\":\"#\"}]}]}. Each operations array contains one to 24 unique "
+        "\"column\":6,\"from\":\".\",\"to\":\"#\"}]}]}. Each operations array contains one to 24 unique "
         "cells. Allowed destination tiles are space, #, ., @, p, s, and t; space edits are forbidden. "
         f"Natural-language reasoning is internal; any unavoidable text must use {response_language}."
     )
@@ -1610,6 +1941,7 @@ def _build_map_operation_messages(
         f"{json.dumps(revision_contract, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "Column ruler (one-based): 123456789012\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
+        f"Focus editable-cell facts (authoritative):\n{json.dumps(focus_facts, ensure_ascii=False, separators=(',', ':'))}\n\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"Deterministic solver evidence (authoritative): {json.dumps(solver_evidence, ensure_ascii=False)}"
@@ -1808,6 +2140,105 @@ async def _generate_map_operation_candidates(
     raise last_error
 
 
+def _deterministic_revision_fallback(
+    *,
+    rows,
+    plan,
+    revision_contract,
+    request_id,
+    language,
+    proposal_validator,
+    baseline_metrics,
+    movement_requirement,
+    preserved_components,
+    started_at,
+):
+    """Use the bounded local search when the modifier model cannot supply a valid candidate."""
+    result = search_revision_plan(
+        rows,
+        plan,
+        proposal_validator or validate_and_solve,
+        baseline_metrics=baseline_metrics,
+        deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
+        movement_requirement=movement_requirement,
+        preserved_components=preserved_components,
+    )
+    strategy_index = result.strategy_index
+    selected_contract = (revision_contract.get("strategies") or [])[result.strategy_index - 1]
+    operations = _operations_from_diff(
+        rows,
+        result.rows,
+        include_from=bool(selected_contract.get("requiredTransitions")),
+    )
+    if not operations:
+        raise ProposalSearchExhausted({
+            **result.diagnostics,
+            "failureReasons": {"empty_diff": 1},
+        })
+    # Re-run the public operation path so a search primitive can never bypass
+    # the same contract that protects an LLM candidate.
+    verified_rows = execute_revision_operations(
+        rows,
+        operations,
+        revision_contract,
+        strategy_index,
+    )
+    if tuple(verified_rows) != tuple(result.rows):
+        raise ProposalSearchExhausted({
+            **result.diagnostics,
+            "failureReasons": {"contract_replay_mismatch": 1},
+        })
+    diagnostics = dict(result.diagnostics or {})
+    diagnostics.update({
+        "source": "deterministic_search",
+        "selectedCandidateIndex": None,
+        "selectedStrategyIndex": strategy_index,
+        "changedCellCount": _changed_cell_count(rows, result.rows),
+        "candidateCount": diagnostics.get("constructedCandidates", 0),
+    })
+    return LLMExecutionResult(
+        assistant_message=(
+            "我整理了一份等待你审查的地图提案。"
+            if language == "zh-CN"
+            else "I prepared a map proposal for your review."
+        ),
+        attempts_used=0,
+        request_id=request_id,
+        proposed_rows=list(result.rows),
+        modification_summary="",
+        model="deterministic-revision-search",
+        latency_ms=diagnostics.get("elapsedMs", 0),
+        guidance={
+            "move": "deliver_revision",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "uiCues": [],
+        },
+        revision_contract=revision_contract,
+        revision_operations=operations,
+        proposal_diagnostics=diagnostics,
+    )
+
+
+def _operations_from_diff(before_rows, after_rows, include_from=False):
+    operations = []
+    for y, (before_row, after_row) in enumerate(zip(before_rows, after_rows)):
+        for x, (before, after) in enumerate(zip(before_row, after_row)):
+            if before == after:
+                continue
+            operation = {
+                "row": y + 1,
+                "column": x + 1,
+                "to": after,
+            }
+            if include_from:
+                operation["from"] = before
+            operations.append(operation)
+    return operations
+
+
 def language_from_context(stage_context):
     return "zh-CN" if stage_context.get("responseLanguage") == "zh-CN" else "en"
 
@@ -1904,10 +2335,15 @@ def execute_revision_operations(base_rows, operations, revision_contract, strate
     """Apply one modifier-agent candidate under the immutable execution contract."""
     if not isinstance(operations, list) or any(
         not isinstance(operation, dict)
-        or set(operation) != {"row", "column", "to"}
+        or set(operation) not in (
+            {"row", "column", "to"},
+            {"row", "column", "from", "to"},
+        )
         for operation in operations
     ):
-        raise ValueError("modifier operations must contain only row, column, and to")
+        raise ValueError(
+            "modifier operations must contain only row, column, and to, with optional from"
+        )
     strategies = (revision_contract or {}).get("strategies") or []
     if (
         isinstance(strategy_index, bool)
@@ -2062,6 +2498,17 @@ def _validate_operation_contract(operations, strategy):
             raise ValueError(f"{operator} requires paired source and destination operations")
     if len(set(positions)) != len(positions):
         raise ValueError("the revision contract cannot contain duplicate changed cells")
+    required = {
+        (item.get("row"), item.get("column"), item.get("from"), item.get("to"))
+        for item in strategy.get("requiredTransitions") or []
+    }
+    if required:
+        observed_transitions = {
+            (y + 1, x + 1, before, after)
+            for x, y, before, after in operations
+        }
+        if not required.issubset(observed_transitions):
+            raise ValueError("operations do not implement every required tile transition")
 
 
 def _validate_metric_goals(goals, baseline_metrics, validation):
@@ -2588,6 +3035,7 @@ async def _generate_plain_with_model_fallback(
                 language,
                 stage_context,
                 stage_opening,
+                rows=rows,
             )
             disagreement = _extract_plain_disagreement(
                 content,
@@ -2617,6 +3065,20 @@ async def _generate_plain_with_model_fallback(
                     _latest_role_content(messages[:-1], "assistant"),
                     language,
                 )
+                if proposal_offer is not None and not proposal_offer.get("executionBrief"):
+                    inferred_brief = _execution_brief_from_text(
+                        " ".join(
+                            str(proposal_offer.get(field) or "")
+                            for field in ("summary", "rationale")
+                        )
+                        + " "
+                        + visible_content
+                        + " "
+                        + _latest_role_content(messages, "user"),
+                        rows,
+                    )
+                    if inferred_brief:
+                        proposal_offer["executionBrief"] = inferred_brief
             if (
                 guidance_mode == "revision_advice"
                 and proposal_offer is None
@@ -2804,6 +3266,25 @@ async def _generate_plain_with_model_fallback(
                     guidance["followUpQuestion"] = repaired["followUpQuestion"]
                     guidance["uiCues"] = repaired["uiCues"]
                 guidance_fallback_used = True
+            if guidance.get("proposalOffer") and not guidance["proposalOffer"].get(
+                "executionBrief"
+            ):
+                # Binding/repair can replace an abstract model offer. Re-attach any
+                # exact transition stated by the user's request after that repair so
+                # the hidden execution contract cannot lose its hard coordinate.
+                inferred_brief = _execution_brief_from_text(
+                    " ".join(
+                        str(guidance["proposalOffer"].get(field) or "")
+                        for field in ("summary", "rationale")
+                    )
+                    + " "
+                    + visible_content
+                    + " "
+                    + _latest_role_content(messages, "user"),
+                    rows,
+                )
+                if inferred_brief:
+                    guidance["proposalOffer"]["executionBrief"] = inferred_brief
             grounding_texts = [
                 body,
                 guidance.get("followUpQuestion"),
@@ -2919,6 +3400,43 @@ async def _generate_plain_with_model_fallback(
             latencyMs=int((time.monotonic() - started_at) * 1000),
             responseMode="plain_text",
         )
+        grounding_error = " ".join(
+            str(value or "")
+            for value in (last_error.safe_message, validation_feedback)
+        ).casefold()
+        if rows is not None and (
+            "executionbrief" in grounding_error
+            or "coordinate" in grounding_error
+            or "deterministic map facts" in grounding_error
+        ):
+            # A repeated coordinate/brief conflict is a grounding problem, not a
+            # reason to manufacture a proposal card from an abstract fallback.
+            # Return ordinary clarification prose so the designer can correct the
+            # location or tile state explicitly.
+            return LLMExecutionResult(
+                assistant_message=(
+                    "我发现刚才提到的具体坐标或格子状态与当前已保存地图对不上。"
+                    "我不会猜测邻近格，也不会改动当前地图；请重新确认要修改的位置，"
+                    "以及它当前是墙、地板、水域还是其他元素。"
+                    if language == "zh-CN"
+                    else "The precise coordinate or tile state in that suggestion does not match "
+                    "the saved map. I will not guess a neighboring cell or change the map; please "
+                    "confirm the location and whether it is currently a wall, floor, water, or entity."
+                ),
+                attempts_used=last_error.attempts_used,
+                request_id=request_id,
+                model="execution-brief-grounding-guard",
+                latency_ms=int((time.monotonic() - started_at) * 1000),
+                guidance={
+                    "move": "clarify_intent",
+                    "intentHypothesis": None,
+                    "intentConfidence": None,
+                    "followUpQuestion": None,
+                    "proposalOffer": None,
+                    "disagreement": None,
+                    "uiCues": [],
+                },
+            )
         raise last_error
 
     raise LLMServiceError(
@@ -3016,6 +3534,26 @@ async def _generate_with_model_fallback(
                 stage_context,
                 rows,
             )
+
+            # The model-facing JSON may still describe a precise user request only in
+            # the latest chat turn. Preserve that hard coordinate transition before
+            # the conceptual offer is persisted, just as the plain-text path does.
+            if validated[4].get("proposalOffer") is not None and not validated[4][
+                "proposalOffer"
+            ].get("executionBrief"):
+                inferred_brief = _execution_brief_from_text(
+                    " ".join(
+                        str(validated[4]["proposalOffer"].get(field) or "")
+                        for field in ("summary", "rationale")
+                    )
+                    + " "
+                    + validated[0]
+                    + " "
+                    + _latest_role_content(messages, "user"),
+                    rows,
+                )
+                if inferred_brief:
+                    validated[4]["proposalOffer"]["executionBrief"] = inferred_brief
 
             if task == "map_proposal" and validated[2] is None:
                 raise ValueError(
@@ -3378,6 +3916,7 @@ def validate_chat_response(
         assessment_only,
         language,
         stage_context,
+        rows=rows,
     )
     if (
         assessment_only
@@ -3405,6 +3944,20 @@ def validate_chat_response(
             "",
             language,
         )
+        if guidance["proposalOffer"] is not None and not guidance["proposalOffer"].get(
+            "executionBrief"
+        ) and rows is not None:
+            inferred_brief = _execution_brief_from_text(
+                " ".join(
+                    str(guidance["proposalOffer"].get(field) or "")
+                    for field in ("summary", "rationale")
+                )
+                + " "
+                + assistant_message,
+                rows,
+            )
+            if inferred_brief:
+                guidance["proposalOffer"]["executionBrief"] = inferred_brief
     stage_one_opening = assessment_only and _is_stage_one(stage_context)
     deterministic_opening_question = None
 
@@ -4269,7 +4822,13 @@ def _discussion_insight_is_useful(text, language="en"):
     )
 
 
-def _extract_plain_guidance(content, language, stage_context, stage_opening=False):
+def _extract_plain_guidance(
+    content,
+    language,
+    stage_context,
+    stage_opening=False,
+    rows=None,
+):
     marker = "<GUIDANCE>"
     marker_index = content.find(marker)
 
@@ -4294,7 +4853,7 @@ def _extract_plain_guidance(content, language, stage_context, stage_opening=Fals
 
     for raw_line in re.split(r"\s*\|\|\s*|[\r\n]+", block_tail[:closing_index]):
         match = re.match(
-            r"^(WARNING|MANUAL_EDIT|INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE)\s*:\s*(.+?)\s*$",
+            r"^(WARNING|MANUAL_EDIT|INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE|EXECUTION_BRIEF)\s*:\s*(.+?)\s*$",
             raw_line.strip(),
         )
 
@@ -4310,10 +4869,24 @@ def _extract_plain_guidance(content, language, stage_context, stage_opening=Fals
 
     summary = fields.get("PROPOSAL_SUMMARY")
     rationale = fields.get("PROPOSAL_RATIONALE")
+    execution_brief = None
+    if fields.get("EXECUTION_BRIEF"):
+        try:
+            execution_brief = _validate_execution_brief(
+                json.loads(fields["EXECUTION_BRIEF"]),
+                rows,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exception:
+            if rows is not None:
+                raise ValueError(
+                    f"executionBrief is invalid for the saved Stage: {exception}"
+                ) from exception
+            execution_brief = None
     proposal_offer = (
         {
             "summary": summary[:600],
             "rationale": rationale[:1000],
+            **({"executionBrief": execution_brief} if execution_brief else {}),
         }
         if summary and rationale
         else None
@@ -4622,6 +5195,7 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
 
     original_summary = str(proposal_offer.get("summary") or "").strip()
     original_rationale = str(proposal_offer.get("rationale") or "").strip()
+    execution_brief = proposal_offer.get("executionBrief")
     summary_was_meta_language = _proposal_card_is_meta_language(original_summary)
     rationale_was_meta_language = _proposal_card_is_meta_language(original_rationale)
     if summary_was_meta_language:
@@ -4644,10 +5218,13 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
             language,
         )
         if grounded_offer is not None:
-            return _ensure_proposal_offer_explanation(
+            return _attach_execution_brief(
+                _ensure_proposal_offer_explanation(
                 grounded_offer,
                 visible_content,
                 language,
+                ),
+                execution_brief,
             )
     corpus = " ".join(
         part for part in (visible_content, previous_content, original_summary, original_rationale)
@@ -4778,10 +5355,21 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
         or _guidance_reuses_visible_sentence(original_rationale, previous_content)
         or _guidance_text_matches(original_summary, original_rationale)
     )
-    return _ensure_proposal_offer_explanation({
-        "summary": (summary if summary_needs_distilling else original_summary)[:600],
-        "rationale": (rationale if rationale_needs_expansion else original_rationale)[:1000],
-    }, visible_content, language)
+    return _attach_execution_brief(
+        _ensure_proposal_offer_explanation({
+            "summary": (summary if summary_needs_distilling else original_summary)[:600],
+            "rationale": (rationale if rationale_needs_expansion else original_rationale)[:1000],
+        }, visible_content, language),
+        execution_brief,
+    )
+
+
+def _attach_execution_brief(offer, execution_brief):
+    if offer is None or execution_brief is None:
+        return offer
+    result = dict(offer)
+    result["executionBrief"] = execution_brief
+    return result
 
 
 def _proposal_summary_has_concrete_action(summary, language):
@@ -5794,9 +6382,10 @@ def _guidance_advice_request(message):
         return True
 
     return bool(re.search(
-        r"\b(?:suggestion(?:s)?|advice|plan|idea(?:s)?|brainstorm|how (?:to|should|would|could)|"
-        r"what (?:would|could|do) you suggest|what would you change|help me think|"
-        r"give me (?:an? )?(?:idea|direction|plan))\b",
+        r"\b(?:suggest(?:ion)?s?|recommend(?:ation)?s?|advice|plan|idea(?:s)?|brainstorm|"
+        r"how (?:to|should|would|could)|what (?:would|could|do) you suggest|"
+        r"what would you change|help me think|give me (?:an? )?(?:idea|direction|plan)|"
+        r"(?:a|an|the|some)\s+(?:concrete\s+)?(?:revision|change|direction|plan|edit))\b",
         text,
     ))
 
@@ -6824,7 +7413,155 @@ def _build_draft_provenance_guidance(stage_context):
     )
 
 
-def _validate_guidance(payload, assessment_only, language="en", stage_context=None):
+def _validate_execution_brief(value, rows=None):
+    """Validate the hidden, machine-facing part of a conceptual revision card."""
+    if not isinstance(value, dict):
+        raise ValueError("executionBrief must be an object.")
+    allowed = {
+        "schemaVersion", "effect", "anchors", "focus", "requiredTransitions",
+        "allowedOperators", "preserve", "playObjective",
+    }
+    if not set(value).issubset(allowed):
+        raise ValueError("executionBrief contains unexpected fields.")
+    if value.get("schemaVersion", 1) != 1:
+        raise ValueError("executionBrief.schemaVersion is unsupported.")
+    effect = value.get("effect")
+    if effect is not None and effect not in {
+        "open_route", "narrow_route", "adjust_internal_walls", "relocate_start",
+        "relocate_box", "relocate_target", "reshape_water", "change_box_order",
+    }:
+        raise ValueError("executionBrief.effect is invalid.")
+    anchors = value.get("anchors", [])
+    if (
+        not isinstance(anchors, list)
+        or len(anchors) > 5
+        or any(not isinstance(anchor, str) for anchor in anchors)
+        or len(set(anchors)) != len(anchors)
+        or any(anchor not in {"P", "B1", "B2", "T1", "T2"} for anchor in anchors)
+    ):
+        raise ValueError("executionBrief.anchors is invalid.")
+    focus = value.get("focus")
+    if focus is not None:
+        if not isinstance(focus, dict) or set(focus) != {"row", "column", "radius"}:
+            raise ValueError("executionBrief.focus is invalid.")
+        if any(
+            isinstance(focus[key], bool) or not isinstance(focus[key], int)
+            for key in ("row", "column", "radius")
+        ) or not 1 <= focus["row"] <= 10 or not 1 <= focus["column"] <= 12 or not 1 <= focus["radius"] <= 3:
+            raise ValueError("executionBrief.focus is outside the Stage.")
+    transitions = value.get("requiredTransitions", [])
+    if not isinstance(transitions, list) or len(transitions) > 12:
+        raise ValueError("executionBrief.requiredTransitions is invalid.")
+    normalized_transitions = []
+    seen_coordinates = set()
+    allowed_tiles = set("#.@pst")
+    for transition in transitions:
+        if not isinstance(transition, dict) or set(transition) != {"row", "column", "from", "to"}:
+            raise ValueError("executionBrief has an invalid required transition.")
+        row, column = transition["row"], transition["column"]
+        before, after = transition["from"], transition["to"]
+        if (
+            isinstance(row, bool) or isinstance(column, bool)
+            or not isinstance(row, int) or not isinstance(column, int)
+            or not 1 <= row <= 10 or not 1 <= column <= 12
+            or before not in allowed_tiles or after not in allowed_tiles
+            or before == after or (row, column) in seen_coordinates
+        ):
+            raise ValueError("executionBrief has an invalid required transition.")
+        seen_coordinates.add((row, column))
+        normalized_transitions.append({
+            "row": row,
+            "column": column,
+            "from": before,
+            "to": after,
+        })
+    operators = value.get("allowedOperators", [])
+    valid_operators = {
+        "add_wall", "remove_wall", "move_player", "move_box", "move_target",
+        "add_water", "remove_water",
+    }
+    if (
+        not isinstance(operators, list)
+        or not 1 <= len(operators) <= 7
+        or any(not isinstance(operator, str) for operator in operators)
+        or len(set(operators)) != len(operators)
+        or any(operator not in valid_operators for operator in operators)
+    ):
+        raise ValueError("executionBrief.allowedOperators is invalid.")
+    preserve = value.get("preserve", [])
+    valid_preserve = {
+        "outer_shell", "player", "boxes", "targets", "water", "walls", "unrelated_areas",
+    }
+    if (
+        not isinstance(preserve, list)
+        or any(not isinstance(component, str) for component in preserve)
+        or len(set(preserve)) != len(preserve)
+        or any(component not in valid_preserve for component in preserve)
+    ):
+        raise ValueError("executionBrief.preserve is invalid.")
+    objective = value.get("playObjective")
+    if objective is not None and (
+        not isinstance(objective, str) or not objective.strip() or len(objective) > 120
+        or "\n" in objective or "\r" in objective
+    ):
+        raise ValueError("executionBrief.playObjective is invalid.")
+
+    operator_for_transition = {
+        (".", "#"): "add_wall", ("#", "."): "remove_wall",
+        ("p", "."): "move_player", (".", "p"): "move_player",
+        ("s", "."): "move_box", (".", "s"): "move_box",
+        ("t", "."): "move_target", (".", "t"): "move_target",
+        (".", "@"): "add_water", ("@", "."): "remove_water",
+    }
+    for transition in normalized_transitions:
+        operator = operator_for_transition.get((transition["from"], transition["to"]))
+        if operator is None or operator not in operators:
+            raise ValueError("executionBrief.allowedOperators cannot realize a required transition.")
+        if operator in {"add_wall", "remove_wall"} and "walls" in preserve:
+            raise ValueError("executionBrief preserves walls but requires a wall edit.")
+        component = {
+            "move_player": "player", "move_box": "boxes", "move_target": "targets",
+            "add_water": "water", "remove_water": "water",
+        }.get(operator)
+        if component and component in preserve:
+            raise ValueError(f"executionBrief preserves {component} but requires an edit.")
+        if focus is not None and max(
+            abs(focus["column"] - transition["column"]),
+            abs(focus["row"] - transition["row"]),
+        ) > focus["radius"]:
+            raise ValueError("executionBrief.focus does not contain every required transition.")
+    if rows is not None:
+        if len(rows) != 10 or any(len(row) != 12 for row in rows):
+            raise ValueError("executionBrief cannot be checked against an invalid Stage.")
+        facts = build_map_facts(rows)
+        known_anchors = {
+            "P",
+            *(box["id"] for box in facts.get("boxes") or []),
+            *(target["id"] for target in facts.get("targets") or []),
+        }
+        if any(anchor not in known_anchors for anchor in anchors):
+            raise ValueError("executionBrief names an entity that is not on the saved Stage.")
+        for transition in normalized_transitions:
+            current = rows[transition["row"] - 1][transition["column"] - 1]
+            if current != transition["from"]:
+                raise ValueError(
+                    "executionBrief coordinate conflict: "
+                    f"row {transition['row']}, column {transition['column']} is {current!r}, "
+                    f"not {transition['from']!r}."
+                )
+    return {
+        "schemaVersion": 1,
+        "effect": effect,
+        "anchors": list(anchors),
+        "focus": dict(focus) if focus is not None else None,
+        "requiredTransitions": normalized_transitions,
+        "allowedOperators": list(operators),
+        "preserve": list(preserve),
+        "playObjective": objective.strip() if isinstance(objective, str) else None,
+    }
+
+
+def _validate_guidance(payload, assessment_only, language="en", stage_context=None, rows=None):
     if payload is None:
         raise ValueError("guidance is required.")
 
@@ -6898,8 +7635,10 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
         if move != "offer_revision" or not isinstance(proposal_offer, dict):
             raise ValueError("proposalOffer requires the offer_revision move.")
 
-        if set(proposal_offer) != {"summary", "rationale"}:
+        if not {"summary", "rationale"}.issubset(proposal_offer):
             raise ValueError("proposalOffer must contain summary and rationale.")
+        if not set(proposal_offer).issubset({"summary", "rationale", "executionBrief"}):
+            raise ValueError("proposalOffer contains an invalid field.")
 
         proposal_offer = {
             "summary": _normalize_single_level_language(
@@ -6910,6 +7649,11 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
                 "proposalOffer.rationale",
             )),
         }
+        if "executionBrief" in payload.get("proposalOffer", {}):
+            proposal_offer["executionBrief"] = _validate_execution_brief(
+                payload["proposalOffer"]["executionBrief"],
+                rows,
+            )
     elif move == "offer_revision":
         raise ValueError("The offer_revision move requires proposalOffer.")
 

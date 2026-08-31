@@ -1262,16 +1262,23 @@ def _send_message_locked(
                 stage_context=context["stageContext"],
             )
         except LLMServiceError as exception:
-            execution = _proposal_search_failure_execution(
-                session_id=session_id,
-                access_cookie=access_cookie,
-                base_version_id=payload.baseVersionId,
-                idempotency_key=payload.idempotencyKey,
-                revision_state=revision_state,
-                revision_brief=revision_brief,
-                language=language,
-                exception=exception,
-            )
+            if exception.code == "REVISION_CONTRACT_INVALID":
+                execution = _revision_contract_invalid_execution(
+                    language=language,
+                    request_id=exception.request_id,
+                    exception=exception,
+                )
+            else:
+                execution = _proposal_search_failure_execution(
+                    session_id=session_id,
+                    access_cookie=access_cookie,
+                    base_version_id=payload.baseVersionId,
+                    idempotency_key=payload.idempotencyKey,
+                    revision_state=revision_state,
+                    revision_brief=revision_brief,
+                    language=language,
+                    exception=exception,
+                )
             if execution is None:
                 if not retrying_failed_message:
                     with connect(immediate=True) as database:
@@ -1706,6 +1713,37 @@ def _legacy_proposal_relaxation_fallback_after_failure(
                 "briefHash": brief_hash,
             },
         },
+    )
+
+
+def _revision_contract_invalid_execution(*, language, request_id, exception):
+    if language == "zh-CN":
+        message = (
+            "我发现这张方案卡里的坐标或当前格子状态与已保存地图对不上。"
+            "我不会把它猜成邻近格，也不会改动当前地图；请先重新说明需要调整的具体位置或方向。"
+        )
+    else:
+        message = (
+            "The proposal refers to a coordinate or tile state that does not match the saved map. "
+            "I will not guess a neighboring cell or change the current map; please restate the "
+            "specific location or direction before we continue."
+        )
+    return LLMExecutionResult(
+        assistant_message=message,
+        attempts_used=exception.attempts_used,
+        request_id=request_id,
+        model="revision-contract-guard",
+        guidance={
+            "move": "clarify_intent",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "uiCues": [],
+        },
+        revision_plan=getattr(exception, "revision_plan", {}) or {},
+        revision_contract=getattr(exception, "revision_contract", {}) or {},
+        proposal_diagnostics=getattr(exception, "proposal_diagnostics", {}) or {},
     )
 
 

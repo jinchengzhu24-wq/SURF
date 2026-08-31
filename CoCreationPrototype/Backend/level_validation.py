@@ -422,6 +422,15 @@ def build_map_facts(rows, before_rows=None):
             for index, target in enumerate(targets, start=1)
         ],
         "waterCells": [point(position) for position in positions["@"]],
+        # Keep exact tile facts alongside the compact entity facts.  The chat
+        # model may discuss a coordinate, but only this authoritative map
+        # snapshot may decide whether that coordinate is actually editable.
+        "tileAt": {
+            f"{y + 1},{x + 1}": tile
+            for y, row in enumerate(normalized)
+            for x, tile in enumerate(row)
+            if tile != " "
+        },
     }
 
     if before_rows is not None:

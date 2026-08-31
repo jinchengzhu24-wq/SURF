@@ -205,10 +205,150 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn('"id":"B1","row":3,"column":5', prompt)
         self.assertIn("Map-grounding rule", prompt)
 
+    def test_execution_brief_validates_exact_tiles_and_keeps_tile_facts(self):
+        brief = {
+            "schemaVersion": 1,
+            "effect": "adjust_internal_walls",
+            "anchors": ["B1", "T1"],
+            "focus": {"row": 2, "column": 2, "radius": 1},
+            "requiredTransitions": [
+                {"row": 2, "column": 2, "from": ".", "to": "#"},
+            ],
+            "allowedOperators": ["add_wall"],
+            "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+            "playObjective": "route_choice",
+        }
+        normalized = llm_client._validate_execution_brief(brief, OPERATION_BASE_ROWS)
+
+        self.assertEqual(normalized["requiredTransitions"][0]["from"], ".")
+        self.assertEqual(
+            llm_client.build_map_facts(OPERATION_BASE_ROWS)["tileAt"]["2,2"],
+            ".",
+        )
+        with self.assertRaisesRegex(ValueError, "coordinate conflict"):
+            llm_client._validate_execution_brief(
+                {
+                    **brief,
+                    "requiredTransitions": [
+                        {"row": 2, "column": 2, "from": "#", "to": "."},
+                    ],
+                    "allowedOperators": ["remove_wall"],
+                },
+                OPERATION_BASE_ROWS,
+            )
+
+    def test_enriched_contract_allows_one_cell_required_wall_transition(self):
+        plan = llm_client.parse_revision_plan({
+            "strategies": [{
+                "effect": "adjust_internal_walls",
+                "focus": {"row": 2, "column": 2, "radius": 1},
+                "operators": ["add_wall"],
+                "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                "editBudget": 1,
+                "metricGoals": [],
+                "requiredTransitions": [
+                    {"row": 2, "column": 2, "from": ".", "to": "#"},
+                ],
+                "anchorEntities": ["B1", "T1"],
+                "playObjective": "route_choice",
+            }],
+        })
+        llm_client.validate_revision_plan_against_map(OPERATION_BASE_ROWS, plan)
+        contract = llm_client._build_revision_execution_contract(plan, "open one local route")
+
+        self.assertEqual(contract["strategies"][0]["minimumChangedCells"], 1)
+        self.assertEqual(contract["strategies"][0]["maximumChangedCells"], 1)
+        changed = llm_client.execute_revision_operations(
+            OPERATION_BASE_ROWS,
+            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+            contract,
+            1,
+        )
+        self.assertEqual(changed[1], "##.........#")
+
+    def test_plain_execution_brief_is_checked_against_saved_tiles(self):
+        content = (
+            "I would open the cited local route.\n"
+            "<GUIDANCE>PROPOSAL_SUMMARY: Open the local route || "
+            "PROPOSAL_RATIONALE: Compare the first push after the wall is removed. || "
+            "EXECUTION_BRIEF: "
+            + json.dumps({
+                "schemaVersion": 1,
+                "effect": "open_route",
+                "anchors": ["B1"],
+                "focus": {"row": 2, "column": 2, "radius": 1},
+                "requiredTransitions": [
+                    {"row": 2, "column": 2, "from": "#", "to": "."},
+                ],
+                "allowedOperators": ["remove_wall"],
+                "preserve": ["outer_shell", "player", "boxes", "targets", "water"],
+                "playObjective": "route_choice",
+            })
+            + "</GUIDANCE>"
+        )
+        with self.assertRaisesRegex(ValueError, "coordinate conflict"):
+            llm_client._extract_plain_guidance(
+                content,
+                "en",
+                {},
+                rows=OPERATION_BASE_ROWS,
+            )
+
+    def test_english_coordinate_request_is_recovered_into_execution_brief(self):
+        brief = llm_client._execution_brief_from_text(
+            "Please suggest a concrete revision: change (2,2) from floor to wall.",
+            OPERATION_BASE_ROWS,
+        )
+
+        self.assertIsNotNone(brief)
+        self.assertEqual(
+            brief["requiredTransitions"],
+            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+        )
+        self.assertEqual(brief["allowedOperators"], ["add_wall"])
+
+    def test_repeated_coordinate_conflict_returns_plain_clarification_instead_of_502(self):
+        content = (
+            "I would open the cited local route.\n"
+            "<GUIDANCE>PROPOSAL_SUMMARY: Open the local route || "
+            "PROPOSAL_RATIONALE: Compare the first push after the wall is removed. || "
+            "EXECUTION_BRIEF: "
+            + json.dumps({
+                "schemaVersion": 1,
+                "effect": "open_route",
+                "anchors": ["B1"],
+                "focus": {"row": 2, "column": 2, "radius": 1},
+                "requiredTransitions": [
+                    {"row": 2, "column": 2, "from": "#", "to": "."},
+                ],
+                "allowedOperators": ["remove_wall"],
+                "preserve": ["outer_shell", "player", "boxes", "targets", "water"],
+                "playObjective": "route_choice",
+            })
+            + "</GUIDANCE>"
+        )
+        result, client = self.execute(
+            [content, content],
+            rows=OPERATION_BASE_ROWS,
+            language="en",
+        )
+
+        self.assertIn("does not match the saved map", result.assistant_message)
+        self.assertIsNone(result.guidance["proposalOffer"])
+        self.assertEqual(result.guidance["move"], "clarify_intent")
+        self.assertEqual(len(client.chat.completions.calls), 2)
+
     def test_map_grounding_rejects_the_reported_wrong_corner_and_water_claim(self):
         with self.assertRaisesRegex(ValueError, "upper-right"):
             llm_client._validate_map_grounding_texts(
                 ["The upper-right box is next to water."], MAP_GROUNDING_ROWS
+            )
+
+    def test_map_grounding_rejects_wrong_explicit_coordinate_tile(self):
+        with self.assertRaisesRegex(ValueError, "row 2, column 2"):
+            llm_client._validate_map_grounding_texts(
+                ["把(2,2)从墙变成地板。"],
+                OPERATION_BASE_ROWS,
             )
 
         with self.assertRaisesRegex(ValueError, "touches water"):
@@ -959,6 +1099,7 @@ class LLMClientTests(unittest.TestCase):
         messages = (
             "给我一个方案，我想让玩家花更多时间绕过障碍物。",
             "I want the player to spend more time detouring around obstacles; can you suggest a plan?",
+            "Please suggest a concrete revision: change (2,4) from floor to wall.",
         )
 
         for message in messages:
@@ -1026,6 +1167,30 @@ class LLMClientTests(unittest.TestCase):
             "required guidance card",
             client.chat.completions.calls[1]["messages"][0]["content"],
         )
+
+    def test_concrete_english_coordinate_request_keeps_execution_brief_when_model_omits_metadata(self):
+        result, client = self.execute(
+            [
+                "I would focus on the local opening.",
+                "I would focus on the local opening.",
+            ],
+            rows=OPERATION_BASE_ROWS,
+            language="en",
+            conversation=[{
+                "role": "user",
+                "content": (
+                    "Please suggest a concrete revision: change (2,2) from floor to wall, "
+                    "while keeping the boxes and targets unchanged."
+                ),
+            }],
+        )
+
+        self.assertEqual(result.guidance["move"], "offer_revision")
+        self.assertEqual(
+            result.guidance["proposalOffer"]["executionBrief"]["requiredTransitions"],
+            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+        )
+        self.assertEqual(len(client.chat.completions.calls), 2)
 
     def test_open_ended_help_gets_a_grounded_discussion_card_when_model_omits_metadata(self):
         result, client = self.execute(
@@ -1410,6 +1575,64 @@ class LLMClientTests(unittest.TestCase):
             client.chat.completions.calls[0]["response_format"],
             {"type": "json_object"},
         )
+
+    def test_invalid_modifier_candidates_fall_back_to_exact_deterministic_transition(self):
+        plan_payload = json.dumps({
+            "strategies": [{
+                "effect": "adjust_internal_walls",
+                "focus": {"row": 2, "column": 2, "radius": 1},
+                "operators": ["add_wall"],
+                "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                "editBudget": 1,
+                "metricGoals": [],
+                "requiredTransitions": [
+                    {"row": 2, "column": 2, "from": ".", "to": "#"},
+                ],
+                "anchorEntities": ["B1", "T1"],
+                "playObjective": "route_choice",
+            }],
+        })
+        invalid_candidates = operation_payload([
+            {"row": 2, "column": 2, "to": "."},
+        ])
+        client = FakeClient([plan_payload, invalid_candidates, invalid_candidates])
+        source_offer = {
+            "summary": "Open the local route",
+            "rationale": "Change only the cited wall and compare the first push.",
+            "executionBrief": {
+                "schemaVersion": 1,
+                "effect": "adjust_internal_walls",
+                "anchors": ["B1", "T1"],
+                "focus": {"row": 2, "column": 2, "radius": 1},
+                "requiredTransitions": [
+                    {"row": 2, "column": 2, "from": ".", "to": "#"},
+                ],
+                "allowedOperators": ["add_wall"],
+                "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                "playObjective": "route_choice",
+            },
+        }
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "请按紫卡生成这个方案"}],
+                OPERATION_BASE_ROWS,
+                "deterministic-transition-fallback-test",
+                stage_context={
+                    "explicitAction": "execute_revision",
+                    "sourceProposalOffer": source_offer,
+                },
+                proposal_validator=llm_client.validate_and_solve,
+            )
+
+        self.assertEqual(result.proposed_rows[1], "##.........#")
+        self.assertEqual(result.revision_operations, [
+            {"row": 2, "column": 2, "from": ".", "to": "#"},
+        ])
+        self.assertEqual(result.proposal_diagnostics["source"], "deterministic_search")
 
     def test_confirmed_concrete_chinese_plan_immediately_uses_proposal_workflow(self):
         response = revision_plan_payload(
@@ -1842,13 +2065,13 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertEqual(result[1], "###........#")
 
-        with self.assertRaisesRegex(ValueError, "only row, column, and to"):
-            llm_client.execute_revision_operations(
-                OPERATION_BASE_ROWS,
-                [{"row": 2, "column": 2, "from": ".", "to": "#"}],
-                contract,
-                1,
-            )
+        declared_before = llm_client.execute_revision_operations(
+            OPERATION_BASE_ROWS,
+            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+            contract,
+            1,
+        )
+        self.assertEqual(declared_before[1], "##.........#")
 
         with self.assertRaisesRegex(ValueError, "outside the revision focus"):
             llm_client.execute_revision_operations(

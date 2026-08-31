@@ -39,6 +39,7 @@ PRESERVE_COMPONENTS = {
     "boxes",
     "targets",
     "water",
+    "walls",
     "unrelated_areas",
 }
 METRICS = {"solutionSteps", "solutionPushes", "searchedStates"}
@@ -94,6 +95,9 @@ class RevisionStrategy:
     preserve: frozenset[str]
     edit_budget: int
     metric_goals: tuple[MetricGoal, ...]
+    required_transitions: tuple[tuple[int, int, str, str], ...] = ()
+    anchor_entities: tuple[str, ...] = ()
+    play_objective: str | None = None
 
     def as_dict(self):
         return {
@@ -114,6 +118,17 @@ class RevisionStrategy:
                 {"metric": goal.metric, "direction": goal.direction}
                 for goal in self.metric_goals
             ],
+            "requiredTransitions": [
+                {
+                    "row": row,
+                    "column": column,
+                    "from": before,
+                    "to": after,
+                }
+                for row, column, before, after in self.required_transitions
+            ],
+            "anchorEntities": list(self.anchor_entities),
+            "playObjective": self.play_objective,
         }
 
 
@@ -200,8 +215,9 @@ def parse_revision_plan(payload):
 
 
 def _parse_strategy(payload, index):
-    expected = {"effect", "focus", "operators", "preserve", "editBudget", "metricGoals"}
-    if not isinstance(payload, dict) or set(payload) != expected:
+    required = {"effect", "focus", "operators", "preserve", "editBudget", "metricGoals"}
+    optional = {"requiredTransitions", "anchorEntities", "playObjective"}
+    if not isinstance(payload, dict) or not required.issubset(payload) or not set(payload).issubset(required | optional):
         raise RevisionPlanError(f"strategy {index} does not match the required fields.")
     effect = payload["effect"]
     if effect not in EFFECTS:
@@ -253,6 +269,15 @@ def _parse_strategy(payload, index):
             raise RevisionPlanError(f"strategy {index} repeats a metric goal.")
         seen_metrics.add(goal["metric"])
         parsed_goals.append(MetricGoal(goal["metric"], goal["direction"]))
+    required_transitions = _parse_required_transitions(
+        payload.get("requiredTransitions", []),
+        index,
+    )
+    anchor_entities = _parse_anchor_entities(
+        payload.get("anchorEntities", []),
+        index,
+    )
+    play_objective = _parse_play_objective(payload.get("playObjective"), index)
     return RevisionStrategy(
         effect=effect,
         focus=focus,
@@ -260,7 +285,60 @@ def _parse_strategy(payload, index):
         preserve=preserve,
         edit_budget=edit_budget,
         metric_goals=tuple(parsed_goals),
+        required_transitions=required_transitions,
+        anchor_entities=anchor_entities,
+        play_objective=play_objective,
     )
+
+
+def _parse_required_transitions(payload, strategy_index):
+    if not isinstance(payload, list) or len(payload) > 12:
+        raise RevisionPlanError(f"strategy {strategy_index} requiredTransitions are invalid.")
+    parsed = []
+    seen = set()
+    allowed_tiles = set("#.@pst")
+    for transition in payload:
+        if not isinstance(transition, dict) or set(transition) != {"row", "column", "from", "to"}:
+            raise RevisionPlanError(f"strategy {strategy_index} has an invalid required transition.")
+        row, column = transition["row"], transition["column"]
+        before, after = transition["from"], transition["to"]
+        if (
+            isinstance(row, bool) or isinstance(column, bool)
+            or not isinstance(row, int) or not isinstance(column, int)
+            or not 1 <= row <= HEIGHT or not 1 <= column <= WIDTH
+            or before not in allowed_tiles or after not in allowed_tiles
+            or before == after
+        ):
+            raise RevisionPlanError(f"strategy {strategy_index} has an invalid required transition.")
+        key = (row, column)
+        if key in seen:
+            raise RevisionPlanError(f"strategy {strategy_index} repeats a required transition coordinate.")
+        seen.add(key)
+        parsed.append((row, column, before, after))
+    return tuple(parsed)
+
+
+def _parse_anchor_entities(payload, strategy_index):
+    allowed = {"P", "B1", "B2", "T1", "T2"}
+    if (
+        not isinstance(payload, list)
+        or len(payload) > 5
+        or any(not isinstance(entity, str) for entity in payload)
+        or len(set(payload)) != len(payload)
+        or any(entity not in allowed for entity in payload)
+    ):
+        raise RevisionPlanError(f"strategy {strategy_index} anchorEntities are invalid.")
+    return tuple(payload)
+
+
+def _parse_play_objective(payload, strategy_index):
+    if payload is None:
+        return None
+    if not isinstance(payload, str) or not payload.strip() or len(payload) > 120:
+        raise RevisionPlanError(f"strategy {strategy_index} playObjective is invalid.")
+    if "\n" in payload or "\r" in payload:
+        raise RevisionPlanError(f"strategy {strategy_index} playObjective is invalid.")
+    return payload.strip()
 
 
 def _parse_focus(payload, strategy_index):
@@ -276,6 +354,84 @@ def _parse_focus(payload, strategy_index):
     return Focus(row, column, radius)
 
 
+def validate_revision_plan_against_map(base_rows, plan):
+    """Reject a semantically valid plan that cannot match the saved Stage."""
+    rows = tuple(base_rows)
+    if len(rows) != HEIGHT or any(len(row) != WIDTH for row in rows):
+        raise RevisionPlanError("The base Stage must be a 12x10 map.")
+    shell = _connected_outer_shell(rows)
+    for index, strategy in enumerate(plan.strategies, start=1):
+        minimum = _minimum_changed_cells(strategy)
+        if minimum > strategy.edit_budget:
+            raise RevisionPlanError(
+                f"strategy {index} has an impossible edit range: {minimum}..{strategy.edit_budget}."
+            )
+        if len(strategy.required_transitions) > strategy.edit_budget:
+            raise RevisionPlanError(
+                f"strategy {index} requires more transitions than its edit budget."
+            )
+        for row, column, before, after in strategy.required_transitions:
+            x, y = column - 1, row - 1
+            if rows[y][x] != before:
+                raise RevisionPlanError(
+                    f"strategy {index} requires row {row}, column {column} to be {before!r}, "
+                    f"but the saved Stage contains {rows[y][x]!r}."
+                )
+            if (x, y) in shell or before == " " or after == " ":
+                raise RevisionPlanError(
+                    f"strategy {index} requires an invalid shell or void transition."
+                )
+            operator = _transition_operator(before, after)
+            if operator is None or operator not in strategy.operators:
+                raise RevisionPlanError(
+                    f"strategy {index} cannot realize required transition {before!r}->{after!r}."
+                )
+            if operator in {"add_wall", "remove_wall"} and "walls" in strategy.preserve:
+                raise RevisionPlanError(f"strategy {index} preserves walls but edits a wall.")
+            component = OPERATOR_COMPONENT.get(operator)
+            if component and component in strategy.preserve:
+                raise RevisionPlanError(
+                    f"strategy {index} preserves {component} but edits it."
+                )
+            if strategy.focus and not _inside_focus(strategy.focus, x, y):
+                raise RevisionPlanError(
+                    f"strategy {index} required transition is outside its focus."
+                )
+    return True
+
+
+def _minimum_changed_cells(strategy):
+    entity_operators = {"move_player", "move_box", "move_target"}
+    if strategy.required_transitions:
+        required_operators = {
+            _transition_operator(before, after)
+            for _, _, before, after in strategy.required_transitions
+        }
+        if required_operators.intersection(entity_operators):
+            return max(2, len(strategy.required_transitions))
+        return len(strategy.required_transitions)
+    if strategy.effect in {"relocate_start", "relocate_box", "relocate_target"}:
+        return 2
+    if set(strategy.operators).intersection(entity_operators):
+        return 2
+    return 1
+
+
+def _transition_operator(before, after):
+    return {
+        (".", "#"): "add_wall",
+        ("#", "."): "remove_wall",
+        ("p", "."): "move_player",
+        (".", "p"): "move_player",
+        ("s", "."): "move_box",
+        (".", "s"): "move_box",
+        ("t", "."): "move_target",
+        (".", "t"): "move_target",
+        (".", "@"): "add_water",
+        ("@", "."): "remove_water",
+    }.get((before, after))
+
+
 def search_revision_plan(
     base_rows,
     plan,
@@ -284,6 +440,7 @@ def search_revision_plan(
     deadline=None,
     movement_requirement=None,
     preserved_components=None,
+    required_transitions=None,
 ):
     search_started_at = time.monotonic()
     base_rows = tuple(base_rows)
@@ -303,6 +460,16 @@ def search_revision_plan(
         diagnostics["movementRequirement"] = dict(movement_requirement)
     if preserved_components:
         diagnostics["preservedComponents"] = sorted(set(preserved_components))
+    if required_transitions:
+        diagnostics["requiredTransitions"] = [
+            {
+                "row": row,
+                "column": column,
+                "from": before,
+                "to": after,
+            }
+            for row, column, before, after in required_transitions
+        ]
     verified = []
     seen_maps = {base_rows}
 
@@ -346,6 +513,11 @@ def search_revision_plan(
                         baseline_metrics,
                         diagnostics,
                         verified,
+                        required_transitions=(
+                            tuple(required_transitions)
+                            if required_transitions is not None
+                            else strategy.required_transitions
+                        ),
                     )
                     if len(verified) >= MAX_VALID_CANDIDATES:
                         break
@@ -620,7 +792,16 @@ def _evaluate_state(
     baseline_metrics,
     diagnostics,
     verified,
+    required_transitions=(),
 ):
+    if not _state_realizes_required_transitions(
+        state.rows,
+        base_rows,
+        required_transitions,
+    ):
+        diagnostics["staticRejectedCandidates"] += 1
+        _count_failure(diagnostics, "required_transition_not_realized")
+        return
     if not _state_realizes_effect(state, strategy):
         diagnostics["staticRejectedCandidates"] += 1
         _count_failure(diagnostics, "effect_not_realized")
@@ -656,6 +837,16 @@ def _evaluate_state(
         effect_match=effect_match,
         changed_cells=changed_cells,
     ))
+
+
+def _state_realizes_required_transitions(rows, base_rows, transitions):
+    for row, column, before, after in transitions or ():
+        x, y = column - 1, row - 1
+        if not (0 <= y < len(rows) and 0 <= x < len(rows[y])):
+            return False
+        if base_rows[y][x] != before or rows[y][x] != after:
+            return False
+    return True
 
 
 def _state_realizes_effect(state, strategy):

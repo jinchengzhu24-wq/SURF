@@ -84,6 +84,8 @@ co_creation_chat
 
 普通聊天、质疑和换方案都不得生成 `proposedRows`。只有 `execute_revision` 且来源 turn 属于当前 Stage、Stage 未过期、契约有效并通过确定性验证时，才会创建待审查 proposal；只有用户接受 proposal 后才创建 `llm_accepted` Stage。失败、超时、空候选或非法模型输出不得放宽要求、覆盖原 Stage 或伪造分歧。
 
+`proposalOffer` 可以带隐藏的 `executionBrief`，用于把可见的 summary/rationale 连接到可执行契约。它保存 `effect`、`anchors`、`focus`、`requiredTransitions`、`allowedOperators`、`preserve` 和 `playObjective`；明确的坐标及 `from → to` 必须原样进入 `RevisionPlan`，并由服务端对照当前 `tileAt` 再校验。精确的一格结构调整允许一个变更格，实体移动必须成对变更。修改助手候选全部非法时，服务端调用生产确定性 `search_revision_plan()` 兜底；旧紫卡缺少 execution brief 时保持兼容，但不得猜测邻近格。
+
 动作、风险复核和分歧沿用 `audit_events`，包括 `card_action_requested`、`proposal_challenge_started`、`alternative_revision_requested`、`disagreement_started`、`disagreement_updated`、`disagreement_resolved` 和 `human_edit_reviewed`。
 
 ## Prompt 文件
