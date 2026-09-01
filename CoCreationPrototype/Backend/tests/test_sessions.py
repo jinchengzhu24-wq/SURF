@@ -2617,6 +2617,81 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(assessed.json()["currentVersionId"], stage_id)
 
+    def test_chat_patch_updates_public_progress_without_exposing_internal_patch(self):
+        version_id = self.read_session()["currentVersionId"]
+        question = "Can the player read the B2 to T1 detour?"
+        first_execution = LLMExecutionResult(
+            "The new corridor gives us a concrete detour to evaluate.",
+            1,
+            "progress-question-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "designContextPatch": {
+                    "openQuestions": [{"question": question, "status": "open"}],
+                },
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=first_execution):
+            first = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "We still need to test whether the player can read the B2 to T1 detour.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "progress-question-001",
+                },
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        payload = first.json()
+        self.assertNotIn("designContextPatch", payload["turns"][-1]["guidance"])
+        progress = next(
+            item for item in payload["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(progress["unresolvedQuestions"][0]["question"], question)
+
+        second_execution = LLMExecutionResult(
+            "That question is settled by the latest play observation.",
+            1,
+            "progress-question-002",
+            model="mock-model",
+            guidance={
+                "move": "reflect_on_play",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "designContextPatch": {
+                    "openQuestions": [{
+                        "question": question,
+                        "status": "resolved",
+                        "evidenceText": "The detour is clear now",
+                    }],
+                },
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=second_execution):
+            second = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "The detour is clear now, so we can move on.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "progress-question-002",
+                },
+            )
+        self.assertEqual(second.status_code, 200, second.text)
+        progress = next(
+            item for item in second.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(progress["unresolvedQuestions"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

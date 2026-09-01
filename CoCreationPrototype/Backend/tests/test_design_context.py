@@ -108,6 +108,63 @@ class DesignContextUnitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_design_context_patch({"goals": [{"bad": "value"}]})
 
+    def test_open_question_requires_user_evidence_to_resolve(self):
+        question = "Can the player understand the B2 to T1 detour without a hint?"
+        context = merge_chat_update(
+            empty_design_context(),
+            patch={"openQuestions": [{"question": question, "status": "open"}]},
+            user_text="We should still test the B2 to T1 detour.",
+            stage_id="stage-1",
+            turn_id="turn-1",
+        )
+        self.assertEqual(context["openQuestions"][0]["status"], "open")
+
+        unresolved = merge_chat_update(
+            context,
+            patch={
+                "openQuestions": [{
+                    "question": question,
+                    "status": "resolved",
+                    "evidenceText": "The detour is clear now",
+                }]
+            },
+            user_text="I am not sure yet.",
+            stage_id="stage-1",
+            turn_id="turn-2",
+        )
+        self.assertEqual(unresolved["openQuestions"][0]["status"], "open")
+
+        resolved = merge_chat_update(
+            context,
+            patch={
+                "openQuestions": [{
+                    "question": question,
+                    "status": "resolved",
+                    "evidenceText": "The detour is clear now",
+                }]
+            },
+            user_text="The detour is clear now, so we can move on.",
+            stage_id="stage-1",
+            turn_id="turn-3",
+        )
+        self.assertEqual(resolved["openQuestions"][0]["status"], "resolved")
+        self.assertEqual(resolved["openQuestions"][0]["resolvedByTurnId"], "turn-3")
+
+    def test_model_cannot_create_confirmed_decision_in_chat_patch(self):
+        context = merge_chat_update(
+            empty_design_context(),
+            patch={
+                "decisions": [{
+                    "decision": "Keep the direct opening",
+                    "reason": "The assistant recommends it.",
+                }]
+            },
+            user_text="I am considering the opening.",
+            stage_id="stage-1",
+            turn_id="turn-1",
+        )
+        self.assertEqual(context["confirmedDecisions"], [])
+
 
 class DesignContextRepositoryTests(unittest.TestCase):
     def test_database_migrates_design_context_column_and_backfill_is_idempotent(self):
@@ -181,12 +238,43 @@ class DesignContextRepositoryTests(unittest.TestCase):
                         stage_id=parent_id,
                         turn_id="turn-parent",
                     )
+                    parent_context = add_confirmed_decision(
+                        parent_context,
+                        "Keep the direct opening",
+                        "The designer accepted the opening direction.",
+                        parent_id,
+                        "turn-parent-decision",
+                    )
+                    parent_context = merge_chat_update(
+                        parent_context,
+                        patch={"openQuestions": [{
+                            "question": "Can the player read the B2 to T1 detour?",
+                            "status": "open",
+                        }]},
+                        user_text="We still need to test whether the player can read the B2 to T1 detour.",
+                        stage_id=parent_id,
+                        turn_id="turn-parent-question",
+                    )
                     repository.save_design_context(database, parent_id, parent_context)
                     self.assertEqual(repository.backfill_design_contexts(database), 1)
                     child_context = repository.load_design_context(
                         database, session_id, child_id
                     )
                     self.assertEqual(child_context["userGoals"], parent_context["userGoals"])
+                    payload = repository.serialize_session(database, session_id)
+                    child_progress = next(
+                        item for item in payload["progressContexts"]
+                        if item["versionId"] == child_id
+                    )
+                    self.assertEqual(
+                        child_progress["confirmedDecisions"][0]["sourceStageNumber"],
+                        1,
+                    )
+                    self.assertEqual(
+                        child_progress["unresolvedQuestions"][0]["sourceStageNumber"],
+                        1,
+                    )
+                    self.assertNotIn("designContext", payload)
             finally:
                 repository.DATABASE_PATH = original_path
 

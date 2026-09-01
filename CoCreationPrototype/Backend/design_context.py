@@ -1,8 +1,7 @@
-"""Shared, server-owned semantic memory for one co-created level.
+"""Server-owned semantic memory for one co-created level.
 
-The memory is deliberately small and provenance-heavy.  It is a Stage snapshot,
-not a second transcript: raw chat remains in conversation_turns while this
-module stores only design meaning that can safely be handed to another agent.
+Raw chat remains in ``conversation_turns``. This module stores only bounded,
+provenance-aware meaning that can safely be carried between immutable Stages.
 """
 
 from copy import deepcopy
@@ -16,6 +15,7 @@ GOAL_STATUSES = {"active", "superseded", "rejected"}
 DECISION_STATUSES = {"active", "superseded"}
 QUESTION_STATUSES = {"open", "resolved"}
 MAX_ITEMS = 32
+MAX_PATCH_ITEMS = 8
 MAX_TEXT = 1200
 
 
@@ -95,7 +95,7 @@ def _normalize_decision(item, rejected=False, index=0):
             index,
         ),
         "decision": decision,
-        "reason": _text(item.get("reason"), MAX_TEXT),
+        "reason": _text(item.get("reason")),
         "sourceStageId": _source(item.get("sourceStageId")),
         "sourceTurnId": _source(item.get("sourceTurnId")),
         "proposalId": _source(item.get("proposalId")),
@@ -119,6 +119,10 @@ def _normalize_question(item, index=0):
         "status": status if status in QUESTION_STATUSES else "open",
         "sourceStageId": _source(item.get("sourceStageId")),
         "sourceTurnId": _source(item.get("sourceTurnId")),
+        "updatedFromTurnId": _source(
+            item.get("updatedFromTurnId") or item.get("sourceTurnId")
+        ),
+        "resolvedByTurnId": _source(item.get("resolvedByTurnId")),
     }
 
 
@@ -144,9 +148,10 @@ def _normalize_disagreement(value):
 
 
 def normalize_design_context(value):
-    """Return a safe snapshot; malformed/legacy values become an empty snapshot."""
+    """Return a safe snapshot; malformed and legacy values become valid memory."""
     if not isinstance(value, dict):
         return empty_design_context()
+
     result = empty_design_context()
     result["userGoals"] = [
         item
@@ -186,22 +191,26 @@ def clone_design_context(value):
 
 
 def validate_design_context_patch(value):
-    """Validate the optional model patch without trusting its authority."""
+    """Validate the optional model patch without trusting model authority."""
     if value is None:
         return None
     if not isinstance(value, dict):
         raise ValueError("designContextPatch must be an object")
+
     allowed = {"goals", "constraints", "decisions", "rejections", "openQuestions", "corrections"}
     if set(value) - allowed:
         raise ValueError("designContextPatch contains unknown fields")
+
     result = {field: [] for field in allowed}
     for field in allowed:
         entries = value.get(field) or []
-        if not isinstance(entries, list) or len(entries) > 8:
-            raise ValueError(f"designContextPatch.{field} must contain at most 8 items")
+        if not isinstance(entries, list) or len(entries) > MAX_PATCH_ITEMS:
+            raise ValueError(f"designContextPatch.{field} must contain at most {MAX_PATCH_ITEMS} items")
+
         for raw in entries:
             if not isinstance(raw, dict):
                 raise ValueError(f"designContextPatch.{field} contains a non-object")
+
             if field in {"goals", "constraints"}:
                 key = "goal" if field == "goals" else "constraint"
                 clean = _text(raw.get(key))
@@ -209,9 +218,9 @@ def validate_design_context_patch(value):
                     raise ValueError(f"designContextPatch.{field} contains empty text")
                 result[field].append({
                     key: clean,
-                    # The server always downgrades model-provided authority.
                     "authority": "inferred",
                     "confidence": _confidence(raw.get("confidence")),
+                    "evidenceText": _text(raw.get("evidenceText"), MAX_TEXT) or None,
                 })
             elif field in {"decisions", "rejections"}:
                 decision = _text(raw.get("decision"))
@@ -225,7 +234,15 @@ def validate_design_context_patch(value):
                 question = _text(raw.get("question"))
                 if not question:
                     raise ValueError("designContextPatch.openQuestions contains empty question")
-                result[field].append({"question": question})
+                status = raw.get("status", "open")
+                if status not in QUESTION_STATUSES:
+                    raise ValueError("designContextPatch.openQuestions has an invalid status")
+                result[field].append({
+                    "question": question,
+                    "status": status,
+                    "targetId": _text(raw.get("targetId"), 96) or None,
+                    "evidenceText": _text(raw.get("evidenceText"), MAX_TEXT) or None,
+                })
             else:
                 target = _text(raw.get("targetId"), 96)
                 replacement = _text(raw.get("replacement"))
@@ -264,12 +281,14 @@ def _merge_goal(items, field_name, value, authority, stage_id, turn_id, confiden
         supersedes_id = existing["id"]
     else:
         supersedes_id = None
-        # A stronger correction supersedes earlier entries in the same semantic
-        # family without deleting provenance.
         for item in items:
-            if item.get("status") == "active" and _authority_rank(item.get("authority")) < _authority_rank(authority):
+            if (
+                item.get("status") == "active"
+                and _authority_rank(item.get("authority")) < _authority_rank(authority)
+            ):
                 item["status"] = "superseded"
                 supersedes_id = item["id"]
+
     item = {
         "id": _stable_id(field_name, clean, stage_id, turn_id),
         field_name: clean,
@@ -293,17 +312,89 @@ def _append_unique(items, item, identity_fields):
     return item["id"]
 
 
-def merge_chat_update(context, patch=None, user_text=None, stage_id=None, turn_id=None):
-    """Merge one chat response and the latest user text into a Stage snapshot.
+def _verified_user_evidence(evidence_text, user_text):
+    evidence = str(evidence_text or "").strip()
+    return bool(evidence and evidence in str(user_text or ""))
 
-    Model patches are reference-only.  Explicit entries come from the user's
-    own words, so a model cannot promote an inferred statement by writing an
-    authority field in JSON.
-    """
+
+def _merge_open_question(result, entry, stage_id, turn_id, user_text):
+    question = _text(entry.get("question"))
+    if not question:
+        return False
+
+    target_id = _source(entry.get("targetId"))
+    existing = next(
+        (
+            item for item in result["openQuestions"]
+            if (target_id and item.get("id") == target_id)
+            or _text(item.get("question")).casefold() == question.casefold()
+        ),
+        None,
+    )
+    status = entry.get("status", "open")
+
+    if status == "resolved":
+        if not _verified_user_evidence(entry.get("evidenceText"), user_text):
+            return False
+        if existing is None:
+            return False
+        existing["status"] = "resolved"
+        existing["updatedFromTurnId"] = _source(turn_id)
+        existing["resolvedByTurnId"] = _source(turn_id)
+        return True
+
+    if existing is not None:
+        if existing.get("status") == "resolved":
+            existing["status"] = "open"
+        existing["updatedFromTurnId"] = _source(turn_id)
+        return True
+
+    result["openQuestions"].append({
+        "id": _stable_id("question", question, stage_id, turn_id),
+        "question": question,
+        "status": "open",
+        "sourceStageId": _source(stage_id),
+        "sourceTurnId": _source(turn_id),
+        "updatedFromTurnId": _source(turn_id),
+        "resolvedByTurnId": None,
+    })
+    return True
+
+
+def extract_explicit_user_memory(user_text):
+    """Conservatively retain design language that came from the user's turn."""
+    text = _text(user_text)
+    if not text or len(text) < 4:
+        return [], []
+
+    lowered = text.casefold()
+    goal_markers = (
+        "i want", "i prefer", "i'd like", "would like", "make ", "change ", "adjust ",
+        "keep ", "increase ", "reduce ", "move ",
+        "\u5e0c\u671b", "\u6211\u60f3", "\u6211\u5e0c\u671b", "\u6211\u66f4\u5728\u610f",
+        "\u4fdd\u6301", "\u589e\u52a0", "\u51cf\u5c11", "\u8c03\u6574", "\u6539",
+    )
+    constraint_markers = (
+        "avoid", "must not", "do not", "don't", "preserve", "fair", "solvable", "readable",
+        "\u907f\u514d", "\u4e0d\u8981", "\u4e0d\u80fd", "\u5fc5\u987b", "\u516c\u5e73",
+        "\u53ef\u89e3", "\u53ef\u8bfb", "\u4e0d\u7834\u574f", "\u4fdd\u7559",
+    )
+    if any(marker in text for marker in ("?", "\uFF1F")):
+        if not any(marker in lowered or marker in text for marker in goal_markers + constraint_markers):
+            return [], []
+
+    has_constraint = any(marker in lowered or marker in text for marker in constraint_markers)
+    has_goal = any(marker in lowered or marker in text for marker in goal_markers)
+    return ([text] if has_goal else []), ([text] if has_constraint else [])
+
+
+def merge_chat_update(context, patch=None, user_text=None, stage_id=None, turn_id=None):
+    """Merge user evidence and model suggestions into a Stage snapshot."""
     result = normalize_design_context(context)
     patch = validate_design_context_patch(patch) if patch is not None else None
     user_value = _text(user_text).casefold()
     explicit_goals, explicit_constraints = extract_explicit_user_memory(user_text)
+
     for value in explicit_goals:
         _merge_goal(result["userGoals"], "goal", value, "explicit", stage_id, turn_id, 1.0)
     for value in explicit_constraints:
@@ -311,43 +402,35 @@ def merge_chat_update(context, patch=None, user_text=None, stage_id=None, turn_i
 
     if patch:
         for entry in patch["goals"]:
+            authority = "explicit" if _verified_user_evidence(entry.get("evidenceText"), user_text) else "inferred"
             _merge_goal(
-                result["userGoals"], "goal", entry["goal"], "inferred",
-                stage_id, turn_id, entry.get("confidence", 0.5),
+                result["userGoals"], "goal", entry["goal"], authority,
+                stage_id, turn_id, 1.0 if authority == "explicit" else entry.get("confidence", 0.5),
             )
         for entry in patch["constraints"]:
+            authority = "explicit" if _verified_user_evidence(entry.get("evidenceText"), user_text) else "inferred"
             _merge_goal(
-                result["designConstraints"], "constraint", entry["constraint"], "inferred",
-                stage_id, turn_id, entry.get("confidence", 0.5),
+                result["designConstraints"], "constraint", entry["constraint"], authority,
+                stage_id, turn_id, 1.0 if authority == "explicit" else entry.get("confidence", 0.5),
             )
         for entry in patch["openQuestions"]:
-            question = {
-                "id": _stable_id("question", entry["question"], stage_id, turn_id),
-                "question": entry["question"],
-                "status": "open",
-                "sourceStageId": _source(stage_id),
-                "sourceTurnId": _source(turn_id),
-            }
-            _append_unique(result["openQuestions"], question, ("question",))
+            _merge_open_question(result, entry, stage_id, turn_id, user_text)
 
-        # Corrections are suggestions from the model, not authority.  They are
-        # allowed to close an old inference only when the same user turn is
-        # visibly corrective; the replacement itself remains inferred unless
-        # the user's text is also extracted as an explicit statement above.
         correction_markers = (
-            "not ", "don't", "do not", "instead", "actually", "不要", "不想", "不是", "改成", "而是",
+            "not ", "don't", "do not", "instead", "actually",
+            "\u4e0d\u8981", "\u4e0d\u60f3", "\u4e0d\u662f", "\u6539\u6210", "\u800c\u662f",
         )
         if user_value and any(marker in user_value for marker in correction_markers):
-            targets = {entry.get("id") for entry in patch["corrections"]}
+            targets = {entry.get("targetId") for entry in patch["corrections"]}
             for item in result["userGoals"] + result["designConstraints"]:
                 if item.get("id") in targets and item.get("status") == "active":
                     item["status"] = "superseded"
 
-    # A plainly corrective user sentence invalidates the nearest matching
-    # active inferred goal, but does not erase a confirmed decision.
-    if user_value and any(marker in user_value for marker in (
-        "not ", "don't", "do not", "instead", "actually", "不要", "不想", "不是", "改成", "而是",
-    )):
+    correction_markers = (
+        "not ", "don't", "do not", "instead", "actually",
+        "\u4e0d\u8981", "\u4e0d\u60f3", "\u4e0d\u662f", "\u6539\u6210", "\u800c\u662f",
+    )
+    if user_value and any(marker in user_value for marker in correction_markers):
         for item in result["userGoals"] + result["designConstraints"]:
             if item.get("authority") == "inferred" and item.get("status") == "active":
                 item["status"] = "superseded"
@@ -355,32 +438,6 @@ def merge_chat_update(context, patch=None, user_text=None, stage_id=None, turn_i
     result["updatedFromStageId"] = _source(stage_id)
     result["updatedFromTurnId"] = _source(turn_id)
     return normalize_design_context(result)
-
-
-def extract_explicit_user_memory(user_text):
-    """Conservative extraction: retain user-owned design language, not all chat."""
-    text = _text(user_text)
-    if not text or len(text) < 4:
-        return [], []
-    lowered = text.casefold()
-    goal_markers = (
-        "i want", "i prefer", "i'd like", "would like", "make ", "change ", "adjust ",
-        "keep ", "increase ", "reduce ", "move ", "希望", "我想", "我希望", "我更在意", "保持", "增加", "减少", "调整", "改",
-    )
-    constraint_markers = (
-        "avoid", "must not", "do not", "don't", "preserve", "fair", "solvable", "readable",
-        "避免", "不要", "不能", "必须", "公平", "可解", "可读", "不破坏", "保留",
-    )
-    # Questions are requests for clarification unless they also contain a
-    # declarative preference.  Keep the extraction bounded to one user turn.
-    if "?" in text or "？" in text:
-        if not any(marker in lowered or marker in text for marker in goal_markers + constraint_markers):
-            return [], []
-    constraints = [text] if any(marker in lowered or marker in text for marker in constraint_markers) else []
-    goals = [text] if any(marker in lowered or marker in text for marker in goal_markers) else []
-    if constraints and goals and any(marker in lowered or marker in text for marker in ("avoid", "must", "do not", "不要", "不能", "必须")):
-        goals = []
-    return goals, constraints
 
 
 def add_confirmed_decision(context, decision, reason, stage_id, turn_id, proposal_id=None):
@@ -395,7 +452,10 @@ def add_confirmed_decision(context, decision, reason, stage_id, turn_id, proposa
     }, index=len(result["confirmedDecisions"]))
     if item is not None:
         for existing in result["confirmedDecisions"]:
-            if existing.get("status") == "active" and existing.get("decision", "").casefold() == decision.casefold():
+            if (
+                existing.get("status") == "active"
+                and existing.get("decision", "").casefold() == decision.casefold()
+            ):
                 existing["status"] = "superseded"
         result["confirmedDecisions"].append(item)
     result["updatedFromStageId"] = _source(stage_id)
@@ -451,95 +511,3 @@ def revision_projection(context):
 
 def evaluator_projection(context):
     return normalize_design_context(context)
-
-
-# Keep the user-language extractor below in Unicode-escape form.  This file is
-# also shipped to hosts whose editor defaults are not UTF-8; escaped literals
-# prevent a source-code encoding conversion from disabling Chinese memory
-# updates at runtime.
-def extract_explicit_user_memory(user_text):
-    """Conservatively retain design language that came from the user's turn."""
-    text = _text(user_text)
-    if not text or len(text) < 4:
-        return [], []
-    lowered = text.casefold()
-    goal_markers = (
-        "i want", "i prefer", "i'd like", "would like", "make ", "change ", "adjust ",
-        "keep ", "increase ", "reduce ", "move ",
-        "\u5e0c\u671b", "\u6211\u60f3", "\u6211\u5e0c\u671b", "\u6211\u66f4\u5728\u610f",
-        "\u4fdd\u6301", "\u589e\u52a0", "\u51cf\u5c11", "\u8c03\u6574", "\u6539",
-    )
-    constraint_markers = (
-        "avoid", "must not", "do not", "don't", "preserve", "fair", "solvable", "readable",
-        "\u907f\u514d", "\u4e0d\u8981", "\u4e0d\u80fd", "\u5fc5\u987b", "\u516c\u5e73",
-        "\u53ef\u89e3", "\u53ef\u8bfb", "\u4e0d\u7834\u574f", "\u4fdd\u7559",
-    )
-    question_markers = ("?", "\uFF1F")
-    if any(marker in text for marker in question_markers):
-        if not any(marker in lowered or marker in text for marker in goal_markers + constraint_markers):
-            return [], []
-    has_constraint = any(marker in lowered or marker in text for marker in constraint_markers)
-    has_goal = any(marker in lowered or marker in text for marker in goal_markers)
-    constraints = [text] if has_constraint else []
-    goals = [text] if has_goal else []
-    return goals, constraints
-
-
-def merge_chat_update(context, patch=None, user_text=None, stage_id=None, turn_id=None):
-    """Merge server-owned memory without allowing model authority promotion."""
-    result = normalize_design_context(context)
-    patch = validate_design_context_patch(patch) if patch is not None else None
-    user_value = _text(user_text).casefold()
-    explicit_goals, explicit_constraints = extract_explicit_user_memory(user_text)
-    for value in explicit_goals:
-        _merge_goal(result["userGoals"], "goal", value, "explicit", stage_id, turn_id, 1.0)
-    for value in explicit_constraints:
-        _merge_goal(result["designConstraints"], "constraint", value, "explicit", stage_id, turn_id, 1.0)
-
-    if patch:
-        for entry in patch["goals"]:
-            _merge_goal(
-                result["userGoals"], "goal", entry["goal"], "inferred",
-                stage_id, turn_id, entry.get("confidence", 0.5),
-            )
-        for entry in patch["constraints"]:
-            _merge_goal(
-                result["designConstraints"], "constraint", entry["constraint"], "inferred",
-                stage_id, turn_id, entry.get("confidence", 0.5),
-            )
-        for entry in patch["openQuestions"]:
-            _append_unique(
-                result["openQuestions"],
-                {
-                    "id": _stable_id("question", entry["question"], stage_id, turn_id),
-                    "question": entry["question"],
-                    "status": "open",
-                    "sourceStageId": _source(stage_id),
-                    "sourceTurnId": _source(turn_id),
-                },
-                ("question",),
-            )
-        correction_markers = (
-            "not ", "don't", "do not", "instead", "actually",
-            "\u4e0d\u8981", "\u4e0d\u60f3", "\u4e0d\u662f", "\u6539\u6210", "\u800c\u662f",
-        )
-        if user_value and any(marker in user_value for marker in correction_markers):
-            targets = {entry.get("targetId") for entry in patch["corrections"]}
-            for item in result["userGoals"] + result["designConstraints"]:
-                if item.get("id") in targets and item.get("status") == "active":
-                    item["status"] = "superseded"
-
-    # A direct corrective sentence can invalidate an unconfirmed AI reading,
-    # but it cannot rewrite an explicit or confirmed user decision.
-    correction_markers = (
-        "not ", "don't", "do not", "instead", "actually",
-        "\u4e0d\u8981", "\u4e0d\u60f3", "\u4e0d\u662f", "\u6539\u6210", "\u800c\u662f",
-    )
-    if user_value and any(marker in user_value for marker in correction_markers):
-        for item in result["userGoals"] + result["designConstraints"]:
-            if item.get("authority") == "inferred" and item.get("status") == "active":
-                item["status"] = "superseded"
-
-    result["updatedFromStageId"] = _source(stage_id)
-    result["updatedFromTurnId"] = _source(turn_id)
-    return normalize_design_context(result)

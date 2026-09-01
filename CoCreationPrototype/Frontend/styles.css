@@ -173,6 +173,21 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 .chat-panel { display: flex; flex-direction: column; }
 .history-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 13px; border-bottom: 1px solid #ecd48c; color: #684d00; background: var(--amber-soft); font-size: 11px; }
 .history-banner button { border: 0; color: var(--amber); background: transparent; cursor: pointer; font-weight: 800; }
+.progress-panel { border-bottom: 1px solid var(--border); background: var(--surface-soft); }
+.progress-panel > summary { padding: 9px 13px; color: var(--brand-dark); background: #d7e4e8; cursor: pointer; font-family: Consolas, "Courier New", monospace; font-size: 11px; font-weight: 900; list-style: none; }
+.progress-panel > summary::-webkit-details-marker { display: none; }
+.progress-panel > summary::before { content: "+"; display: inline-block; width: 16px; color: var(--brand); font-size: 14px; }
+.progress-panel[open] > summary::before { content: "-"; }
+.progress-panel-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px 13px 12px; border-top: 1px solid #bdcdd1; }
+.progress-section { min-width: 0; padding: 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+.progress-section h3 { margin: 0 0 8px; color: var(--brand-dark); font-family: Consolas, "Courier New", monospace; font-size: 10px; }
+.progress-items { display: grid; gap: 7px; }
+.progress-item { padding: 8px; border-left: 3px solid var(--brand); background: #f8f7ef; }
+.progress-item-question { border-left-color: var(--amber); background: #fffaf0; }
+.progress-item-text, .progress-item-reason, .progress-empty { margin: 0; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.progress-item-reason { margin-top: 5px; color: var(--muted); font-size: 9px; }
+.progress-item small { display: block; margin-top: 6px; color: var(--muted); font-family: Consolas, "Courier New", monospace; font-size: 8px; }
+.progress-empty { color: var(--muted); }
 .chat-scroll { min-height: 380px; flex: 1; overflow-y: auto; padding: 17px; background: #fbfcfc; }
 .empty-chat { display: flex; min-height: 320px; align-items: center; justify-content: center; flex-direction: column; padding: 25px; color: var(--muted); text-align: center; }
 .empty-mark { display: grid; width: 46px; height: 46px; margin-bottom: 12px; place-items: center; border-radius: 12px; color: var(--brand-dark); background: var(--brand-soft); font-size: 12px; font-weight: 850; }
@@ -308,6 +323,8 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
     .prototype-status { display: none; }
     main { padding: 12px 10px 24px; }
     .panel-header { min-height: 64px; padding: 11px; }
+    .progress-panel-body { grid-template-columns: 1fr; padding: 9px 10px 10px; }
+    .progress-panel > summary { padding: 9px 10px; }
     .panel-header .play-button { min-height: 34px; padding: 0 9px; font-size: 10px; }
     .method-pill { display: none; }
     .stage-card { min-width: 180px; }

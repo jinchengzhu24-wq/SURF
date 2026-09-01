@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=cocreation-bidirectional-challenge-20260831-2">
+    <link rel="stylesheet" href="./styles.css?v=cocreation-continuous-progress-20260901-1">
 </head>
 <body>
     <div class="app">
@@ -67,6 +67,20 @@
                         <span data-i18n="viewingHistory">You are viewing a historical Stage. Chat remains grounded in the latest Stage.</span>
                         <button type="button" id="returnCurrentButton" data-i18n="returnCurrent">Return to current</button>
                     </div>
+
+                    <details class="progress-panel" id="progressPanel">
+                        <summary id="progressSummary" aria-controls="progressPanelBody" aria-expanded="false"><span data-i18n="progressTitle">Co-creation progress</span></summary>
+                        <div class="progress-panel-body" id="progressPanelBody">
+                            <section class="progress-section" aria-labelledby="confirmedDecisionsTitle">
+                                <h3 id="confirmedDecisionsTitle" data-i18n="confirmedDecisions">Confirmed decisions</h3>
+                                <div class="progress-items" id="confirmedDecisionsList" aria-live="polite"></div>
+                            </section>
+                            <section class="progress-section" aria-labelledby="unresolvedQuestionsTitle">
+                                <h3 id="unresolvedQuestionsTitle" data-i18n="unresolvedQuestions">Unresolved questions</h3>
+                                <div class="progress-items" id="unresolvedQuestionsList" aria-live="polite"></div>
+                            </section>
+                        </div>
+                    </details>
 
                     <div class="chat-scroll" id="chatScroll">
                         <div class="empty-chat" id="emptyChat">
@@ -171,6 +185,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=cocreation-bidirectional-challenge-20260831-2"></script>
+    <script src="./app.js?v=cocreation-continuous-progress-20260901-1"></script>
 </body>
 </html>

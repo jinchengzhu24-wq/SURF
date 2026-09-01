@@ -312,8 +312,9 @@ def _has_valid_design_context(raw):
 def backfill_design_contexts(database):
     """Conservatively seed snapshots for databases created before DesignContext.
 
-    This performs no model calls.  Only user turns, formal decisions, and
-    explicitly structured legacy disagreement/hypothesis fields are considered.
+    This performs no model calls. Only user turns, formal decisions, and
+    explicitly structured legacy disagreement fields are considered. Historical
+    assistant intent prose is deliberately not promoted into semantic memory.
     """
     sessions = database.execute("SELECT id FROM design_sessions ORDER BY created_at, id").fetchall()
     changed = 0
@@ -350,14 +351,6 @@ def backfill_design_contexts(database):
                     )
                     continue
                 guidance = load_json(turn["guidance_json"]) or {}
-                hypothesis = str(guidance.get("intentHypothesis") or "").strip()
-                if hypothesis:
-                    context = merge_chat_update(
-                        context,
-                        patch={"goals": [{"goal": hypothesis}]},
-                        stage_id=version["id"],
-                        turn_id=turn["id"],
-                    )
                 disagreement = guidance.get("disagreement")
                 if isinstance(disagreement, dict) and disagreement.get("status") == "active":
                     context = set_active_disagreement(
@@ -515,6 +508,50 @@ def serialize_session(database, session_id):
     opening_by_version = {
         opening["version_id"]: opening for opening in accepted_openings
     }
+    turn_created_at = {turn["id"]: turn["created_at"] for turn in turns}
+
+    stage_numbers = {version["id"]: version["stage_number"] for version in versions}
+
+    def source_stage_number(source_version_id, current_version):
+        return stage_numbers.get(source_version_id, current_version["stage_number"])
+
+    progress_contexts = []
+    for version in versions:
+        context = load_design_context(database, session_id, version["id"])
+        progress_contexts.append({
+            "versionId": version["id"],
+            "stageNumber": version["stage_number"],
+            "parentVersionId": version["parent_version_id"],
+            "confirmedDecisions": [
+                {
+                    "decision": item["decision"],
+                    "reason": item.get("reason") or None,
+                    "sourceStageNumber": source_stage_number(
+                        item.get("sourceStageId"), version
+                    ),
+                    "updatedAt": turn_created_at.get(item.get("sourceTurnId")),
+                    "label": "confirmed",
+                }
+                for item in context.get("confirmedDecisions", [])
+                if item.get("status") == "active"
+            ],
+            "unresolvedQuestions": [
+                {
+                    "question": item["question"],
+                    "sourceStageNumber": source_stage_number(
+                        item.get("sourceStageId"), version
+                    ),
+                    "updatedAt": turn_created_at.get(
+                        item.get("updatedFromTurnId")
+                        or item.get("resolvedByTurnId")
+                        or item.get("sourceTurnId")
+                    ),
+                    "label": "open",
+                }
+                for item in context.get("openQuestions", [])
+                if item.get("status") == "open"
+            ],
+        })
 
     for attempt in attempts:
         attempts_by_version.setdefault(attempt["version_id"], []).append(
@@ -572,6 +609,7 @@ def serialize_session(database, session_id):
             }
             for version in versions
         ],
+        "progressContexts": progress_contexts,
         "turns": [
             {
                 "turnId": turn["id"],

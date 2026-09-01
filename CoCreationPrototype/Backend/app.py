@@ -3159,6 +3159,98 @@ def _looks_like_designer_goal(content):
     )
 
 
+def _stage_lineage(database, session_id, version):
+    """Return compact saved-version facts from the root through ``version``."""
+    lineage = []
+    current = version
+    while current is not None and len(lineage) < 24:
+        parent = (
+            get_version(database, session_id, current["parent_version_id"])
+            if current["parent_version_id"]
+            else None
+        )
+        parent_rows = load_json(parent["rows_json"]) if parent is not None else None
+        current_rows = load_json(current["rows_json"])
+        lineage.append({
+            "versionId": current["id"],
+            "stageNumber": current["stage_number"],
+            "parentVersionId": current["parent_version_id"],
+            "source": current["source"],
+            "summary": current["summary"],
+            "changeSummary": (
+                summarize_stage_changes(parent_rows, current_rows)
+                if parent_rows is not None
+                else None
+            ),
+        })
+        current = parent
+    lineage.reverse()
+    return lineage
+
+
+def _progress_context(database, session_id, version, design_context, latest_user_direction, latest_play):
+    """Build a bounded role-neutral continuity projection for the LLM."""
+    lineage = _stage_lineage(database, session_id, version)
+    stage_numbers = {item["versionId"]: item["stageNumber"] for item in lineage}
+
+    def source_stage_number(source_stage_id):
+        return stage_numbers.get(source_stage_id, version["stage_number"])
+
+    confirmed = [
+        {
+            "decision": item["decision"],
+            "reason": item.get("reason") or None,
+            "sourceStageNumber": source_stage_number(item.get("sourceStageId")),
+            "sourceTurnId": item.get("sourceTurnId"),
+        }
+        for item in design_context.get("confirmedDecisions", [])
+        if item.get("status") == "active"
+    ]
+    unresolved = [
+        {
+            "question": item["question"],
+            "sourceStageNumber": source_stage_number(item.get("sourceStageId")),
+            "sourceTurnId": item.get("sourceTurnId"),
+            "id": item.get("id"),
+        }
+        for item in design_context.get("openQuestions", [])
+        if item.get("status") == "open"
+    ]
+    inherited = [
+        item for item in confirmed
+        if item["sourceStageNumber"] < version["stage_number"]
+    ]
+    latest_evidence = None
+    if latest_play is not None:
+        latest_evidence = {
+            "kind": "play",
+            "status": latest_play["status"],
+            "durationSeconds": latest_play["duration_seconds"],
+            "moveCount": latest_play["move_count"],
+            "pushCount": latest_play["push_count"],
+            "restartCount": latest_play["restart_count"],
+            "minimumMoves": latest_play["minimum_moves"],
+            "minimumPushes": latest_play["minimum_pushes"],
+        }
+
+    return {
+        "currentStage": {
+            "stageNumber": version["stage_number"],
+            "versionId": version["id"],
+            "parentVersionId": version["parent_version_id"],
+            "source": version["source"],
+        },
+        "stageLineage": lineage[-12:],
+        "inheritedConfirmedDecisions": inherited[-12:],
+        "confirmedDecisions": confirmed[-16:],
+        "unresolvedQuestions": unresolved[-16:],
+        "rejectedDecisions": design_context.get("rejectedDecisions", [])[-12:],
+        "latestUserDirection": latest_user_direction or None,
+        "latestEvidence": latest_evidence,
+        "activeDisagreement": design_context.get("activeDisagreement"),
+    }
+
+
 def build_llm_context(database, session_id, version):
     session = database.execute(
         "SELECT initial_draft_method, language, demo_mode FROM design_sessions WHERE id = ?",
@@ -3225,12 +3317,6 @@ def build_llm_context(database, session_id, version):
         if parent_rows is not None
         else None
     )
-    prior_designer_context = _ancestor_designer_context(
-        database,
-        session_id,
-        version,
-        limit=8,
-    )
     conversation = [
         {"role": turn["role"], "content": turn["content"]}
         for turn in reversed(turns)
@@ -3252,8 +3338,8 @@ def build_llm_context(database, session_id, version):
         ),
         "uiCues": {},
     }
+    lineage_ids = {item["versionId"] for item in _stage_lineage(database, session_id, version)}
     hypothesis_status_by_turn = {}
-    hypothesis_status_events = []
     for event in database.execute(
         """
         SELECT payload_json FROM audit_events
@@ -3263,14 +3349,11 @@ def build_llm_context(database, session_id, version):
         (session_id,),
     ).fetchall():
         event_payload = load_json(event["payload_json"]) or {}
+        if event_payload.get("versionId") not in lineage_ids:
+            continue
         event_turn_id = event_payload.get("turnId")
         if event_turn_id:
             hypothesis_status_by_turn[event_turn_id] = event_payload.get("status")
-            hypothesis_status_events.append(event_payload.get("status"))
-
-    latest_hypothesis_status = (
-        hypothesis_status_events[-1] if hypothesis_status_events else None
-    )
 
     guidance_sources = [
         (load_json(turn["guidance_json"]) or {}, turn["id"])
@@ -3288,10 +3371,7 @@ def build_llm_context(database, session_id, version):
 
     latest_disagreement_seen = False
     for guidance, guidance_turn_id in guidance_sources:
-        if (
-            latest_hypothesis_status == "rejected"
-            or hypothesis_status_by_turn.get(guidance_turn_id) == "rejected"
-        ):
+        if hypothesis_status_by_turn.get(guidance_turn_id) == "rejected":
             guidance = dict(guidance)
             guidance["intentHypothesis"] = None
             guidance["intentConfidence"] = None
@@ -3340,6 +3420,14 @@ def build_llm_context(database, session_id, version):
             break
 
     latest_user_direction = _latest_substantive_design_direction(turns)
+    progress_context = _progress_context(
+        database,
+        session_id,
+        version,
+        design_context,
+        latest_user_direction,
+        latest_play,
+    )
     challenge_rows = database.execute(
         """
         SELECT payload_json FROM audit_events
@@ -3432,7 +3520,7 @@ def build_llm_context(database, session_id, version):
             "recentGuidance": recent_guidance,
             "activeDisagreement": recent_guidance["activeDisagreement"],
             "challengeContext": challenge_context,
-            "priorDesignerContext": prior_designer_context,
+            "progressContext": progress_context,
             # All agents read this server-owned snapshot.  The projections are
             # intentionally separate so the modifier cannot receive chat history
             # or unconfirmed intent as an execution constraint.
@@ -3515,6 +3603,8 @@ def _latest_substantive_design_direction(turns):
         if not content or normalized in generic_continuations:
             continue
         if any(term in content for term in design_terms):
+            return content
+        if len(normalized) >= 4:
             return content
     return ""
 
@@ -3956,9 +4046,10 @@ def _update_design_context_from_turn(
         )
         patch = None
 
+    previous = load_design_context(database, session_id, version_id)
     try:
         context = merge_chat_update(
-            load_design_context(database, session_id, version_id),
+            previous,
             patch=patch,
             user_text=user_content,
             stage_id=version_id,
@@ -3992,7 +4083,6 @@ def _update_design_context_from_turn(
             turn_id,
         )
 
-    previous = load_design_context(database, session_id, version_id)
     save_design_context(database, version_id, context)
     record_event(
         database,

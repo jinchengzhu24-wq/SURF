@@ -239,49 +239,8 @@ class LLMClientTests(unittest.TestCase):
             }],
         )
 
-    def test_entity_route_links_resolve_b1_and_t1_from_map_facts(self):
-        body = "B1 通往 T1 的路径上加点转折。"
-
-        links = llm_client._filter_coordinate_links([], body, ENTITY_ROUTE_ROWS)
-
-        self.assertEqual(links, [{
-            "text": "B1 通往 T1",
-            "from": {"row": 3, "column": 5},
-            "to": {"row": 3, "column": 7},
-        }])
-
-    def test_entity_route_links_resolve_b2_and_t2_and_reverse_direction(self):
-        between_body = "B2 与 T2 之间的路径更长。"
-        reverse_body = "从 T1 到 B1 的通道需要绕行。"
-
-        between_links = llm_client._filter_coordinate_links(
-            [], between_body, ENTITY_ROUTE_ROWS
-        )
-        reverse_links = llm_client._filter_coordinate_links(
-            [], reverse_body, ENTITY_ROUTE_ROWS
-        )
-
-        self.assertEqual(between_links[0]["text"], "B2 与 T2")
-        self.assertEqual(between_links[0]["from"], {"row": 6, "column": 4})
-        self.assertEqual(between_links[0]["to"], {"row": 6, "column": 8})
-        self.assertEqual(reverse_links[0]["from"], {"row": 3, "column": 7})
-        self.assertEqual(reverse_links[0]["to"], {"row": 3, "column": 5})
-
-    def test_entity_route_fallback_ignores_plain_entity_co_mentions_and_missing_ids(self):
-        ordinary_body = "我会同时关注 B1 和 T1 的位置。"
-        missing_body = "B3 通往 T3 的路径暂时不明确。"
-
-        self.assertEqual(
-            llm_client._filter_coordinate_links([], ordinary_body, ENTITY_ROUTE_ROWS),
-            [],
-        )
-        self.assertEqual(
-            llm_client._filter_coordinate_links([], missing_body, ENTITY_ROUTE_ROWS),
-            [],
-        )
-
-    def test_structured_entity_route_fallback_is_added_without_changing_body(self):
-        body = "B1 通往 T1 的路径上加点转折。"
+    def test_llm_metadata_accepts_natural_entity_route_without_changing_body(self):
+        body = "B2 从（4,9）往 T1 走的时候，路线选择明显多了。"
         payload = {
             "assistantMessage": body,
             "guidance": {
@@ -292,6 +251,11 @@ class LLMClientTests(unittest.TestCase):
                 "proposalOffer": None,
                 "disagreement": None,
                 "uiCues": [],
+                "coordinateLinks": [{
+                    "text": "B2 从（4,9）往 T1 走",
+                    "from": {"row": 6, "column": 4},
+                    "to": {"row": 3, "column": 7},
+                }],
             },
             "assessment": None,
             "proposedRows": None,
@@ -304,7 +268,59 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertEqual(result[0], body)
-        self.assertEqual(result[4]["coordinateLinks"][0]["text"], "B1 通往 T1")
+        self.assertEqual(
+            result[4]["coordinateLinks"],
+            [{
+                "text": "B2 从（4,9）往 T1 走",
+                "from": {"row": 6, "column": 4},
+                "to": {"row": 3, "column": 7},
+            }],
+        )
+
+    def test_route_language_is_not_inferred_without_llm_metadata(self):
+        route_body = "B2 与 T2 之间的路径更长。"
+        ordinary_body = "我会同时关注 B1 和 T1 的位置。"
+
+        self.assertEqual(
+            llm_client._filter_coordinate_links([], route_body, ENTITY_ROUTE_ROWS),
+            [],
+        )
+        self.assertEqual(
+            llm_client._filter_coordinate_links([], ordinary_body, ENTITY_ROUTE_ROWS),
+            [],
+        )
+
+    def test_llm_metadata_supports_different_route_wording(self):
+        cases = [
+            (
+                "B1 通往 T1 的路径上加点转折。",
+                "B1 通往 T1",
+                {"row": 3, "column": 5},
+                {"row": 3, "column": 7},
+            ),
+            (
+                "从 T2 沿走廊到 B2 会经过一段窄路。",
+                "从 T2 沿走廊到 B2",
+                {"row": 6, "column": 8},
+                {"row": 6, "column": 4},
+            ),
+            (
+                "The route from B2 to T1 can now use the open corridor.",
+                "route from B2 to T1",
+                {"row": 6, "column": 4},
+                {"row": 3, "column": 7},
+            ),
+        ]
+
+        for body, link_text, source, destination in cases:
+            with self.subTest(body=body):
+                links = llm_client._filter_coordinate_links(
+                    [{"text": link_text, "from": source, "to": destination}],
+                    body,
+                    ENTITY_ROUTE_ROWS,
+                )
+                self.assertEqual(len(links), 1)
+                self.assertEqual(links[0]["text"], link_text)
 
     def test_structured_coordinate_links_are_filtered_against_final_visible_body(self):
         body = "I would guide the player from (5,5) to (5,7)."
@@ -326,6 +342,11 @@ class LLMClientTests(unittest.TestCase):
                     },
                     {
                         "text": "not present",
+                        "from": {"row": 5, "column": 5},
+                        "to": {"row": 5, "column": 7},
+                    },
+                    {
+                        "text": "from (5,5)",
                         "from": {"row": 5, "column": 5},
                         "to": {"row": 5, "column": 7},
                     },
@@ -967,6 +988,39 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("never produce four cards", messages[0]["content"])
         self.assertIn("two to four compact paragraphs", messages[0]["content"])
         self.assertIn("Give observations room to breathe", messages[0]["content"])
+
+    def test_chat_prompt_carries_confirmed_decisions_and_open_questions_naturally(self):
+        stage_context = {
+            "progressContext": {
+                "currentStage": {"stageNumber": 2, "versionId": "stage-2"},
+                "confirmedDecisions": [{
+                    "decision": "Keep the direct opening",
+                    "sourceStageNumber": 1,
+                }],
+                "unresolvedQuestions": [{
+                    "question": "Can the player read the B2 to T1 detour?",
+                    "sourceStageNumber": 2,
+                }],
+            }
+        }
+
+        structured = llm_client.build_chat_messages(
+            [{"role": "user", "content": "The extra corridor is now open."}],
+            OPERATION_BASE_ROWS,
+            stage_context=stage_context,
+        )
+        plain = llm_client.build_plain_chat_messages(
+            [{"role": "user", "content": "The extra corridor is now open."}],
+            OPERATION_BASE_ROWS,
+            stage_context=stage_context,
+        )
+
+        for messages in (structured, plain):
+            prompt = messages[0]["content"]
+            self.assertIn("Continuous progress context", prompt)
+            self.assertIn("Keep the direct opening", prompt)
+            self.assertIn("Can the player read the B2 to T1 detour?", prompt)
+            self.assertIn("do not add a fixed progress heading", prompt.lower())
 
     def test_pure_generic_question_uses_fallback_model(self):
         result, client = self.execute([

@@ -279,6 +279,25 @@ const translations = {
 translations.en.entityLegend = "P: Player · B1/B2: Boxes · T1/T2: Targets · ~: Water";
 translations["zh-CN"].entityLegend = "P\uFF1A\u73A9\u5BB6 \u00B7 B1/B2\uFF1A\u7BB1\u5B50 \u00B7 T1/T2\uFF1A\u76EE\u6807 \u00B7 ~\uFF1A\u6C34\u57DF";
 
+translations.en.progressTitle = "Co-creation progress";
+translations.en.confirmedDecisions = "Confirmed decisions";
+translations.en.unresolvedQuestions = "Unresolved questions";
+translations.en.noConfirmedDecisions = "No confirmed decisions yet.";
+translations.en.noUnresolvedQuestions = "No unresolved questions yet.";
+translations.en.fromStage = "From Stage {stage}";
+translations.en.confirmedLabel = "Confirmed";
+translations.en.unresolvedLabel = "Unresolved";
+translations.en.updatedAt = "Updated {time}";
+translations["zh-CN"].progressTitle = "\u5171\u521b\u8fdb\u5ea6";
+translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
+translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
+translations["zh-CN"].noConfirmedDecisions = "\u6682\u65e0\u5df2\u786e\u8ba4\u51b3\u7b56\u3002";
+translations["zh-CN"].noUnresolvedQuestions = "\u6682\u65e0\u672a\u89e3\u51b3\u95ee\u9898\u3002";
+translations["zh-CN"].fromStage = "\u6765\u81ea Stage {stage}";
+translations["zh-CN"].confirmedLabel = "\u5df2\u786e\u8ba4";
+translations["zh-CN"].unresolvedLabel = "\u5f85\u89e3\u51b3";
+translations["zh-CN"].updatedAt = "\u6700\u8fd1\u66f4\u65b0 {time}";
+
 const state = {
     session: null,
     sessionId: "",
@@ -363,7 +382,7 @@ const validationTileNames = {
 const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
     "languageButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
-    "returnCurrentButton", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
+    "returnCurrentButton", "progressPanel", "progressSummary", "confirmedDecisionsList", "unresolvedQuestionsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
     "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
@@ -377,6 +396,17 @@ elements.demoButton.addEventListener("click", createDemoSession);
 elements.retryButton.addEventListener("click", () => state.retryAction && state.retryAction());
 elements.chatRetryButton.addEventListener("click", retryPendingMessage);
 elements.returnCurrentButton.addEventListener("click", selectCurrentVersion);
+elements.progressPanel.addEventListener("toggle", () => {
+    if (!state.session || !elements.progressPanel.dataset.progressKey) return;
+    elements.progressSummary.setAttribute(
+        "aria-expanded",
+        elements.progressPanel.open ? "true" : "false",
+    );
+    localStorage.setItem(
+        progressPanelStorageKey(),
+        elements.progressPanel.open ? "open" : "closed",
+    );
+});
 elements.chatForm.addEventListener("submit", sendMessage);
 elements.messageInput.addEventListener("input", handleComposerInput);
 elements.messageInput.addEventListener("keydown", handleComposerKeydown);
@@ -497,6 +527,7 @@ function render() {
     elements.methodPill.textContent = t(state.session.initialDraftMethod);
     renderStages();
     renderDeadline();
+    renderProgressContext();
     renderMessages();
     renderProposal();
     renderMap();
@@ -531,6 +562,99 @@ function renderStages() {
         evidence.textContent = latest ? formatAttempt(latest) : t("noPlayEvidence");
         button.append(top, mini, meta, evidence);
         elements.stageList.appendChild(button);
+    });
+}
+
+function renderProgressContext() {
+    if (!elements.progressPanel) return;
+    if (!state.session || !Array.isArray(state.session.progressContexts)) {
+        elements.progressPanel.hidden = true;
+        return;
+    }
+
+    const key = progressPanelKey();
+    if (elements.progressPanel.dataset.progressKey !== key) {
+        elements.progressPanel.dataset.progressKey = key;
+        const saved = localStorage.getItem(progressPanelStorageKey());
+        elements.progressPanel.open = saved === "open";
+    }
+    elements.progressSummary.setAttribute(
+        "aria-expanded",
+        elements.progressPanel.open ? "true" : "false",
+    );
+
+    const context = (state.session.progressContexts || []).find(
+        item => item.versionId === state.selectedVersionId
+    ) || { confirmedDecisions: [], unresolvedQuestions: [] };
+
+    elements.progressPanel.hidden = false;
+    renderProgressItems(
+        elements.confirmedDecisionsList,
+        context.confirmedDecisions,
+        "decision",
+        "noConfirmedDecisions",
+    );
+    renderProgressItems(
+        elements.unresolvedQuestionsList,
+        context.unresolvedQuestions,
+        "question",
+        "noUnresolvedQuestions",
+    );
+}
+
+function renderProgressItems(container, items, type, emptyKey) {
+    if (!container) return;
+    container.textContent = "";
+    const entries = Array.isArray(items) ? items : [];
+    if (!entries.length) {
+        const empty = document.createElement("p");
+        empty.className = "progress-empty";
+        empty.textContent = t(emptyKey);
+        container.appendChild(empty);
+        return;
+    }
+
+    entries.forEach(item => {
+        const record = document.createElement("article");
+        record.className = `progress-item progress-item-${type}`;
+
+        const text = document.createElement("p");
+        text.className = "progress-item-text";
+        text.textContent = String(item?.decision || item?.question || "").trim();
+        record.appendChild(text);
+
+        if (type === "decision" && item?.reason) {
+            const reason = document.createElement("p");
+            reason.className = "progress-item-reason";
+            reason.textContent = String(item.reason);
+            record.appendChild(reason);
+        }
+
+        const meta = document.createElement("small");
+        const stageNumber = Number(item?.sourceStageNumber);
+        const source = Number.isInteger(stageNumber)
+            ? t("fromStage").replace("{stage}", String(stageNumber))
+            : "";
+        const label = type === "decision" ? t("confirmedLabel") : t("unresolvedLabel");
+        const updated = formatProgressTime(item?.updatedAt);
+        const updatedLabel = updated
+            ? t("updatedAt").replace("{time}", updated)
+            : "";
+        meta.textContent = [label, source, updatedLabel].filter(Boolean).join(" \u00b7 ");
+        record.appendChild(meta);
+        container.appendChild(record);
+    });
+}
+
+function formatProgressTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString(state.language === "zh-CN" ? "zh-CN" : "en-US", {
+        month: "numeric",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
     });
 }
 
@@ -2037,6 +2161,8 @@ function handleComposerKeydown(event) { if (event.key === "Enter" && !event.shif
 function composerKey() { return `cocreationComposer:${state.sessionId}:${state.session?.currentVersionId || "none"}`; }
 function pendingMessageKey() { return `cocreationPendingMessage:${state.sessionId}:${state.session?.currentVersionId || "none"}`; }
 function selectedStageKey() { return `cocreationStage:${state.sessionId}`; }
+function progressPanelKey() { return `${state.sessionId}:${state.selectedVersionId || "none"}`; }
+function progressPanelStorageKey() { return `cocreationProgress:${progressPanelKey()}`; }
 
 function readHash() {
     return Object.fromEntries(new URLSearchParams(window.location.hash.replace(/^#/, "")));
