@@ -57,6 +57,11 @@ PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
 COORDINATE_LINK_LIMIT = 8
+ENTITY_ROUTE_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?P<entity>[BT]\d+)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+ENTITY_ROUTE_SENTENCE_PATTERN = re.compile(r"[^。！？!?；;.\r\n]+")
 PROMPT_VERSION = "cocreation-v34-design-context-revision"
 
 GUIDANCE_MOVES = {
@@ -319,11 +324,14 @@ def build_chat_messages(
         "one concrete question or one independent first-person insight instead of ending the "
         "exchange passively. Do not reuse the preceding card's judgment or wording.\n"
         "coordinateLinks is optional visual-only metadata. When the visible reply explicitly describes a "
-        "movement or route from one coordinate to another, it may contain objects with exactly text, from, "
-        "and to. text must be an unchanged contiguous substring of assistantMessage, from/to must use one-based "
-        "row and column coordinates, and this field must not change the visible reply or introduce new wording. "
-        "Do not emit a link for vague spatial language or an unrelated coordinate mention. These links are for "
-        "map visualization only and are never an edit instruction or a design constraint.\n"
+        "movement or route from one coordinate to another, including a route between named entities such as "
+        "B1/B2 and T1/T2, it may contain objects with exactly text, from, and to. text must be an unchanged "
+        "contiguous substring of assistantMessage, from/to must use one-based row and column coordinates resolved "
+        "from the authoritative Deterministic Map Facts, and this field must not change the visible reply or "
+        "introduce new wording. For B1/B2 and T1/T2, use the corresponding numeric positions from those facts; "
+        "do not invent or substitute a nearby cell. Do not emit a link for vague spatial language or an unrelated "
+        "entity mention. These links are for map visualization only and are never an edit instruction or a design "
+        "constraint.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
         "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
         "suggestions, and satisfactionQuestion; features and suggestions are non-empty "
@@ -472,9 +480,11 @@ def build_plain_chat_messages(
             "listed in Saved Stage context.recentGuidance. The visible reply must stand on "
             "its own and must not mention these tags or mechanically repeat their text. "
             "COORDINATE_LINKS is optional visual metadata, not visible prose: use it only for an explicit "
-            "from-coordinate-to-coordinate movement or route already described in the reply; text must exactly "
-            "match a contiguous visible substring, and from/to use one-based row and column values. Do not "
-            "rewrite the reply to create a link, and do not use links for vague spatial language. "
+            "from-coordinate-to-coordinate movement or route already described in the reply. This includes named "
+            "entity routes such as from T1 to B1, B1通往T1, or the path between B2 and T2; resolve those entity IDs "
+            "to their one-based numeric positions from Deterministic Map Facts. text must exactly match a contiguous "
+            "visible substring. Do not rewrite the reply to create a link, and do not use links for vague entity "
+            "mentions. "
         )
     )
     system_prompt = (
@@ -8006,11 +8016,145 @@ def _normalize_coordinate_links(value, rows=None):
 def _filter_coordinate_links(value, body, rows=None):
     """Require annotations to refer to text that survived visible-body cleanup."""
     visible_body = str(body or "")
-    return [
+    explicit_links = [
         link
         for link in _normalize_coordinate_links(value, rows=rows)
         if link["text"] in visible_body
     ]
+    inferred_links = _infer_entity_coordinate_links(visible_body, rows)
+    merged_links = list(explicit_links)
+    for inferred in inferred_links:
+        if any(
+            inferred["text"] in existing["text"]
+            or existing["text"] in inferred["text"]
+            for existing in merged_links
+        ):
+            continue
+        merged_links.append(inferred)
+        if len(merged_links) >= COORDINATE_LINK_LIMIT:
+            break
+    return merged_links
+
+
+def _entity_coordinate_positions(rows):
+    """Resolve the UI's row-major B/T labels to authoritative map coordinates."""
+    if not isinstance(rows, (list, tuple)):
+        return {}
+
+    positions = {}
+    counts = {"s": 0, "t": 0}
+    for row_number, row in enumerate(rows, start=1):
+        if not isinstance(row, str):
+            return {}
+        for column_number, tile in enumerate(row, start=1):
+            if tile not in counts:
+                continue
+            counts[tile] += 1
+            prefix = "B" if tile == "s" else "T"
+            positions[f"{prefix}{counts[tile]}"] = {
+                "row": row_number,
+                "column": column_number,
+            }
+    return positions
+
+
+def _is_entity_route_phrase(sentence, first, second):
+    """Recognize an explicit route relation without treating ordinary co-mentions as paths."""
+    middle = sentence[first.end():second.start()]
+    before = sentence[max(0, first.start() - 80):first.start()]
+    after = sentence[second.end():min(len(sentence), second.end() + 80)]
+
+    chinese_middle = re.search(
+        r"(?:通往|通向|连到|连接到|到达|路径|路线|通道|通路|走廊|沿着?|经过|绕回|转折)",
+        middle,
+    )
+    if chinese_middle:
+        return True
+
+    if re.fullmatch(r"\s*(?:到|至|往)\s*", middle):
+        return True
+
+    english_middle = re.search(
+        r"\b(?:path|route|corridor|way|via|along|through|lead(?:s|ing)?|connect(?:s|ed|ing)?)\b",
+        middle,
+        flags=re.IGNORECASE,
+    )
+    if english_middle:
+        return True
+
+    if re.fullmatch(r"\s*(?:to|toward|towards|via|along|through)\s*", middle, flags=re.IGNORECASE):
+        return True
+
+    relation_context = f"{before}{middle}{after}"
+    if re.search(
+        r"(?:之间\s*(?:的)?\s*(?:路径|路线|通道|通路|走廊)|"
+        r"\b(?:path|route|corridor|way)\s+between\b|"
+        r"\bbetween\b[^.。！？!?；;\r\n]{0,60}\b(?:path|route|corridor|way)\b|"
+        r"(?:路径|路线|通道|通路|走廊)\s*(?:上|中)?$)",
+        relation_context,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
+    if re.search(r"(?:从\s*)$|\bfrom\s*$", before, flags=re.IGNORECASE):
+        return bool(
+            re.search(r"(?:到|至|往)\s*$", middle)
+            or re.search(r"\bto\s*$", middle, flags=re.IGNORECASE)
+        )
+
+    return False
+
+
+def _infer_entity_coordinate_links(body, rows=None):
+    """Infer display-only links for explicit B/T route language in visible prose."""
+    positions = _entity_coordinate_positions(rows)
+    if not positions:
+        return []
+
+    text = str(body or "")
+    candidates = []
+    for sentence_match in ENTITY_ROUTE_SENTENCE_PATTERN.finditer(text):
+        sentence = sentence_match.group(0)
+        entity_matches = list(ENTITY_ROUTE_TOKEN_PATTERN.finditer(sentence))
+        for first_index, first in enumerate(entity_matches):
+            first_id = first.group("entity").upper()
+            if first_id not in positions:
+                continue
+            for second in entity_matches[first_index + 1:]:
+                second_id = second.group("entity").upper()
+                if second_id not in positions:
+                    continue
+                if first_id[0] == second_id[0]:
+                    continue
+                if not _is_entity_route_phrase(sentence, first, second):
+                    continue
+
+                source_id, destination_id = first_id, second_id
+                middle = sentence[first.end():second.start()]
+                if re.search(r"(?:从\s*|\bfrom\s*)$", middle, flags=re.IGNORECASE):
+                    source_id, destination_id = destination_id, source_id
+
+                candidates.append({
+                    "text": sentence[first.start():second.end()].strip(),
+                    "from": dict(positions[source_id]),
+                    "to": dict(positions[destination_id]),
+                    "_length": second.end() - first.start(),
+                    "_start": sentence_match.start() + first.start(),
+                })
+
+    candidates.sort(key=lambda item: (item["_start"], item["_length"]))
+    selected = []
+    occupied_ranges = []
+    for candidate in candidates:
+        start = candidate.pop("_start")
+        end = start + candidate.pop("_length")
+        if any(start < occupied_end and end > occupied_start for occupied_start, occupied_end in occupied_ranges):
+            continue
+        occupied_ranges.append((start, end))
+        selected.append(candidate)
+        if len(selected) >= COORDINATE_LINK_LIMIT:
+            break
+    return selected
 
 
 def _validate_disagreement(value, language):

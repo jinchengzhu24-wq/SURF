@@ -33,6 +33,20 @@ OPERATION_BASE_ROWS = [
 ]
 
 
+ENTITY_ROUTE_ROWS = [
+    "############",
+    "#p.........#",
+    "#...s.t....#",
+    "#..........#",
+    "#..........#",
+    "#..s...t...#",
+    "#..........#",
+    "#..........#",
+    "#..........#",
+    "############",
+]
+
+
 MAP_GROUNDING_ROWS = [
     "  ######### ",
     " ##...p..t# ",
@@ -224,6 +238,73 @@ class LLMClientTests(unittest.TestCase):
                 "to": {"row": 5, "column": 7},
             }],
         )
+
+    def test_entity_route_links_resolve_b1_and_t1_from_map_facts(self):
+        body = "B1 通往 T1 的路径上加点转折。"
+
+        links = llm_client._filter_coordinate_links([], body, ENTITY_ROUTE_ROWS)
+
+        self.assertEqual(links, [{
+            "text": "B1 通往 T1",
+            "from": {"row": 3, "column": 5},
+            "to": {"row": 3, "column": 7},
+        }])
+
+    def test_entity_route_links_resolve_b2_and_t2_and_reverse_direction(self):
+        between_body = "B2 与 T2 之间的路径更长。"
+        reverse_body = "从 T1 到 B1 的通道需要绕行。"
+
+        between_links = llm_client._filter_coordinate_links(
+            [], between_body, ENTITY_ROUTE_ROWS
+        )
+        reverse_links = llm_client._filter_coordinate_links(
+            [], reverse_body, ENTITY_ROUTE_ROWS
+        )
+
+        self.assertEqual(between_links[0]["text"], "B2 与 T2")
+        self.assertEqual(between_links[0]["from"], {"row": 6, "column": 4})
+        self.assertEqual(between_links[0]["to"], {"row": 6, "column": 8})
+        self.assertEqual(reverse_links[0]["from"], {"row": 3, "column": 7})
+        self.assertEqual(reverse_links[0]["to"], {"row": 3, "column": 5})
+
+    def test_entity_route_fallback_ignores_plain_entity_co_mentions_and_missing_ids(self):
+        ordinary_body = "我会同时关注 B1 和 T1 的位置。"
+        missing_body = "B3 通往 T3 的路径暂时不明确。"
+
+        self.assertEqual(
+            llm_client._filter_coordinate_links([], ordinary_body, ENTITY_ROUTE_ROWS),
+            [],
+        )
+        self.assertEqual(
+            llm_client._filter_coordinate_links([], missing_body, ENTITY_ROUTE_ROWS),
+            [],
+        )
+
+    def test_structured_entity_route_fallback_is_added_without_changing_body(self):
+        body = "B1 通往 T1 的路径上加点转折。"
+        payload = {
+            "assistantMessage": body,
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            rows=ENTITY_ROUTE_ROWS,
+        )
+
+        self.assertEqual(result[0], body)
+        self.assertEqual(result[4]["coordinateLinks"][0]["text"], "B1 通往 T1")
 
     def test_structured_coordinate_links_are_filtered_against_final_visible_body(self):
         body = "I would guide the player from (5,5) to (5,7)."
