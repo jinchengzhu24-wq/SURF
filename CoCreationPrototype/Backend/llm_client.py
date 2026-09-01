@@ -24,6 +24,7 @@ from proposal_search import (
     validate_revision_plan_against_map,
 )
 from level_validation import build_map_facts, validate_and_solve
+from design_context import validate_design_context_patch
 
 
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -55,7 +56,7 @@ PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
-PROMPT_VERSION = "cocreation-v33-two-agent-revision"
+PROMPT_VERSION = "cocreation-v34-design-context-revision"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -142,6 +143,9 @@ def build_chat_messages(
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     map_facts = _map_facts_for_prompt(rows, stage_context)
+    design_context_prompt = _design_context_prompt(
+        stage_context, role=(stage_context.get("agentRole") or "chat")
+    )
     task = _build_task_instructions(assessment_only, stage_context)
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
     revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
@@ -267,6 +271,10 @@ def build_chat_messages(
         '"intentConfidence":null,"followUpQuestion":null,'
         '"proposalOffer":null,"disagreement":null,"uiCues":[]},"assessment":null,"proposedRows":null,'
         '"modificationSummary":""}.\n'
+        "You may additionally return a top-level designContextPatch object with goals, "
+        "constraints, decisions, rejections, openQuestions, and corrections. This is an "
+        "untrusted reference patch: the server assigns explicit only from the user's own "
+        "words and never accepts model-provided confirmed status.\n"
         "guidance.move must be one of observe_stage, clarify_intent, "
         "offer_perspective, challenge_tradeoff, reflect_on_play, offer_revision, "
         "or deliver_revision. intentConfidence must be null, low, medium, or high. "
@@ -339,6 +347,7 @@ def build_chat_messages(
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Current saved stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
+        f"{design_context_prompt}\n"
         f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
         f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
@@ -368,6 +377,9 @@ def build_plain_chat_messages(
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     map_facts = _map_facts_for_prompt(rows, stage_context)
+    design_context_prompt = _design_context_prompt(
+        stage_context, role=(stage_context.get("agentRole") or "chat")
+    )
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
     guidance_mode = classify_guidance_request(
         conversation,
@@ -407,7 +419,7 @@ def build_plain_chat_messages(
             "After the visible reply, you may append one optional machine-readable block "
             "as one final line using exactly this compact form:\n"
             "<GUIDANCE>DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
-            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || EXECUTION_BRIEF: {JSON} || DISAGREEMENT: {JSON}</GUIDANCE>\n"
+            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || EXECUTION_BRIEF: {JSON} || DISAGREEMENT: {JSON} || DESIGN_CONTEXT_PATCH: {JSON}</GUIDANCE>\n"
             "Omit any field that is not warranted, and omit the entire block whenever no card "
             "is warranted, including an ordinary project question or factual answer. The very "
             "first Stage 1 opening also has no metadata block. Visible cards "
@@ -496,6 +508,7 @@ def build_plain_chat_messages(
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Current saved Stage (12 x 10):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
+        f"{design_context_prompt}\n"
         f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
         f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
@@ -538,6 +551,37 @@ def _map_facts_for_prompt(rows, stage_context):
                 "reason": "The supplied rows are not a complete validated Stage.",
             }
     return json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+
+
+def _design_context_prompt(stage_context, role="chat"):
+    context = stage_context or {}
+    if role == "revision":
+        memory = context.get("revisionDesignContext") or {}
+        rules = (
+            "This is the minimal Revision projection. Only active explicit/confirmed goals, "
+            "constraints, confirmed decisions, relevant rejections, and open questions are "
+            "execution context. Inferred intent is deliberately excluded from hard constraints. "
+            "Do not reconstruct intent from chat history."
+        )
+    elif role == "evaluator":
+        memory = context.get("evaluatorDesignContext") or context.get("designContext") or {}
+        rules = (
+            "Separate user-authored goals from confirmed decisions, AI inferences, and actual "
+            "map facts. Never turn an inference into a user goal or a warning without evidence."
+        )
+    else:
+        memory = context.get("designContext") or {}
+        rules = (
+            "This is server-owned semantic memory inherited from the parent Stage. explicit is "
+            "the user's own statement, confirmed is a user-confirmed decision, and inferred is "
+            "only a tentative AI reading. Never promote inferred to confirmed, do not repeat a "
+            "rejected direction, and invite correction when an explicit goal changes."
+        )
+    return (
+        "DesignContext (shared semantic memory; provenance is authoritative):\n"
+        f"{rules}\n"
+        f"{json.dumps(memory, ensure_ascii=False, separators=(',', ':'))}"
+    )
 
 
 def _editable_focus_facts(rows, focus):
@@ -1372,14 +1416,21 @@ def _build_revision_plan_messages(
     numbered_map = "\n".join(
         f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
     )
-    transcript = [
-        {
-            "role": message.get("role"),
-            "content": str(message.get("content") or "")[:2000],
-        }
-        for message in conversation[-12:]
-        if message.get("role") in {"user", "assistant"}
-    ]
+    latest_user = next(
+        (
+            {
+                "role": "user",
+                "content": str(message.get("content") or "")[:2000],
+            }
+            for message in reversed(conversation or [])
+            if message.get("role") == "user"
+        ),
+        None,
+    )
+    # The modifier handoff must not receive a transcript.  The semantic Chat
+    # handoff has already distilled the authorized direction into the brief and
+    # DesignContext projection.
+    transcript = [latest_user] if latest_user else []
     system_prompt = (
         "You are the Sokoban co-creation chat assistant. Compile a designer-authorized revision "
         "for one saved 12x10 Stage into a detailed, executable semantic RevisionPlan. Do not "
@@ -1414,6 +1465,7 @@ def _build_revision_plan_messages(
         f"Interpret conversation in {response_language}."
     )
     user_prompt = (
+        f"{_design_context_prompt(stage_context, role='revision')}\n\n"
         f"Authorized revision brief: {revision_brief!r}. "
         f"Structured execution brief (authoritative when present): "
         f"{json.dumps(execution_brief, ensure_ascii=False, separators=(',', ':'))}. "
@@ -1424,7 +1476,7 @@ def _build_revision_plan_messages(
         f"Focus editable-cell facts (authoritative):\n{edit_facts}\n\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
-        f"Recent Stage conversation JSON: {json.dumps(transcript, ensure_ascii=False)}"
+        f"Authorized latest user confirmation JSON: {json.dumps(transcript, ensure_ascii=False)}"
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -1939,6 +1991,7 @@ def _build_map_operation_messages(
     user_prompt = (
         "The following contract is authoritative and is the only revision instruction:\n"
         f"{json.dumps(revision_contract, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        f"{_design_context_prompt(stage_context, role='revision')}\n\n"
         "Column ruler (one-based): 123456789012\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Focus editable-cell facts (authoritative):\n{json.dumps(focus_facts, ensure_ascii=False, separators=(',', ':'))}\n\n"
@@ -3037,6 +3090,9 @@ async def _generate_plain_with_model_fallback(
                 stage_opening,
                 rows=rows,
             )
+            design_context_patch, design_context_patch_error = (
+                _extract_plain_design_context_patch(content)
+            )
             disagreement = _extract_plain_disagreement(
                 content,
                 language,
@@ -3208,6 +3264,10 @@ async def _generate_plain_with_model_fallback(
                 "disagreement": disagreement,
                 "uiCues": ui_cues[:2],
             }
+            if design_context_patch is not None:
+                guidance["designContextPatch"] = design_context_patch
+            if design_context_patch_error:
+                guidance["designContextPatchError"] = design_context_patch_error
             guidance = _apply_guidance_card_policy(guidance)
             guidance = _ensure_required_guidance_card(
                 guidance,
@@ -3899,13 +3959,16 @@ def validate_chat_response(
     if not isinstance(payload, dict):
         raise ValueError("The model response must be a JSON object.")
 
-    if set(payload) != {
+    allowed_payload_fields = {
         "assistantMessage",
         "guidance",
         "assessment",
         "proposedRows",
         "modificationSummary",
-    }:
+        "designContextPatch",
+    }
+    required_payload_fields = allowed_payload_fields - {"designContextPatch"}
+    if not required_payload_fields.issubset(payload) or set(payload) - allowed_payload_fields:
         raise ValueError("The model response contains unexpected or missing fields.")
 
     assistant_message = _normalize_single_level_language(
@@ -3918,6 +3981,12 @@ def validate_chat_response(
         stage_context,
         rows=rows,
     )
+    patch_value = payload.get("designContextPatch")
+    if patch_value is not None:
+        try:
+            guidance["designContextPatch"] = validate_design_context_patch(patch_value)
+        except (TypeError, ValueError) as exception:
+            guidance["designContextPatchError"] = str(exception)[:500]
     if (
         assessment_only
         and _is_human_edit_stage_opening(assessment_only, stage_context)
@@ -4929,6 +4998,21 @@ def _extract_plain_guidance(
         ui_cues.append({"type": cue_type, "text": cue_text})
 
     return visible, intent, proposal_offer, ui_cues[:2]
+
+
+def _extract_plain_design_context_patch(content):
+    """Read the optional internal patch from the plain-text metadata line."""
+    marker = re.search(
+        r"DESIGN_CONTEXT_PATCH\s*:\s*(\{.*?\})(?:\s*\|\||\s*</GUIDANCE>)",
+        str(content or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if marker is None:
+        return None, None
+    try:
+        return validate_design_context_patch(json.loads(marker.group(1))), None
+    except (TypeError, ValueError, json.JSONDecodeError) as exception:
+        return None, str(exception)[:500]
 
 
 def _extract_plain_disagreement(content, language, stage_context=None):
@@ -7575,7 +7659,7 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
         "followUpQuestion",
         "proposalOffer",
     }
-    allowed_fields = required_fields | {"uiCues", "disagreement"}
+    allowed_fields = required_fields | {"uiCues", "disagreement", "designContextPatch"}
 
     if not required_fields.issubset(payload) or not set(payload).issubset(allowed_fields):
         raise ValueError("guidance contains unexpected or missing fields.")
@@ -7742,7 +7826,7 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
         if human_edit_disagreement and not risk_cue_types:
             raise ValueError("A human-edit disagreement opening requires a warning uiCue.")
 
-    return {
+    normalized_guidance = {
         "move": move,
         "intentHypothesis": intent_hypothesis,
         "intentConfidence": intent_confidence,
@@ -7751,6 +7835,14 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
         "disagreement": disagreement,
         "uiCues": normalized_cues,
     }
+    if "designContextPatch" in payload:
+        try:
+            normalized_guidance["designContextPatch"] = validate_design_context_patch(
+                payload.get("designContextPatch")
+            )
+        except (TypeError, ValueError) as exception:
+            normalized_guidance["designContextPatchError"] = str(exception)[:500]
+    return normalized_guidance
 
 
 def _validate_disagreement(value, language):

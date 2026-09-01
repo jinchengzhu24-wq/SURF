@@ -187,6 +187,16 @@ WebGL 页面底部的 `DATA DASHBOARD` 按钮会先在游戏页面内显示 Dash
 
 8010 的 `final` 事件会记录 `coCreationDurationSeconds`，定义为首次打开共创网页到确认最终 Stage 的耗时，按服务器十分钟期限计算并限制在 0–600 秒；设计意图填写不计入。对手游玩 Final Stage 时按 `R` 重开的次数通过 8000 结果字段 `restartCount` 记录，在 Challenge maps、Compare player challenges 和 Final map 的 `Opponent restarts` 中展示；网络重试、重新进入场景和问卷重填不计入，旧结果缺少字段时显示 `-`。对手游玩时长仍来自 8000 `result_submitted.durationSeconds`，只在 Result submitted 和挑战地图详情中展示。Dashboard 的 Match ID 和两位玩家 `studySessionId` 默认显示前 8 位，旁边的复制按钮复制完整值，搜索支持完整值与短值。
 
+### 8010 跨 Stage DesignContext
+
+地图版本通过 `parentVersionId` 和 `diff` 继承同一个关卡的结构演化；现在每个 `level_versions` 还保存可空的 `design_context_json` 快照。快照记录用户目标、设计约束、确认过的决策、拒绝过的方案、开放问题和 active disagreement，包含来源 Stage/turn，不新增数据库表。旧数据库启动时自动迁移并按 Stage 顺序保守回填，回填不调用模型，也不把 AI 普通正文当成用户意图。
+
+DesignContext 的 authority 分为三层：`explicit` 是用户自己说出的目标或约束，`confirmed` 只能由用户确认/接受提案/接受折中/正式保留现状形成，`inferred` 只是 AI 可纠正的暂时理解。旧内容不会删除，用户修正时标记 `superseded` 或 `rejected` 并保留来源；inferred 不能覆盖更高权限内容，也不能单独驱动地图执行。最终 `designer_intentions` 仍是最终提交时的自报告，不与该后台记忆混用。
+
+新 Stage（接受提案、手动保存、restore）复制父 Stage 的最新快照后再记录本次事件。接受提案追加 `confirmedDecision`，拒绝提案追加 `rejectedDecision`；手动编辑只继承语义记忆，地图 diff 本身不被自动解释为用户目标。Chat 读取完整语义快照，Revision 只接收 active explicit/confirmed 目标、约束、确认/拒绝决策、相关开放问题和执行 brief，Evaluator/手动编辑复核读取带来源的完整投影；三者不重新从跨 Stage 原始聊天猜测意图，且 8010 永不接收 8000 DG context、研究者目标或实验条件。
+
+普通聊天可返回内部 `designContextPatch`，服务端负责校验和合并；非法 patch 只写失败审计，不阻塞可见对话。该字段被前端隐藏，不增加卡片或颜色。既有 REVISION、MANUAL EDIT、WARNING、LET'S DISCUSS、TENTATIVE INTENT 和最新紫卡唯一可操作限制保持不变。
+
 挑战提交当前只包含地图 rows 和兼容用的初稿模式字段：
 
 ```json

@@ -53,11 +53,22 @@ from repository import (
     get_current_version,
     get_session,
     get_version,
+    load_design_context,
     load_json,
     next_stage_number,
     next_turn_sequence,
     record_event,
+    save_design_context,
     serialize_session,
+)
+from design_context import (
+    add_confirmed_decision,
+    add_rejected_decision,
+    clone_design_context,
+    evaluator_projection,
+    merge_chat_update,
+    revision_projection,
+    set_active_disagreement,
 )
 
 
@@ -554,8 +565,8 @@ def _create_session_record(
                 INSERT INTO level_versions(
                     id, session_id, stage_number, parent_version_id, source,
                     rows_json, summary, diff_json, validation_json,
-                    idempotency_key, created_at
-                ) VALUES (?, ?, 1, NULL, 'initial', ?, ?, '[]', ?, ?, ?)
+                    design_context_json, idempotency_key, created_at
+                ) VALUES (?, ?, 1, NULL, 'initial', ?, ?, '[]', ?, ?, ?, ?)
                 """,
                 (
                     version_id,
@@ -563,6 +574,17 @@ def _create_session_record(
                     dump_json(list(validation.rows)),
                     initial_summary,
                     dump_json(validation.as_dict()),
+                    dump_json({
+                        "schemaVersion": 1,
+                        "userGoals": [],
+                        "designConstraints": [],
+                        "confirmedDecisions": [],
+                        "rejectedDecisions": [],
+                        "openQuestions": [],
+                        "activeDisagreement": None,
+                        "updatedFromStageId": version_id,
+                        "updatedFromTurnId": None,
+                    }),
                     "initial:" + idempotency_key,
                     created_at,
                 ),
@@ -886,6 +908,7 @@ def restore_version(
             "restore:" + payload.idempotencyKey,
             current,
             parent_version_id=source["id"],
+            design_context=load_design_context(database, session_id, source["id"]),
         )
         _insert_decision(
             database,
@@ -964,6 +987,7 @@ def assess_version(
             context = build_llm_context(database, session_id, version)
             session_language = session["language"]
             context["stageContext"]["discussionCardMode"] = "disagreement_only"
+            context["stageContext"]["agentRole"] = "evaluator"
 
     if existing_session_payload is not None:
         synchronize_opening_with_online_match(
@@ -992,6 +1016,8 @@ def assess_version(
         context["stageContext"],
     )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
+    design_context_guidance = dict(execution.guidance or {})
+    execution = replace(execution, guidance=_public_guidance(execution.guidance))
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     opening_sync = None
@@ -1070,6 +1096,14 @@ def assess_version(
                 version_id,
                 turn_id,
                 execution.guidance,
+            )
+            _update_design_context_from_turn(
+                database,
+                session_id,
+                version_id,
+                None,
+                turn_id,
+                design_context_guidance,
             )
 
             opening_sync = {
@@ -1346,6 +1380,13 @@ def _send_message_locked(
             context["stageContext"],
         )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
+    # The semantic patch is consumed by the server and never becomes a new
+    # visible card or frontend protocol field.
+    design_context_guidance = dict(execution.guidance or {})
+    execution = replace(
+        execution,
+        guidance=_public_guidance(execution.guidance),
+    )
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     with connect(immediate=True) as database:
@@ -1542,6 +1583,14 @@ def _send_message_locked(
                 payload.baseVersionId,
                 assistant_turn_id,
                 execution.guidance,
+            )
+            _update_design_context_from_turn(
+                database,
+                session_id,
+                payload.baseVersionId,
+                content,
+                assistant_turn_id,
+                design_context_guidance,
             )
 
         session_payload = serialize_session(database, session_id)
@@ -2077,6 +2126,28 @@ def decide_proposal(
                     "proposal:" + payload.idempotencyKey,
                     current,
                 )
+                child_context = add_confirmed_decision(
+                    load_design_context(database, session_id, new_version_id),
+                    proposal["summary"],
+                    clean_optional(payload.reason, 2000)
+                    or "Designer accepted the validated map proposal.",
+                    new_version_id,
+                    proposal["assistant_turn_id"],
+                    proposal_id,
+                )
+                save_design_context(database, new_version_id, child_context)
+                record_event(
+                    database,
+                    session_id,
+                    "design_context_updated",
+                    {
+                        "versionId": new_version_id,
+                        "sourceTurnId": proposal["assistant_turn_id"],
+                        "kind": "confirmed_decision",
+                        "proposalId": proposal_id,
+                    },
+                    now,
+                )
 
             database.execute(
                 """
@@ -2101,6 +2172,33 @@ def decide_proposal(
                 payload.idempotencyKey,
             )
             if payload.decision == "reject":
+                current_context = load_design_context(
+                    database, session_id, proposal["base_version_id"]
+                )
+                current_context = add_rejected_decision(
+                    current_context,
+                    proposal["summary"],
+                    clean_optional(payload.reason, 2000) or "",
+                    proposal["base_version_id"],
+                    proposal["assistant_turn_id"],
+                    proposal_id,
+                )
+                save_design_context(
+                    database, proposal["base_version_id"], current_context
+                )
+                record_event(
+                    database,
+                    session_id,
+                    "design_context_updated",
+                    {
+                        "versionId": proposal["base_version_id"],
+                        "sourceTurnId": proposal["assistant_turn_id"],
+                        "kind": "rejected_decision",
+                        "proposalId": proposal_id,
+                        "hasReason": bool(clean_optional(payload.reason, 2000)),
+                    },
+                    now,
+                )
                 record_intent_hypothesis(
                     database,
                     session_id,
@@ -2776,6 +2874,7 @@ def _insert_version(
     idempotency_key,
     current,
     parent_version_id=None,
+    design_context=None,
 ):
     version_id = uuid.uuid4().hex
     now = utc_now()
@@ -2785,8 +2884,8 @@ def _insert_version(
         INSERT INTO level_versions(
             id, session_id, stage_number, parent_version_id, source,
             rows_json, summary, diff_json, validation_json,
-            idempotency_key, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            design_context_json, idempotency_key, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             version_id,
@@ -2798,6 +2897,13 @@ def _insert_version(
             summary,
             dump_json(describe_diff(current_rows, validation.rows)),
             dump_json(validation.as_dict()),
+            dump_json(
+                clone_design_context(
+                    design_context
+                    if design_context is not None
+                    else load_design_context(database, session["id"], current["id"])
+                )
+            ),
             idempotency_key,
             now,
         ),
@@ -3090,6 +3196,7 @@ def build_llm_context(database, session_id, version):
         (session_id, version["id"]),
     ).fetchone()
     current_rows = load_json(version["rows_json"])
+    design_context = load_design_context(database, session_id, version["id"])
     parent = (
         get_version(database, session_id, version["parent_version_id"])
         if version["parent_version_id"]
@@ -3309,6 +3416,12 @@ def build_llm_context(database, session_id, version):
             "activeDisagreement": recent_guidance["activeDisagreement"],
             "challengeContext": challenge_context,
             "priorDesignerContext": prior_designer_context,
+            # All agents read this server-owned snapshot.  The projections are
+            # intentionally separate so the modifier cannot receive chat history
+            # or unconfirmed intent as an execution constraint.
+            "designContext": design_context,
+            "revisionDesignContext": revision_projection(design_context),
+            "evaluatorDesignContext": evaluator_projection(design_context),
             "guidanceEvidenceSignature": guidance_evidence_signature,
             "openingTurnId": (
                 accepted_opening["assistant_turn_id"]
@@ -3790,6 +3903,100 @@ def _record_disagreement_event(database, session_id, version_id, turn_id, guidan
         },
         utc_now(),
     )
+
+
+def _public_guidance(guidance):
+    """Remove backend-only semantic memory patches before storing/rendering a turn."""
+    result = dict(guidance or {})
+    result.pop("designContextPatch", None)
+    result.pop("designContextPatchError", None)
+    return result
+
+
+def _update_design_context_from_turn(
+    database,
+    session_id,
+    version_id,
+    user_content,
+    turn_id,
+    guidance,
+):
+    """Merge server-owned memory after a normal chat or Stage review.
+
+    A malformed model patch is intentionally non-fatal: the visible turn is
+    already useful, while the failed patch is retained only in the audit log.
+    """
+    guidance = guidance or {}
+    patch = guidance.get("designContextPatch")
+    patch_error = guidance.get("designContextPatchError")
+    if patch_error:
+        record_event(
+            database,
+            session_id,
+            "design_context_patch_rejected",
+            {"versionId": version_id, "turnId": turn_id, "error": str(patch_error)[:500]},
+            utc_now(),
+        )
+        patch = None
+
+    try:
+        context = merge_chat_update(
+            load_design_context(database, session_id, version_id),
+            patch=patch,
+            user_text=user_content,
+            stage_id=version_id,
+            turn_id=turn_id,
+        )
+    except (TypeError, ValueError) as exception:
+        record_event(
+            database,
+            session_id,
+            "design_context_patch_rejected",
+            {
+                "versionId": version_id,
+                "turnId": turn_id,
+                "error": str(exception)[:500],
+            },
+            utc_now(),
+        )
+        context = load_design_context(database, session_id, version_id)
+
+    disagreement = guidance.get("disagreement")
+    if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+        context = set_active_disagreement(context, disagreement, version_id, turn_id)
+    elif isinstance(disagreement, dict) and disagreement.get("status") == "resolved":
+        resolution = disagreement.get("resolution")
+        context = set_active_disagreement(context, None, version_id, turn_id)
+        context = add_confirmed_decision(
+            context,
+            f"Resolve disagreement: {resolution}",
+            disagreement.get("coreDisagreement") or "The parties reached a shared design decision.",
+            version_id,
+            turn_id,
+        )
+
+    previous = load_design_context(database, session_id, version_id)
+    save_design_context(database, version_id, context)
+    record_event(
+        database,
+        session_id,
+        "design_context_updated",
+        {
+            "versionId": version_id,
+            "turnId": turn_id,
+            "hasExplicitUserMemory": bool(
+                any(item.get("sourceTurnId") == turn_id and item.get("authority") == "explicit"
+                    for item in context.get("userGoals", []) + context.get("designConstraints", []))
+            ),
+            "hasInferredMemory": bool(patch),
+            "disagreementStatus": (
+                disagreement.get("status") if isinstance(disagreement, dict) else None
+            ),
+            "changed": context != previous,
+        },
+        utc_now(),
+    )
+    return context
 
 
 def expire_interrupted_attempts(database, session_id):

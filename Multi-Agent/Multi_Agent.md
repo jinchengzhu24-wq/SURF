@@ -84,6 +84,14 @@ co_creation_chat
 
 普通聊天、质疑和换方案都不得生成 `proposedRows`。只有 `execute_revision` 且来源 turn 属于当前 Stage、Stage 未过期、契约有效并通过确定性验证时，才会创建待审查 proposal；只有用户接受 proposal 后才创建 `llm_accepted` Stage。失败、超时、空候选或非法模型输出不得放宽要求、覆盖原 Stage 或伪造分歧。
 
+## 跨 Stage DesignContext
+
+每个 `level_versions` 通过可空的 `design_context_json` 保存一个服务端拥有的 DesignContext 快照。创建子 Stage 时先复制父快照，再记录本次事件；父快照不可变。快照包括 `userGoals`、`designConstraints`、`confirmedDecisions`、`rejectedDecisions`、`openQuestions` 和 `activeDisagreement`，每项保留来源 Stage/turn。
+
+authority 必须严格区分：`explicit` 是用户原文，`confirmed` 只能来自用户接受/确认/折中/保留现状等正式动作，`inferred` 只是可纠正的 AI 假设。模型不能自行把 inferred 写成 confirmed；用户修正时保留旧条目并标记 `superseded` 或 `rejected`。普通聊天可以返回内部 `designContextPatch`，但服务端重新校验并以用户原文和正式动作决定权限；非法 patch 只审计，不阻塞对话。
+
+Chat 读取完整带来源快照；Revision 只读取 active explicit/confirmed 目标和约束、确认/拒绝决策、相关开放问题及执行 brief，不读取完整历史聊天、inferred 硬约束、8000 DG context、研究者目标或实验条件；Evaluator/手动编辑复核读取完整评估投影。DesignContext 只用于后台上下文，不增加卡片，不替代最终 `designer_intentions`，也不改变最新紫卡唯一可操作规则。
+
 `proposalOffer` 可以带隐藏的 `executionBrief`，用于把可见的 summary/rationale 连接到可执行契约。它保存 `effect`、`anchors`、`focus`、`requiredTransitions`、`allowedOperators`、`preserve` 和 `playObjective`；明确的坐标及 `from → to` 必须原样进入 `RevisionPlan`，并由服务端对照当前 `tileAt` 再校验。精确的一格结构调整允许一个变更格，实体移动必须成对变更。修改助手候选全部非法时，服务端调用生产确定性 `search_revision_plan()` 兜底；旧紫卡缺少 execution brief 时保持兼容，但不得猜测邻近格。
 
 动作、风险复核和分歧沿用 `audit_events`，包括 `card_action_requested`、`proposal_challenge_started`、`alternative_revision_requested`、`disagreement_started`、`disagreement_updated`、`disagreement_resolved` 和 `human_edit_reviewed`。

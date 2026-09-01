@@ -5,6 +5,15 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 
+from design_context import (
+    add_confirmed_decision,
+    add_rejected_decision,
+    empty_design_context,
+    merge_chat_update,
+    normalize_design_context,
+    set_active_disagreement,
+)
+
 
 BACKEND_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = BACKEND_DIR / "data"
@@ -47,6 +56,7 @@ CREATE TABLE IF NOT EXISTS level_versions (
     summary TEXT NOT NULL,
     diff_json TEXT NOT NULL,
     validation_json TEXT NOT NULL,
+    design_context_json TEXT,
     idempotency_key TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(session_id, stage_number),
@@ -180,15 +190,19 @@ def initialize_database():
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     database = sqlite3.connect(DATABASE_PATH)
+    database.row_factory = sqlite3.Row
 
     try:
         database.executescript(SCHEMA)
         _ensure_column(database, "conversation_turns", "guidance_json", "TEXT")
+        _ensure_column(database, "level_versions", "design_context_json", "TEXT")
         _ensure_column(database, "design_sessions", "demo_mode", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(database, "design_sessions", "deadline_started_at", "TEXT")
         _ensure_column(database, "design_sessions", "deadline_at", "TEXT")
         database.execute("PRAGMA journal_mode=WAL")
         database.execute("PRAGMA foreign_keys=ON")
+        database.commit()
+        backfill_design_contexts(database)
         database.commit()
     finally:
         database.close()
@@ -258,6 +272,155 @@ def get_version(database, session_id, version_id):
 
 def get_current_version(database, session):
     return get_version(database, session["id"], session["current_version_id"])
+
+
+def load_design_context(database, session_id, version_id):
+    row = database.execute(
+        "SELECT design_context_json FROM level_versions WHERE session_id = ? AND id = ?",
+        (session_id, version_id),
+    ).fetchone()
+    if row is None:
+        return empty_design_context()
+    raw = row["design_context_json"]
+    if not raw:
+        return empty_design_context()
+    try:
+        return normalize_design_context(load_json(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return empty_design_context()
+
+
+def save_design_context(database, version_id, context):
+    normalized = normalize_design_context(context)
+    database.execute(
+        "UPDATE level_versions SET design_context_json = ? WHERE id = ?",
+        (dump_json(normalized), version_id),
+    )
+    return normalized
+
+
+def _has_valid_design_context(raw):
+    if not raw:
+        return False
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(value, dict) and value.get("schemaVersion") == 1
+
+
+def backfill_design_contexts(database):
+    """Conservatively seed snapshots for databases created before DesignContext.
+
+    This performs no model calls.  Only user turns, formal decisions, and
+    explicitly structured legacy disagreement/hypothesis fields are considered.
+    """
+    sessions = database.execute("SELECT id FROM design_sessions ORDER BY created_at, id").fetchall()
+    changed = 0
+    for session in sessions:
+        versions = database.execute(
+            "SELECT * FROM level_versions WHERE session_id = ? ORDER BY stage_number, created_at",
+            (session["id"],),
+        ).fetchall()
+        for version in versions:
+            if _has_valid_design_context(version["design_context_json"]):
+                continue
+
+            context = (
+                load_design_context(database, session["id"], version["parent_version_id"])
+                if version["parent_version_id"]
+                else empty_design_context()
+            )
+            turns = database.execute(
+                """
+                SELECT id, role, content, guidance_json
+                FROM conversation_turns
+                WHERE session_id = ? AND version_id = ?
+                ORDER BY sequence_number
+                """,
+                (session["id"], version["id"]),
+            ).fetchall()
+            for turn in turns:
+                if turn["role"] == "user":
+                    context = merge_chat_update(
+                        context,
+                        user_text=turn["content"],
+                        stage_id=version["id"],
+                        turn_id=turn["id"],
+                    )
+                    continue
+                guidance = load_json(turn["guidance_json"]) or {}
+                hypothesis = str(guidance.get("intentHypothesis") or "").strip()
+                if hypothesis:
+                    context = merge_chat_update(
+                        context,
+                        patch={"goals": [{"goal": hypothesis}]},
+                        stage_id=version["id"],
+                        turn_id=turn["id"],
+                    )
+                disagreement = guidance.get("disagreement")
+                if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+                    context = set_active_disagreement(
+                        context, disagreement, version["id"], turn["id"]
+                    )
+
+            decisions = database.execute(
+                """
+                SELECT decision.*, proposal.summary, proposal.assistant_turn_id,
+                       proposal.base_version_id
+                FROM designer_decisions AS decision
+                LEFT JOIN change_proposals AS proposal ON proposal.id = decision.proposal_id
+                WHERE decision.session_id = ?
+                  AND (decision.version_id = ? OR proposal.base_version_id = ?)
+                ORDER BY decision.created_at
+                """,
+                (session["id"], version["id"], version["id"]),
+            ).fetchall()
+            for decision in decisions:
+                if decision["decision_type"] == "accept" and decision["version_id"] == version["id"]:
+                    context = add_confirmed_decision(
+                        context,
+                        decision["summary"] or "Accepted the proposed map revision",
+                        decision["reason"] or "Designer accepted the validated proposal.",
+                        version["id"],
+                        decision["assistant_turn_id"],
+                        decision["proposal_id"],
+                    )
+                elif decision["decision_type"] == "reject" and decision["proposal_id"] is not None:
+                    context = add_rejected_decision(
+                        context,
+                        decision["summary"] or "Rejected the proposed map revision",
+                        decision["reason"] or "",
+                        version["id"],
+                        decision["assistant_turn_id"],
+                        decision["proposal_id"],
+                    )
+
+            context["updatedFromStageId"] = version["id"]
+            save_design_context(database, version["id"], context)
+            event_exists = database.execute(
+                """
+                SELECT 1 FROM audit_events
+                WHERE session_id = ? AND event_type = 'design_context_backfilled'
+                  AND json_extract(payload_json, '$.versionId') = ?
+                LIMIT 1
+                """,
+                (session["id"], version["id"]),
+            ).fetchone()
+            if event_exists is None:
+                database.execute(
+                    """
+                    INSERT INTO audit_events(session_id, event_type, payload_json, created_at)
+                    VALUES (?, 'design_context_backfilled', ?, ?)
+                    """,
+                    (
+                        session["id"],
+                        dump_json({"versionId": version["id"], "schemaVersion": 1}),
+                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    ),
+                )
+            changed += 1
+    return changed
 
 
 def record_event(database, session_id, event_type, payload, created_at):
