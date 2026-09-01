@@ -1017,6 +1017,7 @@ def assess_version(
     )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
     design_context_guidance = dict(execution.guidance or {})
+    design_context_guidance.pop("coordinateLinks", None)
     execution = replace(execution, guidance=_public_guidance(execution.guidance))
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
@@ -1383,6 +1384,7 @@ def _send_message_locked(
     # The semantic patch is consumed by the server and never becomes a new
     # visible card or frontend protocol field.
     design_context_guidance = dict(execution.guidance or {})
+    design_context_guidance.pop("coordinateLinks", None)
     execution = replace(
         execution,
         guidance=_public_guidance(execution.guidance),
@@ -3049,20 +3051,22 @@ def _pending_assistant_translations(database, session_id, language, turn_ids):
             if body.endswith(suffix):
                 body = body[: -len(suffix)].rstrip()
 
-        items.append(
-            {
-                "turnId": row["id"],
-                "body": body,
-                "followUpQuestion": guidance.get("followUpQuestion"),
-                "intentHypothesis": guidance.get("intentHypothesis"),
-                "proposalOfferSummary": proposal_offer.get("summary"),
-                "proposalOfferRationale": proposal_offer.get("rationale"),
-                "uiCueTexts": [cue.get("text") for cue in ui_cues],
-                "proposalSummary": row["summary"],
-                "disagreement": guidance.get("disagreement"),
-                "guidance": guidance,
-            }
-        )
+        item = {
+            "turnId": row["id"],
+            "body": body,
+            "followUpQuestion": guidance.get("followUpQuestion"),
+            "intentHypothesis": guidance.get("intentHypothesis"),
+            "proposalOfferSummary": proposal_offer.get("summary"),
+            "proposalOfferRationale": proposal_offer.get("rationale"),
+            "uiCueTexts": [cue.get("text") for cue in ui_cues],
+            "proposalSummary": row["summary"],
+            "disagreement": guidance.get("disagreement"),
+            "guidance": guidance,
+        }
+        coordinate_links = guidance.get("coordinateLinks") or []
+        if coordinate_links:
+            item["coordinateLinks"] = coordinate_links
+        items.append(item)
 
     return items
 
@@ -3091,6 +3095,19 @@ def _translated_guidance(source_guidance, translated):
             **guidance["disagreement"],
             **translated_disagreement,
         }
+    source_links = guidance.get("coordinateLinks") or []
+    translated_link_texts = translated.get("coordinateLinkTexts") or []
+    if source_links and len(translated_link_texts) == len(source_links):
+        translated_body = str(translated.get("body") or "")
+        guidance["coordinateLinks"] = [
+            {**link, "text": translated_text}
+            for link, translated_text in zip(source_links, translated_link_texts)
+            if isinstance(translated_text, str)
+            and translated_text.strip()
+            and translated_text in translated_body
+        ]
+    elif source_links:
+        guidance["coordinateLinks"] = []
     return guidance
 
 

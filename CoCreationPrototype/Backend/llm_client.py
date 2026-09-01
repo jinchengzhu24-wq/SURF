@@ -56,6 +56,7 @@ PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
+COORDINATE_LINK_LIMIT = 8
 PROMPT_VERSION = "cocreation-v34-design-context-revision"
 
 GUIDANCE_MOVES = {
@@ -269,7 +270,7 @@ def build_chat_messages(
         '{"assistantMessage":"...","guidance":'
         '{"move":"observe_stage","intentHypothesis":null,'
         '"intentConfidence":null,"followUpQuestion":null,'
-        '"proposalOffer":null,"disagreement":null,"uiCues":[]},"assessment":null,"proposedRows":null,'
+        '"proposalOffer":null,"disagreement":null,"uiCues":[],"coordinateLinks":[]},"assessment":null,"proposedRows":null,'
         '"modificationSummary":""}.\n'
         "You may additionally return a top-level designContextPatch object with goals, "
         "constraints, decisions, rejections, openQuestions, and corrections. This is an "
@@ -317,6 +318,12 @@ def build_chat_messages(
         "point, use either "
         "one concrete question or one independent first-person insight instead of ending the "
         "exchange passively. Do not reuse the preceding card's judgment or wording.\n"
+        "coordinateLinks is optional visual-only metadata. When the visible reply explicitly describes a "
+        "movement or route from one coordinate to another, it may contain objects with exactly text, from, "
+        "and to. text must be an unchanged contiguous substring of assistantMessage, from/to must use one-based "
+        "row and column coordinates, and this field must not change the visible reply or introduce new wording. "
+        "Do not emit a link for vague spatial language or an unrelated coordinate mention. These links are for "
+        "map visualization only and are never an edit instruction or a design constraint.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
         "instead be an object with exactly solutionSummary, difficultyOpinion, features, "
         "suggestions, and satisfactionQuestion; features and suggestions are non-empty "
@@ -419,7 +426,8 @@ def build_plain_chat_messages(
             "After the visible reply, you may append one optional machine-readable block "
             "as one final line using exactly this compact form:\n"
             "<GUIDANCE>DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
-            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || EXECUTION_BRIEF: {JSON} || DISAGREEMENT: {JSON} || DESIGN_CONTEXT_PATCH: {JSON}</GUIDANCE>\n"
+            "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || EXECUTION_BRIEF: {JSON} || DISAGREEMENT: {JSON} || "
+            "COORDINATE_LINKS: [{JSON}, ...] || DESIGN_CONTEXT_PATCH: {JSON}</GUIDANCE>\n"
             "Omit any field that is not warranted, and omit the entire block whenever no card "
             "is warranted, including an ordinary project question or factual answer. The very "
             "first Stage 1 opening also has no metadata block. Visible cards "
@@ -463,6 +471,10 @@ def build_plain_chat_messages(
             "question. Do not repeat an unchanged card "
             "listed in Saved Stage context.recentGuidance. The visible reply must stand on "
             "its own and must not mention these tags or mechanically repeat their text. "
+            "COORDINATE_LINKS is optional visual metadata, not visible prose: use it only for an explicit "
+            "from-coordinate-to-coordinate movement or route already described in the reply; text must exactly "
+            "match a contiguous visible substring, and from/to use one-based row and column values. Do not "
+            "rewrite the reply to create a link, and do not use links for vague spatial language. "
         )
     )
     system_prompt = (
@@ -2794,7 +2806,9 @@ def translate_turns(items, target_language, request_id):
                 "\"proposalSummary\":null,\"disagreement\":null}]}."
                 " When the source item has a disagreement object, preserve its status, subject, "
                 "and resolution, and translate only its userPosition, aiPosition, "
-                "coreDisagreement, and nextQuestion fields."
+                "coreDisagreement, and nextQuestion fields. When a source item includes "
+                "coordinateLinks, return coordinateLinkTexts in the same order and translate "
+                "only their text values; omit coordinateLinkTexts for items without coordinateLinks."
             ),
         },
         {
@@ -3090,6 +3104,7 @@ async def _generate_plain_with_model_fallback(
                 stage_opening,
                 rows=rows,
             )
+            coordinate_links = _extract_plain_coordinate_links(content, rows)
             design_context_patch, design_context_patch_error = (
                 _extract_plain_design_context_patch(content)
             )
@@ -3263,6 +3278,7 @@ async def _generate_plain_with_model_fallback(
                 "proposalOffer": proposal_offer,
                 "disagreement": disagreement,
                 "uiCues": ui_cues[:2],
+                "coordinateLinks": coordinate_links,
             }
             if design_context_patch is not None:
                 guidance["designContextPatch"] = design_context_patch
@@ -3283,6 +3299,11 @@ async def _generate_plain_with_model_fallback(
             body = _remove_guidance_from_body(
                 body,
                 guidance.get("followUpQuestion"),
+            )
+            guidance["coordinateLinks"] = _filter_coordinate_links(
+                guidance.get("coordinateLinks"),
+                body,
+                rows,
             )
             proposal_binding_issue = _proposal_offer_binding_issue(
                 guidance.get("proposalOffer"),
@@ -3813,9 +3834,10 @@ def validate_translation_response(payload, source_items):
     translated_by_id = {}
 
     for index, translation in enumerate(translations):
+        source_links = source_items[index].get("coordinateLinks") or []
         item_expected_fields = expected_fields | (
             {"disagreement"} if "disagreement" in source_items[index] else set()
-        )
+        ) | ({"coordinateLinkTexts"} if source_links else set())
         if not isinstance(translation, dict) or set(translation) != item_expected_fields:
             raise ValueError(f"Translation item {index} does not match the required fields.")
 
@@ -3860,6 +3882,23 @@ def validate_translation_response(payload, source_items):
             )
             for cue_index, translated_text in enumerate(translated_cues)
         ]
+        if source_links:
+            translated_link_texts = translation["coordinateLinkTexts"]
+            if (
+                not isinstance(translated_link_texts, list)
+                or len(translated_link_texts) != len(source_links)
+            ):
+                raise ValueError(
+                    "Translated coordinateLinkTexts must preserve the source item count."
+                )
+            normalized["coordinateLinkTexts"] = [
+                _validate_translated_text(
+                    translated_text,
+                    source_links[link_index]["text"],
+                    f"translations[{index}].coordinateLinkTexts[{link_index}]",
+                )
+                for link_index, translated_text in enumerate(translated_link_texts)
+            ]
         if "disagreement" in item_expected_fields:
             source_disagreement = source.get("disagreement")
             translated_disagreement = translation.get("disagreement")
@@ -4201,6 +4240,11 @@ def validate_chat_response(
     assistant_message = _remove_guidance_from_body(
         assistant_message,
         guidance.get("followUpQuestion"),
+    )
+    guidance["coordinateLinks"] = _filter_coordinate_links(
+        guidance.get("coordinateLinks"),
+        assistant_message,
+        rows,
     )
 
     modification_summary = payload.get("modificationSummary", "")
@@ -4998,6 +5042,35 @@ def _extract_plain_guidance(
         ui_cues.append({"type": cue_type, "text": cue_text})
 
     return visible, intent, proposal_offer, ui_cues[:2]
+
+
+def _extract_plain_coordinate_links(content, rows=None):
+    """Parse optional route annotations without changing visible plain-text replies."""
+    marker = "<GUIDANCE>"
+    marker_index = str(content or "").find(marker)
+    if marker_index < 0:
+        return []
+
+    block_tail = str(content)[marker_index + len(marker):]
+    closing_index = block_tail.find("</GUIDANCE>")
+    if closing_index < 0:
+        return []
+
+    for raw_line in re.split(r"\s*\|\|\s*|[\r\n]+", block_tail[:closing_index]):
+        match = re.match(
+            r"^COORDINATE_LINKS\s*:\s*(.+?)\s*$",
+            raw_line.strip(),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        try:
+            value = json.loads(match.group(1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        return _normalize_coordinate_links(value, rows=rows)
+
+    return []
 
 
 def _extract_plain_design_context_patch(content):
@@ -7659,7 +7732,12 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
         "followUpQuestion",
         "proposalOffer",
     }
-    allowed_fields = required_fields | {"uiCues", "disagreement", "designContextPatch"}
+    allowed_fields = required_fields | {
+        "uiCues",
+        "disagreement",
+        "designContextPatch",
+        "coordinateLinks",
+    }
 
     if not required_fields.issubset(payload) or not set(payload).issubset(allowed_fields):
         raise ValueError("guidance contains unexpected or missing fields.")
@@ -7834,6 +7912,10 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
         "proposalOffer": proposal_offer,
         "disagreement": disagreement,
         "uiCues": normalized_cues,
+        "coordinateLinks": _normalize_coordinate_links(
+            payload.get("coordinateLinks"),
+            rows=rows,
+        ),
     }
     if "designContextPatch" in payload:
         try:
@@ -7843,6 +7925,92 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
         except (TypeError, ValueError) as exception:
             normalized_guidance["designContextPatchError"] = str(exception)[:500]
     return normalized_guidance
+
+
+def _normalize_coordinate_links(value, rows=None):
+    """Keep only safe, map-bounded visual annotations from the model."""
+    if not isinstance(value, list):
+        return []
+
+    height = len(rows) if rows is not None else 10
+    width = len(rows[0]) if rows and isinstance(rows[0], str) else 12
+    normalized = []
+    seen = set()
+
+    for item in value[:COORDINATE_LINK_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        source = item.get("from")
+        destination = item.get("to")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if len(text.strip()) > 400:
+            continue
+        if not isinstance(source, dict) or not isinstance(destination, dict):
+            continue
+
+        coordinates = []
+        valid = True
+        for point in (source, destination):
+            row = point.get("row")
+            column = point.get("column")
+            if (
+                isinstance(row, bool)
+                or not isinstance(row, int)
+                or isinstance(column, bool)
+                or not isinstance(column, int)
+                or not (1 <= row <= height and 1 <= column <= width)
+            ):
+                valid = False
+                break
+            if rows is not None:
+                if row > len(rows) or not isinstance(rows[row - 1], str):
+                    valid = False
+                    break
+                if (
+                    column > len(rows[row - 1])
+                    or rows[row - 1][column - 1] not in {".", "p", "s", "t"}
+                ):
+                    valid = False
+                    break
+            coordinates.append((row, column))
+
+        if not valid or coordinates[0] == coordinates[1]:
+            continue
+
+        link = {
+            "text": text.strip(),
+            "from": {
+                "row": coordinates[0][0],
+                "column": coordinates[0][1],
+            },
+            "to": {
+                "row": coordinates[1][0],
+                "column": coordinates[1][1],
+            },
+        }
+        key = (
+            link["text"],
+            coordinates[0],
+            coordinates[1],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(link)
+
+    return normalized
+
+
+def _filter_coordinate_links(value, body, rows=None):
+    """Require annotations to refer to text that survived visible-body cleanup."""
+    visible_body = str(body or "")
+    return [
+        link
+        for link in _normalize_coordinate_links(value, rows=rows)
+        if link["text"] in visible_body
+    ]
 
 
 def _validate_disagreement(value, language):

@@ -2021,6 +2021,43 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(cached.status_code, 200, cached.text)
         cached_mock.assert_not_called()
 
+    def test_translated_coordinate_guidance_keeps_saved_endpoints(self):
+        source = {
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+            "coordinateLinks": [{
+                "text": "from (5,5) to (5,7)",
+                "from": {"row": 5, "column": 5},
+                "to": {"row": 5, "column": 7},
+            }],
+        }
+        translated = {
+            "body": "from (5,5) to (5,7).",
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": None,
+            "proposalOfferRationale": None,
+            "uiCueTexts": [],
+            "proposalSummary": None,
+            "coordinateLinkTexts": ["from (5,5) to (5,7)"],
+        }
+
+        result = backend._translated_guidance(source, translated)
+
+        self.assertEqual(
+            result["coordinateLinks"][0]["from"],
+            {"row": 5, "column": 5},
+        )
+        self.assertEqual(
+            result["coordinateLinks"][0]["to"],
+            {"row": 5, "column": 7},
+        )
+
     def test_bidirectional_revision_actions_are_visible_and_audited(self):
         version_id = self.read_session()["currentVersionId"]
         offer_execution = LLMExecutionResult(

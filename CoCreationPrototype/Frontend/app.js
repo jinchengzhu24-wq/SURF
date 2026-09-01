@@ -276,6 +276,9 @@ const translations = {
     }
 };
 
+translations.en.entityLegend = "P: Player · B1/B2: Boxes · T1/T2: Targets · ~: Water";
+translations["zh-CN"].entityLegend = "P\uFF1A\u73A9\u5BB6 \u00B7 B1/B2\uFF1A\u7BB1\u5B50 \u00B7 T1/T2\uFF1A\u76EE\u6807 \u00B7 ~\uFF1A\u6C34\u57DF";
+
 const state = {
     session: null,
     sessionId: "",
@@ -298,6 +301,7 @@ const state = {
     translationInProgress: false,
     translationRemainingCount: 0,
     retryAction: null,
+    activeCoordinateLink: null,
     language: "zh-CN"
 };
 
@@ -361,7 +365,7 @@ const elements = Object.fromEntries([
     "languageButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
-    "sendButton", "characterCount", "selectedStageEyebrow", "mapGrid",
+    "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
     "restoreStageButton", "playButton", "playAttemptCount", "playAttemptList", "finalActions",
     "finalizeButton", "intentionForm", "intentionInput", "completeCard", "returnUnityButton", "finalizeModal",
@@ -388,6 +392,9 @@ elements.cancelFinalizeButton.addEventListener("click", () => elements.finalizeM
 elements.confirmFinalizeButton.addEventListener("click", finalizeSession);
 elements.intentionForm.addEventListener("submit", submitIntention);
 elements.returnUnityButton.addEventListener("click", returnToUnity);
+window.addEventListener("resize", () => {
+    if (state.activeCoordinateLink) requestAnimationFrame(drawActiveCoordinateRoute);
+});
 
 applyTranslations();
 initialize();
@@ -475,6 +482,7 @@ async function refreshSession() {
 
     localStorage.setItem(selectedStageKey(), state.selectedVersionId);
     syncHash();
+    state.activeCoordinateLink = null;
     resetDraftFromSelection();
     render();
     void ensureVisibleTranslations();
@@ -577,7 +585,8 @@ function renderAssistantBubble(turn, bubble) {
         : null;
     const bodyNode = document.createElement("div");
     bodyNode.className = "message-body";
-    bodyNode.textContent = assistantBodyWithoutCues(localized.content, uiCues, question);
+    const body = assistantBodyWithoutCues(localized.content, uiCues, question);
+    renderAssistantBody(bodyNode, body, guidance.coordinateLinks, turn);
     bubble.appendChild(bodyNode);
 
     if (localized !== turn) {
@@ -775,6 +784,157 @@ function assistantBodyWithoutCues(content, uiCues, question) {
     return body;
 }
 
+const coordinateRouteDirections = [
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1]
+];
+
+function renderAssistantBody(node, body, links, turn) {
+    const text = String(body || "");
+    const candidates = [];
+    const occupiedRanges = [];
+
+    (Array.isArray(links) ? links : []).forEach((link, linkIndex) => {
+        const linkText = String(link?.text || "").trim();
+        if (!linkText) return;
+
+        const route = findCoordinateRoute(state.draftRows, link.from, link.to);
+        if (!route) return;
+
+        let start = text.indexOf(linkText);
+        while (start >= 0 && occupiedRanges.some(range => (
+            start < range.end && start + linkText.length > range.start
+        ))) {
+            start = text.indexOf(linkText, start + 1);
+        }
+        if (start < 0) return;
+
+        const candidate = {
+            link,
+            linkIndex,
+            route,
+            start,
+            end: start + linkText.length,
+            text: linkText
+        };
+        occupiedRanges.push({ start: candidate.start, end: candidate.end });
+        candidates.push(candidate);
+    });
+
+    candidates.sort((left, right) => left.start - right.start);
+    if (!candidates.length) {
+        node.textContent = text;
+        return;
+    }
+
+    let cursor = 0;
+    candidates.forEach(candidate => {
+        if (candidate.start > cursor) {
+            node.appendChild(document.createTextNode(text.slice(cursor, candidate.start)));
+        }
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "coordinate-link";
+        button.textContent = candidate.text;
+        button.dataset.coordinateLinkIndex = String(candidate.linkIndex);
+        button.setAttribute(
+            "aria-label",
+            `Show route from ${formatCoordinatePoint(candidate.link.from)} to ${formatCoordinatePoint(candidate.link.to)}`
+        );
+        button.addEventListener("click", () => toggleCoordinateLink(turn, candidate.linkIndex, candidate.link));
+        node.appendChild(button);
+        cursor = candidate.end;
+    });
+    if (cursor < text.length) node.appendChild(document.createTextNode(text.slice(cursor)));
+}
+
+function formatCoordinatePoint(point) {
+    return `row ${point?.row}, column ${point?.column}`;
+}
+
+function normalizedCoordinatePoint(point) {
+    if (!point || !Number.isInteger(point.row) || !Number.isInteger(point.column)) return null;
+    if (point.row < 1 || point.row > 10 || point.column < 1 || point.column > 12) return null;
+    return { row: point.row, column: point.column };
+}
+
+function findCoordinateRoute(rows, from, to) {
+    if (!Array.isArray(rows) || rows.length !== 10 || rows.some(row => typeof row !== "string" || row.length !== 12)) {
+        return null;
+    }
+    const source = normalizedCoordinatePoint(from);
+    const destination = normalizedCoordinatePoint(to);
+    if (!source || !destination || (source.row === destination.row && source.column === destination.column)) {
+        return null;
+    }
+
+    const start = [source.row - 1, source.column - 1];
+    const end = [destination.row - 1, destination.column - 1];
+    const startKey = `${start[0]},${start[1]}`;
+    const endKey = `${end[0]},${end[1]}`;
+    const isOpen = (row, column) => {
+        if (row < 0 || row >= rows.length || column < 0 || column >= rows[row].length) return false;
+        const tile = rows[row][column];
+        if (tile === " " || tile === "#" || tile === "@") return false;
+        const key = `${row},${column}`;
+        return tile !== "s" || key === startKey || key === endKey;
+    };
+
+    if (!isOpen(start[0], start[1]) || !isOpen(end[0], end[1])) return null;
+
+    const queue = [start];
+    const previous = new Map([[startKey, null]]);
+    let queueIndex = 0;
+    while (queueIndex < queue.length) {
+        const [row, column] = queue[queueIndex++];
+        const currentKey = `${row},${column}`;
+        if (currentKey === endKey) break;
+
+        coordinateRouteDirections.forEach(([rowDelta, columnDelta]) => {
+            const nextRow = row + rowDelta;
+            const nextColumn = column + columnDelta;
+            const nextKey = `${nextRow},${nextColumn}`;
+            if (!isOpen(nextRow, nextColumn) || previous.has(nextKey)) return;
+            previous.set(nextKey, currentKey);
+            queue.push([nextRow, nextColumn]);
+        });
+    }
+
+    if (!previous.has(endKey)) return null;
+    const path = [];
+    let key = endKey;
+    while (key !== null) {
+        const [row, column] = key.split(",").map(Number);
+        path.push({ row: row + 1, column: column + 1 });
+        key = previous.get(key);
+    }
+    return path.reverse();
+}
+
+function toggleCoordinateLink(turn, linkIndex, link) {
+    const active = state.activeCoordinateLink;
+    const sameLink = active
+        && active.versionId === state.selectedVersionId
+        && active.turnId === turn.turnId
+        && active.linkIndex === linkIndex;
+    if (sameLink) {
+        state.activeCoordinateLink = null;
+    } else if (findCoordinateRoute(state.draftRows, link.from, link.to)) {
+        state.activeCoordinateLink = {
+            versionId: state.selectedVersionId,
+            turnId: turn.turnId,
+            linkIndex,
+            from: { ...link.from },
+            to: { ...link.to }
+        };
+    } else {
+        state.activeCoordinateLink = null;
+    }
+    drawActiveCoordinateRoute();
+}
+
 function proposalForTurn(turnId) {
     return state.session.proposals.find(proposal => proposal.assistantTurnId === turnId);
 }
@@ -855,19 +1015,93 @@ function renderProposal() {
     elements.proposalArea.appendChild(card);
 }
 
+function clearMapOverlay() {
+    elements.mapOverlay.textContent = "";
+    elements.mapOverlay.removeAttribute("viewBox");
+}
+
+function drawActiveCoordinateRoute() {
+    clearMapOverlay();
+    const active = state.activeCoordinateLink;
+    if (!active || active.versionId !== state.selectedVersionId) return;
+
+    const route = findCoordinateRoute(state.draftRows, active.from, active.to);
+    const board = elements.mapBoard;
+    if (!route || !board) {
+        state.activeCoordinateLink = null;
+        return;
+    }
+
+    const boardRect = board.getBoundingClientRect();
+    const points = route.map(point => {
+        const cell = elements.mapGrid.querySelector(
+            `[data-row="${point.row}"][data-column="${point.column}"]`
+        );
+        if (!cell) return null;
+        const cellRect = cell.getBoundingClientRect();
+        return `${cellRect.left + cellRect.width / 2 - boardRect.left},${cellRect.top + cellRect.height / 2 - boardRect.top}`;
+    });
+    if (points.some(point => !point) || !boardRect.width || !boardRect.height) {
+        state.activeCoordinateLink = null;
+        return;
+    }
+
+    elements.mapOverlay.setAttribute("viewBox", `0 0 ${boardRect.width} ${boardRect.height}`);
+    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+    marker.setAttribute("id", "coordinate-route-arrowhead");
+    marker.setAttribute("viewBox", "0 0 10 10");
+    marker.setAttribute("refX", "8");
+    marker.setAttribute("refY", "5");
+    marker.setAttribute("markerWidth", "7");
+    marker.setAttribute("markerHeight", "7");
+    marker.setAttribute("orient", "auto-start-reverse");
+    marker.setAttribute("markerUnits", "userSpaceOnUse");
+    const arrowhead = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    arrowhead.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+    arrowhead.setAttribute("fill", "#d62828");
+    marker.appendChild(arrowhead);
+    defs.appendChild(marker);
+    elements.mapOverlay.appendChild(defs);
+
+    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    polyline.setAttribute("points", points.join(" "));
+    polyline.setAttribute("fill", "none");
+    polyline.setAttribute("stroke", "#d62828");
+    polyline.setAttribute("stroke-width", "3");
+    polyline.setAttribute("stroke-linecap", "round");
+    polyline.setAttribute("stroke-linejoin", "round");
+    polyline.setAttribute("stroke-dasharray", "7 5");
+    polyline.setAttribute("marker-end", "url(#coordinate-route-arrowhead)");
+    elements.mapOverlay.appendChild(polyline);
+}
+
 function renderMap() {
+    state.activeCoordinateLink = null;
     const version = selectedVersion();
+    clearMapOverlay();
     if (!version) return;
     elements.selectedStageEyebrow.textContent = `${t("stage").toUpperCase()} ${version.stageNumber}`;
     elements.mapGrid.textContent = "";
     elements.mapGrid.style.gridTemplateColumns = "repeat(12, var(--tile-size))";
+    const entityLabels = buildEntityLabels(state.draftRows);
     state.draftRows.forEach((row, y) => {
         [...row].forEach((tile, x) => {
             const cell = document.createElement("button");
             cell.type = "button";
             cell.className = `tile ${tileClass(tile)}`;
-            cell.textContent = tileLabel(tile);
-            cell.title = formatTileCoordinate(x, y);
+            const entityLabel = entityLabels.get(`${x},${y}`);
+            cell.textContent = entityLabel || tileLabel(tile);
+            cell.title = formatEntityCoordinate(entityLabel, x, y);
+            cell.dataset.row = String(y + 1);
+            cell.dataset.column = String(x + 1);
+            if (entityLabel) cell.dataset.entityId = entityLabel;
+            cell.setAttribute(
+                "aria-label",
+                entityLabel
+                    ? formatEntityCoordinate(entityLabel, x, y)
+                    : `${t(tileName(tile))} ${formatTileCoordinate(x, y)}`,
+            );
             cell.disabled = !canEditSelected();
             if (version.diff.some(change => change.x === x && change.y === y)) cell.classList.add("changed");
             cell.addEventListener("click", () => editTile(x, y));
@@ -889,6 +1123,8 @@ function renderMap() {
     elements.mapMode.textContent = state.session.status !== "active" ? t("lockedMode") : version.versionId === state.session.currentVersionId ? t("editMode") : t("readOnlyMode");
     if (state.dirty) elements.mapMode.textContent += ` · ${t("unsaved")}`;
     renderAttempts(version);
+    drawActiveCoordinateRoute();
+    requestAnimationFrame(drawActiveCoordinateRoute);
 }
 
 function renderToolbar() {
@@ -1261,6 +1497,7 @@ async function toggleLanguage() {
 function selectVersion(versionId, shouldRender = true) {
     if (!findVersion(versionId)) return;
     state.selectedVersionId = versionId;
+    state.activeCoordinateLink = null;
     localStorage.setItem(selectedStageKey(), versionId);
     syncHash();
     resetDraftFromSelection();
@@ -1447,10 +1684,16 @@ function resetDraftFromSelection() {
     state.validationError = null;
 }
 
-function discardDraft() { resetDraftFromSelection(); renderMap(); updateControls(); }
+function discardDraft() {
+    state.activeCoordinateLink = null;
+    resetDraftFromSelection();
+    renderMap();
+    updateControls();
+}
 
 function editTile(x, y) {
     if (!canEditSelected()) return;
+    state.activeCoordinateLink = null;
     const row = [...state.draftRows[y]];
     row[x] = state.selectedTile;
     state.draftRows[y] = row.join("");
@@ -1472,11 +1715,18 @@ function createMiniMap(rows, diff, extraClass = "") {
     const map = document.createElement("div");
     map.className = `mini-map ${extraClass}`;
     map.style.gridTemplateColumns = "repeat(12, 1fr)";
+    const entityLabels = buildEntityLabels(rows);
     const changed = new Set((diff || []).map(item => `${item.x},${item.y}`));
     rows.forEach((row, y) => [...row].forEach((tile, x) => {
         const cell = document.createElement("i");
         cell.className = tileClass(tile);
-        cell.title = formatTileCoordinate(x, y);
+        const entityLabel = entityLabels.get(`${x},${y}`);
+        cell.title = formatEntityCoordinate(entityLabel, x, y);
+        if (entityLabel) {
+            cell.dataset.entityId = entityLabel;
+            cell.setAttribute("role", "img");
+            cell.setAttribute("aria-label", formatEntityCoordinate(entityLabel, x, y));
+        }
         if (changed.has(`${x},${y}`)) cell.classList.add("changed");
         map.appendChild(cell);
     }));
@@ -1817,6 +2067,23 @@ function makeButton(label, className, handler, options = {}) {
     if (options.title) button.title = options.title;
     if (handler && !options.disabled) button.addEventListener("click", handler);
     return button;
+}
+function buildEntityLabels(rows) {
+    const labels = new Map();
+    const counts = { s: 0, t: 0 };
+    (rows || []).forEach((row, y) => [...String(row || "")].forEach((tile, x) => {
+        if (tile === "p") labels.set(`${x},${y}`, "P");
+        if (tile === "s" || tile === "t") {
+            counts[tile] += 1;
+            labels.set(`${x},${y}`, `${tile === "s" ? "B" : "T"}${counts[tile]}`);
+        }
+    }));
+    return labels;
+}
+function formatEntityCoordinate(entityLabel, x, y) {
+    return entityLabel
+        ? `${entityLabel} (row ${y + 1}, column ${x + 1})`
+        : formatTileCoordinate(x, y);
 }
 function tileClass(tile) { return tile === "#" ? "tile-wall" : tile === "@" ? "tile-water" : tile === "p" ? "tile-player" : tile === "s" ? "tile-box" : tile === "t" ? "tile-target" : tile === "." ? "tile-floor" : "tile-empty"; }
 function tileName(tile) { return tile === "#" ? "wall" : tile === "@" ? "water" : tile === "p" ? "player" : tile === "s" ? "box" : tile === "t" ? "target" : tile === "." ? "floor" : "erase"; }

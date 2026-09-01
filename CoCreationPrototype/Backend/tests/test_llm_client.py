@@ -175,6 +175,133 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(request["max_tokens"], llm_client.PLAIN_CHAT_MAX_TOKENS)
         self.assertEqual(request["extra_body"], {"thinking": {"type": "disabled"}})
 
+    def test_plain_coordinate_links_are_hidden_metadata_and_keep_body_unchanged(self):
+        body = "I would move from (5,5) along the corridor to (5,7)."
+        content = (
+            body
+            + "\n<GUIDANCE>COORDINATE_LINKS: "
+            + json.dumps([{
+                "text": "from (5,5) along the corridor to (5,7)",
+                "from": {"row": 5, "column": 5},
+                "to": {"row": 5, "column": 7},
+            }])
+            + "</GUIDANCE>"
+        )
+
+        visible, _, _, _ = llm_client._extract_plain_guidance(
+            content,
+            "en",
+            {},
+            rows=OPERATION_BASE_ROWS,
+        )
+        links = llm_client._extract_plain_coordinate_links(content, OPERATION_BASE_ROWS)
+
+        self.assertEqual(visible, body)
+        self.assertEqual(links[0]["text"], "from (5,5) along the corridor to (5,7)")
+        self.assertEqual(links[0]["from"], {"row": 5, "column": 5})
+
+    def test_plain_chat_persists_coordinate_links_without_visible_metadata(self):
+        body = "I would move from (5,5) along the corridor to (5,7)."
+        content = (
+            body
+            + "\n<GUIDANCE>COORDINATE_LINKS: "
+            + json.dumps([{
+                "text": "from (5,5) along the corridor to (5,7)",
+                "from": {"row": 5, "column": 5},
+                "to": {"row": 5, "column": 7},
+            }])
+            + "</GUIDANCE>"
+        )
+
+        result, _ = self.execute([content], rows=OPERATION_BASE_ROWS)
+
+        self.assertEqual(result.assistant_message, body)
+        self.assertEqual(
+            result.guidance["coordinateLinks"],
+            [{
+                "text": "from (5,5) along the corridor to (5,7)",
+                "from": {"row": 5, "column": 5},
+                "to": {"row": 5, "column": 7},
+            }],
+        )
+
+    def test_structured_coordinate_links_are_filtered_against_final_visible_body(self):
+        body = "I would guide the player from (5,5) to (5,7)."
+        payload = {
+            "assistantMessage": body,
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+                "coordinateLinks": [
+                    {
+                        "text": "from (5,5) to (5,7)",
+                        "from": {"row": 5, "column": 5},
+                        "to": {"row": 5, "column": 7},
+                    },
+                    {
+                        "text": "not present",
+                        "from": {"row": 5, "column": 5},
+                        "to": {"row": 5, "column": 7},
+                    },
+                ],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            rows=OPERATION_BASE_ROWS,
+        )
+
+        self.assertEqual(result[0], body)
+        self.assertEqual(len(result[4]["coordinateLinks"]), 1)
+        self.assertEqual(result[4]["coordinateLinks"][0]["to"], {"row": 5, "column": 7})
+
+    def test_coordinate_links_reject_void_and_out_of_range_points_without_blocking_reply(self):
+        body = "The route remains worth watching."
+        payload = {
+            "assistantMessage": body,
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+                "coordinateLinks": [
+                    {
+                        "text": "outside",
+                        "from": {"row": 0, "column": 1},
+                        "to": {"row": 5, "column": 7},
+                    },
+                    {
+                        "text": "void",
+                        "from": {"row": 1, "column": 1},
+                        "to": {"row": 5, "column": 7},
+                    },
+                ],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            rows=OPERATION_BASE_ROWS,
+        )
+
+        self.assertEqual(result[0], body)
+        self.assertEqual(result[4]["coordinateLinks"], [])
+
     def test_non_json_natural_language_is_accepted_immediately(self):
         result, client = self.execute(["This is useful prose, not a JSON object."])
 
@@ -3333,6 +3460,41 @@ class LLMClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "must remain null"):
             llm_client.validate_translation_response(payload, source)
+
+    def test_translation_preserves_coordinate_endpoints_and_translates_only_link_text(self):
+        source = [{
+            "turnId": "turn-route",
+            "body": "Move from (5,5) to (5,7).",
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": None,
+            "proposalOfferRationale": None,
+            "uiCueTexts": [],
+            "proposalSummary": None,
+            "coordinateLinks": [{
+                "text": "from (5,5) to (5,7)",
+                "from": {"row": 5, "column": 5},
+                "to": {"row": 5, "column": 7},
+            }],
+        }]
+        payload = {"translations": [{
+            "turnId": "turn-route",
+            "body": "From (5,5) to (5,7).",
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": None,
+            "proposalOfferRationale": None,
+            "uiCueTexts": [],
+            "proposalSummary": None,
+            "coordinateLinkTexts": ["from (5,5) to (5,7)"],
+        }]}
+
+        translated = llm_client.validate_translation_response(payload, source)[0]
+
+        self.assertEqual(
+            translated["coordinateLinkTexts"],
+            ["from (5,5) to (5,7)"],
+        )
 
     def test_translation_normalizes_false_multi_level_language(self):
         source = [{

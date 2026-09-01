@@ -112,9 +112,13 @@
                         </button>
                     </header>
                     <div class="map-content">
-                        <div class="map-frame">
-                            <div class="map-grid" id="mapGrid" aria-label="Sokoban map"></div>
+                        <div class="map-frame" id="mapFrame">
+                            <div class="map-board" id="mapBoard">
+                                <div class="map-grid" id="mapGrid" aria-label="Sokoban map"></div>
+                                <svg class="map-overlay" id="mapOverlay" aria-hidden="true" focusable="false"></svg>
+                            </div>
                         </div>
+                        <p class="map-entity-legend" data-i18n="entityLegend">P: Player · B1/B2: Boxes · T1/T2: Targets · ~: Water</p>
                         <div class="map-toolbar" id="mapToolbar" aria-label="Tile palette"></div>
                         <div class="map-mode" id="mapMode"></div>
                         <div class="validation-card" id="validationCard"></div>
