@@ -265,4 +265,4 @@ Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Soko
 `coCreationDurationSeconds`。每次新演示会话在新地图验证和新会话创建成功后，清理上一轮
 演示会话及其关联的对话、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。若地图
 生成或会话创建失败，上一轮演示记录保持不变。前端静态资源缓存键为
-`cocreation-continuous-progress-20260901-1`。
+`cocreation-continuous-progress-20260901-5`。

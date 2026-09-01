@@ -1270,6 +1270,122 @@ main {
         var(--pixel-shadow);
 }
 
+.progress-panel {
+    margin: 0 17px;
+    border: 0;
+    border-bottom: 2px solid #9b9e98;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    font-weight: 800;
+}
+
+.progress-panel > summary {
+    padding: 8px 3px 7px;
+    border-bottom: 0;
+    color: #17364a;
+    background: transparent;
+    box-shadow: none;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+}
+
+.progress-panel > summary::before {
+    content: "▸";
+    width: 18px;
+    color: #684513;
+    font-size: 12px;
+}
+
+.progress-panel > summary:hover {
+    color: #315b75;
+    background: transparent;
+}
+
+.progress-panel[open] > summary {
+    color: #17364a;
+}
+
+.progress-panel[open] > summary::before {
+    content: "▾";
+}
+
+.progress-panel-body {
+    gap: 16px;
+    padding: 9px 3px 11px;
+    border-top: 0;
+    background: transparent;
+    font-weight: 800;
+}
+
+.progress-section {
+    padding: 2px 8px 5px;
+    border: 0;
+    border-left: 4px solid #747b7c;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+.progress-section:first-child {
+    border-left-color: #315d21;
+}
+
+.progress-section:last-child {
+    border-left-color: #684513;
+}
+
+.progress-section h3 {
+    margin-bottom: 5px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #b3b4ad;
+    color: #17364a;
+    font-size: 12px;
+    font-weight: 900;
+}
+
+.progress-section:first-child h3 {
+    color: #315d21;
+}
+
+.progress-section:last-child h3 {
+    color: #684513;
+}
+
+.progress-item {
+    padding: 6px 7px;
+    border: 1px solid #b3b4ad;
+    border-left: 3px solid #315d21;
+    background: #f0ede3;
+    box-shadow: inset 0 0 0 1px #fffdf3;
+    font-weight: 800;
+}
+
+.progress-item-question {
+    border-left-color: #684513;
+    background: #efe8d1;
+}
+
+.progress-item-reason {
+    color: #4d514b;
+    font-size: 10px;
+    font-weight: 750;
+}
+
+.progress-item small {
+    color: #5d536b;
+    font-size: 10px;
+    font-weight: 800;
+}
+
+.progress-item-text,
+.progress-empty {
+    font-size: 12px;
+    font-weight: 800;
+}
+
 button:focus-visible,
 textarea:focus-visible {
     outline: 3px solid #ffe188;
@@ -1307,6 +1423,10 @@ textarea:focus-visible {
     :root {
         --tile-size: 23px;
         --pixel-shadow: 2px 2px 0 rgba(31, 39, 32, 0.34);
+    }
+
+    .progress-panel {
+        margin: 0 10px;
     }
 
     body {
