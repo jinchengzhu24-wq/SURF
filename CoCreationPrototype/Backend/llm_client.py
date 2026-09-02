@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
@@ -61,7 +62,7 @@ PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
 COORDINATE_LINK_LIMIT = 8
-PROMPT_VERSION = "cocreation-v37-continuous-progress-routes"
+PROMPT_VERSION = "cocreation-v38-grounded-routes-progress"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -179,7 +180,8 @@ def build_chat_messages(
         "genuine unresolved design question, include one matching openQuestions entry "
         "inside the internal designContextPatch with status open. Do not manufacture a "
         "question for ordinary conversation, and never use this patch to create a confirmed "
-        "decision or rejection. When the reply is about the saved map, preferably include "
+        "decision or rejection. When the reply is about the saved map, strongly prefer the "
+        "reply to include "
         "one concise, concrete route description—for example player or box to target, one "
         "coordinate to another, or through a named corridor. The route must be real in the "
         "authoritative map facts, must not be a complete solution sequence, and its exact "
@@ -379,8 +381,9 @@ def build_chat_messages(
         "point, use either "
         "one concrete question or one independent first-person insight instead of ending the "
         "exchange passively. Do not reuse the preceding card's judgment or wording.\n"
-        "coordinateLinks is optional visual-only metadata, but you must use your semantic judgment to add one "
-        "whenever the visible reply contains a concrete path or movement description between two map anchors. "
+        "coordinateLinks is high-priority visual-only metadata. For a map-related design reply, strongly prefer adding one "
+        "whenever the visible reply contains a concrete path or movement description between two map anchors; "
+        "omit it only when no genuine grounded route exists or the reply is not map-related. "
         "Recognize natural wording rather than relying on a fixed list of phrases: this includes coordinate-to-"
         "coordinate movement, named entity routes such as B1/B2 and T1/T2, and mixed descriptions such as "
         "'B2 from (4,9) toward T1'. For each concrete route, return an object with exactly text, from, and to. "
@@ -468,7 +471,8 @@ def build_plain_chat_messages(
         "unresolved design question, include one matching openQuestions entry in the "
         "internal DESIGN_CONTEXT_PATCH with status open. Do not add a question just to "
         "fill the panel, and never use the patch to create a confirmed decision or rejection. "
-        "For a map-related reply, add one concise concrete route description when it helps "
+        "For a map-related reply, strongly prefer one concise concrete route description when "
+        "the facts support one and it helps "
         "the designer see the judgment—such as player or box to target, coordinate to "
         "coordinate, or through a named corridor. It must be a real route supported by the "
         "authoritative map facts, not a complete solver sequence. Repeat the exact visible "
@@ -571,8 +575,9 @@ def build_plain_chat_messages(
             "question. Do not repeat an unchanged card "
             "listed in Saved Stage context.recentGuidance. The visible reply must stand on "
             "its own and must not mention these tags or mechanically repeat their text. "
-            "COORDINATE_LINKS is optional visual metadata, not visible prose: use your semantic judgment to add "
-            "a link whenever the reply contains a concrete path or movement between two map anchors. Recognize "
+            "COORDINATE_LINKS is high-priority visual metadata, not visible prose: for a map-related reply strongly prefer "
+            "adding a link whenever the reply contains a concrete path or movement between two map anchors; "
+            "omit it only when no genuine grounded route exists or the reply is not map-related. Recognize "
             "natural wording instead of relying on a fixed phrase list. This includes coordinate routes, named "
             "entity routes such as from T1 to B1, B1通往T1, or the path between B2 and T2, and mixed wording such "
             "as B2从（4,9）往T1走. Resolve B1/B2/T1/T2 to their one-based numeric positions from Deterministic "
@@ -960,6 +965,68 @@ def _validate_coordinate_claims(text, rows):
             raise ValueError(
                 f"The reply claims row {row}, column {column} starts as {before!r}, "
                 f"but deterministic map facts say it is {actual!r}."
+            )
+
+    _validate_entity_coordinate_claims(text, rows)
+
+
+def _map_entity_coordinates(rows):
+    """Return the stable entity labels used by the map-facts contract."""
+    facts = build_map_facts(rows)
+    result = {"P": facts["player"]}
+    result.update({item["id"]: item for item in facts["boxes"]})
+    result.update({item["id"]: item for item in facts["targets"]})
+    return {
+        key: {"row": value["row"], "column": value["column"]}
+        for key, value in result.items()
+    }
+
+
+def _entity_coordinate_claims(text, rows):
+    """Yield explicit entity-to-coordinate claims in either writing order."""
+    coordinate = r"[\(\uFF08]\s*(\d{1,2})\s*[,，]\s*(\d{1,2})\s*[\)\uFF09]"
+    entity = r"(?:P|B\d+|T\d+|玩家|起点)"
+    marker = (
+        r"(?:at|located\s+at|is\s+at|in|on|位于|在|处于|坐落于|起点为)"
+    )
+    patterns = (
+        re.compile(
+            rf"(?P<entity>\b{entity}\b).{{0,24}}?{marker}\s*{coordinate}",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"{coordinate}.{{0,24}}?{marker}\s*(?P<entity>\b{entity}\b)",
+            flags=re.IGNORECASE,
+        ),
+    )
+    for pattern in patterns:
+        for match in pattern.finditer(str(text or "")):
+            entity_name = match.group("entity").upper()
+            if entity_name in {"玩家", "起点"}:
+                entity_name = "P"
+            coordinate_match = re.search(coordinate, match.group(0))
+            if coordinate_match is None:
+                continue
+            yield entity_name, {
+                "row": int(coordinate_match.group(1)),
+                "column": int(coordinate_match.group(2)),
+            }
+
+
+def _validate_entity_coordinate_claims(text, rows):
+    try:
+        expected = _map_entity_coordinates(rows)
+    except (TypeError, ValueError, KeyError):
+        return
+    for entity_name, claimed in _entity_coordinate_claims(text, rows):
+        actual = expected.get(entity_name)
+        if actual is None:
+            raise ValueError(f"The reply refers to an unknown map entity {entity_name}.")
+        if actual != claimed:
+            raise ValueError(
+                f"The reply places {entity_name} at row {claimed['row']}, column "
+                f"{claimed['column']}, but deterministic map facts place it at "
+                f"row {actual['row']}, column {actual['column']}."
             )
 
 
@@ -3616,6 +3683,11 @@ async def _generate_plain_with_model_fallback(
                 body,
                 rows,
             )
+            guidance["coordinateLinks"] = _recover_coordinate_links(
+                body,
+                rows,
+                guidance["coordinateLinks"],
+            )
             proposal_binding_issue = _proposal_offer_binding_issue(
                 guidance.get("proposalOffer"),
                 body,
@@ -4523,6 +4595,11 @@ def validate_chat_response(
         guidance.get("coordinateLinks"),
         assistant_message,
         rows,
+    )
+    guidance["coordinateLinks"] = _recover_coordinate_links(
+        assistant_message,
+        rows,
+        guidance["coordinateLinks"],
     )
 
     modification_summary = payload.get("modificationSummary", "")
@@ -8358,12 +8435,174 @@ def _normalize_coordinate_links(value, rows=None):
     return normalized
 
 
+def _route_text_has_direction(text):
+    return bool(re.search(
+        r"(?:\b(?:from|to|toward|towards|through|via|walk|go|lead|route|path|corridor)\b|"
+        r"从|到|向|往|朝向|通往|经过|沿着|路线|路径|通道|走到|走向)",
+        str(text or ""),
+        flags=re.IGNORECASE,
+    ))
+
+
+def _route_anchors(text, rows):
+    """Return ordered, authoritative coordinate anchors from route prose."""
+    try:
+        entity_coordinates = _map_entity_coordinates(rows)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+    coordinate_pattern = re.compile(
+        r"[\(\uFF08]\s*(\d{1,2})\s*[,，]\s*(\d{1,2})\s*[\)\uFF09]"
+    )
+    entity_pattern = re.compile(
+        r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+|玩家|起点)(?![A-Za-z0-9])",
+        flags=re.IGNORECASE,
+    )
+    anchors = []
+    for match in coordinate_pattern.finditer(str(text or "")):
+        anchors.append((match.start(), {
+            "row": int(match.group(1)),
+            "column": int(match.group(2)),
+        }))
+    for match in entity_pattern.finditer(str(text or "")):
+        label = match.group(0).upper()
+        if label in {"玩家", "起点"}:
+            label = "P"
+        point = entity_coordinates.get(label)
+        if point is None:
+            return None
+        anchors.append((match.start(), dict(point)))
+    anchors.sort(key=lambda item: item[0])
+    return [point for _, point in anchors]
+
+
+def _coordinate_route_exists(rows, source, destination):
+    """Use the same conservative walkability rule as the browser arrow renderer."""
+    if not isinstance(rows, list) or not rows or not all(isinstance(row, str) for row in rows):
+        return False
+    height = len(rows)
+    width = len(rows[0])
+    for row in rows:
+        if len(row) != width:
+            return False
+
+    def point(value):
+        if not isinstance(value, dict):
+            return None
+        row = value.get("row")
+        column = value.get("column")
+        if (
+            isinstance(row, bool)
+            or not isinstance(row, int)
+            or isinstance(column, bool)
+            or not isinstance(column, int)
+            or not (1 <= row <= height and 1 <= column <= width)
+        ):
+            return None
+        return row - 1, column - 1
+
+    start = point(source)
+    end = point(destination)
+    if start is None or end is None or start == end:
+        return False
+
+    start_key = f"{start[0]},{start[1]}"
+    end_key = f"{end[0]},{end[1]}"
+
+    def is_open(row, column):
+        if not (0 <= row < height and 0 <= column < width):
+            return False
+        tile = rows[row][column]
+        if tile in {" ", "#", "@"}:
+            return False
+        key = f"{row},{column}"
+        return tile != "s" or key in {start_key, end_key}
+
+    if not is_open(*start) or not is_open(*end):
+        return False
+
+    queue = deque([start])
+    visited = {start}
+    while queue:
+        row, column = queue.popleft()
+        if (row, column) == end:
+            return True
+        for row_delta, column_delta in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            next_point = (row + row_delta, column + column_delta)
+            if next_point in visited or not is_open(*next_point):
+                continue
+            visited.add(next_point)
+            queue.append(next_point)
+    return False
+
+
+def _coordinate_link_is_grounded(link, rows):
+    if rows is None:
+        return True
+    if not _route_text_has_direction(link.get("text")):
+        return False
+    if not _coordinate_route_exists(rows, link.get("from"), link.get("to")):
+        return False
+    anchors = _route_anchors(link.get("text"), rows)
+    if not anchors:
+        return False
+    return (
+        anchors[0] == link.get("from")
+        and anchors[-1] == link.get("to")
+        and len(anchors) >= 2
+    )
+
+
+def _recover_coordinate_links(body, rows, existing=None):
+    """Recover links only from explicit, directional, map-grounded route sentences."""
+    if not rows:
+        return list(existing or [])
+    links = list(existing or [])
+    seen = {
+        (item["text"], item["from"]["row"], item["from"]["column"],
+         item["to"]["row"], item["to"]["column"])
+        for item in links
+    }
+    segments = re.split(r"\s*(?:\n+|(?<=[.!?。！？]))\s*", str(body or ""))
+    for segment in segments:
+        text = segment.strip()
+        if not text or not _route_text_has_direction(text):
+            continue
+        anchors = _route_anchors(text, rows)
+        if not anchors or len(anchors) < 2:
+            continue
+        candidate = {
+            "text": text,
+            "from": anchors[0],
+            "to": anchors[-1],
+        }
+        if not _coordinate_link_is_grounded(candidate, rows):
+            continue
+        key = (
+            candidate["text"], candidate["from"]["row"], candidate["from"]["column"],
+            candidate["to"]["row"], candidate["to"]["column"],
+        )
+        overlaps_existing = any(
+            item["text"] in candidate["text"]
+            or candidate["text"] in item["text"]
+            for item in links
+        )
+        if key not in seen and not overlaps_existing:
+            seen.add(key)
+            links.append(candidate)
+        if len(links) >= COORDINATE_LINK_LIMIT:
+            break
+    return links[:COORDINATE_LINK_LIMIT]
+
+
 def _filter_coordinate_links(value, body, rows=None):
     """Keep only LLM-authored annotations that survived visible-body cleanup."""
     visible_body = str(body or "")
     filtered = []
     occupied_ranges = []
     for link in _normalize_coordinate_links(value, rows=rows):
+        if not _coordinate_link_is_grounded(link, rows):
+            continue
         start = visible_body.find(link["text"])
         if start < 0:
             continue

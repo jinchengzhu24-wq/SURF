@@ -317,6 +317,11 @@ def _verified_user_evidence(evidence_text, user_text):
     return bool(evidence and evidence in str(user_text or ""))
 
 
+def _question_key(value):
+    """Compare equivalent questions without duplicating punctuation or spacing variants."""
+    return re.sub(r"\s+", " ", _text(value)).strip("?\uFF1F").casefold()
+
+
 def _merge_open_question(result, entry, stage_id, turn_id, user_text):
     question = _text(entry.get("question"))
     if not question:
@@ -327,7 +332,7 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
         (
             item for item in result["openQuestions"]
             if (target_id and item.get("id") == target_id)
-            or _text(item.get("question")).casefold() == question.casefold()
+            or _question_key(item.get("question")) == _question_key(question)
         ),
         None,
     )
@@ -346,6 +351,7 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
     if existing is not None:
         if existing.get("status") == "resolved":
             existing["status"] = "open"
+        existing["question"] = question
         existing["updatedFromTurnId"] = _source(turn_id)
         return True
 

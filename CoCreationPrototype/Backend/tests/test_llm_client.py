@@ -342,6 +342,51 @@ class LLMClientTests(unittest.TestCase):
             [],
         )
 
+    def test_clear_coordinate_route_recovers_missing_metadata(self):
+        body = "The route from B1 to T1 remains readable."
+
+        links = llm_client._recover_coordinate_links(body, ENTITY_ROUTE_ROWS)
+
+        self.assertEqual(
+            links,
+            [{
+                "text": body,
+                "from": {"row": 3, "column": 5},
+                "to": {"row": 3, "column": 7},
+            }],
+        )
+
+    def test_coordinate_route_recovery_rejects_entity_co_mentions(self):
+        body = "I am comparing B1 and T1 positions."
+
+        self.assertEqual(
+            llm_client._recover_coordinate_links(body, ENTITY_ROUTE_ROWS),
+            [],
+        )
+
+    def test_coordinate_link_rejects_wrong_entity_endpoint(self):
+        body = "The route from B1 to T1 remains readable."
+
+        self.assertEqual(
+            llm_client._filter_coordinate_links(
+                [{
+                    "text": body,
+                    "from": {"row": 3, "column": 4},
+                    "to": {"row": 3, "column": 7},
+                }],
+                body,
+                ENTITY_ROUTE_ROWS,
+            ),
+            [],
+        )
+
+    def test_entity_coordinate_claim_must_match_map_facts(self):
+        with self.assertRaisesRegex(ValueError, "places B1"):
+            llm_client._validate_map_grounding_texts(
+                ["B1 is at (3,9)."],
+                ENTITY_ROUTE_ROWS,
+            )
+
     def test_llm_metadata_supports_different_route_wording(self):
         cases = [
             (

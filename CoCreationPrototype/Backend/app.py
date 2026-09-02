@@ -1758,6 +1758,7 @@ def _send_message_locked(
                 content,
                 assistant_turn_id,
                 design_context_guidance,
+                assistant_content=execution.assistant_message,
                 allow_progress=allow_progress,
             )
 
@@ -4710,6 +4711,42 @@ def _stage_has_prior_assistant_reply(database, session_id, version_id):
     ).fetchone() is not None
 
 
+def _extract_conservative_map_question(content):
+    """Extract one clearly map-specific question when the model omitted a patch."""
+    map_anchor_pattern = re.compile(
+        r"(?:\b(?:B\d+|T\d+|P|route|path|corridor|box|target|wall|water|push|"
+        r"position|tile|cell)\b|[\u73a9\u5bb6\u7bb1\u5b50\u76ee\u6807\u5899\u6c34\u57df"
+        r"\u901a\u9053\u8def\u7ebf\u8def\u5f84\u63a8\u52a8\u8d77\u70b9]|"
+        r"[\(\uFF08]\s*\d{1,2}\s*[,，]\s*\d{1,2}\s*[\)\uFF09])",
+        flags=re.IGNORECASE,
+    )
+    design_marker_pattern = re.compile(
+        r"(?:\b(?:route|path|corridor|box|target|wall|water|push|layout|difficulty|"
+        r"readable|choice|order|position|keep|change|preserve)\b|"
+        r"\u8def\u7ebf|\u8def\u5f84|\u901a\u9053|\u7bb1\u5b50|\u76ee\u6807|\u5899|\u6c34|"
+        r"\u63a8\u52a8|\u5e03\u5c40|\u96be\u5ea6|\u53ef\u8bfb|\u987a\u5e8f|\u4f4d\u7f6e|"
+        r"\u4fdd\u7559|\u8c03\u6574|\u6539\u52a8)",
+        flags=re.IGNORECASE,
+    )
+    segments = re.split(
+        r"\s*(?:\n+|(?<=[.!?\u3002\uFF01\uFF1F]))\s*",
+        str(content or ""),
+    )
+    for segment in segments:
+        question = re.sub(r"\s+", " ", segment).strip()
+        if not question.endswith(("?", "\uFF1F")):
+            continue
+        if not question or not map_anchor_pattern.search(question):
+            continue
+        if not design_marker_pattern.search(question) and not re.search(
+            r"[\(\uFF08]\s*\d{1,2}\s*[,，]\s*\d{1,2}\s*[\)\uFF09]",
+            question,
+        ):
+            continue
+        return question[:1200]
+    return None
+
+
 def _update_design_context_from_turn(
     database,
     session_id,
@@ -4717,6 +4754,7 @@ def _update_design_context_from_turn(
     user_content,
     turn_id,
     guidance,
+    assistant_content=None,
     allow_progress=True,
 ):
     """Merge server-owned memory after a normal chat or Stage review.
@@ -4782,6 +4820,9 @@ def _update_design_context_from_turn(
         candidates = [guidance.get("followUpQuestion")]
         if isinstance(disagreement, dict) and disagreement.get("status") == "active":
             candidates.append(disagreement.get("nextQuestion"))
+        patch_questions = patch.get("openQuestions") if isinstance(patch, dict) else None
+        if not patch_questions:
+            candidates.append(_extract_conservative_map_question(assistant_content))
         seen_questions = set()
         for question in candidates:
             normalized_question = str(question or "").strip().casefold()

@@ -3053,6 +3053,62 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(progress["unresolvedQuestions"][0]["question"], question)
 
+    def test_later_map_question_is_recovered_when_model_omits_patch(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I notice a compact central route.",
+            1,
+            "fallback-question-opening-001",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "fallback-question-opening-001"},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+
+        execution = LLMExecutionResult(
+            "The route from B1 to T1 feels narrow. Should we keep this corridor open?",
+            1,
+            "fallback-question-chat-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Let's inspect the route.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "fallback-question-chat-001",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        progress = next(
+            item for item in response.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(
+            progress["unresolvedQuestions"][0]["question"],
+            "Should we keep this corridor open?",
+        )
+
     def test_active_disagreement_next_question_enters_progress_after_opening(self):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(

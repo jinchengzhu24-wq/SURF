@@ -48,6 +48,26 @@ class DesignContextUnitTests(unittest.TestCase):
             "turn-2",
         )
 
+    def test_open_question_variants_update_one_cumulative_item(self):
+        context = add_open_question(
+            empty_design_context(),
+            "Should the B1 route stay open?",
+            "stage-1",
+            "turn-1",
+        )
+        context = add_open_question(
+            context,
+            "Should   the B1 route stay open?？",
+            "stage-1",
+            "turn-2",
+        )
+
+        self.assertEqual(len(context["openQuestions"]), 1)
+        self.assertEqual(
+            context["openQuestions"][0]["updatedFromTurnId"],
+            "turn-2",
+        )
+
     def test_explicit_user_memory_and_inferred_patch_have_different_authority(self):
         context = merge_chat_update(
             empty_design_context(),

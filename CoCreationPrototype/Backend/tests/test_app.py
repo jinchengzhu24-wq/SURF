@@ -24,6 +24,17 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
     def tearDown(self):
         self.client.close()
 
+    def test_conservative_map_question_extraction_ignores_generic_question(self):
+        self.assertEqual(
+            backend._extract_conservative_map_question(
+                "The route from B1 to T1 feels narrow. Should we keep this corridor?"
+            ),
+            "Should we keep this corridor?",
+        )
+        self.assertIsNone(
+            backend._extract_conservative_map_question("Would you like to continue?")
+        )
+
     def test_frontend_and_static_assets_are_served(self):
         index_response = self.client.get("/")
         css_response = self.client.get("/styles.css")
