@@ -1190,6 +1190,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("never produce four cards", messages[0]["content"])
         self.assertIn("two to four compact paragraphs", messages[0]["content"])
         self.assertIn("Give observations room to breathe", messages[0]["content"])
+        self.assertIn("Post-opening progress and route rule", messages[0]["content"])
+        self.assertIn("COORDINATE_LINKS", messages[0]["content"])
 
     def test_chat_prompt_carries_confirmed_decisions_and_open_questions_naturally(self):
         stage_context = {
@@ -1223,6 +1225,25 @@ class LLMClientTests(unittest.TestCase):
             self.assertIn("Keep the direct opening", prompt)
             self.assertIn("Can the player read the B2 to T1 detour?", prompt)
             self.assertIn("do not add a fixed progress heading", prompt.lower())
+            self.assertIn("Post-opening", prompt)
+            self.assertTrue(
+                "coordinateLinks" in prompt or "COORDINATE_LINKS" in prompt
+            )
+
+    def test_stage_opening_prompt_does_not_request_continuous_progress(self):
+        structured = llm_client.build_chat_messages(
+            [],
+            OPERATION_BASE_ROWS,
+            assessment_only=True,
+        )
+        plain = llm_client.build_plain_chat_messages(
+            [],
+            OPERATION_BASE_ROWS,
+            stage_opening=True,
+        )
+
+        self.assertNotIn("Post-opening progress", structured[0]["content"])
+        self.assertNotIn("Post-opening progress", plain[0]["content"])
 
     def test_pure_generic_question_uses_fallback_model(self):
         result, client = self.execute([

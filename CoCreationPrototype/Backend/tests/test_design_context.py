@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 import repository
 from design_context import (
     add_confirmed_decision,
+    add_open_question,
     add_rejected_decision,
     empty_design_context,
     merge_chat_update,
@@ -23,6 +24,30 @@ from design_context import (
 
 
 class DesignContextUnitTests(unittest.TestCase):
+    def test_assistant_open_question_is_cumulative_and_deduplicated(self):
+        context = add_open_question(
+            empty_design_context(),
+            "Can the player read the B2 to T1 detour?",
+            "stage-1",
+            "turn-1",
+        )
+        context = add_open_question(
+            context,
+            "Can the player read the B2 to T1 detour?",
+            "stage-1",
+            "turn-2",
+        )
+
+        self.assertEqual(len(context["openQuestions"]), 1)
+        self.assertEqual(
+            context["openQuestions"][0]["sourceTurnId"],
+            "turn-1",
+        )
+        self.assertEqual(
+            context["openQuestions"][0]["updatedFromTurnId"],
+            "turn-2",
+        )
+
     def test_explicit_user_memory_and_inferred_patch_have_different_authority(self):
         context = merge_chat_update(
             empty_design_context(),

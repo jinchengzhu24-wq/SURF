@@ -67,6 +67,7 @@ from repository import (
 )
 from design_context import (
     add_confirmed_decision,
+    add_open_question,
     add_rejected_decision,
     clone_design_context,
     evaluator_projection,
@@ -1108,6 +1109,7 @@ def assess_version(
                 None,
                 turn_id,
                 design_context_guidance,
+                allow_progress=False,
             )
 
             opening_sync = {
@@ -1245,6 +1247,15 @@ def _send_message_locked(
             )
         else:
             source_binding = None
+
+        allow_progress = (
+            payload.action == "none"
+            and _stage_has_prior_assistant_reply(
+                database,
+                session_id,
+                payload.baseVersionId,
+            )
+        )
 
         if prior_user is None:
             insert_turn(
@@ -1747,6 +1758,7 @@ def _send_message_locked(
                 content,
                 assistant_turn_id,
                 design_context_guidance,
+                allow_progress=allow_progress,
             )
 
         session_payload = serialize_session(database, session_id)
@@ -4662,6 +4674,42 @@ def _bind_execution_to_stage(execution, version_id, rows, content="", language="
     )
 
 
+def _stage_has_prior_assistant_reply(database, session_id, version_id):
+    """Return whether this Stage already has its opening assistant reply."""
+    opening = database.execute(
+        "SELECT 1 FROM llm_assessments WHERE session_id = ? AND version_id = ? LIMIT 1",
+        (session_id, version_id),
+    ).fetchone()
+    if opening is not None:
+        return True
+
+    accepted_opening = database.execute(
+        """
+        SELECT 1
+        FROM designer_decisions AS decision
+        JOIN change_proposals AS proposal
+          ON proposal.id = decision.proposal_id
+        WHERE decision.session_id = ?
+          AND decision.version_id = ?
+          AND decision.decision_type = 'accept'
+          AND proposal.assistant_turn_id IS NOT NULL
+        LIMIT 1
+        """,
+        (session_id, version_id),
+    ).fetchone()
+    if accepted_opening is not None:
+        return True
+
+    return database.execute(
+        """
+        SELECT 1 FROM conversation_turns
+        WHERE session_id = ? AND version_id = ? AND role = 'assistant'
+        LIMIT 1
+        """,
+        (session_id, version_id),
+    ).fetchone() is not None
+
+
 def _update_design_context_from_turn(
     database,
     session_id,
@@ -4669,6 +4717,7 @@ def _update_design_context_from_turn(
     user_content,
     turn_id,
     guidance,
+    allow_progress=True,
 ):
     """Merge server-owned memory after a normal chat or Stage review.
 
@@ -4692,7 +4741,10 @@ def _update_design_context_from_turn(
     try:
         context = merge_chat_update(
             previous,
-            patch=patch,
+            # The user's own explicit memory remains attributable even when
+            # this assistant reply is the Stage opening.  Only the model patch
+            # is gated by the opening rule.
+            patch=patch if allow_progress else None,
             user_text=user_content,
             stage_id=version_id,
             turn_id=turn_id,
@@ -4725,6 +4777,22 @@ def _update_design_context_from_turn(
             turn_id,
         )
 
+    auto_open_questions = []
+    if allow_progress:
+        candidates = [guidance.get("followUpQuestion")]
+        if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+            candidates.append(disagreement.get("nextQuestion"))
+        seen_questions = set()
+        for question in candidates:
+            normalized_question = str(question or "").strip().casefold()
+            if not normalized_question or normalized_question in seen_questions:
+                continue
+            seen_questions.add(normalized_question)
+            before = context
+            context = add_open_question(context, question, version_id, turn_id)
+            if context != before:
+                auto_open_questions.append(str(question).strip())
+
     save_design_context(database, version_id, context)
     record_event(
         database,
@@ -4737,7 +4805,9 @@ def _update_design_context_from_turn(
                 any(item.get("sourceTurnId") == turn_id and item.get("authority") == "explicit"
                     for item in context.get("userGoals", []) + context.get("designConstraints", []))
             ),
-            "hasInferredMemory": bool(patch),
+            "hasInferredMemory": bool(patch) and allow_progress,
+            "progressApplied": bool(allow_progress),
+            "autoOpenQuestionCount": len(auto_open_questions),
             "disagreementStatus": (
                 disagreement.get("status") if isinstance(disagreement, dict) else None
             ),

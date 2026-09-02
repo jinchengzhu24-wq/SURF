@@ -61,7 +61,7 @@ PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
 COORDINATE_LINK_LIMIT = 8
-PROMPT_VERSION = "cocreation-v36-continuous-progress"
+PROMPT_VERSION = "cocreation-v37-continuous-progress-routes"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -172,6 +172,21 @@ def build_chat_messages(
     )
     continuity_context_prompt = _continuity_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
+    )
+    post_opening_progress_instruction = (
+        "Post-opening progress rule: this is an ordinary reply after the Stage opening. "
+        "When the map-specific judgment in your reply creates or materially reframes a "
+        "genuine unresolved design question, include one matching openQuestions entry "
+        "inside the internal designContextPatch with status open. Do not manufacture a "
+        "question for ordinary conversation, and never use this patch to create a confirmed "
+        "decision or rejection. When the reply is about the saved map, preferably include "
+        "one concise, concrete route description—for example player or box to target, one "
+        "coordinate to another, or through a named corridor. The route must be real in the "
+        "authoritative map facts, must not be a complete solution sequence, and its exact "
+        "visible substring must be repeated in coordinateLinks with the authoritative from "
+        "and to endpoints. Do not force route prose into ordinary chat that is not map-related."
+        if not assessment_only
+        else ""
     )
     task = _build_task_instructions(assessment_only, stage_context)
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
@@ -301,6 +316,7 @@ def build_chat_messages(
         "discussion from another Stage happened in the current Stage.\n\n"
         f"Write all new natural-language fields in {response_language}. {task} "
         f"{revision_contract}\n\n"
+        f"{post_opening_progress_instruction}\n\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         "Return JSON only with exactly these keys:\n"
         '{"assistantMessage":"...","guidance":'
@@ -446,6 +462,21 @@ def build_plain_chat_messages(
     continuity_context_prompt = _continuity_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
     )
+    post_opening_progress_instruction = (
+        "Post-opening progress and route rule: this is an ordinary reply after the Stage "
+        "opening. If a map-specific judgment creates or materially reframes a genuine "
+        "unresolved design question, include one matching openQuestions entry in the "
+        "internal DESIGN_CONTEXT_PATCH with status open. Do not add a question just to "
+        "fill the panel, and never use the patch to create a confirmed decision or rejection. "
+        "For a map-related reply, add one concise concrete route description when it helps "
+        "the designer see the judgment—such as player or box to target, coordinate to "
+        "coordinate, or through a named corridor. It must be a real route supported by the "
+        "authoritative map facts, not a complete solver sequence. Repeat the exact visible "
+        "route substring in COORDINATE_LINKS with authoritative from/to endpoints. Do not "
+        "force route prose into ordinary non-map chat."
+        if not stage_opening
+        else ""
+    )
     provenance_guidance = _build_draft_provenance_guidance(stage_context)
     guidance_mode = classify_guidance_request(
         conversation,
@@ -587,7 +618,8 @@ def build_plain_chat_messages(
         "There is exactly one level in this session; every Stage is only a saved version of "
         "that same level. Never describe a Stage as a first, second, next, or later level, "
         "and never imply a campaign progression.\n\n"
-        f"{continuity_instruction}{guidance_mode_instruction}\n{action_instruction}\n{guidance_instruction}\n"
+        f"{continuity_instruction}{post_opening_progress_instruction}\n\n"
+        f"{guidance_mode_instruction}\n{action_instruction}\n{guidance_instruction}\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         f"{_map_grounding_contract()}\n\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"

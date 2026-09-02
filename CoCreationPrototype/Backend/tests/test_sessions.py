@@ -516,6 +516,12 @@ class CoCreationSessionTests(unittest.TestCase):
             mocked.call_args.kwargs["stage_context"]["initialDraftMethod"],
             "partial_completion",
         )
+        progress = next(
+            item for item in response.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(progress["confirmedDecisions"], [])
+        self.assertEqual(progress["unresolvedQuestions"], [])
 
     def test_opening_and_first_user_turn_sync_as_three_part_record(self):
         version_id = self.read_session()["currentVersionId"]
@@ -2884,6 +2890,27 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_chat_patch_updates_public_progress_without_exposing_internal_patch(self):
         version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I notice a compact central route.",
+            1,
+            "progress-opening-001",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "progress-opening-001"},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+
         question = "Can the player read the B2 to T1 detour?"
         first_execution = LLMExecutionResult(
             "The new corridor gives us a concrete detour to evaluate.",
@@ -2956,6 +2983,141 @@ class CoCreationSessionTests(unittest.TestCase):
             if item["versionId"] == version_id
         )
         self.assertEqual(progress["unresolvedQuestions"], [])
+
+    def test_first_chat_reply_skips_progress_but_second_reply_updates_it(self):
+        version_id = self.read_session()["currentVersionId"]
+        question = "Should the first push expose the side corridor?"
+        first_execution = LLMExecutionResult(
+            "The opening observation is worth testing against the side corridor.",
+            1,
+            "first-chat-opening-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "designContextPatch": {
+                    "openQuestions": [{"question": question, "status": "open"}],
+                },
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=first_execution):
+            first = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please inspect the opening and the side corridor.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "first-chat-opening-001",
+                },
+            )
+        self.assertEqual(first.status_code, 200, first.text)
+        progress = next(
+            item for item in first.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(progress["unresolvedQuestions"], [])
+
+        second_execution = LLMExecutionResult(
+            "The side corridor gives the first push a readable alternative.",
+            1,
+            "first-chat-followup-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "designContextPatch": {
+                    "openQuestions": [{"question": question, "status": "open"}],
+                },
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=second_execution):
+            second = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "The side corridor should make the first push more readable.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "first-chat-followup-001",
+                },
+            )
+        self.assertEqual(second.status_code, 200, second.text)
+        progress = next(
+            item for item in second.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(progress["unresolvedQuestions"][0]["question"], question)
+
+    def test_active_disagreement_next_question_enters_progress_after_opening(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I see a direct central route.",
+            1,
+            "disagreement-opening-001",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "disagreement-opening-001"},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+
+        next_question = "Which first-push judgment should the player make?"
+        execution = LLMExecutionResult(
+            "I still see a disagreement about the first push.",
+            1,
+            "disagreement-followup-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "disagreement": {
+                    "status": "active",
+                    "subject": "user_request",
+                    "userPosition": "Keep the opening direct.",
+                    "aiPosition": "The first push may need a side choice.",
+                    "coreDisagreement": "Whether the first push should expose a side choice.",
+                    "nextQuestion": next_question,
+                    "resolution": None,
+                },
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "I want to keep the opening direct for now.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "disagreement-followup-001",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        progress = next(
+            item for item in response.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(
+            progress["unresolvedQuestions"][0]["question"],
+            next_question,
+        )
 
 
 if __name__ == "__main__":

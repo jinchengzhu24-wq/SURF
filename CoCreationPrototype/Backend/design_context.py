@@ -361,6 +361,25 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
     return True
 
 
+def add_open_question(context, question, stage_id=None, turn_id=None):
+    """Add an assistant-raised open question using the normal provenance rules."""
+    result = normalize_design_context(context)
+    clean = _text(question)
+    if not clean:
+        return result
+
+    _merge_open_question(
+        result,
+        {"question": clean, "status": "open"},
+        stage_id,
+        turn_id,
+        None,
+    )
+    result["updatedFromStageId"] = _source(stage_id)
+    result["updatedFromTurnId"] = _source(turn_id)
+    return normalize_design_context(result)
+
+
 def extract_explicit_user_memory(user_text):
     """Conservatively retain design language that came from the user's turn."""
     text = _text(user_text)
