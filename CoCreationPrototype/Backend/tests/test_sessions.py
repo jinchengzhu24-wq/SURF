@@ -33,6 +33,19 @@ PLAYER_MOVE_OPERATIONS = [
     {"row": 5, "column": 5, "to": "."},
     {"row": 5, "column": 4, "to": "p"},
 ]
+PLAYER_MOVE_BRIEF = {
+    "schemaVersion": 1,
+    "effect": "relocate_start",
+    "anchors": ["P"],
+    "focus": {"row": 5, "column": 4, "radius": 1},
+    "requiredTransitions": [
+        {"row": 5, "column": 5, "from": "p", "to": "."},
+        {"row": 5, "column": 4, "from": ".", "to": "p"},
+    ],
+    "allowedOperators": ["move_player"],
+    "preserve": ["outer_shell", "boxes", "targets", "water", "unrelated_areas"],
+    "playObjective": "route_choice",
+}
 PLAYER_MOVE_CONTRACT = {
     "schemaVersion": 1,
     "authorizedBrief": "Move the player start left.",
@@ -44,6 +57,9 @@ PLAYER_MOVE_CONTRACT = {
             "preserve": ["outer_shell", "unrelated_areas"],
             "editBudget": 2,
             "metricGoals": [],
+            "requiredTransitions": PLAYER_MOVE_BRIEF["requiredTransitions"],
+            "anchorEntities": ["P"],
+            "playObjective": "route_choice",
         }],
     },
     "strategies": [{
@@ -55,6 +71,9 @@ PLAYER_MOVE_CONTRACT = {
         "minimumChangedCells": 2,
         "maximumChangedCells": 2,
         "metricGoals": [],
+        "requiredTransitions": PLAYER_MOVE_BRIEF["requiredTransitions"],
+        "anchorEntities": ["P"],
+        "playObjective": "route_choice",
     }],
     "explicitlyRelaxedByDesigner": False,
 }
@@ -152,6 +171,179 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "BOOTSTRAP_TOKEN_USED")
+
+    def test_revision_offer_is_bound_to_saved_map_and_hides_execution_contract(self):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "I would close one local opening and then compare the first push.",
+            1,
+            "bound-offer-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Add a wall at (2,2)",
+                    "rationale": "The first push should reveal whether this local closure creates a meaningful detour.",
+                    "executionBrief": {
+                        "schemaVersion": 1,
+                        "effect": "adjust_internal_walls",
+                        "anchors": [],
+                        "focus": {"row": 2, "column": 2, "radius": 1},
+                        "requiredTransitions": [
+                            {"row": 2, "column": 2, "from": ".", "to": "#"}
+                        ],
+                        "allowedOperators": ["add_wall"],
+                        "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                        "playObjective": "route_choice",
+                    },
+                },
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please review this local wall direction.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "bound-offer-message-001",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        turn = response.json()["turns"][-1]
+        self.assertEqual(turn["proposalState"]["status"], "active")
+        self.assertTrue(turn["proposalState"]["actionable"])
+        self.assertNotIn("executionBrief", turn["guidance"]["proposalOffer"])
+        presentation = turn["guidance"]["proposalOffer"]["proposalPresentation"]
+        self.assertEqual(presentation["summary"], "Add a wall at (2,2)")
+        self.assertEqual(
+            presentation["changes"],
+            [{
+                "row": 2,
+                "column": 2,
+                "before": ".",
+                "after": "#",
+                "beforeLabel": "floor (.)",
+                "afterLabel": "wall (#)",
+            }],
+        )
+        self.assertIn("boxes", presentation["preserved"])
+
+        with repository.connect() as database:
+            stored = database.execute(
+                "SELECT proposal_binding_json FROM conversation_turns WHERE id = ?",
+                (turn["turnId"],),
+            ).fetchone()
+        binding = repository.load_json(stored["proposal_binding_json"])
+        self.assertEqual(binding["baseVersionId"], version_id)
+        self.assertEqual(binding["mapFingerprint"], repository.map_fingerprint(SAMPLE_ROWS))
+        self.assertEqual(
+            binding["executionBrief"]["requiredTransitions"],
+            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+        )
+
+        with repository.connect(immediate=True) as database:
+            changed = dict(binding)
+            changed["mapFingerprint"] = "changed-map"
+            database.execute(
+                "UPDATE conversation_turns SET proposal_binding_json = ? WHERE id = ?",
+                (repository.dump_json(changed), turn["turnId"]),
+            )
+        with patch.object(backend, "generate_chat_reply") as generate_reply:
+            stale = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Execute the current proposal.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "bound-offer-stale-action-001",
+                    "action": "execute_revision",
+                    "sourceTurnId": turn["turnId"],
+                },
+            )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["code"], "PROPOSAL_STALE")
+        self.assertEqual(stale.json()["details"]["reason"], "map_changed")
+        generate_reply.assert_not_called()
+
+    def test_already_satisfied_binding_stops_before_revision_generation(self):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "I would close the local opening and compare the first push.",
+            1,
+            "satisfied-offer-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Add a wall at (2,2)",
+                    "rationale": "The first push should reveal whether the detour is meaningful.",
+                    "executionBrief": {
+                        "schemaVersion": 1,
+                        "effect": "adjust_internal_walls",
+                        "anchors": [],
+                        "focus": {"row": 2, "column": 2, "radius": 1},
+                        "requiredTransitions": [
+                            {"row": 2, "column": 2, "from": ".", "to": "#"}
+                        ],
+                        "allowedOperators": ["add_wall"],
+                        "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                        "playObjective": "route_choice",
+                    },
+                },
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            offered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Review this exact wall change.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "satisfied-offer-message-001",
+                },
+            )
+        self.assertEqual(offered.status_code, 200, offered.text)
+        source_turn_id = offered.json()["turns"][-1]["turnId"]
+
+        changed_rows = list(SAMPLE_ROWS)
+        changed_rows[1] = "##.........#"
+        with repository.connect(immediate=True) as database:
+            binding_row = database.execute(
+                "SELECT proposal_binding_json FROM conversation_turns WHERE id = ?",
+                (source_turn_id,),
+            ).fetchone()
+            binding = repository.load_json(binding_row["proposal_binding_json"])
+            binding["mapFingerprint"] = repository.map_fingerprint(changed_rows)
+            database.execute(
+                "UPDATE level_versions SET rows_json = ? WHERE id = ?",
+                (repository.dump_json(changed_rows), version_id),
+            )
+            database.execute(
+                "UPDATE conversation_turns SET proposal_binding_json = ? WHERE id = ?",
+                (repository.dump_json(binding), source_turn_id),
+            )
+
+        with patch.object(backend, "generate_chat_reply") as generate_reply:
+            satisfied = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Execute this proposal.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "satisfied-offer-action-001",
+                    "action": "execute_revision",
+                    "sourceTurnId": source_turn_id,
+                },
+            )
+        self.assertEqual(satisfied.status_code, 409, satisfied.text)
+        self.assertEqual(satisfied.json()["code"], "PROPOSAL_PRECONDITION_FAILED")
+        self.assertEqual(satisfied.json()["details"]["reason"], "already_satisfied")
+        generate_reply.assert_not_called()
 
     def test_formal_session_records_blueprint_to_cocreation_handoff(self):
         with repository.connect() as database:
@@ -745,6 +937,21 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Link the lower target to the water edge",
                     "rationale": "Make the first push depend on reading the water route",
+                    "executionBrief": {
+                        "schemaVersion": 1,
+                        "effect": "adjust_internal_walls",
+                        "anchors": [],
+                        "focus": {"row": 2, "column": 2, "radius": 1},
+                        "requiredTransitions": [
+                            {"row": 2, "column": 2, "from": ".", "to": "#"}
+                        ],
+                        "allowedOperators": ["add_wall"],
+                        "preserve": [
+                            "outer_shell", "player", "boxes", "targets", "water",
+                            "unrelated_areas",
+                        ],
+                        "playObjective": "route_choice",
+                    },
                 },
                 "uiCues": [
                     {
@@ -1254,6 +1461,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Move the player start left",
                     "rationale": "This changes the first route choice while preserving the box-target relationship.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -1516,6 +1724,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Move the player start left",
                     "rationale": "This changes the first route choice while preserving the box-target relationship.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -1654,6 +1863,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Review the current player start",
                     "rationale": "The plan should make a small, testable change to the opening route.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -1726,6 +1936,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Move the player start left",
                     "rationale": "This changes the opening route while keeping the puzzle solvable.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -2058,6 +2269,53 @@ class CoCreationSessionTests(unittest.TestCase):
             {"row": 5, "column": 7},
         )
 
+    def test_translated_proposal_presentation_keeps_exact_tile_metadata(self):
+        source = {
+            "move": "offer_revision",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": {
+                "summary": "Add a wall at (2,2)",
+                "rationale": "Close the direct opening.",
+                "proposalPresentation": {
+                    "schemaVersion": 1,
+                    "summary": "Add a wall at (2,2)",
+                    "rationale": "Close the direct opening.",
+                    "changes": [{
+                        "row": 2,
+                        "column": 2,
+                        "before": ".",
+                        "after": "#",
+                        "beforeLabel": "floor (.)",
+                        "afterLabel": "wall (#)",
+                    }],
+                    "preserved": ["boxes", "targets"],
+                },
+            },
+            "disagreement": None,
+            "uiCues": [],
+        }
+        translated = {
+            "body": "我会在局部开口处增加一道墙。",
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": "在（2,2）增加一道墙",
+            "proposalOfferRationale": "缩短直接开口。",
+            "uiCueTexts": [],
+            "proposalSummary": None,
+        }
+
+        result = backend._translated_guidance(source, translated)
+        presentation = result["proposalOffer"]["proposalPresentation"]
+        self.assertEqual(presentation["summary"], "在（2,2）增加一道墙")
+        self.assertEqual(presentation["rationale"], "缩短直接开口。")
+        self.assertEqual(
+            presentation["changes"][0]["before"],
+            ".",
+        )
+        self.assertEqual(presentation["changes"][0]["after"], "#")
+
     def test_bidirectional_revision_actions_are_visible_and_audited(self):
         version_id = self.read_session()["currentVersionId"]
         offer_execution = LLMExecutionResult(
@@ -2073,6 +2331,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Make the first push create a detour choice",
                     "rationale": "The player should compare the central route with a local detour.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -2137,6 +2396,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Change the box approach order instead",
                     "rationale": "This changes the decision before the first push without copying the detour treatment.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -2222,6 +2482,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Use the left route as the main choice",
                     "rationale": "It creates an earlier route decision.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -2239,6 +2500,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Use the central route as the main choice",
                     "rationale": "It creates a different route decision.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -2326,6 +2588,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Keep the first route readable",
                     "rationale": "This preserves the intended first decision.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -2418,6 +2681,7 @@ class CoCreationSessionTests(unittest.TestCase):
         offer = {
             "summary": "Make the first push create a detour choice",
             "rationale": "The player should compare the central route with a local detour.",
+            "executionBrief": PLAYER_MOVE_BRIEF,
         }
         offer_execution = LLMExecutionResult(
             "I see one focused direction worth comparing.",
@@ -2524,6 +2788,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Keep the direct opening and sharpen its first commitment",
                     "rationale": "This follows your reason while making the early commitment easier to read.",
+                    "executionBrief": PLAYER_MOVE_BRIEF,
                 },
                 "disagreement": resolved,
                 "uiCues": [],

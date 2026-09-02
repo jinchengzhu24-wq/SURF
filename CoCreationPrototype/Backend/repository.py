@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     attempts_used INTEGER,
     latency_ms INTEGER,
     guidance_json TEXT,
+    proposal_binding_json TEXT,
     created_at TEXT NOT NULL,
     UNIQUE(session_id, sequence_number)
 );
@@ -195,6 +196,7 @@ def initialize_database():
     try:
         database.executescript(SCHEMA)
         _ensure_column(database, "conversation_turns", "guidance_json", "TEXT")
+        _ensure_column(database, "conversation_turns", "proposal_binding_json", "TEXT")
         _ensure_column(database, "level_versions", "design_context_json", "TEXT")
         _ensure_column(database, "design_sessions", "demo_mode", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(database, "design_sessions", "deadline_started_at", "TEXT")
@@ -442,7 +444,7 @@ def serialize_session(database, session_id):
     turns = database.execute(
         """
         SELECT id, sequence_number, role, content, language, version_id,
-               request_id, guidance_json, created_at
+               request_id, guidance_json, proposal_binding_json, created_at
         FROM conversation_turns
         WHERE session_id = ? ORDER BY sequence_number
         """,
@@ -511,9 +513,129 @@ def serialize_session(database, session_id):
     turn_created_at = {turn["id"]: turn["created_at"] for turn in turns}
 
     stage_numbers = {version["id"]: version["stage_number"] for version in versions}
+    version_rows = {
+        version["id"]: load_json(version["rows_json"]) or []
+        for version in versions
+    }
 
     def source_stage_number(source_version_id, current_version):
         return stage_numbers.get(source_version_id, current_version["stage_number"])
+
+    latest_revision_turn_by_version = {}
+    for turn in reversed(turns):
+        if turn["role"] != "assistant":
+            continue
+        guidance = load_json(turn["guidance_json"]) or {}
+        offer = guidance.get("proposalOffer") if isinstance(guidance, dict) else None
+        if (
+            isinstance(offer, dict)
+            and str(offer.get("summary") or "").strip()
+            and turn["version_id"] not in latest_revision_turn_by_version
+        ):
+            latest_revision_turn_by_version[turn["version_id"]] = turn["id"]
+
+    def proposal_state(turn, guidance):
+        offer = guidance.get("proposalOffer") if isinstance(guidance, dict) else None
+        if (
+            turn["role"] != "assistant"
+            or not isinstance(offer, dict)
+            or not str(offer.get("summary") or "").strip()
+        ):
+            return None
+
+        try:
+            binding = load_json(turn["proposal_binding_json"])
+        except (TypeError, ValueError):
+            binding = None
+        if not isinstance(binding, dict) or not isinstance(binding.get("executionBrief"), dict):
+            return {
+                "status": "unbound",
+                "actionable": False,
+                "reason": "missing_binding",
+            }
+
+        base_version_id = binding.get("baseVersionId")
+        current_version = next(
+            (version for version in versions if version["id"] == base_version_id),
+            None,
+        )
+        if current_version is None or base_version_id != session["current_version_id"]:
+            return {
+                "status": "stale",
+                "actionable": False,
+                "reason": "version_changed",
+            }
+
+        rows = version_rows.get(base_version_id) or []
+        expected_fingerprint = binding.get("mapFingerprint")
+        if expected_fingerprint and map_fingerprint(rows) != expected_fingerprint:
+            return {
+                "status": "stale",
+                "actionable": False,
+                "reason": "map_changed",
+            }
+
+        brief = binding["executionBrief"]
+        if (
+            not isinstance(brief.get("requiredTransitions"), list)
+            or not brief["requiredTransitions"]
+        ):
+            return {
+                "status": "unbound",
+                "actionable": False,
+                "reason": "missing_exact_transitions",
+            }
+        for transition in brief.get("requiredTransitions") or []:
+            row = transition.get("row")
+            column = transition.get("column")
+            if (
+                not isinstance(row, int)
+                or not isinstance(column, int)
+                or not 1 <= row <= len(rows)
+                or not rows
+                or not 1 <= column <= len(rows[row - 1])
+            ):
+                return {
+                    "status": "stale",
+                    "actionable": False,
+                    "reason": "invalid_binding",
+                }
+            actual = rows[row - 1][column - 1]
+            if actual == transition.get("to"):
+                return {
+                    "status": "already_satisfied",
+                    "actionable": False,
+                    "reason": "already_satisfied",
+                }
+            if actual != transition.get("from"):
+                return {
+                    "status": "stale",
+                    "actionable": False,
+                    "reason": "precondition_failed",
+                }
+
+        binding_status = binding.get("status")
+        if binding_status == "already_satisfied":
+            return {
+                "status": "already_satisfied",
+                "actionable": False,
+                "reason": "already_satisfied",
+            }
+        if binding_status == "stale":
+            return {
+                "status": "stale",
+                "actionable": False,
+                "reason": "proposal_consumed_or_stale",
+            }
+        return {
+            "status": "active",
+            "actionable": (
+                binding.get("status", "active") == "active"
+                and latest_revision_turn_by_version.get(turn["version_id"]) == turn["id"]
+                and turn["version_id"] == session["current_version_id"]
+            ),
+            "reason": None,
+        }
 
     progress_contexts = []
     for version in versions:
@@ -619,7 +741,11 @@ def serialize_session(database, session_id):
                 "language": turn["language"],
                 "versionId": turn["version_id"],
                 "requestId": turn["request_id"],
-                "guidance": load_json(turn["guidance_json"]),
+                "guidance": _public_guidance(load_json(turn["guidance_json"])),
+                "proposalState": proposal_state(
+                    turn,
+                    load_json(turn["guidance_json"]) or {},
+                ),
                 "translations": translations_by_turn.get(turn["id"], {}),
                 "createdAt": turn["created_at"],
             }
@@ -684,6 +810,30 @@ def next_stage_number(database, session_id):
 
 def dump_json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def map_fingerprint(rows):
+    """Return a stable fingerprint for the complete saved Stage grid."""
+    import hashlib
+
+    canonical = json.dumps(
+        list(rows or []),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _public_guidance(value):
+    result = dict(value or {}) if isinstance(value, dict) else {}
+    result.pop("designContextPatch", None)
+    result.pop("designContextPatchError", None)
+    offer = result.get("proposalOffer")
+    if isinstance(offer, dict) and "executionBrief" in offer:
+        offer = dict(offer)
+        offer.pop("executionBrief", None)
+        result["proposalOffer"] = offer
+    return result
 
 
 def load_json(value):

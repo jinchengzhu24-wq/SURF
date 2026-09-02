@@ -77,7 +77,28 @@ def revision_plan_payload(
     preserve=None,
     edit_budget=2,
     metric_goals=None,
+    required_transitions=None,
 ):
+    if required_transitions is None:
+        if effect == "reshape_water":
+            required_transitions = [
+                {"row": 2, "column": 6, "from": ".", "to": "@"},
+                {"row": 2, "column": 7, "from": ".", "to": "@"},
+                {"row": 3, "column": 6, "from": ".", "to": "@"},
+            ]
+        elif effect == "narrow_route":
+            required_transitions = [
+                {"row": 2, "column": 2, "from": ".", "to": "#"},
+                {"row": 2, "column": 3, "from": ".", "to": "#"},
+                {"row": 3, "column": 2, "from": ".", "to": "#"},
+            ]
+        elif effect == "relocate_target":
+            required_transitions = [
+                {"row": 6, "column": 7, "from": "t", "to": "."},
+                {"row": 6, "column": 8, "from": ".", "to": "t"},
+            ]
+        else:
+            required_transitions = []
     return json.dumps({
         "strategies": [{
             "effect": effect,
@@ -92,6 +113,9 @@ def revision_plan_payload(
             ],
             "editBudget": edit_budget,
             "metricGoals": metric_goals or [],
+            "requiredTransitions": required_transitions,
+            "anchorEntities": [],
+            "playObjective": "route_choice",
         }]
     })
 
@@ -188,6 +212,34 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(request["model"], "deepseek-v4-flash")
         self.assertEqual(request["max_tokens"], llm_client.PLAIN_CHAT_MAX_TOKENS)
         self.assertEqual(request["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_model_environment_overrides_are_ignored(self):
+        client = FakeClient(["The verified route remains readable."])
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DEEPSEEK_API_KEY": "test-key",
+                    "DEEPSEEK_MODEL": "deepseek-v4-pro",
+                    "DEEPSEEK_PROPOSAL_MODEL": "some-other-model",
+                    "DEEPSEEK_FALLBACK_MODEL": "another-model",
+                },
+                clear=False,
+            ),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Assess the route."}],
+                ["############"] * 10,
+                "unified-model-config-test",
+            )
+
+        self.assertEqual(result.model, llm_client.UNIFIED_MODEL)
+        self.assertEqual(
+            [call["model"] for call in client.chat.completions.calls],
+            [llm_client.UNIFIED_MODEL],
+        )
 
     def test_plain_coordinate_links_are_hidden_metadata_and_keep_body_unchanged(self):
         body = "I would move from (5,5) along the corridor to (5,7)."
@@ -434,6 +486,18 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn('"id":"B1","row":3,"column":5', prompt)
         self.assertIn("Map-grounding rule", prompt)
 
+    def test_prompt_rebuilds_map_facts_when_supplied_snapshot_is_stale(self):
+        stale_facts = llm_client.build_map_facts(MAP_GROUNDING_ROWS)
+
+        prompt = llm_client.build_plain_chat_messages(
+            [],
+            OPERATION_BASE_ROWS,
+            stage_context={"mapFacts": stale_facts},
+        )[0]["content"]
+
+        self.assertIn('"id":"B1","row":6,"column":5', prompt)
+        self.assertNotIn('"id":"B1","row":3,"column":5', prompt)
+
     def test_execution_brief_validates_exact_tiles_and_keeps_tile_facts(self):
         brief = {
             "schemaVersion": 1,
@@ -464,6 +528,134 @@ class LLMClientTests(unittest.TestCase):
                     "allowedOperators": ["remove_wall"],
                 },
                 OPERATION_BASE_ROWS,
+            )
+
+    def test_chat_revision_plan_is_normalized_to_an_exact_execution_brief(self):
+        payload = {
+            "assistantMessage": "I would close the local opening and compare the first push.",
+            "guidance": {
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Add a wall at (2,2)",
+                    "rationale": "The first push should reveal whether this local closure creates a meaningful detour.",
+                    "revisionPlan": {
+                        "objective": "Make the first route commitment more deliberate",
+                        "changes": [{
+                            "row": 2,
+                            "column": 2,
+                            "before": ".",
+                            "after": "#",
+                            "operation": "add_wall",
+                        }],
+                        "preserve": ["outer_shell", "boxes", "targets", "water"],
+                        "rationale": "Reduce the direct opening while keeping the box-target relationship.",
+                        "expectedEffect": "The player must compare the nearby detour before the first push.",
+                    },
+                },
+                "uiCues": [],
+                "coordinateLinks": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            language="en",
+            rows=OPERATION_BASE_ROWS,
+        )
+        offer = result[4]["proposalOffer"]
+        self.assertNotIn("revisionPlan", offer)
+        self.assertEqual(
+            offer["executionBrief"]["requiredTransitions"],
+            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+        )
+        self.assertEqual(offer["executionBrief"]["allowedOperators"], ["add_wall"])
+        self.assertEqual(
+            offer["executionBrief"]["playObjective"],
+            "Make the first route commitment more deliberate",
+        )
+
+    def test_chat_revision_plan_rejects_a_wrong_operation_or_missing_exact_fields(self):
+        base = {
+            "objective": "Make the first route commitment more deliberate",
+            "changes": [{
+                "row": 2,
+                "column": 2,
+                "before": ".",
+                "after": "#",
+                "operation": "remove_wall",
+            }],
+            "preserve": ["outer_shell", "boxes", "targets", "water"],
+            "rationale": "Reduce the direct opening.",
+            "expectedEffect": "The first route becomes less direct.",
+        }
+        with self.assertRaisesRegex(ValueError, "exact supported transition"):
+            llm_client._validate_revision_plan_payload(base, OPERATION_BASE_ROWS)
+        with self.assertRaisesRegex(ValueError, "must contain objective"):
+            llm_client._validate_revision_plan_payload(
+                {key: value for key, value in base.items() if key != "expectedEffect"},
+                OPERATION_BASE_ROWS,
+            )
+
+    def test_modifier_receives_only_the_frozen_contract_projection(self):
+        contract = {
+            "schemaVersion": 1,
+            "authorizedBrief": "Do not expose this prose to the modifier.",
+            "revisionPlan": {"strategies": [{"effect": "wrong"}]},
+            "strategies": [{
+                "strategyIndex": 1,
+                "effect": "adjust_internal_walls",
+                "focus": {"row": 2, "column": 2, "radius": 1},
+                "allowedOperators": ["add_wall"],
+                "preserve": ["outer_shell", "boxes", "targets", "water"],
+                "minimumChangedCells": 1,
+                "maximumChangedCells": 1,
+                "metricGoals": [],
+                "requiredTransitions": [
+                    {"row": 2, "column": 2, "from": ".", "to": "#"},
+                ],
+                "anchorEntities": [],
+                "playObjective": "route_choice",
+            }],
+        }
+
+        projected = llm_client._modifier_contract_view(contract)
+        self.assertNotIn("authorizedBrief", projected)
+        self.assertNotIn("revisionPlan", projected)
+        self.assertEqual(
+            projected["strategies"][0]["requiredTransitions"],
+            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+        )
+
+    def test_modifier_contract_rejects_an_extra_operation_beyond_frozen_transitions(self):
+        plan = llm_client.parse_revision_plan(json.loads(revision_plan_payload(
+            effect="adjust_internal_walls",
+            operators=["add_wall"],
+            focus={"row": 2, "column": 2, "radius": 1},
+            preserve=["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+            edit_budget=1,
+            required_transitions=[
+                {"row": 2, "column": 2, "from": ".", "to": "#"},
+            ],
+        )))
+        contract = llm_client._build_revision_execution_contract(
+            plan,
+            "Close one local opening.",
+        )
+        with self.assertRaisesRegex(ValueError, "exactly match"):
+            llm_client.execute_revision_operations(
+                OPERATION_BASE_ROWS,
+                [
+                    {"row": 2, "column": 2, "from": ".", "to": "#"},
+                    {"row": 2, "column": 3, "from": ".", "to": "#"},
+                ],
+                contract,
+                1,
             )
 
     def test_enriched_contract_allows_one_cell_required_wall_transition(self):
@@ -523,18 +715,44 @@ class LLMClientTests(unittest.TestCase):
                 rows=OPERATION_BASE_ROWS,
             )
 
-    def test_english_coordinate_request_is_recovered_into_execution_brief(self):
-        brief = llm_client._execution_brief_from_text(
-            "Please suggest a concrete revision: change (2,2) from floor to wall.",
-            OPERATION_BASE_ROWS,
+    def test_legacy_guidance_protocol_accepts_the_exact_revision_plan_shape(self):
+        revision_plan = {
+            "objective": "Make the first route commitment more deliberate",
+            "changes": [{
+                "row": 2,
+                "column": 2,
+                "before": ".",
+                "after": "#",
+                "operation": "add_wall",
+            }],
+            "preserve": ["outer_shell", "boxes", "targets", "water"],
+            "rationale": "Reduce the direct opening.",
+            "expectedEffect": "The first route requires a nearby detour check.",
+        }
+        content = (
+            "I would close the local opening and compare the first push.\n"
+            "<GUIDANCE>PROPOSAL_SUMMARY: Add a wall at (2,2) || "
+            "PROPOSAL_RATIONALE: Compare the first push after the closure. || "
+            "REVISION_PLAN: "
+            + json.dumps(revision_plan, separators=(",", ":"))
+            + "</GUIDANCE>"
+        )
+        visible, _, offer, _ = llm_client._extract_plain_guidance(
+            content,
+            "en",
+            {},
+            rows=OPERATION_BASE_ROWS,
         )
 
-        self.assertIsNotNone(brief)
+        self.assertIn("first push", visible)
         self.assertEqual(
-            brief["requiredTransitions"],
+            offer["executionBrief"]["requiredTransitions"],
             [{"row": 2, "column": 2, "from": ".", "to": "#"}],
         )
-        self.assertEqual(brief["allowedOperators"], ["add_wall"])
+        self.assertNotIn("revisionPlan", offer)
+
+    def test_prose_coordinates_are_not_recovered_into_an_execution_brief(self):
+        self.assertFalse(hasattr(llm_client, "_execution_brief_from_text"))
 
     def test_repeated_coordinate_conflict_returns_plain_clarification_instead_of_502(self):
         content = (
@@ -701,11 +919,8 @@ class LLMClientTests(unittest.TestCase):
             "</GUIDANCE>"
         ])
 
-        self.assertEqual(result.guidance["move"], "offer_revision")
-        self.assertEqual(
-            result.guidance["proposalOffer"]["summary"],
-            "Link the lower target to the water edge",
-        )
+        self.assertNotEqual(result.guidance["move"], "offer_revision")
+        self.assertIsNone(result.guidance["proposalOffer"])
         self.assertNotIn("PROPOSAL_SUMMARY", result.assistant_message)
 
     def test_plain_reply_can_extract_intent_and_proposal_cards_together(self):
@@ -718,11 +933,10 @@ class LLMClientTests(unittest.TestCase):
             "</GUIDANCE>"
         ])
 
-        self.assertEqual(result.guidance["move"], "offer_revision")
+        self.assertNotEqual(result.guidance["move"], "offer_revision")
         self.assertIsNone(result.guidance["intentHypothesis"])
-        self.assertIsNotNone(result.guidance["proposalOffer"])
+        self.assertIsNone(result.guidance["proposalOffer"])
         self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
 
     def test_guidance_card_policy_keeps_only_the_confirmed_families(self):
         discussion = llm_client._apply_guidance_card_policy({
@@ -797,15 +1011,9 @@ class LLMClientTests(unittest.TestCase):
                 language="zh-CN",
             )
 
-        offer = result.guidance["proposalOffer"]
-        self.assertIn("目标点", offer["summary"])
-        self.assertIn("下方", offer["summary"])
-        self.assertIn("具体做法是", offer["rationale"])
-        self.assertNotEqual(offer["summary"], copied)
-        self.assertNotIn("你说得对", offer["rationale"])
+        self.assertIsNone(result.guidance["proposalOffer"])
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertIsNone(result.guidance["intentHypothesis"])
-        self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
 
     def test_proposal_card_rejects_a_bare_confirmation_as_its_title(self):
         content = (
@@ -815,10 +1023,7 @@ class LLMClientTests(unittest.TestCase):
         )
         result, _ = self.execute([content], language="zh-CN")
 
-        offer = result.guidance["proposalOffer"]
-        self.assertNotEqual(offer["summary"], "好")
-        self.assertIn("箱子", offer["summary"])
-        self.assertNotIn("“好”", offer["rationale"])
+        self.assertIsNone(result.guidance["proposalOffer"])
 
     def test_revision_direction_ignores_transition_meta_language(self):
         meta = "\u8fd9\u4e2a\u5224\u65ad\u4f1a\u76f4\u63a5\u5f71\u54cd\u6211\u63a5\u4e0b\u6765\u5efa\u8bae\u600e\u4e48\u8c03\u6574\u8def\u7ebf\u3002"
@@ -867,14 +1072,11 @@ class LLMClientTests(unittest.TestCase):
         )
 
         offer = result.guidance["proposalOffer"]
-        self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(len(client.chat.completions.calls), 2)
-        self.assertIsNotNone(offer)
-        self.assertNotIn(meta, offer["summary"])
-        self.assertIn("\u7ed5\u884c", offer["summary"])
-        self.assertIn("\u8def\u7ebf", offer["rationale"])
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertIsNone(offer)
         self.assertIn("\u5173\u952e\u7bb1\u5b50", result.assistant_message)
-        self.assertEqual(result.guidance["move"], "offer_revision")
+        self.assertNotEqual(result.guidance["move"], "offer_revision")
 
     def test_composing_a_reply_removes_repeated_card_text_but_keeps_analysis(self):
         body = (
@@ -1030,7 +1232,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIn("water-side route", result.assistant_message)
         self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(client.chat.completions.calls[1]["model"], "deepseek-v4-pro")
+        self.assertEqual(client.chat.completions.calls[1]["model"], "deepseek-v4-flash")
         self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_two_pure_generic_questions_return_low_quality_error(self):
@@ -1413,14 +1615,10 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertEqual(len(client.chat.completions.calls), 2)
-        self.assertEqual(result.guidance["move"], "offer_revision")
-        self.assertIsNotNone(result.guidance["proposalOffer"])
-        self.assertIn("绕行", result.guidance["proposalOffer"]["summary"])
-        self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertTrue(any(
-            cue["type"] == "manual_edit"
-            for cue in result.guidance["uiCues"]
-        ))
+        self.assertNotEqual(result.guidance["move"], "offer_revision")
+        self.assertIsNone(result.guidance["proposalOffer"])
+        self.assertIsNotNone(result.guidance["followUpQuestion"])
+        self.assertTrue(result.guidance["followUpQuestion"].strip())
         self.assertIn(
             "REVISION_ADVICE",
             client.chat.completions.calls[0]["messages"][0]["content"],
@@ -1447,11 +1645,8 @@ class LLMClientTests(unittest.TestCase):
             }],
         )
 
-        self.assertEqual(result.guidance["move"], "offer_revision")
-        self.assertEqual(
-            result.guidance["proposalOffer"]["executionBrief"]["requiredTransitions"],
-            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
-        )
+        self.assertNotEqual(result.guidance["move"], "offer_revision")
+        self.assertIsNone(result.guidance["proposalOffer"])
         self.assertEqual(len(client.chat.completions.calls), 2)
 
     def test_open_ended_help_gets_a_grounded_discussion_card_when_model_omits_metadata(self):
@@ -1642,11 +1837,9 @@ class LLMClientTests(unittest.TestCase):
                 stage_context={"recentGuidance": {}},
             )
 
-        self.assertEqual(result.guidance["move"], "offer_revision")
-        self.assertIsNone(result.guidance["intentHypothesis"])
-        self.assertIsNotNone(result.guidance["proposalOffer"])
-        self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertEqual(result.guidance["uiCues"][0]["type"], "manual_edit")
+        self.assertNotEqual(result.guidance["move"], "offer_revision")
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["proposalOffer"])
         self.assertNotIn("？", result.assistant_message)
         self.assertNotIn("吗", result.assistant_message)
 
@@ -1781,7 +1974,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(result.model, "deepseek-v4-pro")
+        self.assertEqual(result.model, "deepseek-v4-flash")
 
     def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
         response = revision_plan_payload()
@@ -1801,7 +1994,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         request = client.chat.completions.calls[0]
-        self.assertEqual(request["model"], "deepseek-v4-pro")
+        self.assertEqual(request["model"], "deepseek-v4-flash")
         self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_PLAN_MAX_TOKENS)
         self.assertEqual(request["response_format"], {"type": "json_object"})
         self.assertIn("semantic RevisionPlan", request["messages"][0]["content"])
@@ -1832,7 +2025,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result.proposed_rows)
-        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-pro")
+        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-flash")
         self.assertEqual(
             client.chat.completions.calls[0]["response_format"],
             {"type": "json_object"},
@@ -1925,7 +2118,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result.proposed_rows)
-        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-pro")
+        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-flash")
         self.assertIn("第7行第6到第8列", client.chat.completions.calls[0]["messages"][1]["content"])
 
     def test_help_me_do_inherits_a_confirmed_concrete_chinese_plan(self):
@@ -1964,7 +2157,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result.proposed_rows)
-        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-pro")
+        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-flash")
 
     def test_map_request_phrases_are_detected_without_matching_design_questions(self):
         positives = (
@@ -2103,7 +2296,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.attempts_used, 3)
         self.assertEqual(
             [call["model"] for call in client.chat.completions.calls],
-            ["deepseek-v4-pro", "deepseek-v4-pro", "deepseek-v4-pro"],
+            ["deepseek-v4-flash", "deepseek-v4-flash", "deepseek-v4-flash"],
         )
         self.assertIn(
             "strategies must contain one to three items",
@@ -2309,6 +2502,7 @@ class LLMClientTests(unittest.TestCase):
             focus={"row": 3, "column": 3, "radius": 1},
             preserve=["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
             edit_budget=3,
+            required_transitions=[],
         )))
         contract = llm_client._build_revision_execution_contract(
             plan,
@@ -2388,10 +2582,10 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(result.model, "deepseek-v4-pro")
+        self.assertEqual(result.model, "deepseek-v4-flash")
         self.assertEqual(
             [call["model"] for call in client.chat.completions.calls],
-            ["deepseek-v4-flash", "deepseek-v4-pro"],
+            ["deepseek-v4-flash", "deepseek-v4-flash"],
         )
         self.assertNotIn("response_format", client.chat.completions.calls[1])
 
@@ -2472,14 +2666,18 @@ class LLMClientTests(unittest.TestCase):
                 "timeout-test",
             )
 
+        self.assertEqual(llm_client.UNIFIED_MODEL, "deepseek-v4-flash")
+        self.assertEqual(llm_client.BACKEND_REQUEST_TIMEOUT_SECONDS, 60.0)
+        self.assertEqual(llm_client.LLM_INTERNAL_DEADLINE_SECONDS, 58.0)
         self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 60.0)
+        self.assertEqual(llm_client.PLAIN_CHAT_TIMEOUT_SECONDS, 60.0)
         self.assertEqual(llm_client.PRIMARY_ATTEMPT_TIMEOUT_SECONDS, 40.0)
         self.assertEqual(llm_client.CHAT_MAX_ATTEMPTS, 2)
         self.assertEqual(llm_client.PROPOSAL_GENERATION_ATTEMPTS, 2)
-        self.assertEqual(llm_client.PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, 18.0)
+        self.assertEqual(llm_client.PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, 22.0)
         self.assertEqual(llm_client.PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, 8.0)
-        self.assertEqual(llm_client.PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, 26.0)
-        self.assertEqual(llm_client.PROPOSAL_SEARCH_DEADLINE_SECONDS, 55.0)
+        self.assertEqual(llm_client.PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, 30.0)
+        self.assertEqual(llm_client.PROPOSAL_SEARCH_DEADLINE_SECONDS, 56.0)
         self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
         self.assertEqual(raised.exception.attempts_used, 2)
         self.assertEqual(len(client.chat.completions.calls), 2)
@@ -2767,7 +2965,7 @@ class LLMClientTests(unittest.TestCase):
             "modificationSummary": "Narrowed the lane.",
         }
 
-        with self.assertRaisesRegex(ValueError, "cannot include proposedRows"):
+        with self.assertRaisesRegex(ValueError, "requires exact requiredTransitions"):
             llm_client.validate_chat_response(payload)
 
     def test_manual_edit_and_warning_ui_cues_are_validated(self):

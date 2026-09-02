@@ -883,6 +883,39 @@ main {
     font-weight: 700;
 }
 
+.proposal-plan-details {
+    margin-top: 11px;
+    padding-top: 9px;
+    border-top: 2px solid rgba(57, 39, 82, 0.28);
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.proposal-plan-details h4 {
+    margin: 0 0 6px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+}
+
+.proposal-plan-details ul {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding-left: 19px;
+}
+
+.proposal-plan-detail-item,
+.proposal-plan-preserved {
+    font-weight: 800;
+    line-height: 1.45;
+}
+
+.proposal-plan-preserved {
+    margin: 7px 0 0;
+}
+
 .guidance-cue-manual-edit {
     color: #315d21;
     background: #d9ebbd;

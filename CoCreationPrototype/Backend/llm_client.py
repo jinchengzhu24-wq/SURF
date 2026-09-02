@@ -25,19 +25,23 @@ from proposal_search import (
 )
 from level_validation import build_map_facts, validate_and_solve
 from design_context import validate_design_context_patch
+from repository import map_fingerprint
 
 
-DEFAULT_MODEL = "deepseek-v4-flash"
-DEFAULT_PROPOSAL_MODEL = "deepseek-v4-pro"
+UNIFIED_MODEL = "deepseek-v4-flash"
+DEFAULT_MODEL = UNIFIED_MODEL
+DEFAULT_PROPOSAL_MODEL = UNIFIED_MODEL
 DEFAULT_BASE_URL = "https://api.deepseek.com"
+BACKEND_REQUEST_TIMEOUT_SECONDS = 60.0
+LLM_INTERNAL_DEADLINE_SECONDS = 58.0
 PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 40.0
-CHAT_TIMEOUT_SECONDS = 60.0
+CHAT_TIMEOUT_SECONDS = BACKEND_REQUEST_TIMEOUT_SECONDS
 CHAT_MAX_ATTEMPTS = 2
 PROPOSAL_GENERATION_ATTEMPTS = 2
-PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS = 18.0
+PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS = 22.0
 PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS = 8.0
-PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS = 26.0
-PROPOSAL_SEARCH_DEADLINE_SECONDS = 55.0
+PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS = 30.0
+PROPOSAL_SEARCH_DEADLINE_SECONDS = 56.0
 # The authorized revision now has two bounded LLM phases: a semantic plan and
 # concrete operation candidates.  Both use the existing proposal model config.
 REVISION_CONTRACT_SCHEMA_VERSION = 1
@@ -46,8 +50,8 @@ REVISION_MAX_CHANGED_CELLS = 12
 # Compatibility for older diagnostics and integrations that imported these names.
 PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
 CHAT_MAX_TOKENS = 1400
-PLAIN_CHAT_TIMEOUT_SECONDS = 25.0
-PLAIN_PRIMARY_TIMEOUT_SECONDS = 15.0
+PLAIN_CHAT_TIMEOUT_SECONDS = BACKEND_REQUEST_TIMEOUT_SECONDS
+PLAIN_PRIMARY_TIMEOUT_SECONDS = 30.0
 PLAIN_CHAT_MAX_TOKENS = 900
 PROPOSAL_MAX_TOKENS = 2400
 PROPOSAL_PLAN_MAX_TOKENS = 1400
@@ -76,6 +80,20 @@ DISAGREEMENT_SUBJECTS = {"ai_revision", "human_edit", "user_request"}
 DISAGREEMENT_RESOLUTIONS = {"user", "ai", "compromise", "retain_current"}
 
 
+def _unified_model_attempts(count):
+    """Return bounded attempts that all use the one configured production model."""
+    return [UNIFIED_MODEL] * max(1, int(count))
+
+
+def _request_deadline(started_at=None):
+    base = time.monotonic() if started_at is None else started_at
+    return base + LLM_INTERNAL_DEADLINE_SECONDS
+
+
+def _remaining_until(deadline):
+    return max(0.0, float(deadline) - time.monotonic())
+
+
 @dataclass(frozen=True)
 class LLMExecutionResult:
     assistant_message: str
@@ -91,6 +109,7 @@ class LLMExecutionResult:
     revision_contract: dict = field(default_factory=dict)
     revision_operations: list[dict] = field(default_factory=list)
     proposal_diagnostics: dict = field(default_factory=dict)
+    proposal_binding: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -139,11 +158,15 @@ def build_chat_messages(
     stage_context=None,
 ):
     serialized_map = "\n".join(rows)
+    numbered_map = "\n".join(
+        f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
+    )
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     map_facts = _map_facts_for_prompt(rows, stage_context)
+    prompt_stage_context = _prompt_stage_context(rows, stage_context)
     design_context_prompt = _design_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
     )
@@ -225,11 +248,15 @@ def build_chat_messages(
         "Treat the saved Stage as read-only until the designer accepts a validated "
         "proposal in the interface. Natural requests such as '你帮我改', '你来改吧', "
         "'按这个思路改', 'can you change it', and 'go ahead and revise it' first produce "
-        "a conceptual purple REVISION card. Ordinary chat must never generate map rows. "
+        "a purple REVISION card bound to an exact, server-checked change contract. Ordinary chat must never generate map rows. "
         "Only the structured execute_revision card action authorizes the two-agent revision "
         "pipeline and proposedRows. You may "
-        "proactively offer one concrete revision "
-        "direction and rationale, but that offer must not contain proposedRows. Never "
+        "proactively offer one concrete revision direction and rationale, but every revision offer "
+        "must also contain a complete hidden revisionPlan with objective, changes, preserve, rationale, "
+        "and expectedEffect. Each change must name one exact one-based row/column, its before and after "
+        "tile, and the matching operation. The server normalizes this plan into executionBrief; "
+        "if the direction cannot be resolved to those facts from the supplied map, ask for clarification "
+        "instead of offering an executable revision. The offer must not contain proposedRows. Never "
         "claim a proposal has been accepted, saved, or verified. Before proposedRows exist, "
         "never say the map has been changed, finished, or is ready to play. When proposedRows "
         "exist, describe them as a reviewable proposal that still awaits the designer's "
@@ -316,11 +343,16 @@ def build_chat_messages(
         "specific play moment, then say why it is worth watching. Avoid report-like lead-ins "
         "such as '我在意的是', '我想把注意力放在', or '比单看格子摆放更能说明'. "
         "proposalOffer must be null or "
-        'an object with summary, rationale, and optional executionBrief. executionBrief is a '
-        'machine-only object with schemaVersion 1, effect, anchors, focus, requiredTransitions, '
-        'allowedOperators, preserve, and playObjective. If the exchange names an exact coordinate '
+        'an object with summary, rationale, and mandatory revisionPlan for every revision offer. revisionPlan is a '
+        'machine-only object with exactly objective, changes, preserve, rationale, and expectedEffect. '
+        'Each changes item must contain row, column, before, after, and operation. The server validates '
+        'each item against the authoritative map and normalizes it into executionBrief with schemaVersion 1, '
+        'effect, anchors, focus, requiredTransitions, allowedOperators, preserve, and playObjective. If the exchange names an exact coordinate '
         'or from/to tile change, include it in requiredTransitions exactly; never substitute a nearby '
         'cell. The server will reject a brief whose coordinate or from tile conflicts with the saved map. '
+        'requiredTransitions must contain every exact intended cell change; it may not be empty for a revision offer. '
+        'If the edit is semantic but cannot yet be resolved to exact cells from the authoritative map facts, '
+        'do not output proposalOffer and ask a clarifying question instead. Never infer a transition from visible prose. '
         "uiCues must be an array of at most two unique objects with exactly type and "
         "text; type must be manual_edit or warning. The legacy tradeoff type is accepted "
         "by the application for historical data but must not be generated. "
@@ -370,11 +402,12 @@ def build_chat_messages(
         "deliver_revision, keep assistantMessage concise and frame the map as pending review.\n\n"
         f"{_map_grounding_contract()}\n\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
-        f"Current saved stage (12 x 10):\n{serialized_map}\n\n"
+        f"Current saved stage (12 x 10), with one-based row labels:\n{numbered_map}\n"
+        f"Canonical saved row strings (the same snapshot):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"{design_context_prompt}\n"
         f"{continuity_context_prompt}\n"
-        f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
+        f"Saved Stage context: {json.dumps(prompt_stage_context, ensure_ascii=False)}\n"
         f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
     )
@@ -398,11 +431,15 @@ def build_plain_chat_messages(
     stage_opening=False,
 ):
     serialized_map = "\n".join(rows)
+    numbered_map = "\n".join(
+        f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
+    )
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     map_facts = _map_facts_for_prompt(rows, stage_context)
+    prompt_stage_context = _prompt_stage_context(rows, stage_context)
     design_context_prompt = _design_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
     )
@@ -554,11 +591,12 @@ def build_plain_chat_messages(
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         f"{_map_grounding_contract()}\n\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
-        f"Current saved Stage (12 x 10):\n{serialized_map}\n\n"
+        f"Current saved Stage (12 x 10), with one-based row labels:\n{numbered_map}\n"
+        f"Canonical saved row strings (the same snapshot):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"{design_context_prompt}\n"
         f"{continuity_context_prompt}\n"
-        f"Saved Stage context: {json.dumps(stage_context, ensure_ascii=False)}\n"
+        f"Saved Stage context: {json.dumps(prompt_stage_context, ensure_ascii=False)}\n"
         f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
     )
@@ -588,18 +626,46 @@ def _llm_solver_evidence(solver_metrics):
 
 
 def _map_facts_for_prompt(rows, stage_context):
-    facts = (stage_context or {}).get("mapFacts")
-    if not isinstance(facts, dict):
-        try:
-            facts = build_map_facts(rows)
-        except ValueError:
-            # Production Stages are validated before reaching the model.  Keeping this
-            # fallback lets isolated prompt/timeout tests use intentionally incomplete grids.
-            facts = {
-                "available": False,
-                "reason": "The supplied rows are not a complete validated Stage.",
-            }
+    try:
+        # Always derive the current entity and tile facts from the exact rows
+        # passed to this agent.  A cached stageContext mapFacts object is only
+        # allowed to contribute parent-diff annotations after its tileAt
+        # snapshot matches; this prevents stale or hand-built context from
+        # disagreeing with the numbered map in the same prompt.
+        facts = build_map_facts(rows)
+        supplied = (stage_context or {}).get("mapFacts")
+        if (
+            isinstance(supplied, dict)
+            and supplied.get("tileAt") == facts.get("tileAt")
+            and isinstance(supplied.get("verifiedEntityChangesFromParent"), dict)
+        ):
+            facts["verifiedEntityChangesFromParent"] = supplied[
+                "verifiedEntityChangesFromParent"
+            ]
+    except ValueError:
+        # Production Stages are validated before reaching the model.  Keeping this
+        # fallback lets isolated prompt/timeout tests use intentionally incomplete grids.
+        facts = {
+            "available": False,
+            "reason": "The supplied rows are not a complete validated Stage.",
+        }
     return json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+
+
+def _prompt_stage_context(rows, stage_context):
+    """Expose only a consistent current snapshot in the chat prompt context."""
+    context = dict(stage_context or {})
+    context["mapFacts"] = json.loads(_map_facts_for_prompt(rows, stage_context))
+    try:
+        context["mapFingerprint"] = map_fingerprint(rows)
+    except (TypeError, ValueError):
+        context.pop("mapFingerprint", None)
+    # These are useful to the server's human-edit bookkeeping but are parent
+    # and child snapshots, not the current grid.  Sending them beside the
+    # current map gives the model an avoidable opportunity to mix snapshots.
+    context.pop("beforeRows", None)
+    context.pop("afterRows", None)
+    return context
 
 
 def _design_context_prompt(stage_context, role="chat"):
@@ -865,67 +931,6 @@ def _validate_coordinate_claims(text, rows):
             )
 
 
-def _execution_brief_from_text(text, rows):
-    """Recover a precise brief only when the visible text states one explicitly."""
-    source = str(text or "")
-    transitions = []
-    pattern = re.compile(
-        r"\(\s*(\d+)\s*[,，]\s*(\d+)\s*\)\s*"
-        r".{0,18}?(?:从|由|from)\s*(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|"
-        r"wall|floor|ground|water|box|crate|target|goal|player|start|#|\.|@|p|s|t)\s*"
-        r"(?:变成|改成|换成|变为|to|into|becomes?)\s*"
-        r"(墙体?|墙|地板|空地|水域?|水|箱子?|目标点?|玩家|起点|"
-        r"wall|floor|ground|water|box|crate|target|goal|player|start|#|\.|@|p|s|t)",
-        flags=re.IGNORECASE,
-    )
-    operator_map = {
-        (".", "#"): "add_wall", ("#", "."): "remove_wall",
-        (".", "@"): "add_water", ("@", "."): "remove_water",
-        ("p", "."): "move_player", ("s", "."): "move_box", ("t", "."): "move_target",
-    }
-    for match in pattern.finditer(source):
-        row, column = int(match.group(1)), int(match.group(2))
-        before = _tile_from_claim(match.group(3))
-        after = _tile_from_claim(match.group(4))
-        operator = operator_map.get((before, after))
-        if operator is None:
-            continue
-        transitions.append({"row": row, "column": column, "from": before, "to": after})
-    if not transitions:
-        return None
-    changed_components = {
-        "add_wall": "walls", "remove_wall": "walls",
-        "add_water": "water", "remove_water": "water",
-        "move_player": "player", "move_box": "boxes", "move_target": "targets",
-    }
-    operators = list(dict.fromkeys(operator_map.get((item["from"], item["to"])) for item in transitions))
-    preserve = ["outer_shell", "unrelated_areas", "boxes", "targets", "player", "water", "walls"]
-    for operator in operators:
-        component = changed_components[operator]
-        if component in preserve:
-            preserve.remove(component)
-    first = transitions[0]
-    return _validate_execution_brief({
-        "schemaVersion": 1,
-        "effect": (
-            "open_route" if any(item in {"remove_wall", "remove_water"} for item in operators)
-            else "narrow_route" if any(item in {"add_wall", "add_water"} for item in operators)
-            else "relocate_start" if "move_player" in operators
-            else "relocate_box" if "move_box" in operators
-            else "relocate_target"
-        ),
-        "anchors": [
-            anchor for anchor in ("P", "B1", "B2", "T1", "T2")
-            if re.search(rf"\b{re.escape(anchor)}\b", source, re.IGNORECASE)
-        ],
-        "focus": {"row": first["row"], "column": first["column"], "radius": 1},
-        "requiredTransitions": transitions,
-        "allowedOperators": operators,
-        "preserve": preserve,
-        "playObjective": "route_choice",
-    }, rows)
-
-
 def generate_stage_assessment(
     conversation,
     rows,
@@ -935,6 +940,7 @@ def generate_stage_assessment(
     request_id,
     stage_context=None,
 ):
+    deadline = _request_deadline()
     try:
         return generate_chat_reply(
             conversation,
@@ -946,6 +952,7 @@ def generate_stage_assessment(
             assessment_only=True,
             stage_context=stage_context,
             _max_attempts=1,
+            _deadline=deadline,
         )
     except LLMServiceError as exception:
         if exception.code not in {
@@ -971,6 +978,7 @@ def generate_stage_assessment(
             play_summary=play_summary,
             stage_context=stage_context,
             stage_opening=True,
+            deadline=deadline,
         )
 
 
@@ -985,7 +993,47 @@ def generate_chat_reply(
     proposal_validator=None,
     stage_context=None,
     _max_attempts=CHAT_MAX_ATTEMPTS,
+    _deadline=None,
 ):
+    deadline = _deadline or _request_deadline()
+    effective_stage_context = dict(stage_context or {})
+    explicit_action = effective_stage_context.get("explicitAction") or "none"
+
+    # The web server marks a validated exact contract as deterministic.  This
+    # path intentionally runs before API-key/model setup: the model is not
+    # allowed to reinterpret a frozen coordinate transition.
+    if (
+        explicit_action == "execute_revision"
+        and effective_stage_context.get("deterministicExactExecution")
+        and isinstance(effective_stage_context.get("authorizedExecutionBrief"), dict)
+    ):
+        try:
+            exact = _deterministic_exact_revision(
+                rows,
+                effective_stage_context["authorizedExecutionBrief"],
+                request_id,
+                language,
+                proposal_validator,
+            )
+        except LLMServiceError:
+            raise
+        except Exception as exception:
+            error = LLMServiceError(
+                "PROPOSAL_SEARCH_EXHAUSTED",
+                "The frozen execution contract could not produce a verified proposal.",
+                request_id,
+                False,
+                0,
+                422,
+            )
+            error.proposal_diagnostics = {
+                "source": "deterministic_contract",
+                "category": "exact_contract_execution",
+            }
+            raise error from exception
+        if exact is not None:
+            return exact
+
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
 
@@ -1003,9 +1051,7 @@ def generate_chat_reply(
         conversation,
         stage_context,
     )
-    effective_stage_context = dict(stage_context or {})
     effective_stage_context["responseLanguage"] = language
-    explicit_action = effective_stage_context.get("explicitAction") or "none"
 
     if explicit_action == "execute_revision":
         revision_state = "authorized"
@@ -1014,7 +1060,9 @@ def generate_chat_reply(
             str(source_offer.get(field) or "").strip()
             for field in ("summary", "rationale")
         ).strip() or revision_brief
-        if source_offer.get("executionBrief"):
+        if source_offer.get("executionBrief") and not effective_stage_context.get(
+            "proposalBindingFrozen"
+        ):
             effective_stage_context["authorizedExecutionBrief"] = source_offer[
                 "executionBrief"
             ]
@@ -1052,6 +1100,7 @@ def generate_chat_reply(
             solver_metrics=solver_metrics,
             play_summary=play_summary,
             stage_context=effective_stage_context,
+            deadline=deadline,
         )
 
     if proposal_request:
@@ -1065,6 +1114,7 @@ def generate_chat_reply(
             proposal_validator=proposal_validator,
             stage_context=effective_stage_context,
             baseline_metrics=solver_metrics,
+            deadline=deadline,
         )
 
     messages = build_chat_messages(
@@ -1076,20 +1126,8 @@ def generate_chat_reply(
         assessment_only,
         effective_stage_context,
     )
-    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    proposal_model = (
-        os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
-        or DEFAULT_PROPOSAL_MODEL
-    )
-    configured_fallback = os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip()
-    primary_model = proposal_model if proposal_request else default_model
-    fallback_model = configured_fallback or (
-        default_model if proposal_request else proposal_model
-    )
-    models = [primary_model]
-
-    if fallback_model != primary_model:
-        models.append(fallback_model)
+    primary_model = UNIFIED_MODEL
+    models = _unified_model_attempts(_max_attempts)
 
     task = "stage_assessment" if assessment_only else (
         "map_proposal" if proposal_request else "chat"
@@ -1101,7 +1139,7 @@ def generate_chat_reply(
         requestId=request_id,
         task=task,
         primaryModel=primary_model,
-        fallbackModel=models[1] if len(models) > 1 else None,
+        fallbackModel=None,
         timeoutSeconds=CHAT_TIMEOUT_SECONDS,
         responseMode="json_object",
     )
@@ -1123,9 +1161,10 @@ def generate_chat_reply(
                     proposal_validator=proposal_validator,
                     stage_context=effective_stage_context,
                     started_at=started_at,
+                    deadline=deadline,
                     max_attempts=_max_attempts,
                 ),
-                timeout=CHAT_TIMEOUT_SECONDS,
+                timeout=min(CHAT_TIMEOUT_SECONDS, _remaining_until(deadline)),
             )
         )
     except asyncio.TimeoutError as exception:
@@ -1161,17 +1200,11 @@ def _generate_revision_search_proposal_sync(
     proposal_validator,
     stage_context,
     baseline_metrics=None,
+    deadline=None,
 ):
     started_at = time.monotonic()
-    proposal_model = (
-        os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
-        or DEFAULT_PROPOSAL_MODEL
-    )
-    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    fallback_model = os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip() or default_model
-    models = [proposal_model]
-    if fallback_model != proposal_model:
-        models.append(fallback_model)
+    deadline = deadline or _request_deadline(started_at)
+    models = _unified_model_attempts(PROPOSAL_GENERATION_ATTEMPTS)
     movement_requirement = _authorized_movement_requirement(conversation)
     preserved_components = _authorized_preserved_components(
         conversation,
@@ -1190,7 +1223,7 @@ def _generate_revision_search_proposal_sync(
         requestId=request_id,
         task="revision_plan",
         primaryModel=models[0],
-        fallbackModel=models[1] if len(models) > 1 else None,
+        fallbackModel=None,
         timeoutSeconds=CHAT_TIMEOUT_SECONDS,
         responseMode="revision_plan",
     )
@@ -1204,8 +1237,15 @@ def _generate_revision_search_proposal_sync(
                     messages=messages,
                     request_id=request_id,
                     started_at=started_at,
+                    deadline=min(
+                        deadline,
+                        started_at + PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+                    ),
                 ),
-                timeout=PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+                timeout=min(
+                    PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+                    _remaining_until(deadline),
+                ),
             )
         )
     except asyncio.TimeoutError as exception:
@@ -1246,6 +1286,7 @@ def _generate_revision_search_proposal_sync(
         stage_context.get("authorizedExecutionBrief") if stage_context else None,
     )
     try:
+        _require_exact_revision_plan(plan)
         revision_contract = _build_revision_execution_contract(
             plan,
             stage_context.get("authorizedRevisionBrief") if stage_context else "",
@@ -1279,7 +1320,7 @@ def _generate_revision_search_proposal_sync(
         error.revision_contract = revision_contract
         error.proposal_diagnostics = {"category": "coordinate_or_contract_conflict"}
         raise error from exception
-    remaining_seconds = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+    remaining_seconds = _remaining_until(deadline)
     if remaining_seconds <= 0:
         error = LLMServiceError(
             "UPSTREAM_TIMEOUT",
@@ -1315,6 +1356,7 @@ def _generate_revision_search_proposal_sync(
                     revision_contract=revision_contract,
                     baseline_metrics=baseline_metrics,
                     started_at=started_at,
+                    deadline=deadline,
                 ),
                 timeout=remaining_seconds,
             )
@@ -1349,6 +1391,7 @@ def _generate_revision_search_proposal_sync(
                 movement_requirement=movement_requirement,
                 preserved_components=preserved_components,
                 started_at=started_at,
+                deadline=deadline,
             )
         except ProposalSearchExhausted as search_exception:
             diagnostics = dict(getattr(exception, "proposal_diagnostics", {}) or {})
@@ -1459,11 +1502,24 @@ def _bind_execution_brief_to_plan(plan, execution_brief):
         operators=operators,
         preserve=preserve,
         edit_budget=min(12, edit_budget),
-        required_transitions=transitions or first.required_transitions,
+        required_transitions=transitions,
         anchor_entities=tuple(execution_brief.get("anchors") or first.anchor_entities),
         play_objective=execution_brief.get("playObjective") or first.play_objective,
     )
-    return replace(plan, strategies=(bound_first, *plan.strategies[1:]))
+    # Once the server has frozen exact transitions, alternatives from the
+    # semantic planner are not additional permission to edit other cells.
+    return replace(plan, strategies=(bound_first,))
+
+
+def _require_exact_revision_plan(plan):
+    """Require every executable strategy to name its complete cell diff."""
+    if not plan.strategies or any(
+        not strategy.required_transitions for strategy in plan.strategies
+    ):
+        raise ValueError(
+            "RevisionPlan must contain non-empty requiredTransitions for every strategy."
+        )
+    return plan
 
 
 def _build_revision_plan_messages(
@@ -1509,24 +1565,27 @@ def _build_revision_plan_messages(
     # DesignContext projection.
     transcript = [latest_user] if latest_user else []
     system_prompt = (
-        "You are the Sokoban co-creation chat assistant. Compile a designer-authorized revision "
-        "for one saved 12x10 Stage into a detailed, executable semantic RevisionPlan. Do not "
-        "generate map rows, coordinates to edit, or tile operations; a separate level revision "
-        "assistant will execute this plan. The application owns all cell changes, structural "
+        "You are the Sokoban co-creation revision-planning assistant. Compile a designer-authorized semantic RevisionPlan "
+        "for one saved 12x10 Stage into a detailed, executable RevisionPlan. Resolve the intended "
+        "change into exact one-based coordinates and before/after tile states using only the authoritative "
+        "map facts below. Do not generate map rows or tile operations. Do not generate full map rows; do not return map rows or tile operations; a separate level revision assistant may realize "
+        "the frozen transitions, while the application owns all cell changes, structural "
         "validation, and solvability. Preserve the authorized direction and every explicit "
         "prohibition. Treat unmentioned areas as protected. Return JSON only with exactly one key, strategies, "
         "containing one to three objects. Every strategy has exactly: effect, focus, operators, "
-        "preserve, editBudget, metricGoals. effect is one of open_route, narrow_route, "
+        "preserve, editBudget, metricGoals, requiredTransitions, anchorEntities, and playObjective. "
+        "effect is one of open_route, narrow_route, "
         "adjust_internal_walls, relocate_start, relocate_box, relocate_target, reshape_water, "
         "change_box_order. focus is null or {row,column,radius}; coordinates are one-based, row "
         "1..10, column 1..12, radius 1..3. operators contains one to three distinct values from "
         "add_wall, remove_wall, move_player, move_box, move_target, add_water, remove_water. "
         "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
         "walls, unrelated_areas. Never list an operator that edits a preserved component. "
-        "Each strategy may also include requiredTransitions (a list of exact one-based "
+        "Each strategy must include requiredTransitions (a non-empty list of every exact one-based "
         "row/column/from/to changes), anchorEntities (P, B1, B2, T1, T2), and playObjective. "
-        "When the authorized brief names an exact coordinate or tile transition, requiredTransitions "
-        "is mandatory and hard: do not replace it with a nearby cell or another operator. "
+        "requiredTransitions is mandatory and hard: do not replace a requested cell with a nearby cell "
+        "or another operator. If the direction is under-specified, do not guess; the caller will ask "
+        "the designer for clarification. "
         "focus must contain every required transition. editBudget is an integer 1..12; a single "
         "structural tile change may use budget 1, while moving a player, box, or target requires "
         "two paired cells. Set the budget to the smallest honest upper bound, never a range that "
@@ -1538,6 +1597,9 @@ def _build_revision_plan_messages(
         "request, select operators that can realize the effect, and use metricGoals when the "
         "designer clearly requests a measurable change. The first strategy is preferred and any "
         "later strategies are strict alternatives, not permission to weaken the request. Natural-language reasoning is internal. "
+        "The numbered map and Deterministic Map Facts below are generated from the same current "
+        "saved snapshot; never reconcile them by guessing or by preferring a coordinate from "
+        "conversation text. "
         + _map_grounding_contract() + " "
         f"Interpret conversation in {response_language}."
     )
@@ -1550,6 +1612,7 @@ def _build_revision_plan_messages(
         f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule} {movement_rule} "
         f"{preservation_rule}\n\n"
         "Column ruler (one-based): 123456789012\n"
+        f"Map snapshot fingerprint for this planning pass: {map_fingerprint(rows)}\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Focus editable-cell facts (authoritative):\n{edit_facts}\n\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
@@ -1736,6 +1799,7 @@ async def _compile_revision_plan(
     messages,
     request_id,
     started_at,
+    deadline=None,
     max_attempts=PROPOSAL_GENERATION_ATTEMPTS,
     initial_validation_feedback=None,
     first_attempt_timeout=PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS,
@@ -1743,12 +1807,16 @@ async def _compile_revision_plan(
     last_error = None
     validation_feedback = initial_validation_feedback
     first_failure_code = None
+    deadline = deadline or min(
+        _request_deadline(started_at),
+        started_at + PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+    )
     for attempt in range(1, max_attempts + 1):
         if attempt == 1 or first_failure_code == "MODEL_RESPONSE_INVALID":
             model = models[0]
         else:
             model = models[1] if len(models) > 1 else models[0]
-        remaining = PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        remaining = _remaining_until(deadline)
         if remaining <= 0:
             raise asyncio.TimeoutError()
         attempt_timeout = min(
@@ -1848,8 +1916,9 @@ def _revision_plan_messages_with_feedback(messages, validation_feedback):
     instruction = (
         "The previous RevisionPlan was rejected for this safe reason: "
         f"{validation_feedback} Return a fresh RevisionPlan JSON object. Keep the authorized "
-        "brief, explicit prohibitions, and preserve-unlisted contract unchanged. Do not return "
-        "map rows or tile operations."
+        "brief, explicit prohibitions, and preserve-unlisted contract unchanged. Return every "
+        "intended edit as an exact requiredTransition. Do not return map rows or tile operations; do not return full map rows or leave the "
+        "transition list empty."
     )
     corrected[0]["content"] = f"{corrected[0]['content']}\n\n{instruction}"
     return corrected
@@ -1866,16 +1935,7 @@ def _generate_map_proposal_sync(
     proposal_validator,
     stage_context,
 ):
-    proposal_model = (
-        os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
-        or DEFAULT_PROPOSAL_MODEL
-    )
-    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    configured_fallback = os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip()
-    fallback_model = configured_fallback or default_model
-    models = [proposal_model]
-    if fallback_model != proposal_model:
-        models.append(fallback_model)
+    models = _unified_model_attempts(PROPOSAL_GENERATION_ATTEMPTS)
     legacy_contract = _build_legacy_revision_execution_contract(stage_context)
     messages = _build_map_operation_messages(
         legacy_contract,
@@ -1884,12 +1944,13 @@ def _generate_map_proposal_sync(
         stage_context,
     )
     started_at = time.monotonic()
+    deadline = _request_deadline(started_at)
     _log_llm_event(
         "llm_request_started",
         requestId=request_id,
         task="map_proposal",
         primaryModel=models[0],
-        fallbackModel=models[1] if len(models) > 1 else None,
+        fallbackModel=None,
         timeoutSeconds=CHAT_TIMEOUT_SECONDS,
         responseMode="operation_candidates",
     )
@@ -1908,8 +1969,9 @@ def _generate_map_proposal_sync(
                     revision_contract=legacy_contract,
                     baseline_metrics=None,
                     started_at=started_at,
+                    deadline=deadline,
                 ),
-                timeout=CHAT_TIMEOUT_SECONDS,
+                timeout=min(CHAT_TIMEOUT_SECONDS, _remaining_until(deadline)),
             )
         )
     except asyncio.TimeoutError as exception:
@@ -2044,11 +2106,13 @@ def _build_map_operation_messages(
         if strategy.get("focus") is not None
     ]
     solver_evidence = _llm_solver_evidence(baseline_metrics or {})
+    modifier_contract = _modifier_contract_view(revision_contract)
     system_prompt = (
         "You are the Sokoban co-creation level revision assistant. The saved 12x10 Stage is "
         "immutable input. Execute only the supplied execution contract; do not reinterpret the "
         "designer's request, invent a broader goal, or use any conversation outside the contract. "
-        "Return only concrete cell-operation candidates. The application constructs the complete "
+        "Return only concrete cell-operation candidates. The numbered map and Deterministic "
+        "Map Facts in this request are one synchronized snapshot. The application constructs the complete "
         "map, enforces the contract, checks structure, and runs the deterministic solver. "
         "Every candidate must make a meaningful, coherent local change within the contract. Do "
         "not add unrelated cells just to make a diff. Never edit void cells or the connected outer "
@@ -2056,9 +2120,10 @@ def _build_map_operation_messages(
         "map structurally valid with exactly one player and matching box/target pairs. Produce up "
         "to three distinct candidates, each tagged with its strategyIndex. Coordinates are one-based. "
         "Each operation must contain row, column, and to, and may include from as a claim that the "
-        "server will verify against the real before tile. Required transitions are hard constraints: "
-        "implement every one exactly before considering optional edits. Never replace a required "
-        "remove_wall with a box/player move. "
+        "server will verify against the real before tile. Required transitions are the complete "
+        "frozen edit set: when they are present, return exactly those transitions and do not add "
+        "optional or compensating edits. Never replace a required remove_wall with a box/player "
+        "move. "
         "A moved player, box, or target requires paired operations that clear the old cell and place "
         "the entity on a current floor cell. Return JSON only with exactly this shape: "
         "{\"candidates\":[{\"strategyIndex\":1,\"operations\":[{\"row\":5,"
@@ -2067,9 +2132,11 @@ def _build_map_operation_messages(
         f"Natural-language reasoning is internal; any unavoidable text must use {response_language}."
     )
     user_prompt = (
-        "The following contract is authoritative and is the only revision instruction:\n"
-        f"{json.dumps(revision_contract, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        "The following contract is authoritative and is the only revision instruction. The "
+        "map rows and facts below are the exact snapshot for this planning pass:\n"
+        f"{json.dumps(modifier_contract, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "Column ruler (one-based): 123456789012\n"
+        f"Map snapshot fingerprint for this execution pass: {map_fingerprint(rows)}\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
         f"Focus editable-cell facts (authoritative):\n{json.dumps(focus_facts, ensure_ascii=False, separators=(',', ':'))}\n\n"
         f"Current saved Stage:\n{numbered_map}\n\n"
@@ -2080,6 +2147,40 @@ def _build_map_operation_messages(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+
+
+def _modifier_contract_view(revision_contract):
+    """Expose only the frozen, executable fields to the operation agent.
+
+    The modifier is deliberately not given the Chat/RevisionPlan prose.  It
+    receives the immutable cell contract and enough local constraints to
+    produce an operation candidate that can be replayed by the server.
+    """
+    strategies = []
+    for strategy in revision_contract.get("strategies") or []:
+        strategies.append({
+            "strategyIndex": strategy.get("strategyIndex"),
+            "effect": strategy.get("effect"),
+            "focus": strategy.get("focus"),
+            "allowedOperators": list(strategy.get("allowedOperators") or []),
+            "preserve": list(strategy.get("preserve") or []),
+            "minimumChangedCells": strategy.get("minimumChangedCells"),
+            "maximumChangedCells": strategy.get("maximumChangedCells"),
+            "metricGoals": list(strategy.get("metricGoals") or []),
+            "requiredTransitions": [
+                {
+                    key: item.get(key)
+                    for key in ("row", "column", "from", "to")
+                }
+                for item in strategy.get("requiredTransitions") or []
+            ],
+            "anchorEntities": list(strategy.get("anchorEntities") or []),
+            "playObjective": strategy.get("playObjective"),
+        })
+    return {
+        "schemaVersion": revision_contract.get("schemaVersion", 1),
+        "strategies": strategies,
+    }
 
 
 async def _generate_map_operation_candidates(
@@ -2095,17 +2196,19 @@ async def _generate_map_operation_candidates(
     revision_contract,
     baseline_metrics,
     started_at,
+    deadline=None,
 ):
     last_error = None
     validation_feedback = None
     attempted_candidate_count = 0
+    deadline = deadline or _request_deadline(started_at)
     attempted_models = list(models[:PROPOSAL_GENERATION_ATTEMPTS])
     while len(attempted_models) < PROPOSAL_GENERATION_ATTEMPTS:
         attempted_models.append(models[0])
 
     for attempt, configured_model in enumerate(attempted_models, start=1):
         model = models[0] if validation_feedback is not None else configured_model
-        remaining = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        remaining = _remaining_until(deadline)
         if remaining <= 0:
             raise asyncio.TimeoutError()
         attempt_timeout = min(PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, remaining)
@@ -2282,6 +2385,7 @@ def _deterministic_revision_fallback(
     movement_requirement,
     preserved_components,
     started_at,
+    deadline=None,
 ):
     """Use the bounded local search when the modifier model cannot supply a valid candidate."""
     result = search_revision_plan(
@@ -2289,7 +2393,10 @@ def _deterministic_revision_fallback(
         plan,
         proposal_validator or validate_and_solve,
         baseline_metrics=baseline_metrics,
-        deadline=started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
+        deadline=min(
+            deadline or _request_deadline(started_at),
+            started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
+        ),
         movement_requirement=movement_requirement,
         preserved_components=preserved_components,
     )
@@ -2497,6 +2604,118 @@ def execute_revision_operations(base_rows, operations, revision_contract, strate
     return rows
 
 
+def _deterministic_exact_revision(
+    rows,
+    execution_brief,
+    request_id,
+    language,
+    proposal_validator,
+):
+    """Execute a frozen transition contract without asking an LLM to guess cells."""
+    brief = _validate_execution_brief(execution_brief, rows)
+    transitions = brief["requiredTransitions"]
+    if not transitions:
+        return None
+
+    operator_by_transition = {
+        (".", "#"): "add_wall",
+        ("#", "."): "remove_wall",
+        (".", "@"): "add_water",
+        ("@", "."): "remove_water",
+        ("p", "."): "move_player",
+        (".", "p"): "move_player",
+        ("s", "."): "move_box",
+        (".", "s"): "move_box",
+        ("t", "."): "move_target",
+        (".", "t"): "move_target",
+    }
+    operators = list(dict.fromkeys(
+        operator_by_transition[(item["from"], item["to"])]
+        for item in transitions
+    ))
+    if len(operators) > 3:
+        raise LLMServiceError(
+            "PROPOSAL_SEARCH_EXHAUSTED",
+            "The frozen transition contract is too broad for one local proposal.",
+            request_id,
+            False,
+            0,
+            422,
+        )
+
+    effect = brief.get("effect")
+    effect_by_operator = {
+        "add_wall": "adjust_internal_walls",
+        "remove_wall": "open_route",
+        "add_water": "reshape_water",
+        "remove_water": "open_route",
+        "move_player": "relocate_start",
+        "move_box": "relocate_box",
+        "move_target": "relocate_target",
+    }
+    if effect is None:
+        effect = effect_by_operator[operators[0]]
+    focus = brief.get("focus")
+    if focus is None:
+        first = transitions[0]
+        focus = {"row": first["row"], "column": first["column"], "radius": 1}
+    entity_operator = any(operator.startswith("move_") for operator in operators)
+    edit_budget = max(len(transitions), 2 if entity_operator else 1)
+    plan = parse_revision_plan({
+        "strategies": [{
+            "effect": effect,
+            "focus": focus,
+            "operators": operators,
+            "preserve": brief.get("preserve") or [],
+            "editBudget": edit_budget,
+            "metricGoals": [],
+            "requiredTransitions": transitions,
+            "anchorEntities": brief.get("anchors") or [],
+            "playObjective": brief.get("playObjective"),
+        }],
+    })
+    validate_revision_plan_against_map(rows, plan)
+    contract = _build_revision_execution_contract(plan, "", {})
+    operations = [
+        {
+            "row": item["row"],
+            "column": item["column"],
+            "from": item["from"],
+            "to": item["to"],
+        }
+        for item in transitions
+    ]
+    proposed_rows = execute_revision_operations(rows, operations, contract, 1)
+    if proposal_validator is not None:
+        proposal_validator(proposed_rows)
+    changed = _changed_cell_count(rows, proposed_rows)
+    return LLMExecutionResult(
+        assistant_message="",
+        attempts_used=0,
+        request_id=request_id,
+        model="deterministic-exact-contract",
+        proposed_rows=proposed_rows,
+        revision_plan=plan.as_dict(),
+        revision_contract=contract,
+        revision_operations=operations,
+        proposal_diagnostics={
+            "source": "deterministic_contract",
+            "changedCellCount": changed,
+            "candidateCount": 1,
+            "modifierAttempts": 0,
+        },
+        guidance={
+            "move": "deliver_revision",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+        },
+    )
+
+
 def _apply_map_operations(
     base_rows,
     operations,
@@ -2637,8 +2856,10 @@ def _validate_operation_contract(operations, strategy):
             (y + 1, x + 1, before, after)
             for x, y, before, after in operations
         }
-        if not required.issubset(observed_transitions):
-            raise ValueError("operations do not implement every required tile transition")
+        if observed_transitions != required:
+            raise ValueError(
+                "operations must exactly match the frozen required tile transitions"
+            )
 
 
 def _validate_metric_goals(goals, baseline_metrics, validation):
@@ -2744,6 +2965,7 @@ def _generate_plain_chat_sync(
     play_summary,
     stage_context,
     stage_opening=False,
+    deadline=None,
 ):
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
@@ -2758,16 +2980,7 @@ def _generate_plain_chat_sync(
             503,
         )
 
-    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    fallback_model = (
-        os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip()
-        or os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
-        or DEFAULT_PROPOSAL_MODEL
-    )
-    models = [default_model]
-
-    if fallback_model != default_model:
-        models.append(fallback_model)
+    models = _unified_model_attempts(CHAT_MAX_ATTEMPTS)
 
     messages = build_plain_chat_messages(
         conversation,
@@ -2785,12 +2998,13 @@ def _generate_plain_chat_sync(
     )
     task = "stage_assessment_fallback" if stage_opening else "chat"
     started_at = time.monotonic()
+    deadline = deadline or _request_deadline(started_at)
     _log_llm_event(
         "llm_request_started",
         requestId=request_id,
         task=task,
         primaryModel=models[0],
-        fallbackModel=models[1] if len(models) > 1 else None,
+        fallbackModel=None,
         timeoutSeconds=PLAIN_CHAT_TIMEOUT_SECONDS,
         responseMode="plain_text",
         guidanceMode=guidance_mode,
@@ -2814,8 +3028,9 @@ def _generate_plain_chat_sync(
                     stage_context=stage_context,
                     guidance_mode=guidance_mode,
                     started_at=started_at,
+                    deadline=deadline,
                 ),
-                timeout=PLAIN_CHAT_TIMEOUT_SECONDS,
+                timeout=min(PLAIN_CHAT_TIMEOUT_SECONDS, _remaining_until(deadline)),
             )
         )
     except asyncio.TimeoutError as exception:
@@ -2832,7 +3047,7 @@ def _generate_plain_chat_sync(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not complete the request before the 25 second limit.",
+            "DeepSeek did not complete the request before the 60 second limit.",
             request_id,
             True,
             min(len(models), CHAT_MAX_ATTEMPTS),
@@ -2881,24 +3096,16 @@ def translate_turns(items, target_language, request_id):
             "content": json.dumps({"items": items}, ensure_ascii=False),
         },
     ]
-    default_model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    fallback_model = (
-        os.getenv("DEEPSEEK_FALLBACK_MODEL", "").strip()
-        or os.getenv("DEEPSEEK_PROPOSAL_MODEL", DEFAULT_PROPOSAL_MODEL).strip()
-        or DEFAULT_PROPOSAL_MODEL
-    )
-    models = [default_model]
-
-    if fallback_model != default_model:
-        models.append(fallback_model)
+    models = _unified_model_attempts(CHAT_MAX_ATTEMPTS)
 
     started_at = time.monotonic()
+    deadline = _request_deadline(started_at)
     _log_llm_event(
         "llm_request_started",
         requestId=request_id,
         task="translation",
         primaryModel=models[0],
-        fallbackModel=models[1] if len(models) > 1 else None,
+        fallbackModel=None,
         timeoutSeconds=CHAT_TIMEOUT_SECONDS,
         responseMode="json_object",
     )
@@ -2914,8 +3121,9 @@ def translate_turns(items, target_language, request_id):
                     items=items,
                     request_id=request_id,
                     started_at=started_at,
+                    deadline=deadline,
                 ),
-                timeout=CHAT_TIMEOUT_SECONDS,
+                timeout=min(CHAT_TIMEOUT_SECONDS, _remaining_until(deadline)),
             )
         )
     except asyncio.TimeoutError as exception:
@@ -2949,12 +3157,14 @@ async def _translate_with_model_fallback(
     items,
     request_id,
     started_at,
+    deadline=None,
 ):
     last_error = None
     validation_feedback = None
+    deadline = deadline or _request_deadline(started_at)
 
     for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
-        remaining = CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        remaining = _remaining_until(deadline)
         response_fields = _empty_response_diagnostics()
 
         if remaining <= 0:
@@ -3099,12 +3309,14 @@ async def _generate_plain_with_model_fallback(
     stage_context,
     guidance_mode,
     started_at,
+    deadline=None,
 ):
     last_error = None
     validation_feedback = None
+    deadline = deadline or _request_deadline(started_at)
 
     for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
-        remaining = PLAIN_CHAT_TIMEOUT_SECONDS - (time.monotonic() - started_at)
+        remaining = _remaining_until(deadline)
 
         if remaining <= 0:
             raise asyncio.TimeoutError()
@@ -3178,6 +3390,7 @@ async def _generate_plain_with_model_fallback(
                 language,
                 stage_context,
             )
+            proposal_binding_downgraded = False
             intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = (
                 _apply_deterministic_guidance_fallback(
                     messages,
@@ -3201,24 +3414,25 @@ async def _generate_plain_with_model_fallback(
                     _latest_role_content(messages[:-1], "assistant"),
                     language,
                 )
-                if proposal_offer is not None and not proposal_offer.get("executionBrief"):
-                    inferred_brief = _execution_brief_from_text(
-                        " ".join(
-                            str(proposal_offer.get(field) or "")
-                            for field in ("summary", "rationale")
-                        )
-                        + " "
-                        + visible_content
-                        + " "
-                        + _latest_role_content(messages, "user"),
-                        rows,
-                    )
-                    if inferred_brief:
-                        proposal_offer["executionBrief"] = inferred_brief
+                if proposal_offer is not None and proposal_offer_requires_execution_brief(
+                    proposal_offer,
+                    visible_content,
+                    proposal_offer.get("summary"),
+                    proposal_offer.get("rationale"),
+                    _latest_role_content(messages, "user"),
+                ):
+                    # Keep the model's visible prose, but do not expose a
+                    # purple card that cannot be tied to a saved tile state. A
+                    # conceptual chat reply must not spend its remaining wall
+                    # clock on a second model call just to repair optional metadata.
+                    proposal_offer = None
+                    proposal_binding_downgraded = True
+                    guidance_fallback_used = True
             if (
                 guidance_mode == "revision_advice"
                 and proposal_offer is None
                 and attempt < len(models[:CHAT_MAX_ATTEMPTS])
+                and not proposal_binding_downgraded
             ):
                 raise ValueError(
                     "REVISION_ADVICE requires a substantive proposalOffer card."
@@ -3412,25 +3626,6 @@ async def _generate_plain_with_model_fallback(
                     guidance["followUpQuestion"] = repaired["followUpQuestion"]
                     guidance["uiCues"] = repaired["uiCues"]
                 guidance_fallback_used = True
-            if guidance.get("proposalOffer") and not guidance["proposalOffer"].get(
-                "executionBrief"
-            ):
-                # Binding/repair can replace an abstract model offer. Re-attach any
-                # exact transition stated by the user's request after that repair so
-                # the hidden execution contract cannot lose its hard coordinate.
-                inferred_brief = _execution_brief_from_text(
-                    " ".join(
-                        str(guidance["proposalOffer"].get(field) or "")
-                        for field in ("summary", "rationale")
-                    )
-                    + " "
-                    + visible_content
-                    + " "
-                    + _latest_role_content(messages, "user"),
-                    rows,
-                )
-                if inferred_brief:
-                    guidance["proposalOffer"]["executionBrief"] = inferred_brief
             grounding_texts = [
                 body,
                 guidance.get("followUpQuestion"),
@@ -3611,9 +3806,11 @@ async def _generate_with_model_fallback(
     stage_context,
     started_at,
     max_attempts,
+    deadline=None,
 ):
     last_error = None
     validation_feedback = None
+    deadline = deadline or _request_deadline(started_at)
 
     for attempt, configured_model in enumerate(models[:max_attempts], start=1):
         model = (
@@ -3622,7 +3819,7 @@ async def _generate_with_model_fallback(
             else configured_model
         )
         elapsed = time.monotonic() - started_at
-        remaining = CHAT_TIMEOUT_SECONDS - elapsed
+        remaining = _remaining_until(deadline)
         response_fields = _empty_response_diagnostics()
 
         if remaining <= 0:
@@ -3684,22 +3881,20 @@ async def _generate_with_model_fallback(
             # The model-facing JSON may still describe a precise user request only in
             # the latest chat turn. Preserve that hard coordinate transition before
             # the conceptual offer is persisted, just as the plain-text path does.
-            if validated[4].get("proposalOffer") is not None and not validated[4][
-                "proposalOffer"
-            ].get("executionBrief"):
-                inferred_brief = _execution_brief_from_text(
-                    " ".join(
-                        str(validated[4]["proposalOffer"].get(field) or "")
-                        for field in ("summary", "rationale")
+            if validated[4].get("proposalOffer") is not None and proposal_offer_requires_execution_brief(
+                validated[4]["proposalOffer"],
+                validated[0],
+                validated[4]["proposalOffer"].get("summary"),
+                validated[4]["proposalOffer"].get("rationale"),
+                _latest_role_content(messages, "user"),
+            ):
+                if attempt < len(models[:max_attempts]):
+                    raise ValueError(
+                        "An exact coordinate edit requires a server-validated executionBrief."
                     )
-                    + " "
-                    + validated[0]
-                    + " "
-                    + _latest_role_content(messages, "user"),
-                    rows,
-                )
-                if inferred_brief:
-                    validated[4]["proposalOffer"]["executionBrief"] = inferred_brief
+                validated[4]["proposalOffer"] = None
+                if validated[4].get("move") == "offer_revision":
+                    validated[4]["move"] = "offer_perspective"
 
             if task == "map_proposal" and validated[2] is None:
                 raise ValueError(
@@ -4117,20 +4312,6 @@ def validate_chat_response(
             "",
             language,
         )
-        if guidance["proposalOffer"] is not None and not guidance["proposalOffer"].get(
-            "executionBrief"
-        ) and rows is not None:
-            inferred_brief = _execution_brief_from_text(
-                " ".join(
-                    str(guidance["proposalOffer"].get(field) or "")
-                    for field in ("summary", "rationale")
-                )
-                + " "
-                + assistant_message,
-                rows,
-            )
-            if inferred_brief:
-                guidance["proposalOffer"]["executionBrief"] = inferred_brief
     stage_one_opening = assessment_only and _is_stage_one(stage_context)
     deterministic_opening_question = None
 
@@ -5031,7 +5212,7 @@ def _extract_plain_guidance(
 
     for raw_line in re.split(r"\s*\|\|\s*|[\r\n]+", block_tail[:closing_index]):
         match = re.match(
-            r"^(WARNING|MANUAL_EDIT|INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE|EXECUTION_BRIEF)\s*:\s*(.+?)\s*$",
+            r"^(WARNING|MANUAL_EDIT|INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE|EXECUTION_BRIEF|REVISION_PLAN)\s*:\s*(.+?)\s*$",
             raw_line.strip(),
         )
 
@@ -5048,6 +5229,19 @@ def _extract_plain_guidance(
     summary = fields.get("PROPOSAL_SUMMARY")
     rationale = fields.get("PROPOSAL_RATIONALE")
     execution_brief = None
+    revision_plan = None
+    if fields.get("REVISION_PLAN"):
+        try:
+            revision_plan = _validate_revision_plan_payload(
+                json.loads(fields["REVISION_PLAN"]),
+                rows,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exception:
+            if rows is not None:
+                raise ValueError(
+                    f"revisionPlan is invalid for the saved Stage: {exception}"
+                ) from exception
+            revision_plan = None
     if fields.get("EXECUTION_BRIEF"):
         try:
             execution_brief = _validate_execution_brief(
@@ -5060,6 +5254,8 @@ def _extract_plain_guidance(
                     f"executionBrief is invalid for the saved Stage: {exception}"
                 ) from exception
             execution_brief = None
+    if revision_plan is not None:
+        execution_brief = revision_plan
     proposal_offer = (
         {
             "summary": summary[:600],
@@ -5697,6 +5893,25 @@ def _proposal_body_has_playable_support(body, language):
     ]
 
 
+def _proposal_offer_has_exact_execution_plan(proposal_offer):
+    """Return whether a proposal is bound to at least one exact tile transition."""
+    if not isinstance(proposal_offer, dict):
+        return False
+    brief = proposal_offer.get("executionBrief")
+    return (
+        isinstance(brief, dict)
+        and isinstance(brief.get("requiredTransitions"), list)
+        and bool(brief["requiredTransitions"])
+    )
+
+
+def proposal_offer_requires_execution_brief(proposal_offer, *texts):
+    """Reject every proposal card that would require a downstream agent to guess cells."""
+    return isinstance(proposal_offer, dict) and not _proposal_offer_has_exact_execution_plan(
+        proposal_offer
+    )
+
+
 def _plain_action_instruction(stage_context):
     context = stage_context or {}
     action = context.get("explicitAction") or "none"
@@ -5779,6 +5994,12 @@ def _plain_action_instruction(stage_context):
 def _proposal_offer_binding_issue(proposal_offer, body, messages, language):
     if not proposal_offer:
         return None
+
+    if not _proposal_offer_has_exact_execution_plan(proposal_offer):
+        return (
+            "the proposal has no complete executionBrief with exact requiredTransitions; "
+            "the assistant must ask for clarification instead of making the executor infer cells"
+        )
 
     summary = str(proposal_offer.get("summary") or "").strip()
     rationale = str(proposal_offer.get("rationale") or "").strip()
@@ -5926,11 +6147,10 @@ def _repair_conceptual_proposal_binding(
     stage_context,
 ):
     cleaned_body = _remove_proposal_text_from_body(body, proposal_offer)
-    fallback_offer = (
-        _deterministic_revision_advice_offer(messages, visible_content, language)
-        if _has_revision_material(messages, visible_content)
-        else None
-    )
+    # A deterministic prose fallback cannot know which exact cells the designer
+    # intends.  Keep the reply conversational, but never manufacture a proposal
+    # card that would force the executor to infer coordinates later.
+    fallback_offer = None
     recent_cues = ((stage_context or {}).get("recentGuidance") or {}).get("uiCues") or {}
     if isinstance(recent_cues, dict):
         recent_cues = recent_cues.values()
@@ -6093,18 +6313,6 @@ def _apply_deterministic_guidance_fallback(
     evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
     fallback_used = False
 
-    if (
-        guidance_mode == "revision_advice"
-        and proposal_offer is None
-        and allow_required_fallback
-    ):
-        proposal_offer = _deterministic_revision_advice_offer(
-            messages,
-            visible_content,
-            language,
-        )
-        fallback_used = proposal_offer is not None
-
     difficulty_reframe = _user_reframes_difficulty_judgment(messages)
     intent_hypothesis = _replace_echoed_intent_hypothesis(
         intent_hypothesis,
@@ -6124,40 +6332,6 @@ def _apply_deterministic_guidance_fallback(
 
         if not _guidance_text_matches(candidate, recent.get("intentHypothesis")):
             intent_hypothesis = candidate
-            fallback_used = True
-
-    if (
-        proposal_offer is None
-        and explicit_agreement
-        and not recent.get("proposalOffer")
-    ):
-        previous_assistant = _latest_role_content(messages[:-1], "assistant")
-        summary_source = (
-            _revision_direction_sentence(visible_content)
-            or _first_declarative_sentence(visible_content)
-        )
-        rationale_source = _first_declarative_sentence(previous_assistant)
-
-        if language == "zh-CN":
-            summary = summary_source or "把刚才讨论的方向落实为一个可审查的局部修改"
-            rationale = rationale_source or "把玩家已经确认的方向转化为可验证的地图变化"
-        else:
-            summary = summary_source or "Turn the agreed direction into a reviewable local revision"
-            rationale = rationale_source or (
-                "Translate the direction you confirmed into a map change that can be validated"
-            )
-
-        candidate_offer = {
-            "summary": summary[:600],
-            "rationale": rationale[:1000],
-        }
-        previous_offer = recent.get("proposalOffer") or {}
-
-        if not _guidance_text_matches(
-            f"{candidate_offer['summary']} {candidate_offer['rationale']}",
-            f"{previous_offer.get('summary', '')} {previous_offer.get('rationale', '')}",
-        ):
-            proposal_offer = candidate_offer
             fallback_used = True
 
     cue_by_type = {
@@ -6209,99 +6383,6 @@ def _apply_deterministic_guidance_fallback(
     return intent_hypothesis, proposal_offer, ordered_cues, fallback_used
 
 
-def _deterministic_revision_advice_offer(messages, visible_content, language):
-    """Create a safe conceptual offer when the model omitted the required advice card."""
-    if not _has_revision_material(messages, visible_content):
-        return None
-
-    latest_user = _latest_role_content(messages, "user")
-    corpus = " ".join(
-        part for part in (latest_user, visible_content) if str(part or "").strip()
-    ).casefold()
-    chinese = language == "zh-CN" or re.search(r"[\u3400-\u9fff]", corpus)
-
-    if chinese:
-        if any(marker in corpus for marker in ("时间", "游玩", "停留", "延长", "慢下来", "更久", "太快")):
-            summary = "让关键箱子路线形成绕行选择"
-            rationale = (
-                "围绕当前最直接的箱子路线做局部调整，让玩家在第一次推进前比较直接路线和绕行路线；"
-                "试玩时确认游玩时间的增加来自路线判断，而不只是增加移动步数。"
-            )
-        elif any(marker in corpus for marker in ("绕过障碍", "绕行", "障碍物")):
-            summary = "让障碍形成需要绕行的路线选择"
-            rationale = (
-                "围绕当前关卡的可通行区域做局部调整，让玩家在第一次接近障碍时需要比较绕行路线；"
-                "再通过试玩判断它带来的是实际路线选择，而不只是增加移动距离。"
-            )
-        elif any(marker in corpus for marker in ("水域", "水边", "水") ) and any(
-            marker in corpus for marker in ("路线", "通道", "推进", "箱")
-        ):
-            summary = "让水域参与箱子的路线判断"
-            rationale = (
-                "把调整集中在水域与相关路线的局部关系上，让箱子第一次经过这里时必须重新读取绕行"
-                "空间与推进顺序；试玩时确认水域是否真正改变了选择。"
-            )
-        elif any(marker in corpus for marker in ("难度", "挑战", "压力", "更难")):
-            summary = "把难度落到一次真实的路线取舍"
-            rationale = (
-                "优先调整会影响关键推动顺序的局部空间，而不是单纯增加障碍数量；试玩时观察玩家是否"
-                "在第一次关键推动前停下来判断，并确认难度来自取舍而不是误读。"
-            )
-        elif any(marker in corpus for marker in ("箱子", "目标", "推动", "顺序")):
-            summary = "重新组织箱子与目标的推进顺序"
-            rationale = (
-                "围绕相关箱子接近目标前的局部路线进行调整，让玩家需要判断先后顺序；试玩时确认"
-                "这个变化确实影响推箱关系，而不是只改变位置。"
-            )
-        else:
-            summary = "把当前方向落实为可比较的局部调整"
-            rationale = (
-                "把改动集中在当前讨论的局部，并用第一次路线选择或关键推动来判断体验是否真的改变，"
-                "而不是只产生视觉差异。"
-            )
-    else:
-        if any(marker in corpus for marker in ("time", "playtime", "stay", "longer", "slow", "too quickly")):
-            summary = "Make the key box route create a detour choice"
-            rationale = (
-                "Keep the change local around the most direct box route so the first push makes the player"
-                " compare a direct path with a detour; play should confirm that extra time comes from route judgment."
-            )
-        elif any(marker in corpus for marker in ("detour", "obstacle", "绕行")):
-            summary = "Make the obstacles create a meaningful detour choice"
-            rationale = (
-                "Keep the change local around the traversable space so the first approach to the obstacle"
-                " requires a route comparison; play should confirm a real choice rather than extra walking."
-            )
-        elif "water" in corpus and any(
-            marker in corpus for marker in ("route", "corridor", "push", "box")
-        ):
-            summary = "Make water shape the box's route choice"
-            rationale = (
-                "Keep the adjustment local to the water and its neighboring route so the first pass makes"
-                " the player reread detour space and push order; play should confirm that water changes choice."
-            )
-        elif any(marker in corpus for marker in ("difficulty", "challenge", "pressure")):
-            summary = "Put difficulty into one real route trade-off"
-            rationale = (
-                "Adjust the local space that affects a key push order instead of merely adding obstacles;"
-                " play should show a meaningful pause and choice rather than confusion."
-            )
-        elif any(marker in corpus for marker in ("box", "crate", "target", "push order")):
-            summary = "Reframe the box-to-target push order"
-            rationale = (
-                "Keep the change around the relevant approach so the player must judge which push comes"
-                " first; play should confirm a changed push relationship rather than a visual move."
-            )
-        else:
-            summary = "Turn the direction into a comparable local revision"
-            rationale = (
-                "Keep the change local to the discussion and judge it through the first route choice or"
-                " key push, so the result changes play rather than only appearance."
-            )
-
-    return {"summary": summary, "rationale": rationale}
-
-
 def _apply_guidance_card_policy(guidance):
     """Normalize guidance into one of the approved one-to-three card families."""
     normalized = dict(guidance or {})
@@ -6348,6 +6429,16 @@ def _apply_guidance_card_policy(guidance):
 
     normalized["uiCues"] = [warning] if warning is not None else []
     return normalized
+
+
+def _exact_revision_clarification(language):
+    if language == "zh-CN":
+        return (
+            "为了避免按猜测改图，请明确指出要修改的坐标，并说明每个格子修改前是什么、修改后要变成什么。"
+        )
+    return (
+        "To keep the revision precise, please specify the cells to change and state the tile before and after each change."
+    )
 
 
 def _ensure_required_guidance_card(
@@ -6397,14 +6488,8 @@ def _ensure_required_guidance_card(
         return normalized
 
     if guidance_mode == "revision_advice":
-        proposal_offer = normalized.get("proposalOffer") or (
-            _deterministic_revision_advice_offer(
-                messages,
-                visible_content,
-                language,
-            )
-        )
-        if proposal_offer:
+        proposal_offer = normalized.get("proposalOffer")
+        if _proposal_offer_has_exact_execution_plan(proposal_offer):
             normalized["move"] = "offer_revision"
             normalized["proposalOffer"] = proposal_offer
             normalized["intentHypothesis"] = None
@@ -6426,6 +6511,20 @@ def _ensure_required_guidance_card(
                 if cue.get("type") in {"warning", "tradeoff", "manual_edit"}
             ][:2]
             return normalized
+
+        normalized["move"] = "clarify_intent"
+        normalized["proposalOffer"] = None
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
+        normalized["followUpQuestion"] = normalized.get("followUpQuestion") or (
+            _exact_revision_clarification(language)
+        )
+        normalized["uiCues"] = [
+            dict(cue)
+            for cue in normalized.get("uiCues") or []
+            if cue.get("type") in {"warning", "tradeoff"} and cue.get("text")
+        ][:1]
+        return normalized
 
     if guidance_mode == "discussion":
         normalized["proposalOffer"] = None
@@ -6563,10 +6662,12 @@ def _guidance_mode_instruction(guidance_mode):
         return (
             "Deterministic request routing classified the latest user request as REVISION_ADVICE: "
             "the designer has stated a meaningful design direction and is asking for a suggestion "
-            "or plan. You must include both PROPOSAL_SUMMARY and PROPOSAL_RATIONALE, then include "
-            "MANUAL_EDIT as the companion card. The proposal is conceptual and contains no map rows "
-            "or tile operations; it must describe a concrete local design move and the playable effect "
-            "to judge. Do not output DISCUSS or INTENT in this action family, and do not claim that "
+            "or plan. You must include PROPOSAL_SUMMARY, PROPOSAL_RATIONALE, and an EXECUTION_BRIEF "
+            "with at least one exact required transition containing row, column, from, and to. "
+            "Resolve every intended edit from the authoritative map facts; if that is not possible, "
+            "ask for clarification and do not output a proposalOffer. The proposal may not contain "
+            "map rows or an execution result, but its machine contract must be exact. Do not output "
+            "DISCUSS or INTENT in this action family, and do not claim that "
             "the map was changed."
         )
     if guidance_mode == "discussion":
@@ -7635,6 +7736,132 @@ def _build_draft_provenance_guidance(stage_context):
     )
 
 
+def _proposal_operation_family(operations):
+    operation_set = set(operations)
+    if operation_set.issubset({"add_wall", "remove_wall"}):
+        return "adjust_internal_walls"
+    if operation_set.issubset({"add_water", "remove_water"}):
+        return "reshape_water"
+    if operation_set == {"move_player"}:
+        return "relocate_start"
+    if operation_set == {"move_box"}:
+        return "relocate_box"
+    if operation_set == {"move_target"}:
+        return "relocate_target"
+    if operation_set.issubset({"move_box", "move_target", "add_wall", "remove_wall"}):
+        return "change_box_order"
+    raise ValueError(
+        "revisionPlan.changes must use one supported operation family."
+    )
+
+
+def _validate_revision_plan_payload(value, rows=None):
+    """Normalize the Chat plan into the existing exact executionBrief shape."""
+    if not isinstance(value, dict):
+        raise ValueError("revisionPlan must be an object.")
+    required = {"objective", "changes", "preserve", "rationale", "expectedEffect"}
+    if set(value) != required:
+        raise ValueError(
+            "revisionPlan must contain objective, changes, preserve, rationale, and expectedEffect."
+        )
+
+    text_fields = {}
+    for field in ("objective", "rationale", "expectedEffect"):
+        item = value.get(field)
+        if (
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > 1000
+            or "\n" in item
+            or "\r" in item
+        ):
+            raise ValueError(f"revisionPlan.{field} is invalid.")
+        text_fields[field] = item.strip()
+
+    changes = value.get("changes")
+    if not isinstance(changes, list) or not 1 <= len(changes) <= 12:
+        raise ValueError("revisionPlan.changes must contain one to twelve exact cell changes.")
+
+    transition_by_operation = {
+        (".", "#"): "add_wall",
+        ("#", "."): "remove_wall",
+        ("p", "."): "move_player",
+        (".", "p"): "move_player",
+        ("s", "."): "move_box",
+        (".", "s"): "move_box",
+        ("t", "."): "move_target",
+        (".", "t"): "move_target",
+        (".", "@"): "add_water",
+        ("@", "."): "remove_water",
+    }
+    transitions = []
+    operations = []
+    seen_coordinates = set()
+    for index, change in enumerate(changes):
+        if not isinstance(change, dict) or set(change) != {
+            "row", "column", "before", "after", "operation"
+        }:
+            raise ValueError(
+                f"revisionPlan.changes[{index}] must contain row, column, before, after, and operation."
+            )
+        row = change["row"]
+        column = change["column"]
+        before = change["before"]
+        after = change["after"]
+        operation = change["operation"]
+        if (
+            isinstance(row, bool)
+            or isinstance(column, bool)
+            or not isinstance(row, int)
+            or not isinstance(column, int)
+            or not 1 <= row <= 10
+            or not 1 <= column <= 12
+            or before not in set("#.@pst")
+            or after not in set("#.@pst")
+            or before == after
+            or (row, column) in seen_coordinates
+            or operation not in {
+                "add_wall", "remove_wall", "move_player", "move_box", "move_target",
+                "add_water", "remove_water",
+            }
+            or transition_by_operation.get((before, after)) != operation
+        ):
+            raise ValueError(f"revisionPlan.changes[{index}] is not an exact supported transition.")
+        seen_coordinates.add((row, column))
+        transitions.append({
+            "row": row,
+            "column": column,
+            "from": before,
+            "to": after,
+        })
+        operations.append(operation)
+
+    preserve = value.get("preserve")
+    valid_preserve = {
+        "outer_shell", "player", "boxes", "targets", "water", "walls", "unrelated_areas",
+    }
+    if (
+        not isinstance(preserve, list)
+        or any(not isinstance(item, str) for item in preserve)
+        or len(set(preserve)) != len(preserve)
+        or any(item not in valid_preserve for item in preserve)
+    ):
+        raise ValueError("revisionPlan.preserve is invalid.")
+
+    effect = _proposal_operation_family(operations)
+    brief = {
+        "schemaVersion": 1,
+        "effect": effect,
+        "anchors": [],
+        "focus": None,
+        "requiredTransitions": transitions,
+        "allowedOperators": list(dict.fromkeys(operations)),
+        "preserve": list(preserve),
+        "playObjective": text_fields["objective"],
+    }
+    return _validate_execution_brief(brief, rows)
+
+
 def _validate_execution_brief(value, rows=None):
     """Validate the hidden, machine-facing part of a conceptual revision card."""
     if not isinstance(value, dict):
@@ -7783,6 +8010,16 @@ def _validate_execution_brief(value, rows=None):
     }
 
 
+def validate_execution_brief(value, rows=None):
+    """Public server-side entry point for validating a proposal execution brief."""
+    return _validate_execution_brief(value, rows)
+
+
+def normalize_revision_plan(value, rows=None):
+    """Public server-side entry point for normalizing a Chat revision plan."""
+    return _validate_revision_plan_payload(value, rows)
+
+
 def _validate_guidance(payload, assessment_only, language="en", stage_context=None, rows=None):
     if payload is None:
         raise ValueError("guidance is required.")
@@ -7864,9 +8101,12 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
 
         if not {"summary", "rationale"}.issubset(proposal_offer):
             raise ValueError("proposalOffer must contain summary and rationale.")
-        if not set(proposal_offer).issubset({"summary", "rationale", "executionBrief"}):
+        if not set(proposal_offer).issubset({
+            "summary", "rationale", "executionBrief", "revisionPlan",
+        }):
             raise ValueError("proposalOffer contains an invalid field.")
 
+        raw_proposal_offer = proposal_offer
         proposal_offer = {
             "summary": _normalize_single_level_language(
                 _clean_text(proposal_offer.get("summary"), "proposalOffer.summary")
@@ -7876,10 +8116,28 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
                 "proposalOffer.rationale",
             )),
         }
-        if "executionBrief" in payload.get("proposalOffer", {}):
-            proposal_offer["executionBrief"] = _validate_execution_brief(
-                payload["proposalOffer"]["executionBrief"],
+        normalized_brief = None
+        if "revisionPlan" in raw_proposal_offer:
+            normalized_brief = _validate_revision_plan_payload(
+                raw_proposal_offer["revisionPlan"],
                 rows,
+            )
+        if "executionBrief" in raw_proposal_offer:
+            execution_brief = _validate_execution_brief(
+                raw_proposal_offer["executionBrief"],
+                rows,
+            )
+            if normalized_brief is not None and execution_brief != normalized_brief:
+                raise ValueError(
+                    "proposalOffer executionBrief conflicts with revisionPlan."
+                )
+            normalized_brief = execution_brief
+        if normalized_brief is not None:
+            proposal_offer["executionBrief"] = normalized_brief
+        if not _proposal_offer_has_exact_execution_plan(proposal_offer):
+            raise ValueError(
+                "proposalOffer requires exact requiredTransitions; ask for clarification when the "
+                "intended cells cannot be resolved from the authoritative map facts."
             )
     elif move == "offer_revision":
         raise ValueError("The offer_revision move requires proposalOffer.")

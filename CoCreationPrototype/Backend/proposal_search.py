@@ -840,7 +840,18 @@ def _evaluate_state(
 
 
 def _state_realizes_required_transitions(rows, base_rows, transitions):
-    for row, column, before, after in transitions or ():
+    required = set(transitions or ())
+    if not required:
+        return True
+    observed = {
+        (row_index + 1, column_index + 1, before, after)
+        for row_index, (base_row, row) in enumerate(zip(base_rows, rows))
+        for column_index, (before, after) in enumerate(zip(base_row, row))
+        if before != after
+    }
+    if observed != required:
+        return False
+    for row, column, before, after in required:
         x, y = column - 1, row - 1
         if not (0 <= y < len(rows) and 0 <= x < len(rows[y])):
             return False

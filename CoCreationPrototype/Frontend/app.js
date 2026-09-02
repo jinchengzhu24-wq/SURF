@@ -50,7 +50,7 @@ const translations = {
         noStageConversationBody: "Each Stage keeps only the discussion attached to that saved version.",
         thinking: "Assistant is considering the current Stage...",
         chatWaitingPrimary: "Waiting for the primary assistant",
-        chatWaitingFallback: "The primary assistant was slow; trying the fallback assistant",
+        chatWaitingFallback: "The assistant is taking longer than usual; retrying once",
         chatRetryPending: "The previous message did not finish. Retry it without creating a duplicate.",
         messageLabel: "Message the level design assistant",
         messagePlaceholder: "Explain what you want to change or ask about the level...",
@@ -99,6 +99,12 @@ const translations = {
         challengeRevision: "Challenge this plan",
         alternativeRevision: "Try another plan",
         staleRevisionCard: "Only the latest revision card can be acted on.",
+        proposalStale: "This proposal is based on an older Stage and is no longer active.",
+        proposalAlreadySatisfied: "The current map already contains this change.",
+        proposalPreconditionFailed: "The current map no longer matches this proposal's prerequisite.",
+        proposalUnbound: "This historical proposal is readable but has no reliable execution binding.",
+        proposalAlreadyExecuted: "This proposal has already been used once and is no longer active.",
+        proposalSearchExhausted: "No verified map proposal could be produced for this direction. The current map was not changed.",
         discussionUser: "User direction",
         discussionAi: "AI view",
         discussionCore: "Core disagreement",
@@ -146,6 +152,9 @@ const translations = {
         error_MODEL_EMPTY_RESPONSE: "The latest model attempt returned blank content, and no earlier attempt produced a valid result. Retry without creating a duplicate.",
         error_INVALID_MESSAGE_ACTION: "That card action is invalid. Refresh and try again.",
         error_INVALID_CARD_SOURCE: "That revision card no longer belongs to the current Stage. Refresh and choose the current card.",
+        error_PROPOSAL_STALE: "This proposal is based on an older Stage or map snapshot and is no longer active.",
+        error_PROPOSAL_PRECONDITION_FAILED: "The current map no longer matches this proposal's prerequisite.",
+        error_PROPOSAL_SEARCH_EXHAUSTED: "No verified map proposal could be produced for this direction. The current map was not changed.",
         error_DISAGREEMENT_ACTIVE: "Resolve the current disagreement before choosing another revision card.",
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
         playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again.",
@@ -176,7 +185,7 @@ const translations = {
         noStageConversationBody: "每个 Stage 只显示与该已保存版本关联的讨论。",
         thinking: "助手正在分析当前 Stage……",
         chatWaitingPrimary: "正在等待首选模型生成回复",
-        chatWaitingFallback: "首选模型响应较慢，正在尝试备用模型",
+        chatWaitingFallback: "助手响应较慢，正在重试一次",
         chatRetryPending: "上一条消息尚未完成，可安全重试且不会产生重复记录。",
         messageLabel: "给关卡设计助手发送消息",
         messagePlaceholder: "说明你想修改什么，或询问这个关卡的设计……",
@@ -225,6 +234,12 @@ const translations = {
         challengeRevision: "质疑这个方案",
         alternativeRevision: "换一个方案",
         staleRevisionCard: "仅最新方案可操作",
+        proposalStale: "该方案基于旧 Stage，已失效。",
+        proposalAlreadySatisfied: "当前地图已经包含这项修改。",
+        proposalPreconditionFailed: "当前地图状态已不再符合这项方案的执行前提。",
+        proposalUnbound: "这是历史方案，只能阅读，缺少可靠的执行绑定。",
+        proposalAlreadyExecuted: "这项方案已经执行过一次，当前不再可用。",
+        proposalSearchExhausted: "没有找到通过验证的地图方案，当前地图未改变。",
         discussionUser: "用户目前的方向",
         discussionAi: "AI 目前的观点",
         discussionCore: "分歧核心",
@@ -288,6 +303,11 @@ translations.en.fromStage = "From Stage {stage}";
 translations.en.confirmedLabel = "Confirmed";
 translations.en.unresolvedLabel = "Unresolved";
 translations.en.updatedAt = "Updated {time}";
+translations.en.proposalConcreteChanges = "Concrete tile changes";
+translations.en.proposalPreserved = "Preserved";
+translations.en.proposalBefore = "Before";
+translations.en.proposalAfter = "After";
+translations.en.executeBoundProposal = "Execute the bound proposal.";
 translations["zh-CN"].progressTitle = "\u5171\u521b\u8fdb\u5ea6";
 translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
 translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
@@ -297,6 +317,11 @@ translations["zh-CN"].fromStage = "\u6765\u81ea Stage {stage}";
 translations["zh-CN"].confirmedLabel = "\u5df2\u786e\u8ba4";
 translations["zh-CN"].unresolvedLabel = "\u5f85\u89e3\u51b3";
 translations["zh-CN"].updatedAt = "\u6700\u8fd1\u66f4\u65b0 {time}";
+translations["zh-CN"].proposalConcreteChanges = "\u5177\u4f53\u683c\u5b50\u53d8\u5316";
+translations["zh-CN"].proposalPreserved = "\u4fdd\u6301\u4e0d\u53d8";
+translations["zh-CN"].proposalBefore = "\u4fee\u6539\u524d";
+translations["zh-CN"].proposalAfter = "\u4fee\u6539\u540e";
+translations["zh-CN"].executeBoundProposal = "\u6267\u884c\u5df2\u7ed1\u5b9a\u7684\u65b9\u6848\u3002";
 
 const state = {
     session: null,
@@ -353,6 +378,9 @@ const chineseApiErrors = {
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。",
     INVALID_MESSAGE_ACTION: "卡片操作无效，请刷新后重试。",
     INVALID_CARD_SOURCE: "这张修改建议无效、已过期或不再对应当前 Stage，请重新查看最新方案。",
+    PROPOSAL_STALE: "该方案基于旧 Stage 或旧地图快照，已失效。",
+    PROPOSAL_PRECONDITION_FAILED: "当前地图状态已不再符合这项方案的执行前提。",
+    PROPOSAL_SEARCH_EXHAUSTED: "没有找到通过验证的地图方案，当前地图未改变。",
     DISAGREEMENT_ACTIVE: "当前仍有未解决的分歧，请先继续协商后再选择修改方案。"
 };
 
@@ -733,37 +761,60 @@ function renderAssistantBubble(turn, bubble) {
 
     const offer = guidance.proposalOffer;
 
-    if (offer && offer.summary) {
+    const presentation = offer?.proposalPresentation;
+    const proposalSummary = presentation?.summary || offer?.summary;
+    const proposalRationale = presentation?.rationale || offer?.rationale || "";
+    if (offer && proposalSummary) {
         const revisionCue = createGuidanceCue(
             "revision",
-            offer.summary,
-            offer.rationale || ""
+            proposalSummary,
+            proposalRationale,
         );
+        if (presentation) {
+            revisionCue.appendChild(
+                createProposalPresentation(presentation)
+            );
+        }
+        const proposalState = turn.proposalState || null;
+        const proposalStatus = proposalState?.status || (
+            isLatestRevisionOfferTurn(turn) ? "active" : "stale"
+        );
+        const actionable = proposalStatus === "active"
+            && isLatestRevisionOfferTurn(turn)
+            && proposalState?.actionable !== false;
         if (canEditSelected() && !selectedStageHasActiveDisagreement()) {
-            const actionable = isLatestRevisionOfferTurn(turn);
-            [
-                ["execute_revision", "draftSuggestedRevision"],
-                ["challenge_revision", "challengeRevision"],
-                ["alternative_revision", "alternativeRevision"]
-            ].forEach(([action, labelKey]) => {
-                revisionCue.appendChild(makeButton(
-                    t(labelKey),
-                    `secondary-button guidance-cue-button${actionable ? "" : " guidance-cue-button-stale"}`,
-                    actionable
-                        ? () => sendRevisionCardAction(action, turn, offer)
-                        : null,
-                    {
-                        disabled: !actionable,
-                        title: actionable ? "" : t("staleRevisionCard")
-                    }
-                ));
-            });
-            if (!actionable) {
+            if (proposalStatus !== "already_satisfied" && proposalStatus !== "unbound") {
+                [
+                    ["execute_revision", "draftSuggestedRevision"],
+                    ["challenge_revision", "challengeRevision"],
+                    ["alternative_revision", "alternativeRevision"]
+                ].forEach(([action, labelKey]) => {
+                    const disabled = !actionable;
+                    revisionCue.appendChild(makeButton(
+                        t(labelKey),
+                        `secondary-button guidance-cue-button${disabled ? " guidance-cue-button-stale" : ""}`,
+                        actionable
+                            ? () => sendRevisionCardAction(action, turn, offer)
+                            : null,
+                        {
+                            disabled,
+                            title: actionable ? "" : proposalStateMessage(proposalStatus)
+                        }
+                    ));
+                });
+            }
+            if (!actionable && proposalStatus !== "already_satisfied" && proposalStatus !== "unbound") {
                 const staleNote = document.createElement("small");
                 staleNote.className = "guidance-cue-stale-note";
-                staleNote.textContent = t("staleRevisionCard");
+                staleNote.textContent = proposalStateMessage(proposalStatus);
                 revisionCue.appendChild(staleNote);
             }
+        }
+        if (proposalStatus === "already_satisfied" || proposalStatus === "unbound") {
+            const statusNote = document.createElement("small");
+            statusNote.className = "guidance-cue-stale-note";
+            statusNote.textContent = proposalStateMessage(proposalStatus);
+            revisionCue.appendChild(statusNote);
         }
         cueList.appendChild(revisionCue);
     } else if (proposal && proposal.summary) {
@@ -791,6 +842,14 @@ function renderAssistantBubble(turn, bubble) {
         // Legacy render contract: if (question) bubble.appendChild(createDiscussionFocus(question));
         bubble.appendChild(createDiscussionFocus(question));
     }
+}
+
+function proposalStateMessage(status) {
+    if (status === "already_satisfied") return t("proposalAlreadySatisfied");
+    if (status === "unbound") return t("proposalUnbound");
+    if (status === "stale") return t("proposalStale");
+    if (status === "precondition_failed") return t("proposalPreconditionFailed");
+    return t("staleRevisionCard");
 }
 
 function selectedStageHasActiveDisagreement() {
@@ -1083,6 +1142,63 @@ function createGuidanceCue(type, text, detail = "") {
     return cue;
 }
 
+function proposalPresentationTileLabel(tile) {
+    const label = t(tileName(tile));
+    return `${label} (${tile})`;
+}
+
+function proposalPreservedLabel(value) {
+    const labels = {
+        outer_shell: state.language === "zh-CN" ? "外壳" : "outer shell",
+        unrelated_areas: state.language === "zh-CN" ? "其他区域" : "unrelated areas",
+        player: t("player"),
+        boxes: t("box"),
+        targets: t("target"),
+        water: t("water"),
+        walls: state.language === "zh-CN" ? "墙体" : "walls"
+    };
+    return labels[value] || String(value || "");
+}
+
+function createProposalPresentation(presentation) {
+    const section = document.createElement("div");
+    section.className = "proposal-plan-details";
+
+    const title = document.createElement("h4");
+    title.textContent = t("proposalConcreteChanges");
+    section.appendChild(title);
+
+    const changes = Array.isArray(presentation?.changes)
+        ? presentation.changes
+        : [];
+    if (changes.length) {
+        const list = document.createElement("ul");
+        changes.forEach(change => {
+            if (!Number.isInteger(change?.row) || !Number.isInteger(change?.column)) return;
+            const item = document.createElement("li");
+            item.className = "proposal-plan-detail-item";
+            const before = proposalPresentationTileLabel(change.before);
+            const after = proposalPresentationTileLabel(change.after);
+            item.textContent = `(${change.row}, ${change.column})：${t("proposalBefore")} ${before} → ${t("proposalAfter")} ${after}`;
+            list.appendChild(item);
+        });
+        if (list.childElementCount) section.appendChild(list);
+    }
+
+    const preserved = Array.isArray(presentation?.preserved)
+        ? presentation.preserved
+            .map(proposalPreservedLabel)
+            .filter(Boolean)
+        : [];
+    if (preserved.length) {
+        const preservedText = document.createElement("p");
+        preservedText.className = "proposal-plan-preserved";
+        preservedText.textContent = `${t("proposalPreserved")}：${preserved.join("、")}`;
+        section.appendChild(preservedText);
+    }
+    return section;
+}
+
 function prefillProposalConsent(offer) {
     // Legacy helper kept for integrations that call it directly. Purple-card
     // Historical callback shape was: () => prefillProposalConsent(offer)
@@ -1096,17 +1212,21 @@ function prefillProposalConsent(offer) {
 
 function sendRevisionCardAction(action, turn, offer) {
     if (!canEditSelected() || state.busy) return;
+    if (turn?.proposalState && turn.proposalState.actionable === false) {
+        showNotice(proposalStateMessage(turn.proposalState.status));
+        render();
+        return;
+    }
     if (!isLatestRevisionOfferTurn(turn)) {
         showNotice(t("staleRevisionCard"));
         render();
         return;
     }
-    const summary = String(offer?.summary || "").trim();
     const content = action === "execute_revision"
-        ? t("proposalConsent").replace("{summary}", summary)
+        ? t("executeBoundProposal")
         : action === "challenge_revision"
-            ? `${t("challengeRevision")}: ${summary}`
-            : `${t("alternativeRevision")}: ${summary}`;
+            ? t("challengeRevision")
+            : t("alternativeRevision");
     state.pendingMessage = {
         content,
         baseVersionId: state.session.currentVersionId,
@@ -1366,13 +1486,13 @@ function renderTranslationStatus() {
 
 function chatWaitingMessage() {
     const elapsedSeconds = Math.min(
-        65,
+        60,
         Math.max(0, Math.floor((Date.now() - state.chatStartedAt) / 1000))
     );
     const phase = elapsedSeconds < 40
         ? t("chatWaitingPrimary")
         : t("chatWaitingFallback");
-    return `${phase} · ${elapsedSeconds} / 65 ${t("seconds")}`;
+    return `${phase} · ${elapsedSeconds} / 60 ${t("seconds")}`;
 }
 
 function startChatTimer() {
@@ -1396,7 +1516,7 @@ async function ensureAssessment(versionId) {
         state.session = await api(`/api/sessions/${state.sessionId}/versions/${versionId}/assessments`, {
             method: "POST",
             body: { idempotencyKey: uniqueId("assessment") },
-            timeoutMs: 65000
+            timeoutMs: 60000
         });
         render();
     } catch (error) {
@@ -1452,7 +1572,7 @@ async function submitPendingMessage() {
         state.session = await api(`/api/sessions/${state.sessionId}/messages`, {
             method: "POST",
             body: pending,
-            timeoutMs: 65000
+            timeoutMs: 60000
         });
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());
@@ -1463,7 +1583,11 @@ async function submitPendingMessage() {
         render();
     } catch (error) {
         if (
-            error?.code === "INVALID_CARD_SOURCE"
+            [
+                "INVALID_CARD_SOURCE",
+                "PROPOSAL_STALE",
+                "PROPOSAL_PRECONDITION_FAILED"
+            ].includes(error?.code)
             && pending.action
             && pending.action !== "none"
         ) {
@@ -1474,7 +1598,7 @@ async function submitPendingMessage() {
             try {
                 await refreshSession();
             } catch (_refreshError) {
-                // Keep the original stale-card error visible if the refresh
+                // Keep the original proposal-state error visible if the refresh
                 // itself cannot complete.
             }
         }
@@ -1737,7 +1861,7 @@ async function translateVisibleBatch(batch, targetLanguage) {
             {
                 method: "POST",
                 body: { turnIds },
-                timeoutMs: 65000
+                timeoutMs: 60000
             }
         );
         const translatedById = new Map(
@@ -1930,6 +2054,14 @@ function showError(error, retryAction) {
 
 function localizedErrorMessage(error) {
     if (error?.code === "PENDING_MESSAGE") return t("chatRetryPending");
+    if (error?.code === "PROPOSAL_PRECONDITION_FAILED") {
+        const reason = error.details?.reason;
+        if (reason === "already_satisfied") return t("proposalAlreadySatisfied");
+        if (reason === "unbound") return t("proposalUnbound");
+        if (reason === "already_executed") return t("proposalAlreadyExecuted");
+        return t("proposalPreconditionFailed");
+    }
+    if (error?.code === "PROPOSAL_STALE") return t("proposalStale");
     const localized = state.language === "zh-CN"
         ? chineseApiErrors[error?.code]
         : translations.en[`error_${error?.code}`];

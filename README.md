@@ -24,7 +24,7 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 当前询问四个中立的地图设计问题（首步检查、推箱依赖、空间分布、路线结构），前两题用于推断难度，后两题用于推断布局。AI 输出温暖的 AI reflection 以及难度/布局建议；四道答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI 推荐和用户最终确认一起保存，不会传入 8010 共创服务或其 LLM 上下文。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。当前 8010 前端脚本与样式缓存键为 `cocreation-continuous-progress-20260901-1`。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。当前 8010 前端脚本与样式缓存键为 `cocreation-unified-flash-20260902-2`。
 
 正式 Unity 共创会话在浏览器首次访问授权后开始 10 分钟倒计时。直访问示例会话不创建 deadline、不倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
 
@@ -115,7 +115,7 @@ LLM 每轮还会接收初稿方法与当前 Stage 来源，避免把生成器产
 
 对话以保存的 Stage 为边界：每条 turn 仍完整持久化并带有 `versionId`，但页面选择某个 Stage 时只显示该版本相关的对话，LLM 也只接收当前 Stage 的最近对话。唯一的关系型承接是已接受提案的 assistant turn：它不复制、不改写原记录，而通过 proposal/decision/version 关联同时显示为新 Stage 的第一条上下文。历史 Stage 的对话只读；返回当前 Stage 后才可继续发送，并恢复当前 Stage 自己的草稿或未完成请求。
 
-8010 的一次业务请求使用真正的 60 秒总时长硬上限。普通聊天和 Stage 开场优先使用 `deepseek-v4-flash`，并沿用最多 40 秒的首选模型窗口；明确执行紫卡完整地图提案时优先使用 `deepseek-v4-pro` 编译计划，首次最多 18 秒，结构纠正或 Flash 传输后备最多 8 秒，模型阶段合计不超过 26 秒。确定性候选搜索在请求第 55 秒停止，为持久化和响应预留五秒。上游显式关闭思考输出，避免推理 token 耗尽后只返回空 JSON。普通问题留在正文；新蓝卡必须由结构化 active `disagreement` 驱动，旧 turn 才沿用 `followUpQuestion`。服务日志记录安全结构原因和搜索摘要，两次计划尝试共用同一 requestId 和消息幂等键；只有显式 `execute_revision` 且验证成功的提案才会入库为 proposal，搜索耗尽则保存说明而不创建 proposal。聊天输入区显示实时秒数与主/备用阶段，并在 65 秒执行浏览器安全中止；失败、刷新或连接中断后使用原消息幂等键重试，确保同一请求最多保存一条 user turn 和一条 assistant turn。
+8010 的一次业务请求使用真正的 60 秒总时长硬上限。普通聊天、Stage 开场、翻译以及完整地图提案的 `RevisionPlan` 与修改助手阶段统一使用 `deepseek-v4-flash`；提案计划阶段和操作候选阶段共享同一个请求截止时间，内部最多在 58 秒停止，为持久化和响应预留缓冲。上游显式关闭思考输出，避免推理 token 耗尽后只返回空 JSON。普通问题留在正文；新蓝卡必须由结构化 active `disagreement` 驱动，旧 turn 才沿用 `followUpQuestion`。服务日志记录安全结构原因和搜索摘要，两次计划尝试共用同一 requestId 和消息幂等键；只有显式 `execute_revision` 且验证成功的提案才会入库为 proposal，搜索耗尽则保存说明而不创建 proposal。聊天输入区显示实时秒数，并在 60 秒执行浏览器安全中止；失败、刷新或连接中断后使用原消息幂等键重试，确保同一请求最多保存一条 user turn 和一条 assistant turn。
 
 后端使用独立 SQLite/WAL。默认数据库为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`，`.env` 和数据库文件均被本目录 `.gitignore` 排除。
 完整地图修改采用“LLM 意图编译器 → 结构化 execution brief → RevisionPlan/executionContract → 关卡修改助手候选 → 确定性原子校验与求解 → 确定性局部搜索兜底 → 待审查提案”。`proposalOffer.summary/rationale` 继续负责用户可见内容；可选的 `proposalOffer.executionBrief` 保存 effect、锚点、focus、精确 `requiredTransitions`、允许算子、保护组件和游玩目标。明确坐标及 `from → to` 是硬约束，服务端会用当前 Stage 的 `tileAt` 事实再次核对；冲突时只要求澄清，不猜邻近格，也不生成错误紫卡。`RevisionStrategy` 仍描述效果、焦点区域、允许算子、保护项、修改预算和客观指标方向；后端负责扩展 `add/remove wall`、`move player/box/target` 与 `add/remove water`。精确的一格结构修改允许 1 个真实变更格，实体移动必须成对清除旧位置和写入新位置，多格修改按实际预算计算，最大 12 格；外壳与 void 从候选空间排除。候选必须真正使用能够实现其声明效果的算子、满足声明的指标变化，并遵守“不要改水/墙/玩家/箱子/目标”等明确保留项；否则会被拒绝而非作为低分方案选出。修改助手候选全部非法或不可解时，生产链会在 focus、锚点、effect、requiredTransitions 和保护规则内调用 `search_revision_plan()`；只有真实 tile 变化、结构合法且可解的候选才能进入 proposal。搜索最多构造 64 张地图、保存最多八张可解候选，并按明确要求、指标方向、区域/组件吻合度、最小改动和稳定签名选择一份。失败按坐标冲突、契约冲突、模型候选非法或确实没有可解候选分类；不会放宽要求、覆盖当前 Stage 或撤销手动编辑。旧 `proposalOffer` 没有 execution brief 时继续读取，但无法可靠恢复精确意图时优先要求澄清。
@@ -265,4 +265,4 @@ Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Soko
 `coCreationDurationSeconds`。每次新演示会话在新地图验证和新会话创建成功后，清理上一轮
 演示会话及其关联的对话、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。若地图
 生成或会话创建失败，上一轮演示记录保持不变。前端静态资源缓存键为
-`cocreation-continuous-progress-20260901-5`。
+`cocreation-unified-flash-20260902-2`。
