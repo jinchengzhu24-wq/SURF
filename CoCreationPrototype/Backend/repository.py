@@ -518,6 +518,92 @@ def serialize_session(database, session_id):
         for version in versions
     }
 
+    def public_turn_guidance(turn_guidance, body, rows, language):
+        """Recheck stored route annotations before exposing historical turns."""
+        guidance = _public_guidance(turn_guidance)
+        try:
+            # Import lazily to avoid the repository <-> LLM client import cycle.
+            from llm_client import _sanitize_visible_guidance
+
+            guidance = _sanitize_visible_guidance(guidance, language)
+        except (ImportError, TypeError, ValueError, KeyError):
+            pass
+        if not guidance.get("coordinateLinks"):
+            return guidance
+        try:
+            # Import lazily to avoid the repository <-> LLM client import cycle.
+            from llm_client import _filter_coordinate_links
+
+            links = _filter_coordinate_links(
+                guidance.get("coordinateLinks"),
+                body,
+                rows,
+            )
+        except (ImportError, TypeError, ValueError, KeyError):
+            links = []
+        if links:
+            guidance["coordinateLinks"] = links
+        else:
+            guidance.pop("coordinateLinks", None)
+        return guidance
+
+    def public_text(value, language):
+        """Hide prompt-only implementation labels in legacy stored text."""
+        try:
+            # Import lazily to avoid the repository <-> LLM client import cycle.
+            from llm_client import _sanitize_visible_model_text
+
+            return _sanitize_visible_model_text(value, language)
+        except (ImportError, TypeError, ValueError, KeyError):
+            return value
+
+    def public_turn_content(turn):
+        if turn["role"] != "assistant":
+            return turn["content"]
+        return public_text(turn["content"], turn["language"])
+
+    public_content_by_turn = {
+        turn["id"]: public_turn_content(turn)
+        for turn in turns
+    }
+
+    def public_assessment_payload(payload, language):
+        if not isinstance(payload, dict):
+            return payload
+        try:
+            # Import lazily to avoid the repository <-> LLM client import cycle.
+            from llm_client import _sanitize_visible_model_text
+        except ImportError:
+            return payload
+
+        result = dict(payload)
+        for field_name in (
+            "solutionSummary",
+            "difficultyOpinion",
+            "satisfactionQuestion",
+        ):
+            if result.get(field_name) is not None:
+                result[field_name] = _sanitize_visible_model_text(
+                    result[field_name], language
+                )
+        for field_name in ("features", "suggestions"):
+            if isinstance(result.get(field_name), list):
+                result[field_name] = [
+                    _sanitize_visible_model_text(item, language)
+                    for item in result[field_name]
+                ]
+        return result
+
+    public_guidance_by_turn = {
+        turn["id"]: public_turn_guidance(
+            load_json(turn["guidance_json"]),
+            public_content_by_turn[turn["id"]],
+            version_rows.get(turn["version_id"], []),
+            turn["language"],
+        )
+        for turn in turns
+    }
+
     def source_stage_number(source_version_id, current_version):
         return stage_numbers.get(source_version_id, current_version["stage_number"])
 
@@ -681,11 +767,23 @@ def serialize_session(database, session_id):
         )
 
     for translation in translations:
+        translation_guidance = load_json(translation["guidance_json"])
+        translation_turn = next(
+            (turn for turn in turns if turn["id"] == translation["turn_id"]),
+            None,
+        )
+        if translation_turn is not None:
+            translation_guidance = public_turn_guidance(
+                translation_guidance,
+                public_text(translation["body"], translation["language"]),
+                version_rows.get(translation_turn["version_id"], []),
+                translation["language"],
+            )
         translations_by_turn.setdefault(translation["turn_id"], {})[
             translation["language"]
         ] = {
-            "body": translation["body"],
-            "guidance": load_json(translation["guidance_json"]),
+            "body": public_text(translation["body"], translation["language"]),
+            "guidance": translation_guidance,
             "proposalSummary": translation["proposal_summary"],
             "createdAt": translation["created_at"],
         }
@@ -737,11 +835,11 @@ def serialize_session(database, session_id):
                 "turnId": turn["id"],
                 "sequence": turn["sequence_number"],
                 "role": turn["role"],
-                "content": turn["content"],
+                "content": public_content_by_turn[turn["id"]],
                 "language": turn["language"],
                 "versionId": turn["version_id"],
                 "requestId": turn["request_id"],
-                "guidance": _public_guidance(load_json(turn["guidance_json"])),
+                "guidance": public_guidance_by_turn.get(turn["id"], {}),
                 "proposalState": proposal_state(
                     turn,
                     load_json(turn["guidance_json"]) or {},
@@ -756,7 +854,17 @@ def serialize_session(database, session_id):
                 "assessmentId": assessment["id"],
                 "versionId": assessment["version_id"],
                 "assistantTurnId": assessment["assistant_turn_id"],
-                "payload": load_json(assessment["payload_json"]),
+                "payload": public_assessment_payload(
+                    load_json(assessment["payload_json"]),
+                    next(
+                        (
+                            turn["language"]
+                            for turn in turns
+                            if turn["id"] == assessment["assistant_turn_id"]
+                        ),
+                        session["language"],
+                    ),
+                ),
                 "createdAt": assessment["created_at"],
             }
             for assessment in assessments

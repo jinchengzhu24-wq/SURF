@@ -2275,6 +2275,65 @@ class CoCreationSessionTests(unittest.TestCase):
             {"row": 5, "column": 7},
         )
 
+    def test_public_serialization_removes_historical_position_annotation(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I notice the saved layout.",
+            1,
+            "historical-position-opening-001",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "historical-position-opening-001"},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+
+        body = "B1 and T1 are positioned in the lower-right area."
+        execution = LLMExecutionResult(
+            body,
+            1,
+            "historical-position-chat-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "coordinateLinks": [{
+                    "text": body,
+                    "from": {"row": 5, "column": 5},
+                    "to": {"row": 6, "column": 7},
+                }],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Let's compare the positions.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "historical-position-chat-001",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn(
+            "coordinateLinks",
+            response.json()["turns"][-1]["guidance"],
+        )
+
     def test_translated_proposal_presentation_keeps_exact_tile_metadata(self):
         source = {
             "move": "offer_revision",

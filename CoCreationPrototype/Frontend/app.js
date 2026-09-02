@@ -308,6 +308,12 @@ translations.en.proposalPreserved = "Preserved";
 translations.en.proposalBefore = "Before";
 translations.en.proposalAfter = "After";
 translations.en.executeBoundProposal = "Execute the bound proposal.";
+translations.en.assessmentTitle = "Stage assessment";
+translations.en.assessmentSolution = "Solvability";
+translations.en.assessmentDifficulty = "Difficulty perspective";
+translations.en.assessmentFeatures = "What stands out";
+translations.en.assessmentSuggestions = "Possible next look";
+translations.en.assessmentQuestion = "Discussion focus";
 translations["zh-CN"].progressTitle = "\u5171\u521b\u8fdb\u5ea6";
 translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
 translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
@@ -322,6 +328,12 @@ translations["zh-CN"].proposalPreserved = "\u4fdd\u6301\u4e0d\u53d8";
 translations["zh-CN"].proposalBefore = "\u4fee\u6539\u524d";
 translations["zh-CN"].proposalAfter = "\u4fee\u6539\u540e";
 translations["zh-CN"].executeBoundProposal = "\u6267\u884c\u5df2\u7ed1\u5b9a\u7684\u65b9\u6848\u3002";
+translations["zh-CN"].assessmentTitle = "Stage \u8bc4\u4ef7";
+translations["zh-CN"].assessmentSolution = "\u53ef\u89e3\u6027";
+translations["zh-CN"].assessmentDifficulty = "\u96be\u5ea6\u89c2\u70b9";
+translations["zh-CN"].assessmentFeatures = "\u503c\u5f97\u6ce8\u610f";
+translations["zh-CN"].assessmentSuggestions = "\u53ef\u4ee5\u7ee7\u7eed\u89c2\u5bdf";
+translations["zh-CN"].assessmentQuestion = "\u8ba8\u8bba\u7126\u70b9";
 
 const state = {
     session: null,
@@ -740,6 +752,10 @@ function renderAssistantBubble(turn, bubble) {
     const body = assistantBodyWithoutCues(localized.content, uiCues, question);
     renderAssistantBody(bodyNode, body, guidance.coordinateLinks, turn);
     bubble.appendChild(bodyNode);
+    const assessment = assessmentForTurn(turn.turnId);
+    if (assessment) {
+        bubble.appendChild(createAssessmentCard(assessment.payload));
+    }
 
     if (localized !== turn) {
         const translatedLabel = document.createElement("small");
@@ -842,6 +858,57 @@ function renderAssistantBubble(turn, bubble) {
         // Legacy render contract: if (question) bubble.appendChild(createDiscussionFocus(question));
         bubble.appendChild(createDiscussionFocus(question));
     }
+}
+
+function assessmentForTurn(turnId) {
+    return state.session?.assessments?.find(
+        item => item.assistantTurnId === turnId
+    ) || null;
+}
+
+function createAssessmentCard(payload) {
+    const assessment = payload && typeof payload === "object" ? payload : {};
+    const card = document.createElement("section");
+    card.className = "assessment-card";
+
+    const title = document.createElement("strong");
+    title.textContent = t("assessmentTitle");
+    card.appendChild(title);
+
+    const appendParagraph = (labelKey, value) => {
+        const text = String(value || "").trim();
+        if (!text) return;
+        const paragraph = document.createElement("p");
+        const label = document.createElement("b");
+        label.textContent = `${t(labelKey)}：`;
+        paragraph.append(label, document.createTextNode(text));
+        card.appendChild(paragraph);
+    };
+
+    appendParagraph("assessmentSolution", assessment.solutionSummary);
+    appendParagraph("assessmentDifficulty", assessment.difficultyOpinion);
+
+    const appendList = (labelKey, values) => {
+        const entries = Array.isArray(values)
+            ? values.map(value => String(value || "").trim()).filter(Boolean)
+            : [];
+        if (!entries.length) return;
+        const label = document.createElement("b");
+        label.textContent = `${t(labelKey)}：`;
+        card.appendChild(label);
+        const list = document.createElement("ul");
+        entries.forEach(value => {
+            const item = document.createElement("li");
+            item.textContent = value;
+            list.appendChild(item);
+        });
+        card.appendChild(list);
+    };
+
+    appendList("assessmentFeatures", assessment.features);
+    appendList("assessmentSuggestions", assessment.suggestions);
+    appendParagraph("assessmentQuestion", assessment.satisfactionQuestion);
+    return card;
 }
 
 function proposalStateMessage(status) {
@@ -1294,16 +1361,19 @@ function drawActiveCoordinateRoute() {
     const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
     const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
     marker.setAttribute("id", "coordinate-route-arrowhead");
-    marker.setAttribute("viewBox", "0 0 10 10");
-    marker.setAttribute("refX", "8");
-    marker.setAttribute("refY", "5");
-    marker.setAttribute("markerWidth", "7");
-    marker.setAttribute("markerHeight", "7");
-    marker.setAttribute("orient", "auto-start-reverse");
+    marker.setAttribute("viewBox", "0 0 14 14");
+    marker.setAttribute("refX", "12");
+    marker.setAttribute("refY", "7");
+    marker.setAttribute("markerWidth", "14");
+    marker.setAttribute("markerHeight", "14");
+    marker.setAttribute("orient", "auto");
     marker.setAttribute("markerUnits", "userSpaceOnUse");
     const arrowhead = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    arrowhead.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+    arrowhead.setAttribute("d", "M 0 1 L 13 7 L 0 13 L 3.5 7 Z");
     arrowhead.setAttribute("fill", "#d62828");
+    arrowhead.setAttribute("stroke", "#5b1010");
+    arrowhead.setAttribute("stroke-width", "1");
+    arrowhead.setAttribute("stroke-linejoin", "round");
     marker.appendChild(arrowhead);
     defs.appendChild(marker);
     elements.mapOverlay.appendChild(defs);
@@ -1312,7 +1382,7 @@ function drawActiveCoordinateRoute() {
     polyline.setAttribute("points", points.join(" "));
     polyline.setAttribute("fill", "none");
     polyline.setAttribute("stroke", "#d62828");
-    polyline.setAttribute("stroke-width", "3");
+    polyline.setAttribute("stroke-width", "4");
     polyline.setAttribute("stroke-linecap", "round");
     polyline.setAttribute("stroke-linejoin", "round");
     polyline.setAttribute("stroke-dasharray", "7 5");

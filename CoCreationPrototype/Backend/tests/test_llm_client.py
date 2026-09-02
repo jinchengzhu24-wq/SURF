@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import httpx
 from openai import APITimeoutError
@@ -241,6 +241,104 @@ class LLMClientTests(unittest.TestCase):
             [llm_client.UNIFIED_MODEL],
         )
 
+    def test_kimi_provider_uses_kimi_k26_configuration(self):
+        client = FakeClient(["The verified route remains readable."])
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "COCREATION_LLM_PROVIDER": "kimi",
+                    "COCREATION_LLM_MODEL": "kimi-k2.6",
+                    "COCREATION_LLM_BASE_URL": "https://api.moonshot.cn/v1",
+                    "KIMI_API_KEY": "test-kimi-key",
+                },
+                clear=False,
+            ),
+            patch.object(llm_client, "_create_async_client", return_value=client) as create_client,
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Assess the route."}],
+                ["############"] * 10,
+                "kimi-config-test",
+            )
+
+        self.assertEqual(result.model, "kimi-k2.6")
+        self.assertEqual(client.chat.completions.calls[0]["model"], "kimi-k2.6")
+        self.assertEqual(client.chat.completions.calls[0]["temperature"], 0.6)
+        self.assertEqual(
+            client.chat.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
+        create_client.assert_called_once_with(
+            "test-kimi-key",
+            "https://api.moonshot.cn/v1",
+            ANY,
+        )
+
+    def test_visible_output_removes_prompt_only_field_names(self):
+        payload = {
+            "assistantMessage": (
+                "gridDistance suggests the box is close, while `_solver` and tileAt "
+                "confirm the current route."
+            ),
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "mapFacts and solutionSteps are internal.",
+        }
+
+        result = llm_client.validate_chat_response(payload, language="en")
+
+        for value in (result[0], result[3]):
+            self.assertNotRegex(
+                value,
+                r"gridDistance|_solver|tileAt|mapFacts|solutionSteps",
+            )
+        self.assertIn("Manhattan distance", result[0])
+        self.assertIn("current tile", result[0])
+
+    def test_translation_visible_output_removes_prompt_only_field_names(self):
+        source_items = [{
+            "turnId": "turn-1",
+            "body": "A route is visible.",
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": None,
+            "proposalOfferRationale": None,
+            "uiCueTexts": [],
+            "proposalSummary": None,
+            "disagreement": None,
+        }]
+        payload = {
+            "translations": [{
+                "turnId": "turn-1",
+                "body": "gridDistance and `_solver` are internal.",
+                "followUpQuestion": None,
+                "intentHypothesis": None,
+                "proposalOfferSummary": None,
+                "proposalOfferRationale": None,
+                "uiCueTexts": [],
+                "proposalSummary": None,
+                "disagreement": None,
+            }]
+        }
+
+        result = llm_client.validate_translation_response(
+            payload,
+            source_items,
+            target_language="en",
+        )
+
+        self.assertNotRegex(result[0]["body"], r"gridDistance|_solver")
+        self.assertIn("Manhattan distance", result[0]["body"])
+
     def test_plain_coordinate_links_are_hidden_metadata_and_keep_body_unchanged(self):
         body = "I would move from (5,5) along the corridor to (5,7)."
         content = (
@@ -361,6 +459,42 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(
             llm_client._recover_coordinate_links(body, ENTITY_ROUTE_ROWS),
+            [],
+        )
+
+    def test_position_description_with_route_word_is_not_annotated(self):
+        body = "The route layout places B1 and B2 beside water, while T1 and T2 sit in the lower-right row."
+
+        self.assertEqual(
+            llm_client._recover_coordinate_links(body, ENTITY_ROUTE_ROWS),
+            [],
+        )
+
+    def test_location_relation_is_not_annotated_by_direction_word_elsewhere(self):
+        body = "B2在(6,4)，紧挨着水；T2在(6,8)，玩家要从左侧绕水。"
+
+        self.assertEqual(
+            llm_client._filter_coordinate_links(
+                [{
+                    "text": body,
+                    "from": {"row": 6, "column": 4},
+                    "to": {"row": 6, "column": 8},
+                }],
+                body,
+                ENTITY_ROUTE_ROWS,
+            ),
+            [],
+        )
+        self.assertEqual(
+            llm_client._filter_coordinate_links(
+                [{
+                    "text": body,
+                    "from": {"row": 3, "column": 5},
+                    "to": {"row": 3, "column": 7},
+                }],
+                body,
+                ENTITY_ROUTE_ROWS,
+            ),
             [],
         )
 
@@ -1937,6 +2071,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("water narrows", result.assistant_message)
         self.assertNotIn("?", result.assistant_message)
         self.assertIn("play the Stage", result.assistant_message)
+        self.assertIn("small, reviewable edits", result.assistant_message)
+        self.assertEqual(
+            result.assistant_message.count("You can share a first reaction or play the Stage"),
+            1,
+        )
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertIn("deterministic solver", result.assessment["solutionSummary"])
         self.assertEqual(len(client.chat.completions.calls), 2)

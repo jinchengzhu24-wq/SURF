@@ -33,6 +33,8 @@ UNIFIED_MODEL = "deepseek-v4-flash"
 DEFAULT_MODEL = UNIFIED_MODEL
 DEFAULT_PROPOSAL_MODEL = UNIFIED_MODEL
 DEFAULT_BASE_URL = "https://api.deepseek.com"
+KIMI_MODEL = "kimi-k2.6"
+KIMI_BASE_URL = "https://api.moonshot.cn/v1"
 BACKEND_REQUEST_TIMEOUT_SECONDS = 60.0
 LLM_INTERNAL_DEADLINE_SECONDS = 58.0
 PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 40.0
@@ -62,7 +64,7 @@ PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_TOKENS = 3200
 CHAT_RESPONSE_MAX_LENGTH = 4000
 COORDINATE_LINK_LIMIT = 8
-PROMPT_VERSION = "cocreation-v38-grounded-routes-progress"
+PROMPT_VERSION = "cocreation-v40-kimi-visible-output-contract"
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -83,7 +85,35 @@ DISAGREEMENT_RESOLUTIONS = {"user", "ai", "compromise", "retain_current"}
 
 def _unified_model_attempts(count):
     """Return bounded attempts that all use the one configured production model."""
-    return [UNIFIED_MODEL] * max(1, int(count))
+    configured_model = os.getenv("COCREATION_LLM_MODEL", "").strip()
+    provider = os.getenv("COCREATION_LLM_PROVIDER", "").strip().lower()
+    model = configured_model or (KIMI_MODEL if provider == "kimi" else UNIFIED_MODEL)
+    return [model] * max(1, int(count))
+
+
+def _llm_credentials():
+    """Resolve provider credentials without coupling the chat pipeline to one vendor."""
+    provider = os.getenv("COCREATION_LLM_PROVIDER", "").strip().lower()
+    generic_key = os.getenv("COCREATION_LLM_API_KEY", "").strip()
+    kimi_key = os.getenv("KIMI_API_KEY", "").strip()
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+
+    if provider == "kimi" or generic_key or kimi_key:
+        api_key = generic_key or kimi_key
+        base_url = (
+            os.getenv("COCREATION_LLM_BASE_URL", "").strip()
+            or os.getenv("KIMI_BASE_URL", "").strip()
+            or KIMI_BASE_URL
+        )
+    else:
+        # Keep the old names as a local/rollback compatibility path.
+        api_key = deepseek_key
+        base_url = (
+            os.getenv("COCREATION_LLM_BASE_URL", "").strip()
+            or os.getenv("DEEPSEEK_BASE_URL", "").strip()
+            or DEFAULT_BASE_URL
+        )
+    return api_key, base_url
 
 
 def _request_deadline(started_at=None):
@@ -230,6 +260,12 @@ def build_chat_messages(
         "complete response; do not end with a question by habit. A factual question should be "
         "answered before any optional follow-up. Do not mechanically include every "
         "possible move in each reply.\n\n"
+        "Visible-output contract: never mention prompt-only JSON keys, internal object names, "
+        "or implementation labels such as gridDistance, _solver, tileAt, mapFacts, "
+        "solutionSteps, solutionPushes, searchedStates, designContextPatch, or "
+        "coordinateLinks. Express verified facts in ordinary design language. For Stage 1, "
+        "write only the map observation and your personal design response; the server adds "
+        "the fixed closing guidance, so do not write process or editor instructions yourself.\n\n"
         "Continuity is part of the conversation, not a report format. Use the supplied "
         "confirmed decisions and unresolved questions to make the latest response more "
         "specific, carry forward the relevant judgment, and naturally move one open question "
@@ -381,9 +417,9 @@ def build_chat_messages(
         "point, use either "
         "one concrete question or one independent first-person insight instead of ending the "
         "exchange passively. Do not reuse the preceding card's judgment or wording.\n"
-        "coordinateLinks is high-priority visual-only metadata. For a map-related design reply, strongly prefer adding one "
-        "whenever the visible reply contains a concrete path or movement description between two map anchors; "
-        "omit it only when no genuine grounded route exists or the reply is not map-related. "
+        "coordinateLinks is high-priority visual-only metadata, but it is never a marker for a location fact. For a map-related design reply, strongly prefer adding one "
+        "only when one concise visible sentence contains a concrete movement relation between two map anchors; "
+        "omit it when the sentence merely says an entity is at a coordinate, beside water, near another tile, separated by a wall, in a corner, or compares positions. "
         "Recognize natural wording rather than relying on a fixed list of phrases: this includes coordinate-to-"
         "coordinate movement, named entity routes such as B1/B2 and T1/T2, and mixed descriptions such as "
         "'B2 from (4,9) toward T1'. For each concrete route, return an object with exactly text, from, and to. "
@@ -391,6 +427,7 @@ def build_chat_messages(
         "and column coordinates resolved from the authoritative Deterministic Map Facts. For B1/B2 and T1/T2, "
         "use their corresponding numeric positions from those facts; do not invent or substitute a nearby cell. "
         "Do not emit a link for a vague spatial comment, a design intention, or an ordinary co-mention of entities. "
+        "Before emitting each link, check the link text itself: its first and last map anchors must be the declared from/to endpoints, and a movement connector such as from/to, toward, through, via, along, 到, 向, 往, 经过, or 沿着 must occur between those anchors. A connector elsewhere in the reply does not count. "
         "If you are uncertain whether a passage describes a specific route, omit the link. These links are for map "
         "visualization only and are never an edit instruction or a design constraint.\n"
         "assessment must normally be null. For a newly saved Stage opening it must "
@@ -575,14 +612,15 @@ def build_plain_chat_messages(
             "question. Do not repeat an unchanged card "
             "listed in Saved Stage context.recentGuidance. The visible reply must stand on "
             "its own and must not mention these tags or mechanically repeat their text. "
-            "COORDINATE_LINKS is high-priority visual metadata, not visible prose: for a map-related reply strongly prefer "
-            "adding a link whenever the reply contains a concrete path or movement between two map anchors; "
+            "COORDINATE_LINKS is high-priority visual metadata, not a marker for a location fact: for a map-related reply strongly prefer "
+            "adding a link only when one concise visible sentence contains a concrete movement relation between two map anchors. "
+            "Do not annotate a sentence that merely says an entity is at a coordinate, beside water, near another tile, separated by a wall, in a corner, or compares positions; "
             "omit it only when no genuine grounded route exists or the reply is not map-related. Recognize "
             "natural wording instead of relying on a fixed phrase list. This includes coordinate routes, named "
-            "entity routes such as from T1 to B1, B1通往T1, or the path between B2 and T2, and mixed wording such "
+            "entity routes such as from T1 to B1, B1通往T1, or B2沿着通道到T2, and mixed wording such "
             "as B2从（4,9）往T1走. Resolve B1/B2/T1/T2 to their one-based numeric positions from Deterministic "
             "Map Facts. Each item must contain exactly text, from, and to; text must exactly match a contiguous "
-            "visible substring and must not be rewritten into existence. Do not use links for vague spatial "
+            "visible substring and must not be rewritten into existence. The link text's first and last map anchors must equal from/to, and a movement connector such as from/to, toward, through, via, along, 到, 向, 往, 经过, or 沿着 must occur between those anchors; a connector elsewhere in the reply does not count. Do not use links for vague spatial "
             "language, design intentions, or ordinary entity co-mentions; if uncertain, omit the link. "
         )
     )
@@ -809,7 +847,9 @@ def _map_grounding_contract():
         "water, or in a narrow passage unless the facts explicitly support that exact current "
         "claim. gridDistance is Manhattan distance only, not a traversable route or a push "
         "solution. If the facts do not establish a relation, state it as a question about a "
-        "future play moment rather than as a fact about the saved map."
+        "future play moment rather than as a fact about the saved map. The JSON field names "
+        "in Deterministic Map Facts are prompt-only; never repeat them in assistantMessage, "
+        "assessment, guidance, or any other user-visible text."
     )
 
 
@@ -1133,13 +1173,16 @@ def generate_chat_reply(
         if exact is not None:
             return exact
 
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+    api_key, base_url = _llm_credentials()
 
-    if not api_key or api_key == "your_deepseek_api_key_here":
+    if not api_key or api_key in {
+        "your_deepseek_api_key_here",
+        "your_kimi_api_key_here",
+        "your_llm_api_key_here",
+    }:
         raise LLMServiceError(
             "CONFIGURATION_ERROR",
-            "DEEPSEEK_API_KEY is missing.",
+            "The configured LLM API key is missing.",
             request_id,
             False,
             0,
@@ -1225,8 +1268,8 @@ def generate_chat_reply(
         assessment_only,
         effective_stage_context,
     )
-    primary_model = UNIFIED_MODEL
     models = _unified_model_attempts(_max_attempts)
+    primary_model = models[0]
 
     task = "stage_assessment" if assessment_only else (
         "map_proposal" if proposal_request else "chat"
@@ -3066,13 +3109,16 @@ def _generate_plain_chat_sync(
     stage_opening=False,
     deadline=None,
 ):
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+    api_key, base_url = _llm_credentials()
 
-    if not api_key or api_key == "your_deepseek_api_key_here":
+    if not api_key or api_key in {
+        "your_deepseek_api_key_here",
+        "your_kimi_api_key_here",
+        "your_llm_api_key_here",
+    }:
         raise LLMServiceError(
             "CONFIGURATION_ERROR",
-            "DEEPSEEK_API_KEY is missing.",
+            "The configured LLM API key is missing.",
             request_id,
             False,
             0,
@@ -3155,13 +3201,16 @@ def _generate_plain_chat_sync(
 
 
 def translate_turns(items, target_language, request_id):
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+    api_key, base_url = _llm_credentials()
 
-    if not api_key or api_key == "your_deepseek_api_key_here":
+    if not api_key or api_key in {
+        "your_deepseek_api_key_here",
+        "your_kimi_api_key_here",
+        "your_llm_api_key_here",
+    }:
         raise LLMServiceError(
             "CONFIGURATION_ERROR",
-            "DEEPSEEK_API_KEY is missing.",
+            "The configured LLM API key is missing.",
             request_id,
             False,
             0,
@@ -3218,6 +3267,7 @@ def translate_turns(items, target_language, request_id):
                     models=models,
                     messages=messages,
                     items=items,
+                    target_language=target_language,
                     request_id=request_id,
                     started_at=started_at,
                     deadline=deadline,
@@ -3254,6 +3304,7 @@ async def _translate_with_model_fallback(
     models,
     messages,
     items,
+    target_language,
     request_id,
     started_at,
     deadline=None,
@@ -3312,7 +3363,11 @@ async def _translate_with_model_fallback(
                 raise EmptyModelResponse("The model returned an empty response.")
 
             payload = json.loads(content)
-            translations = validate_translation_response(payload, items)
+            translations = validate_translation_response(
+                payload,
+                items,
+                target_language=target_language,
+            )
             latency_ms = int((time.monotonic() - started_at) * 1000)
             _log_llm_event(
                 "llm_request_completed",
@@ -3463,8 +3518,11 @@ async def _generate_plain_with_model_fallback(
             if len(content.strip()) > CHAT_RESPONSE_MAX_LENGTH:
                 raise ValueError("The model response is too long.")
 
-            content = _normalize_unsaved_change_claims(
-                _normalize_single_level_language(content.strip()),
+            content = _sanitize_visible_model_text(
+                _normalize_unsaved_change_claims(
+                    _normalize_single_level_language(content.strip()),
+                    language,
+                ),
                 language,
             )
             discussion_focus = _extract_plain_discussion_focus(
@@ -3658,6 +3716,7 @@ async def _generate_plain_with_model_fallback(
                 "uiCues": ui_cues[:2],
                 "coordinateLinks": coordinate_links,
             }
+            guidance = _sanitize_visible_guidance(guidance, language)
             if design_context_patch is not None:
                 guidance["designContextPatch"] = design_context_patch
             if design_context_patch_error:
@@ -4175,7 +4234,7 @@ def _safe_validation_reason(exception):
     return None
 
 
-def validate_translation_response(payload, source_items):
+def validate_translation_response(payload, source_items, target_language="en"):
     if not isinstance(payload, dict) or set(payload) != {"translations"}:
         raise ValueError("Translation output must contain only translations.")
 
@@ -4218,6 +4277,10 @@ def validate_translation_response(payload, source_items):
             f"translations[{index}].body",
             allow_empty=True,
         )
+        normalized["body"] = _sanitize_visible_model_text(
+            normalized["body"],
+            target_language,
+        )
 
         for field_name in (
             "followUpQuestion",
@@ -4230,6 +4293,10 @@ def validate_translation_response(payload, source_items):
                 translation[field_name],
                 source[field_name],
                 f"translations[{index}].{field_name}",
+            )
+            normalized[field_name] = _sanitize_visible_model_text(
+                normalized[field_name],
+                target_language,
             )
 
         source_cues = source["uiCueTexts"]
@@ -4245,6 +4312,10 @@ def validate_translation_response(payload, source_items):
                 f"translations[{index}].uiCueTexts[{cue_index}]",
             )
             for cue_index, translated_text in enumerate(translated_cues)
+        ]
+        normalized["uiCueTexts"] = [
+            _sanitize_visible_model_text(text, target_language)
+            for text in normalized["uiCueTexts"]
         ]
         if source_links:
             translated_link_texts = translation["coordinateLinkTexts"]
@@ -4263,6 +4334,13 @@ def validate_translation_response(payload, source_items):
                 )
                 for link_index, translated_text in enumerate(translated_link_texts)
             ]
+            normalized["coordinateLinkTexts"] = [
+                _sanitize_visible_model_text(
+                    text,
+                    target_language,
+                )
+                for text in normalized["coordinateLinkTexts"]
+            ]
         if "disagreement" in item_expected_fields:
             source_disagreement = source.get("disagreement")
             translated_disagreement = translation.get("disagreement")
@@ -4277,6 +4355,16 @@ def validate_translation_response(payload, source_items):
                     source_disagreement,
                     f"translations[{index}].disagreement",
                 )
+                for field_name in (
+                    "userPosition",
+                    "aiPosition",
+                    "coreDisagreement",
+                    "nextQuestion",
+                ):
+                    normalized["disagreement"][field_name] = _sanitize_visible_model_text(
+                        normalized["disagreement"][field_name],
+                        target_language,
+                    )
         translated_by_id[turn_id] = normalized
 
     if set(translated_by_id) != set(source_by_id):
@@ -4337,7 +4425,9 @@ async def _request_completion(
     request_options = {
         "model": model,
         "messages": messages,
-        "temperature": 0.45,
+        # Kimi K2.6 accepts temperature=0.6 when thinking is disabled;
+        # DeepSeek's existing path keeps its previous sampling value.
+        "temperature": 0.6 if str(model).lower().startswith("kimi-") else 0.45,
         "max_tokens": max_tokens,
         "stream": False,
         "extra_body": {"thinking": {"type": "disabled"}},
@@ -4374,8 +4464,11 @@ def validate_chat_response(
     if not required_payload_fields.issubset(payload) or set(payload) - allowed_payload_fields:
         raise ValueError("The model response contains unexpected or missing fields.")
 
-    assistant_message = _normalize_single_level_language(
-        _clean_text(payload.get("assistantMessage"), "assistantMessage")
+    assistant_message = _sanitize_visible_model_text(
+        _normalize_single_level_language(
+            _clean_text(payload.get("assistantMessage"), "assistantMessage")
+        ),
+        language,
     )
     guidance = _validate_guidance(
         payload.get("guidance"),
@@ -4384,6 +4477,7 @@ def validate_chat_response(
         stage_context,
         rows=rows,
     )
+    guidance = _sanitize_visible_guidance(guidance, language)
     patch_value = payload.get("designContextPatch")
     if patch_value is not None:
         try:
@@ -4499,30 +4593,45 @@ def validate_chat_response(
         raise ValueError("assessment must be an object.")
     else:
         assessment = {
-            "solutionSummary": _normalize_single_level_language(_clean_text(
-                assessment_payload.get("solutionSummary"),
-                "assessment.solutionSummary",
-            )),
-            "difficultyOpinion": _normalize_single_level_language(_clean_text(
-                assessment_payload.get("difficultyOpinion"),
-                "assessment.difficultyOpinion",
-            )),
+            "solutionSummary": _sanitize_visible_model_text(
+                _normalize_single_level_language(_clean_text(
+                    assessment_payload.get("solutionSummary"),
+                    "assessment.solutionSummary",
+                )),
+                language,
+            ),
+            "difficultyOpinion": _sanitize_visible_model_text(
+                _normalize_single_level_language(_clean_text(
+                    assessment_payload.get("difficultyOpinion"),
+                    "assessment.difficultyOpinion",
+                )),
+                language,
+            ),
             "features": [
-                _normalize_single_level_language(item)
+                _sanitize_visible_model_text(
+                    _normalize_single_level_language(item),
+                    language,
+                )
                 for item in _clean_list(assessment_payload.get("features"), "features")
             ],
             "suggestions": [
-                _normalize_single_level_language(item)
+                _sanitize_visible_model_text(
+                    _normalize_single_level_language(item),
+                    language,
+                )
                 for item in _clean_list(
                     assessment_payload.get("suggestions"),
                     "suggestions",
                 )
             ],
-            "satisfactionQuestion": _normalize_single_level_language(
-                _clean_optional_text(
-                    assessment_payload.get("satisfactionQuestion"),
-                    "assessment.satisfactionQuestion",
-                )
+            "satisfactionQuestion": _sanitize_visible_model_text(
+                _normalize_single_level_language(
+                    _clean_optional_text(
+                        assessment_payload.get("satisfactionQuestion"),
+                        "assessment.satisfactionQuestion",
+                    )
+                ),
+                language,
             ),
         }
 
@@ -4637,7 +4746,10 @@ def validate_chat_response(
         assistant_message,
         assessment,
         proposed_rows,
-        _normalize_single_level_language(modification_summary.strip())[:1000],
+        _sanitize_visible_model_text(
+            _normalize_single_level_language(modification_summary.strip()),
+            language,
+        )[:1000],
         guidance,
     )
 
@@ -4823,6 +4935,107 @@ def _normalize_single_level_language(value):
         flags=re.IGNORECASE,
     )
     return text
+
+
+_VISIBLE_INTERNAL_TERM_REPLACEMENTS = {
+    "gridDistance": ("曼哈顿距离", "Manhattan distance"),
+    "_solver": ("确定性求解器", "deterministic solver"),
+    "solutionSteps": ("求解步数", "solution steps"),
+    "solutionPushes": ("推动次数", "pushes"),
+    "searchedStates": ("搜索状态数", "searched states"),
+    "tileAt": ("当前格子", "current tile"),
+    "mapFacts": ("当前地图事实", "current map facts"),
+    "mapFingerprint": ("当前地图", "current map"),
+    "orthogonallyAdjacentToWater": ("与水域正交相邻", "orthogonally adjacent to water"),
+    "entityCoordinates": ("实体坐标", "entity coordinates"),
+    "verifiedEntityChangesFromParent": ("已核对的版本变化", "verified version changes"),
+    "designContextPatch": ("设计进度", "design progress"),
+    "coordinateLinks": ("路线端点", "route endpoints"),
+}
+
+
+def _sanitize_visible_model_text(value, language="en"):
+    """Remove implementation vocabulary that must never become visible prose."""
+    if value is None:
+        return None
+
+    text = str(value)
+    text = re.sub(r"```(?:json|text|plaintext)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"`([^`\r\n]+)`", r"\1", text)
+    language_index = 0 if language == "zh-CN" else 1
+    for token, replacements in _VISIBLE_INTERNAL_TERM_REPLACEMENTS.items():
+        replacement = replacements[language_index]
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])",
+            replacement,
+            text,
+        )
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    return text.strip()
+
+
+def _sanitize_visible_guidance(guidance, language="en"):
+    """Sanitize public guidance while preserving backend-only context patches."""
+    result = dict(guidance or {})
+    for field_name in ("intentHypothesis", "followUpQuestion"):
+        if result.get(field_name) is not None:
+            result[field_name] = _sanitize_visible_model_text(
+                result[field_name], language
+            )
+
+    offer = result.get("proposalOffer")
+    if isinstance(offer, dict):
+        offer = dict(offer)
+        for field_name in ("summary", "rationale"):
+            if offer.get(field_name) is not None:
+                offer[field_name] = _sanitize_visible_model_text(
+                    offer[field_name], language
+                )
+        result["proposalOffer"] = offer
+
+    disagreement = result.get("disagreement")
+    if isinstance(disagreement, dict):
+        disagreement = dict(disagreement)
+        for field_name in (
+            "userPosition",
+            "aiPosition",
+            "coreDisagreement",
+            "nextQuestion",
+        ):
+            if disagreement.get(field_name) is not None:
+                disagreement[field_name] = _sanitize_visible_model_text(
+                    disagreement[field_name], language
+                )
+        result["disagreement"] = disagreement
+
+    cues = result.get("uiCues")
+    if isinstance(cues, list):
+        result["uiCues"] = [
+            {
+                **cue,
+                "text": _sanitize_visible_model_text(cue.get("text"), language),
+            }
+            if isinstance(cue, dict)
+            else cue
+            for cue in cues
+        ]
+
+    links = result.get("coordinateLinks")
+    if isinstance(links, list):
+        result["coordinateLinks"] = [
+            {
+                **link,
+                "text": _sanitize_visible_model_text(link.get("text"), language),
+            }
+            if isinstance(link, dict)
+            else link
+            for link in links
+        ]
+
+    # designContextPatch and its error are intentionally untouched: they are
+    # consumed by the server and removed by app._public_guidance before storage.
+    return result
 
 
 def _normalize_unsaved_change_claims(value, language="en"):
@@ -8436,23 +8649,27 @@ def _normalize_coordinate_links(value, rows=None):
 
 
 def _route_text_has_direction(text):
+    # This is only a cheap pre-filter. The authoritative check below also
+    # requires the connector to sit between the link's first and last anchors.
     return bool(re.search(
-        r"(?:\b(?:from|to|toward|towards|through|via|walk|go|lead|route|path|corridor)\b|"
-        r"从|到|向|往|朝向|通往|经过|沿着|路线|路径|通道|走到|走向)",
+        r"(?:\b(?:to|toward|towards|through|via|along|walk(?:ing)?|"
+        r"move(?:s|d|ing)?|go(?:es|ing)?|lead(?:s|ing)?)\b|"
+        r"到|向|往|朝向|通往|通向|经过|沿着|走到|走向|前往|抵达|"
+        r"推向|推到|移动到|绕到|绕向)",
         str(text or ""),
         flags=re.IGNORECASE,
     ))
 
 
-def _route_anchors(text, rows):
-    """Return ordered, authoritative coordinate anchors from route prose."""
+def _route_anchor_matches(text, rows):
+    """Return ordered entity/coordinate anchors with their visible spans."""
     try:
         entity_coordinates = _map_entity_coordinates(rows)
     except (TypeError, ValueError, KeyError):
         return None
 
     coordinate_pattern = re.compile(
-        r"[\(\uFF08]\s*(\d{1,2})\s*[,，]\s*(\d{1,2})\s*[\)\uFF09]"
+        r"[\(\uFF08]\s*(\d{1,2})\s*[,\uFF0C]\s*(\d{1,2})\s*[\)\uFF09]"
     )
     entity_pattern = re.compile(
         r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+|玩家|起点)(?![A-Za-z0-9])",
@@ -8460,10 +8677,14 @@ def _route_anchors(text, rows):
     )
     anchors = []
     for match in coordinate_pattern.finditer(str(text or "")):
-        anchors.append((match.start(), {
-            "row": int(match.group(1)),
-            "column": int(match.group(2)),
-        }))
+        anchors.append({
+            "start": match.start(),
+            "end": match.end(),
+            "point": {
+                "row": int(match.group(1)),
+                "column": int(match.group(2)),
+            },
+        })
     for match in entity_pattern.finditer(str(text or "")):
         label = match.group(0).upper()
         if label in {"玩家", "起点"}:
@@ -8471,9 +8692,52 @@ def _route_anchors(text, rows):
         point = entity_coordinates.get(label)
         if point is None:
             return None
-        anchors.append((match.start(), dict(point)))
-    anchors.sort(key=lambda item: item[0])
-    return [point for _, point in anchors]
+        anchors.append({
+            "start": match.start(),
+            "end": match.end(),
+            "point": dict(point),
+        })
+    anchors.sort(key=lambda item: item["start"])
+    return anchors
+
+
+def _route_anchors(text, rows):
+    """Return ordered, authoritative coordinate anchors from route prose."""
+    matches = _route_anchor_matches(text, rows)
+    if matches is None:
+        return None
+    return [item["point"] for item in matches]
+
+
+def _route_text_is_concise(text):
+    """Reject a whole evaluation/report being used as one route label."""
+    value = str(text or "").strip()
+    if not value or "\n" in value or "\r" in value or len(value) > 220:
+        return False
+    return len(re.findall(r"[.!?。！？]", value)) <= 1
+
+
+def _route_relation_is_explicit(text, source, destination, rows):
+    """Require a movement connector between the declared visible endpoints."""
+    if not _route_text_is_concise(text):
+        return False
+    matches = _route_anchor_matches(text, rows)
+    if not matches or len(matches) < 2:
+        return False
+    if (
+        matches[0]["point"] != source
+        or matches[-1]["point"] != destination
+    ):
+        return False
+    between = str(text)[matches[0]["end"]:matches[-1]["start"]]
+    return bool(re.search(
+        r"(?:\b(?:to|toward|towards|through|via|along|walk(?:ing)?|"
+        r"move(?:s|d|ing)?|go(?:es|ing)?|lead(?:s|ing)?)\b|"
+        r"到|向|往|朝向|通往|通向|经过|沿着|走到|走向|前往|抵达|"
+        r"推向|推到|移动到|绕到|绕向)",
+        between,
+        flags=re.IGNORECASE,
+    ))
 
 
 def _coordinate_route_exists(rows, source, destination):
@@ -8539,18 +8803,16 @@ def _coordinate_route_exists(rows, source, destination):
 def _coordinate_link_is_grounded(link, rows):
     if rows is None:
         return True
-    if not _route_text_has_direction(link.get("text")):
+    if not _route_relation_is_explicit(
+        link.get("text"),
+        link.get("from"),
+        link.get("to"),
+        rows,
+    ):
         return False
     if not _coordinate_route_exists(rows, link.get("from"), link.get("to")):
         return False
-    anchors = _route_anchors(link.get("text"), rows)
-    if not anchors:
-        return False
-    return (
-        anchors[0] == link.get("from")
-        and anchors[-1] == link.get("to")
-        and len(anchors) >= 2
-    )
+    return True
 
 
 def _recover_coordinate_links(body, rows, existing=None):
@@ -8850,7 +9112,10 @@ def _compose_assistant_message(
     stage_context=None,
 ):
     stage_context = stage_context or {}
-    message = _deduplicate_assistant_body(message)
+    message = _sanitize_visible_model_text(
+        _deduplicate_assistant_body(message),
+        language,
+    )
     change_summary = stage_context.get("changeSummary") or {}
     components = change_summary.get("components") or []
 
@@ -8873,20 +9138,31 @@ def _compose_assistant_message(
         message = f"{acknowledgement}\n\n{message}"
 
     ui_cues = guidance.get("uiCues") or []
-    additions = [cue["text"] for cue in ui_cues if cue.get("text")]
+    additions = [
+        _sanitize_visible_model_text(cue["text"], language)
+        for cue in ui_cues
+        if cue.get("text")
+    ]
     follow_up = guidance.get("followUpQuestion")
+    follow_up = _sanitize_visible_model_text(follow_up, language)
     proposal_offer = guidance.get("proposalOffer") or {}
 
     for addition in [*additions, follow_up]:
         message = _remove_guidance_from_body(message, addition)
 
-    for addition in [proposal_offer.get("summary"), proposal_offer.get("rationale")]:
+    for addition in [
+        _sanitize_visible_model_text(proposal_offer.get("summary"), language),
+        _sanitize_visible_model_text(proposal_offer.get("rationale"), language),
+    ]:
         message = _remove_exact_guidance_from_body(message, addition)
 
     if follow_up:
         additions.append(follow_up)
 
-    return "\n\n".join(part for part in [message, *additions] if part)
+    return _sanitize_visible_model_text(
+        "\n\n".join(part for part in [message, *additions] if part),
+        language,
+    )
 
 
 def _localized_change_labels(components, language):
