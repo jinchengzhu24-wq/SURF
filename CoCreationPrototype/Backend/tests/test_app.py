@@ -34,6 +34,17 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIsNone(
             backend._extract_conservative_map_question("Would you like to continue?")
         )
+        self.assertIsNone(
+            backend._extract_conservative_map_question(
+                "B2 goes to (8,7), then to (8,8): is that route reachable?"
+            )
+        )
+        self.assertEqual(
+            backend._extract_conservative_map_question(
+                "The water changes the push rhythm. Should it create a visible detour or only affect push order?"
+            ),
+            "Should it create a visible detour or only affect push order?",
+        )
 
     def test_frontend_and_static_assets_are_served(self):
         index_response = self.client.get("/")
@@ -42,7 +53,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("cocreation-unified-flash-20260902-3", index_response.text)
+        self.assertIn("cocreation-kimi-20260903-2", index_response.text)
         self.assertIn('<html lang="zh-CN">', index_response.text)
         self.assertEqual(css_response.status_code, 200)
         self.assertIn("--bg: #6f9d31", css_response.text)
@@ -55,10 +66,10 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("GUIDANCE_CUE_LABELS", js_response.text)
         self.assertIn("assistantBodyWithoutCues", js_response.text)
         self.assertIn("proposalForTurn", js_response.text)
-        self.assertIn("assessmentForTurn", js_response.text)
-        self.assertIn("createAssessmentCard", js_response.text)
-        self.assertIn("assessmentSolution", js_response.text)
-        self.assertIn("assessmentDifficulty", js_response.text)
+        self.assertNotIn("assessmentForTurn", js_response.text)
+        self.assertNotIn("createAssessmentCard", js_response.text)
+        self.assertNotIn("assessmentSolution", js_response.text)
+        self.assertNotIn("assessmentDifficulty", js_response.text)
         self.assertIn('language: "zh-CN"', js_response.text)
         self.assertIn('apiError.details = payload.details || null;', js_response.text)
         self.assertIn('validationFailed', js_response.text)
@@ -71,6 +82,10 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("verifiedProposalMessage()", js_response.text)
         self.assertIn("guidanceForDisplay", js_response.text)
         self.assertIn("createDiscussionFocus", js_response.text)
+        self.assertIn('role="log"', index_response.text)
+        self.assertIn('tabindex="0"', index_response.text)
+        self.assertIn("renderedMessageStageId", js_response.text)
+        self.assertIn("scrollbar-gutter", css_response.text)
         self.assertIn("elements.chatForm.requestSubmit()", js_response.text)
         self.assertIn('id="returnUnityButton"', index_response.text)
         self.assertIn('elements.returnUnityButton.addEventListener("click", returnToUnity)', js_response.text)
@@ -153,7 +168,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('warning: "WARNING / 风险提示"', js_response.text)
         self.assertIn('tradeoff: "WARNING / 风险提示"', js_response.text)
         self.assertNotIn('.guidance-offer {', css_response.text)
-        self.assertIn("createAssessmentCard", js_response.text)
+        self.assertNotIn("createAssessmentCard", js_response.text)
 
     def test_relaxed_revision_suggestion_names_the_lowered_requirement_before_generation(self):
         execution = backend._relaxed_revision_suggestion_execution(
@@ -445,28 +460,16 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         system_prompt = prompt_messages[0]["content"]
 
         self.assertIn("\n".join(backend.SAMPLE_ROWS), system_prompt)
-        self.assertIn("read-only", system_prompt)
-        self.assertIn("at most one central question", system_prompt)
-        self.assertIn("tentative, correctable hypothesis", system_prompt)
-        self.assertIn("Every difficulty statement must explicitly use", system_prompt)
-        self.assertIn("exactly one level", system_prompt)
-        self.assertIn("Every Stage number is only a saved-version index", system_prompt)
+        self.assertIn("authoritative", system_prompt)
+        self.assertIn("at most one concrete question", system_prompt)
+        self.assertIn("tentative", system_prompt)
+        self.assertIn("one level with Stages as saved-version indices", system_prompt)
         self.assertIn("offer_revision", system_prompt)
-        self.assertIn("edit the level directly with the tile tools", system_prompt)
-        self.assertIn("newly saved human_edit Stage", system_prompt)
-        self.assertIn("only turns attached to this saved Stage", system_prompt)
-        self.assertIn("accepted LLM proposal may be carried forward", system_prompt)
-        self.assertIn("manual_edit uiCue", system_prompt)
-        self.assertIn("warning uiCue", system_prompt)
-        self.assertIn("only when strong", system_prompt)
-        self.assertIn("Ordinary uncertainty, route trade-offs", system_prompt)
-        self.assertIn("thoughtful, equal design peer", system_prompt)
-        self.assertIn("do not end with a question by habit", system_prompt)
-        self.assertIn('"followUpQuestion":null', system_prompt)
-        self.assertIn("do not recite metrics or spell out a move sequence", system_prompt)
-        self.assertIn("differ from the current saved Stage by at least one tile", system_prompt)
-        self.assertIn("unless the before/after rows prove it", system_prompt)
-        self.assertIn('"uiCues":[]', system_prompt)
+        self.assertIn("Do not claim a map was changed", system_prompt)
+        self.assertIn("Draft provenance and attribution", system_prompt)
+        self.assertIn("Continuous progress context", system_prompt)
+        self.assertIn("Never create a confirmed decision", system_prompt)
+        self.assertIn("coordinateLinks", system_prompt)
         self.assertIn('"solutionSteps": 12', system_prompt)
         self.assertIn('"solutionPushes": 4', system_prompt)
         self.assertNotIn("UURRDDLL", system_prompt)

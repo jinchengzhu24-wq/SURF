@@ -6,7 +6,6 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/SURF/CoCreationPrototype/Backend
-EnvironmentFile=/root/SURF/Backend/.env
 EnvironmentFile=-/root/SURF/CoCreationPrototype/Backend/.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/root/SURF/CoCreationPrototype/Backend/venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8010

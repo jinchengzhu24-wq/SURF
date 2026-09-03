@@ -29,12 +29,16 @@ from design_context import validate_design_context_patch
 from repository import map_fingerprint
 
 
-UNIFIED_MODEL = "deepseek-v4-flash"
-DEFAULT_MODEL = UNIFIED_MODEL
-DEFAULT_PROPOSAL_MODEL = UNIFIED_MODEL
-DEFAULT_BASE_URL = "https://api.deepseek.com"
 KIMI_MODEL = "kimi-k2.6"
 KIMI_BASE_URL = "https://api.moonshot.cn/v1"
+# 8010 is intentionally a Kimi-only service.  The 8000 service has its own
+# runtime and remains on DeepSeek; these compatibility names are retained for
+# callers that import them, but they must never resolve 8010 credentials from
+# the 8000 environment.
+UNIFIED_MODEL = KIMI_MODEL
+DEFAULT_MODEL = KIMI_MODEL
+DEFAULT_PROPOSAL_MODEL = KIMI_MODEL
+DEFAULT_BASE_URL = KIMI_BASE_URL
 BACKEND_REQUEST_TIMEOUT_SECONDS = 60.0
 LLM_INTERNAL_DEADLINE_SECONDS = 58.0
 PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 40.0
@@ -52,19 +56,96 @@ REVISION_MIN_CHANGED_CELLS = 1
 REVISION_MAX_CHANGED_CELLS = 12
 # Compatibility for older diagnostics and integrations that imported these names.
 PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
-CHAT_MAX_TOKENS = 1400
+CHAT_MAX_COMPLETION_TOKENS = 2600
+# Compatibility alias for integrations that import the old constant name.
+CHAT_MAX_TOKENS = CHAT_MAX_COMPLETION_TOKENS
 PLAIN_CHAT_TIMEOUT_SECONDS = BACKEND_REQUEST_TIMEOUT_SECONDS
 PLAIN_PRIMARY_TIMEOUT_SECONDS = 30.0
-PLAIN_CHAT_MAX_TOKENS = 900
-PROPOSAL_MAX_TOKENS = 2400
-PROPOSAL_PLAN_MAX_TOKENS = 1400
-PROPOSAL_OPERATION_MAX_TOKENS = 1400
+PLAIN_CHAT_MAX_COMPLETION_TOKENS = 2200
+PLAIN_CHAT_MAX_TOKENS = PLAIN_CHAT_MAX_COMPLETION_TOKENS
+PROPOSAL_MAX_COMPLETION_TOKENS = 2400
+PROPOSAL_MAX_TOKENS = PROPOSAL_MAX_COMPLETION_TOKENS
+PROPOSAL_PLAN_MAX_COMPLETION_TOKENS = 1400
+PROPOSAL_PLAN_MAX_TOKENS = PROPOSAL_PLAN_MAX_COMPLETION_TOKENS
+PROPOSAL_OPERATION_MAX_COMPLETION_TOKENS = 1400
+PROPOSAL_OPERATION_MAX_TOKENS = PROPOSAL_OPERATION_MAX_COMPLETION_TOKENS
 PROPOSAL_CANDIDATE_LIMIT = 3
 PROPOSAL_OPERATION_LIMIT = 24
-TRANSLATION_MAX_TOKENS = 3200
-CHAT_RESPONSE_MAX_LENGTH = 4000
+TRANSLATION_MAX_COMPLETION_TOKENS = 3200
+TRANSLATION_MAX_TOKENS = TRANSLATION_MAX_COMPLETION_TOKENS
+CHAT_RESPONSE_MAX_LENGTH = 8000
 COORDINATE_LINK_LIMIT = 8
-PROMPT_VERSION = "cocreation-v40-kimi-visible-output-contract"
+PROMPT_VERSION = "cocreation-v42-kimi-detailed-design-route-bounded"
+
+
+def _structured_response_format(task=None):
+    """Build a compact schema contract that Kimi can follow reliably.
+
+    The application still performs the authoritative validation after parsing.
+    This schema exists to keep Kimi's JSON envelope stable and to avoid asking
+    the model to infer the wire shape from the much larger design rules.
+    """
+    task = str(task or "chat")
+    if task == "translation":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "translations": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["translations"],
+        }
+        name = "cocreation_translation"
+    elif task == "revision_plan":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "schemaVersion": {"type": ["integer", "null"]},
+                "strategies": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["strategies"],
+        }
+        name = "cocreation_revision_plan"
+    elif task == "operation_candidates":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "candidates": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["candidates"],
+        }
+        name = "cocreation_operation_candidates"
+    else:
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "assistantMessage": {"type": "string"},
+                "guidance": {"type": "object"},
+                "assessment": {"type": ["object", "null"]},
+                "proposedRows": {"type": ["array", "null"], "items": {"type": "string"}},
+                "modificationSummary": {"type": "string"},
+                "designContextPatch": {"type": ["object", "null"]},
+            },
+            "required": [
+                "assistantMessage",
+                "guidance",
+                "assessment",
+                "proposedRows",
+                "modificationSummary",
+            ],
+        }
+        name = (
+            "cocreation_stage_assessment"
+            if task == "stage_assessment"
+            else "cocreation_chat"
+        )
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "strict": True, "schema": schema},
+    }
 
 GUIDANCE_MOVES = {
     "observe_stage",
@@ -84,35 +165,27 @@ DISAGREEMENT_RESOLUTIONS = {"user", "ai", "compromise", "retain_current"}
 
 
 def _unified_model_attempts(count):
-    """Return bounded attempts that all use the one configured production model."""
-    configured_model = os.getenv("COCREATION_LLM_MODEL", "").strip()
-    provider = os.getenv("COCREATION_LLM_PROVIDER", "").strip().lower()
-    model = configured_model or (KIMI_MODEL if provider == "kimi" else UNIFIED_MODEL)
-    return [model] * max(1, int(count))
+    """Return bounded attempts for the one production model used by 8010."""
+    # Do not allow a shared 8000 environment or an old model override to change
+    # the provider for this service.  Explicit configuration is still read by
+    # readiness/deployment checks, while every request remains Kimi K2.6.
+    return [KIMI_MODEL] * max(1, int(count))
 
 
 def _llm_credentials():
-    """Resolve provider credentials without coupling the chat pipeline to one vendor."""
+    """Resolve only the 8010 Kimi credentials."""
     provider = os.getenv("COCREATION_LLM_PROVIDER", "").strip().lower()
     generic_key = os.getenv("COCREATION_LLM_API_KEY", "").strip()
     kimi_key = os.getenv("KIMI_API_KEY", "").strip()
-    deepseek_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if provider not in {"", "kimi"}:
+        return "", KIMI_BASE_URL
 
-    if provider == "kimi" or generic_key or kimi_key:
-        api_key = generic_key or kimi_key
-        base_url = (
-            os.getenv("COCREATION_LLM_BASE_URL", "").strip()
-            or os.getenv("KIMI_BASE_URL", "").strip()
-            or KIMI_BASE_URL
-        )
-    else:
-        # Keep the old names as a local/rollback compatibility path.
-        api_key = deepseek_key
-        base_url = (
-            os.getenv("COCREATION_LLM_BASE_URL", "").strip()
-            or os.getenv("DEEPSEEK_BASE_URL", "").strip()
-            or DEFAULT_BASE_URL
-        )
+    api_key = generic_key or kimi_key
+    base_url = (
+        os.getenv("COCREATION_LLM_BASE_URL", "").strip()
+        or os.getenv("KIMI_BASE_URL", "").strip()
+        or KIMI_BASE_URL
+    )
     return api_key, base_url
 
 
@@ -206,9 +279,13 @@ def build_chat_messages(
     )
     post_opening_progress_instruction = (
         "Post-opening progress rule: this is an ordinary reply after the Stage opening. "
-        "When the map-specific judgment in your reply creates or materially reframes a "
-        "genuine unresolved design question, include one matching openQuestions entry "
-        "inside the internal designContextPatch with status open. Do not manufacture a "
+         "When the map-specific judgment in your reply creates or materially reframes a "
+         "genuine unresolved design question about design direction, intent, experience, or "
+         "trade-offs, include one matching openQuestions entry "
+         "inside the internal designContextPatch with status open. Do not manufacture a "
+         "progress question from your own route calculation, coordinate trace, next movement, "
+         "reachability check, or solver reasoning; those may remain briefly in the visible body "
+         "when useful. Do not manufacture a "
         "question for ordinary conversation, and never use this patch to create a confirmed "
         "decision or rejection. When the reply is about the saved map, strongly prefer the "
         "reply to include "
@@ -245,8 +322,8 @@ def build_chat_messages(
         "one primary conversational move: observe the Stage, clarify intention, offer "
         "your perspective, challenge a trade-off respectfully, reflect on play evidence, "
         "offer a revision direction, or deliver an explicitly requested revision. "
-        "Usually write two to four compact paragraphs and at most one central question. A "
-        "simple factual answer may be shorter, but a design response should normally include "
+         "Use as much space as the design question genuinely needs and at most one central "
+         "question. A simple factual answer may be shorter, but a design response should normally include "
         "a concrete observation, your own interpretation, and enough reasoning or a playable "
         "example to feel like a real person thinking alongside the designer. Do not pad the "
         "reply or turn it into a report. Vary the "
@@ -467,6 +544,23 @@ def build_chat_messages(
         f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
     )
+    system_prompt = _compact_kimi_structured_prompt(
+        assessment_only=assessment_only,
+        stage_context=prompt_stage_context,
+        response_language=response_language,
+        task="stage_assessment" if assessment_only else "chat",
+        map_facts=map_facts,
+        numbered_map=numbered_map,
+        serialized_map=serialized_map,
+        design_context_prompt=design_context_prompt,
+        continuity_context_prompt=continuity_context_prompt,
+        solver_metrics=solver_metrics,
+        play_summary=play_summary,
+        task_instructions=task,
+        provenance_guidance=provenance_guidance,
+        revision_contract=revision_contract,
+        post_opening_progress_instruction=post_opening_progress_instruction,
+    )
     return [
         {"role": "system", "content": system_prompt},
         *[
@@ -503,11 +597,14 @@ def build_plain_chat_messages(
         stage_context, role=(stage_context.get("agentRole") or "chat")
     )
     post_opening_progress_instruction = (
-        "Post-opening progress and route rule: this is an ordinary reply after the Stage "
-        "opening. If a map-specific judgment creates or materially reframes a genuine "
-        "unresolved design question, include one matching openQuestions entry in the "
-        "internal DESIGN_CONTEXT_PATCH with status open. Do not add a question just to "
-        "fill the panel, and never use the patch to create a confirmed decision or rejection. "
+         "Post-opening progress and route rule: this is an ordinary reply after the Stage "
+         "opening. If a map-specific judgment creates or materially reframes a genuine "
+         "unresolved design question about design direction, intent, experience, or trade-offs, "
+         "include one matching openQuestions entry in the "
+         "internal DESIGN_CONTEXT_PATCH with status open. Do not add a question just to "
+         "fill the panel. Never put your own route calculation, coordinate trace, next movement, "
+         "reachability check, or solver reasoning in DESIGN_CONTEXT_PATCH, and never use the patch "
+         "to create a confirmed decision or rejection. "
         "For a map-related reply, strongly prefer one concise concrete route description when "
         "the facts support one and it helps "
         "the designer see the judgment—such as player or box to target, coordinate to "
@@ -633,8 +730,8 @@ def build_plain_chat_messages(
         "formatting instructions. The only permitted metadata is the optional trailing "
         "GUIDANCE block described below. "
         f"{opening_instruction}{revision_instruction}"
-        "Usually use two to four compact paragraphs, varying their rhythm and opening. A "
-        "very simple answer may be shorter. Give observations room to breathe: connect a "
+         "Give observations room to breathe and vary the rhythm and opening. A very simple answer "
+         "may be shorter. Connect a "
         "specific map detail to a playable moment, explain why your view follows, and add a "
         "small concrete example when useful. Keep it conversational rather than exhaustive. Do not "
         "mechanically follow acknowledgement, evaluation, then question; do not restate "
@@ -675,6 +772,37 @@ def build_plain_chat_messages(
         f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
     )
+    compact_guidance_instruction = (
+        "After the visible prose, optionally add one final <GUIDANCE> block with only "
+        "warranted fields: DISCUSS, WARNING, MANUAL_EDIT, INTENT, PROPOSAL_SUMMARY, "
+        "PROPOSAL_RATIONALE, EXECUTION_BRIEF, DISAGREEMENT, COORDINATE_LINKS, or "
+        "DESIGN_CONTEXT_PATCH. Omit it whenever no card or metadata is warranted; never "
+        "produce four cards. Keep ordinary questions in assistantMessage. Do not repeat "
+        "unchanged cards from recentGuidance. An active disagreement cannot contain a "
+        "proposal; a patch cannot create a confirmed decision. Use exact route metadata "
+        "only for a visible, grounded movement sentence."
+    )
+    system_prompt = _compact_kimi_plain_prompt(
+        stage_opening=stage_opening,
+        stage_context=prompt_stage_context,
+        response_language=response_language,
+        guidance_mode=guidance_mode,
+        map_facts=map_facts,
+        numbered_map=numbered_map,
+        serialized_map=serialized_map,
+        design_context_prompt=design_context_prompt,
+        continuity_context_prompt=continuity_context_prompt,
+        solver_metrics=solver_metrics,
+        play_summary=play_summary,
+        opening_instruction=opening_instruction,
+        revision_instruction=revision_instruction,
+        continuity_instruction=continuity_instruction,
+        guidance_mode_instruction=guidance_mode_instruction,
+        action_instruction=action_instruction,
+        guidance_instruction=compact_guidance_instruction,
+        provenance_guidance=provenance_guidance,
+        post_opening_progress_instruction=post_opening_progress_instruction,
+    )
     return [
         {"role": "system", "content": system_prompt},
         *[
@@ -683,6 +811,200 @@ def build_plain_chat_messages(
             if message.get("role") in {"user", "assistant"}
         ],
     ]
+
+
+def _compact_kimi_structured_prompt(
+    *,
+    assessment_only,
+    stage_context,
+    response_language,
+    task,
+    map_facts,
+    numbered_map,
+    serialized_map,
+    design_context_prompt,
+    continuity_context_prompt,
+    solver_metrics,
+    play_summary,
+    task_instructions,
+    provenance_guidance,
+    revision_contract,
+    post_opening_progress_instruction,
+):
+    """Use a short, task-first contract for Kimi's structured responses."""
+    opening = (
+        "This is a Stage opening. Describe only one or two concrete map choices "
+        "and your subjective design reaction. Do not ask a question or a yes/no question, or "
+        "present an either-or choice using or/versus/vs or 还是/或者/或是, or write "
+        "workflow/editor instructions; the server adds the Stage 1 closing."
+        if assessment_only
+        else "Respond directly to the latest designer message in natural prose."
+    )
+    progress = (
+        "After the Stage opening, add an internal designContextPatch.openQuestions "
+        "entry only when the reply creates or materially reframes a real map-specific "
+        "unresolved design question about direction, intent, experience, or trade-offs. "
+        "Never put route calculations, coordinate traces, next movements, reachability checks, "
+        "or solver reasoning in this field. Never create a confirmed decision from the patch."
+        if not assessment_only
+        else "Do not add progress items from this opening."
+    )
+    route = (
+        "For a map-related reply, you may include detailed design analysis and one main route "
+        "passage when it describes movement between two real anchors (player/box to target, "
+        "coordinate to coordinate, or through a named corridor). Keep only the key corridor, "
+        "endpoint, and risk or design consequence; do not enumerate every step, alternative, "
+        "BFS result, or solver state. A location, adjacency, comparison, or direction-only "
+        "sentence is not a route. If used, copy the exact visible route sentence into one "
+        "coordinateLinks item with authoritative one-based from/to points. Omit it when the "
+        "relation or endpoints are uncertain. Do not add a fixed progress heading or checklist."
+    )
+    schema = (
+        'Return exactly one JSON object with these required keys: '
+        '{"assistantMessage":"...","guidance":{...},"assessment":null,'
+        '"proposedRows":null,"modificationSummary":"..."}. '
+        'guidance must contain move, intentHypothesis, intentConfidence, followUpQuestion, '
+        'proposalOffer, disagreement, uiCues, and coordinateLinks. You may add the optional '
+        'designContextPatch object. For a Stage opening, assessment must contain exactly '
+        'solutionSummary, difficultyOpinion, features, suggestions, and satisfactionQuestion; '
+        'for ordinary chat assessment is null. Use null/[] when a field is not warranted.'
+    )
+    safety = (
+        "Visible text must not mention JSON keys or internal labels such as gridDistance, "
+        "_solver, tileAt, mapFacts, solutionSteps, designContextPatch, or coordinateLinks. "
+        "Use only the authoritative map below. Treat the saved Stage as read-only. Treat this as one level with Stages as saved-version indices. Never claim a map was changed, accepted, "
+        "saved, or verified unless the server supplied that fact. Do not claim a map was changed, "
+        "accepted, saved, or verified without server evidence. A revision offer is only "
+        "conceptual and must include a complete hidden revisionPlan; never output map rows "
+        "in ordinary chat. At a real decision point, ask at most one concrete question whose "
+        "answer changes the next design judgment; otherwise let a useful observation stand. "
+        "Give a detailed, natural design response when the topic needs it; do not force a "
+        "fixed paragraph count or compress away useful reasoning. For route reasoning only, "
+        "show one main route in a short, verifiable passage with its key corridor, endpoint, "
+        "and design consequence. Do not enumerate every solver step, alternative route, or "
+        "internal search state. End every response with a complete sentence."
+    )
+    return "\n\n".join([
+        f"You are the Kimi K2.6 Sokoban co-creation design peer. Write all new natural-language fields in {response_language}.",
+        opening,
+        progress,
+        route,
+        schema,
+        safety,
+        f"Task-specific instructions:\n{task_instructions} {revision_contract}".strip(),
+        f"Draft provenance and attribution:\n{provenance_guidance}",
+        post_opening_progress_instruction,
+        _map_grounding_contract(),
+        f"Deterministic Map Facts (authoritative):\n{map_facts}",
+        f"Current saved Stage (12 x 10), one-based rows:\n{numbered_map}",
+        f"Canonical saved row strings:\n{serialized_map}",
+        "Legend: # wall, . floor, @ water, p player, s box, t target.",
+        design_context_prompt,
+        continuity_context_prompt,
+        f"Saved Stage context: {json.dumps(stage_context or {}, ensure_ascii=False)}",
+        f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}",
+        f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}",
+        f"Task: {task}.",
+    ])
+
+
+def _compact_kimi_plain_prompt(
+    *,
+    stage_opening,
+    stage_context,
+    response_language,
+    guidance_mode,
+    map_facts,
+    numbered_map,
+    serialized_map,
+    design_context_prompt,
+    continuity_context_prompt,
+    solver_metrics,
+    play_summary,
+    opening_instruction,
+    revision_instruction,
+    continuity_instruction,
+    guidance_mode_instruction,
+    action_instruction,
+    guidance_instruction,
+    provenance_guidance,
+    post_opening_progress_instruction,
+):
+    """Use the same compact facts/routing contract for text fallback."""
+    opening = (
+        "This is a Stage opening. Describe one or two concrete map choices and your own "
+        "design reaction. Do not ask a question or a yes/no question, or present an either-or "
+        "choice using or/versus/vs or 还是/或者/或是, or include process/editor instructions; "
+        "the server appends the Stage 1 closing."
+        if stage_opening
+        else "Respond to the latest designer message first, in natural conversational prose."
+    )
+    metadata = (
+        "Do not output a metadata block for a Stage opening."
+        if stage_opening
+        else (
+            "You may finish with one compact <GUIDANCE> block. Include only warranted fields "
+            "from DISCUSS, WARNING, MANUAL_EDIT, INTENT, PROPOSAL_SUMMARY, PROPOSAL_RATIONALE, "
+            "EXECUTION_BRIEF, DISAGREEMENT, COORDINATE_LINKS, and DESIGN_CONTEXT_PATCH. "
+            "Omit it whenever no card is warranted; never use the block to create a confirmed decision."
+        )
+    )
+    route = (
+        "For map-related prose, include detailed design reasoning when useful, and at most one "
+        "compact route passage that explicitly describes movement between two real anchors, such "
+        "as B1 toward T1 or (2,3) through the corridor to (2,8). The route passage may explain "
+        "the key corridor and design consequence, but should stay within a few sentences and "
+        "roughly six coordinate nodes; do not list a full solver sequence or every alternative. "
+        "Do not mark location, adjacency, comparison, or direction-only descriptions as routes. "
+        "When a route is present, COORDINATE_LINKS must repeat the exact visible route sentence "
+        "and use current authoritative endpoints; omit it when uncertain."
+    )
+    progress = (
+        "After the opening, add DESIGN_CONTEXT_PATCH only for a genuine map-specific unresolved "
+        "design question about direction, intent, experience, or trade-offs. Never put route "
+        "calculations, coordinate traces, next movements, reachability checks, or solver reasoning "
+        "in it. Do not add generic questions and do not create confirmed decisions."
+        if not stage_opening
+        else "The opening must not add progress questions or decisions."
+    )
+    safety = (
+        "Never mention internal keys or labels such as gridDistance, _solver, tileAt, mapFacts, "
+        "solutionSteps, DESIGN_CONTEXT_PATCH, or COORDINATE_LINKS in visible prose. Do not claim "
+        "an edit was applied or saved. If the designer asks for a change, describe or clarify "
+        "the direction; the server controls execution. Connect specific map details to a playable "
+        "moment when explaining a design judgment. Give enough detail to make the reasoning useful; "
+        "there is no fixed paragraph-count limit. If route reasoning is relevant, keep it to one "
+        "short, verifiable route passage with at most a few key coordinates and no exhaustive "
+        "solver trace. At a real decision point, ask at most one specific design question. "
+        "End with a complete sentence."
+    )
+    return "\n\n".join([
+        f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
+        opening,
+        progress,
+        opening_instruction,
+        revision_instruction,
+        continuity_instruction,
+        guidance_mode_instruction,
+        action_instruction,
+        guidance_instruction,
+        f"Draft provenance and attribution:\n{provenance_guidance}",
+        post_opening_progress_instruction,
+        route,
+        metadata,
+        safety,
+        _map_grounding_contract(),
+        f"Deterministic Map Facts (authoritative):\n{map_facts}",
+        f"Current saved Stage (12 x 10), one-based rows:\n{numbered_map}",
+        f"Canonical saved row strings:\n{serialized_map}",
+        "Legend: # wall, . floor, @ water, p player, s box, t target.",
+        design_context_prompt,
+        continuity_context_prompt,
+        f"Saved Stage context: {json.dumps(stage_context or {}, ensure_ascii=False)}",
+        f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}",
+        f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}",
+        f"Guidance mode: {guidance_mode}.",
+    ])
 
 
 def _llm_solver_evidence(solver_metrics):
@@ -1090,7 +1412,7 @@ def generate_stage_assessment(
             play_summary=play_summary,
             assessment_only=True,
             stage_context=stage_context,
-            _max_attempts=1,
+            _max_attempts=CHAT_MAX_ATTEMPTS,
             _deadline=deadline,
         )
     except LLMServiceError as exception:
@@ -1176,7 +1498,6 @@ def generate_chat_reply(
     api_key, base_url = _llm_credentials()
 
     if not api_key or api_key in {
-        "your_deepseek_api_key_here",
         "your_kimi_api_key_here",
         "your_llm_api_key_here",
     }:
@@ -1323,7 +1644,7 @@ def generate_chat_reply(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not complete the request before the 60 second limit.",
+            "Kimi did not complete the request before the 60 second limit.",
             request_id,
             True,
             min(len(models), _max_attempts),
@@ -1404,7 +1725,7 @@ def _generate_revision_search_proposal_sync(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not compile the revision plan before the proposal time limit.",
+            "Kimi did not compile the revision plan before the proposal time limit.",
             request_id,
             True,
             PROPOSAL_GENERATION_ATTEMPTS,
@@ -1466,7 +1787,7 @@ def _generate_revision_search_proposal_sync(
     if remaining_seconds <= 0:
         error = LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not create executable revision operations before the 60 second limit.",
+            "Kimi did not create executable revision operations before the 60 second limit.",
             request_id,
             True,
             attempts_used,
@@ -1506,7 +1827,7 @@ def _generate_revision_search_proposal_sync(
     except asyncio.TimeoutError as exception:
         error = LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not create executable revision operations before the 60 second limit.",
+            "Kimi did not create executable revision operations before the 60 second limit.",
             request_id,
             True,
             attempts_used + PROPOSAL_GENERATION_ATTEMPTS,
@@ -1985,6 +2306,7 @@ async def _compile_revision_plan(
                     _revision_plan_messages_with_feedback(messages, validation_feedback),
                     PROPOSAL_PLAN_MAX_TOKENS,
                     attempt_timeout,
+                    task="revision_plan",
                 ),
                 timeout=attempt_timeout,
             )
@@ -2001,7 +2323,7 @@ async def _compile_revision_plan(
             failure_reason = None
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
-                "DeepSeek did not respond before the revision-plan attempt timeout.",
+                "Kimi did not respond before the revision-plan attempt timeout.",
                 request_id,
                 True,
                 attempt,
@@ -2130,7 +2452,7 @@ def _generate_map_proposal_sync(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not complete the request before the 60 second limit.",
+            "Kimi did not complete the request before the 60 second limit.",
             request_id,
             True,
             PROPOSAL_GENERATION_ATTEMPTS,
@@ -2378,6 +2700,7 @@ async def _generate_map_operation_candidates(
                     attempt_messages,
                     PROPOSAL_OPERATION_MAX_TOKENS,
                     attempt_timeout,
+                    task="operation_candidates",
                 ),
                 timeout=attempt_timeout,
             )
@@ -2455,7 +2778,7 @@ async def _generate_map_operation_candidates(
             failure_reason = None
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
-                "DeepSeek did not respond before the attempt timeout.",
+                "Kimi did not respond before the attempt timeout.",
                 request_id,
                 True,
                 attempt,
@@ -3112,7 +3435,6 @@ def _generate_plain_chat_sync(
     api_key, base_url = _llm_credentials()
 
     if not api_key or api_key in {
-        "your_deepseek_api_key_here",
         "your_kimi_api_key_here",
         "your_llm_api_key_here",
     }:
@@ -3192,7 +3514,7 @@ def _generate_plain_chat_sync(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not complete the request before the 60 second limit.",
+            "Kimi did not complete the request before the 60 second limit.",
             request_id,
             True,
             min(len(models), CHAT_MAX_ATTEMPTS),
@@ -3204,7 +3526,6 @@ def translate_turns(items, target_language, request_id):
     api_key, base_url = _llm_credentials()
 
     if not api_key or api_key in {
-        "your_deepseek_api_key_here",
         "your_kimi_api_key_here",
         "your_llm_api_key_here",
     }:
@@ -3289,7 +3610,7 @@ def translate_turns(items, target_language, request_id):
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not complete the translation before the 60 second limit.",
+            "Kimi did not complete the translation before the 60 second limit.",
             request_id,
             True,
             min(len(models), CHAT_MAX_ATTEMPTS),
@@ -3348,6 +3669,7 @@ async def _translate_with_model_fallback(
                     ),
                     TRANSLATION_MAX_TOKENS,
                     attempt_timeout,
+                    task="translation",
                 ),
                 timeout=attempt_timeout,
             )
@@ -3391,7 +3713,7 @@ async def _translate_with_model_fallback(
             failure_reason = None
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
-                "DeepSeek did not respond before the translation attempt timeout.",
+                "Kimi did not respond before the translation attempt timeout.",
                 request_id,
                 True,
                 attempt,
@@ -3505,11 +3827,14 @@ async def _generate_plain_with_model_fallback(
                     PLAIN_CHAT_MAX_TOKENS,
                     attempt_timeout,
                     structured=False,
+                    task="stage_assessment_fallback" if stage_opening else "plain_chat",
                 ),
                 timeout=attempt_timeout,
             )
             choice = response.choices[0]
             response_fields = _response_diagnostics(response, choice)
+            if str(getattr(choice, "finish_reason", "") or "") == "length":
+                raise ValueError("The model output reached its token limit.")
             content = str(choice.message.content or "")
 
             if not content.strip():
@@ -3538,6 +3863,10 @@ async def _generate_plain_with_model_fallback(
                 stage_opening,
                 rows=rows,
             )
+            if _route_reasoning_is_overlong(visible_content):
+                raise ValueError(
+                    "The route reasoning is too detailed; keep only the key grounded route and its design consequence."
+                )
             coordinate_links = _extract_plain_coordinate_links(content, rows)
             design_context_patch, design_context_patch_error = (
                 _extract_plain_design_context_patch(content)
@@ -3860,7 +4189,7 @@ async def _generate_plain_with_model_fallback(
             failure_reason = None
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
-                "DeepSeek did not respond before the attempt timeout.",
+                "Kimi did not respond before the attempt timeout.",
                 request_id,
                 True,
                 attempt,
@@ -3904,6 +4233,35 @@ async def _generate_plain_with_model_fallback(
             latencyMs=int((time.monotonic() - started_at) * 1000),
             responseMode="plain_text",
         )
+        if _is_length_failure(last_error, validation_feedback) or _is_route_compaction_failure(
+            last_error,
+            validation_feedback,
+        ):
+            fallback_message = _safe_incomplete_chat_reply(
+                language,
+                stage_opening=stage_opening,
+                rows=rows,
+            )
+            return LLMExecutionResult(
+                assistant_message=fallback_message,
+                assessment={},
+                proposed_rows=None,
+                modification_summary="",
+                attempts_used=last_error.attempts_used,
+                request_id=request_id,
+                model="kimi-k2.6",
+                latency_ms=int((time.monotonic() - started_at) * 1000),
+                guidance={
+                    "move": "observe_stage" if stage_opening else "clarify_intent",
+                    "intentHypothesis": None,
+                    "intentConfidence": None,
+                    "followUpQuestion": None,
+                    "proposalOffer": None,
+                    "disagreement": None,
+                    "uiCues": [],
+                    "coordinateLinks": [],
+                },
+            )
         grounding_error = " ".join(
             str(value or "")
             for value in (last_error.safe_message, validation_feedback)
@@ -4017,6 +4375,7 @@ async def _generate_with_model_fallback(
                     attempt_messages,
                     max_tokens,
                     attempt_timeout,
+                    task=task,
                 ),
                 timeout=attempt_timeout,
             )
@@ -4105,7 +4464,7 @@ async def _generate_with_model_fallback(
             failure_reason = None
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
-                "DeepSeek did not respond before the attempt timeout.",
+                "Kimi did not respond before the attempt timeout.",
                 request_id,
                 True,
                 attempt,
@@ -4176,6 +4535,12 @@ def _messages_with_validation_feedback(messages, validation_feedback, task=None)
         "that reason while following every original content and safety rule. Do not "
         "mention the retry or validation error to the designer."
     )
+    if any(marker in str(validation_feedback).casefold() for marker in ("token limit", "too long", "cut off")):
+        instruction += (
+            " Preserve the detailed map/design analysis, but compress only the route reasoning "
+            "to one short, verifiable passage; do not enumerate a full solver trace. End the "
+            "assistantMessage with a complete sentence."
+        )
 
     if task == "map_proposal":
         instruction += (
@@ -4199,7 +4564,26 @@ def _plain_messages_with_validation_feedback(messages, validation_feedback):
         return messages
 
     corrected = [dict(message) for message in messages]
-    if "REVISION_ADVICE" in validation_feedback or "proposalOffer" in validation_feedback:
+    feedback_text = str(validation_feedback)
+    feedback_lower = feedback_text.casefold()
+    if "token limit" in feedback_lower or "too long" in feedback_lower:
+        instruction = (
+            "Your previous reply for this same request was cut off or exceeded the visible "
+            "response limit. Write a fresh, complete reply rather than continuing the partial "
+            "text. Preserve the useful design observations, causes, consequences, and trade-offs; "
+            "only compress the route reasoning into one short verifiable passage, without an "
+            "exhaustive solver trace. Do not mention this correction to the designer. End with "
+            "a complete conclusion."
+        )
+    elif "route reasoning" in feedback_lower:
+        instruction = (
+            "Your previous reply used an over-expanded route trace. Write a fresh reply that "
+            "keeps the detailed design analysis, but reduces route reasoning to one short, "
+            "grounded passage with only the key corridor, endpoint, and design consequence. "
+            "Do not enumerate every coordinate, movement, alternative, BFS result, or solver "
+            "state. Do not mention this correction to the designer."
+        )
+    elif "REVISION_ADVICE" in validation_feedback or "proposalOffer" in validation_feedback:
         instruction = (
             "Your previous reply for this same request was rejected because it omitted the "
             f"required guidance card: {validation_feedback} Write a fresh reply with a "
@@ -4417,27 +4801,40 @@ async def _request_completion(
     base_url,
     model,
     messages,
-    max_tokens,
+    max_completion_tokens,
     timeout_seconds,
     structured=True,
+    task=None,
 ):
     client = _create_async_client(api_key, base_url, timeout_seconds)
     request_options = {
         "model": model,
         "messages": messages,
-        # Kimi K2.6 accepts temperature=0.6 when thinking is disabled;
-        # DeepSeek's existing path keeps its previous sampling value.
-        "temperature": 0.6 if str(model).lower().startswith("kimi-") else 0.45,
-        "max_tokens": max_tokens,
+        "temperature": 0.6,
+        "max_completion_tokens": max_completion_tokens,
         "stream": False,
         "extra_body": {"thinking": {"type": "disabled"}},
     }
 
     if structured:
-        request_options["response_format"] = {"type": "json_object"}
+        request_options["response_format"] = _structured_response_format(task)
 
     try:
-        return await client.chat.completions.create(**request_options)
+        try:
+            return await client.chat.completions.create(**request_options)
+        except APIStatusError as exception:
+            # Kimi deployments can differ in their JSON-schema rollout.  A
+            # schema rejection is safe to retry once in JSON-object mode; the
+            # response is still validated by the application before storage.
+            status_code = getattr(exception, "status_code", None)
+            if (
+                structured
+                and str(model).lower() == KIMI_MODEL
+                and status_code in {400, 404, 422}
+            ):
+                request_options["response_format"] = {"type": "json_object"}
+                return await client.chat.completions.create(**request_options)
+            raise
     finally:
         await client.close()
 
@@ -4700,6 +5097,10 @@ def validate_chat_response(
         assistant_message,
         guidance.get("followUpQuestion"),
     )
+    if _route_reasoning_is_overlong(assistant_message):
+        raise ValueError(
+            "The route reasoning is too detailed; keep only the key grounded route and its design consequence."
+        )
     guidance["coordinateLinks"] = _filter_coordinate_links(
         guidance.get("coordinateLinks"),
         assistant_message,
@@ -6342,6 +6743,61 @@ def _proposal_offer_binding_issue(proposal_offer, body, messages, language):
     return None
 
 
+def _is_length_failure(exception, validation_feedback=None):
+    text = " ".join(
+        str(value or "") for value in (exception, validation_feedback)
+    ).casefold()
+    return "token limit" in text or "too long" in text or "cut off" in text
+
+
+def _route_reasoning_is_overlong(value):
+    """Detect an over-expanded route trace without limiting normal design analysis."""
+    text = str(value or "")
+    coordinate_pattern = re.compile(
+        r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
+    )
+    movement_pattern = re.compile(
+        r"(?:from|toward|through|via|along|then|next|move(?:s|d)? to|go(?:es)? to|"
+        r"reach(?:es|ed)?|push(?:es|ed)?|\u4ece|\u5230|\u524d\u5f80|\u7ecf\u8fc7|"
+        r"\u6cbf\u7740|\u8d70\u5230|\u63a8\u5230|\u79fb\u52a8\u5230|\u5148.*\u518d)",
+        flags=re.IGNORECASE,
+    )
+
+    for paragraph in re.split(r"\n\s*\n", text):
+        coordinates = coordinate_pattern.findall(paragraph)
+        movement_matches = movement_pattern.findall(paragraph)
+        arrow_count = paragraph.count("→") + paragraph.count("->")
+        if len(coordinates) > 6 and (len(movement_matches) >= 2 or arrow_count >= 2):
+            return True
+        if arrow_count >= 5:
+            return True
+    return False
+
+
+def _is_route_compaction_failure(exception, validation_feedback=None):
+    text = " ".join(
+        str(value or "") for value in (exception, validation_feedback)
+    ).casefold()
+    return "route reasoning" in text and "detailed" in text
+
+
+def _safe_incomplete_chat_reply(language, stage_opening=False, rows=None):
+    if language == "zh-CN":
+        message = (
+            "这次分析没有完整生成，我先不保留半截结论；请再发送一次，我会保留关键设计判断，"
+            "并把路径推演收束得更清楚。"
+        )
+    else:
+        message = (
+            "This analysis did not finish cleanly, so I will not keep the partial conclusion. "
+            "Please send it once more; I will preserve the key design judgment and keep the "
+            "route reasoning tighter."
+        )
+    if stage_opening:
+        return _ensure_stage_one_orientation(message, rows, language)
+    return message
+
+
 def _remove_proposal_text_from_body(body, proposal_offer):
     result = str(body or "").strip()
     for field in ("summary", "rationale"):
@@ -7724,6 +8180,8 @@ def _ensure_stage_one_orientation(message, rows, language):
             kept.append(separator.join(remaining))
 
     body = "\n\n".join(kept).strip()
+    if compact_guidance.casefold() in body.casefold():
+        return body
     return f"{body}\n\n{compact_guidance}" if body else compact_guidance
 
 
@@ -8706,7 +9164,13 @@ def _route_anchors(text, rows):
     matches = _route_anchor_matches(text, rows)
     if matches is None:
         return None
-    return [item["point"] for item in matches]
+    anchors = []
+    for item in matches:
+        point = item["point"]
+        if anchors and anchors[-1] == point:
+            continue
+        anchors.append(point)
+    return anchors
 
 
 def _route_text_is_concise(text):
@@ -8721,15 +9185,27 @@ def _route_relation_is_explicit(text, source, destination, rows):
     """Require a movement connector between the declared visible endpoints."""
     if not _route_text_is_concise(text):
         return False
+    value = str(text or "")
+    if re.search(
+        r"(?:\b(?:extend(?:s|ed|ing)?|lie(?:s)?|located|situated|beside|near|adjacent|"
+        r"separated|position(?:ed)?|at)\b|"
+        r"延伸|分布|位于|坐落|紧挨|靠近|相邻|隔着|旁边|左侧|右侧|上方|下方|"
+        r"距离|位置关系|坐标对应)",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        return False
     matches = _route_anchor_matches(text, rows)
     if not matches or len(matches) < 2:
         return False
-    if (
-        matches[0]["point"] != source
-        or matches[-1]["point"] != destination
-    ):
+    anchors = _route_anchors(text, rows)
+    if not anchors or len(anchors) < 2:
         return False
-    between = str(text)[matches[0]["end"]:matches[-1]["start"]]
+    if anchors[0] != source or anchors[-1] != destination:
+        return False
+    first = next(item for item in matches if item["point"] == anchors[0])
+    last = next(item for item in reversed(matches) if item["point"] == anchors[-1])
+    between = value[first["end"]:last["start"]]
     return bool(re.search(
         r"(?:\b(?:to|toward|towards|through|via|along|walk(?:ing)?|"
         r"move(?:s|d|ing)?|go(?:es|ing)?|lead(?:s|ing)?)\b|"
@@ -9116,6 +9592,11 @@ def _compose_assistant_message(
         _deduplicate_assistant_body(message),
         language,
     )
+    if assessment_only and _is_stage_one(stage_context):
+        # This is the final visible-text gate.  Keeping it here makes the
+        # fixed Stage 1 guidance apply to every structured/plain/fallback path
+        # and makes the operation idempotent for legacy openings.
+        message = _ensure_stage_one_orientation(message, None, language)
     change_summary = stage_context.get("changeSummary") or {}
     components = change_summary.get("components") or []
 
@@ -9225,7 +9706,7 @@ def classify_exception(exception, request_id, attempts_used):
     if isinstance(exception, APITimeoutError):
         return LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "DeepSeek did not respond before the timeout.",
+            "Kimi did not respond before the timeout.",
             request_id,
             True,
             attempts_used,
@@ -9235,7 +9716,7 @@ def classify_exception(exception, request_id, attempts_used):
     if isinstance(exception, RateLimitError):
         return LLMServiceError(
             "UPSTREAM_RATE_LIMIT",
-            "DeepSeek rate limited the request.",
+            "Kimi rate limited the request.",
             request_id,
             True,
             attempts_used,
@@ -9245,7 +9726,7 @@ def classify_exception(exception, request_id, attempts_used):
     if isinstance(exception, APIConnectionError):
         return LLMServiceError(
             "UPSTREAM_CONNECTION_ERROR",
-            "The prototype could not connect to DeepSeek.",
+            "The prototype could not connect to Kimi.",
             request_id,
             True,
             attempts_used,
@@ -9257,7 +9738,7 @@ def classify_exception(exception, request_id, attempts_used):
         retryable = upstream_status == 429 or upstream_status >= 500
         return LLMServiceError(
             "UPSTREAM_SERVER_ERROR" if retryable else "UPSTREAM_REQUEST_REJECTED",
-            f"DeepSeek returned HTTP {upstream_status or 'error'}.",
+            f"Kimi returned HTTP {upstream_status or 'error'}.",
             request_id,
             retryable,
             attempts_used,

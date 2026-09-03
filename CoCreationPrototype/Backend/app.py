@@ -47,6 +47,7 @@ from llm_client import (
     proposal_offer_requires_execution_brief,
     translate_turns,
     validate_execution_brief,
+    _ensure_stage_one_orientation,
 )
 from repository import (
     DATABASE_PATH,
@@ -70,7 +71,9 @@ from design_context import (
     add_open_question,
     add_rejected_decision,
     clone_design_context,
+    design_level_open_questions,
     evaluator_projection,
+    is_design_level_question,
     merge_chat_update,
     revision_projection,
     set_active_disagreement,
@@ -960,9 +963,16 @@ def assess_version(
         ).fetchone()
 
         if existing is not None:
+            existing_opening_text = existing["assistant_text"]
+            if version["stage_number"] == 1:
+                existing_opening_text = _ensure_stage_one_orientation(
+                    existing_opening_text,
+                    load_json(version["rows_json"]),
+                    existing["language"],
+                )
             existing_opening_sync = {
                 "assistantTurnId": existing["assistant_turn_id"],
-                "assistantText": existing["assistant_text"],
+                "assistantText": existing_opening_text,
                 "language": existing["language"],
                 "cards": _displayed_cards(load_json(existing["guidance_json"])),
             }
@@ -1119,9 +1129,16 @@ def assess_version(
                 "cards": _displayed_cards(execution.guidance),
             }
         else:
+            existing_opening_text = existing["assistant_text"]
+            if version["stage_number"] == 1:
+                existing_opening_text = _ensure_stage_one_orientation(
+                    existing_opening_text,
+                    load_json(version["rows_json"]),
+                    existing["language"],
+                )
             opening_sync = {
                 "assistantTurnId": existing["assistant_turn_id"],
-                "assistantText": existing["assistant_text"],
+                "assistantText": existing_opening_text,
                 "language": existing["language"],
                 "cards": _displayed_cards(load_json(existing["guidance_json"])),
             }
@@ -2885,6 +2902,7 @@ def synchronize_turn_with_online_match(session_id, request_id):
         ).fetchone()
         if user_turn is None or assistant_turn is None:
             return
+        version = get_version(database, session_id, assistant_turn["version_id"])
         event = {
             "eventId": f"turn:{assistant_turn['id']}",
             "eventType": "turn",
@@ -2927,9 +2945,16 @@ def synchronize_turn_with_online_match(session_id, request_id):
                 ),
             ).fetchone()
             if earlier_user_turn is None:
+                opening_text = opening_turn["content"]
+                if version is not None and version["stage_number"] == 1:
+                    opening_text = _ensure_stage_one_orientation(
+                        opening_text,
+                        load_json(version["rows_json"]),
+                        opening_turn["language"],
+                    )
                 event.update({
                     "openingAssistantTurnId": opening_turn["id"],
-                    "openingAssistantText": opening_turn["content"],
+                    "openingAssistantText": opening_text,
                     "openingLanguage": opening_turn["language"],
                     "openingCards": _displayed_cards(
                         load_json(opening_turn["guidance_json"])
@@ -3410,8 +3435,7 @@ def _progress_context(database, session_id, version, design_context, latest_user
             "sourceTurnId": item.get("sourceTurnId"),
             "id": item.get("id"),
         }
-        for item in design_context.get("openQuestions", [])
-        if item.get("status") == "open"
+        for item in design_level_open_questions(design_context)
     ]
     inherited = [
         item for item in confirmed
@@ -4738,6 +4762,8 @@ def _extract_conservative_map_question(content):
             continue
         if not question or not map_anchor_pattern.search(question):
             continue
+        if not is_design_level_question(question):
+            continue
         if not design_marker_pattern.search(question) and not re.search(
             r"[\(\uFF08]\s*\d{1,2}\s*[,，]\s*\d{1,2}\s*[\)\uFF09]",
             question,
@@ -4820,7 +4846,19 @@ def _update_design_context_from_turn(
         candidates = [guidance.get("followUpQuestion")]
         if isinstance(disagreement, dict) and disagreement.get("status") == "active":
             candidates.append(disagreement.get("nextQuestion"))
-        patch_questions = patch.get("openQuestions") if isinstance(patch, dict) else None
+        patch_questions = (
+            [
+                item for item in patch.get("openQuestions", [])
+                if isinstance(item, dict)
+                and item.get("status", "open") == "open"
+                and is_design_level_question(
+                    item.get("question"),
+                    item.get("evidenceText"),
+                )
+            ]
+            if isinstance(patch, dict)
+            else []
+        )
         if not patch_questions:
             candidates.append(_extract_conservative_map_question(assistant_content))
         seen_questions = set()

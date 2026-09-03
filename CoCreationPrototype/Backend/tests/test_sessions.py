@@ -592,7 +592,13 @@ class CoCreationSessionTests(unittest.TestCase):
         events = [call.args[1] for call in sync.call_args_list]
         self.assertEqual(events[0]["eventType"], "opening")
         turn = next(event for event in events if event["eventType"] == "turn")
-        self.assertEqual(turn["openingAssistantText"], opening.assistant_message)
+        self.assertEqual(
+            turn["openingAssistantText"],
+            opening.assistant_message
+            + "\n\nYou can share a first reaction or play the Stage; I support only "
+            "small, reviewable edits and thinking through them, while a broad rebuild "
+            "stays designer-led.",
+        )
         self.assertEqual(turn["userText"], "Could the route feel fair?")
         self.assertEqual(turn["assistantText"], reply.assistant_message)
         regular_turn = [event for event in events if event["eventType"] == "turn"][1]

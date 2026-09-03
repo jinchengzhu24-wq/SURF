@@ -17,6 +17,8 @@ from design_context import (
     add_open_question,
     add_rejected_decision,
     empty_design_context,
+    design_level_open_questions,
+    is_design_level_question,
     merge_chat_update,
     revision_projection,
     validate_design_context_patch,
@@ -24,6 +26,49 @@ from design_context import (
 
 
 class DesignContextUnitTests(unittest.TestCase):
+    def test_design_question_filter_keeps_design_tradeoffs_but_drops_route_mechanics(self):
+        self.assertTrue(
+            is_design_level_question(
+                "Should the water create a visible detour, or only affect push order?"
+            )
+        )
+        self.assertTrue(
+            is_design_level_question(
+                "Which first-push judgment should the player make?"
+            )
+        )
+        self.assertFalse(
+            is_design_level_question(
+                "B2 goes to (8,7), then to (8,8): is that route reachable?"
+            )
+        )
+        self.assertFalse(is_design_level_question("What do you think?"))
+
+    def test_route_mechanics_in_patch_are_not_saved_as_open_questions(self):
+        context = merge_chat_update(
+            empty_design_context(),
+            patch={
+                "openQuestions": [{
+                    "question": "B2 goes to (8,7), then to (8,8): is that route reachable?",
+                    "status": "open",
+                }]
+            },
+            user_text="Let's inspect the route.",
+            stage_id="stage-1",
+            turn_id="turn-route",
+        )
+        self.assertEqual(context["openQuestions"], [])
+
+    def test_legacy_route_questions_are_hidden_from_public_progress(self):
+        context = empty_design_context()
+        context["openQuestions"] = [{
+            "question": "B2 goes to (8,7), then to (8,8): is that route reachable?",
+            "status": "open",
+            "sourceStageNumber": 1,
+        }]
+
+        self.assertEqual(design_level_open_questions(context), [])
+
     def test_assistant_open_question_is_cumulative_and_deduplicated(self):
         context = add_open_question(
             empty_design_context(),

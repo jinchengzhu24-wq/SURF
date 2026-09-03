@@ -4,13 +4,16 @@
 
 This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, and the independent 8010 co-creation service. Unity code is under `Assets/Scripts/`; scenes are under `Assets/Scenes/`; preserve every Unity asset's `.meta` file. `Backend/` is the 8000 service, `Frontend/` is its static dashboard, and `CoCreationPrototype/` contains the 8010 backend and frontend. `Library/`, `Temp/`, `Logs/`, generated solution files, and `WebGLBuild/` are generated output.
 
-## Current Product Baseline (2026-08-31)
+## Current Product Baseline (2026-09-03)
 
 - The active online route is `Menu -> Questionnaire(Online1) -> Online_Lobby -> Match_Briefing -> DG -> DG_Level -> CoCreation_Entry -> 8010 -> Challenge_Waiting -> Online_Level -> Match_Result -> Questionnaire(Online2) -> Menu`. Both online questionnaires are part of every match cycle: Online1 opens the pre-match WJX survey before the lobby, and Online2 opens the post-match WJX survey after results. Do not add a persistent skip flag.
 - The Unity `Draft` scene is retired; the immutable `draft` event remains an 8000 dashboard research record. PC code, scenes, and backend capability are retained for later work but have no Build Settings entry, menu/navigation route, or current client integration. Do not restore them without a confirmed study-design revision.
 - DG asks four neutral map-design questions (first-move inspection, push dependencies, space distribution, and route rhythm). AI returns a warm reflection plus difficulty and layout recommendations; Q1–Q2 infer difficulty and Q3–Q4 infer layout. Confirmed DG context guides only the 8000 first-draft generator; it must never be sent to, persisted by, or exposed in the 8010 service or its LLM context.
 - Menu's `Tutorial` button opens the static bilingual PDF at `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`. It opens in the browser's PDF viewer and does not enter a Unity route.
 - The documented Agent roles are `Draft首版理解助手` and `关卡蓝图规划助手` on 8000, plus `共创聊天助手` and `共创关卡修改助手` inside 8010. The deterministic generator, executor, validator, and Sokoban solver are not Agents.
+- Model isolation is mandatory: the two 8000 Agents keep `deepseek-v4-flash`; the two 8010 Agents and all 8010 auxiliary LLM tasks use Kimi `kimi-k2.6` through the Moonshot endpoint. The 8010 service must not read or silently fall back to 8000 `DEEPSEEK_*` variables.
+- 8010 Stage assessment remains a backend archival record only; the frontend must not render a Stage assessment card. Stage 1's fixed operation guidance is appended by the backend exactly once. Historical Stage 1 openings receive the same read-time compatibility repair without rewriting the database.
+- Kimi responses use the final backend output chain: parse, remove internal fields, validate current-Stage coordinates/routes, apply DesignContext rules, then append the Stage 1 closing only for the Stage 1 opening. `designContextPatch` and `coordinateLinks` remain backend metadata and are never visible cards.
 
 ## Unity Authoring
 

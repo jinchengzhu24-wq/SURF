@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=cocreation-unified-flash-20260902-3">
+    <link rel="stylesheet" href="./styles.css?v=cocreation-kimi-20260903-2">
 </head>
 <body>
     <div class="app">
@@ -82,11 +82,11 @@
                         </div>
                     </details>
 
-                    <div class="chat-scroll" id="chatScroll">
+                    <div class="chat-scroll" id="chatScroll" role="log" tabindex="0" aria-label="Conversation history">
                         <div class="empty-chat" id="emptyChat">
                             <div class="empty-mark" aria-hidden="true">AI</div>
-                            <h3 data-i18n="assessmentPending">Preparing the first Stage assessment</h3>
-                            <p data-i18n="assessmentPendingBody">The assistant will discuss the verified current map and ask what you want to refine.</p>
+                            <h3 data-i18n="assessmentPending">Preparing the first Stage opening</h3>
+                            <p data-i18n="assessmentPendingBody">The assistant will discuss what stands out in the verified current map.</p>
                         </div>
                         <div class="message-list" id="messageList" aria-live="polite"></div>
                         <div class="translation-status" id="translationStatus" role="status" aria-live="polite" hidden></div>
@@ -185,6 +185,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=cocreation-unified-flash-20260902-3"></script>
+    <script src="./app.js?v=cocreation-kimi-20260903-2"></script>
 </body>
 </html>

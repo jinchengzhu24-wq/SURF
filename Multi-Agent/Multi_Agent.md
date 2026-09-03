@@ -4,14 +4,28 @@
 
 8010 的流程只有两个 LLM 角色。意图理解、风险判断和协商由聊天助手完成；地图操作由关卡修改助手在获得明确授权后完成。确定性生成器、候选搜索器、结构校验器和 Sokoban 求解器不是 Agent。
 
-| Agent | 服务 | 当前职责 | 输入 → 输出 |
-|---|---|---|---|
-| Draft首版理解助手 | 8000 | 阅读四道中立 DG 回答，形成首版难度与布局理解 | DG 回答 → `dgContext` |
-| 关卡蓝图规划助手 | 8000 | 将确认后的设计理解转换成首版生成蓝图 | `dgContext` → `LevelDesignPlan` |
-| 共创聊天助手 | 8010 | 理解意图、分析方案、做证据约束的风险判断、维护分歧，并编译已授权的语义计划 | 当前 Stage、地图事实、求解/试玩证据、当前 Stage 对话 → 普通正文、五色引导、`RevisionPlan`、`executionContract` |
-| 共创关卡修改助手 | 8010 | 只按已授权契约生成局部操作候选，不重新解释意图、不参与协商 | `RevisionPlan`、`executionContract`、当前 Stage、地图事实、求解指标 → 操作候选 |
+| Agent | 服务 | 使用模型 | 当前职责 | 输入 → 输出 |
+|---|---|---|---|---|
+| Draft首版理解助手 | 8000 | DeepSeek v4 Flash (`deepseek-v4-flash`) | 阅读四道中立 DG 回答，形成首版难度与布局理解 | DG 回答 → `dgContext` |
+| 关卡蓝图规划助手 | 8000 | DeepSeek v4 Flash (`deepseek-v4-flash`) | 将确认后的设计理解转换成首版生成蓝图 | `dgContext` → `LevelDesignPlan` |
+| 共创聊天助手 | 8010 | Kimi K2.6 (`kimi-k2.6`) | 理解意图、分析方案、做证据约束的风险判断、维护分歧，并编译已授权的语义计划 | 当前 Stage、地图事实、求解/试玩证据、当前 Stage 对话 → 普通正文、五色引导、`RevisionPlan`、`executionContract` |
+| 共创关卡修改助手 | 8010 | Kimi K2.6 (`kimi-k2.6`) | 只按已授权契约生成局部操作候选，不重新解释意图、不参与协商 | `RevisionPlan`、`executionContract`、当前 Stage、地图事实、求解指标 → 操作候选 |
 
 8000 的 `dgContext`、研究者目标和实验条件不得进入 8010。8010 的直接示例会话也不经过 8000。父 Stage 传给手动编辑复核的上下文只包含用户明确说过的目标和理由，不包含 AI 未确认的意图假设。
+
+## 模型隔离与 8010 输出边界
+
+- 8000 的两个 Agent 继续使用 `deepseek-v4-flash`；8010 的两个 Agent 以及 Stage 开场、普通聊天、翻译和 Revision 相关 LLM 任务统一使用 Kimi `kimi-k2.6` 与 Moonshot 地址。
+- 8010 使用 `thinking` disabled、`temperature=0.6` 和 `max_completion_tokens`。结构化请求优先使用严格 JSON schema；接口兼容性失败时只在同一 Kimi 请求内降级到 `json_object`，结构化校验失败后进行有限的同模型重试，不静默切换到 DeepSeek。
+- 模型只负责生成候选内容，服务端负责最终文本清洗、地图事实、坐标、路线端点、进度权限、提案契约和确定性校验。`designContextPatch`、`coordinateLinks`、`gridDistance`、`tileAt`、`_solver`、`solutionSteps` 等内部字段不得进入用户可见正文。
+- Stage 评价仍由 8010 后端生成和归档，但前端不再显示 Stage 评价卡。Stage 1 开场由后端幂等追加固定操作收尾；其他 Stage 和普通聊天不追加该收尾。旧 Stage 1 开场在读取展示时保守补齐，不重写历史数据库记录。
+
+## 后续聊天、共创进度与路线
+
+- 每个 Stage 的第一条 assistant opening 只承担开场观察、开场记录、分歧和意图假设处理，不更新“已确认决策”或“未解决问题”。从同一 Stage 的第二条及之后普通 assistant 回复开始，才允许消费合法的 `designContextPatch`，并累计、更新、去重未解决问题。
+- `followUpQuestion`、活跃结构化分歧的 `nextQuestion` 以及回复中明确、具体的地图设计问题可以进入未解决问题；“你怎么看”“可以吗”“是否满意”等泛化问题不进入。模型 patch 中的 `decisions/rejections` 不能直接创建已确认决策；已确认决策只能由用户正式接受/拒绝提案或解决分歧产生。
+- 地图相关回复强烈偏好一条简短、真实的移动路线，但只有出现“玩家/箱子到目标”“坐标到坐标”或“经过明确通道/区域”等明确移动关系时才生成。仅描述位置、靠近、相邻、方向或并列实体不标路线。
+- 路线可见文字必须是正文连续子串，`coordinateLinks.text` 必须与其完全一致，`from/to` 必须来自生成时的当前 Stage 地图事实并通过可达性校验。端点错误、不可达、旧 Stage 或无法确认的关系不生成箭头；中英文切换只翻译路线文字，端点不变。
 
 ## 与《共创修改流程》图的对应关系
 

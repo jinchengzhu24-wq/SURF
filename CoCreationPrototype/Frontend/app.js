@@ -44,7 +44,7 @@ const translations = {
         discuss: "Discuss and refine this Stage",
         viewingHistory: "You are viewing this historical Stage and its own conversation. Return to the current Stage to continue chatting.",
         returnCurrent: "Return to current",
-        assessmentPending: "Preparing the first Stage assessment",
+        assessmentPending: "Preparing the first Stage opening",
         assessmentPendingBody: "The assistant will discuss what stands out in the verified current map.",
         noStageConversation: "No conversation has been recorded for this Stage.",
         noStageConversationBody: "Each Stage keeps only the discussion attached to that saved version.",
@@ -179,7 +179,7 @@ const translations = {
         discuss: "讨论并继续完善当前 Stage",
         viewingHistory: "你正在查看这个历史 Stage 及其相关对话；返回当前 Stage 后才能继续聊天。",
         returnCurrent: "返回当前版本",
-        assessmentPending: "正在准备首版评价",
+        assessmentPending: "正在准备首段回复",
         assessmentPendingBody: "助手会围绕已验证的当前地图中值得关注的部分展开讨论。",
         noStageConversation: "这个 Stage 暂时没有相关对话。",
         noStageConversationBody: "每个 Stage 只显示与该已保存版本关联的讨论。",
@@ -308,12 +308,6 @@ translations.en.proposalPreserved = "Preserved";
 translations.en.proposalBefore = "Before";
 translations.en.proposalAfter = "After";
 translations.en.executeBoundProposal = "Execute the bound proposal.";
-translations.en.assessmentTitle = "Stage assessment";
-translations.en.assessmentSolution = "Solvability";
-translations.en.assessmentDifficulty = "Difficulty perspective";
-translations.en.assessmentFeatures = "What stands out";
-translations.en.assessmentSuggestions = "Possible next look";
-translations.en.assessmentQuestion = "Discussion focus";
 translations["zh-CN"].progressTitle = "\u5171\u521b\u8fdb\u5ea6";
 translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
 translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
@@ -328,12 +322,6 @@ translations["zh-CN"].proposalPreserved = "\u4fdd\u6301\u4e0d\u53d8";
 translations["zh-CN"].proposalBefore = "\u4fee\u6539\u524d";
 translations["zh-CN"].proposalAfter = "\u4fee\u6539\u540e";
 translations["zh-CN"].executeBoundProposal = "\u6267\u884c\u5df2\u7ed1\u5b9a\u7684\u65b9\u6848\u3002";
-translations["zh-CN"].assessmentTitle = "Stage \u8bc4\u4ef7";
-translations["zh-CN"].assessmentSolution = "\u53ef\u89e3\u6027";
-translations["zh-CN"].assessmentDifficulty = "\u96be\u5ea6\u89c2\u70b9";
-translations["zh-CN"].assessmentFeatures = "\u503c\u5f97\u6ce8\u610f";
-translations["zh-CN"].assessmentSuggestions = "\u53ef\u4ee5\u7ee7\u7eed\u89c2\u5bdf";
-translations["zh-CN"].assessmentQuestion = "\u8ba8\u8bba\u7126\u70b9";
 
 const state = {
     session: null,
@@ -358,6 +346,8 @@ const state = {
     translationRemainingCount: 0,
     retryAction: null,
     activeCoordinateLink: null,
+    renderedMessageStageId: null,
+    renderedMessageCount: 0,
     language: "zh-CN"
 };
 
@@ -699,8 +689,17 @@ function formatProgressTime(value) {
 }
 
 function renderMessages() {
+    const previousStageId = state.renderedMessageStageId;
+    const previousMessageCount = state.renderedMessageCount;
+    const previousScrollTop = elements.chatScroll.scrollTop;
+    const previousScrollHeight = elements.chatScroll.scrollHeight;
+    const previousClientHeight = elements.chatScroll.clientHeight;
+    const wasNearBottom = previousScrollHeight - previousScrollTop - previousClientHeight <= 48;
     elements.messageList.textContent = "";
     const turns = selectedStageTurns();
+    const stageChanged = previousStageId !== null && previousStageId !== state.selectedVersionId;
+    const initialRender = previousStageId === null;
+    const hasNewTurns = turns.length > previousMessageCount;
     elements.emptyChat.hidden = turns.length > 0;
 
     if (turns.length === 0) {
@@ -735,7 +734,18 @@ function renderMessages() {
         row.appendChild(content);
         elements.messageList.appendChild(row);
     });
-    requestAnimationFrame(() => elements.chatScroll.scrollTop = elements.chatScroll.scrollHeight);
+    state.renderedMessageStageId = state.selectedVersionId;
+    state.renderedMessageCount = turns.length;
+    requestAnimationFrame(() => {
+        if (initialRender || stageChanged || (hasNewTurns && wasNearBottom)) {
+            elements.chatScroll.scrollTop = elements.chatScroll.scrollHeight;
+            return;
+        }
+        elements.chatScroll.scrollTop = Math.min(
+            previousScrollTop,
+            Math.max(0, elements.chatScroll.scrollHeight - elements.chatScroll.clientHeight),
+        );
+    });
 }
 
 function renderAssistantBubble(turn, bubble) {
@@ -752,10 +762,6 @@ function renderAssistantBubble(turn, bubble) {
     const body = assistantBodyWithoutCues(localized.content, uiCues, question);
     renderAssistantBody(bodyNode, body, guidance.coordinateLinks, turn);
     bubble.appendChild(bodyNode);
-    const assessment = assessmentForTurn(turn.turnId);
-    if (assessment) {
-        bubble.appendChild(createAssessmentCard(assessment.payload));
-    }
 
     if (localized !== turn) {
         const translatedLabel = document.createElement("small");
@@ -858,57 +864,6 @@ function renderAssistantBubble(turn, bubble) {
         // Legacy render contract: if (question) bubble.appendChild(createDiscussionFocus(question));
         bubble.appendChild(createDiscussionFocus(question));
     }
-}
-
-function assessmentForTurn(turnId) {
-    return state.session?.assessments?.find(
-        item => item.assistantTurnId === turnId
-    ) || null;
-}
-
-function createAssessmentCard(payload) {
-    const assessment = payload && typeof payload === "object" ? payload : {};
-    const card = document.createElement("section");
-    card.className = "assessment-card";
-
-    const title = document.createElement("strong");
-    title.textContent = t("assessmentTitle");
-    card.appendChild(title);
-
-    const appendParagraph = (labelKey, value) => {
-        const text = String(value || "").trim();
-        if (!text) return;
-        const paragraph = document.createElement("p");
-        const label = document.createElement("b");
-        label.textContent = `${t(labelKey)}：`;
-        paragraph.append(label, document.createTextNode(text));
-        card.appendChild(paragraph);
-    };
-
-    appendParagraph("assessmentSolution", assessment.solutionSummary);
-    appendParagraph("assessmentDifficulty", assessment.difficultyOpinion);
-
-    const appendList = (labelKey, values) => {
-        const entries = Array.isArray(values)
-            ? values.map(value => String(value || "").trim()).filter(Boolean)
-            : [];
-        if (!entries.length) return;
-        const label = document.createElement("b");
-        label.textContent = `${t(labelKey)}：`;
-        card.appendChild(label);
-        const list = document.createElement("ul");
-        entries.forEach(value => {
-            const item = document.createElement("li");
-            item.textContent = value;
-            list.appendChild(item);
-        });
-        card.appendChild(list);
-    };
-
-    appendList("assessmentFeatures", assessment.features);
-    appendList("assessmentSuggestions", assessment.suggestions);
-    appendParagraph("assessmentQuestion", assessment.satisfactionQuestion);
-    return card;
 }
 
 function proposalStateMessage(status) {

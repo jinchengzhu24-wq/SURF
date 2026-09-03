@@ -1,5 +1,7 @@
 # Draft首版理解助手（8000）
 
+**使用模型：** DeepSeek v4 Flash (`deepseek-v4-flash`)
+
 ## English Prompt
 
 ```text

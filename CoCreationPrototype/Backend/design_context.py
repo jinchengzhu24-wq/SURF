@@ -19,6 +19,107 @@ MAX_PATCH_ITEMS = 8
 MAX_TEXT = 1200
 
 
+_QUESTION_MARKERS = re.compile(
+    r"(?:\?|\uFF1F|\b(?:what|which|how|whether|can|should|would|could|do|does|is|are|"
+    r"did|will)\b|\u4ec0\u4e48|\u54ea|\u5982\u4f55|\u662f\u5426|\u8981\u4e0d\u8981|\u5e94\u8be5|"
+    r"\u66f4\u503e\u5411|\u5e0c\u671b|\u54ea\u4e2a)",
+    flags=re.IGNORECASE,
+)
+_COORDINATE_MARKERS = re.compile(
+    r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
+)
+_ROUTE_TRACE_MARKERS = re.compile(
+    r"(?:\b(?:route\s+from|path|next|then|move\s+to|go\s+to|reachability|reachable|"
+    r"bfs|solver|step)\b|\u5148(?:\u5230|\u8d70|\u63a8|\u79fb\u52a8)|\u518d(?:\u5230|\u8d70|\u63a8|\u79fb\u52a8)|"
+    r"\u7ecf\u8fc7|\u8def\u5f84\u600e\u4e48\u8d70|\u54ea\u4e00\u6b65|\u4e0b\u4e00\u6b65|\u56de\u5230|"
+    r"\u7ed5\u884c|\u53ef\u8fbe|\u901a\u4e0d\u901a|\u79fb\u52a8\u5230|\u63a8\u5230|\u8d70\u5230|"
+    r"\u2192|->)",
+    flags=re.IGNORECASE,
+)
+_SPATIAL_ONLY_MARKERS = re.compile(
+    r"(?:\b(?:where|which\s+cell|what\s+coordinate|adjacent|near|beside|left|right|above|"
+    r"below)\b|\u54ea\u91cc|\u5728\u54ea|\u54ea\u4e2a\u683c|\u5750\u6807|\u76f8\u90bb|\u9760\u8fd1|"
+    r"\u5de6\u4fa7|\u53f3\u4fa7|\u4e0a\u65b9|\u4e0b\u65b9)",
+    flags=re.IGNORECASE,
+)
+_DESIGN_MARKERS = re.compile(
+    r"(?:\b(?:design|experience|intent|trade[- ]?off|choice|emphasis|rhythm|difficulty|"
+    r"readability|guidance|layout|purpose|highlight|notice|stand\s+out|understand|read|"
+    r"clarity|expectation|feel|match|direction|matters|first\s+push|push\s+order|detour|"
+    r"route|corridor|water|box|target|player)\b|"
+    r"\u8bbe\u8ba1|\u4f53\u9a8c|\u610f\u56fe|\u53d6\u820d|\u503e\u5411|\u91cd\u70b9|\u5f3a\u8c03|\u7a81\u51fa|"
+    r"\u8282\u594f|\u96be\u5ea6|\u53ef\u8bfb\u6027|\u5f15\u5bfc|\u5e03\u5c40|\u4f5c\u7528|\u5206\u5de5|"
+    r"\u5148\u540e|\u987a\u5e8f|\u8def\u7ebf|\u8def\u5f84|\u901a\u9053|\u7bb1\u5b50|\u76ee\u6807|"
+    r"\u6c34\u57df|\u74f6\u9888|\u7ed5\u8def|\u8bfb\u61c2|\u6ce8\u610f|\u5e0c\u671b|\u503c\u5f97|"
+    r"\u611f\u89c9|\u9884\u671f|\u6539\u52a8|\u4fdd\u7559|\u5e94\u8be5)",
+    flags=re.IGNORECASE,
+)
+_STRONG_DESIGN_MARKERS = re.compile(
+    r"(?:\b(?:design|experience|intent|trade[- ]?off|choice|emphasis|rhythm|difficulty|"
+    r"readability|guidance|layout|purpose|highlight|stand\s+out|first\s+push|push\s+order|"
+    r"feel|read|understand|notice|expectation|stay\s+open|keep|preserve|winding|longer|shorter)\b|"
+    r"\u8bbe\u8ba1|\u4f53\u9a8c|\u610f\u56fe|\u53d6\u820d|\u91cd\u70b9|\u5f3a\u8c03|\u7a81\u51fa|"
+    r"\u8282\u594f|\u96be\u5ea6|\u53ef\u8bfb\u6027|\u5f15\u5bfc|\u5e03\u5c40|\u4f5c\u7528|\u5206\u5de5|"
+    r"\u5148\u540e|\u987a\u5e8f|\u7ed5\u8def|\u74f6\u9888)",
+    flags=re.IGNORECASE,
+)
+
+
+def is_design_level_question(question, evidence_text=None):
+    """Return whether text is a designer-facing open question, not route mechanics."""
+    clean = _text(question)
+    if not clean or not _QUESTION_MARKERS.search(clean):
+        return False
+
+    lowered = clean.casefold()
+    generic = (
+        "what do you think",
+        "does this work",
+        "is this okay",
+        "would you like to continue",
+        "你怎么看",
+        "可以吗",
+        "是否满意",
+        "还满意吗",
+    )
+    if any(value in lowered or value in clean for value in generic):
+        return False
+
+    if re.search(r"\b(?:bfs|solver|reachability|reachable)\b", lowered):
+        return False
+
+    coordinate_count = len(_COORDINATE_MARKERS.findall(clean))
+    has_route_trace = bool(_ROUTE_TRACE_MARKERS.search(clean))
+    has_design = bool(_DESIGN_MARKERS.search(clean))
+    has_strong_design = bool(_STRONG_DESIGN_MARKERS.search(clean))
+    has_spatial_only = bool(_SPATIAL_ONLY_MARKERS.search(clean))
+
+    if coordinate_count >= 2 and not has_strong_design:
+        return False
+    if has_route_trace and coordinate_count >= 1 and not has_strong_design:
+        return False
+    if has_spatial_only and not has_design:
+        return False
+    if not has_design:
+        return False
+
+    # Evidence may contain route facts, but it cannot turn a mechanical question
+    # into a design question. It is retained only as provenance by the caller.
+    _ = evidence_text
+    return True
+
+
+def design_level_open_questions(context):
+    """Return only unresolved design questions for prompts and public progress views."""
+    value = normalize_design_context(context)
+    return [
+        item
+        for item in value.get("openQuestions", [])
+        if item.get("status") == "open"
+        and is_design_level_question(item.get("question"), item.get("evidenceText"))
+    ]
+
+
 def empty_design_context():
     return {
         "schemaVersion": SCHEMA_VERSION,
@@ -237,6 +338,8 @@ def validate_design_context_patch(value):
                 status = raw.get("status", "open")
                 if status not in QUESTION_STATUSES:
                     raise ValueError("designContextPatch.openQuestions has an invalid status")
+                if not is_design_level_question(question, raw.get("evidenceText")):
+                    continue
                 result[field].append({
                     "question": question,
                     "status": status,
@@ -324,7 +427,10 @@ def _question_key(value):
 
 def _merge_open_question(result, entry, stage_id, turn_id, user_text):
     question = _text(entry.get("question"))
-    if not question:
+    if not question or not is_design_level_question(
+        question,
+        entry.get("evidenceText"),
+    ):
         return False
 
     target_id = _source(entry.get("targetId"))
@@ -371,7 +477,7 @@ def add_open_question(context, question, stage_id=None, turn_id=None):
     """Add an assistant-raised open question using the normal provenance rules."""
     result = normalize_design_context(context)
     clean = _text(question)
-    if not clean:
+    if not clean or not is_design_level_question(clean):
         return result
 
     _merge_open_question(
@@ -529,7 +635,7 @@ def revision_projection(context):
             item for item in value["confirmedDecisions"] if item["status"] == "active"
         ],
         "rejectedDecisions": value["rejectedDecisions"][-12:],
-        "openQuestions": [item for item in value["openQuestions"] if item["status"] == "open"],
+        "openQuestions": design_level_open_questions(value),
         "activeDisagreement": value["activeDisagreement"],
     }
 

@@ -188,7 +188,24 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 .progress-item-reason { margin-top: 5px; color: var(--muted); font-size: 9px; }
 .progress-item small { display: block; margin-top: 6px; color: var(--muted); font-family: Consolas, "Courier New", monospace; font-size: 8px; }
 .progress-empty { color: var(--muted); }
-.chat-scroll { min-height: 380px; flex: 1; overflow-y: auto; padding: 17px; background: #fbfcfc; }
+.chat-scroll {
+    flex: 0 1 auto;
+    min-height: 0;
+    height: clamp(360px, calc(100vh - 360px), 760px);
+    max-height: calc(100vh - 300px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 17px;
+    background: #fbfcfc;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: #6f7b7b #cfd3d0;
+}
+.chat-scroll::-webkit-scrollbar { width: 10px; }
+.chat-scroll::-webkit-scrollbar-track { background: #cfd3d0; }
+.chat-scroll::-webkit-scrollbar-thumb { border: 2px solid #cfd3d0; border-radius: 3px; background: #6f7b7b; }
+.chat-scroll::-webkit-scrollbar-thumb:hover { background: #425c58; }
 .empty-chat { display: flex; min-height: 320px; align-items: center; justify-content: center; flex-direction: column; padding: 25px; color: var(--muted); text-align: center; }
 .empty-mark { display: grid; width: 46px; height: 46px; margin-bottom: 12px; place-items: center; border-radius: 12px; color: var(--brand-dark); background: var(--brand-soft); font-size: 12px; font-weight: 850; }
 .empty-chat h3 { margin: 0 0 7px; color: var(--text); font-size: 15px; }
@@ -204,11 +221,6 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 .translation-label.translation-unavailable { color: var(--danger); }
 .translation-status { margin-top: 10px; padding: 7px 9px; border: 2px solid #747b7c; color: #3f2f18; background: #efd17c; font-family: Consolas, "Courier New", monospace; font-size: 10px; font-weight: 700; line-height: 1.35; }
 .translation-status[hidden] { display: none; }
-.assessment-card { margin-top: 6px; padding: 10px 11px; border: 1px solid #a9ddc1; border-radius: 8px; background: #e9f8ef; font-size: 10px; line-height: 1.5; }
-.assessment-card strong { color: var(--green); text-transform: uppercase; letter-spacing: .05em; }
-.assessment-card p { margin: 5px 0; }
-.assessment-card ul { margin: 6px 0; padding-left: 17px; }
-.assessment-card b { display: block; color: var(--brand-dark); }
 .typing-row { display: flex; align-items: center; gap: 4px; margin-top: 12px; color: var(--muted); font-size: 10px; }
 .typing-row > span { width: 5px; height: 5px; border-radius: 50%; background: var(--brand); animation: pulse 1.1s infinite ease-in-out; }
 .typing-row > span:nth-child(2) { animation-delay: .15s; }
@@ -296,6 +308,7 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
     .workspace { grid-template-columns: 230px minmax(0, 1fr); }
     .map-panel { grid-column: 1 / -1; min-height: auto; }
     .stage-panel, .chat-panel { min-height: 680px; }
+    .chat-scroll { height: clamp(380px, 55vh, 620px); }
     .map-content { display: grid; grid-template-columns: minmax(380px, .9fr) minmax(300px, 1fr); gap: 0 14px; }
     .map-frame, .map-toolbar, .map-mode, .validation-card, .map-actions { grid-column: 1; }
     .play-evidence, .final-actions, .intention-form, .complete-card { grid-column: 2; }
@@ -308,6 +321,7 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
     .stage-list { max-height: none; flex-direction: row; overflow-x: auto; }
     .stage-card { min-width: 205px; }
     .chat-panel { min-height: 650px; }
+    .chat-scroll { height: clamp(360px, 58vh, 600px); }
     .map-panel { grid-column: auto; }
     .map-content { display: block; }
     .play-evidence { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
@@ -328,7 +342,7 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
     .panel-header .play-button { min-height: 34px; padding: 0 9px; font-size: 10px; }
     .method-pill { display: none; }
     .stage-card { min-width: 180px; }
-    .chat-scroll { min-height: 350px; padding: 12px 10px; }
+    .chat-scroll { height: clamp(300px, 55vh, 520px); min-height: 0; padding: 12px 10px; }
     .message-content { max-width: 88%; }
     .composer { align-items: stretch; flex-direction: column; padding: 10px 10px 6px; }
     .composer .primary-button { width: 100%; }

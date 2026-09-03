@@ -10,7 +10,7 @@ Menu
   → CoCreation_Entry（上传首版并创建 8010 会话）
   → 8010 Co-Creation Lab
       → Stage 1 = Unity 首版 rows
-      → LLM 评价、连续聊天、手工编辑或 LLM 修改提案
+      → Stage 1 开场、连续聊天、手工编辑或 LLM 修改提案
       → 每次明确保存/接受才创建不可覆盖的新 Stage
       → 可选择任意已保存 Stage 并点击 Play
           → 8000 WebGL → DG_Level 只读试玩（PC_Level 为保留路径，当前未启用）
@@ -24,11 +24,11 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 当前询问四个中立的地图设计问题（首步检查、推箱依赖、空间分布、路线结构），前两题用于推断难度，后两题用于推断布局。AI 输出温暖的 AI reflection 以及难度/布局建议；四道答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI 推荐和用户最终确认一起保存，不会传入 8010 共创服务或其 LLM 上下文。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。当前 8010 前端脚本与样式缓存键为 `cocreation-unified-flash-20260902-2`。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。8000 的两个 Agent 保持 `deepseek-v4-flash`；8010 的聊天助手和关卡修改助手、Stage 开场、翻译及 Revision 流程统一使用 Kimi K2.6，不读取 8000 的 DeepSeek 环境变量，也不静默回退到 DeepSeek。当前 8010 前端脚本与样式缓存键为 `cocreation-kimi-20260903-1`。
 
 正式 Unity 共创会话在浏览器首次访问授权后开始 10 分钟倒计时。直访问示例会话不创建 deadline、不倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
 
-8010 当前采用“聊天助手理解与协商 → 关卡修改助手执行局部候选 → 后端确定性校验与求解”的双角色交接。普通聊天只产生正文或概念引导，紫卡动作才可能授权地图提案；所有提案仍需用户明确接受后才创建新 Stage。风险质疑必须有具体地图、求解器、试玩或用户目标证据，不能因为意见不同就自动质疑。
+8010 当前采用“聊天助手理解与协商 → 关卡修改助手执行局部候选 → 后端确定性校验与求解”的双角色交接。模型只负责生成内容，后端统一清洗可见文本、校验当前 Stage 坐标和路线、累计 DesignContext，并在 Stage 1 开场最后幂等追加固定操作指引。Stage assessment 仍在后端归档，但不再渲染为可见评价卡；普通聊天不追加该固定收尾。普通聊天只产生正文或概念引导，紫卡动作才可能授权地图提案；所有提案仍需用户明确接受后才创建新 Stage。风险质疑必须有具体地图、求解器、试玩或用户目标证据，不能因为意见不同就自动质疑。
 
 ## 共创规则
 
@@ -100,12 +100,14 @@ AI 的主动质疑适用于直接请求和已保存的 `human_edit`，但只能�
 ```text
 CoCreationPrototype/
 ├── Frontend/              # 独立 HTML/CSS/JS 三栏工作台
-└── Backend/               # FastAPI、DeepSeek 客户端、SQLite 与测试
+└── Backend/               # FastAPI、Kimi K2.6 客户端、SQLite 与测试
 ```
 
 前端视觉复用 8000 MatchMaking/Train dashboard 当前生效的 Pixel-adventure 设计语言：草绿色网格背景、木质 sticky topbar、米白石质面板、蓝紫标题板、硬边像素阴影、Consolas 标题与像素地图框。8010 所有可见文字以 700 粗体为基础，按钮和状态标签使用 800，页面标题保留 900。桌面仍为 Stage / 聊天 / 地图编辑器三栏；低于 1200px 收为两栏，低于 900px 为单栏，680px 下进一步缩小阴影、间距与瓦片。8010 保留独立 CSS，不在运行时引用 8000 文件。
 
 LLM 使用理性、亲切、以第一人称为主的朋友式共创策略，并明确避免机械复述、固定开头、客服话术及“回应—评价—提问”模板。普通设计回复通常保留两至四段紧凑交流，给具体观察、个人判断、原因和可想象的游玩瞬间更多展开空间，但不写成报告。Stage 1 的首条开场不提问，并会明确说明：LLM 只能协助小范围、可审查的改动、建议与思路梳理；大幅重做应先由设计者在右侧编辑器完成。之后，普通问题留在正文；蓝色 `LET'S DISCUSS / 一起聊聊` 只表示具体且尚未解决的分歧。手动保存的 `human_edit` Stage 会先确认真实改动和可解性并正常分析，只有有具体机械证据时才生成 `WARNING + LET'S DISCUSS`，不能为了制造互动强行质疑。用户的明确立场可以形成可纠正的橙色意图卡，但紫卡或 active 蓝卡场景按对应卡片优先级处理，不能重复制造卡片。玩家说“你帮我改”“你来改吧”“按这个思路改”等自然请求时只会先形成紫卡，必须点击紫卡动作才进入严格地图提案流程；“你觉得怎么改”只讨论思路。普通聊天不得声称“改好了”或邀请试玩尚未生成的地图，已验证提案也必须等玩家明确接受才会成为新 Stage。执行授权本身不再被误写进橙色意图卡。整个共创会话始终只有一关，所有 Stage 都只是这同一关的保存版本；提示词与保存前规范化会拦截错误进度表述。其余意图、五色卡片、强证据风险门槛与严格地图验证流程保持不变。
+
+本次 8010 Kimi 适配还规定：Stage 1 固定操作收尾由后端幂等追加，旧 Stage 1 在读取或同步时保守补齐且不改写数据库；Stage assessment 只在后端归档，不再显示评价卡。普通聊天只有在 Stage 1 开场之后才可消费合法 `designContextPatch`，未解决问题按来源 Stage、来源 turn 和更新时间累计；模型 patch 不能直接制造已确认决策。地图相关回复只在存在明确移动关系时生成路线文字和可点击 `coordinateLinks`，方位、邻接和实体并列描述不标箭头。
 
 蓝色与紫色卡片不会再把正文原句直接搬进去。紫卡使用短标题总结实际修改方向，并在下方独立展开预期的游玩影响和验证重点；蓝卡固定总结用户立场、AI 立场、核心分歧和下一问题。普通问题不生成新蓝卡。完整地图提案的模型阶段先编译 `RevisionPlan`，再由关卡修改助手返回局部操作候选；计划结构不合法或候选非法时使用安全的结构反馈重试，候选仍失败则调用生产中的确定性 `search_revision_plan()` 兜底。地图构造、结构校验和求解全部由后端完成，不再把失败地图交给模型重画。
 
@@ -115,14 +117,14 @@ LLM 每轮还会接收初稿方法与当前 Stage 来源，避免把生成器产
 
 对话以保存的 Stage 为边界：每条 turn 仍完整持久化并带有 `versionId`，但页面选择某个 Stage 时只显示该版本相关的对话，LLM 也只接收当前 Stage 的最近对话。唯一的关系型承接是已接受提案的 assistant turn：它不复制、不改写原记录，而通过 proposal/decision/version 关联同时显示为新 Stage 的第一条上下文。历史 Stage 的对话只读；返回当前 Stage 后才可继续发送，并恢复当前 Stage 自己的草稿或未完成请求。
 
-8010 的一次业务请求使用真正的 60 秒总时长硬上限。普通聊天、Stage 开场、翻译以及完整地图提案的 `RevisionPlan` 与修改助手阶段统一使用 `deepseek-v4-flash`；提案计划阶段和操作候选阶段共享同一个请求截止时间，内部最多在 58 秒停止，为持久化和响应预留缓冲。上游显式关闭思考输出，避免推理 token 耗尽后只返回空 JSON。普通问题留在正文；新蓝卡必须由结构化 active `disagreement` 驱动，旧 turn 才沿用 `followUpQuestion`。服务日志记录安全结构原因和搜索摘要，两次计划尝试共用同一 requestId 和消息幂等键；只有显式 `execute_revision` 且验证成功的提案才会入库为 proposal，搜索耗尽则保存说明而不创建 proposal。聊天输入区显示实时秒数，并在 60 秒执行浏览器安全中止；失败、刷新或连接中断后使用原消息幂等键重试，确保同一请求最多保存一条 user turn 和一条 assistant turn。
+8010 的一次业务请求使用真正的 60 秒总时长硬上限。普通聊天、Stage 开场、翻译以及完整地图提案的 `RevisionPlan` 与修改助手阶段统一使用 `kimi-k2.6`；Kimi 请求使用专用 Moonshot 地址、`thinking` disabled、`temperature=0.6` 和 `max_completion_tokens`。结构化请求优先使用严格 JSON schema，接口不支持时仅在同一 Kimi 请求内有限降级到 `json_object`，结构化失败再进行一次带校验原因的同模型重试，之后才进入纯文本安全 fallback。8010 不读取 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL` 或 `DEEPSEEK_BASE_URL`，缺少 Kimi 配置时明确报错。提案计划阶段和操作候选阶段共享同一个请求截止时间，内部最多在 58 秒停止，为持久化和响应预留缓冲。普通问题留在正文；新蓝卡必须由结构化 active `disagreement` 驱动，旧 turn 才沿用 `followUpQuestion`。服务日志记录安全结构原因和搜索摘要，两次计划尝试共用同一 requestId 和消息幂等键；只有显式 `execute_revision` 且验证成功的提案才会入库为 proposal，搜索耗尽则保存说明而不创建 proposal。聊天输入区显示实时秒数，并在 60 秒执行浏览器安全中止；失败、刷新或连接中断后使用原消息幂等键重试，确保同一请求最多保存一条 user turn 和一条 assistant turn。8000 仍沿用自己的 `Backend/.env`、DeepSeek v4-flash 请求链和两个 Agent，服务之间不共享 8010 的模型配置。
 
 后端使用独立 SQLite/WAL。默认数据库为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`，`.env` 和数据库文件均被本目录 `.gitignore` 排除。
 完整地图修改采用“LLM 意图编译器 → 结构化 execution brief → RevisionPlan/executionContract → 关卡修改助手候选 → 确定性原子校验与求解 → 确定性局部搜索兜底 → 待审查提案”。`proposalOffer.summary/rationale` 继续负责用户可见内容；可选的 `proposalOffer.executionBrief` 保存 effect、锚点、focus、精确 `requiredTransitions`、允许算子、保护组件和游玩目标。明确坐标及 `from → to` 是硬约束，服务端会用当前 Stage 的 `tileAt` 事实再次核对；冲突时只要求澄清，不猜邻近格，也不生成错误紫卡。`RevisionStrategy` 仍描述效果、焦点区域、允许算子、保护项、修改预算和客观指标方向；后端负责扩展 `add/remove wall`、`move player/box/target` 与 `add/remove water`。精确的一格结构修改允许 1 个真实变更格，实体移动必须成对清除旧位置和写入新位置，多格修改按实际预算计算，最大 12 格；外壳与 void 从候选空间排除。候选必须真正使用能够实现其声明效果的算子、满足声明的指标变化，并遵守“不要改水/墙/玩家/箱子/目标”等明确保留项；否则会被拒绝而非作为低分方案选出。修改助手候选全部非法或不可解时，生产链会在 focus、锚点、effect、requiredTransitions 和保护规则内调用 `search_revision_plan()`；只有真实 tile 变化、结构合法且可解的候选才能进入 proposal。搜索最多构造 64 张地图、保存最多八张可解候选，并按明确要求、指标方向、区域/组件吻合度、最小改动和稳定签名选择一份。失败按坐标冲突、契约冲突、模型候选非法或确实没有可解候选分类；不会放宽要求、覆盖当前 Stage 或撤销手动编辑。旧 `proposalOffer` 没有 execution brief 时继续读取，但无法可靠恢复精确意图时优先要求澄清。
 
 模型/传输错误（超时、连接失败、空响应、非法 JSON 等）第一次返回可重试错误，前端保留原消息幂等键并显示一次 Retry；Retry 再次失败后保存一条手动编辑/继续讨论的说明，不再继续提供 Retry。若模型已经生成有效 `RevisionPlan`，但确定性搜索找不到同时满足要求且可解的地图，系统将该结果作为已处理的业务结果返回：显示说明和风险提示，不自动放宽要求、不创建提案、不修改当前 Stage，也不显示 Retry。说明会明确邀请设计者亲自在右侧编辑器调整，或继续与 AI 商讨如何缩小、重新表述修改目标；只有新的明确授权和可行提案才会进入地图提案流程。合法计划在构造零候选时仍会执行一次内部结构修正；历史会话中已经存在的 `relaxationOffer` 仍按旧流程兼容读取和确认，但新失败请求不会创建新的放宽流程。
 
-生产 systemd 模板保存在 `CoCreationPrototype/Backend/sokoban-cocreation.service`，其中将写权限限制到独立数据目录，并同时读取主后端的 LLM 配置和 8010 自己的安全配置。
+生产 systemd 模板保存在 `CoCreationPrototype/Backend/sokoban-cocreation.service`，其中将写权限限制到独立数据目录，只读取 8010 自己的 `.env` 和安全配置，不加载 8000 的 DeepSeek 环境文件。
 
 本地启动：
 
@@ -133,7 +135,9 @@ python CoCreationPrototype/Backend/app.py
 
 访问 `http://127.0.0.1:8010/`。关键环境变量见 `CoCreationPrototype/Backend/.env.example`：
 
-- `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`DEEPSEEK_BASE_URL`
+- 8000 `Backend/.env`：`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`DEEPSEEK_BASE_URL`
+- 8010 `CoCreationPrototype/Backend/.env`：`COCREATION_LLM_PROVIDER=kimi`、`COCREATION_LLM_MODEL=kimi-k2.6`、`COCREATION_LLM_BASE_URL=https://api.moonshot.cn/v1`、`KIMI_API_KEY`（或显式 `COCREATION_LLM_API_KEY`）
+- 8010 不得把 8000 的 DeepSeek 变量作为回退；缺少 Kimi key 时服务应报告配置错误
 - `COCREATION_PUBLIC_BASE_URL`
 - `COCREATION_WEBGL_BASE_URL`
 - `COCREATION_TOKEN_SECRET`
@@ -259,10 +263,10 @@ Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Soko
 直接访问 `/cocreation/` 时，页面只显示“创建示例会话” landing，不读取旧的
 `localStorage` 会话，也不会请求上一轮会话、对话、Stage 或地图记录。点击按钮后立即显示
 “正在使用算法创建示例地图……”，再由 8010 后端参考 Unity `Algorithm_Level` 的结构模板、
-墙体/水域布局和反向拉箱流程生成 10×12、两箱、两目标的可解地图，然后自动开始首轮 assessment。
+墙体/水域布局和反向拉箱流程生成 10×12、两箱、两目标的可解地图，然后自动开始首段开场；assessment 仍会在后端归档，但不显示评价卡。
 刷新当前演示会话 URL 可以继续当前测试；演示完成后不显示“返回 Unity 继续”。
 演示数据只写入 8010，不调用 8000 同步接口，不启动十分钟 deadline，也不记录正式匹配的
 `coCreationDurationSeconds`。每次新演示会话在新地图验证和新会话创建成功后，清理上一轮
 演示会话及其关联的对话、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。若地图
 生成或会话创建失败，上一轮演示记录保持不变。前端静态资源缓存键为
-`cocreation-unified-flash-20260902-2`。
+`cocreation-kimi-20260903-1`。

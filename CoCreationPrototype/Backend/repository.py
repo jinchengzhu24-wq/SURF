@@ -8,6 +8,7 @@ from pathlib import Path
 from design_context import (
     add_confirmed_decision,
     add_rejected_decision,
+    design_level_open_questions,
     empty_design_context,
     merge_chat_update,
     normalize_design_context,
@@ -518,6 +519,46 @@ def serialize_session(database, session_id):
         for version in versions
     }
 
+    # A Stage opening is normally owned by its assessment or accepted
+    # proposal.  Older records may have neither marker, so use the earliest
+    # assistant turn only for Stage 1 as a conservative read-time fallback.
+    opening_turn_ids_by_version = {}
+    for assessment in assessments:
+        opening_turn_ids_by_version.setdefault(assessment["version_id"], set()).add(
+            assessment["assistant_turn_id"]
+        )
+    for opening in accepted_openings:
+        opening_turn_ids_by_version.setdefault(opening["version_id"], set()).add(
+            opening["assistant_turn_id"]
+        )
+    for version in versions:
+        if version["stage_number"] != 1:
+            continue
+        if opening_turn_ids_by_version.get(version["id"]):
+            continue
+        version_turns = [turn for turn in turns if turn["version_id"] == version["id"]]
+        first_user_index = next(
+            (
+                index
+                for index, turn in enumerate(version_turns)
+                if turn["role"] == "user"
+            ),
+            None,
+        )
+        first_assistant = next(
+            (
+                turn
+                for index, turn in enumerate(version_turns)
+                if turn["role"] == "assistant"
+                and (first_user_index is None or index < first_user_index)
+            ),
+            None,
+        )
+        if first_assistant is not None:
+            opening_turn_ids_by_version.setdefault(version["id"], set()).add(
+                first_assistant["id"]
+            )
+
     def public_turn_guidance(turn_guidance, body, rows, language):
         """Recheck stored route annotations before exposing historical turns."""
         guidance = _public_guidance(turn_guidance)
@@ -560,7 +601,25 @@ def serialize_session(database, session_id):
     def public_turn_content(turn):
         if turn["role"] != "assistant":
             return turn["content"]
-        return public_text(turn["content"], turn["language"])
+        content = public_text(turn["content"], turn["language"])
+        stage_number = stage_numbers.get(turn["version_id"])
+        if (
+            stage_number == 1
+            and turn["id"] in opening_turn_ids_by_version.get(turn["version_id"], set())
+        ):
+            try:
+                # This is a display-time compatibility repair; historical
+                # database rows remain unchanged.
+                from llm_client import _ensure_stage_one_orientation
+
+                content = _ensure_stage_one_orientation(
+                    content,
+                    version_rows.get(turn["version_id"]),
+                    turn["language"],
+                )
+            except (ImportError, TypeError, ValueError, KeyError):
+                pass
+        return content
 
     public_content_by_turn = {
         turn["id"]: public_turn_content(turn)
@@ -756,8 +815,7 @@ def serialize_session(database, session_id):
                     ),
                     "label": "open",
                 }
-                for item in context.get("openQuestions", [])
-                if item.get("status") == "open"
+                for item in design_level_open_questions(context)
             ],
         })
 

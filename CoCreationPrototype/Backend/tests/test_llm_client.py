@@ -174,6 +174,20 @@ class SlowClient:
 
 
 class LLMClientTests(unittest.TestCase):
+    def setUp(self):
+        self.kimi_environment = patch.dict(
+            os.environ,
+            {
+                "COCREATION_LLM_PROVIDER": "kimi",
+                "COCREATION_LLM_MODEL": "kimi-k2.6",
+                "COCREATION_LLM_BASE_URL": "https://api.moonshot.cn/v1",
+                "KIMI_API_KEY": "test-kimi-key",
+            },
+            clear=False,
+        )
+        self.kimi_environment.start()
+        self.addCleanup(self.kimi_environment.stop)
+
     def execute(self, outcomes, rows=None, **reply_kwargs):
         client = FakeClient(outcomes)
         conversation = reply_kwargs.pop(
@@ -209,8 +223,11 @@ class LLMClientTests(unittest.TestCase):
         request = client.chat.completions.calls[0]
         self.assertNotIn("response_format", request)
         self.assertFalse(request["stream"])
-        self.assertEqual(request["model"], "deepseek-v4-flash")
-        self.assertEqual(request["max_tokens"], llm_client.PLAIN_CHAT_MAX_TOKENS)
+        self.assertEqual(request["model"], "kimi-k2.6")
+        self.assertEqual(
+            request["max_completion_tokens"],
+            llm_client.PLAIN_CHAT_MAX_COMPLETION_TOKENS,
+        )
         self.assertEqual(request["extra_body"], {"thinking": {"type": "disabled"}})
 
     def test_model_environment_overrides_are_ignored(self):
@@ -240,6 +257,29 @@ class LLMClientTests(unittest.TestCase):
             [call["model"] for call in client.chat.completions.calls],
             [llm_client.UNIFIED_MODEL],
         )
+
+    def test_missing_kimi_key_does_not_fall_back_to_deepseek(self):
+        with patch.dict(
+            os.environ,
+            {
+                "COCREATION_LLM_PROVIDER": "kimi",
+                "COCREATION_LLM_API_KEY": "",
+                "COCREATION_LLM_BASE_URL": "https://api.moonshot.cn/v1",
+                "KIMI_API_KEY": "",
+                "DEEPSEEK_API_KEY": "legacy-deepseek-key",
+                "DEEPSEEK_MODEL": "deepseek-v4-flash",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(llm_client.LLMServiceError) as raised:
+                llm_client.generate_chat_reply(
+                    [{"role": "user", "content": "Assess the route."}],
+                    ["############"] * 10,
+                    "no-deepseek-fallback-test",
+                )
+
+        self.assertEqual(raised.exception.code, "CONFIGURATION_ERROR")
+        self.assertEqual(raised.exception.attempts_used, 0)
 
     def test_kimi_provider_uses_kimi_k26_configuration(self):
         client = FakeClient(["The verified route remains readable."])
@@ -1360,15 +1400,15 @@ class LLMClientTests(unittest.TestCase):
             ["############"] * 10,
         )
 
-        self.assertIn("Actively ask at a real decision point", messages[0]["content"])
-        self.assertIn("varying their rhythm and opening", messages[0]["content"])
-        self.assertIn("never ask the designer to approve the preference", messages[0]["content"])
+        self.assertIn("genuine map-specific unresolved", messages[0]["content"])
+        self.assertIn("At a real decision point", messages[0]["content"])
         self.assertIn("<GUIDANCE>", messages[0]["content"])
         self.assertIn("recentGuidance", messages[0]["content"])
         self.assertIn("whenever no card is warranted", messages[0]["content"])
         self.assertIn("never produce four cards", messages[0]["content"])
-        self.assertIn("two to four compact paragraphs", messages[0]["content"])
-        self.assertIn("Give observations room to breathe", messages[0]["content"])
+        self.assertIn("no fixed paragraph-count limit", messages[0]["content"])
+        self.assertIn("one compact route passage", messages[0]["content"])
+        self.assertIn("Connect specific map details to a playable moment", messages[0]["content"])
         self.assertIn("Post-opening progress and route rule", messages[0]["content"])
         self.assertIn("COORDINATE_LINKS", messages[0]["content"])
 
@@ -1432,7 +1472,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIn("water-side route", result.assistant_message)
         self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(client.chat.completions.calls[1]["model"], "deepseek-v4-flash")
+        self.assertEqual(client.chat.completions.calls[1]["model"], "kimi-k2.6")
         self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_two_pure_generic_questions_return_low_quality_error(self):
@@ -2046,6 +2086,7 @@ class LLMClientTests(unittest.TestCase):
     def test_invalid_stage_json_falls_back_to_plain_opening(self):
         client = FakeClient([
             "   ",
+            "not a complete JSON object",
             "The water narrows the central route in an interesting way. "
             "When the box enters that corridor, which route should read first?",
         ])
@@ -2078,16 +2119,25 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertIn("deterministic solver", result.assessment["solutionSummary"])
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(len(client.chat.completions.calls), 3)
         self.assertEqual(
-            client.chat.completions.calls[0]["response_format"],
-            {"type": "json_object"},
+            client.chat.completions.calls[0]["response_format"]["type"],
+            "json_schema",
         )
-        self.assertNotIn("response_format", client.chat.completions.calls[1])
+        self.assertEqual(
+            client.chat.completions.calls[0]["response_format"]["json_schema"]["name"],
+            "cocreation_stage_assessment",
+        )
+        self.assertEqual(
+            client.chat.completions.calls[1]["response_format"]["type"],
+            "json_schema",
+        )
+        self.assertNotIn("response_format", client.chat.completions.calls[2])
 
     def test_later_human_edit_plain_opening_asks_about_the_designer_intention(self):
         client = FakeClient([
             "   ",
+            "not a complete JSON object",
             (
                 "我唯一有点拿不准的是T1在(2,10)那个角落。"
                 "右上角现在被墙收窄了，入口只有(2,9)那一条。"
@@ -2179,7 +2229,73 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(result.model, "deepseek-v4-flash")
+        self.assertEqual(result.model, "kimi-k2.6")
+
+    def test_repeated_length_truncation_returns_a_complete_safe_reply(self):
+        truncated = SimpleNamespace(
+            choices=[SimpleNamespace(
+                finish_reason="length",
+                message=SimpleNamespace(content="The layout suggests that the route"),
+            )]
+        )
+        client = FakeClient([truncated, truncated])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Assess the design trade-off."}],
+                ["############"] * 10,
+                "repeated-length-safe-fallback-test",
+            )
+
+        self.assertEqual(result.attempts_used, 2)
+        self.assertIn("did not finish cleanly", result.assistant_message)
+        self.assertNotIn("The layout suggests", result.assistant_message)
+        self.assertIsNone(result.proposed_rows)
+        self.assertEqual(result.guidance["coordinateLinks"], [])
+        self.assertNotIn("designContextPatch", result.guidance)
+
+    def test_route_reasoning_is_bounded_without_limiting_design_analysis(self):
+        long_route = (
+            "B2 moves from (2,2) to (2,3) -> (2,4) -> (2,5) -> (3,5) -> "
+            "(4,5) -> (5,5) -> (6,5), then reaches T2."
+        )
+        detailed_design = (
+            "The water changes the design rhythm and makes the first push more legible. "
+            "At (3,4) the player can see the intended corridor, while (5,6) remains a "
+            "useful decision point for box order. This is a meaningful trade-off, not a "
+            "complete solver trace."
+        )
+
+        self.assertTrue(llm_client._route_reasoning_is_overlong(long_route))
+        self.assertFalse(llm_client._route_reasoning_is_overlong(detailed_design))
+
+    def test_overlong_route_reasoning_is_retried_and_not_saved(self):
+        long_route = (
+            "B2 moves from (2,2) to (2,3) -> (2,4) -> (2,5) -> (3,5) -> "
+            "(4,5) -> (5,5) -> (6,5), then reaches T2."
+        )
+        client = FakeClient([
+            long_route,
+            "The water makes the first push more deliberate, so the box order becomes a "
+            "useful design choice.",
+        ])
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Explain the map design."}],
+                ENTITY_ROUTE_ROWS,
+                "route-compaction-retry-test",
+            )
+
+        self.assertEqual(result.attempts_used, 2)
+        self.assertIn("more deliberate", result.assistant_message)
+        self.assertNotIn("(2,2)", result.assistant_message)
 
     def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
         response = revision_plan_payload()
@@ -2199,9 +2315,16 @@ class LLMClientTests(unittest.TestCase):
             )
 
         request = client.chat.completions.calls[0]
-        self.assertEqual(request["model"], "deepseek-v4-flash")
-        self.assertEqual(request["max_tokens"], llm_client.PROPOSAL_PLAN_MAX_TOKENS)
-        self.assertEqual(request["response_format"], {"type": "json_object"})
+        self.assertEqual(request["model"], "kimi-k2.6")
+        self.assertEqual(
+            request["max_completion_tokens"],
+            llm_client.PROPOSAL_PLAN_MAX_COMPLETION_TOKENS,
+        )
+        self.assertEqual(request["response_format"]["type"], "json_schema")
+        self.assertEqual(
+            request["response_format"]["json_schema"]["name"],
+            "cocreation_revision_plan",
+        )
         self.assertIn("semantic RevisionPlan", request["messages"][0]["content"])
         self.assertIn("Do not generate map rows", request["messages"][0]["content"])
 
@@ -2230,10 +2353,10 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result.proposed_rows)
-        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(client.chat.completions.calls[0]["model"], "kimi-k2.6")
         self.assertEqual(
-            client.chat.completions.calls[0]["response_format"],
-            {"type": "json_object"},
+            client.chat.completions.calls[0]["response_format"]["type"],
+            "json_schema",
         )
 
     def test_invalid_modifier_candidates_fall_back_to_exact_deterministic_transition(self):
@@ -2323,7 +2446,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result.proposed_rows)
-        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(client.chat.completions.calls[0]["model"], "kimi-k2.6")
         self.assertIn("第7行第6到第8列", client.chat.completions.calls[0]["messages"][1]["content"])
 
     def test_help_me_do_inherits_a_confirmed_concrete_chinese_plan(self):
@@ -2362,7 +2485,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(result.proposed_rows)
-        self.assertEqual(client.chat.completions.calls[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(client.chat.completions.calls[0]["model"], "kimi-k2.6")
 
     def test_map_request_phrases_are_detected_without_matching_design_questions(self):
         positives = (
@@ -2501,7 +2624,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.attempts_used, 3)
         self.assertEqual(
             [call["model"] for call in client.chat.completions.calls],
-            ["deepseek-v4-flash", "deepseek-v4-flash", "deepseek-v4-flash"],
+            ["kimi-k2.6", "kimi-k2.6", "kimi-k2.6"],
         )
         self.assertIn(
             "strategies must contain one to three items",
@@ -2787,10 +2910,10 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(result.model, "deepseek-v4-flash")
+        self.assertEqual(result.model, "kimi-k2.6")
         self.assertEqual(
             [call["model"] for call in client.chat.completions.calls],
-            ["deepseek-v4-flash", "deepseek-v4-flash"],
+            ["kimi-k2.6", "kimi-k2.6"],
         )
         self.assertNotIn("response_format", client.chat.completions.calls[1])
 
@@ -2871,7 +2994,7 @@ class LLMClientTests(unittest.TestCase):
                 "timeout-test",
             )
 
-        self.assertEqual(llm_client.UNIFIED_MODEL, "deepseek-v4-flash")
+        self.assertEqual(llm_client.UNIFIED_MODEL, "kimi-k2.6")
         self.assertEqual(llm_client.BACKEND_REQUEST_TIMEOUT_SECONDS, 60.0)
         self.assertEqual(llm_client.LLM_INTERNAL_DEADLINE_SECONDS, 58.0)
         self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 60.0)
@@ -2889,7 +3012,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_missing_api_key_fails_without_model_call(self):
         with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}),
+            patch.dict(os.environ, {"KIMI_API_KEY": ""}),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -3792,7 +3915,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("Do not say Welcome to Stage", prompt)
         self.assertIn("either-or choice", prompt)
         self.assertIn("还是/或者/或是", prompt)
-        self.assertIn("do not ask a yes/no question", prompt)
+        self.assertIn("Do not ask a question or a yes/no question", prompt)
         self.assertIn("not as the prose style", prompt)
 
     def test_dg_initial_provenance_does_not_attribute_exact_tiles(self):
