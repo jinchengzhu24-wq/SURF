@@ -3626,7 +3626,7 @@ def build_llm_context(database, session_id, version):
             if cue_type == "tradeoff":
                 cue_type = "warning"
             if (
-                cue_type in {"warning", "manual_edit"}
+                cue_type in {"warning", "manual_edit", "clarification"}
                 and cue_type not in recent_guidance["uiCues"]
             ):
                 recent_guidance["uiCues"][cue_type] = {

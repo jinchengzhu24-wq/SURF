@@ -146,6 +146,7 @@ class DesignContextUnitTests(unittest.TestCase):
         )
         self.assertTrue(any(item["authority"] == "explicit" for item in context["userGoals"]))
         self.assertTrue(any(item["authority"] == "explicit" for item in context["designConstraints"]))
+        self.assertEqual(context["confirmedDecisions"], [])
 
     def test_correction_keeps_old_provenance_and_supersedes_inference(self):
         context = merge_chat_update(
@@ -360,6 +361,18 @@ class DesignContextRepositoryTests(unittest.TestCase):
                         child_progress["confirmedDecisions"][0]["sourceStageNumber"],
                         1,
                     )
+                    self.assertEqual(len(child_progress["expressedDirections"]), 2)
+                    self.assertEqual(
+                        {item["kind"] for item in child_progress["expressedDirections"]},
+                        {"goal", "constraint"},
+                    )
+                    for direction in child_progress["expressedDirections"]:
+                        self.assertEqual(
+                            direction["text"],
+                            "I want the first push to remain readable.",
+                        )
+                        self.assertEqual(direction["sourceStageNumber"], 1)
+                        self.assertEqual(direction["label"], "explicit")
                     self.assertEqual(
                         child_progress["unresolvedQuestions"][0]["sourceStageNumber"],
                         1,

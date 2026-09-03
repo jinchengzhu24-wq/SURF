@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=cocreation-kimi-20260903-2">
+    <link rel="stylesheet" href="./styles.css?v=cocreation-kimi-20260903-4">
 </head>
 <body>
     <div class="app">
@@ -71,6 +71,10 @@
                     <details class="progress-panel" id="progressPanel">
                         <summary id="progressSummary" aria-controls="progressPanelBody" aria-expanded="false"><span data-i18n="progressTitle">Co-creation progress</span></summary>
                         <div class="progress-panel-body" id="progressPanelBody">
+                            <section class="progress-section progress-section-expressed" aria-labelledby="expressedDirectionsTitle">
+                                <h3 id="expressedDirectionsTitle" data-i18n="expressedDirections">Expressed directions</h3>
+                                <div class="progress-items" id="expressedDirectionsList" aria-live="polite"></div>
+                            </section>
                             <section class="progress-section" aria-labelledby="confirmedDecisionsTitle">
                                 <h3 id="confirmedDecisionsTitle" data-i18n="confirmedDecisions">Confirmed decisions</h3>
                                 <div class="progress-items" id="confirmedDecisionsList" aria-live="polite"></div>
@@ -185,6 +189,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=cocreation-kimi-20260903-2"></script>
+    <script src="./app.js?v=cocreation-kimi-20260903-4"></script>
 </body>
 </html>

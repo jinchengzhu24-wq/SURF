@@ -39,9 +39,10 @@ UNIFIED_MODEL = KIMI_MODEL
 DEFAULT_MODEL = KIMI_MODEL
 DEFAULT_PROPOSAL_MODEL = KIMI_MODEL
 DEFAULT_BASE_URL = KIMI_BASE_URL
-BACKEND_REQUEST_TIMEOUT_SECONDS = 60.0
-LLM_INTERNAL_DEADLINE_SECONDS = 58.0
-PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 40.0
+BACKEND_REQUEST_TIMEOUT_SECONDS = 120.0
+LLM_INTERNAL_DEADLINE_SECONDS = 116.0
+PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 70.0
+MIN_RETRY_BUDGET_SECONDS = 20.0
 CHAT_TIMEOUT_SECONDS = BACKEND_REQUEST_TIMEOUT_SECONDS
 CHAT_MAX_ATTEMPTS = 2
 PROPOSAL_GENERATION_ATTEMPTS = 2
@@ -60,7 +61,7 @@ CHAT_MAX_COMPLETION_TOKENS = 2600
 # Compatibility alias for integrations that import the old constant name.
 CHAT_MAX_TOKENS = CHAT_MAX_COMPLETION_TOKENS
 PLAIN_CHAT_TIMEOUT_SECONDS = BACKEND_REQUEST_TIMEOUT_SECONDS
-PLAIN_PRIMARY_TIMEOUT_SECONDS = 30.0
+PLAIN_PRIMARY_TIMEOUT_SECONDS = 70.0
 PLAIN_CHAT_MAX_COMPLETION_TOKENS = 2200
 PLAIN_CHAT_MAX_TOKENS = PLAIN_CHAT_MAX_COMPLETION_TOKENS
 PROPOSAL_MAX_COMPLETION_TOKENS = 2400
@@ -74,8 +75,12 @@ PROPOSAL_OPERATION_LIMIT = 24
 TRANSLATION_MAX_COMPLETION_TOKENS = 3200
 TRANSLATION_MAX_TOKENS = TRANSLATION_MAX_COMPLETION_TOKENS
 CHAT_RESPONSE_MAX_LENGTH = 8000
-COORDINATE_LINK_LIMIT = 8
-PROMPT_VERSION = "cocreation-v42-kimi-detailed-design-route-bounded"
+COORDINATE_LINK_LIMIT = 12
+CHAT_MAX_PARAGRAPHS = 6
+CHAT_MAX_SENTENCES = 12
+CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
+CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
+PROMPT_VERSION = "cocreation-v44-kimi-route-salvage"
 
 
 def _structured_response_format(task=None):
@@ -118,13 +123,57 @@ def _structured_response_format(task=None):
         }
         name = "cocreation_operation_candidates"
     else:
+        stage_opening = task == "stage_assessment"
+        guidance_properties = {
+            "move": {
+                "type": "string",
+                "enum": ["observe_stage"] if stage_opening else sorted(GUIDANCE_MOVES),
+            },
+            "intentHypothesis": {"type": ["string", "null"]},
+            "intentConfidence": {
+                "type": ["string", "null"],
+                "enum": ["low", "medium", "high", None],
+            },
+            "followUpQuestion": {"type": ["string", "null"]},
+            "proposalOffer": {"type": ["object", "null"]},
+            "disagreement": {"type": ["object", "null"]},
+            "uiCues": {"type": "array", "items": {"type": "object"}},
+            "coordinateLinks": {"type": "array", "items": {"type": "object"}},
+            "designContextPatch": {"type": ["object", "null"]},
+        }
+        guidance_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": guidance_properties,
+            "required": [
+                "move",
+                "intentHypothesis",
+                "intentConfidence",
+                "followUpQuestion",
+                "proposalOffer",
+                "disagreement",
+                "uiCues",
+                "coordinateLinks",
+            ],
+        }
+        assessment_schema = {
+            "type": ["object", "null"],
+            "properties": {
+                "solutionSummary": {"type": "string"},
+                "difficultyOpinion": {"type": "string"},
+                "features": {"type": "array", "items": {"type": "string"}},
+                "suggestions": {"type": "array", "items": {"type": "string"}},
+                "satisfactionQuestion": {"type": ["string", "null"]},
+            },
+            "additionalProperties": False,
+        }
         schema = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "assistantMessage": {"type": "string"},
-                "guidance": {"type": "object"},
-                "assessment": {"type": ["object", "null"]},
+                "guidance": guidance_schema,
+                "assessment": assessment_schema,
                 "proposedRows": {"type": ["array", "null"], "items": {"type": "string"}},
                 "modificationSummary": {"type": "string"},
                 "designContextPatch": {"type": ["object", "null"]},
@@ -137,6 +186,25 @@ def _structured_response_format(task=None):
                 "modificationSummary",
             ],
         }
+        if stage_opening:
+            schema["properties"]["assessment"] = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "solutionSummary": {"type": "string"},
+                    "difficultyOpinion": {"type": "string"},
+                    "features": {"type": "array", "items": {"type": "string"}},
+                    "suggestions": {"type": "array", "items": {"type": "string"}},
+                    "satisfactionQuestion": {"type": ["string", "null"]},
+                },
+                "required": [
+                    "solutionSummary",
+                    "difficultyOpinion",
+                    "features",
+                    "suggestions",
+                    "satisfactionQuestion",
+                ],
+            }
         name = (
             "cocreation_stage_assessment"
             if task == "stage_assessment"
@@ -157,7 +225,7 @@ GUIDANCE_MOVES = {
     "deliver_revision",
 }
 INTENT_CONFIDENCE_LEVELS = {"low", "medium", "high"}
-UI_CUE_TYPES = {"manual_edit", "warning", "tradeoff"}
+UI_CUE_TYPES = {"manual_edit", "warning", "tradeoff", "clarification"}
 GUIDANCE_REQUEST_MODES = {"revision_advice", "discussion", "none"}
 DISAGREEMENT_STATUSES = {"active", "resolved"}
 DISAGREEMENT_SUBJECTS = {"ai_revision", "human_edit", "user_request"}
@@ -196,6 +264,36 @@ def _request_deadline(started_at=None):
 
 def _remaining_until(deadline):
     return max(0.0, float(deadline) - time.monotonic())
+
+
+def _retry_budget_available(
+    deadline,
+    *,
+    request_id,
+    task,
+    attempt,
+    max_attempts,
+    response_mode,
+    fallback_reason=None,
+    minimum_seconds=MIN_RETRY_BUDGET_SECONDS,
+):
+    """Prevent a retry that cannot realistically finish before the public deadline."""
+    remaining = _remaining_until(deadline)
+    if remaining >= minimum_seconds:
+        return True
+
+    _log_llm_event(
+        "llm_retry_skipped",
+        requestId=request_id,
+        task=task,
+        attempt=attempt,
+        maxAttempts=max_attempts,
+        responseMode=response_mode,
+        remainingSeconds=round(remaining, 3),
+        retrySkippedReason="insufficient_remaining_budget",
+        fallbackReason=fallback_reason,
+    )
+    return False
 
 
 @dataclass(frozen=True)
@@ -276,6 +374,9 @@ def build_chat_messages(
     )
     continuity_context_prompt = _continuity_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
+    )
+    historical_reference_instruction = _historical_stage_reference_instruction(
+        conversation
     )
     post_opening_progress_instruction = (
         "Post-opening progress rule: this is an ordinary reply after the Stage opening. "
@@ -429,10 +530,19 @@ def build_chat_messages(
         "that accepted proposal as the established design context for the new Stage, "
         "not as a request to assess the map from scratch. Do not claim that unrelated "
         "discussion from another Stage happened in the current Stage.\n\n"
-        f"Write all new natural-language fields in {response_language}. {task} "
+        f"Write all new natural-language fields in {response_language}. "
+        + (
+            "In Chinese mode, use Chinese natural language throughout; keep only entity IDs, "
+            "coordinates, and the label Stage in Latin characters. Do not code-switch into "
+            "English design jargon. "
+            if response_language == "Simplified Chinese"
+            else ""
+        )
+        + f"{task} "
         f"{revision_contract}\n\n"
-        f"{post_opening_progress_instruction}\n\n"
-        f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
+         f"{post_opening_progress_instruction}\n\n"
+         f"{historical_reference_instruction}\n\n"
+         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         "Return JSON only with exactly these keys:\n"
         '{"assistantMessage":"...","guidance":'
         '{"move":"observe_stage","intentHypothesis":null,'
@@ -482,10 +592,13 @@ def build_chat_messages(
         'or from/to tile change, include it in requiredTransitions exactly; never substitute a nearby '
         'cell. The server will reject a brief whose coordinate or from tile conflicts with the saved map. '
         'requiredTransitions must contain every exact intended cell change; it may not be empty for a revision offer. '
-        'If the edit is semantic but cannot yet be resolved to exact cells from the authoritative map facts, '
+        'A single response may contain exactly one proposalOffer and exactly one primary revision direction. '
+        'Never present multiple options, Option A/B, or alternative proposals in the same response; the '
+        'alternative_revision card action is the only way to request another proposal. If the edit is semantic '
+        'but cannot yet be resolved to exact cells from the authoritative map facts, '
         'do not output proposalOffer and ask a clarifying question instead. Never infer a transition from visible prose. '
         "uiCues must be an array of at most two unique objects with exactly type and "
-        "text; type must be manual_edit or warning. The legacy tradeoff type is accepted "
+        "text; type must be manual_edit, warning, or clarification. The legacy tradeoff type is accepted "
         "by the application for historical data but must not be generated. "
         "assistantMessage must not repeat followUpQuestion; when non-null, the application "
         "appends it in a separate discussion card. The card must not merely lift a sentence "
@@ -540,7 +653,7 @@ def build_chat_messages(
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"{design_context_prompt}\n"
         f"{continuity_context_prompt}\n"
-        f"Saved Stage context: {json.dumps(prompt_stage_context, ensure_ascii=False)}\n"
+         f"Saved Stage context: {json.dumps(prompt_stage_context, ensure_ascii=False)}\n"
         f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}\n"
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
     )
@@ -560,6 +673,7 @@ def build_chat_messages(
         provenance_guidance=provenance_guidance,
         revision_contract=revision_contract,
         post_opening_progress_instruction=post_opening_progress_instruction,
+        historical_reference_instruction=historical_reference_instruction,
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -595,6 +709,9 @@ def build_plain_chat_messages(
     )
     continuity_context_prompt = _continuity_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
+    )
+    historical_reference_instruction = _historical_stage_reference_instruction(
+        conversation
     )
     post_opening_progress_instruction = (
          "Post-opening progress and route rule: this is an ordinary reply after the Stage "
@@ -678,6 +795,9 @@ def build_plain_chat_messages(
             "a meaningful preference or direction, output INTENT only when using the discussion "
             "family. When you describe a concrete, actionable revision direction, output both "
             "proposal fields and MANUAL_EDIT; WARNING remains optional and needs strong evidence. "
+            "A single response may contain exactly one primary proposal. Never present multiple "
+            "options, Option A/B, or alternative proposals in the same response; the "
+            "alternative_revision action is the only way to request another proposal. "
             "Write INTENT as a compact, "
             "correctable first-person reading of this particular exchange, and vary its "
             "opening from recent cards. A generic execution request such as '你帮我改' is not "
@@ -702,7 +822,9 @@ def build_plain_chat_messages(
             "Ordinary questions stay in assistantMessage. An active disagreement cannot include "
             "a proposal. A resolved disagreement may lead to a new conceptual proposal, except "
             "retain_current, which ends without a proposal. "
-            "Use MANUAL_EDIT alone when the designer's direction is too unclear to turn into a "
+            "Use a clarification cue when the designer's direction is too unclear to turn into a "
+            "single safely bound proposal; it must ask for the missing map decision without "
+            "silently hiding the response. Use MANUAL_EDIT alone when the designer's direction is too unclear to turn into a "
             "proposal, or pair it with a concrete proposal so designer and LLM can compare the "
             "same local idea. Name the area, what to observe, and why, without prescribing exact "
             "coordinates or implying manual editing is required. These metadata requirements do not require a "
@@ -726,7 +848,14 @@ def build_plain_chat_messages(
         "warm friend. Prefer first-person observations and opinions. Sound personally engaged, "
         "kind, and clear-headed; avoid stiff transitions, workflow announcements, bureaucratic "
         "notices, and canned service phrasing. Write only the visible "
-        f"reply to the designer in {response_language}; do not output JSON, analysis, or "
+         f"reply to the designer in {response_language}; "
+         + (
+             "Use Chinese natural language throughout in Chinese mode; keep only entity IDs, "
+             "coordinates, and Stage in Latin characters, and do not use English design jargon. "
+             if response_language == "Simplified Chinese"
+             else ""
+         )
+         + "do not output JSON, analysis, or "
         "formatting instructions. The only permitted metadata is the optional trailing "
         "GUIDANCE block described below. "
         f"{opening_instruction}{revision_instruction}"
@@ -758,8 +887,9 @@ def build_plain_chat_messages(
         "There is exactly one level in this session; every Stage is only a saved version of "
         "that same level. Never describe a Stage as a first, second, next, or later level, "
         "and never imply a campaign progression.\n\n"
-        f"{continuity_instruction}{post_opening_progress_instruction}\n\n"
-        f"{guidance_mode_instruction}\n{action_instruction}\n{guidance_instruction}\n"
+         f"{continuity_instruction}{post_opening_progress_instruction}\n\n"
+         f"{historical_reference_instruction}\n\n"
+         f"{guidance_mode_instruction}\n{action_instruction}\n{guidance_instruction}\n"
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         f"{_map_grounding_contract()}\n\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
@@ -802,6 +932,7 @@ def build_plain_chat_messages(
         guidance_instruction=compact_guidance_instruction,
         provenance_guidance=provenance_guidance,
         post_opening_progress_instruction=post_opening_progress_instruction,
+        historical_reference_instruction=historical_reference_instruction,
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -830,6 +961,7 @@ def _compact_kimi_structured_prompt(
     provenance_guidance,
     revision_contract,
     post_opening_progress_instruction,
+    historical_reference_instruction="",
 ):
     """Use a short, task-first contract for Kimi's structured responses."""
     opening = (
@@ -853,11 +985,15 @@ def _compact_kimi_structured_prompt(
         "For a map-related reply, you may include detailed design analysis and one main route "
         "passage when it describes movement between two real anchors (player/box to target, "
         "coordinate to coordinate, or through a named corridor). Keep only the key corridor, "
-        "endpoint, and risk or design consequence; do not enumerate every step, alternative, "
+        "endpoint, and risk or design consequence; keep the route to 2–4 sentences and at "
+        "most 6 key coordinate nodes. Do not enumerate every step, alternative, "
         "BFS result, or solver state. A location, adjacency, comparison, or direction-only "
         "sentence is not a route. If used, copy the exact visible route sentence into one "
         "coordinateLinks item with authoritative one-based from/to points. Omit it when the "
-        "relation or endpoints are uncertain. Do not add a fixed progress heading or checklist."
+        "relation or endpoints are uncertain. If a short grounded route cannot be written, "
+        "omit the route and finish the detailed design analysis; never stop or invalidate the "
+        "whole response because route metadata is unavailable. Do not add a fixed progress "
+        "heading or checklist."
     )
     schema = (
         'Return exactly one JSON object with these required keys: '
@@ -894,6 +1030,7 @@ def _compact_kimi_structured_prompt(
         f"Task-specific instructions:\n{task_instructions} {revision_contract}".strip(),
         f"Draft provenance and attribution:\n{provenance_guidance}",
         post_opening_progress_instruction,
+        historical_reference_instruction,
         _map_grounding_contract(),
         f"Deterministic Map Facts (authoritative):\n{map_facts}",
         f"Current saved Stage (12 x 10), one-based rows:\n{numbered_map}",
@@ -929,6 +1066,7 @@ def _compact_kimi_plain_prompt(
     guidance_instruction,
     provenance_guidance,
     post_opening_progress_instruction,
+    historical_reference_instruction="",
 ):
     """Use the same compact facts/routing contract for text fallback."""
     opening = (
@@ -950,14 +1088,28 @@ def _compact_kimi_plain_prompt(
         )
     )
     route = (
-        "For map-related prose, include detailed design reasoning when useful, and at most one "
-        "compact route passage that explicitly describes movement between two real anchors, such "
-        "as B1 toward T1 or (2,3) through the corridor to (2,8). The route passage may explain "
-        "the key corridor and design consequence, but should stay within a few sentences and "
-        "roughly six coordinate nodes; do not list a full solver sequence or every alternative. "
+        "For map-related prose, include detailed design reasoning when useful, and up to four "
+        "compact route passages or clauses. Split independent route relations instead of combining "
+        "them into one long sentence. Each passage must explicitly describe movement between real "
+        "anchors, such as B1 toward T1 or (2,3) through the corridor to (2,8). Do not list a full "
+        "the key corridor and design consequence. Do not list a full solver sequence or every "
+        "the key corridor and design consequence, but should stay within 2–4 sentences and "
+        "alternative. "
         "Do not mark location, adjacency, comparison, or direction-only descriptions as routes. "
         "When a route is present, COORDINATE_LINKS must repeat the exact visible route sentence "
-        "and use current authoritative endpoints; omit it when uncertain."
+        "and use current authoritative endpoints; omit it when uncertain. If no short, grounded "
+        "route is available, omit the route and complete the detailed design analysis instead; "
+        "route metadata must never replace an otherwise useful reply."
+    )
+    route = (
+        "For map-related prose, include detailed design reasoning when useful, and up to four "
+        "compact route passages or clauses. Split independent route relations instead of combining "
+        "them into one long sentence. Each passage must explicitly describe movement between real "
+        "anchors, such as B1 toward T1 or (2,3) through the corridor to (2,8). Do not list a full "
+        "solver sequence or every alternative. Do not mark location, adjacency, comparison, or "
+        "direction-only descriptions as routes. When a route is present, COORDINATE_LINKS must "
+        "repeat the exact visible route text and use current authoritative endpoints; omit it when "
+        "uncertain. Route metadata must never replace otherwise useful design reasoning."
     )
     progress = (
         "After the opening, add DESIGN_CONTEXT_PATCH only for a genuine map-specific unresolved "
@@ -978,6 +1130,18 @@ def _compact_kimi_plain_prompt(
         "solver trace. At a real decision point, ask at most one specific design question. "
         "End with a complete sentence."
     )
+    safety = (
+        "Never mention internal keys or labels such as gridDistance, _solver, tileAt, mapFacts, "
+        "solutionSteps, DESIGN_CONTEXT_PATCH, or COORDINATE_LINKS in visible prose. Do not claim "
+        "an edit was applied or saved. If the designer asks for a change, describe or clarify "
+        "the direction; the server controls execution. Connect specific map details to a playable "
+        "moment when explaining a design judgment. Keep the visible reply balanced: normally use "
+        "2-4 paragraphs with 2-4 sentences per paragraph, split an overfull paragraph at a semantic "
+        "boundary, and merge adjacent one-sentence paragraphs about the same point. Keep the full "
+        "reply to roughly six paragraphs and twelve sentences; a simple factual answer may be one "
+        "short paragraph. Preserve useful route detail without an exhaustive solver trace. At a real "
+        "decision point, ask at most one specific design question. End with a complete sentence."
+    )
     return "\n\n".join([
         f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
         opening,
@@ -990,6 +1154,7 @@ def _compact_kimi_plain_prompt(
         guidance_instruction,
         f"Draft provenance and attribution:\n{provenance_guidance}",
         post_opening_progress_instruction,
+        historical_reference_instruction,
         route,
         metadata,
         safety,
@@ -1175,7 +1340,72 @@ def _map_grounding_contract():
     )
 
 
-def _validate_map_grounding_texts(texts, rows):
+def _latest_user_text(conversation):
+    return next(
+        (
+            str(message.get("content") or "").strip()
+            for message in reversed(conversation or [])
+            if message.get("role") == "user"
+            and str(message.get("content") or "").strip()
+        ),
+        "",
+    )
+
+
+def _has_historical_stage_reference(text):
+    lowered = str(text or "").casefold()
+    return any(
+        marker in lowered
+        for marker in (
+            "第一版",
+            "原版",
+            "之前的版本",
+            "上一版",
+            "旧版本",
+            "旧版",
+            "之前的stage",
+            "上一个stage",
+            "first version",
+            "original version",
+            "previous version",
+            "prior version",
+            "earlier version",
+            "previous stage",
+            "prior stage",
+            "earlier stage",
+        )
+    )
+
+
+def _historical_stage_reference_instruction(conversation):
+    if not _has_historical_stage_reference(_latest_user_text(conversation)):
+        return ""
+    return (
+        "Historical Stage reference rule: the designer is referring to an older version. "
+        "The numbered map and Deterministic Map Facts describe only the current saved Stage. "
+        "Discuss the older version conceptually unless a historical snapshot is explicitly "
+        "supplied; do not invent, copy, or transfer its coordinates or entity positions into "
+        "current-map claims, and do not treat that reflection as an edit authorization."
+    )
+
+
+def _contains_unverified_historical_map_claim(text):
+    coordinate = re.compile(
+        r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
+    )
+    entity_position = re.compile(
+        r"\b(?:P|B\d+|T\d+)\b.{0,28}?(?:at|in|on|located|position|coordinate)|"
+        r"(?:玩家|箱子|目标|起点|B\d+|T\d+|P).{0,18}?(?:位于|坐标|在)"
+    , flags=re.IGNORECASE)
+    for sentence in re.split(r"(?<=[.!?。！？])\s*", str(text or "")):
+        if _has_historical_stage_reference(sentence) and (
+            coordinate.search(sentence) or entity_position.search(sentence)
+        ):
+            return True
+    return False
+
+
+def _validate_map_grounding_texts(texts, rows, *, historical_reference=False):
     """Reject a small set of high-impact, checkable spatial hallucinations.
 
     Natural prose is intentionally not parsed wholesale.  This guard covers the claims that
@@ -1186,6 +1416,11 @@ def _validate_map_grounding_texts(texts, rows):
     text = "\n".join(str(value or "") for value in texts).casefold()
     if not text:
         return
+
+    if historical_reference and _contains_unverified_historical_map_claim(text):
+        raise ValueError(
+            "The reply makes a concrete historical Stage map claim without a supplied historical snapshot."
+        )
 
     _validate_coordinate_claims(text, rows)
 
@@ -1272,6 +1507,166 @@ def _validate_map_grounding_texts(texts, rows):
         )
 
 
+def _strip_invalid_stage_grounding_sentences(
+    text,
+    rows,
+    *,
+    historical_reference=False,
+):
+    """Drop only checkable map-claim sentences that contradict this Stage.
+
+    Stage openings are explanatory prose, not execution contracts.  A single
+    hallucinated coordinate should therefore not erase every useful observation
+    in a fallback response.  Formal proposals continue to use the strict whole-
+    payload validation paths.
+    """
+    if not text or not rows:
+        return str(text or "").strip(), []
+
+    sentences = re.split(
+        r"\n{2,}|(?<=[.!?。！？])(?:[ \t]+|(?=[\u3400-\u9fff]))",
+        str(text),
+    )
+    kept = []
+    removed = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        try:
+            _validate_map_grounding_texts(
+                [sentence],
+                rows,
+                historical_reference=historical_reference,
+            )
+        except ValueError as exception:
+            removed.append({"text": sentence, "reason": str(exception)[:300]})
+            continue
+        kept.append(sentence)
+
+    if not removed:
+        return str(text or "").strip(), removed
+    return "\n\n".join(kept).strip(), removed
+
+
+def _strip_invalid_grounding_sentences(
+    text,
+    rows,
+    *,
+    historical_reference=False,
+):
+    """Shared sentence-level recovery for non-executable visible replies."""
+    return _strip_invalid_stage_grounding_sentences(
+        text,
+        rows,
+        historical_reference=historical_reference,
+    )
+
+
+def _sanitize_ordinary_grounding_metadata(guidance, rows, *, historical_reference=False):
+    """Keep a useful ordinary reply when optional model metadata is not grounded.
+
+    A normal design discussion is not an edit contract. Its visible body is validated on
+    its own, while optional cards/questions are discarded individually when they contain a
+    stale coordinate or spatial claim. This prevents one bad Kimi tag from replacing the
+    whole conversation with an edit-oriented clarification.
+    """
+    sanitized = dict(guidance or {})
+
+    def valid_text(value):
+        if not value:
+            return True
+        try:
+            _validate_map_grounding_texts(
+                [value],
+                rows,
+                historical_reference=historical_reference,
+            )
+        except ValueError:
+            return False
+        return True
+
+    for field in ("followUpQuestion", "intentHypothesis"):
+        if not valid_text(sanitized.get(field)):
+            sanitized[field] = None
+
+    offer = sanitized.get("proposalOffer")
+    if isinstance(offer, dict):
+        offer_values = [offer.get("summary"), offer.get("rationale")]
+        execution_brief = offer.get("executionBrief")
+        if execution_brief:
+            offer_values.append(json.dumps(execution_brief, ensure_ascii=False))
+        if not all(valid_text(value) for value in offer_values):
+            sanitized["proposalOffer"] = None
+            if sanitized.get("move") == "offer_revision":
+                sanitized["move"] = "offer_perspective"
+
+    disagreement = sanitized.get("disagreement")
+    if isinstance(disagreement, dict):
+        fields = (
+            "userPosition",
+            "aiPosition",
+            "coreDisagreement",
+            "nextQuestion",
+        )
+        if not all(valid_text(disagreement.get(field)) for field in fields):
+            sanitized["disagreement"] = None
+
+    cues = []
+    for cue in sanitized.get("uiCues") or []:
+        if not isinstance(cue, dict) or valid_text(cue.get("text")):
+            cues.append(cue)
+    sanitized["uiCues"] = cues[:2]
+    return sanitized
+
+
+def _chat_validation_mode(
+    conversation,
+    stage_context=None,
+    *,
+    stage_opening=False,
+    guidance_mode=None,
+):
+    """Classify how strictly current-map claims should affect a chat response."""
+    if stage_opening:
+        return "stage_opening"
+
+    context = stage_context or {}
+    explicit_action = context.get("explicitAction") or "none"
+    if explicit_action in {
+        "execute_revision",
+        "challenge_revision",
+        "alternative_revision",
+    }:
+        return "edit_request"
+    if guidance_mode == "revision_advice":
+        return "edit_request"
+    if context.get("revisionRequestState") in {
+        "authorized",
+        "authorized_relaxed",
+        "needs_direction",
+    }:
+        return "edit_request"
+
+    latest = _latest_user_text(conversation).casefold()
+    route_markers = (
+        "route",
+        "path",
+        "corridor",
+        "路线",
+        "路径",
+        "通道",
+        "绕路",
+        "推到",
+        "移动",
+        "从",
+        "到",
+    )
+    if any(marker in latest for marker in route_markers):
+        return "route_discussion"
+    return "ordinary_chat"
+
+
 def _tile_from_claim(value):
     value = str(value or "").casefold()
     return {
@@ -1347,17 +1742,21 @@ def _map_entity_coordinates(rows):
 def _entity_coordinate_claims(text, rows):
     """Yield explicit entity-to-coordinate claims in either writing order."""
     coordinate = r"[\(\uFF08]\s*(\d{1,2})\s*[,，]\s*(\d{1,2})\s*[\)\uFF09]"
-    entity = r"(?:P|B\d+|T\d+|玩家|起点)"
+    # ``\b`` does not create a boundary between an ASCII entity id and a
+    # Chinese character, so ``B1在(6,3)`` used to evade validation.  Boundary
+    # only against ASCII identifier characters while allowing natural Chinese
+    # prose to touch the id.
+    entity = r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+|玩家|起点)(?![A-Za-z0-9])"
     marker = (
         r"(?:at|located\s+at|is\s+at|in|on|位于|在|处于|坐落于|起点为)"
     )
     patterns = (
         re.compile(
-            rf"(?P<entity>\b{entity}\b).{{0,24}}?{marker}\s*{coordinate}",
+            rf"(?P<entity>{entity}).{{0,24}}?{marker}\s*{coordinate}",
             flags=re.IGNORECASE,
         ),
         re.compile(
-            rf"{coordinate}.{{0,24}}?{marker}\s*(?P<entity>\b{entity}\b)",
+            rf"{coordinate}.{{0,24}}?{marker}\s*(?P<entity>{entity})",
             flags=re.IGNORECASE,
         ),
     )
@@ -1412,7 +1811,10 @@ def generate_stage_assessment(
             play_summary=play_summary,
             assessment_only=True,
             stage_context=stage_context,
-            _max_attempts=CHAT_MAX_ATTEMPTS,
+            # The endpoint owns the opening move and canonicalizes it before
+            # validation.  A second structured model call cannot improve that
+            # deterministic field and only steals time from the text fallback.
+            _max_attempts=1,
             _deadline=deadline,
         )
     except LLMServiceError as exception:
@@ -1429,7 +1831,26 @@ def generate_stage_assessment(
             requestId=request_id,
             fromCode=exception.code,
             responseMode="plain_text",
+            remainingSeconds=round(_remaining_until(deadline), 3),
+            fallbackReason=exception.code,
         )
+        if not _retry_budget_available(
+            deadline,
+            request_id=request_id,
+            task="stage_assessment_fallback",
+            attempt=1,
+            max_attempts=1,
+            response_mode="plain_text",
+            fallback_reason=exception.code,
+        ):
+            return _stage_opening_safe_execution(
+                language=language,
+                rows=rows,
+                request_id=request_id,
+                attempts_used=exception.attempts_used,
+                started_at=deadline - LLM_INTERNAL_DEADLINE_SECONDS,
+                fallback_reason=exception.code,
+            )
         return _generate_plain_chat_sync(
             conversation=conversation,
             rows=rows,
@@ -1440,6 +1861,7 @@ def generate_stage_assessment(
             stage_context=stage_context,
             stage_opening=True,
             deadline=deadline,
+            max_attempts=1,
         )
 
 
@@ -1644,7 +2066,7 @@ def generate_chat_reply(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "Kimi did not complete the request before the 60 second limit.",
+            "Kimi did not complete the request before the 120 second limit.",
             request_id,
             True,
             min(len(models), _max_attempts),
@@ -1787,7 +2209,7 @@ def _generate_revision_search_proposal_sync(
     if remaining_seconds <= 0:
         error = LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "Kimi did not create executable revision operations before the 60 second limit.",
+            "Kimi did not create executable revision operations before the 120 second limit.",
             request_id,
             True,
             attempts_used,
@@ -1827,7 +2249,7 @@ def _generate_revision_search_proposal_sync(
     except asyncio.TimeoutError as exception:
         error = LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "Kimi did not create executable revision operations before the 60 second limit.",
+            "Kimi did not create executable revision operations before the 120 second limit.",
             request_id,
             True,
             attempts_used + PROPOSAL_GENERATION_ATTEMPTS,
@@ -2360,6 +2782,16 @@ async def _compile_revision_plan(
             "UPSTREAM_CONNECTION_ERROR",
         }:
             raise last_error
+        if attempt < max_attempts and not _retry_budget_available(
+            deadline,
+            request_id=request_id,
+            task="map_proposal",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            response_mode="revision_plan",
+            fallback_reason=last_error.code,
+        ):
+            break
     raise last_error
 
 
@@ -2452,7 +2884,7 @@ def _generate_map_proposal_sync(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "Kimi did not complete the request before the 60 second limit.",
+            "Kimi did not complete the request before the 120 second limit.",
             request_id,
             True,
             PROPOSAL_GENERATION_ATTEMPTS,
@@ -2806,6 +3238,16 @@ async def _generate_map_operation_candidates(
         _log_llm_event("llm_attempt_failed", **failure_fields)
         if not last_error.retryable:
             raise last_error
+        if attempt < len(attempted_models) and not _retry_budget_available(
+            deadline,
+            request_id=request_id,
+            task="map_proposal",
+            attempt=attempt,
+            max_attempts=len(attempted_models),
+            response_mode="operation_candidates",
+            fallback_reason=last_error.code,
+        ):
+            break
 
     _log_llm_event(
         "llm_request_completed",
@@ -3431,6 +3873,7 @@ def _generate_plain_chat_sync(
     stage_context,
     stage_opening=False,
     deadline=None,
+    max_attempts=None,
 ):
     api_key, base_url = _llm_credentials()
 
@@ -3447,7 +3890,10 @@ def _generate_plain_chat_sync(
             503,
         )
 
-    models = _unified_model_attempts(CHAT_MAX_ATTEMPTS)
+    effective_max_attempts = (
+        1 if stage_opening else CHAT_MAX_ATTEMPTS
+    ) if max_attempts is None else max(1, int(max_attempts))
+    models = _unified_model_attempts(effective_max_attempts)
 
     messages = build_plain_chat_messages(
         conversation,
@@ -3464,6 +3910,15 @@ def _generate_plain_chat_sync(
         stage_opening=stage_opening,
     )
     task = "stage_assessment_fallback" if stage_opening else "chat"
+    validation_mode = _chat_validation_mode(
+        conversation,
+        stage_context,
+        stage_opening=stage_opening,
+        guidance_mode=guidance_mode,
+    )
+    historical_reference = _has_historical_stage_reference(
+        _latest_user_text(conversation)
+    )
     started_at = time.monotonic()
     deadline = deadline or _request_deadline(started_at)
     _log_llm_event(
@@ -3494,6 +3949,8 @@ def _generate_plain_chat_sync(
                     stage_opening=stage_opening,
                     stage_context=stage_context,
                     guidance_mode=guidance_mode,
+                    validation_mode=validation_mode,
+                    historical_reference=historical_reference,
                     started_at=started_at,
                     deadline=deadline,
                 ),
@@ -3514,7 +3971,7 @@ def _generate_plain_chat_sync(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "Kimi did not complete the request before the 60 second limit.",
+            "Kimi did not complete the request before the 120 second limit.",
             request_id,
             True,
             min(len(models), CHAT_MAX_ATTEMPTS),
@@ -3610,7 +4067,7 @@ def translate_turns(items, target_language, request_id):
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "Kimi did not complete the translation before the 60 second limit.",
+            "Kimi did not complete the translation before the 120 second limit.",
             request_id,
             True,
             min(len(models), CHAT_MAX_ATTEMPTS),
@@ -3634,7 +4091,8 @@ async def _translate_with_model_fallback(
     validation_feedback = None
     deadline = deadline or _request_deadline(started_at)
 
-    for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
+    max_attempts = len(models)
+    for attempt, model in enumerate(models[:max_attempts], start=1):
         remaining = _remaining_until(deadline)
         response_fields = _empty_response_diagnostics()
 
@@ -3651,7 +4109,7 @@ async def _translate_with_model_fallback(
             task="translation",
             model=model,
             attempt=attempt,
-            maxAttempts=len(models[:CHAT_MAX_ATTEMPTS]),
+            maxAttempts=max_attempts,
             timeoutSeconds=round(attempt_timeout, 3),
             responseMode="json_object",
         )
@@ -3746,7 +4204,19 @@ async def _translate_with_model_fallback(
         if not last_error.retryable:
             raise last_error
 
+        if attempt < max_attempts and not _retry_budget_available(
+            deadline,
+            request_id=request_id,
+            task=task,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            response_mode="json_object",
+            fallback_reason=last_error.code,
+        ):
+            break
+
     if last_error is not None:
+        failure_class = _llm_failure_class(last_error, validation_feedback)
         _log_llm_event(
             "llm_request_completed",
             requestId=request_id,
@@ -3756,6 +4226,9 @@ async def _translate_with_model_fallback(
             attemptsUsed=last_error.attempts_used,
             latencyMs=int((time.monotonic() - started_at) * 1000),
             responseMode="json_object",
+            failureClass=failure_class,
+            salvageAction="none",
+            remainingSeconds=round(_remaining_until(deadline), 3),
         )
         raise last_error
 
@@ -3784,6 +4257,8 @@ async def _generate_plain_with_model_fallback(
     stage_opening,
     stage_context,
     guidance_mode,
+    validation_mode="ordinary_chat",
+    historical_reference=False,
     started_at,
     deadline=None,
 ):
@@ -3791,7 +4266,8 @@ async def _generate_plain_with_model_fallback(
     validation_feedback = None
     deadline = deadline or _request_deadline(started_at)
 
-    for attempt, model in enumerate(models[:CHAT_MAX_ATTEMPTS], start=1):
+    max_attempts = len(models)
+    for attempt, model in enumerate(models[:max_attempts], start=1):
         remaining = _remaining_until(deadline)
 
         if remaining <= 0:
@@ -3802,6 +4278,7 @@ async def _generate_plain_with_model_fallback(
             remaining,
         )
         response_fields = _empty_response_diagnostics()
+        grounding_dropped_count = 0
         _log_llm_event(
             "llm_attempt_started",
             requestId=request_id,
@@ -3817,6 +4294,7 @@ async def _generate_plain_with_model_fallback(
             attempt_messages = _plain_messages_with_validation_feedback(
                 messages,
                 validation_feedback,
+                validation_mode=validation_mode,
             )
             response = await asyncio.wait_for(
                 _request_completion(
@@ -3862,10 +4340,90 @@ async def _generate_plain_with_model_fallback(
                 stage_context,
                 stage_opening,
                 rows=rows,
+                strict_metadata=validation_mode not in {"ordinary_chat", "route_discussion"},
             )
-            if _route_reasoning_is_overlong(visible_content):
-                raise ValueError(
-                    "The route reasoning is too detailed; keep only the key grounded route and its design consequence."
+            proposal_text = " ".join(
+                part for part in (
+                    visible_content,
+                    (proposal_offer or {}).get("summary")
+                    if isinstance(proposal_offer, dict)
+                    else "",
+                    (proposal_offer or {}).get("rationale")
+                    if isinstance(proposal_offer, dict)
+                    else "",
+                )
+                if str(part or "").strip()
+            )
+            if guidance_mode == "revision_advice" and _response_contains_multiple_proposals(proposal_text):
+                if attempt < max_attempts:
+                    raise ValueError(
+                        "A single response may contain only one primary proposal."
+                    )
+                visible_content = _multiple_proposal_fallback_reply(language)
+                intent_hypothesis = None
+                proposal_offer = None
+                ui_cues = []
+            if stage_opening:
+                visible_content, removed_grounding = _strip_invalid_stage_grounding_sentences(
+                    visible_content,
+                    rows,
+                    historical_reference=historical_reference,
+                )
+                if removed_grounding:
+                    grounding_dropped_count += len(removed_grounding)
+                    _log_llm_event(
+                        "llm_grounding_sentences_dropped",
+                        requestId=request_id,
+                        task=task,
+                        sentenceCount=len(removed_grounding),
+                        reasonCodes=[
+                            item["reason"].split(":", 1)[0]
+                            for item in removed_grounding
+                        ],
+                    )
+                if not visible_content:
+                    raise ValueError("A Stage opening has no grounded visible analysis left.")
+                discussion_focus = _extract_plain_discussion_focus(
+                    visible_content,
+                    language,
+                    stage_opening,
+                    stage_context,
+                )
+            if rows and validation_mode in {"ordinary_chat", "route_discussion"}:
+                visible_content, removed_grounding = _strip_invalid_grounding_sentences(
+                    visible_content,
+                    rows,
+                    historical_reference=historical_reference,
+                )
+                if removed_grounding:
+                    grounding_dropped_count += len(removed_grounding)
+                    _log_llm_event(
+                        "llm_grounding_sentences_dropped",
+                        requestId=request_id,
+                        task=task,
+                        sentenceCount=len(removed_grounding),
+                        reasonCodes=[
+                            item["reason"].split(":", 1)[0]
+                            for item in removed_grounding
+                        ],
+                    )
+                if not visible_content:
+                    raise ValueError(
+                        "No grounded visible analysis remained after map-fact cleanup."
+                    )
+
+            visible_content, route_recovery = _recover_overlong_route_reasoning(
+                visible_content,
+                rows,
+                language=language,
+            )
+            route_recovery["droppedSentenceCount"] += grounding_dropped_count
+            if route_recovery["changed"]:
+                discussion_focus = _extract_plain_discussion_focus(
+                    visible_content,
+                    language,
+                    stage_opening,
+                    stage_context,
                 )
             coordinate_links = _extract_plain_coordinate_links(content, rows)
             design_context_patch, design_context_patch_error = (
@@ -3890,9 +4448,19 @@ async def _generate_plain_with_model_fallback(
                     rows,
                     play_summary,
                     guidance_mode=guidance_mode,
-                    allow_required_fallback=attempt >= len(models[:CHAT_MAX_ATTEMPTS]),
+                    allow_required_fallback=attempt >= max_attempts,
                 )
             )
+            if stage_opening:
+                # Opening envelopes are observations only.  Keep the visible
+                # analysis and any human-edit review metadata, but never allow
+                # ordinary-chat intent/proposal/patch fields to escape here.
+                intent_hypothesis = None
+                proposal_offer = None
+                design_context_patch = None
+                design_context_patch_error = None
+                if not _is_human_edit_stage_opening(True, stage_context):
+                    ui_cues = []
             if proposal_offer is not None:
                 proposal_offer = _distill_proposal_offer(
                     proposal_offer,
@@ -3917,7 +4485,7 @@ async def _generate_plain_with_model_fallback(
             if (
                 guidance_mode == "revision_advice"
                 and proposal_offer is None
-                and attempt < len(models[:CHAT_MAX_ATTEMPTS])
+                and attempt < max_attempts
                 and not proposal_binding_downgraded
             ):
                 raise ValueError(
@@ -4027,6 +4595,8 @@ async def _generate_plain_with_model_fallback(
                 ui_cues = []
                 guidance_fallback_used = True
 
+            body = _normalize_response_paragraphs(body)
+
             guidance = {
                 "move": _plain_guidance_move(
                     stage_opening,
@@ -4050,6 +4620,18 @@ async def _generate_plain_with_model_fallback(
                 guidance["designContextPatch"] = design_context_patch
             if design_context_patch_error:
                 guidance["designContextPatchError"] = design_context_patch_error
+            if stage_opening:
+                guidance = _sanitize_ordinary_grounding_metadata(
+                    guidance,
+                    rows,
+                    historical_reference=historical_reference,
+                )
+                guidance["move"] = "observe_stage"
+                guidance["intentHypothesis"] = None
+                guidance["intentConfidence"] = None
+                guidance["proposalOffer"] = None
+                guidance.pop("designContextPatch", None)
+                guidance.pop("designContextPatchError", None)
             guidance = _apply_guidance_card_policy(guidance)
             guidance = _ensure_required_guidance_card(
                 guidance,
@@ -4066,6 +4648,7 @@ async def _generate_plain_with_model_fallback(
                 body,
                 guidance.get("followUpQuestion"),
             )
+            original_coordinate_link_count = len(guidance.get("coordinateLinks") or [])
             guidance["coordinateLinks"] = _filter_coordinate_links(
                 guidance.get("coordinateLinks"),
                 body,
@@ -4075,6 +4658,9 @@ async def _generate_plain_with_model_fallback(
                 body,
                 rows,
                 guidance["coordinateLinks"],
+            )
+            route_recovery["coordinateLinksDropped"] = (
+                original_coordinate_link_count > len(guidance["coordinateLinks"])
             )
             proposal_binding_issue = _proposal_offer_binding_issue(
                 guidance.get("proposalOffer"),
@@ -4118,17 +4704,33 @@ async def _generate_plain_with_model_fallback(
                     guidance["followUpQuestion"] = repaired["followUpQuestion"]
                     guidance["uiCues"] = repaired["uiCues"]
                 guidance_fallback_used = True
-            grounding_texts = [
-                body,
-                guidance.get("followUpQuestion"),
-                guidance.get("intentHypothesis"),
-            ]
-            if guidance.get("proposalOffer"):
-                grounding_texts.extend(guidance["proposalOffer"].values())
-            grounding_texts.extend(
-                cue.get("text") for cue in guidance.get("uiCues") or []
-            )
-            _validate_map_grounding_texts(grounding_texts, rows)
+            if validation_mode in {"ordinary_chat", "route_discussion"}:
+                _validate_map_grounding_texts(
+                    [body],
+                    rows,
+                    historical_reference=historical_reference,
+                )
+                guidance = _sanitize_ordinary_grounding_metadata(
+                    guidance,
+                    rows,
+                    historical_reference=historical_reference,
+                )
+            else:
+                grounding_texts = [
+                    body,
+                    guidance.get("followUpQuestion"),
+                    guidance.get("intentHypothesis"),
+                ]
+                if guidance.get("proposalOffer"):
+                    grounding_texts.extend(guidance["proposalOffer"].values())
+                grounding_texts.extend(
+                    cue.get("text") for cue in guidance.get("uiCues") or []
+                )
+                _validate_map_grounding_texts(
+                    grounding_texts,
+                    rows,
+                    historical_reference=historical_reference,
+                )
             evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
             if evidence_signature and guidance["uiCues"]:
                 guidance["evidenceSignature"] = evidence_signature
@@ -4182,6 +4784,13 @@ async def _generate_plain_with_model_fallback(
                     cue.get("type") == "manual_edit"
                     for cue in guidance.get("uiCues", [])
                 ),
+                failureClass=None,
+                salvageAction=route_recovery["salvageAction"],
+                routeSentenceCount=route_recovery["routeSentenceCount"],
+                routeCoordinateCount=route_recovery["routeCoordinateCount"],
+                droppedSentenceCount=route_recovery["droppedSentenceCount"],
+                coordinateLinksDropped=route_recovery["coordinateLinksDropped"],
+                remainingSeconds=round(_remaining_until(deadline), 3),
                 **response_fields,
             )
             return result
@@ -4214,12 +4823,29 @@ async def _generate_plain_with_model_fallback(
         }
         if failure_reason:
             failure_fields["validationReason"] = failure_reason
+        failure_fields["failureClass"] = _llm_failure_class(
+            last_error,
+            validation_feedback,
+        )
+        failure_fields["remainingSeconds"] = round(_remaining_until(deadline), 3)
+        failure_fields["salvageAction"] = "pending_retry_or_fallback"
         _log_llm_event(
             "llm_attempt_failed",
             **failure_fields,
         )
 
-        if attempt == 1 and not _plain_fallback_allowed(last_error):
+        if attempt >= max_attempts or not _plain_fallback_allowed(last_error):
+            break
+
+        if not _retry_budget_available(
+            deadline,
+            request_id=request_id,
+            task=task,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            response_mode="plain_text",
+            fallback_reason=last_error.code,
+        ):
             break
 
     if last_error is not None:
@@ -4232,11 +4858,28 @@ async def _generate_plain_with_model_fallback(
             attemptsUsed=last_error.attempts_used,
             latencyMs=int((time.monotonic() - started_at) * 1000),
             responseMode="plain_text",
+            failureClass=_llm_failure_class(last_error, validation_feedback),
+            salvageAction="pending_fallback",
+            routeSentenceCount=0,
+            routeCoordinateCount=0,
+            droppedSentenceCount=0,
+            coordinateLinksDropped=False,
+            remainingSeconds=round(_remaining_until(deadline), 3),
         )
-        if _is_length_failure(last_error, validation_feedback) or _is_route_compaction_failure(
-            last_error,
-            validation_feedback,
-        ):
+        if stage_opening:
+            # A Stage opening has already spent its one structured attempt and
+            # one plain-text fallback attempt.  Do not turn a malformed fallback
+            # into another Kimi request; return a complete, orientation-safe
+            # opening instead.
+            return _stage_opening_safe_execution(
+                language=language,
+                rows=rows,
+                request_id=request_id,
+                attempts_used=last_error.attempts_used,
+                started_at=started_at,
+                fallback_reason=last_error.code,
+            )
+        if _is_length_failure(last_error, validation_feedback):
             fallback_message = _safe_incomplete_chat_reply(
                 language,
                 stage_opening=stage_opening,
@@ -4262,15 +4905,31 @@ async def _generate_plain_with_model_fallback(
                     "coordinateLinks": [],
                 },
             )
-        grounding_error = " ".join(
-            str(value or "")
-            for value in (last_error.safe_message, validation_feedback)
-        ).casefold()
-        if rows is not None and (
-            "executionbrief" in grounding_error
-            or "coordinate" in grounding_error
-            or "deterministic map facts" in grounding_error
+        if rows is not None and _is_map_grounding_failure(
+            last_error.safe_message,
+            validation_feedback,
         ):
+            if validation_mode in {"ordinary_chat", "route_discussion"}:
+                return LLMExecutionResult(
+                    assistant_message=_safe_grounding_chat_reply(language),
+                    assessment={},
+                    proposed_rows=None,
+                    modification_summary="",
+                    attempts_used=last_error.attempts_used,
+                    request_id=request_id,
+                    model="grounding-safe-chat-fallback",
+                    latency_ms=int((time.monotonic() - started_at) * 1000),
+                    guidance={
+                        "move": "offer_perspective",
+                        "intentHypothesis": None,
+                        "intentConfidence": None,
+                        "followUpQuestion": None,
+                        "proposalOffer": None,
+                        "disagreement": None,
+                        "uiCues": [],
+                        "coordinateLinks": [],
+                    },
+                )
             # A repeated coordinate/brief conflict is a grounding problem, not a
             # reason to manufacture a proposal card from an abstract fallback.
             # Return ordinary clarification prose so the designer can correct the
@@ -4342,6 +5001,14 @@ async def _generate_with_model_fallback(
         elapsed = time.monotonic() - started_at
         remaining = _remaining_until(deadline)
         response_fields = _empty_response_diagnostics()
+        route_recovery = {
+            "changed": False,
+            "salvageAction": "none",
+            "routeSentenceCount": 0,
+            "routeCoordinateCount": 0,
+            "droppedSentenceCount": 0,
+            "coordinateLinksDropped": False,
+        }
 
         if remaining <= 0:
             raise asyncio.TimeoutError()
@@ -4392,6 +5059,27 @@ async def _generate_with_model_fallback(
                 raise EmptyModelResponse("The model returned an empty response.")
 
             payload = json.loads(content)
+            if assessment_only:
+                payload = _canonicalize_stage_assessment_payload(payload, stage_context)
+                if isinstance(payload.get("assistantMessage"), str):
+                    payload = dict(payload)
+                    payload["assistantMessage"], route_recovery = (
+                        _recover_overlong_route_reasoning(
+                            payload["assistantMessage"],
+                            rows,
+                            language=language,
+                        )
+                    )
+                    if route_recovery["changed"]:
+                        _log_llm_event(
+                            "llm_route_salvaged",
+                            requestId=request_id,
+                            task=task,
+                            salvageAction=route_recovery["salvageAction"],
+                            routeSentenceCount=route_recovery["routeSentenceCount"],
+                            routeCoordinateCount=route_recovery["routeCoordinateCount"],
+                            droppedSentenceCount=route_recovery["droppedSentenceCount"],
+                        )
             validated = validate_chat_response(
                 payload,
                 assessment_only,
@@ -4426,6 +5114,12 @@ async def _generate_with_model_fallback(
             if validated[2] is not None and proposal_validator is not None:
                 proposal_validator(validated[2])
 
+            route_recovery["coordinateLinksDropped"] = (
+                isinstance(payload.get("guidance"), dict)
+                and len(payload["guidance"].get("coordinateLinks") or [])
+                > len(validated[4].get("coordinateLinks") or [])
+            )
+
             latency_ms = int((time.monotonic() - started_at) * 1000)
             result = LLMExecutionResult(
                 assistant_message=_compose_assistant_message(
@@ -4457,6 +5151,13 @@ async def _generate_with_model_fallback(
                 attemptsUsed=attempt,
                 latencyMs=latency_ms,
                 responseMode="json_object",
+                failureClass=None,
+                salvageAction=route_recovery["salvageAction"],
+                routeSentenceCount=route_recovery["routeSentenceCount"],
+                routeCoordinateCount=route_recovery["routeCoordinateCount"],
+                droppedSentenceCount=route_recovery["droppedSentenceCount"],
+                coordinateLinksDropped=route_recovery["coordinateLinksDropped"],
+                remainingSeconds=round(_remaining_until(deadline), 3),
                 **response_fields,
             )
             return result
@@ -4492,6 +5193,12 @@ async def _generate_with_model_fallback(
 
         if failure_reason:
             failure_fields["validationReason"] = failure_reason
+        failure_fields["failureClass"] = _llm_failure_class(
+            last_error,
+            validation_feedback,
+        )
+        failure_fields["salvageAction"] = "pending_retry"
+        failure_fields["remainingSeconds"] = round(_remaining_until(deadline), 3)
 
         _log_llm_event(
             "llm_attempt_failed",
@@ -4501,7 +5208,19 @@ async def _generate_with_model_fallback(
         if not last_error.retryable:
             raise last_error
 
+        if attempt < max_attempts and not _retry_budget_available(
+            deadline,
+            request_id=request_id,
+            task=task,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            response_mode="json_object",
+            fallback_reason=last_error.code,
+        ):
+            break
+
     if last_error is not None:
+        failure_class = _llm_failure_class(last_error, validation_feedback)
         _log_llm_event(
             "llm_request_completed",
             requestId=request_id,
@@ -4511,6 +5230,13 @@ async def _generate_with_model_fallback(
             attemptsUsed=last_error.attempts_used,
             latencyMs=int((time.monotonic() - started_at) * 1000),
             responseMode="json_object",
+            failureClass=failure_class,
+            salvageAction="none",
+            routeSentenceCount=0,
+            routeCoordinateCount=0,
+            droppedSentenceCount=0,
+            coordinateLinksDropped=False,
+            remainingSeconds=round(_remaining_until(deadline), 3),
         )
         raise last_error
 
@@ -4559,7 +5285,12 @@ def _messages_with_validation_feedback(messages, validation_feedback, task=None)
     return corrected
 
 
-def _plain_messages_with_validation_feedback(messages, validation_feedback):
+def _plain_messages_with_validation_feedback(
+    messages,
+    validation_feedback,
+    *,
+    validation_mode="ordinary_chat",
+):
     if not validation_feedback:
         return messages
 
@@ -4591,6 +5322,16 @@ def _plain_messages_with_validation_feedback(messages, validation_feedback):
             "block, plus the required MANUAL_EDIT companion card. Keep it conceptual: do not "
             "output map rows, tile operations, or claim that the map changed. Do not mention "
             "this correction to the designer."
+        )
+    elif validation_mode in {"ordinary_chat", "route_discussion"}:
+        instruction = (
+            "Your previous reply contained a spatial claim that conflicts with deterministic map facts "
+            "and is not verified for the current Stage. Write a fresh, complete "
+            "design discussion that preserves the useful interpretation and removes only the unsupported "
+            "coordinate, position, or optional card. Do not ask the designer to confirm a modification "
+            "unless they explicitly requested an edit. If the designer referred to an older version, "
+            "discuss it conceptually unless a historical snapshot is supplied. Do not mention this "
+            "correction to the designer."
         )
     else:
         instruction = (
@@ -4839,13 +5580,48 @@ async def _request_completion(
         await client.close()
 
 
+def _canonicalize_stage_assessment_payload(payload, stage_context=None):
+    """Apply endpoint-owned Stage opening fields before validation.
+
+    Stage assessment is an observation, not a proposal or an intent-confirmation
+    step.  Kimi sometimes reuses the ordinary-chat envelope and fills optional
+    intent/proposal fields anyway.  Those fields are independently disposable;
+    rejecting the whole response would throw away otherwise useful map analysis.
+    Human-edit openings may still retain their warning/disagreement fields.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    normalized = dict(payload)
+    guidance = payload.get("guidance")
+    if isinstance(guidance, dict):
+        guidance = dict(guidance)
+        guidance["move"] = "observe_stage"
+        guidance["intentHypothesis"] = None
+        guidance["intentConfidence"] = None
+        guidance["proposalOffer"] = None
+        guidance.pop("designContextPatch", None)
+        if not _is_human_edit_stage_opening(True, stage_context):
+            # Regular Stage openings do not create warning cards from model
+            # metadata.  Keep the prose and assessment, but drop optional card
+            # metadata that the ordinary-chat envelope may have leaked in.
+            guidance["uiCues"] = []
+        normalized["guidance"] = guidance
+    if "designContextPatch" in normalized:
+        normalized["designContextPatch"] = None
+    return normalized
+
+
 def validate_chat_response(
     payload,
     assessment_only=False,
     language="en",
     stage_context=None,
     rows=None,
+    validation_mode="strict",
+    historical_reference=False,
 ):
+    if assessment_only:
+        payload = _canonicalize_stage_assessment_payload(payload, stage_context)
     if not isinstance(payload, dict):
         raise ValueError("The model response must be a JSON object.")
 
@@ -4867,6 +5643,14 @@ def validate_chat_response(
         ),
         language,
     )
+    if assessment_only and rows:
+        assistant_message, _removed_grounding = _strip_invalid_stage_grounding_sentences(
+            assistant_message,
+            rows,
+            historical_reference=historical_reference,
+        )
+        if not assistant_message:
+            raise ValueError("A Stage opening has no grounded visible analysis left.")
     guidance = _validate_guidance(
         payload.get("guidance"),
         assessment_only,
@@ -5079,6 +5863,23 @@ def validate_chat_response(
     if guidance["move"] == "deliver_revision" and proposed_rows is None:
         raise ValueError("The deliver_revision move requires proposedRows.")
 
+    proposal_text = " ".join(
+        part for part in (
+            assistant_message,
+            (guidance.get("proposalOffer") or {}).get("summary")
+            if isinstance(guidance.get("proposalOffer"), dict)
+            else "",
+            (guidance.get("proposalOffer") or {}).get("rationale")
+            if isinstance(guidance.get("proposalOffer"), dict)
+            else "",
+        )
+        if str(part or "").strip()
+    )
+    if guidance.get("proposalOffer") is not None and _response_contains_multiple_proposals(
+        proposal_text
+    ):
+        raise ValueError("A single response may contain only one primary proposal.")
+
     if proposed_rows is not None:
         if not isinstance(proposed_rows, list) or not all(
             isinstance(row, str) for row in proposed_rows
@@ -5092,15 +5893,11 @@ def validate_chat_response(
         language,
         proposed_rows is not None,
     )
-    assistant_message = _deduplicate_assistant_body(assistant_message)
+    assistant_message = _normalize_response_paragraphs(assistant_message)
     assistant_message = _remove_guidance_from_body(
         assistant_message,
         guidance.get("followUpQuestion"),
     )
-    if _route_reasoning_is_overlong(assistant_message):
-        raise ValueError(
-            "The route reasoning is too detailed; keep only the key grounded route and its design consequence."
-        )
     guidance["coordinateLinks"] = _filter_coordinate_links(
         guidance.get("coordinateLinks"),
         assistant_message,
@@ -5118,30 +5915,46 @@ def validate_chat_response(
         raise ValueError("modificationSummary must be a string.")
 
     if rows is not None:
-        grounding_texts = [
-            assistant_message,
-            guidance.get("followUpQuestion"),
-            guidance.get("intentHypothesis"),
-            modification_summary,
-        ]
-        if guidance.get("proposalOffer"):
-            grounding_texts.extend(guidance["proposalOffer"].values())
-        if guidance.get("disagreement"):
-            grounding_texts.extend(
-                guidance["disagreement"].get(field)
-                for field in (
-                    "userPosition",
-                    "aiPosition",
-                    "coreDisagreement",
-                    "nextQuestion",
-                )
+        if validation_mode in {"ordinary_chat", "route_discussion"}:
+            _validate_map_grounding_texts(
+                [assistant_message],
+                rows,
+                historical_reference=historical_reference,
             )
-        grounding_texts.extend(
-            cue.get("text") for cue in guidance.get("uiCues") or []
-        )
-        for value in assessment.values():
-            grounding_texts.extend(value if isinstance(value, list) else [value])
-        _validate_map_grounding_texts(grounding_texts, rows)
+            guidance = _sanitize_ordinary_grounding_metadata(
+                guidance,
+                rows,
+                historical_reference=historical_reference,
+            )
+        else:
+            grounding_texts = [
+                assistant_message,
+                guidance.get("followUpQuestion"),
+                guidance.get("intentHypothesis"),
+                modification_summary,
+            ]
+            if guidance.get("proposalOffer"):
+                grounding_texts.extend(guidance["proposalOffer"].values())
+            if guidance.get("disagreement"):
+                grounding_texts.extend(
+                    guidance["disagreement"].get(field)
+                    for field in (
+                        "userPosition",
+                        "aiPosition",
+                        "coreDisagreement",
+                        "nextQuestion",
+                    )
+                )
+            grounding_texts.extend(
+                cue.get("text") for cue in guidance.get("uiCues") or []
+            )
+            for value in assessment.values():
+                grounding_texts.extend(value if isinstance(value, list) else [value])
+            _validate_map_grounding_texts(
+                grounding_texts,
+                rows,
+                historical_reference=historical_reference,
+            )
 
     return (
         assistant_message,
@@ -5355,6 +6168,21 @@ _VISIBLE_INTERNAL_TERM_REPLACEMENTS = {
 }
 
 
+_VISIBLE_CHINESE_DESIGN_TERM_REPLACEMENTS = (
+    (r"\bpeninsula\b", "\u534a\u5c9b"),
+    (r"\bchoke\s+point\b", "\u74f6\u9888\u70b9"),
+    (r"\bbottleneck\b", "\u74f6\u9888\u70b9"),
+    (r"\bplayable\s+moment\b", "\u5173\u952e\u64cd\u4f5c\u65f6\u523b"),
+    (r"\broute\s+choice\b", "\u8def\u7ebf\u9009\u62e9"),
+    (r"\btrade[- ]off\b", "\u8bbe\u8ba1\u53d6\u820d"),
+    (r"\bcorridor\b", "\u901a\u9053"),
+    (r"\breadability\b", "\u53ef\u8bfb\u6027"),
+    (r"\bpush\s+order\b", "\u63a8\u7bb1\u987a\u5e8f"),
+    (r"\bdeadlock\b", "\u6b7b\u5c40"),
+    (r"\bcluster\b", "\u805a\u96c6\u533a"),
+)
+
+
 def _sanitize_visible_model_text(value, language="en"):
     """Remove implementation vocabulary that must never become visible prose."""
     if value is None:
@@ -5371,6 +6199,9 @@ def _sanitize_visible_model_text(value, language="en"):
             replacement,
             text,
         )
+    if language == "zh-CN":
+        for pattern, replacement in _VISIBLE_CHINESE_DESIGN_TERM_REPLACEMENTS:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n[ \t]+", "\n", text)
     return text.strip()
@@ -5910,6 +6741,7 @@ def _extract_plain_guidance(
     stage_context,
     stage_opening=False,
     rows=None,
+    strict_metadata=True,
 ):
     marker = "<GUIDANCE>"
     marker_index = content.find(marker)
@@ -5935,7 +6767,7 @@ def _extract_plain_guidance(
 
     for raw_line in re.split(r"\s*\|\|\s*|[\r\n]+", block_tail[:closing_index]):
         match = re.match(
-            r"^(WARNING|MANUAL_EDIT|INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE|EXECUTION_BRIEF|REVISION_PLAN)\s*:\s*(.+?)\s*$",
+            r"^(WARNING|MANUAL_EDIT|CLARIFICATION|INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE|EXECUTION_BRIEF|REVISION_PLAN)\s*:\s*(.+?)\s*$",
             raw_line.strip(),
         )
 
@@ -5953,6 +6785,7 @@ def _extract_plain_guidance(
     rationale = fields.get("PROPOSAL_RATIONALE")
     execution_brief = None
     revision_plan = None
+    proposal_metadata_invalid = False
     if fields.get("REVISION_PLAN"):
         try:
             revision_plan = _validate_revision_plan_payload(
@@ -5960,10 +6793,11 @@ def _extract_plain_guidance(
                 rows,
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exception:
-            if rows is not None:
+            if rows is not None and strict_metadata:
                 raise ValueError(
                     f"revisionPlan is invalid for the saved Stage: {exception}"
                 ) from exception
+            proposal_metadata_invalid = True
             revision_plan = None
     if fields.get("EXECUTION_BRIEF"):
         try:
@@ -5972,10 +6806,11 @@ def _extract_plain_guidance(
                 rows,
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exception:
-            if rows is not None:
+            if rows is not None and strict_metadata:
                 raise ValueError(
                     f"executionBrief is invalid for the saved Stage: {exception}"
                 ) from exception
+            proposal_metadata_invalid = True
             execution_brief = None
     if revision_plan is not None:
         execution_brief = revision_plan
@@ -5985,7 +6820,7 @@ def _extract_plain_guidance(
             "rationale": rationale[:1000],
             **({"executionBrief": execution_brief} if execution_brief else {}),
         }
-        if summary and rationale
+        if summary and rationale and not proposal_metadata_invalid
         else None
     )
     recent_guidance = (stage_context or {}).get("recentGuidance") or {}
@@ -6008,7 +6843,11 @@ def _extract_plain_guidance(
     ui_cues = []
     previous_cues = recent_guidance.get("uiCues") or {}
 
-    for field_name, cue_type in (("WARNING", "warning"), ("MANUAL_EDIT", "manual_edit")):
+    for field_name, cue_type in (
+        ("WARNING", "warning"),
+        ("MANUAL_EDIT", "manual_edit"),
+        ("CLARIFICATION", "clarification"),
+    ):
         cue_text = str(fields.get(field_name) or "").strip()[:1000]
         previous = previous_cues.get(cue_type) or {}
 
@@ -6185,6 +7024,155 @@ def _deduplicate_assistant_body(value):
             paragraphs.append(candidate)
 
     return "\n\n".join(paragraphs)
+
+
+def _normalize_response_paragraphs(value):
+    """Balance visible prose without dropping sentences or route details."""
+    body = _deduplicate_assistant_body(value)
+    if not body:
+        return body
+
+    def sentences(paragraph):
+        return [
+            sentence.strip()
+            for sentence in re.split(
+                r"(?<=[.!?銆傦紒锛焆])\s*|(?<=[;；])\s+|[\r\n]+",
+                paragraph,
+            )
+            if sentence.strip()
+        ]
+
+    def is_cjk(text):
+        return bool(re.search(r"[\u3400-\u9fff]", text))
+
+    def too_large(items):
+        text = "".join(items) if is_cjk("".join(items)) else " ".join(items)
+        if is_cjk(text):
+            return len(text) > CHAT_PARAGRAPH_MAX_CHINESE_CHARS
+        return len(re.findall(r"\b\w+\b", text)) > CHAT_PARAGRAPH_MAX_LATIN_WORDS
+
+    groups = []
+    pending = []
+
+    def flush():
+        nonlocal pending
+        if pending:
+            groups.append(list(pending))
+            pending = []
+
+    for raw_paragraph in body.split("\n\n"):
+        paragraph_sentences = sentences(raw_paragraph.strip())
+        if not paragraph_sentences:
+            continue
+        for sentence in paragraph_sentences:
+            if pending and (
+                len(pending) >= 4
+                or too_large(pending + [sentence])
+            ):
+                flush()
+            pending.append(sentence)
+        # Keep multi-sentence source paragraphs semantically separate. Single-sentence
+        # paragraphs remain pending so a reply made of many short fragments is regrouped.
+        if len(paragraph_sentences) > 1:
+            flush()
+    flush()
+
+    def render(items):
+        separator = "" if is_cjk("".join(items)) else " "
+        return separator.join(items).strip()
+
+    rendered = [render(group) for group in groups if render(group)]
+    while len(rendered) > CHAT_MAX_PARAGRAPHS:
+        merge_index = next(
+            (
+                index for index in range(len(rendered) - 1)
+                if len(sentences(rendered[index])) == 1
+                or len(sentences(rendered[index + 1])) == 1
+            ),
+            None,
+        )
+        if merge_index is None:
+            break
+        merged = [rendered[merge_index], rendered[merge_index + 1]]
+        separator = "" if is_cjk("".join(merged)) else " "
+        rendered[merge_index:merge_index + 2] = [separator.join(merged)]
+
+    return "\n\n".join(rendered).strip()
+
+
+def _normalize_response_paragraphs(value):
+    """Balance visible prose without dropping sentences or route details."""
+    body = _deduplicate_assistant_body(value)
+    if not body:
+        return body
+
+    def sentences(paragraph):
+        return [
+            sentence.strip()
+            for sentence in re.split(
+                r"(?<=[.!?\u3002\uff01\uff1f])\s*|(?<=[;\uff1b])\s*|[\r\n]+",
+                paragraph,
+            )
+            if sentence.strip()
+        ]
+
+    def is_cjk(text):
+        return bool(re.search(r"[\u3400-\u9fff]", text))
+
+    def too_large(items):
+        text = "".join(items) if is_cjk("".join(items)) else " ".join(items)
+        if is_cjk(text):
+            return len(text) > CHAT_PARAGRAPH_MAX_CHINESE_CHARS
+        return len(re.findall(r"\b\w+\b", text)) > CHAT_PARAGRAPH_MAX_LATIN_WORDS
+
+    groups = []
+    pending = []
+
+    def flush():
+        nonlocal pending
+        if pending:
+            groups.append(list(pending))
+            pending = []
+
+    for raw_paragraph in body.split("\n\n"):
+        paragraph_sentences = sentences(raw_paragraph.strip())
+        if not paragraph_sentences:
+            continue
+        for sentence in paragraph_sentences:
+            if pending and (
+                len(pending) >= 4
+                or too_large(pending + [sentence])
+            ):
+                flush()
+            pending.append(sentence)
+        if len(paragraph_sentences) > 1:
+            flush()
+    flush()
+
+    def render(items):
+        separator = "" if is_cjk("".join(items)) else " "
+        return separator.join(items).strip()
+
+    rendered = [render(group) for group in groups if render(group)]
+    while len(rendered) > CHAT_MAX_PARAGRAPHS:
+        merge_index = next(
+            (
+                index for index in range(len(rendered) - 1)
+                if len(sentences(rendered[index])) + len(sentences(rendered[index + 1])) <= 4
+            ),
+            None,
+        )
+        if merge_index is None:
+            merge_index = min(
+                range(len(rendered) - 1),
+                key=lambda index: len(sentences(rendered[index]))
+                + len(sentences(rendered[index + 1])),
+            )
+        merged = [rendered[merge_index], rendered[merge_index + 1]]
+        separator = "" if is_cjk("".join(merged)) else " "
+        rendered[merge_index:merge_index + 2] = [separator.join(merged)]
+
+    return "\n\n".join(rendered).strip()
 
 
 def _remove_guidance_from_body(value, guidance_text):
@@ -6628,6 +7616,20 @@ def _proposal_offer_has_exact_execution_plan(proposal_offer):
     )
 
 
+def _response_contains_multiple_proposals(text):
+    """Reject explicit multi-option answers; one purple card represents one plan."""
+    value = str(text or "")
+    option_markers = re.findall(
+        r"(?:\b(?:option|plan|proposal)\s*(?:[a-d]|[1-4]|one|two|three|four|"
+        r"first|second|third|fourth)\b|"
+        r"\b(?:first|second|third|fourth)\s+(?:option|plan|proposal)\b|"
+        r"方案\s*(?:[A-D一二三四]|[1-4]))",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return len(option_markers) >= 2
+
+
 def proposal_offer_requires_execution_brief(proposal_offer, *texts):
     """Reject every proposal card that would require a downstream agent to guess cells."""
     return isinstance(proposal_offer, dict) and not _proposal_offer_has_exact_execution_plan(
@@ -6750,8 +7752,7 @@ def _is_length_failure(exception, validation_feedback=None):
     return "token limit" in text or "too long" in text or "cut off" in text
 
 
-def _route_reasoning_is_overlong(value):
-    """Detect an over-expanded route trace without limiting normal design analysis."""
+def _route_sentence_profile(value):
     text = str(value or "")
     coordinate_pattern = re.compile(
         r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
@@ -6762,16 +7763,196 @@ def _route_reasoning_is_overlong(value):
         r"\u6cbf\u7740|\u8d70\u5230|\u63a8\u5230|\u79fb\u52a8\u5230|\u5148.*\u518d)",
         flags=re.IGNORECASE,
     )
+    coordinates = coordinate_pattern.findall(text)
+    movement_matches = movement_pattern.findall(text)
+    arrow_count = text.count("→") + text.count("->")
+    return {
+        "coordinateCount": len(coordinates),
+        "movementCount": len(movement_matches),
+        "arrowCount": arrow_count,
+        "routeLike": len(coordinates) >= 2
+        and (bool(movement_matches) or arrow_count > 0),
+    }
 
+
+def _route_reasoning_profile(value):
+    """Describe route density without treating it as a response-validity error."""
+    text = str(value or "")
+    route_sentence_count = 0
+    route_coordinate_count = 0
+    overlong = False
     for paragraph in re.split(r"\n\s*\n", text):
-        coordinates = coordinate_pattern.findall(paragraph)
-        movement_matches = movement_pattern.findall(paragraph)
-        arrow_count = paragraph.count("→") + paragraph.count("->")
-        if len(coordinates) > 6 and (len(movement_matches) >= 2 or arrow_count >= 2):
-            return True
-        if arrow_count >= 5:
-            return True
-    return False
+        paragraph_profile = _route_sentence_profile(paragraph)
+        route_coordinate_count += paragraph_profile["coordinateCount"]
+        route_sentence_count += sum(
+            1
+            for sentence in re.split(
+                r"(?<=[.!?\u3002\uff01\uff1f])\s*|[\r\n]+",
+                paragraph,
+            )
+            if _route_sentence_profile(sentence)["routeLike"]
+        )
+        if paragraph_profile["coordinateCount"] > 6 and (
+            paragraph_profile["movementCount"] >= 2
+            or paragraph_profile["arrowCount"] >= 2
+        ):
+            overlong = True
+        if paragraph_profile["arrowCount"] >= 5:
+            overlong = True
+    return {
+        "overlong": overlong,
+        "routeSentenceCount": route_sentence_count,
+        "routeCoordinateCount": route_coordinate_count,
+    }
+
+
+def _route_reasoning_is_overlong(value):
+    """Compatibility predicate for tests and diagnostics.
+
+    Callers that process a response should use _recover_overlong_route_reasoning
+    instead of turning this quality signal into a validation exception.
+    """
+    return _route_reasoning_profile(value)["overlong"]
+
+
+def _compact_arrow_route_sentence(sentence):
+    """Collapse an explicit arrow chain while preserving its endpoints and prose."""
+    coordinate = r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
+    chain_pattern = re.compile(
+        rf"(?P<chain>{coordinate}(?:\s*(?:→|->)\s*{coordinate}){{4,}})"
+    )
+    match = chain_pattern.search(str(sentence or ""))
+    if match is None:
+        return None
+
+    points = re.findall(coordinate, match.group("chain"))
+    if len(points) < 2:
+        return None
+    compact_chain = f"{points[0]} → … → {points[-1]}"
+    return (
+        str(sentence)[:match.start()]
+        + compact_chain
+        + str(sentence)[match.end():]
+    ).strip()
+
+
+def _recover_overlong_route_reasoning(value, rows=None, *, language="en"):
+    """Salvage design prose when route tracing exceeds the visible-route budget.
+
+    Route verbosity is a presentation concern, not a safety failure. Keep ordinary
+    design sentences, keep one concise route sentence when it can be identified, and
+    discard only later route-trace sentences. Formal proposal validation does not use
+    this helper.
+    """
+    original = str(value or "").strip()
+    profile = _route_reasoning_profile(original)
+    result = {
+        "changed": False,
+        "salvageAction": "none",
+        "routeSentenceCount": profile["routeSentenceCount"],
+        "routeCoordinateCount": profile["routeCoordinateCount"],
+        "droppedSentenceCount": 0,
+        "coordinateLinksDropped": False,
+    }
+    if not original or not rows or not profile["overlong"]:
+        return original, result
+
+    kept_paragraphs = []
+    route_kept = False
+    for raw_paragraph in re.split(r"\n\s*\n", original):
+        paragraph = raw_paragraph.strip()
+        if not paragraph:
+            continue
+        kept_sentences = []
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(
+                r"(?<=[.!?\u3002\uff01\uff1f])\s*|[\r\n]+",
+                paragraph,
+            )
+            if sentence.strip()
+        ]
+        for sentence in sentences:
+            sentence_profile = _route_sentence_profile(sentence)
+            if not sentence_profile["routeLike"]:
+                kept_sentences.append(sentence)
+                continue
+
+            if route_kept:
+                result["droppedSentenceCount"] += 1
+                continue
+
+            candidate = sentence
+            if (
+                sentence_profile["coordinateCount"] > 6
+                or sentence_profile["arrowCount"] >= 5
+            ):
+                candidate = _compact_arrow_route_sentence(sentence)
+                if not candidate or _route_reasoning_profile(candidate)["overlong"]:
+                    candidate = None
+
+            if candidate:
+                kept_sentences.append(candidate)
+                route_kept = True
+            else:
+                result["droppedSentenceCount"] += 1
+                route_kept = True
+
+        if kept_sentences:
+            kept_paragraphs.append(" ".join(kept_sentences))
+
+    recovered = "\n\n".join(kept_paragraphs).strip()
+    result["changed"] = recovered != original
+    if result["changed"]:
+        result["salvageAction"] = (
+            "route_compacted" if result["droppedSentenceCount"] == 0
+            else "route_compacted_and_sentences_dropped"
+        )
+    return recovered, result
+
+
+def _route_sentence_profile(value):
+    """Profile one visible sentence using escaped Unicode route markers."""
+    text = str(value or "")
+    coordinate_pattern = re.compile(
+        r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
+    )
+    movement_pattern = re.compile(
+        r"(?:from|toward|through|via|along|then|next|move(?:s|d)? to|go(?:es)? to|"
+        r"reach(?:es|ed)?|push(?:es|ed)?|\u4ECE|\u5230|\u524D\u5F80|\u7ECF\u8FC7|"
+        r"\u6CBF\u7740|\u8D70\u5230|\u63A8\u5230|\u79FB\u52A8\u5230|\u5148.*\u518D)",
+        flags=re.IGNORECASE,
+    )
+    coordinates = coordinate_pattern.findall(text)
+    movement_matches = movement_pattern.findall(text)
+    arrow_count = text.count("\u2192") + text.count("->")
+    return {
+        "coordinateCount": len(coordinates),
+        "movementCount": len(movement_matches),
+        "arrowCount": arrow_count,
+        "routeLike": len(coordinates) >= 2
+        and (bool(movement_matches) or arrow_count > 0),
+    }
+
+
+def _compact_arrow_route_sentence(sentence):
+    """Collapse a long explicit arrow chain while preserving its endpoints."""
+    coordinate = r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
+    chain_pattern = re.compile(
+        rf"(?P<chain>{coordinate}(?:\s*(?:\u2192|->)\s*{coordinate}){{4,}})"
+    )
+    match = chain_pattern.search(str(sentence or ""))
+    if match is None:
+        return None
+    points = re.findall(coordinate, match.group("chain"))
+    if len(points) < 2:
+        return None
+    compact_chain = f"{points[0]} \u2192 \u2026 \u2192 {points[-1]}"
+    return (
+        str(sentence)[:match.start()]
+        + compact_chain
+        + str(sentence)[match.end():]
+    ).strip()
 
 
 def _is_route_compaction_failure(exception, validation_feedback=None):
@@ -6779,6 +7960,31 @@ def _is_route_compaction_failure(exception, validation_feedback=None):
         str(value or "") for value in (exception, validation_feedback)
     ).casefold()
     return "route reasoning" in text and "detailed" in text
+
+
+def _llm_failure_class(exception, validation_feedback=None):
+    code = str(getattr(exception, "code", "") or "")
+    text = " ".join(
+        str(value or "") for value in (exception, validation_feedback)
+    ).casefold()
+    if "route reasoning" in text or "route" in text and "detailed" in text:
+        return "route_quality"
+    if "token limit" in text or "cut off" in text or code == "MODEL_TOO_LONG":
+        return "truncated_output"
+    if code == "MODEL_EMPTY_RESPONSE":
+        return "empty_output"
+    if (
+        "map facts" in text
+        or "map-fact" in text
+        or "places b" in text
+        or "places t" in text
+    ):
+        return "map_grounding"
+    if code == "UPSTREAM_TIMEOUT":
+        return "upstream_timeout"
+    if code.startswith("UPSTREAM_"):
+        return "upstream_transport"
+    return "schema_or_model_validation"
 
 
 def _safe_incomplete_chat_reply(language, stage_opening=False, rows=None):
@@ -6796,6 +8002,86 @@ def _safe_incomplete_chat_reply(language, stage_opening=False, rows=None):
     if stage_opening:
         return _ensure_stage_one_orientation(message, rows, language)
     return message
+
+
+def _stage_opening_safe_execution(
+    *,
+    language,
+    rows,
+    request_id,
+    attempts_used,
+    started_at,
+    fallback_reason,
+):
+    """Return a complete opening without spending another upstream request."""
+    fallback_message = _safe_incomplete_chat_reply(
+        language,
+        stage_opening=True,
+        rows=rows,
+    )
+    _log_llm_event(
+        "llm_fallback_returned",
+        requestId=request_id,
+        task="stage_assessment_fallback",
+        fallbackReason=fallback_reason,
+        remainingSeconds=round(_remaining_until(_request_deadline(started_at)), 3),
+    )
+    return LLMExecutionResult(
+        assistant_message=fallback_message,
+        assessment={},
+        proposed_rows=None,
+        modification_summary="",
+        attempts_used=attempts_used,
+        request_id=request_id,
+        model="kimi-k2.6-safe-opening",
+        latency_ms=int((time.monotonic() - started_at) * 1000),
+        guidance={
+            "move": "observe_stage",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+            "coordinateLinks": [],
+        },
+    )
+
+
+def _safe_grounding_chat_reply(language):
+    if language == "zh-CN":
+        return (
+            "我理解你是在讨论当前布局带来的设计感受。刚才回复里有一处具体地图事实没有被可靠确认，"
+            "所以我先不把未验证的坐标或位置当成结论；我们仍然可以从空间分布、节奏和引导效果继续讨论。"
+        )
+    return (
+        "I understand that you are discussing the design feel of the current layout. One concrete map fact "
+        "in the previous reply could not be verified, so I will not treat an unverified coordinate as fact; "
+        "we can still continue from the layout, rhythm, and guidance effect."
+    )
+
+
+def _is_map_grounding_failure(exception, validation_feedback=None):
+    text = " ".join(
+        str(value or "") for value in (exception, validation_feedback)
+    ).casefold()
+    markers = (
+        "conflicts with deterministic map facts",
+        "executionbrief is invalid for the saved stage",
+        "executionbrief coordinate conflict",
+        "revisionplan is invalid for the saved stage",
+        "outside the saved stage",
+        "deterministic map facts say",
+        "map-fact cleanup",
+        "does not match the saved map",
+        "places b",
+        "places t",
+        "historical stage map claim",
+        "current box is close to a target",
+        "current player is close to a target",
+        "current box touches water",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _remove_proposal_text_from_body(body, proposal_offer):
@@ -6965,21 +8251,12 @@ def _repair_conceptual_proposal_binding(
             if language == "zh-CN"
             else "I have not found a reliable concrete revision direction yet, so I would start from one observable play moment."
         )
-    latest_user = _latest_role_content(messages, "user")
-    question = _friendly_default_discussion_focus(
-        rows,
-        language,
-        latest_user,
-        ((stage_context or {}).get("recentGuidance") or {}).get(
-            "discussionFocusHistory",
-            [],
-        ),
-    )
+    question = _exact_revision_clarification(language)
     return {
         "body": cleaned_body,
         "proposalOffer": None,
-        "followUpQuestion": question,
-        "uiCues": warnings,
+        "followUpQuestion": None,
+        "uiCues": [{"type": "clarification", "text": question}],
     }
 
 
@@ -7099,7 +8376,13 @@ def _apply_deterministic_guidance_fallback(
     )
     if intent_hypothesis is None and (
         difficulty_reframe
-        or (explicit_direction and not recent.get("intentHypothesis"))
+        or (
+            explicit_direction
+            and (
+                not recent.get("intentHypothesis")
+                or _latest_direction_is_new(messages)
+            )
+        )
     ):
         candidate = _natural_intent_candidate(
             latest_user,
@@ -7115,7 +8398,7 @@ def _apply_deterministic_guidance_fallback(
     cue_by_type = {
         cue.get("type"): cue
         for cue in ui_cues
-        if cue.get("type") in {"warning", "manual_edit"} and cue.get("text")
+        if cue.get("type") in {"warning", "manual_edit", "clarification"} and cue.get("text")
     }
 
     warning_cue = cue_by_type.get("warning")
@@ -7155,7 +8438,7 @@ def _apply_deterministic_guidance_fallback(
 
     ordered_cues = [
         cue_by_type[cue_type]
-        for cue_type in ("warning", "manual_edit")
+        for cue_type in ("clarification", "warning", "manual_edit")
         if cue_type in cue_by_type
     ][:2]
     return intent_hypothesis, proposal_offer, ordered_cues, fallback_used
@@ -7173,7 +8456,7 @@ def _apply_guidance_card_policy(guidance):
     cues = [
         dict(cue)
         for cue in normalized.get("uiCues") or []
-        if cue.get("type") in {"warning", "tradeoff", "manual_edit"}
+        if cue.get("type") in {"warning", "tradeoff", "manual_edit", "clarification"}
         and cue.get("text")
     ]
     warning = next(
@@ -7182,6 +8465,10 @@ def _apply_guidance_card_policy(guidance):
     )
     manual = next(
         (cue for cue in cues if cue.get("type") == "manual_edit"),
+        None,
+    )
+    clarification = next(
+        (cue for cue in cues if cue.get("type") == "clarification"),
         None,
     )
 
@@ -7196,6 +8483,13 @@ def _apply_guidance_card_policy(guidance):
         normalized["uiCues"] = [
             cue for cue in (manual, warning) if cue is not None
         ]
+        return normalized
+
+    if clarification is not None:
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
+        normalized["followUpQuestion"] = None
+        normalized["uiCues"] = [clarification]
         return normalized
 
     if manual is not None:
@@ -7216,6 +8510,39 @@ def _exact_revision_clarification(language):
         )
     return (
         "To keep the revision precise, please specify the cells to change and state the tile before and after each change."
+    )
+
+
+def _multiple_proposal_fallback_reply(language):
+    if language == "zh-CN":
+        return (
+            "我会一次只提出一个可执行方案。刚才的回复包含了多个候选方向，"
+            "请点击重新生成方案，或先说明你希望保留的那一个方向。"
+        )
+    return (
+        "I will present one executable proposal at a time. The previous reply contained multiple "
+        "candidate directions, so please request a regenerated proposal or tell me which direction to keep."
+    )
+
+
+def _exact_revision_clarification(language):
+    if language == "zh-CN":
+        return (
+            "\u4e3a\u4e86\u907f\u514d\u6309\u731c\u6d4b\u6539\u56fe，\u8bf7\u660e\u786e\u6307\u51fa\u8981\u4fee\u6539\u7684\u5750\u6807，\u5e76\u8bf4\u660e\u6bcf\u4e2a\u683c\u5b50\u4fee\u6539\u524d\u662f\u4ec0\u4e48\u3001\u4fee\u6539\u540e\u8981\u53d8\u6210\u4ec0\u4e48\u3002"
+        )
+    return (
+        "To keep the revision precise, please specify the cells to change and state the tile before and after each change."
+    )
+
+
+def _multiple_proposal_fallback_reply(language):
+    if language == "zh-CN":
+        return (
+            "\u6211\u4f1a\u4e00\u6b21\u53ea\u63d0\u51fa\u4e00\u4e2a\u53ef\u6267\u884c\u65b9\u6848\u3002\u521a\u624d\u7684\u56de\u590d\u5305\u542b\u4e86\u591a\u4e2a\u5019\u9009\u65b9\u5411\uff0c\u8bf7\u70b9\u51fb\u91cd\u65b0\u751f\u6210\u65b9\u6848\uff0c\u6216\u5148\u8bf4\u660e\u4f60\u5e0c\u671b\u4fdd\u7559\u7684\u90a3\u4e00\u4e2a\u65b9\u5411\u3002"
+        )
+    return (
+        "I will present one executable proposal at a time. The previous reply contained multiple "
+        "candidate directions, so please request a regenerated proposal or tell me which direction to keep."
     )
 
 
@@ -7294,14 +8621,11 @@ def _ensure_required_guidance_card(
         normalized["proposalOffer"] = None
         normalized["intentHypothesis"] = None
         normalized["intentConfidence"] = None
-        normalized["followUpQuestion"] = normalized.get("followUpQuestion") or (
-            _exact_revision_clarification(language)
-        )
+        clarification = normalized.get("followUpQuestion") or _exact_revision_clarification(language)
+        normalized["followUpQuestion"] = None
         normalized["uiCues"] = [
-            dict(cue)
-            for cue in normalized.get("uiCues") or []
-            if cue.get("type") in {"warning", "tradeoff"} and cue.get("text")
-        ][:1]
+            {"type": "clarification", "text": clarification}
+        ]
         return normalized
 
     if guidance_mode == "discussion":
@@ -7474,6 +8798,16 @@ def _guidance_advice_request(message):
     if not text:
         return False
 
+    if re.search(
+        r"(?:\u7ed9\u6211(?:\u4e00\u4e2a|\u4e00\u70b9)?\u65b9\u6848|\u6211\u60f3\u8981(?:\u4e00\u4e2a)?\u65b9\u6848|"
+        r"\u6211\u5e0c\u671b\u6709\u4e00\u4e2a\u65b9\u6848|\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848|"
+        r"\u7ed9\u6211\u5efa\u8bae|\u7ed9\u6211\u601d\u8def|\u8bf7\u5efa\u8bae|\u8bf7\u63d0\u4f9b\u65b9\u6848|"
+        r"\u600e\u4e48\u6539|\u5982\u4f55\u6539|\u600e\u4e48\u8c03\u6574|\u5982\u4f55\u8c03\u6574|"
+        r"\u4f60\u4f1a\u600e\u4e48\u505a|\u8bf7\u4f60\u5206\u6790)",
+        text,
+    ):
+        return True
+
     chinese_markers = (
         "建议", "方案", "思路", "怎么改", "如何改", "怎么调整", "如何调整",
         "有什么办法", "帮我想", "给我点想法", "给点思路", "你会怎么",
@@ -7496,6 +8830,14 @@ def _guidance_confusion_request(message):
     if not text:
         return False
 
+    if re.search(
+        r"(?:\u56f0\u60d1|\u4e0d\u77e5\u9053|\u6ca1\u60f3\u6cd5|\u6ca1\u6709\u60f3\u6cd5|"
+        r"\u6ca1\u601d\u8def|\u6ca1\u6709\u601d\u8def|\u6ca1\u6709\u65b9\u5411|"
+        r"\u4e0d\u786e\u5b9a\u4ece\u54ea\u91cc|\u4e0d\u77e5\u9053\u4ece\u54ea\u91cc\u5f00\u59cb)",
+        text,
+    ):
+        return True
+
     chinese_markers = (
         "迷茫", "不知道", "没想法", "没有想法", "没思路", "没有思路",
         "没有方向", "不知道从哪里", "不确定从哪里", "怎么开始", "不知该",
@@ -7515,11 +8857,22 @@ def _contains_user_design_direction(message):
     if not text:
         return False
 
+    actual_chinese_direction = bool(re.search(
+        r"(?:\u6211\u60f3(?:\u8981|\u8ba9|\u628a)|\u6211\u5e0c\u671b|"
+        r"\u6211\u503e\u5411\u4e8e|\u6211\u66f4\u503e\u5411\u4e8e|\u8bf7\u4fdd\u6301|"
+        r"\u4fdd\u6301|\u4e0d\u8981|\u5fc5\u987b|\u8ba9\u73a9\u5bb6|\u4f7f\u73a9\u5bb6|"
+        r"\u589e\u52a0|\u51cf\u5c11|\u5f3a\u5316|\u5f31\u5316|\u8c03\u6574|\u4fee\u6539|"
+        r"\u6539\u6210).{0,100}(?:\u6c34\u57df|\u6c34|\u7bb1\u5b50|\u76ee\u6807|"
+        r"\u8def\u7ebf|\u901a\u9053|\u969c\u788d|\u7a7a\u95f4|\u96be\u5ea6|\u9009\u62e9|"
+        r"\u8282\u594f|\u53ef\u8bfb|\u63a8\u7bb1|\u63a8\u52a8)",
+        text,
+    ))
+
     # A bare open question such as "How would you change the route?" asks for ideas but does
     # not establish a direction.  A statement plus a question, such as "I want water to shape
     # the route; how would you change it?", remains a concrete direction.
     has_question = "?" in text or "？" in text
-    if has_question and not re.search(
+    if has_question and not actual_chinese_direction and not re.search(
         r"(?:我想|我希望|我更想|我的目标|希望让|想让|需要让|我倾向于|"
         r"\bi (?:want|would like|hope|prefer)|\bmy goal is\b|\bmake the player\b|"
         r"\blet the player\b)",
@@ -7528,7 +8881,7 @@ def _contains_user_design_direction(message):
     ):
         return False
 
-    if _contains_concrete_revision_direction(text):
+    if actual_chinese_direction or _contains_concrete_revision_direction(text):
         return True
 
     chinese_direction_leads = (
@@ -8216,6 +9569,29 @@ def _latest_user_states_direction(messages):
         )
     )
     return english_direction is not None or chinese_direction
+
+
+def _latest_direction_is_new(messages):
+    """Detect a new user direction without suppressing later corrections."""
+    user_messages = [
+        str(message.get("content") or "").strip()
+        for message in messages or []
+        if message.get("role") == "user" and str(message.get("content") or "").strip()
+    ]
+    if not user_messages:
+        return False
+    latest = user_messages[-1]
+    if _latest_user_explicitly_agrees(latest):
+        # Acceptance of an existing proposal is not a new direction.  It must
+        # not resurrect a duplicate intent card from the previous turn.
+        return False
+    previous_directions = [
+        message for message in user_messages[:-1]
+        if _latest_user_states_direction([{"role": "user", "content": message}])
+    ]
+    if not previous_directions:
+        return True
+    return not _guidance_text_matches(latest, previous_directions[-1])
 
 
 def _build_minimal_stage_assessment(message, question, language, solver_metrics):
@@ -9110,7 +10486,7 @@ def _route_text_has_direction(text):
     # This is only a cheap pre-filter. The authoritative check below also
     # requires the connector to sit between the link's first and last anchors.
     return bool(re.search(
-        r"(?:\b(?:to|toward|towards|through|via|along|walk(?:ing)?|"
+        r"(?:\u2192|->|\b(?:to|toward|towards|through|via|along|walk(?:ing)?|"
         r"move(?:s|d|ing)?|go(?:es|ing)?|lead(?:s|ing)?)\b|"
         r"到|向|往|朝向|通往|通向|经过|沿着|走到|走向|前往|抵达|"
         r"推向|推到|移动到|绕到|绕向)",
@@ -9201,13 +10577,31 @@ def _route_relation_is_explicit(text, source, destination, rows):
     anchors = _route_anchors(text, rows)
     if not anchors or len(anchors) < 2:
         return False
+    # A single visual link must describe one local movement relation.  When a
+    # sentence names several independent entities/coordinates, taking its first
+    # and last anchor creates exactly the misleading arrows seen in long map
+    # evaluations.  One optional waypoint is enough for a concise route label;
+    # longer reasoning stays visible prose without an arrow.
+    if len(anchors) > 3:
+        return False
+    for point in anchors:
+        row = point.get("row")
+        column = point.get("column")
+        if (
+            not isinstance(row, int)
+            or not isinstance(column, int)
+            or not (1 <= row <= len(rows))
+            or not (1 <= column <= len(rows[row - 1]))
+            or rows[row - 1][column - 1] in {" ", "#", "@"}
+        ):
+            return False
     if anchors[0] != source or anchors[-1] != destination:
         return False
     first = next(item for item in matches if item["point"] == anchors[0])
     last = next(item for item in reversed(matches) if item["point"] == anchors[-1])
     between = value[first["end"]:last["start"]]
     return bool(re.search(
-        r"(?:\b(?:to|toward|towards|through|via|along|walk(?:ing)?|"
+        r"(?:\u2192|->|\b(?:to|toward|towards|through|via|along|walk(?:ing)?|"
         r"move(?:s|d|ing)?|go(?:es|ing)?|lead(?:s|ing)?)\b|"
         r"到|向|往|朝向|通往|通向|经过|沿着|走到|走向|前往|抵达|"
         r"推向|推到|移动到|绕到|绕向)",
@@ -9328,6 +10722,259 @@ def _recover_coordinate_links(body, rows, existing=None):
         if key not in seen and not overlaps_existing:
             seen.add(key)
             links.append(candidate)
+        if len(links) >= COORDINATE_LINK_LIMIT:
+            break
+    return links[:COORDINATE_LINK_LIMIT]
+
+
+def _route_relation_clauses(text, rows=None):
+    """Split route prose at sentence and explicit relation boundaries."""
+    sentences = re.split(
+        r"(?<=[.!?\u3002\uff01\uff1f])\s*|[\r\n]+",
+        str(text or ""),
+    )
+    clauses = []
+    split_pattern = re.compile(
+        r"\s*(?:[;；]+|\s+(?:and then|while|whereas)\s+|,(?=\s*(?:while|whereas|before|after|"
+        r"or)\b)|，(?=\s*(?:同时|然后|随后|再|而|或者|之前|之后)))\s*",
+        flags=re.IGNORECASE,
+    )
+    for sentence in sentences:
+        for piece in split_pattern.split(sentence):
+            piece = piece.strip()
+            if not piece:
+                continue
+            comma_parts = re.split(
+                r"(?<=\S),\s*(?=then\b)|(?<=\S)，\s*(?=然后|随后)",
+                piece,
+                flags=re.IGNORECASE,
+            )
+            if rows is not None and len(comma_parts) > 1:
+                for left, right in zip(comma_parts, comma_parts[1:]):
+                    if (
+                        len(_route_anchor_matches(left, rows) or []) >= 2
+                        and len(_route_anchor_matches(right, rows) or []) >= 2
+                    ):
+                        clauses.extend(
+                            part.strip() for part in comma_parts if part.strip()
+                        )
+                        break
+                else:
+                    clauses.append(piece)
+            else:
+                clauses.append(piece)
+    return clauses
+
+
+def _route_relation_clauses(text, rows=None):
+    """Split route prose at sentence and explicit relation boundaries."""
+    sentences = re.split(
+        r"(?<=[.!?\u3002\uff01\uff1f])\s*|[\r\n]+",
+        str(text or ""),
+    )
+    clauses = []
+    split_pattern = re.compile(
+        r"\s*(?:[;\u003b\uff1b]+|\s+(?:and then|while|whereas)\s+|"
+        r",(?=\s*(?:while|whereas|before|after|or)\b)|"
+        r"\uff0c(?=\s*(?:\u540c\u65f6|\u7136\u540e|\u968f\u540e|\u518d|\u800c|\u6216\u8005|\u4e4b\u524d|\u4e4b\u540e)))\s*",
+        flags=re.IGNORECASE,
+    )
+    for sentence in sentences:
+        for piece in split_pattern.split(sentence):
+            piece = piece.strip()
+            if not piece:
+                continue
+            comma_parts = re.split(
+                r"(?<=\S),\s*(?=then\b)|(?<=\S)\uff0c\s*(?=\u7136\u540e|\u968f\u540e)",
+                piece,
+                flags=re.IGNORECASE,
+            )
+            if rows is not None and len(comma_parts) > 1:
+                split_independent = any(
+                    len(_route_anchor_matches(left, rows) or []) >= 2
+                    and len(_route_anchor_matches(right, rows) or []) >= 2
+                    for left, right in zip(comma_parts, comma_parts[1:])
+                )
+                if split_independent:
+                    clauses.extend(part.strip() for part in comma_parts if part.strip())
+                    continue
+            clauses.append(piece)
+    return clauses
+
+
+def _route_relation_candidates(text, rows):
+    """Return local, directional, map-grounded relation snippets."""
+    candidates = []
+    movement = re.compile(
+        r"(?:\u2192|->|\b(?:to|toward|towards|through|via|along|walk(?:s|ed|ing)?|"
+        r"move(?:s|d|ing)?|go(?:es|ing)?|lead(?:s|ing)?|reach(?:es|ed|ing)?)\b|"
+        r"(?:\u5230|\u5411|\u671d\u5411|\u901a\u5f80|\u5f80|\u7ecf\u8fc7|\u6cbf\u7740|\u8d70|\u8d70\u5230|"
+        r"\u79fb\u52a8\u5230|\u63a8\u5411|\u63a8\u5230|\u7ed5\u5411|\u7a7f\u8fc7))",
+        flags=re.IGNORECASE,
+    )
+    for clause in _route_relation_clauses(text, rows):
+        matches = _route_anchor_matches(clause, rows)
+        if not matches or len(matches) < 2:
+            continue
+        anchors = []
+        for match in matches:
+            if anchors and anchors[-1]["point"] == match["point"]:
+                anchors[-1]["end"] = max(anchors[-1]["end"], match["end"])
+                continue
+            anchors.append(dict(match))
+        for source, destination in zip(anchors, anchors[1:]):
+            between = clause[source["end"]:destination["start"]]
+            if not movement.search(between):
+                continue
+            if (
+                re.search(r"\b(?:go|walk|move)\w*\b.*\bfrom\b", between, re.IGNORECASE)
+                and not re.search(r"\b(?:to|toward|towards|through|via)\b", between, re.IGNORECASE)
+            ):
+                continue
+            candidate_text = (
+                clause.strip()
+                if len(anchors) == 2
+                else clause[source["start"]:destination["end"]].strip(" ,，;；")
+            )
+            candidate = {
+                "text": candidate_text,
+                "from": dict(source["point"]),
+                "to": dict(destination["point"]),
+            }
+            if not _route_text_is_concise(candidate_text):
+                continue
+            if not _coordinate_link_is_grounded(candidate, rows):
+                continue
+            candidates.append(candidate)
+    return candidates
+
+
+def _route_relation_is_explicit(text, source, destination, rows):
+    """Accept one local movement relation, not a location statement or route chain."""
+    if not _route_text_is_concise(text):
+        return False
+    matches = _route_relation_anchor_matches(str(text or ""), rows)
+    if not matches:
+        return False
+    anchors = []
+    for match in matches:
+        point = match["point"]
+        if anchors and anchors[-1] == point:
+            continue
+        anchors.append(point)
+    if len(anchors) != 2 or anchors[0] != source or anchors[-1] != destination:
+        return False
+    return any(
+        candidate["from"] == source
+        and candidate["to"] == destination
+        and candidate["text"] in str(text or "")
+        for candidate in _route_relation_candidates_without_grounding(text, rows)
+    )
+
+
+def _route_relation_anchor_matches(text, rows):
+    """Ignore an entity's ``from`` coordinate qualifier, but keep real waypoints."""
+    matches = _route_anchor_matches(text, rows)
+    if matches is None:
+        return None
+
+    filtered = []
+    value = str(text or "")
+    entity_before_coordinate = re.compile(
+        r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+)(?![A-Za-z0-9])"
+        r"[^()\r\n]{0,32}(?:\bfrom\b|\u4ece)\s*$",
+        flags=re.IGNORECASE,
+    )
+    for match in matches:
+        is_coordinate = value[match["start"]:match["end"]].lstrip().startswith(("(", "（"))
+        prefix = value[:match["start"]]
+        if is_coordinate and entity_before_coordinate.search(prefix):
+            continue
+        filtered.append(match)
+    return filtered
+
+
+def _route_relation_candidates_without_grounding(text, rows):
+    """Build local relation snippets before the recursive grounding check."""
+    candidates = []
+    movement = re.compile(
+        r"(?:\u2192|->|\b(?:to|toward|towards|through|via|along|walk(?:s|ed|ing)?|"
+        r"move(?:s|d|ing)?|go(?:es|ing)?|lead(?:s|ing)?|reach(?:es|ed|ing)?)\b|"
+        r"(?:\u5230|\u5411|\u671d\u5411|\u901a\u5f80|\u5f80|\u7ecf\u8fc7|\u6cbf\u7740|\u8d70|\u8d70\u5230|"
+        r"\u79fb\u52a8\u5230|\u63a8\u5411|\u63a8\u5230|\u7ed5\u5411|\u7a7f\u8fc7))",
+        flags=re.IGNORECASE,
+    )
+    for clause in _route_relation_clauses(text, rows):
+        matches = _route_relation_anchor_matches(clause, rows)
+        if not matches or len(matches) < 2:
+            continue
+        anchors = []
+        for match in matches:
+            if anchors and anchors[-1]["point"] == match["point"]:
+                anchors[-1]["end"] = max(anchors[-1]["end"], match["end"])
+                continue
+            anchors.append(dict(match))
+        for source, destination in zip(anchors, anchors[1:]):
+            between = clause[source["end"]:destination["start"]]
+            if re.search(
+                r"\b(?:is|are|lies?|sits?|located|positioned|placed)\b[^.!?]{0,40}"
+                r"\b(?:near|beside|adjacent|next\s+to|to\s+the\s+left|to\s+the\s+right|"
+                r"above|below)\b|"
+                r"(?:\u5728|\u4f4d\u4e8e|\u9760\u8fd1|\u65c1\u8fb9|\u76f8\u90bb|\u5de6\u4fa7|"
+                r"\u53f3\u4fa7|\u4e0a\u65b9|\u4e0b\u65b9)",
+                between,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            if not movement.search(between):
+                continue
+            if (
+                re.search(r"\b(?:go|walk|move)\w*\b.*\bfrom\b", between, re.IGNORECASE)
+                and not re.search(r"\b(?:to|toward|towards|through|via)\b", between, re.IGNORECASE)
+            ):
+                continue
+            candidates.append({
+                "text": (
+                    clause.strip()
+                    if len(anchors) == 2
+                    else clause[source["start"]:destination["end"]].strip(" ,，;；")
+                ),
+                "from": dict(source["point"]),
+                "to": dict(destination["point"]),
+            })
+    return candidates
+
+
+def _recover_coordinate_links(body, rows, existing=None):
+    """Recover up to twelve local route links from grounded visible prose."""
+    if not rows:
+        return list(existing or [])
+    links = list(existing or [])
+    seen = {
+        (
+            item["text"], item["from"]["row"], item["from"]["column"],
+            item["to"]["row"], item["to"]["column"],
+        )
+        for item in links
+    }
+    for candidate in _route_relation_candidates_without_grounding(body, rows):
+        if not _coordinate_link_is_grounded(candidate, rows):
+            continue
+        key = (
+            candidate["text"], candidate["from"]["row"], candidate["from"]["column"],
+            candidate["to"]["row"], candidate["to"]["column"],
+        )
+        if key in seen:
+            continue
+        overlaps_existing = any(
+            item["text"] in candidate["text"]
+            or candidate["text"] in item["text"]
+            for item in links
+        )
+        if overlaps_existing:
+            continue
+        seen.add(key)
+        links.append(candidate)
         if len(links) >= COORDINATE_LINK_LIMIT:
             break
     return links[:COORDINATE_LINK_LIMIT]
@@ -9882,7 +11529,12 @@ def _classify_revision_request(conversation, stage_context=None):
         "照这个做",
         "按这个做",
     )
-    marker_match = any(
+    actual_direct_edit = bool(re.search(
+        r"(?:\u8bf7|\u5e2e\u6211|\u4f60\u6765|\u76f4\u63a5)(?:\u628a|\u5c06).{0,100}"
+        r"(?:\u6539|\u8c03\u6574|\u4fee\u6539|\u79fb\u52a8|\u589e\u52a0|\u51cf\u5c11|\u5220\u9664|\u4fdd\u7559)",
+        latest_user_message,
+    ))
+    marker_match = actual_direct_edit or any(
         marker in latest_user_message
         for marker in (*english_markers, *chinese_markers)
     )

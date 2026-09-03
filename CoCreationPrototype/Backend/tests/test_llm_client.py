@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -344,6 +345,53 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("Manhattan distance", result[0])
         self.assertIn("current tile", result[0])
 
+    def test_chinese_visible_output_localizes_design_jargon(self):
+        payload = {
+            "assistantMessage": (
+                "The Peninsula creates a choke point and a playable moment, so route choice "
+                "and push order shape the trade-off through the corridor."
+            ),
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload, language="zh-CN")
+
+        self.assertIn("\u534a\u5c9b", result[0])
+        self.assertIn("\u74f6\u9888\u70b9", result[0])
+        self.assertIn("\u5173\u952e\u64cd\u4f5c\u65f6\u523b", result[0])
+        self.assertIn("\u8def\u7ebf\u9009\u62e9", result[0])
+        self.assertIn("\u63a8\u7bb1\u987a\u5e8f", result[0])
+        self.assertNotIn("Peninsula", result[0])
+        self.assertNotIn("choke point", result[0])
+        self.assertNotIn("playable moment", result[0])
+
+    def test_stage_assessment_schema_owns_opening_move(self):
+        schema = llm_client._structured_response_format("stage_assessment")
+        guidance = schema["json_schema"]["schema"]["properties"]["guidance"]
+        assessment = schema["json_schema"]["schema"]["properties"]["assessment"]
+
+        self.assertEqual(guidance["properties"]["move"]["enum"], ["observe_stage"])
+        self.assertEqual(
+            assessment["required"],
+            [
+                "solutionSummary",
+                "difficultyOpinion",
+                "features",
+                "suggestions",
+                "satisfactionQuestion",
+            ],
+        )
+
     def test_translation_visible_output_removes_prompt_only_field_names(self):
         source_items = [{
             "turnId": "turn-1",
@@ -558,6 +606,11 @@ class LLMClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "places B1"):
             llm_client._validate_map_grounding_texts(
                 ["B1 is at (3,9)."],
+                ENTITY_ROUTE_ROWS,
+            )
+        with self.assertRaisesRegex(ValueError, "places B1"):
+            llm_client._validate_map_grounding_texts(
+                ["B1\u5728(6,3)\u7d27\u6328\u7740\u73a9\u5bb6"],
                 ENTITY_ROUTE_ROWS,
             )
 
@@ -973,7 +1026,7 @@ class LLMClientTests(unittest.TestCase):
     def test_prose_coordinates_are_not_recovered_into_an_execution_brief(self):
         self.assertFalse(hasattr(llm_client, "_execution_brief_from_text"))
 
-    def test_repeated_coordinate_conflict_returns_plain_clarification_instead_of_502(self):
+    def test_plain_reply_drops_invalid_optional_proposal_metadata_without_replacing_body(self):
         content = (
             "I would open the cited local route.\n"
             "<GUIDANCE>PROPOSAL_SUMMARY: Open the local route || "
@@ -999,10 +1052,86 @@ class LLMClientTests(unittest.TestCase):
             language="en",
         )
 
-        self.assertIn("does not match the saved map", result.assistant_message)
+        self.assertEqual(result.assistant_message, "I would open the cited local route.")
         self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertEqual(result.guidance["move"], "clarify_intent")
+        self.assertEqual(result.guidance["move"], "offer_perspective")
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_ordinary_grounding_failure_uses_chat_fallback_not_edit_clarification(self):
+        result, client = self.execute(
+            ["B1 is at (1,1), so the lower-left cluster is the key design issue."] * 2,
+            rows=ENTITY_ROUTE_ROWS,
+            conversation=[{
+                "role": "user",
+                "content": "I only feel the lower-left cluster in the first version is crowded.",
+            }],
+        )
+
+        self.assertEqual(result.model, "grounding-safe-chat-fallback")
+        self.assertEqual(result.guidance["move"], "offer_perspective")
+        self.assertIsNone(result.guidance["proposalOffer"])
+        self.assertNotIn("confirm the location", result.assistant_message)
+        self.assertNotIn("请重新确认要修改", result.assistant_message)
         self.assertEqual(len(client.chat.completions.calls), 2)
+
+    def test_historical_coordinate_claim_requires_a_historical_snapshot(self):
+        with self.assertRaisesRegex(ValueError, "historical Stage map claim"):
+            llm_client._validate_map_grounding_texts(
+                ["In the first version B1 was at (1,1)."],
+                ENTITY_ROUTE_ROWS,
+                historical_reference=True,
+            )
+
+        llm_client._validate_map_grounding_texts(
+            ["The first version felt crowded in the lower-left."],
+            ENTITY_ROUTE_ROWS,
+            historical_reference=True,
+        )
+
+    def test_recovery_preserves_a_valid_route_after_spatial_context(self):
+        body = (
+            "B1 is beside P, while B2 is near T2; the player should go around the water "
+            "from B1 toward T1."
+        )
+
+        links = llm_client._recover_coordinate_links(body, ENTITY_ROUTE_ROWS)
+        self.assertEqual(len(links), 1)
+        self.assertIn("from B1 toward T1", links[0]["text"])
+        self.assertEqual(links[0]["from"], {"row": 3, "column": 5})
+        self.assertEqual(links[0]["to"], {"row": 3, "column": 7})
+
+    def test_route_recovery_splits_waypoints_and_independent_routes(self):
+        body = (
+            "B1 moves through (6,3) toward T1. "
+            "B2 moves from (6,4) to T2."
+        )
+
+        links = llm_client._recover_coordinate_links(body, ENTITY_ROUTE_ROWS)
+
+        self.assertEqual(len(links), 3)
+        self.assertEqual(
+            [(item["from"], item["to"]) for item in links],
+            [
+                ({"row": 3, "column": 5}, {"row": 6, "column": 3}),
+                ({"row": 6, "column": 3}, {"row": 3, "column": 7}),
+                ({"row": 6, "column": 4}, {"row": 6, "column": 8}),
+            ],
+        )
+
+    def test_route_recovery_does_not_mark_position_only_relations(self):
+        body = "B1 is to the left of T1, while B2 is beside T2."
+
+        self.assertEqual(
+            llm_client._recover_coordinate_links(body, ENTITY_ROUTE_ROWS),
+            [],
+        )
+
+        same_sentence = "B1 moves to T1, while B2 moves to T2."
+        links = llm_client._recover_coordinate_links(
+            same_sentence,
+            ENTITY_ROUTE_ROWS,
+        )
+        self.assertEqual(len(links), 2)
 
     def test_map_grounding_rejects_the_reported_wrong_corner_and_water_claim(self):
         with self.assertRaisesRegex(ValueError, "upper-right"):
@@ -1406,8 +1535,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("recentGuidance", messages[0]["content"])
         self.assertIn("whenever no card is warranted", messages[0]["content"])
         self.assertIn("never produce four cards", messages[0]["content"])
-        self.assertIn("no fixed paragraph-count limit", messages[0]["content"])
-        self.assertIn("one compact route passage", messages[0]["content"])
+        self.assertIn("2-4 paragraphs with 2-4 sentences per paragraph", messages[0]["content"])
+        self.assertIn("up to four compact route passages", messages[0]["content"])
         self.assertIn("Connect specific map details to a playable moment", messages[0]["content"])
         self.assertIn("Post-opening progress and route rule", messages[0]["content"])
         self.assertIn("COORDINATE_LINKS", messages[0]["content"])
@@ -1857,8 +1986,9 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertNotEqual(result.guidance["move"], "offer_revision")
         self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertIsNotNone(result.guidance["followUpQuestion"])
-        self.assertTrue(result.guidance["followUpQuestion"].strip())
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertEqual(result.guidance["uiCues"][0]["type"], "clarification")
+        self.assertTrue(result.guidance["uiCues"][0]["text"].strip())
         self.assertIn(
             "REVISION_ADVICE",
             client.chat.completions.calls[0]["messages"][0]["content"],
@@ -1888,6 +2018,52 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotEqual(result.guidance["move"], "offer_revision")
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertEqual(len(client.chat.completions.calls), 2)
+
+    def test_revision_advice_rejects_multiple_options_and_shows_clarification(self):
+        multi_option_reply = (
+            "Option A: close the upper opening. Option B: move the target instead."
+        )
+        result, client = self.execute(
+            [multi_option_reply, multi_option_reply],
+            rows=OPERATION_BASE_ROWS,
+            language="en",
+            conversation=[{
+                "role": "user",
+                "content": (
+                    "Please suggest a concrete revision: change (2,2) from floor to wall, "
+                    "while keeping the boxes and targets unchanged."
+                ),
+            }],
+        )
+
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertIsNone(result.guidance["proposalOffer"])
+        self.assertEqual(result.guidance["move"], "clarify_intent")
+        self.assertEqual(result.guidance["uiCues"][0]["type"], "clarification")
+        self.assertNotIn("Option A", result.assistant_message)
+
+    def test_response_paragraphs_are_balanced_without_dropping_route_detail(self):
+        body = (
+            "The first route choice is visible. It gives the player a clear comparison. "
+            "The water then changes the push order.\n\n"
+            "The next moment should remain testable.\n\n"
+            "The target approach stays local.\n\n"
+            "The player can compare the detour.\n\n"
+            "The result should change play.\n\n"
+            "The final check is whether the choice reads.\n\n"
+            "The map should remain solvable."
+        )
+
+        normalized = llm_client._normalize_response_paragraphs(body)
+        paragraphs = normalized.split("\n\n")
+
+        self.assertLessEqual(len(paragraphs), llm_client.CHAT_MAX_PARAGRAPHS)
+        self.assertTrue(all(1 <= len(re.findall(r"[.!?]", paragraph)) <= 4 for paragraph in paragraphs))
+        for sentence in (
+            "The first route choice is visible.",
+            "The map should remain solvable.",
+        ):
+            self.assertIn(sentence, normalized)
 
     def test_open_ended_help_gets_a_grounded_discussion_card_when_model_omits_metadata(self):
         result, client = self.execute(
@@ -2086,7 +2262,6 @@ class LLMClientTests(unittest.TestCase):
     def test_invalid_stage_json_falls_back_to_plain_opening(self):
         client = FakeClient([
             "   ",
-            "not a complete JSON object",
             "The water narrows the central route in an interesting way. "
             "When the box enters that corridor, which route should read first?",
         ])
@@ -2119,7 +2294,7 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertIn("deterministic solver", result.assessment["solutionSummary"])
-        self.assertEqual(len(client.chat.completions.calls), 3)
+        self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertEqual(
             client.chat.completions.calls[0]["response_format"]["type"],
             "json_schema",
@@ -2128,11 +2303,238 @@ class LLMClientTests(unittest.TestCase):
             client.chat.completions.calls[0]["response_format"]["json_schema"]["name"],
             "cocreation_stage_assessment",
         )
+        self.assertNotIn("response_format", client.chat.completions.calls[1])
+
+    def test_invalid_stage_guidance_move_is_normalized_without_a_structured_retry(self):
+        payload = json.dumps({
+            "assistantMessage": "The water makes the central route feel deliberately tense.",
+            "guidance": {
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The saved map is solvable.",
+                "difficultyOpinion": "In my view, the opening asks for careful reading.",
+                "features": ["A central water route"],
+                "suggestions": ["Watch the first approach"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        })
+
+        client = FakeClient([payload])
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_stage_assessment(
+                [],
+                ["############"] * 10,
+                "en",
+                {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
+                {},
+                "stage-invalid-guidance-move-test",
+                {"stageNumber": 1, "source": "initial"},
+            )
+
+        self.assertEqual(result.guidance["move"], "observe_stage")
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_stage_route_overflow_is_salvaged_without_plain_fallback(self):
+        payload = json.dumps({
+            "assistantMessage": (
+                "The lower corridor gives the opening a meaningful approach. "
+                "B2 can move through "
+                "(6,4) \u2192 (6,5) \u2192 (6,6) \u2192 (6,7) \u2192 "
+                "(6,8) \u2192 (6,7) \u2192 (6,8) toward T2, and that route "
+                "makes the push order part of the intended rhythm."
+            ),
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "coordinateLinks": [],
+            },
+            "assessment": {
+                "solutionSummary": "The saved map is solvable.",
+                "difficultyOpinion": "The opening asks for careful reading.",
+                "features": ["A lower corridor"],
+                "suggestions": ["Watch the push order"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        })
+        client = FakeClient([payload])
+
+        with patch.object(llm_client, "_create_async_client", return_value=client):
+            result = llm_client.generate_stage_assessment(
+                [],
+                ENTITY_ROUTE_ROWS,
+                "en",
+                {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
+                {},
+                "stage-route-salvage-test",
+                {"stageNumber": 2, "source": "accepted_proposal"},
+            )
+
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertIn("meaningful approach", result.assistant_message)
+        self.assertIn("push order part", result.assistant_message)
+        self.assertIn("\u2192 \u2026 \u2192", result.assistant_message)
         self.assertEqual(
-            client.chat.completions.calls[1]["response_format"]["type"],
-            "json_schema",
+            result.guidance["coordinateLinks"],
+            [{
+                "text": (
+                    "B2 can move through (6,4) \u2192 \u2026 \u2192 (6,8) toward T2, "
+                    "and that route makes the push order part of the intended rhythm."
+                ),
+                "from": {"row": 6, "column": 4},
+                "to": {"row": 6, "column": 8},
+            }],
         )
-        self.assertNotIn("response_format", client.chat.completions.calls[2])
+
+    def test_stage_opening_invalid_intent_metadata_is_dropped_without_plain_fallback(self):
+        payload = json.dumps({
+            "assistantMessage": "The central water route gives the opening a clear rhythm.",
+            "guidance": {
+                "move": "offer_revision",
+                "intentHypothesis": "You want a difficult level.",
+                "intentConfidence": "not-a-level",
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": "Add a wall",
+                    "rationale": "This would make the route harder.",
+                },
+                "uiCues": [{"type": "warning", "text": "The opening is risky."}],
+            },
+            "assessment": {
+                "solutionSummary": "The saved map is solvable.",
+                "difficultyOpinion": "The opening asks for careful reading.",
+                "features": ["A central water route"],
+                "suggestions": ["Watch the first approach"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        })
+
+        client = FakeClient([payload])
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_stage_assessment(
+                [],
+                ["############"] * 10,
+                "en",
+                {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
+                {},
+                "stage-invalid-intent-metadata-test",
+                {"stageNumber": 2, "source": "accepted_proposal"},
+            )
+
+        self.assertIn("central water route", result.assistant_message)
+        self.assertEqual(result.guidance["move"], "observe_stage")
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentConfidence"])
+        self.assertIsNone(result.guidance["proposalOffer"])
+        self.assertEqual(result.guidance["uiCues"], [])
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_stage_opening_wrong_coordinate_sentence_is_removed_but_other_analysis_survives(self):
+        payload = json.dumps({
+            "assistantMessage": (
+                "T1 is at (8,6), so the lower route is the main entrance. "
+                "The water still creates a meaningful pause before the first push."
+            ),
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The saved map is solvable.",
+                "difficultyOpinion": "The opening asks for careful reading.",
+                "features": ["The water creates a pause"],
+                "suggestions": ["Watch the first push"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        })
+
+        result = llm_client.validate_chat_response(
+            json.loads(payload),
+            assessment_only=True,
+            language="en",
+            rows=ENTITY_ROUTE_ROWS,
+            stage_context={"stageNumber": 2},
+        )
+
+        self.assertNotIn("T1 is at (8,6)", result[0])
+        self.assertIn("water still creates a meaningful pause", result[0])
+
+    def test_plain_stage_fallback_removes_wrong_coordinate_sentence_and_keeps_body(self):
+        client = FakeClient([
+            "not valid JSON",
+            (
+                "T1 is at (8,6), so the lower route is the main entrance. "
+                "The water still creates a meaningful pause before the first push."
+            ),
+        ])
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_stage_assessment(
+                [],
+                ENTITY_ROUTE_ROWS,
+                "en",
+                {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
+                {},
+                "stage-plain-grounding-recovery-test",
+                {"stageNumber": 2, "source": "accepted_proposal"},
+            )
+
+        self.assertIn("water still creates a meaningful pause", result.assistant_message)
+        self.assertNotIn("T1 is at (8,6)", result.assistant_message)
+        self.assertNotEqual(result.model, "kimi-k2.6-safe-opening")
+        self.assertEqual(len(client.chat.completions.calls), 2)
+
+    def test_stage_fallback_skips_plain_request_when_remaining_budget_is_too_short(self):
+        client = FakeClient(["not valid JSON"])
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "LLM_INTERNAL_DEADLINE_SECONDS", 0.01),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.generate_stage_assessment(
+                [],
+                ["############"] * 10,
+                "en",
+                {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
+                {},
+                "stage-fallback-budget-test",
+                {"stageNumber": 1, "source": "initial"},
+            )
+
+        self.assertEqual(result.model, "kimi-k2.6-safe-opening")
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertIn("first reaction", result.assistant_message)
 
     def test_later_human_edit_plain_opening_asks_about_the_designer_intention(self):
         client = FakeClient([
@@ -2272,16 +2674,12 @@ class LLMClientTests(unittest.TestCase):
         self.assertTrue(llm_client._route_reasoning_is_overlong(long_route))
         self.assertFalse(llm_client._route_reasoning_is_overlong(detailed_design))
 
-    def test_overlong_route_reasoning_is_retried_and_not_saved(self):
+    def test_overlong_route_reasoning_is_salvaged_without_discarding_the_reply(self):
         long_route = (
             "B2 moves from (2,2) to (2,3) -> (2,4) -> (2,5) -> (3,5) -> "
             "(4,5) -> (5,5) -> (6,5), then reaches T2."
         )
-        client = FakeClient([
-            long_route,
-            "The water makes the first push more deliberate, so the box order becomes a "
-            "useful design choice.",
-        ])
+        client = FakeClient([long_route])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -2293,9 +2691,52 @@ class LLMClientTests(unittest.TestCase):
                 "route-compaction-retry-test",
             )
 
-        self.assertEqual(result.attempts_used, 2)
-        self.assertIn("more deliberate", result.assistant_message)
-        self.assertNotIn("(2,2)", result.assistant_message)
+        self.assertEqual(result.attempts_used, 1)
+        self.assertNotIn("did not finish cleanly", result.assistant_message)
+        self.assertIn("B2 moves from", result.assistant_message)
+        self.assertIn("\u2192", result.assistant_message)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_overlong_route_keeps_design_sentences_and_drops_later_trace(self):
+        content = (
+            "The water makes the first push more deliberate, so the box order becomes a "
+            "useful design choice.\n\n"
+            "B2 moves from (2,2) -> (2,3) -> (2,4) -> (2,5) -> (3,5) -> "
+            "(4,5) -> (5,5) -> (6,5), then reaches T2.\n"
+            "Then it continues through (6,6) -> (6,7) -> (6,8) before the next push."
+        )
+        result, client = self.execute([content], rows=ENTITY_ROUTE_ROWS)
+
+        self.assertEqual(result.attempts_used, 1)
+        self.assertIn("first push more deliberate", result.assistant_message)
+        self.assertIn("B2 moves from", result.assistant_message)
+        self.assertNotIn("Then it continues", result.assistant_message)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_coordinate_route_is_recovered_after_final_text_cleanup(self):
+        content = (
+            "The route runs from (2,2) -> (2,3) -> (2,4) -> (2,5) -> "
+            "(2,6) -> (2,7) -> (2,8)."
+        )
+        result, _ = self.execute([content], rows=ENTITY_ROUTE_ROWS)
+
+        self.assertEqual(len(result.guidance["coordinateLinks"]), 1)
+        link = result.guidance["coordinateLinks"][0]
+        self.assertEqual(link["from"], {"row": 2, "column": 2})
+        self.assertEqual(link["to"], {"row": 2, "column": 8})
+        self.assertIn(link["text"], result.assistant_message)
+
+    def test_ordinary_grounding_drops_only_the_invalid_sentence(self):
+        content = (
+            "B1 is at (1,1), so the lower-left cluster is the key design issue. "
+            "The water still creates a meaningful pause before the first push."
+        )
+        result, client = self.execute([content], rows=ENTITY_ROUTE_ROWS)
+
+        self.assertEqual(result.attempts_used, 1)
+        self.assertNotIn("B1 is at (1,1)", result.assistant_message)
+        self.assertIn("water still creates a meaningful pause", result.assistant_message)
+        self.assertEqual(len(client.chat.completions.calls), 1)
 
     def test_explicit_map_proposal_uses_pro_model_and_larger_output_limit(self):
         response = revision_plan_payload()
@@ -2942,6 +3383,7 @@ class LLMClientTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            patch.object(llm_client, "LLM_INTERNAL_DEADLINE_SECONDS", 0.06),
             patch.object(llm_client, "PLAIN_CHAT_TIMEOUT_SECONDS", 0.06),
             patch.object(llm_client, "PLAIN_PRIMARY_TIMEOUT_SECONDS", 0.02),
             patch.object(llm_client, "_create_async_client", return_value=SlowClient()),
@@ -2954,7 +3396,20 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
+        self.assertEqual(raised.exception.attempts_used, 1)
         self.assertLess(llm_client.time.monotonic() - started_at, 1.0)
+
+    def test_retry_budget_helper_skips_a_short_remaining_window(self):
+        self.assertFalse(
+            llm_client._retry_budget_available(
+                llm_client.time.monotonic() + 0.01,
+                request_id="retry-budget-test",
+                task="chat",
+                attempt=1,
+                max_attempts=2,
+                response_mode="plain_text",
+            )
+        )
 
     def test_two_empty_plain_responses_use_fallback_then_fail(self):
         client = FakeClient(["   ", "\n\t"])
@@ -2995,11 +3450,11 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(llm_client.UNIFIED_MODEL, "kimi-k2.6")
-        self.assertEqual(llm_client.BACKEND_REQUEST_TIMEOUT_SECONDS, 60.0)
-        self.assertEqual(llm_client.LLM_INTERNAL_DEADLINE_SECONDS, 58.0)
-        self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 60.0)
-        self.assertEqual(llm_client.PLAIN_CHAT_TIMEOUT_SECONDS, 60.0)
-        self.assertEqual(llm_client.PRIMARY_ATTEMPT_TIMEOUT_SECONDS, 40.0)
+        self.assertEqual(llm_client.BACKEND_REQUEST_TIMEOUT_SECONDS, 120.0)
+        self.assertEqual(llm_client.LLM_INTERNAL_DEADLINE_SECONDS, 116.0)
+        self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 120.0)
+        self.assertEqual(llm_client.PLAIN_CHAT_TIMEOUT_SECONDS, 120.0)
+        self.assertEqual(llm_client.PRIMARY_ATTEMPT_TIMEOUT_SECONDS, 70.0)
         self.assertEqual(llm_client.CHAT_MAX_ATTEMPTS, 2)
         self.assertEqual(llm_client.PROPOSAL_GENERATION_ATTEMPTS, 2)
         self.assertEqual(llm_client.PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, 22.0)
@@ -4033,7 +4488,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(result.split("\n\n")), 1)
         self.assertIn("In my view", result)
 
-    def test_stage_opening_rejects_intention_inference(self):
+    def test_stage_opening_drops_ordinary_intention_metadata_but_keeps_analysis(self):
         payload = {
             "assistantMessage": "You want a difficult level.",
             "guidance": {
@@ -4055,8 +4510,16 @@ class LLMClientTests(unittest.TestCase):
             "modificationSummary": "",
         }
 
-        with self.assertRaisesRegex(ValueError, "cannot infer intention"):
-            llm_client.validate_chat_response(payload, assessment_only=True)
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            stage_context={"stageNumber": 2},
+        )
+
+        self.assertIn("difficult level", result[0])
+        self.assertIsNone(result[4]["intentHypothesis"])
+        self.assertIsNone(result[4]["intentConfidence"])
+        self.assertIsNone(result[4]["proposalOffer"])
 
     def test_human_edit_opening_acknowledges_verified_changes_in_chinese(self):
         message = llm_client._compose_assistant_message(

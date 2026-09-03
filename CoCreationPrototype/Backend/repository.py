@@ -569,17 +569,16 @@ def serialize_session(database, session_id):
             guidance = _sanitize_visible_guidance(guidance, language)
         except (ImportError, TypeError, ValueError, KeyError):
             pass
-        if not guidance.get("coordinateLinks"):
-            return guidance
         try:
             # Import lazily to avoid the repository <-> LLM client import cycle.
-            from llm_client import _filter_coordinate_links
+            from llm_client import _filter_coordinate_links, _recover_coordinate_links
 
             links = _filter_coordinate_links(
                 guidance.get("coordinateLinks"),
                 body,
                 rows,
             )
+            links = _recover_coordinate_links(body, rows, links)
         except (ImportError, TypeError, ValueError, KeyError):
             links = []
         if links:
@@ -785,10 +784,31 @@ def serialize_session(database, session_id):
     progress_contexts = []
     for version in versions:
         context = load_design_context(database, session_id, version["id"])
+        expressed_directions = []
+        for field_name, kind in (("goal", "goal"), ("constraint", "constraint")):
+            for item in context.get(
+                "userGoals" if field_name == "goal" else "designConstraints",
+                [],
+            ):
+                if item.get("status") != "active" or item.get("authority") != "explicit":
+                    continue
+                text = str(item.get(field_name) or "").strip()
+                if not text:
+                    continue
+                expressed_directions.append({
+                    "kind": kind,
+                    "text": text,
+                    "sourceStageNumber": source_stage_number(
+                        item.get("sourceStageId"), version
+                    ),
+                    "updatedAt": turn_created_at.get(item.get("sourceTurnId")),
+                    "label": "explicit",
+                })
         progress_contexts.append({
             "versionId": version["id"],
             "stageNumber": version["stage_number"],
             "parentVersionId": version["parent_version_id"],
+            "expressedDirections": expressed_directions[-16:],
             "confirmedDecisions": [
                 {
                     "decision": item["decision"],

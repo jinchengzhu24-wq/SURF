@@ -1,6 +1,8 @@
 "use strict";
 
 const MAX_MESSAGE_LENGTH = 2000;
+const LLM_REQUEST_TIMEOUT_MS = 120000;
+const LLM_PRIMARY_WAIT_SECONDS = 70;
 const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
 const API_PREFIX = window.location.pathname.startsWith("/cocreation")
     ? "/cocreation"
@@ -25,6 +27,14 @@ const GUIDANCE_CUE_LABELS = {
         tradeoff: "WARNING / 风险提示"
     }
 };
+
+GUIDANCE_CUE_LABELS.en.clarification = "NEEDS CLARIFICATION / 闇€瑕佹緢娓呮";
+GUIDANCE_CUE_LABELS["zh-CN"].clarification = "闇€瑕佹緢娓呮";
+
+// Keep this label readable even when older generated files contain mojibake
+// fallback labels above.
+GUIDANCE_CUE_LABELS.en.clarification = "NEEDS CLARIFICATION / \u9700\u8981\u6f84\u6e05";
+GUIDANCE_CUE_LABELS["zh-CN"].clarification = "\u9700\u8981\u6f84\u6e05";
 
 const translations = {
     en: {
@@ -295,11 +305,14 @@ translations.en.entityLegend = "P: Player · B1/B2: Boxes · T1/T2: Targets · ~
 translations["zh-CN"].entityLegend = "P\uFF1A\u73A9\u5BB6 \u00B7 B1/B2\uFF1A\u7BB1\u5B50 \u00B7 T1/T2\uFF1A\u76EE\u6807 \u00B7 ~\uFF1A\u6C34\u57DF";
 
 translations.en.progressTitle = "Co-creation progress";
+translations.en.expressedDirections = "Expressed directions";
+translations.en.noExpressedDirections = "No explicit directions yet.";
 translations.en.confirmedDecisions = "Confirmed decisions";
 translations.en.unresolvedQuestions = "Unresolved questions";
 translations.en.noConfirmedDecisions = "No confirmed decisions yet.";
 translations.en.noUnresolvedQuestions = "No unresolved questions yet.";
 translations.en.fromStage = "From Stage {stage}";
+translations.en.explicitLabel = "Explicit";
 translations.en.confirmedLabel = "Confirmed";
 translations.en.unresolvedLabel = "Unresolved";
 translations.en.updatedAt = "Updated {time}";
@@ -309,11 +322,14 @@ translations.en.proposalBefore = "Before";
 translations.en.proposalAfter = "After";
 translations.en.executeBoundProposal = "Execute the bound proposal.";
 translations["zh-CN"].progressTitle = "\u5171\u521b\u8fdb\u5ea6";
+translations["zh-CN"].expressedDirections = "\u5df2\u8868\u8fbe\u65b9\u5411";
+translations["zh-CN"].noExpressedDirections = "\u6682\u65e0\u660e\u786e\u8868\u8fbe\u7684\u65b9\u5411\u3002";
 translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
 translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
 translations["zh-CN"].noConfirmedDecisions = "\u6682\u65e0\u5df2\u786e\u8ba4\u51b3\u7b56\u3002";
 translations["zh-CN"].noUnresolvedQuestions = "\u6682\u65e0\u672a\u89e3\u51b3\u95ee\u9898\u3002";
 translations["zh-CN"].fromStage = "\u6765\u81ea Stage {stage}";
+translations["zh-CN"].explicitLabel = "\u5df2\u660e\u786e\u8868\u8fbe";
 translations["zh-CN"].confirmedLabel = "\u5df2\u786e\u8ba4";
 translations["zh-CN"].unresolvedLabel = "\u5f85\u89e3\u51b3";
 translations["zh-CN"].updatedAt = "\u6700\u8fd1\u66f4\u65b0 {time}";
@@ -412,7 +428,7 @@ const validationTileNames = {
 const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
     "languageButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
-    "returnCurrentButton", "progressPanel", "progressSummary", "confirmedDecisionsList", "unresolvedQuestionsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
+    "returnCurrentButton", "progressPanel", "progressSummary", "expressedDirectionsList", "confirmedDecisionsList", "unresolvedQuestionsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
     "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
@@ -615,9 +631,15 @@ function renderProgressContext() {
 
     const context = (state.session.progressContexts || []).find(
         item => item.versionId === state.selectedVersionId
-    ) || { confirmedDecisions: [], unresolvedQuestions: [] };
+    ) || { expressedDirections: [], confirmedDecisions: [], unresolvedQuestions: [] };
 
     elements.progressPanel.hidden = false;
+    renderProgressItems(
+        elements.expressedDirectionsList,
+        context.expressedDirections,
+        "direction",
+        "noExpressedDirections",
+    );
     renderProgressItems(
         elements.confirmedDecisionsList,
         context.confirmedDecisions,
@@ -650,7 +672,7 @@ function renderProgressItems(container, items, type, emptyKey) {
 
         const text = document.createElement("p");
         text.className = "progress-item-text";
-        text.textContent = String(item?.decision || item?.question || "").trim();
+        text.textContent = String(item?.text || item?.decision || item?.question || "").trim();
         record.appendChild(text);
 
         if (type === "decision" && item?.reason) {
@@ -665,7 +687,9 @@ function renderProgressItems(container, items, type, emptyKey) {
         const source = Number.isInteger(stageNumber)
             ? t("fromStage").replace("{stage}", String(stageNumber))
             : "";
-        const label = type === "decision" ? t("confirmedLabel") : t("unresolvedLabel");
+        const label = type === "decision"
+            ? t("confirmedLabel")
+            : type === "direction" ? t("explicitLabel") : t("unresolvedLabel");
         const updated = formatProgressTime(item?.updatedAt);
         const updatedLabel = updated
             ? t("updatedAt").replace("{time}", updated)
@@ -849,7 +873,7 @@ function renderAssistantBubble(turn, bubble) {
     }
 
     uiCues.forEach(cue => {
-        if (cue && ["manual_edit", "warning", "tradeoff"].includes(cue.type) && cue.text) {
+        if (cue && ["manual_edit", "warning", "tradeoff", "clarification"].includes(cue.type) && cue.text) {
             const displayType = cue.type === "tradeoff" ? "warning" : cue.type;
             cueList.appendChild(createGuidanceCue(displayType, cue.text));
         }
@@ -875,9 +899,15 @@ function proposalStateMessage(status) {
 }
 
 function selectedStageHasActiveDisagreement() {
-    return selectedStageTurns().some(turn =>
-        turn.role === "assistant" && turn.guidance?.disagreement?.status === "active"
-    );
+    let latestStatus = null;
+    selectedStageTurns().forEach(turn => {
+        if (turn.role !== "assistant") return;
+        const disagreement = turn.guidance?.disagreement;
+        if (disagreement && typeof disagreement === "object") {
+            latestStatus = disagreement.status || null;
+        }
+    });
+    return latestStatus === "active";
 }
 
 function isRevisionOfferTurn(turn) {
@@ -901,6 +931,7 @@ function guidanceForDisplay(source, proposal = null) {
     const cues = Array.isArray(source.uiCues) ? source.uiCues.filter(Boolean) : [];
     const warning = cues.find(cue => ["warning", "tradeoff"].includes(cue.type) && cue.text);
     let manual = cues.find(cue => cue.type === "manual_edit" && cue.text);
+    const clarification = cues.find(cue => cue.type === "clarification" && cue.text);
 
     if (guidance.proposalOffer || proposal) {
         manual ||= {
@@ -916,6 +947,12 @@ function guidanceForDisplay(source, proposal = null) {
         guidance.intentHypothesis = null;
         guidance.followUpQuestion = null;
         guidance.uiCues = [manual];
+        return guidance;
+    }
+    if (clarification) {
+        guidance.intentHypothesis = null;
+        guidance.followUpQuestion = null;
+        guidance.uiCues = [clarification, warning].filter(Boolean);
         return guidance;
     }
     guidance.uiCues = warning ? [warning] : [];
@@ -1316,18 +1353,18 @@ function drawActiveCoordinateRoute() {
     const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
     const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
     marker.setAttribute("id", "coordinate-route-arrowhead");
-    marker.setAttribute("viewBox", "0 0 14 14");
-    marker.setAttribute("refX", "12");
-    marker.setAttribute("refY", "7");
-    marker.setAttribute("markerWidth", "14");
-    marker.setAttribute("markerHeight", "14");
+    marker.setAttribute("viewBox", "0 0 20 20");
+    marker.setAttribute("refX", "18");
+    marker.setAttribute("refY", "10");
+    marker.setAttribute("markerWidth", "20");
+    marker.setAttribute("markerHeight", "20");
     marker.setAttribute("orient", "auto");
     marker.setAttribute("markerUnits", "userSpaceOnUse");
     const arrowhead = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    arrowhead.setAttribute("d", "M 0 1 L 13 7 L 0 13 L 3.5 7 Z");
-    arrowhead.setAttribute("fill", "#d62828");
-    arrowhead.setAttribute("stroke", "#5b1010");
-    arrowhead.setAttribute("stroke-width", "1");
+    arrowhead.setAttribute("d", "M 1 1 L 19 10 L 1 19 L 5.5 10 Z");
+    arrowhead.setAttribute("fill", "#e03131");
+    arrowhead.setAttribute("stroke", "#ffffff");
+    arrowhead.setAttribute("stroke-width", "1.5");
     arrowhead.setAttribute("stroke-linejoin", "round");
     marker.appendChild(arrowhead);
     defs.appendChild(marker);
@@ -1336,8 +1373,8 @@ function drawActiveCoordinateRoute() {
     const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
     polyline.setAttribute("points", points.join(" "));
     polyline.setAttribute("fill", "none");
-    polyline.setAttribute("stroke", "#d62828");
-    polyline.setAttribute("stroke-width", "4");
+    polyline.setAttribute("stroke", "#e03131");
+    polyline.setAttribute("stroke-width", "5");
     polyline.setAttribute("stroke-linecap", "round");
     polyline.setAttribute("stroke-linejoin", "round");
     polyline.setAttribute("stroke-dasharray", "7 5");
@@ -1510,14 +1547,15 @@ function renderTranslationStatus() {
 }
 
 function chatWaitingMessage() {
+    const timeoutSeconds = LLM_REQUEST_TIMEOUT_MS / 1000;
     const elapsedSeconds = Math.min(
-        60,
+        timeoutSeconds,
         Math.max(0, Math.floor((Date.now() - state.chatStartedAt) / 1000))
     );
-    const phase = elapsedSeconds < 40
+    const phase = elapsedSeconds < LLM_PRIMARY_WAIT_SECONDS
         ? t("chatWaitingPrimary")
         : t("chatWaitingFallback");
-    return `${phase} · ${elapsedSeconds} / 60 ${t("seconds")}`;
+    return `${phase} · ${elapsedSeconds} / ${timeoutSeconds} ${t("seconds")}`;
 }
 
 function startChatTimer() {
@@ -1541,7 +1579,7 @@ async function ensureAssessment(versionId) {
         state.session = await api(`/api/sessions/${state.sessionId}/versions/${versionId}/assessments`, {
             method: "POST",
             body: { idempotencyKey: uniqueId("assessment") },
-            timeoutMs: 60000
+            timeoutMs: LLM_REQUEST_TIMEOUT_MS
         });
         render();
     } catch (error) {
@@ -1597,7 +1635,7 @@ async function submitPendingMessage() {
         state.session = await api(`/api/sessions/${state.sessionId}/messages`, {
             method: "POST",
             body: pending,
-            timeoutMs: 60000
+            timeoutMs: LLM_REQUEST_TIMEOUT_MS
         });
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());
@@ -1886,7 +1924,7 @@ async function translateVisibleBatch(batch, targetLanguage) {
             {
                 method: "POST",
                 body: { turnIds },
-                timeoutMs: 60000
+                timeoutMs: LLM_REQUEST_TIMEOUT_MS
             }
         );
         const translatedById = new Map(
