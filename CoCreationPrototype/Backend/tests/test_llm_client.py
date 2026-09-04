@@ -18,6 +18,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import llm_client
+from level_validation import build_entity_bindings
 
 
 OPERATION_BASE_ROWS = [
@@ -614,6 +615,82 @@ class LLMClientTests(unittest.TestCase):
                 ENTITY_ROUTE_ROWS,
             )
 
+    def test_coordinate_grounding_supports_current_fact_forms_and_skips_future_routes(self):
+        bindings = build_entity_bindings(ENTITY_ROUTE_ROWS)
+        current_claims = [
+            "B1 is at (3,5).",
+            "B1 occupies (3,5).",
+            "B1 is located in row 3, column 5.",
+            "B1 sits on row 3, column 5.",
+            "B1 \u5728\u7b2c 3 \u884c\u7b2c 5 \u5217\u3002",
+            "\u7b2c 3 \u884c\u7b2c 5 \u5217\u662f B1\u3002",
+            "B1 \u4f4d\u4e8e\uff083\uff0c5\uff09\u3002",
+        ]
+        for claim in current_claims:
+            with self.subTest(claim=claim):
+                llm_client._validate_map_grounding_texts(
+                    [claim], ENTITY_ROUTE_ROWS, entity_bindings=bindings
+                )
+
+        for future_claim in (
+            "B1 will move to (3,9).",
+            "If B1 moved to (3,9), the detour would be longer.",
+            "\u5982\u679c B1 \u79fb\u52a8\u5230\uff083\uff0c9\uff09\uff0c\u8fd9\u53ea\u662f\u5047\u8bbe\u3002",
+        ):
+            with self.subTest(future_claim=future_claim):
+                llm_client._validate_map_grounding_texts(
+                    [future_claim], ENTITY_ROUTE_ROWS, entity_bindings=bindings
+                )
+
+        with self.assertRaisesRegex(ValueError, "places B1"):
+            llm_client._validate_map_grounding_texts(
+                ["\u7b2c 3 \u884c\u7b2c 9 \u5217\u662f B1\u3002"],
+                ENTITY_ROUTE_ROWS,
+                entity_bindings=bindings,
+            )
+
+    def test_route_recovery_uses_stable_entities_and_local_waypoints(self):
+        bindings = build_entity_bindings(ENTITY_ROUTE_ROWS)
+        links = llm_client._recover_coordinate_links(
+            "B1 -> (3,6) -> T1", ENTITY_ROUTE_ROWS, entity_bindings=bindings
+        )
+
+        self.assertEqual(
+            [(item["text"], item["from"], item["to"]) for item in links],
+            [
+                ("B1 -> (3,6)", {"row": 3, "column": 5}, {"row": 3, "column": 6}),
+                ("(3,6) -> T1", {"row": 3, "column": 6}, {"row": 3, "column": 7}),
+            ],
+        )
+        self.assertEqual(
+            llm_client._recover_coordinate_links(
+                "B1 is near T1; B1 is beside T1", ENTITY_ROUTE_ROWS,
+                entity_bindings=bindings,
+            ),
+            [],
+        )
+        self.assertEqual(
+            llm_client._recover_coordinate_links(
+                "B1 is close to T1", ENTITY_ROUTE_ROWS,
+                entity_bindings=bindings,
+            ),
+            [],
+        )
+
+    def test_named_current_relations_are_checked_against_the_named_entities(self):
+        bindings = build_entity_bindings(ENTITY_ROUTE_ROWS)
+        llm_client._validate_map_grounding_texts(
+            ["B1 is close to T1."],
+            ENTITY_ROUTE_ROWS,
+            entity_bindings=bindings,
+        )
+        with self.assertRaisesRegex(ValueError, "B1.*T2"):
+            llm_client._validate_map_grounding_texts(
+                ["B1 is near T2."],
+                ENTITY_ROUTE_ROWS,
+                entity_bindings=bindings,
+            )
+
     def test_llm_metadata_supports_different_route_wording(self):
         cases = [
             (
@@ -800,6 +877,43 @@ class LLMClientTests(unittest.TestCase):
                     "allowedOperators": ["remove_wall"],
                 },
                 OPERATION_BASE_ROWS,
+            )
+
+    def test_execution_brief_binds_both_sides_of_entity_move(self):
+        bindings = build_entity_bindings(ENTITY_ROUTE_ROWS)
+        brief = {
+            "schemaVersion": 1,
+            "effect": "relocate_box",
+            "anchors": ["B1"],
+            "focus": {"row": 3, "column": 6, "radius": 2},
+            "requiredTransitions": [
+                {"row": 3, "column": 5, "from": "s", "to": ".", "anchorEntity": "B1"},
+                {"row": 3, "column": 6, "from": ".", "to": "s", "anchorEntity": "B1"},
+            ],
+            "allowedOperators": ["move_box"],
+            "preserve": ["outer_shell", "player", "targets", "water", "unrelated_areas"],
+            "playObjective": "route_choice",
+        }
+
+        normalized = llm_client._validate_execution_brief(
+            brief, ENTITY_ROUTE_ROWS, bindings
+        )
+        self.assertEqual(
+            [item["anchorEntity"] for item in normalized["requiredTransitions"]],
+            ["B1", "B1"],
+        )
+
+        with self.assertRaisesRegex(ValueError, "source coordinate"):
+            llm_client._validate_execution_brief(
+                {
+                    **brief,
+                    "requiredTransitions": [
+                        {"row": 3, "column": 4, "from": "s", "to": ".", "anchorEntity": "B1"},
+                        {"row": 3, "column": 6, "from": ".", "to": "s", "anchorEntity": "B1"},
+                    ],
+                },
+                ENTITY_ROUTE_ROWS,
+                bindings,
             )
 
     def test_chat_revision_plan_is_normalized_to_an_exact_execution_brief(self):

@@ -367,7 +367,11 @@ def build_chat_messages(
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
-    map_facts = _map_facts_for_prompt(rows, stage_context)
+    map_facts = (
+        _canonical_entity_table(rows, stage_context)
+        + "\n"
+        + _map_facts_for_prompt(rows, stage_context)
+    )
     prompt_stage_context = _prompt_stage_context(rows, stage_context)
     design_context_prompt = _design_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
@@ -648,7 +652,7 @@ def build_chat_messages(
         "deliver_revision, keep assistantMessage concise and frame the map as pending review.\n\n"
         f"{_map_grounding_contract()}\n\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
-        f"Current saved stage (12 x 10), with one-based row labels:\n{numbered_map}\n"
+        f"Current saved stage (10 rows × 12 columns), with one-based row labels:\n{numbered_map}\n"
         f"Canonical saved row strings (the same snapshot):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"{design_context_prompt}\n"
@@ -702,7 +706,11 @@ def build_plain_chat_messages(
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
-    map_facts = _map_facts_for_prompt(rows, stage_context)
+    map_facts = (
+        _canonical_entity_table(rows, stage_context)
+        + "\n"
+        + _map_facts_for_prompt(rows, stage_context)
+    )
     prompt_stage_context = _prompt_stage_context(rows, stage_context)
     design_context_prompt = _design_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
@@ -893,7 +901,7 @@ def build_plain_chat_messages(
         f"Draft provenance and attribution rules: {provenance_guidance}\n\n"
         f"{_map_grounding_contract()}\n\n"
         f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
-        f"Current saved Stage (12 x 10), with one-based row labels:\n{numbered_map}\n"
+        f"Current saved Stage (10 rows × 12 columns), with one-based row labels:\n{numbered_map}\n"
         f"Canonical saved row strings (the same snapshot):\n{serialized_map}\n\n"
         "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
         f"{design_context_prompt}\n"
@@ -1033,7 +1041,7 @@ def _compact_kimi_structured_prompt(
         historical_reference_instruction,
         _map_grounding_contract(),
         f"Deterministic Map Facts (authoritative):\n{map_facts}",
-        f"Current saved Stage (12 x 10), one-based rows:\n{numbered_map}",
+        f"Current saved Stage (10 rows × 12 columns), one-based rows:\n{numbered_map}",
         f"Canonical saved row strings:\n{serialized_map}",
         "Legend: # wall, . floor, @ water, p player, s box, t target.",
         design_context_prompt,
@@ -1160,7 +1168,7 @@ def _compact_kimi_plain_prompt(
         safety,
         _map_grounding_contract(),
         f"Deterministic Map Facts (authoritative):\n{map_facts}",
-        f"Current saved Stage (12 x 10), one-based rows:\n{numbered_map}",
+        f"Current saved Stage (10 rows × 12 columns), one-based rows:\n{numbered_map}",
         f"Canonical saved row strings:\n{serialized_map}",
         "Legend: # wall, . floor, @ water, p player, s box, t target.",
         design_context_prompt,
@@ -1194,11 +1202,19 @@ def _map_facts_for_prompt(rows, stage_context):
         # allowed to contribute parent-diff annotations after its tileAt
         # snapshot matches; this prevents stale or hand-built context from
         # disagreeing with the numbered map in the same prompt.
-        facts = build_map_facts(rows)
+        context = stage_context or {}
+        facts = build_map_facts(
+            rows,
+            entity_bindings=context.get("entityBindings"),
+        )
         supplied = (stage_context or {}).get("mapFacts")
         if (
             isinstance(supplied, dict)
             and supplied.get("tileAt") == facts.get("tileAt")
+            and supplied.get("mapFingerprint") == facts.get("mapFingerprint")
+            and supplied.get("entityBindingFingerprint") == facts.get(
+                "entityBindingFingerprint"
+            )
             and isinstance(supplied.get("verifiedEntityChangesFromParent"), dict)
         ):
             facts["verifiedEntityChangesFromParent"] = supplied[
@@ -1212,6 +1228,38 @@ def _map_facts_for_prompt(rows, stage_context):
             "reason": "The supplied rows are not a complete validated Stage.",
         }
     return json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+
+
+def _canonical_entity_table(rows, stage_context=None):
+    """Render the server-owned entity binding in a stable prompt format."""
+    try:
+        facts = json.loads(_map_facts_for_prompt(rows, stage_context or {}))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "Authoritative entities: unavailable; use neutral coordinate descriptions."
+    records = list(facts.get("entities") or [])
+    order = {"player": 0, "box": 1, "target": 2}
+    records.sort(key=lambda item: (order.get(item.get("kind"), 9), item.get("id") or ""))
+    lines = [
+        "Authoritative entities (server binding; never renumber from visual position):"
+    ]
+    for item in records:
+        label = item.get("id")
+        kind = item.get("kind") or "entity"
+        row = item.get("row")
+        column = item.get("column")
+        confidence = item.get("identityConfidence") or "unknown"
+        if confidence == "exact" and label:
+            lines.append(
+                f"{label} = {kind} at row {row}, column {column} (identity exact)"
+            )
+        else:
+            lines.append(
+                f"{kind} at row {row}, column {column} (identity unknown; "
+                "do not use a historical B/T label as a hard constraint)"
+            )
+    if not records:
+        lines.append("No stable entity binding is available; use neutral coordinates only.")
+    return "\n".join(lines)
 
 
 def _prompt_stage_context(rows, stage_context):
@@ -1405,7 +1453,75 @@ def _contains_unverified_historical_map_claim(text):
     return False
 
 
-def _validate_map_grounding_texts(texts, rows, *, historical_reference=False):
+def _validate_named_entity_relations(text, facts):
+    """Validate only explicit present-tense relations involving named entities."""
+    records = {
+        item.get("id"): item
+        for item in facts.get("entities") or []
+        if item.get("id") and item.get("identityConfidence") == "exact"
+    }
+    if not records:
+        return
+
+    def point(label):
+        item = records.get(label)
+        return (item.get("row"), item.get("column")) if item else None
+
+    relation = re.compile(
+        r"(?:\bnear\b|\bclose\s+to\b|\badjacent\s+to\b|\bbeside\b|"
+        r"\bnext\s+to\b|\u9760\u8fd1|\u76f8\u90bb|\u65c1\u8fb9|\u7d27\u6328)",
+        flags=re.IGNORECASE,
+    )
+    future = re.compile(
+        r"(?:\bif\b|\bwould\b|\bwill\b|\bmove(?:s|d|ing)?\b|\bpush(?:es|ed|ing)?\b|"
+        r"\btoward(?:s)?\b|\bfrom\b|\u5982\u679c|\u82e5|\u5c06|\u4f1a|\u79fb\u52a8|"
+        r"\u63a8\u5230|\u63a8\u5411)",
+        flags=re.IGNORECASE,
+    )
+    labels = re.compile(
+        r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+)(?![A-Za-z0-9])",
+        flags=re.IGNORECASE,
+    )
+    for sentence in re.split(r"(?<=[.!?\u3002\uff01\uff1f])|[\r\n]+", str(text or "")):
+        if not relation.search(sentence) or future.search(sentence):
+            continue
+        named = list(dict.fromkeys(match.group(0).upper() for match in labels.finditer(sentence)))
+        if len(named) >= 2:
+            first, second = named[0], named[1]
+            first_point, second_point = point(first), point(second)
+            if first_point and second_point:
+                distance = abs(first_point[0] - second_point[0]) + abs(first_point[1] - second_point[1])
+                if distance > 2:
+                    raise ValueError(
+                        f"The reply claims {first} is close to {second}, but the saved map does not support that relation."
+                    )
+        if re.search(
+            r"(?:\b(?:B\d+)\b).{0,28}(?:\b(?:water)\b|\u6c34\u57df|\u6c34\u8fb9)",
+            sentence,
+            flags=re.IGNORECASE,
+        ):
+            for label in named:
+                item = records.get(label)
+                if item and item.get("kind") == "box":
+                    adjacent = any(
+                        cell["row"] == item["row"] + row_delta
+                        and cell["column"] == item["column"] + column_delta
+                        for cell in facts.get("waterCells") or []
+                        for row_delta, column_delta in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                    )
+                    if not adjacent:
+                        raise ValueError(
+                            f"The reply claims {label} is beside water, but the saved map does not support that relation."
+                        )
+
+
+def _validate_map_grounding_texts(
+    texts,
+    rows,
+    *,
+    historical_reference=False,
+    entity_bindings=None,
+):
     """Reject a small set of high-impact, checkable spatial hallucinations.
 
     Natural prose is intentionally not parsed wholesale.  This guard covers the claims that
@@ -1422,12 +1538,13 @@ def _validate_map_grounding_texts(texts, rows, *, historical_reference=False):
             "The reply makes a concrete historical Stage map claim without a supplied historical snapshot."
         )
 
-    _validate_coordinate_claims(text, rows)
+    _validate_coordinate_claims(text, rows, entity_bindings=entity_bindings)
 
     try:
-        facts = build_map_facts(rows)
+        facts = build_map_facts(rows, entity_bindings=entity_bindings)
     except ValueError:
         return
+    _validate_named_entity_relations(text, facts)
     height = len(rows)
     width = len(rows[0]) if rows else 0
     entities = {
@@ -1512,6 +1629,7 @@ def _strip_invalid_stage_grounding_sentences(
     rows,
     *,
     historical_reference=False,
+    entity_bindings=None,
 ):
     """Drop only checkable map-claim sentences that contradict this Stage.
 
@@ -1538,6 +1656,7 @@ def _strip_invalid_stage_grounding_sentences(
                 [sentence],
                 rows,
                 historical_reference=historical_reference,
+                entity_bindings=entity_bindings,
             )
         except ValueError as exception:
             removed.append({"text": sentence, "reason": str(exception)[:300]})
@@ -1554,16 +1673,24 @@ def _strip_invalid_grounding_sentences(
     rows,
     *,
     historical_reference=False,
+    entity_bindings=None,
 ):
     """Shared sentence-level recovery for non-executable visible replies."""
     return _strip_invalid_stage_grounding_sentences(
         text,
         rows,
         historical_reference=historical_reference,
+        entity_bindings=entity_bindings,
     )
 
 
-def _sanitize_ordinary_grounding_metadata(guidance, rows, *, historical_reference=False):
+def _sanitize_ordinary_grounding_metadata(
+    guidance,
+    rows,
+    *,
+    historical_reference=False,
+    entity_bindings=None,
+):
     """Keep a useful ordinary reply when optional model metadata is not grounded.
 
     A normal design discussion is not an edit contract. Its visible body is validated on
@@ -1581,6 +1708,7 @@ def _sanitize_ordinary_grounding_metadata(guidance, rows, *, historical_referenc
                 [value],
                 rows,
                 historical_reference=historical_reference,
+                entity_bindings=entity_bindings,
             )
         except ValueError:
             return False
@@ -1679,7 +1807,7 @@ def _tile_from_claim(value):
     }.get(value)
 
 
-def _validate_coordinate_claims(text, rows):
+def _validate_coordinate_claims(text, rows, *, entity_bindings=None):
     """Check explicit coordinate/tile statements before they reach a proposal card."""
     if not rows:
         return
@@ -1724,15 +1852,15 @@ def _validate_coordinate_claims(text, rows):
                 f"but deterministic map facts say it is {actual!r}."
             )
 
-    _validate_entity_coordinate_claims(text, rows)
+    _validate_entity_coordinate_claims(text, rows, entity_bindings=entity_bindings)
 
 
-def _map_entity_coordinates(rows):
+def _map_entity_coordinates(rows, entity_bindings=None):
     """Return the stable entity labels used by the map-facts contract."""
-    facts = build_map_facts(rows)
-    result = {"P": facts["player"]}
-    result.update({item["id"]: item for item in facts["boxes"]})
-    result.update({item["id"]: item for item in facts["targets"]})
+    facts = build_map_facts(rows, entity_bindings=entity_bindings)
+    result = {item["id"]: item for item in facts.get("entities") or []}
+    if "P" not in result:
+        result["P"] = facts["player"]
     return {
         key: {"row": value["row"], "column": value["column"]}
         for key, value in result.items()
@@ -1760,6 +1888,82 @@ def _entity_coordinate_claims(text, rows):
             flags=re.IGNORECASE,
         ),
     )
+    # The original compact matcher is retained for legacy wording.  These
+    # explicit forms cover the common English/Chinese current-fact statements
+    # without treating a future route or an ``if`` clause as a saved fact.
+    stable_entity = (
+        r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+|"
+        r"\u73a9\u5bb6|\u8d77\u70b9)(?![A-Za-z0-9])"
+    )
+    current_marker = re.compile(
+        r"(?:\bis\b|\bwas\b|\boccup(?:y|ies|ied)\b|\bsits?\b|"
+        r"\blocated\b|\bpositioned\b|\bplaced\b|"
+        r"\u5728|\u4f4d\u4e8e|\u5750\u843d\u4e8e|\u5904\u5728|\u662f)",
+        flags=re.IGNORECASE,
+    )
+    future_marker = re.compile(
+        r"(?:\bif\b|\bwould\b|\bwill\b|\bmove(?:s|d|ing)?\b|"
+        r"\bpush(?:es|ed|ing)?\b|\bto\b|\btoward(?:s)?\b|\bfrom\b|"
+        r"\u5982\u679c|\u82e5|\u5c06|\u4f1a|\u79fb\u52a8|\u63a8\u5230|\u63a8\u5411|"
+        r"\u6539\u5230|\u53d8\u6210)",
+        flags=re.IGNORECASE,
+    )
+    stable_patterns = (
+        re.compile(
+            rf"(?P<entity>{stable_entity})(?P<between>.{{0,60}}?)"
+            rf"[\(\uFF08]\s*(?P<row>\d{{1,2}})\s*[,，]\s*(?P<column>\d{{1,2}})\s*[\)\uFF09]",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"(?P<entity>{stable_entity})(?P<between>.{{0,60}}?)"
+            rf"(?:row|line)\s*(?P<row>\d{{1,2}})\s*,?\s*(?:column|col)\s*(?P<column>\d{{1,2}})",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"(?P<entity>{stable_entity})(?P<between>.{{0,60}}?)"
+            rf"\u7b2c\s*(?P<row>\d{{1,2}})\s*\u884c\s*\u7b2c\s*(?P<column>\d{{1,2}})\s*\u5217",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"[\(\uFF08]\s*(?P<row>\d{{1,2}})\s*[,，]\s*(?P<column>\d{{1,2}})\s*[\)\uFF09]"
+            rf"(?P<between>.{{0,60}}?)(?P<entity>{stable_entity})",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"(?:row|line)\s*(?P<row>\d{{1,2}})\s*,?\s*(?:column|col)\s*(?P<column>\d{{1,2}})"
+            rf"(?P<between>.{{0,60}}?)(?P<entity>{stable_entity})",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"\u7b2c\s*(?P<row>\d{{1,2}})\s*\u884c\s*\u7b2c\s*(?P<column>\d{{1,2}})\s*\u5217"
+            rf"(?P<between>.{{0,60}}?)(?P<entity>{stable_entity})",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"\u7b2c\s*(?P<row>\d{{1,2}})\s*\u884c\s*\u7b2c\s*(?P<column>\d{{1,2}})\s*\u5217"
+            rf"(?P<between>.{{0,60}}?)(?:\u662f|\u4e3a|\u5c5e\u4e8e)\s*(?P<entity>{stable_entity})",
+            flags=re.IGNORECASE,
+        ),
+    )
+    seen_claims = set()
+    for stable_pattern in stable_patterns:
+        for match in stable_pattern.finditer(str(text or "")):
+            between = match.group("between")
+            if not current_marker.search(between) or future_marker.search(between):
+                continue
+            entity_name = match.group("entity").upper()
+            if entity_name in {"玩家", "起点"}:
+                entity_name = "P"
+            claim = (
+                entity_name,
+                int(match.group("row")),
+                int(match.group("column")),
+            )
+            if claim in seen_claims:
+                continue
+            seen_claims.add(claim)
+            yield claim[0], {"row": claim[1], "column": claim[2]}
+
     for pattern in patterns:
         for match in pattern.finditer(str(text or "")):
             entity_name = match.group("entity").upper()
@@ -1774,12 +1978,24 @@ def _entity_coordinate_claims(text, rows):
             }
 
 
-def _validate_entity_coordinate_claims(text, rows):
+def _validate_entity_coordinate_claims(text, rows, *, entity_bindings=None):
     try:
-        expected = _map_entity_coordinates(rows)
+        expected = _map_entity_coordinates(rows, entity_bindings)
+        facts = build_map_facts(rows, entity_bindings=entity_bindings)
+        uncertain = {
+            item.get("id")
+            for item in facts.get("entities") or []
+            if item.get("id") and item.get("identityConfidence") != "exact"
+        }
     except (TypeError, ValueError, KeyError):
         return
     for entity_name, claimed in _entity_coordinate_claims(text, rows):
+        if entity_name in {"\u73a9\u5bb6", "\u8d77\u70b9"}:
+            entity_name = "P"
+        if entity_name in uncertain:
+            raise ValueError(
+                f"The saved Stage cannot verify the identity of {entity_name}; use a coordinate instead."
+            )
         actual = expected.get(entity_name)
         if actual is None:
             raise ValueError(f"The reply refers to an unknown map entity {entity_name}.")
@@ -1897,6 +2113,7 @@ def generate_chat_reply(
                 request_id,
                 language,
                 proposal_validator,
+                effective_stage_context.get("entityBindings"),
             )
         except LLMServiceError:
             raise
@@ -1953,6 +2170,17 @@ def generate_chat_reply(
             ]
     elif explicit_action in {"challenge_revision", "alternative_revision"}:
         revision_state, revision_brief = "not_request", None
+
+    if explicit_action == "alternative_revision":
+        cited_offer = effective_stage_context.get("sourceProposalOffer") or {}
+        cited_summary = str(cited_offer.get("summary") or "").strip()
+        cited_rationale = str(cited_offer.get("rationale") or "").strip()
+        effective_stage_context["alternativeRevisionBrief"] = (
+            "Generate one materially different proposal for the same designer direction. "
+            f"The cited proposal was {cited_summary!r}: {cited_rationale!r}. "
+            "Do not reuse its exact required transition set; choose a different local treatment "
+            "that remains grounded in the current saved Stage."
+        )
 
     if not assessment_only and revision_state != "not_request":
         effective_stage_context["revisionRequestState"] = revision_state
@@ -2191,7 +2419,16 @@ def _generate_revision_search_proposal_sync(
         error.proposal_diagnostics = {"category": "contract_conflict"}
         raise error from exception
     try:
-        validate_revision_plan_against_map(rows, plan)
+        validate_revision_plan_against_map(
+            rows,
+            plan,
+            (stage_context or {}).get("entityBindings"),
+        )
+        _validate_revision_plan_entities(
+            plan,
+            rows,
+            (stage_context or {}).get("entityBindings"),
+        )
     except ValueError as exception:
         error = LLMServiceError(
             "REVISION_CONTRACT_INVALID",
@@ -2275,6 +2512,7 @@ def _generate_revision_search_proposal_sync(
                 baseline_metrics=baseline_metrics,
                 movement_requirement=movement_requirement,
                 preserved_components=preserved_components,
+                entity_bindings=(stage_context or {}).get("entityBindings"),
                 started_at=started_at,
                 deadline=deadline,
             )
@@ -2354,6 +2592,10 @@ def _bind_execution_brief_to_plan(plan, execution_brief):
         )
         for item in execution_brief.get("requiredTransitions") or []
     )
+    transition_entities = tuple(
+        item.get("anchorEntity")
+        for item in execution_brief.get("requiredTransitions") or []
+    )
     if not transitions and not execution_brief.get("effect"):
         return plan
     first = plan.strategies[0]
@@ -2388,6 +2630,7 @@ def _bind_execution_brief_to_plan(plan, execution_brief):
         preserve=preserve,
         edit_budget=min(12, edit_budget),
         required_transitions=transitions,
+        required_transition_entities=transition_entities,
         anchor_entities=tuple(execution_brief.get("anchors") or first.anchor_entities),
         play_objective=execution_brief.get("playObjective") or first.play_objective,
     )
@@ -2407,6 +2650,30 @@ def _require_exact_revision_plan(plan):
     return plan
 
 
+def _validate_revision_plan_entities(plan, rows, entity_bindings=None):
+    """Apply the same current-stage identity rules to the planner output."""
+    if entity_bindings is None:
+        return
+    for index, strategy in enumerate(plan.strategies, start=1):
+        data = strategy.as_dict()
+        brief = {
+            "schemaVersion": 1,
+            "effect": data.get("effect"),
+            "anchors": data.get("anchorEntities") or [],
+            "focus": data.get("focus"),
+            "requiredTransitions": data.get("requiredTransitions") or [],
+            "allowedOperators": data.get("operators") or [],
+            "preserve": data.get("preserve") or [],
+            "playObjective": data.get("playObjective"),
+        }
+        try:
+            _validate_execution_brief(brief, rows, entity_bindings)
+        except (TypeError, ValueError) as exception:
+            raise ValueError(
+                f"RevisionPlan strategy {index} is not bound to the current entity snapshot: {exception}"
+            ) from exception
+
+
 def _build_revision_plan_messages(
     conversation,
     rows,
@@ -2417,6 +2684,9 @@ def _build_revision_plan_messages(
 ):
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     revision_brief = str(stage_context.get("authorizedRevisionBrief") or "").strip()
+    alternative_brief = str(
+        stage_context.get("alternativeRevisionBrief") or ""
+    ).strip()
     execution_brief = stage_context.get("authorizedExecutionBrief") or {}
     original_brief = str(stage_context.get("relaxationOriginalBrief") or "").strip()
     relaxation_rule = (
@@ -2428,7 +2698,11 @@ def _build_revision_plan_messages(
     )
     movement_rule = _movement_requirement_prompt(movement_requirement)
     preservation_rule = _preserved_components_prompt(preserved_components)
-    map_facts = _map_facts_for_prompt(rows, stage_context)
+    map_facts = (
+        _canonical_entity_table(rows, stage_context)
+        + "\n"
+        + _map_facts_for_prompt(rows, stage_context)
+    )
     continuity_context = _continuity_context_prompt(stage_context, role="revision")
     edit_facts = _editable_focus_facts(rows, execution_brief.get("focus"))
     numbered_map = "\n".join(
@@ -2451,7 +2725,7 @@ def _build_revision_plan_messages(
     transcript = [latest_user] if latest_user else []
     system_prompt = (
         "You are the Sokoban co-creation revision-planning assistant. Compile a designer-authorized semantic RevisionPlan "
-        "for one saved 12x10 Stage into a detailed, executable RevisionPlan. Resolve the intended "
+        "for one saved 10-row × 12-column Stage into a detailed, executable RevisionPlan. Resolve the intended "
         "change into exact one-based coordinates and before/after tile states using only the authoritative "
         "map facts below. Do not generate map rows or tile operations. Do not generate full map rows; do not return map rows or tile operations; a separate level revision assistant may realize "
         "the frozen transitions, while the application owns all cell changes, structural "
@@ -2492,6 +2766,7 @@ def _build_revision_plan_messages(
         f"{_design_context_prompt(stage_context, role='revision')}\n\n"
         f"{continuity_context}\n\n"
         f"Authorized revision brief: {revision_brief!r}. "
+        f"Alternative proposal constraint: {alternative_brief!r}. "
         f"Structured execution brief (authoritative when present): "
         f"{json.dumps(execution_brief, ensure_ascii=False, separators=(',', ':'))}. "
         f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule} {movement_rule} "
@@ -2990,7 +3265,11 @@ def _build_map_operation_messages(
     numbered_map = "\n".join(
         f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
     )
-    map_facts = _map_facts_for_prompt(rows, stage_context)
+    map_facts = (
+        _canonical_entity_table(rows, stage_context)
+        + "\n"
+        + _map_facts_for_prompt(rows, stage_context)
+    )
     focus_facts = [
         {
             "strategyIndex": strategy.get("strategyIndex"),
@@ -3004,7 +3283,7 @@ def _build_map_operation_messages(
     solver_evidence = _llm_solver_evidence(baseline_metrics or {})
     modifier_contract = _modifier_contract_view(revision_contract)
     system_prompt = (
-        "You are the Sokoban co-creation level revision assistant. The saved 12x10 Stage is "
+        "You are the Sokoban co-creation level revision assistant. The saved Stage has 10 rows × 12 columns and is "
         "immutable input. Execute only the supplied execution contract; do not reinterpret the "
         "designer's request, invent a broader goal, or use any conversation outside the contract. "
         "Return only concrete cell-operation candidates. The numbered map and Deterministic "
@@ -3066,7 +3345,8 @@ def _modifier_contract_view(revision_contract):
             "requiredTransitions": [
                 {
                     key: item.get(key)
-                    for key in ("row", "column", "from", "to")
+                    for key in ("row", "column", "from", "to", "anchorEntity")
+                    if key in item
                 }
                 for item in strategy.get("requiredTransitions") or []
             ],
@@ -3292,6 +3572,7 @@ def _deterministic_revision_fallback(
     movement_requirement,
     preserved_components,
     started_at,
+    entity_bindings=None,
     deadline=None,
 ):
     """Use the bounded local search when the modifier model cannot supply a valid candidate."""
@@ -3306,6 +3587,7 @@ def _deterministic_revision_fallback(
         ),
         movement_requirement=movement_requirement,
         preserved_components=preserved_components,
+        entity_bindings=entity_bindings,
     )
     strategy_index = result.strategy_index
     selected_contract = (revision_contract.get("strategies") or [])[result.strategy_index - 1]
@@ -3517,9 +3799,10 @@ def _deterministic_exact_revision(
     request_id,
     language,
     proposal_validator,
+    entity_bindings=None,
 ):
     """Execute a frozen transition contract without asking an LLM to guess cells."""
-    brief = _validate_execution_brief(execution_brief, rows)
+    brief = _validate_execution_brief(execution_brief, rows, entity_bindings)
     transitions = brief["requiredTransitions"]
     if not transitions:
         return None
@@ -3581,7 +3864,8 @@ def _deterministic_exact_revision(
             "playObjective": brief.get("playObjective"),
         }],
     })
-    validate_revision_plan_against_map(rows, plan)
+    validate_revision_plan_against_map(rows, plan, entity_bindings)
+    _validate_revision_plan_entities(plan, rows, entity_bindings)
     contract = _build_revision_execution_contract(plan, "", {})
     operations = [
         {
@@ -3649,7 +3933,7 @@ def _apply_map_operations(
             raise ValueError("operation coordinates must be integers")
         y, x = row - 1, column - 1
         if not (0 <= y < len(base_rows) and 0 <= x < len(base_rows[y])):
-            raise ValueError("operation coordinate is outside the 12x10 Stage")
+            raise ValueError("operation coordinate is outside the 10-row × 12-column Stage")
         before = base_rows[y][x]
         declared_before = operation.get("from")
         if declared_before is not None and declared_before != before:
@@ -4295,6 +4579,8 @@ async def _generate_plain_with_model_fallback(
                 messages,
                 validation_feedback,
                 validation_mode=validation_mode,
+                rows=rows,
+                stage_context=stage_context,
             )
             response = await asyncio.wait_for(
                 _request_completion(
@@ -4368,6 +4654,7 @@ async def _generate_plain_with_model_fallback(
                     visible_content,
                     rows,
                     historical_reference=historical_reference,
+                    entity_bindings=(stage_context or {}).get("entityBindings"),
                 )
                 if removed_grounding:
                     grounding_dropped_count += len(removed_grounding)
@@ -4394,6 +4681,7 @@ async def _generate_plain_with_model_fallback(
                     visible_content,
                     rows,
                     historical_reference=historical_reference,
+                    entity_bindings=(stage_context or {}).get("entityBindings"),
                 )
                 if removed_grounding:
                     grounding_dropped_count += len(removed_grounding)
@@ -4625,6 +4913,7 @@ async def _generate_plain_with_model_fallback(
                     guidance,
                     rows,
                     historical_reference=historical_reference,
+                    entity_bindings=(stage_context or {}).get("entityBindings"),
                 )
                 guidance["move"] = "observe_stage"
                 guidance["intentHypothesis"] = None
@@ -4653,11 +4942,13 @@ async def _generate_plain_with_model_fallback(
                 guidance.get("coordinateLinks"),
                 body,
                 rows,
+                (stage_context or {}).get("entityBindings"),
             )
             guidance["coordinateLinks"] = _recover_coordinate_links(
                 body,
                 rows,
                 guidance["coordinateLinks"],
+                (stage_context or {}).get("entityBindings"),
             )
             route_recovery["coordinateLinksDropped"] = (
                 original_coordinate_link_count > len(guidance["coordinateLinks"])
@@ -4709,11 +5000,13 @@ async def _generate_plain_with_model_fallback(
                     [body],
                     rows,
                     historical_reference=historical_reference,
+                    entity_bindings=(stage_context or {}).get("entityBindings"),
                 )
                 guidance = _sanitize_ordinary_grounding_metadata(
                     guidance,
                     rows,
                     historical_reference=historical_reference,
+                    entity_bindings=(stage_context or {}).get("entityBindings"),
                 )
             else:
                 grounding_texts = [
@@ -4730,6 +5023,7 @@ async def _generate_plain_with_model_fallback(
                     grounding_texts,
                     rows,
                     historical_reference=historical_reference,
+                    entity_bindings=(stage_context or {}).get("entityBindings"),
                 )
             evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
             if evidence_signature and guidance["uiCues"]:
@@ -4909,6 +5203,30 @@ async def _generate_plain_with_model_fallback(
             last_error.safe_message,
             validation_feedback,
         ):
+            clarification = _safe_grounding_clarification(language)
+            return LLMExecutionResult(
+                assistant_message=clarification,
+                assessment={},
+                proposed_rows=None,
+                modification_summary="",
+                attempts_used=last_error.attempts_used,
+                request_id=request_id,
+                # Keep the historical model label for integrations that use it
+                # as a presentation hint; the actual UI cue is now the
+                # neutral clarification card above.
+                model="grounding-safe-chat-fallback",
+                latency_ms=int((time.monotonic() - started_at) * 1000),
+                guidance={
+                    "move": "offer_perspective",
+                    "intentHypothesis": None,
+                    "intentConfidence": None,
+                    "followUpQuestion": None,
+                    "proposalOffer": None,
+                    "disagreement": None,
+                    "uiCues": [{"type": "clarification", "text": clarification}],
+                    "coordinateLinks": [],
+                },
+            )
             if validation_mode in {"ordinary_chat", "route_discussion"}:
                 return LLMExecutionResult(
                     assistant_message=_safe_grounding_chat_reply(language),
@@ -5290,6 +5608,8 @@ def _plain_messages_with_validation_feedback(
     validation_feedback,
     *,
     validation_mode="ordinary_chat",
+    rows=None,
+    stage_context=None,
 ):
     if not validation_feedback:
         return messages
@@ -5340,6 +5660,43 @@ def _plain_messages_with_validation_feedback(
             "fresh grounded reply. Use only verified entity IDs or coordinates for current map "
             "relations, and do not mention this correction to the designer."
         )
+    if rows is not None and any(
+        marker in feedback_lower
+        for marker in (
+            "spatial",
+            "grounding",
+            "map facts",
+            "does not match",
+            "saved map",
+        )
+    ):
+        try:
+            facts = json.loads(_map_facts_for_prompt(rows, stage_context))
+            entities = list(facts.get("entities") or [])
+            table = "\n".join(
+                (
+                    f"{item.get('id')}: row {item.get('row')}, column {item.get('column')} "
+                    f"(identity {item.get('identityConfidence') or 'unknown'})"
+                    if item.get("identityConfidence") == "exact"
+                    else (
+                        f"unlabelled {item.get('kind') or 'entity'} at row {item.get('row')}, "
+                        f"column {item.get('column')} (identity unknown; do not use a historical label)"
+                    )
+                )
+                for item in entities
+                if item.get("row") and item.get("column")
+            )
+            if table:
+                instruction += (
+                    "\n\nGrounding failure type/details (use only for correction, do not mention it): "
+                    f"{feedback_text[:500]}\n"
+                    "Authoritative current entity table for this retry (do not reorder or infer it):\n"
+                    f"{table}\n"
+                    f"Current map fingerprint: {facts.get('mapFingerprint')}\n"
+                    "Recheck every related entity and rewrite the complete reply using these exact bindings."
+                )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
     for message in corrected:
         if message.get("role") == "system":
             message["content"] = f"{message.get('content', '')}\n\n{instruction}"
@@ -5648,6 +6005,7 @@ def validate_chat_response(
             assistant_message,
             rows,
             historical_reference=historical_reference,
+            entity_bindings=(stage_context or {}).get("entityBindings"),
         )
         if not assistant_message:
             raise ValueError("A Stage opening has no grounded visible analysis left.")
@@ -5902,11 +6260,13 @@ def validate_chat_response(
         guidance.get("coordinateLinks"),
         assistant_message,
         rows,
+        (stage_context or {}).get("entityBindings"),
     )
     guidance["coordinateLinks"] = _recover_coordinate_links(
         assistant_message,
         rows,
         guidance["coordinateLinks"],
+        (stage_context or {}).get("entityBindings"),
     )
 
     modification_summary = payload.get("modificationSummary", "")
@@ -5920,11 +6280,13 @@ def validate_chat_response(
                 [assistant_message],
                 rows,
                 historical_reference=historical_reference,
+                entity_bindings=(stage_context or {}).get("entityBindings"),
             )
             guidance = _sanitize_ordinary_grounding_metadata(
                 guidance,
                 rows,
                 historical_reference=historical_reference,
+                entity_bindings=(stage_context or {}).get("entityBindings"),
             )
         else:
             grounding_texts = [
@@ -5954,6 +6316,7 @@ def validate_chat_response(
                 grounding_texts,
                 rows,
                 historical_reference=historical_reference,
+                entity_bindings=(stage_context or {}).get("entityBindings"),
             )
 
     return (
@@ -7026,7 +7389,7 @@ def _deduplicate_assistant_body(value):
     return "\n\n".join(paragraphs)
 
 
-def _normalize_response_paragraphs(value):
+def _legacy_normalize_response_paragraphs(value):
     """Balance visible prose without dropping sentences or route details."""
     body = _deduplicate_assistant_body(value)
     if not body:
@@ -7653,10 +8016,15 @@ def _plain_action_instruction(stage_context):
             "GUIDANCE fields, including DISCUSS, WARNING, or proposal fields."
         )
     if action == "alternative_revision":
+        alternative_brief = str(context.get("alternativeRevisionBrief") or "").strip()
         return (
             "CARD ACTION: alternative_revision. The cited proposal is "
             f"{offer_text}. Offer a different conceptual local treatment with a different summary and "
-            "playable rationale. Do not emit map rows or a disagreement."
+            "playable rationale. Return exactly one proposalOffer with a complete, current-Stage-"
+            "validated executionBrief containing every required transition and anchorEntity for any "
+            "entity movement. Do not emit map rows or a disagreement. If the current facts cannot "
+            "support a different exact proposal, ask for clarification and omit proposalOffer. "
+            f"{alternative_brief}"
         )
     if context.get("challengeContext"):
         return (
@@ -7752,7 +8120,7 @@ def _is_length_failure(exception, validation_feedback=None):
     return "token limit" in text or "too long" in text or "cut off" in text
 
 
-def _route_sentence_profile(value):
+def _legacy_route_sentence_profile(value):
     text = str(value or "")
     coordinate_pattern = re.compile(
         r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
@@ -7815,7 +8183,7 @@ def _route_reasoning_is_overlong(value):
     return _route_reasoning_profile(value)["overlong"]
 
 
-def _compact_arrow_route_sentence(sentence):
+def _legacy_compact_arrow_route_sentence(sentence):
     """Collapse an explicit arrow chain while preserving its endpoints and prose."""
     coordinate = r"[\(\uFF08]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\)\uFF09]"
     chain_pattern = re.compile(
@@ -8061,6 +8429,19 @@ def _safe_grounding_chat_reply(language):
     )
 
 
+def _safe_grounding_clarification(language):
+    """Neutral user-facing recovery after bounded grounding retries."""
+    if language == "zh-CN":
+        return (
+            "当前还没有形成一份与已保存地图完全一致、可验证的方案。"
+            "地图没有被修改，请重新生成方案，或补充需要调整的具体方向。"
+        )
+    return (
+        "I could not form a proposal that is fully consistent with the saved map. "
+        "The map was not changed; please regenerate the proposal or clarify the direction to adjust."
+    )
+
+
 def _is_map_grounding_failure(exception, validation_feedback=None):
     text = " ".join(
         str(value or "") for value in (exception, validation_feedback)
@@ -8076,6 +8457,9 @@ def _is_map_grounding_failure(exception, validation_feedback=None):
         "does not match the saved map",
         "places b",
         "places t",
+        "places p",
+        "saved map does not support",
+        "is beside water",
         "historical stage map claim",
         "current box is close to a target",
         "current player is close to a target",
@@ -8503,7 +8887,7 @@ def _apply_guidance_card_policy(guidance):
     return normalized
 
 
-def _exact_revision_clarification(language):
+def _legacy_exact_revision_clarification(language):
     if language == "zh-CN":
         return (
             "为了避免按猜测改图，请明确指出要修改的坐标，并说明每个格子修改前是什么、修改后要变成什么。"
@@ -8513,7 +8897,7 @@ def _exact_revision_clarification(language):
     )
 
 
-def _multiple_proposal_fallback_reply(language):
+def _legacy_multiple_proposal_fallback_reply(language):
     if language == "zh-CN":
         return (
             "我会一次只提出一个可执行方案。刚才的回复包含了多个候选方向，"
@@ -9911,7 +10295,7 @@ def _proposal_operation_family(operations):
     )
 
 
-def _validate_revision_plan_payload(value, rows=None):
+def _validate_revision_plan_payload(value, rows=None, entity_bindings=None):
     """Normalize the Chat plan into the existing exact executionBrief shape."""
     if not isinstance(value, dict):
         raise ValueError("revisionPlan must be an object.")
@@ -9954,9 +10338,15 @@ def _validate_revision_plan_payload(value, rows=None):
     operations = []
     seen_coordinates = set()
     for index, change in enumerate(changes):
-        if not isinstance(change, dict) or set(change) != {
-            "row", "column", "before", "after", "operation"
-        }:
+        if (
+            not isinstance(change, dict)
+            or not {
+                "row", "column", "before", "after", "operation"
+            }.issubset(change)
+            or set(change) - {
+                "row", "column", "before", "after", "operation", "anchorEntity"
+            }
+        ):
             raise ValueError(
                 f"revisionPlan.changes[{index}] must contain row, column, before, after, and operation."
             )
@@ -9965,6 +10355,7 @@ def _validate_revision_plan_payload(value, rows=None):
         before = change["before"]
         after = change["after"]
         operation = change["operation"]
+        anchor_entity = change.get("anchorEntity")
         if (
             isinstance(row, bool)
             or isinstance(column, bool)
@@ -9981,6 +10372,10 @@ def _validate_revision_plan_payload(value, rows=None):
                 "add_water", "remove_water",
             }
             or transition_by_operation.get((before, after)) != operation
+            or (
+                anchor_entity is not None
+                and anchor_entity not in {"P", "B1", "B2", "T1", "T2"}
+            )
         ):
             raise ValueError(f"revisionPlan.changes[{index}] is not an exact supported transition.")
         seen_coordinates.add((row, column))
@@ -9989,6 +10384,11 @@ def _validate_revision_plan_payload(value, rows=None):
             "column": column,
             "from": before,
             "to": after,
+            **(
+                {"anchorEntity": anchor_entity}
+                if anchor_entity is not None
+                else {}
+            ),
         })
         operations.append(operation)
 
@@ -10015,10 +10415,10 @@ def _validate_revision_plan_payload(value, rows=None):
         "preserve": list(preserve),
         "playObjective": text_fields["objective"],
     }
-    return _validate_execution_brief(brief, rows)
+    return _validate_execution_brief(brief, rows, entity_bindings)
 
 
-def _validate_execution_brief(value, rows=None):
+def _validate_execution_brief(value, rows=None, entity_bindings=None):
     """Validate the hidden, machine-facing part of a conceptual revision card."""
     if not isinstance(value, dict):
         raise ValueError("executionBrief must be an object.")
@@ -10061,7 +10461,11 @@ def _validate_execution_brief(value, rows=None):
     seen_coordinates = set()
     allowed_tiles = set("#.@pst")
     for transition in transitions:
-        if not isinstance(transition, dict) or set(transition) != {"row", "column", "from", "to"}:
+        if (
+            not isinstance(transition, dict)
+            or not {"row", "column", "from", "to"}.issubset(transition)
+            or set(transition) - {"row", "column", "from", "to", "anchorEntity"}
+        ):
             raise ValueError("executionBrief has an invalid required transition.")
         row, column = transition["row"], transition["column"]
         before, after = transition["from"], transition["to"]
@@ -10074,11 +10478,19 @@ def _validate_execution_brief(value, rows=None):
         ):
             raise ValueError("executionBrief has an invalid required transition.")
         seen_coordinates.add((row, column))
+        anchor_entity = transition.get("anchorEntity")
+        if anchor_entity is not None and anchor_entity not in {"P", "B1", "B2", "T1", "T2"}:
+            raise ValueError("executionBrief has an invalid anchorEntity.")
         normalized_transitions.append({
             "row": row,
             "column": column,
             "from": before,
             "to": after,
+            **(
+                {"anchorEntity": anchor_entity}
+                if anchor_entity is not None
+                else {}
+            ),
         })
     operators = value.get("allowedOperators", [])
     valid_operators = {
@@ -10138,14 +10550,126 @@ def _validate_execution_brief(value, rows=None):
     if rows is not None:
         if len(rows) != 10 or any(len(row) != 12 for row in rows):
             raise ValueError("executionBrief cannot be checked against an invalid Stage.")
-        facts = build_map_facts(rows)
+        facts = build_map_facts(rows, entity_bindings=entity_bindings)
+        fact_entities = list(facts.get("entities") or [])
         known_anchors = {
-            "P",
-            *(box["id"] for box in facts.get("boxes") or []),
-            *(target["id"] for target in facts.get("targets") or []),
+            item.get("id")
+            for item in fact_entities
+            if item.get("id")
         }
         if any(anchor not in known_anchors for anchor in anchors):
             raise ValueError("executionBrief names an entity that is not on the saved Stage.")
+        entities_by_id = {
+            item.get("id"): item
+            for item in fact_entities
+            if item.get("id")
+        }
+        if any(
+            entities_by_id.get(anchor, {}).get("identityConfidence") != "exact"
+            for anchor in anchors
+        ):
+            raise ValueError("executionBrief cannot use an entity with unknown identity.")
+        entity_tiles = {"P": "p", "B1": "s", "B2": "s", "T1": "t", "T2": "t"}
+        for label in anchors:
+            entity = entities_by_id[label]
+            tile = entity_tiles[label]
+            source_indexes = [
+                index
+                for index, item in enumerate(normalized_transitions)
+                if item.get("anchorEntity") is None
+                and item["from"] == tile
+                and item["to"] == "."
+                and (item["row"], item["column"])
+                == (entity["row"], entity["column"])
+            ]
+            destination_indexes = [
+                index
+                for index, item in enumerate(normalized_transitions)
+                if item.get("anchorEntity") is None
+                and item["from"] == "."
+                and item["to"] == tile
+            ]
+            if len(source_indexes) == 1 and len(destination_indexes) == 1:
+                normalized_transitions[source_indexes[0]] = {
+                    **normalized_transitions[source_indexes[0]],
+                    "anchorEntity": label,
+                }
+                normalized_transitions[destination_indexes[0]] = {
+                    **normalized_transitions[destination_indexes[0]],
+                    "anchorEntity": label,
+                }
+        tagged = {}
+        for transition in normalized_transitions:
+            label = transition.get("anchorEntity")
+            if label is None:
+                continue
+            entity = entities_by_id.get(label)
+            if entity is None:
+                raise ValueError("executionBrief anchorEntity is not on the saved Stage.")
+            if entity.get("identityConfidence") == "unknown":
+                raise ValueError("executionBrief cannot use an entity with unknown identity.")
+            tile = {"P": "p", "B1": "s", "B2": "s", "T1": "t", "T2": "t"}[label]
+            coordinate = (transition["row"], transition["column"])
+            entity_coordinate = (entity["row"], entity["column"])
+            is_source = transition["from"] == tile and transition["to"] == "."
+            is_destination = transition["from"] == "." and transition["to"] == tile
+            if not (is_source or is_destination):
+                raise ValueError("executionBrief anchorEntity does not match its tile transition.")
+            if is_source and coordinate != entity_coordinate:
+                raise ValueError(
+                    f"executionBrief anchorEntity {label} does not match its source coordinate."
+                )
+            tagged.setdefault(label, {"sources": [], "destinations": []})[
+                "sources" if is_source else "destinations"
+            ].append(transition)
+
+        for label, group in tagged.items():
+            if len(group["sources"]) != 1 or len(group["destinations"]) != 1:
+                raise ValueError(
+                    f"executionBrief entity move for {label} requires one source and one destination."
+                )
+
+        moving_operators = {
+            operator_for_transition[(item["from"], item["to"])]
+            for item in normalized_transitions
+            if (item["from"], item["to"]) in operator_for_transition
+        } & {"move_player", "move_box", "move_target"}
+        if (
+            moving_operators
+            and entity_bindings is not None
+            and any(item.get("anchorEntity") is None for item in normalized_transitions)
+        ):
+            raise ValueError(
+                "entity movement transitions must identify their anchorEntity."
+            )
+        if any(label not in anchors for label in tagged):
+            raise ValueError("executionBrief anchors must include every transition entity.")
+        if moving_operators and effect in {"relocate_start", "relocate_box", "relocate_target"}:
+            expected_prefix = {
+                "relocate_start": "P",
+                "relocate_box": "B",
+                "relocate_target": "T",
+            }[effect]
+            relevant_anchors = [
+                anchor for anchor in anchors if anchor.startswith(expected_prefix)
+            ]
+            if len(relevant_anchors) != 1:
+                raise ValueError(
+                    f"{effect} requires exactly one explicitly bound entity anchor."
+                )
+            anchor = relevant_anchors[0]
+            entity = entities_by_id[anchor]
+            source_coordinates = {
+                (item["row"], item["column"])
+                for item in normalized_transitions
+                if item["from"] == {"P": "p", "B1": "s", "B2": "s", "T1": "t", "T2": "t"}[anchor]
+                and item["to"] == "."
+            }
+            if source_coordinates != {(entity["row"], entity["column"])}:
+                raise ValueError(
+                    f"{effect} transitions do not operate on anchor {anchor}."
+                )
+
         for transition in normalized_transitions:
             current = rows[transition["row"] - 1][transition["column"] - 1]
             if current != transition["from"]:
@@ -10166,14 +10690,14 @@ def _validate_execution_brief(value, rows=None):
     }
 
 
-def validate_execution_brief(value, rows=None):
+def validate_execution_brief(value, rows=None, entity_bindings=None):
     """Public server-side entry point for validating a proposal execution brief."""
-    return _validate_execution_brief(value, rows)
+    return _validate_execution_brief(value, rows, entity_bindings)
 
 
-def normalize_revision_plan(value, rows=None):
+def normalize_revision_plan(value, rows=None, entity_bindings=None):
     """Public server-side entry point for normalizing a Chat revision plan."""
-    return _validate_revision_plan_payload(value, rows)
+    return _validate_revision_plan_payload(value, rows, entity_bindings)
 
 
 def _validate_guidance(payload, assessment_only, language="en", stage_context=None, rows=None):
@@ -10277,11 +10801,13 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
             normalized_brief = _validate_revision_plan_payload(
                 raw_proposal_offer["revisionPlan"],
                 rows,
+                (stage_context or {}).get("entityBindings"),
             )
         if "executionBrief" in raw_proposal_offer:
             execution_brief = _validate_execution_brief(
                 raw_proposal_offer["executionBrief"],
                 rows,
+                (stage_context or {}).get("entityBindings"),
             )
             if normalized_brief is not None and execution_brief != normalized_brief:
                 raise ValueError(
@@ -10495,10 +11021,16 @@ def _route_text_has_direction(text):
     ))
 
 
-def _route_anchor_matches(text, rows):
+def _route_anchor_matches(text, rows, entity_bindings=None):
     """Return ordered entity/coordinate anchors with their visible spans."""
     try:
-        entity_coordinates = _map_entity_coordinates(rows)
+        entity_coordinates = _map_entity_coordinates(rows, entity_bindings)
+        facts = build_map_facts(rows, entity_bindings=entity_bindings)
+        uncertain = {
+            item.get("id")
+            for item in facts.get("entities") or []
+            if item.get("id") and item.get("identityConfidence") != "exact"
+        }
     except (TypeError, ValueError, KeyError):
         return None
 
@@ -10523,6 +11055,8 @@ def _route_anchor_matches(text, rows):
         label = match.group(0).upper()
         if label in {"玩家", "起点"}:
             label = "P"
+        if label in uncertain:
+            return None
         point = entity_coordinates.get(label)
         if point is None:
             return None
@@ -10535,9 +11069,9 @@ def _route_anchor_matches(text, rows):
     return anchors
 
 
-def _route_anchors(text, rows):
+def _route_anchors(text, rows, entity_bindings=None):
     """Return ordered, authoritative coordinate anchors from route prose."""
-    matches = _route_anchor_matches(text, rows)
+    matches = _route_anchor_matches(text, rows, entity_bindings)
     if matches is None:
         return None
     anchors = []
@@ -10557,7 +11091,7 @@ def _route_text_is_concise(text):
     return len(re.findall(r"[.!?。！？]", value)) <= 1
 
 
-def _route_relation_is_explicit(text, source, destination, rows):
+def _legacy_route_relation_is_explicit(text, source, destination, rows):
     """Require a movement connector between the declared visible endpoints."""
     if not _route_text_is_concise(text):
         return False
@@ -10670,7 +11204,7 @@ def _coordinate_route_exists(rows, source, destination):
     return False
 
 
-def _coordinate_link_is_grounded(link, rows):
+def _coordinate_link_is_grounded(link, rows, entity_bindings=None):
     if rows is None:
         return True
     if not _route_relation_is_explicit(
@@ -10678,6 +11212,7 @@ def _coordinate_link_is_grounded(link, rows):
         link.get("from"),
         link.get("to"),
         rows,
+        entity_bindings,
     ):
         return False
     if not _coordinate_route_exists(rows, link.get("from"), link.get("to")):
@@ -10685,7 +11220,7 @@ def _coordinate_link_is_grounded(link, rows):
     return True
 
 
-def _recover_coordinate_links(body, rows, existing=None):
+def _legacy_recover_coordinate_links(body, rows, existing=None, entity_bindings=None):
     """Recover links only from explicit, directional, map-grounded route sentences."""
     if not rows:
         return list(existing or [])
@@ -10700,7 +11235,7 @@ def _recover_coordinate_links(body, rows, existing=None):
         text = segment.strip()
         if not text or not _route_text_has_direction(text):
             continue
-        anchors = _route_anchors(text, rows)
+        anchors = _route_anchors(text, rows, entity_bindings)
         if not anchors or len(anchors) < 2:
             continue
         candidate = {
@@ -10708,7 +11243,7 @@ def _recover_coordinate_links(body, rows, existing=None):
             "from": anchors[0],
             "to": anchors[-1],
         }
-        if not _coordinate_link_is_grounded(candidate, rows):
+        if not _coordinate_link_is_grounded(candidate, rows, entity_bindings):
             continue
         key = (
             candidate["text"], candidate["from"]["row"], candidate["from"]["column"],
@@ -10727,7 +11262,7 @@ def _recover_coordinate_links(body, rows, existing=None):
     return links[:COORDINATE_LINK_LIMIT]
 
 
-def _route_relation_clauses(text, rows=None):
+def _legacy_route_relation_clauses(text, rows=None, entity_bindings=None):
     """Split route prose at sentence and explicit relation boundaries."""
     sentences = re.split(
         r"(?<=[.!?\u3002\uff01\uff1f])\s*|[\r\n]+",
@@ -10766,7 +11301,7 @@ def _route_relation_clauses(text, rows=None):
     return clauses
 
 
-def _route_relation_clauses(text, rows=None):
+def _route_relation_clauses(text, rows=None, entity_bindings=None):
     """Split route prose at sentence and explicit relation boundaries."""
     sentences = re.split(
         r"(?<=[.!?\u3002\uff01\uff1f])\s*|[\r\n]+",
@@ -10791,8 +11326,8 @@ def _route_relation_clauses(text, rows=None):
             )
             if rows is not None and len(comma_parts) > 1:
                 split_independent = any(
-                    len(_route_anchor_matches(left, rows) or []) >= 2
-                    and len(_route_anchor_matches(right, rows) or []) >= 2
+                    len(_route_anchor_matches(left, rows, entity_bindings) or []) >= 2
+                    and len(_route_anchor_matches(right, rows, entity_bindings) or []) >= 2
                     for left, right in zip(comma_parts, comma_parts[1:])
                 )
                 if split_independent:
@@ -10849,11 +11384,11 @@ def _route_relation_candidates(text, rows):
     return candidates
 
 
-def _route_relation_is_explicit(text, source, destination, rows):
+def _route_relation_is_explicit(text, source, destination, rows, entity_bindings=None):
     """Accept one local movement relation, not a location statement or route chain."""
     if not _route_text_is_concise(text):
         return False
-    matches = _route_relation_anchor_matches(str(text or ""), rows)
+    matches = _route_relation_anchor_matches(str(text or ""), rows, entity_bindings)
     if not matches:
         return False
     anchors = []
@@ -10868,13 +11403,17 @@ def _route_relation_is_explicit(text, source, destination, rows):
         candidate["from"] == source
         and candidate["to"] == destination
         and candidate["text"] in str(text or "")
-        for candidate in _route_relation_candidates_without_grounding(text, rows)
+        for candidate in _route_relation_candidates_without_grounding(
+            text,
+            rows,
+            entity_bindings,
+        )
     )
 
 
-def _route_relation_anchor_matches(text, rows):
+def _route_relation_anchor_matches(text, rows, entity_bindings=None):
     """Ignore an entity's ``from`` coordinate qualifier, but keep real waypoints."""
-    matches = _route_anchor_matches(text, rows)
+    matches = _route_anchor_matches(text, rows, entity_bindings)
     if matches is None:
         return None
 
@@ -10894,7 +11433,7 @@ def _route_relation_anchor_matches(text, rows):
     return filtered
 
 
-def _route_relation_candidates_without_grounding(text, rows):
+def _route_relation_candidates_without_grounding(text, rows, entity_bindings=None):
     """Build local relation snippets before the recursive grounding check."""
     candidates = []
     movement = re.compile(
@@ -10904,8 +11443,8 @@ def _route_relation_candidates_without_grounding(text, rows):
         r"\u79fb\u52a8\u5230|\u63a8\u5411|\u63a8\u5230|\u7ed5\u5411|\u7a7f\u8fc7))",
         flags=re.IGNORECASE,
     )
-    for clause in _route_relation_clauses(text, rows):
-        matches = _route_relation_anchor_matches(clause, rows)
+    for clause in _route_relation_clauses(text, rows, entity_bindings):
+        matches = _route_relation_anchor_matches(clause, rows, entity_bindings)
         if not matches or len(matches) < 2:
             continue
         anchors = []
@@ -10918,7 +11457,7 @@ def _route_relation_candidates_without_grounding(text, rows):
             between = clause[source["end"]:destination["start"]]
             if re.search(
                 r"\b(?:is|are|lies?|sits?|located|positioned|placed)\b[^.!?]{0,40}"
-                r"\b(?:near|beside|adjacent|next\s+to|to\s+the\s+left|to\s+the\s+right|"
+                r"\b(?:near|close\s+to|beside|adjacent|next\s+to|to\s+the\s+left|to\s+the\s+right|"
                 r"above|below)\b|"
                 r"(?:\u5728|\u4f4d\u4e8e|\u9760\u8fd1|\u65c1\u8fb9|\u76f8\u90bb|\u5de6\u4fa7|"
                 r"\u53f3\u4fa7|\u4e0a\u65b9|\u4e0b\u65b9)",
@@ -10945,7 +11484,7 @@ def _route_relation_candidates_without_grounding(text, rows):
     return candidates
 
 
-def _recover_coordinate_links(body, rows, existing=None):
+def _recover_coordinate_links(body, rows, existing=None, entity_bindings=None):
     """Recover up to twelve local route links from grounded visible prose."""
     if not rows:
         return list(existing or [])
@@ -10957,8 +11496,12 @@ def _recover_coordinate_links(body, rows, existing=None):
         )
         for item in links
     }
-    for candidate in _route_relation_candidates_without_grounding(body, rows):
-        if not _coordinate_link_is_grounded(candidate, rows):
+    for candidate in _route_relation_candidates_without_grounding(
+        body,
+        rows,
+        entity_bindings,
+    ):
+        if not _coordinate_link_is_grounded(candidate, rows, entity_bindings):
             continue
         key = (
             candidate["text"], candidate["from"]["row"], candidate["from"]["column"],
@@ -10980,13 +11523,13 @@ def _recover_coordinate_links(body, rows, existing=None):
     return links[:COORDINATE_LINK_LIMIT]
 
 
-def _filter_coordinate_links(value, body, rows=None):
+def _filter_coordinate_links(value, body, rows=None, entity_bindings=None):
     """Keep only LLM-authored annotations that survived visible-body cleanup."""
     visible_body = str(body or "")
     filtered = []
     occupied_ranges = []
     for link in _normalize_coordinate_links(value, rows=rows):
-        if not _coordinate_link_is_grounded(link, rows):
+        if not _coordinate_link_is_grounded(link, rows, entity_bindings):
             continue
         start = visible_body.find(link["text"])
         if start < 0:

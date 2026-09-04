@@ -14,6 +14,13 @@ from design_context import (
     normalize_design_context,
     set_active_disagreement,
 )
+from level_validation import (
+    build_entity_bindings,
+    build_untrusted_entity_bindings,
+    derive_entity_transitions,
+    entity_binding_fingerprint,
+    entity_bindings_match_rows,
+)
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -58,6 +65,7 @@ CREATE TABLE IF NOT EXISTS level_versions (
     diff_json TEXT NOT NULL,
     validation_json TEXT NOT NULL,
     design_context_json TEXT,
+    entity_bindings_json TEXT,
     idempotency_key TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(session_id, stage_number),
@@ -199,6 +207,7 @@ def initialize_database():
         _ensure_column(database, "conversation_turns", "guidance_json", "TEXT")
         _ensure_column(database, "conversation_turns", "proposal_binding_json", "TEXT")
         _ensure_column(database, "level_versions", "design_context_json", "TEXT")
+        _ensure_column(database, "level_versions", "entity_bindings_json", "TEXT")
         _ensure_column(database, "design_sessions", "demo_mode", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(database, "design_sessions", "deadline_started_at", "TEXT")
         _ensure_column(database, "design_sessions", "deadline_at", "TEXT")
@@ -206,6 +215,7 @@ def initialize_database():
         database.execute("PRAGMA foreign_keys=ON")
         database.commit()
         backfill_design_contexts(database)
+        backfill_entity_bindings(database)
         database.commit()
     finally:
         database.close()
@@ -302,6 +312,32 @@ def save_design_context(database, version_id, context):
     return normalized
 
 
+def load_entity_bindings(database, session_id, version_id):
+    row = database.execute(
+        "SELECT entity_bindings_json FROM level_versions WHERE session_id = ? AND id = ?",
+        (session_id, version_id),
+    ).fetchone()
+    if row is None or not row["entity_bindings_json"]:
+        return None
+    try:
+        value = load_json(row["entity_bindings_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def save_entity_bindings(database, version_id, bindings):
+    if not isinstance(bindings, dict):
+        raise ValueError("entity bindings must be an object")
+    normalized = dict(bindings)
+    normalized["bindingFingerprint"] = entity_binding_fingerprint(normalized)
+    database.execute(
+        "UPDATE level_versions SET entity_bindings_json = ? WHERE id = ?",
+        (dump_json(normalized), version_id),
+    )
+    return normalized
+
+
 def _has_valid_design_context(raw):
     if not raw:
         return False
@@ -310,6 +346,96 @@ def _has_valid_design_context(raw):
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
     return isinstance(value, dict) and value.get("schemaVersion") == 1
+
+
+def _has_valid_entity_bindings(raw, rows=None):
+    if not raw:
+        return False
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not (
+        isinstance(value, dict)
+        and value.get("schemaVersion") == 1
+        and isinstance(value.get("entities"), list)
+        and bool(value.get("mapFingerprint"))
+        and value.get("bindingFingerprint") == entity_binding_fingerprint(value)
+    ):
+        return False
+    return rows is None or entity_bindings_match_rows(value, rows)
+
+
+def backfill_entity_bindings(database):
+    """Seed persistent entity identities without making model-based guesses.
+
+    Existing versions are processed in Stage order.  The level validation
+    layer only inherits unchanged or uniquely provable moves; ambiguous legacy
+    edits are deliberately recorded as partial/unknown.
+    """
+    sessions = database.execute(
+        "SELECT id FROM design_sessions ORDER BY created_at, id"
+    ).fetchall()
+    for session in sessions:
+        versions = database.execute(
+            "SELECT * FROM level_versions WHERE session_id = ? ORDER BY stage_number, created_at",
+            (session["id"],),
+        ).fetchall()
+        for version in versions:
+            rows = load_json(version["rows_json"])
+            if _has_valid_entity_bindings(version["entity_bindings_json"], rows):
+                continue
+            parent = (
+                database.execute(
+                    "SELECT * FROM level_versions WHERE session_id = ? AND id = ?",
+                    (session["id"], version["parent_version_id"]),
+                ).fetchone()
+                if version["parent_version_id"]
+                else None
+            )
+            parent_bindings = (
+                load_json(parent["entity_bindings_json"])
+                if parent is not None and parent["entity_bindings_json"]
+                else None
+            )
+            parent_rows = load_json(parent["rows_json"]) if parent is not None else None
+            try:
+                transitions = (
+                    derive_entity_transitions(parent_rows, rows)
+                    if parent_rows is not None
+                    else None
+                )
+                bindings = build_entity_bindings(
+                    rows,
+                    parent_bindings=parent_bindings,
+                    entity_transitions=transitions,
+                    source="legacy_backfill",
+                )
+            except (ValueError, TypeError):
+                # Historical semantic validation rules must not prevent the
+                # service from starting. These identities are not execution
+                # safe and remain unknown until a valid child Stage proves
+                # them again.
+                bindings = build_untrusted_entity_bindings(
+                    rows,
+                    source="legacy_untrusted",
+                )
+            database.execute(
+                "UPDATE level_versions SET entity_bindings_json = ? WHERE id = ?",
+                (dump_json(bindings), version["id"]),
+            )
+            record_event(
+                database,
+                session["id"],
+                "entity_binding_backfilled",
+                {
+                    "versionId": version["id"],
+                    "stageNumber": version["stage_number"],
+                    "identityStatus": bindings["identityStatus"],
+                    "bindingFingerprint": bindings["bindingFingerprint"],
+                },
+                version["created_at"],
+            )
 
 
 def backfill_design_contexts(database):
@@ -518,6 +644,12 @@ def serialize_session(database, session_id):
         version["id"]: load_json(version["rows_json"]) or []
         for version in versions
     }
+    version_bindings = {
+        version["id"]: load_json(version["entity_bindings_json"])
+        if version["entity_bindings_json"]
+        else None
+        for version in versions
+    }
 
     # A Stage opening is normally owned by its assessment or accepted
     # proposal.  Older records may have neither marker, so use the earliest
@@ -559,7 +691,7 @@ def serialize_session(database, session_id):
                 first_assistant["id"]
             )
 
-    def public_turn_guidance(turn_guidance, body, rows, language):
+    def public_turn_guidance(turn_guidance, body, rows, language, entity_bindings=None):
         """Recheck stored route annotations before exposing historical turns."""
         guidance = _public_guidance(turn_guidance)
         try:
@@ -577,8 +709,9 @@ def serialize_session(database, session_id):
                 guidance.get("coordinateLinks"),
                 body,
                 rows,
+                entity_bindings,
             )
-            links = _recover_coordinate_links(body, rows, links)
+            links = _recover_coordinate_links(body, rows, links, entity_bindings)
         except (ImportError, TypeError, ValueError, KeyError):
             links = []
         if links:
@@ -658,6 +791,7 @@ def serialize_session(database, session_id):
             public_content_by_turn[turn["id"]],
             version_rows.get(turn["version_id"], []),
             turn["language"],
+            version_bindings.get(turn["version_id"]),
         )
         for turn in turns
     }
@@ -710,6 +844,14 @@ def serialize_session(database, session_id):
                 "reason": "version_changed",
             }
 
+        current_context = load_design_context(database, session_id, base_version_id)
+        if (current_context.get("activeDisagreement") or {}).get("status") == "active":
+            return {
+                "status": "disagreement_active",
+                "actionable": False,
+                "reason": "disagreement_active",
+            }
+
         rows = version_rows.get(base_version_id) or []
         expected_fingerprint = binding.get("mapFingerprint")
         if expected_fingerprint and map_fingerprint(rows) != expected_fingerprint:
@@ -717,6 +859,22 @@ def serialize_session(database, session_id):
                 "status": "stale",
                 "actionable": False,
                 "reason": "map_changed",
+            }
+
+        expected_binding_fingerprint = binding.get("entityBindingFingerprint")
+        current_bindings = version_bindings.get(base_version_id)
+        actual_binding_fingerprint = (
+            current_bindings or {}
+        ).get("bindingFingerprint")
+        if (
+            not expected_binding_fingerprint
+            or not actual_binding_fingerprint
+            or expected_binding_fingerprint != actual_binding_fingerprint
+        ):
+            return {
+                "status": "stale",
+                "actionable": False,
+                "reason": "entity_binding_changed",
             }
 
         brief = binding["executionBrief"]
@@ -856,6 +1014,7 @@ def serialize_session(database, session_id):
                 public_text(translation["body"], translation["language"]),
                 version_rows.get(translation_turn["version_id"], []),
                 translation["language"],
+                version_bindings.get(translation_turn["version_id"]),
             )
         translations_by_turn.setdefault(translation["turn_id"], {})[
             translation["language"]

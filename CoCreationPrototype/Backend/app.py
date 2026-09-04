@@ -26,7 +26,12 @@ from pydantic import BaseModel, ConfigDict
 from level_validation import (
     HEIGHT,
     WIDTH,
+    build_entity_bindings,
+    build_untrusted_entity_bindings,
     build_map_facts,
+    derive_entity_transitions,
+    entity_binding_fingerprint,
+    entity_bindings_match_rows,
     LevelValidationError,
     describe_diff,
     summarize_verified_diff,
@@ -44,7 +49,6 @@ from llm_client import (
     generate_chat_reply,
     generate_stage_assessment,
     normalize_revision_plan,
-    proposal_offer_requires_execution_brief,
     translate_turns,
     validate_execution_brief,
     _ensure_stage_one_orientation,
@@ -57,6 +61,7 @@ from repository import (
     get_current_version,
     get_session,
     get_version,
+    load_entity_bindings,
     load_design_context,
     load_json,
     map_fingerprint,
@@ -540,6 +545,10 @@ def _create_session_record(
         if existing is None:
             session_id = uuid.uuid4().hex
             version_id = uuid.uuid4().hex
+            initial_bindings = build_entity_bindings(
+                validation.rows,
+                source="initial",
+            )
             access_token = derive_token("access", session_id)
             integration_token = derive_token("integration", session_id)
             bootstrap_token = derive_token("bootstrap", session_id)
@@ -573,8 +582,9 @@ def _create_session_record(
                 INSERT INTO level_versions(
                     id, session_id, stage_number, parent_version_id, source,
                     rows_json, summary, diff_json, validation_json,
-                    design_context_json, idempotency_key, created_at
-                ) VALUES (?, ?, 1, NULL, 'initial', ?, ?, '[]', ?, ?, ?, ?)
+                    design_context_json, entity_bindings_json,
+                    idempotency_key, created_at
+                ) VALUES (?, ?, 1, NULL, 'initial', ?, ?, '[]', ?, ?, ?, ?, ?)
                 """,
                 (
                     version_id,
@@ -593,6 +603,7 @@ def _create_session_record(
                         "updatedFromStageId": version_id,
                         "updatedFromTurnId": None,
                     }),
+                    dump_json(initial_bindings),
                     "initial:" + idempotency_key,
                     created_at,
                 ),
@@ -1369,7 +1380,7 @@ def _send_message_locked(
         except LLMServiceError as exception:
             revision_failure = exception
             if exception.code == "REVISION_CONTRACT_INVALID":
-                execution = _revision_contract_invalid_execution(
+                execution = _revision_contract_clarification_execution(
                     language=language,
                     request_id=exception.request_id,
                     exception=exception,
@@ -1445,6 +1456,7 @@ def _send_message_locked(
             execution,
             source_offer,
             language,
+            source_binding,
         )
     if payload.action == "none" and context["stageContext"].get("source") == "human_edit":
         execution = _normalize_manual_edit_review_execution(
@@ -1458,6 +1470,7 @@ def _send_message_locked(
         context["rows"],
         content,
         language,
+        context["stageContext"].get("entityBindings"),
     )
     # The semantic patch is consumed by the server and never becomes a new
     # visible card or frontend protocol field.
@@ -1570,7 +1583,7 @@ def _send_message_locked(
                         "transitions": [
                             {
                                 key: item.get(key)
-                                for key in ("row", "column", "from", "to")
+                                for key in ("row", "column", "from", "to", "anchorEntity")
                             }
                             for item in (
                                 execution.proposal_binding.get(
@@ -2306,6 +2319,16 @@ def decide_proposal(
                     validation.rows,
                     session["language"],
                 )
+                proposal_offer = (
+                    proposal_guidance.get("proposalOffer")
+                    if isinstance(proposal_guidance, dict)
+                    else None
+                )
+                proposal_brief = (
+                    proposal_offer.get("executionBrief")
+                    if isinstance(proposal_offer, dict)
+                    else None
+                )
                 new_version_id = _insert_version(
                     database,
                     session,
@@ -2314,6 +2337,11 @@ def decide_proposal(
                     verified_summary,
                     "proposal:" + payload.idempotencyKey,
                     current,
+                    entity_transitions=(
+                        proposal_brief.get("requiredTransitions", [])
+                        if isinstance(proposal_brief, dict)
+                        else []
+                    ),
                 )
                 child_context = add_confirmed_decision(
                     load_design_context(database, session_id, new_version_id),
@@ -3072,17 +3100,44 @@ def _insert_version(
     current,
     parent_version_id=None,
     design_context=None,
+    entity_bindings=None,
+    entity_transitions=None,
 ):
     version_id = uuid.uuid4().hex
     now = utc_now()
     current_rows = load_json(current["rows_json"])
+    binding_parent_id = parent_version_id or current["id"]
+    parent_bindings = load_entity_bindings(
+        database,
+        session["id"],
+        binding_parent_id,
+    )
+    if not entity_transitions:
+        parent_rows = current_rows
+        if parent_version_id and parent_version_id != current["id"]:
+            parent_version = get_version(database, session["id"], parent_version_id)
+            if parent_version is not None:
+                parent_rows = load_json(parent_version["rows_json"])
+        entity_transitions = derive_entity_transitions(parent_rows, validation.rows)
+    if isinstance(entity_bindings, dict):
+        version_bindings = dict(entity_bindings)
+    else:
+        version_bindings = build_entity_bindings(
+            validation.rows,
+            parent_bindings=parent_bindings,
+            entity_transitions=entity_transitions,
+            source=source,
+        )
+    version_bindings["mapFingerprint"] = map_fingerprint(validation.rows)
+    version_bindings["bindingFingerprint"] = entity_binding_fingerprint(version_bindings)
     database.execute(
         """
         INSERT INTO level_versions(
             id, session_id, stage_number, parent_version_id, source,
             rows_json, summary, diff_json, validation_json,
-            design_context_json, idempotency_key, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            design_context_json, entity_bindings_json,
+            idempotency_key, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             version_id,
@@ -3101,6 +3156,7 @@ def _insert_version(
                     else load_design_context(database, session["id"], current["id"])
                 )
             ),
+            dump_json(version_bindings),
             idempotency_key,
             now,
         ),
@@ -3176,6 +3232,11 @@ def insert_turn(database, session, role, content, version_id, request_id, execut
                         offer,
                         version_id,
                         load_json(version["rows_json"]),
+                        load_entity_bindings(
+                            database,
+                            session["id"],
+                            version_id,
+                        ),
                     )
                 except (TypeError, ValueError):
                     proposal_binding = None
@@ -3526,6 +3587,30 @@ def build_llm_context(database, session_id, version):
         (session_id, version["id"]),
     ).fetchone()
     current_rows = load_json(version["rows_json"])
+    entity_bindings = load_entity_bindings(database, session_id, version["id"])
+    if not isinstance(entity_bindings, dict) or not entity_bindings_match_rows(
+        entity_bindings,
+        current_rows,
+    ):
+        fallback_parent = None
+        if isinstance(entity_bindings, dict):
+            fallback_parent = dict(entity_bindings)
+            fallback_parent["entities"] = [
+                {**item, "identityConfidence": "unknown"}
+                for item in entity_bindings.get("entities", [])
+                if isinstance(item, dict)
+            ]
+        try:
+            entity_bindings = build_entity_bindings(
+                current_rows,
+                parent_bindings=fallback_parent,
+                source="runtime_legacy_fallback",
+            )
+        except (ValueError, TypeError):
+            entity_bindings = build_untrusted_entity_bindings(
+                current_rows,
+                source="runtime_legacy_untrusted",
+            )
     design_context = load_design_context(database, session_id, version["id"])
     parent = (
         get_version(database, session_id, version["parent_version_id"])
@@ -3725,6 +3810,7 @@ def build_llm_context(database, session_id, version):
         "validation": load_json(version["validation_json"]),
         "conversation": conversation,
         "stageContext": {
+            "versionId": version["id"],
             "stageNumber": version["stage_number"],
             "source": version["source"],
             "initialDraftMethod": (
@@ -3737,8 +3823,14 @@ def build_llm_context(database, session_id, version):
             "afterRows": current_rows if version["source"] == "human_edit" else None,
             "diff": load_json(version["diff_json"]),
             "changeSummary": change_summary,
-            "mapFacts": build_map_facts(current_rows, parent_rows),
+            "mapFacts": build_map_facts(
+                current_rows,
+                parent_rows,
+                entity_bindings,
+            ),
+            "entityBindings": entity_bindings,
             "mapFingerprint": map_fingerprint(current_rows),
+            "entityBindingFingerprint": entity_bindings.get("bindingFingerprint"),
             "recentGuidance": recent_guidance,
             "activeDisagreement": recent_guidance["activeDisagreement"],
             "challengeContext": challenge_context,
@@ -4013,8 +4105,29 @@ def _preflight_proposal(
                 "The selected proposal has no reliable execution binding.",
                 details={"reason": "unbound"},
             )
+        current_version = get_version(
+            database,
+            session_id,
+            session["current_version_id"],
+        )
+        current_bindings = load_entity_bindings(
+            database,
+            session_id,
+            session["current_version_id"],
+        )
+        if current_version is None:
+            raise ApiError(
+                409,
+                "PROPOSAL_PRECONDITION_FAILED",
+                "The selected proposal has no reliable execution binding.",
+                details={"reason": "version_missing"},
+            )
         try:
-            brief = validate_execution_brief(raw_brief, current_rows)
+            brief = validate_execution_brief(
+                raw_brief,
+                current_rows,
+                current_bindings,
+            )
         except (TypeError, ValueError) as exception:
             raise ApiError(
                 409,
@@ -4025,6 +4138,9 @@ def _preflight_proposal(
         binding = {
             "baseVersionId": source_turn["version_id"],
             "mapFingerprint": map_fingerprint(current_rows),
+            "entityBindingFingerprint": (
+                current_bindings or {}
+            ).get("bindingFingerprint"),
             "executionBrief": brief,
             "status": "active",
         }
@@ -4043,7 +4159,7 @@ def _preflight_proposal(
                 "transitions": [
                     {
                         key: item.get(key)
-                        for key in ("row", "column", "from", "to")
+                        for key in ("row", "column", "from", "to", "anchorEntity")
                     }
                     for item in brief.get("requiredTransitions", [])
                 ],
@@ -4070,6 +4186,11 @@ def _preflight_proposal(
             "The selected proposal has no reliable execution binding.",
             details={"reason": "unbound"},
         )
+    current_bindings = load_entity_bindings(
+        database,
+        session_id,
+        session["current_version_id"],
+    )
     try:
         # Re-check the stored shape without comparing it to the current map;
         # the fingerprint and transitions below perform that preflight.
@@ -4112,6 +4233,36 @@ def _preflight_proposal(
             "The selected proposal belongs to an older Stage.",
             details={"reason": "version_changed"},
         )
+    # If the requested diff is already present, report that stable terminal
+    # state before snapshot checks.  This remains a non-mutating precondition
+    # failure and gives clients the useful reason even when an older client
+    # refreshed only the proposal's map fingerprint.
+    for transition in brief.get("requiredTransitions") or []:
+        row = transition["row"]
+        column = transition["column"]
+        if current_rows[row - 1][column - 1] == transition["to"]:
+            details = {
+                "row": row,
+                "column": column,
+                "expected": transition["from"],
+                "actual": current_rows[row - 1][column - 1],
+            }
+            _mark_proposal_binding_status(
+                database,
+                session_id,
+                source_turn["id"],
+                binding,
+                "already_satisfied",
+                "already_satisfied",
+                details,
+            )
+            raise ApiError(
+                409,
+                "PROPOSAL_PRECONDITION_FAILED",
+                "The current Stage already contains this proposal's requested change.",
+                details={"reason": "already_satisfied", **details},
+            )
+
     actual_fingerprint = map_fingerprint(current_rows)
     if binding.get("mapFingerprint") != actual_fingerprint:
         _mark_proposal_binding_status(
@@ -4127,6 +4278,25 @@ def _preflight_proposal(
             "PROPOSAL_STALE",
             "The selected proposal was generated from an older map snapshot.",
             details={"reason": "map_changed"},
+        )
+    actual_binding_fingerprint = (current_bindings or {}).get("bindingFingerprint")
+    if (
+        not actual_binding_fingerprint
+        or binding.get("entityBindingFingerprint") != actual_binding_fingerprint
+    ):
+        _mark_proposal_binding_status(
+            database,
+            session_id,
+            source_turn["id"],
+            binding,
+            "stale",
+            "entity_binding_changed",
+        )
+        raise ApiError(
+            409,
+            "PROPOSAL_STALE",
+            "The selected proposal was generated from an older entity snapshot.",
+            details={"reason": "entity_binding_changed"},
         )
     if binding.get("status") not in {None, "active"}:
         reason = binding.get("status")
@@ -4162,6 +4332,29 @@ def _preflight_proposal(
             "This proposal has already been executed once and is no longer active.",
             details={"reason": "already_executed"},
         )
+
+    try:
+        brief = validate_execution_brief(
+            brief,
+            current_rows,
+            current_bindings,
+        )
+        binding["executionBrief"] = brief
+    except (TypeError, ValueError) as exception:
+        _mark_proposal_binding_status(
+            database,
+            session_id,
+            source_turn["id"],
+            binding,
+            "stale",
+            "execution_binding_mismatch",
+        )
+        raise ApiError(
+            409,
+            "PROPOSAL_PRECONDITION_FAILED",
+            "The selected proposal no longer matches the saved map snapshot.",
+            details={"reason": "execution_binding_mismatch"},
+        ) from exception
 
     for transition in brief.get("requiredTransitions") or []:
         row = transition["row"]
@@ -4335,7 +4528,12 @@ def _sanitize_challenge_execution(execution, offer, language):
     )
 
 
-def _ensure_alternative_revision_execution(execution, original_offer, language):
+def _ensure_alternative_revision_execution(
+    execution,
+    original_offer,
+    language,
+    original_binding=None,
+):
     guidance = dict(execution.guidance or {})
     offer = guidance.get("proposalOffer")
     original_text = " ".join(
@@ -4363,10 +4561,45 @@ def _ensure_alternative_revision_execution(execution, original_offer, language):
             }
     candidate_summary = str(offer.get("summary") or "").strip().casefold()
     candidate_rationale = str(offer.get("rationale") or "").strip().casefold()
+    original_transitions = {
+        (
+            item.get("row"),
+            item.get("column"),
+            item.get("from"),
+            item.get("to"),
+            item.get("anchorEntity"),
+        )
+        for item in (
+            (original_binding or {}).get("executionBrief", {}).get(
+                "requiredTransitions", []
+            )
+            if isinstance((original_binding or {}).get("executionBrief"), dict)
+            else []
+        )
+        if isinstance(item, dict)
+    }
+    candidate_transitions = {
+        (
+            item.get("row"),
+            item.get("column"),
+            item.get("from"),
+            item.get("to"),
+            item.get("anchorEntity"),
+        )
+        for item in (offer.get("executionBrief") or {}).get(
+            "requiredTransitions", []
+        )
+        if isinstance(item, dict)
+    } if isinstance(offer.get("executionBrief"), dict) else set()
     if (
         " ".join(str(value or "") for value in offer.values()).strip() == original_text.strip()
         or candidate_summary == original_summary
         or candidate_rationale == original_rationale
+        or (
+            original_transitions
+            and candidate_transitions
+            and original_transitions == candidate_transitions
+        )
     ):
         if language == "zh-CN":
             offer = {
@@ -4592,13 +4825,17 @@ def _proposal_presentation_for_binding(
     return presentation
 
 
-def _proposal_binding_for_offer(offer, version_id, rows):
+def _proposal_binding_for_offer(offer, version_id, rows, entity_bindings=None):
     """Normalize and bind a proposal to the exact saved Stage it was generated from."""
     if not isinstance(offer, dict) or not str(offer.get("summary") or "").strip():
         return None
     raw_brief = offer.get("executionBrief")
     if raw_brief is None and "revisionPlan" in offer:
-        raw_brief = normalize_revision_plan(offer.get("revisionPlan"), rows)
+        raw_brief = normalize_revision_plan(
+            offer.get("revisionPlan"),
+            rows,
+            entity_bindings,
+        )
     if (
         not isinstance(raw_brief, dict)
         or not isinstance(raw_brief.get("requiredTransitions"), list)
@@ -4606,7 +4843,7 @@ def _proposal_binding_for_offer(offer, version_id, rows):
     ):
         raise ValueError("proposal requires exact requiredTransitions")
     try:
-        brief = validate_execution_brief(raw_brief, rows)
+        brief = validate_execution_brief(raw_brief, rows, entity_bindings)
     except ValueError:
         # A previously generated card can reach this path after another
         # operation already applied its target state. Preserve that fact
@@ -4622,6 +4859,9 @@ def _proposal_binding_for_offer(offer, version_id, rows):
         return {
             "baseVersionId": version_id,
             "mapFingerprint": map_fingerprint(rows),
+            "entityBindingFingerprint": (
+                entity_bindings or {}
+            ).get("bindingFingerprint"),
             "executionBrief": brief,
             "status": "already_satisfied",
         }
@@ -4637,12 +4877,57 @@ def _proposal_binding_for_offer(offer, version_id, rows):
     return {
         "baseVersionId": version_id,
         "mapFingerprint": map_fingerprint(rows),
+        "entityBindingFingerprint": (
+            entity_bindings or {}
+        ).get("bindingFingerprint"),
         "executionBrief": brief,
         "status": status,
     }
 
 
-def _bind_execution_to_stage(execution, version_id, rows, content="", language="en"):
+def _execution_binding_clarification(language):
+    if language == "zh-CN":
+        return (
+            "当前还没有形成一份与已保存地图完全一致、可验证的方案。"
+            "地图没有被修改；请重新生成方案，或补充需要调整的具体方向。"
+        )
+    return (
+        "I do not yet have a proposal that is fully consistent with the saved map and can be "
+        "verified. The map was not changed; please regenerate the proposal or clarify the exact direction."
+    )
+
+
+def _revision_contract_clarification_execution(*, language, request_id, exception):
+    """Expose contract rejection as a neutral, non-executable clarification card."""
+    execution = _revision_contract_invalid_execution(
+        language=language,
+        request_id=request_id,
+        exception=exception,
+    )
+    clarification = _execution_binding_clarification(language)
+    guidance = dict(execution.guidance or {})
+    guidance["move"] = "clarify_intent"
+    guidance["proposalOffer"] = None
+    guidance["uiCues"] = [{"type": "clarification", "text": clarification}]
+    return replace(
+        execution,
+        assistant_message=clarification,
+        guidance=guidance,
+        proposal_diagnostics={
+            **(execution.proposal_diagnostics or {}),
+            "category": "execution_binding_rejected",
+        },
+    )
+
+
+def _bind_execution_to_stage(
+    execution,
+    version_id,
+    rows,
+    content="",
+    language="en",
+    entity_bindings=None,
+):
     """Attach backend-only proposal metadata without changing visible assistant prose."""
     guidance = dict(execution.guidance or {})
     offer = guidance.get("proposalOffer")
@@ -4655,6 +4940,7 @@ def _bind_execution_to_stage(execution, version_id, rows, content="", language="
             normalized_offer["executionBrief"] = normalize_revision_plan(
                 offer.get("revisionPlan"),
                 rows,
+                entity_bindings,
             )
             normalized_offer.pop("revisionPlan", None)
             offer = normalized_offer
@@ -4663,25 +4949,31 @@ def _bind_execution_to_stage(execution, version_id, rows, content="", language="
             pass
 
     try:
-        binding = _proposal_binding_for_offer(offer, version_id, rows)
+        binding = _proposal_binding_for_offer(
+            offer,
+            version_id,
+            rows,
+            entity_bindings,
+        )
     except (TypeError, ValueError):
         # An exact coordinate/action without a validated brief must never be
-        # rendered as an executable card. Keep the reply body, remove only the
-        # machine-facing card metadata.
-        if proposal_offer_requires_execution_brief(
-            offer,
-            execution.assistant_message,
-            content,
-        ):
-            guidance["proposalOffer"] = None
-            if guidance.get("move") == "offer_revision":
-                guidance["move"] = "offer_perspective"
-            return replace(
-                execution,
-                guidance=guidance,
-                proposal_binding={},
-            )
-        return replace(execution, proposal_binding={})
+        # rendered as an executable card.  Preserve the conversation turn, but
+        # make the failed binding visible as a neutral clarification instead of
+        # silently dropping the only actionable feedback.
+        clarification = _execution_binding_clarification(language)
+        guidance["proposalOffer"] = None
+        guidance["move"] = "clarify_intent"
+        guidance["followUpQuestion"] = None
+        guidance["uiCues"] = [{"type": "clarification", "text": clarification}]
+        return replace(
+            execution,
+            guidance=guidance,
+            proposal_binding={},
+            proposal_diagnostics={
+                **(execution.proposal_diagnostics or {}),
+                "category": "execution_binding_rejected",
+            },
+        )
     presentation = _proposal_presentation_for_binding(
         binding,
         language,

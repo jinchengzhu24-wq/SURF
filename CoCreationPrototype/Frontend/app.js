@@ -107,12 +107,13 @@ const translations = {
         suggestedDirection: "Assistant design direction",
         draftSuggestedRevision: "Ask the assistant to draft this",
         challengeRevision: "Challenge this plan",
-        alternativeRevision: "Try another plan",
+        alternativeRevision: "Regenerate proposal",
         staleRevisionCard: "Only the latest revision card can be acted on.",
         proposalStale: "This proposal is based on an older Stage and is no longer active.",
         proposalAlreadySatisfied: "The current map already contains this change.",
         proposalPreconditionFailed: "The current map no longer matches this proposal's prerequisite.",
         proposalUnbound: "This historical proposal is readable but has no reliable execution binding.",
+        proposalDisagreementActive: "Resolve the active disagreement before using this proposal.",
         proposalAlreadyExecuted: "This proposal has already been used once and is no longer active.",
         proposalSearchExhausted: "No verified map proposal could be produced for this direction. The current map was not changed.",
         discussionUser: "User direction",
@@ -338,6 +339,8 @@ translations["zh-CN"].proposalPreserved = "\u4fdd\u6301\u4e0d\u53d8";
 translations["zh-CN"].proposalBefore = "\u4fee\u6539\u524d";
 translations["zh-CN"].proposalAfter = "\u4fee\u6539\u540e";
 translations["zh-CN"].executeBoundProposal = "\u6267\u884c\u5df2\u7ed1\u5b9a\u7684\u65b9\u6848\u3002";
+translations["zh-CN"].alternativeRevision = "\u91cd\u65b0\u751f\u6210\u65b9\u6848";
+translations["zh-CN"].proposalDisagreementActive = "\u8bf7\u5148\u89e3\u51b3\u5f53\u524d\u5206\u6b67\uff0c\u518d\u4f7f\u7528\u8fd9\u4e2a\u65b9\u6848";
 
 const state = {
     session: null,
@@ -895,6 +898,7 @@ function proposalStateMessage(status) {
     if (status === "unbound") return t("proposalUnbound");
     if (status === "stale") return t("proposalStale");
     if (status === "precondition_failed") return t("proposalPreconditionFailed");
+    if (status === "disagreement_active") return t("proposalDisagreementActive");
     return t("staleRevisionCard");
 }
 

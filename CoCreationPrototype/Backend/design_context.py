@@ -501,8 +501,9 @@ def extract_explicit_user_memory(user_text):
     lowered = text.casefold()
     goal_markers = (
         "i want", "i prefer", "i'd like", "would like", "make ", "change ", "adjust ",
-        "keep ", "increase ", "reduce ", "move ",
-        "\u5e0c\u671b", "\u6211\u60f3", "\u6211\u5e0c\u671b", "\u6211\u66f4\u5728\u610f",
+        "keep ", "increase ", "reduce ", "move ", "i lean toward", "i tend to",
+        "\u5e0c\u671b", "\u6211\u60f3", "\u6211\u60f3\u8981", "\u6211\u503e\u5411\u4e8e",
+        "\u6211\u503e\u5411", "\u6211\u5e0c\u671b", "\u6211\u66f4\u5728\u610f", "\u8bf7\u4fdd\u6301",
         "\u4fdd\u6301", "\u589e\u52a0", "\u51cf\u5c11", "\u8c03\u6574", "\u6539",
     )
     constraint_markers = (

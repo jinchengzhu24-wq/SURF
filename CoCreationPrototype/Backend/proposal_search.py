@@ -2,6 +2,8 @@ from collections import deque
 from dataclasses import dataclass
 import time
 
+from level_validation import build_map_facts
+
 
 WIDTH = 12
 HEIGHT = 10
@@ -96,6 +98,7 @@ class RevisionStrategy:
     edit_budget: int
     metric_goals: tuple[MetricGoal, ...]
     required_transitions: tuple[tuple[int, int, str, str], ...] = ()
+    required_transition_entities: tuple[str | None, ...] = ()
     anchor_entities: tuple[str, ...] = ()
     play_objective: str | None = None
 
@@ -124,8 +127,16 @@ class RevisionStrategy:
                     "column": column,
                     "from": before,
                     "to": after,
+                    **(
+                        {"anchorEntity": self.required_transition_entities[index]}
+                        if index < len(self.required_transition_entities)
+                        and self.required_transition_entities[index]
+                        else {}
+                    ),
                 }
-                for row, column, before, after in self.required_transitions
+                for index, (row, column, before, after) in enumerate(
+                    self.required_transitions
+                )
             ],
             "anchorEntities": list(self.anchor_entities),
             "playObjective": self.play_objective,
@@ -269,7 +280,7 @@ def _parse_strategy(payload, index):
             raise RevisionPlanError(f"strategy {index} repeats a metric goal.")
         seen_metrics.add(goal["metric"])
         parsed_goals.append(MetricGoal(goal["metric"], goal["direction"]))
-    required_transitions = _parse_required_transitions(
+    required_transitions, transition_entities = _parse_required_transitions(
         payload.get("requiredTransitions", []),
         index,
     )
@@ -286,6 +297,7 @@ def _parse_strategy(payload, index):
         edit_budget=edit_budget,
         metric_goals=tuple(parsed_goals),
         required_transitions=required_transitions,
+        required_transition_entities=transition_entities,
         anchor_entities=anchor_entities,
         play_objective=play_objective,
     )
@@ -295,10 +307,15 @@ def _parse_required_transitions(payload, strategy_index):
     if not isinstance(payload, list) or len(payload) > 12:
         raise RevisionPlanError(f"strategy {strategy_index} requiredTransitions are invalid.")
     parsed = []
+    entities = []
     seen = set()
     allowed_tiles = set("#.@pst")
     for transition in payload:
-        if not isinstance(transition, dict) or set(transition) != {"row", "column", "from", "to"}:
+        if (
+            not isinstance(transition, dict)
+            or not {"row", "column", "from", "to"}.issubset(transition)
+            or set(transition) - {"row", "column", "from", "to", "anchorEntity"}
+        ):
             raise RevisionPlanError(f"strategy {strategy_index} has an invalid required transition.")
         row, column = transition["row"], transition["column"]
         before, after = transition["from"], transition["to"]
@@ -315,7 +332,13 @@ def _parse_required_transitions(payload, strategy_index):
             raise RevisionPlanError(f"strategy {strategy_index} repeats a required transition coordinate.")
         seen.add(key)
         parsed.append((row, column, before, after))
-    return tuple(parsed)
+        anchor = transition.get("anchorEntity")
+        if anchor is not None and anchor not in {"P", "B1", "B2", "T1", "T2"}:
+            raise RevisionPlanError(
+                f"strategy {strategy_index} has an invalid anchorEntity."
+            )
+        entities.append(anchor)
+    return tuple(parsed), tuple(entities)
 
 
 def _parse_anchor_entities(payload, strategy_index):
@@ -354,13 +377,89 @@ def _parse_focus(payload, strategy_index):
     return Focus(row, column, radius)
 
 
-def validate_revision_plan_against_map(base_rows, plan):
+def validate_revision_plan_against_map(base_rows, plan, entity_bindings=None):
     """Reject a semantically valid plan that cannot match the saved Stage."""
     rows = tuple(base_rows)
     if len(rows) != HEIGHT or any(len(row) != WIDTH for row in rows):
-        raise RevisionPlanError("The base Stage must be a 12x10 map.")
+        raise RevisionPlanError("The base Stage must contain 10 rows of 12 columns.")
     shell = _connected_outer_shell(rows)
+    exact_entities = {}
+    if entity_bindings is not None:
+        facts = build_map_facts(rows, entity_bindings=entity_bindings)
+        exact_entities = {
+            item.get("id"): item
+            for item in facts.get("entities") or []
+            if item.get("id")
+        }
     for index, strategy in enumerate(plan.strategies, start=1):
+        if entity_bindings is not None:
+            if any(
+                entity not in exact_entities
+                or exact_entities[entity].get("identityConfidence") != "exact"
+                for entity in strategy.anchor_entities
+            ):
+                raise RevisionPlanError(
+                    f"strategy {index} names an unavailable or uncertain entity anchor."
+                )
+            transition_entities = {
+                entity
+                for entity in strategy.required_transition_entities
+                if entity
+            }
+            if any(
+                entity not in exact_entities
+                or exact_entities[entity].get("identityConfidence") != "exact"
+                for entity in transition_entities
+            ) or not transition_entities.issubset(set(strategy.anchor_entities)):
+                raise RevisionPlanError(
+                    f"strategy {index} required transitions are not bound to its anchors."
+                )
+            moving_operators = set(strategy.operators).intersection(
+                {"move_player", "move_box", "move_target"}
+            )
+            if (
+                moving_operators
+                and not strategy.anchor_entities
+            ) or (
+                strategy.effect in {"relocate_start", "relocate_box", "relocate_target"}
+                and len(strategy.anchor_entities) != 1
+            ):
+                raise RevisionPlanError(
+                    f"strategy {index} requires explicit entity anchors for relocation."
+                )
+            operator_anchor_rules = {
+                "move_player": {"P"},
+                "move_box": {"B1", "B2"},
+                "move_target": {"T1", "T2"},
+            }
+            for operator in moving_operators:
+                if not set(strategy.anchor_entities).intersection(
+                    operator_anchor_rules[operator]
+                ):
+                    raise RevisionPlanError(
+                        f"strategy {index} must bind {operator} to its entity type."
+                    )
+            entity_tiles = {"P": "p", "B1": "s", "B2": "s", "T1": "t", "T2": "t"}
+            for transition, entity in zip(
+                strategy.required_transitions,
+                strategy.required_transition_entities,
+            ):
+                if not entity:
+                    continue
+                tile = entity_tiles[entity]
+                position = exact_entities[entity]
+                is_source = transition[2] == tile and transition[3] == "."
+                is_destination = transition[2] == "." and transition[3] == tile
+                if not (is_source or is_destination):
+                    raise RevisionPlanError(
+                        f"strategy {index} has a transition incompatible with {entity}."
+                    )
+                if is_source and transition[:2] != (
+                    position["row"], position["column"]
+                ):
+                    raise RevisionPlanError(
+                        f"strategy {index} has a source transition away from {entity}."
+                    )
         minimum = _minimum_changed_cells(strategy)
         if minimum > strategy.edit_budget:
             raise RevisionPlanError(
@@ -441,9 +540,11 @@ def search_revision_plan(
     movement_requirement=None,
     preserved_components=None,
     required_transitions=None,
+    entity_bindings=None,
 ):
     search_started_at = time.monotonic()
     base_rows = tuple(base_rows)
+    validate_revision_plan_against_map(base_rows, plan, entity_bindings)
     baseline_metrics = baseline_metrics or {}
     deadline = deadline if deadline is not None else float("inf")
     diagnostics = {
@@ -483,6 +584,7 @@ def search_revision_plan(
             baseline_metrics,
             movement_requirement,
             preserved_components,
+            entity_bindings,
         )
         beam = []
         for primitive in primitives[:PRIMITIVE_LIMIT]:
@@ -580,6 +682,7 @@ def _generate_primitives(
     baseline_metrics,
     movement_requirement=None,
     preserved_components=None,
+    entity_bindings=None,
 ):
     shell = _connected_outer_shell(rows)
     trace_cells = _solution_trace_cells(rows, baseline_metrics.get("solution"))
@@ -589,6 +692,7 @@ def _generate_primitives(
         tile: [(x, y) for y, row in enumerate(rows) for x, value in enumerate(row) if value == tile]
         for tile in ("p", "s", "t")
     }
+    anchor_positions = _anchor_positions(rows, strategy.anchor_entities, entity_bindings)
     internal_walls = [
         (x, y)
         for y, row in enumerate(rows)
@@ -669,7 +773,13 @@ def _generate_primitives(
                     ))
         elif operator in {"move_box", "move_target"}:
             tile = "s" if operator == "move_box" else "t"
-            for source in positions[tile]:
+            allowed_sources = positions[tile]
+            if strategy.anchor_entities:
+                allowed_sources = [
+                    source for source in allowed_sources
+                    if source in anchor_positions
+                ]
+            for source in allowed_sources:
                 for x, y in _candidate_cells(rows, strategy.focus, {"."}, [source]):
                     if not _movement_destination_matches(
                         source,
@@ -692,6 +802,24 @@ def _generate_primitives(
         _primitive_key(item),
     ))
     return primitives
+
+
+def _anchor_positions(rows, anchor_entities, entity_bindings=None):
+    if not anchor_entities:
+        return set()
+    try:
+        facts = build_map_facts(rows, entity_bindings=entity_bindings)
+    except (TypeError, ValueError, KeyError):
+        return set()
+    result = set()
+    entities = list(facts.get("entities") or [])
+    for entity in entities:
+        if (
+            entity.get("id") in set(anchor_entities)
+            and entity.get("identityConfidence") == "exact"
+        ):
+            result.add((entity.get("column", 0) - 1, entity.get("row", 0) - 1))
+    return result
 
 
 def _operator_changes_preserved_component(operator, preserved_components):

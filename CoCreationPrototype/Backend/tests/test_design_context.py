@@ -148,6 +148,20 @@ class DesignContextUnitTests(unittest.TestCase):
         self.assertTrue(any(item["authority"] == "explicit" for item in context["designConstraints"]))
         self.assertEqual(context["confirmedDecisions"], [])
 
+    def test_directional_phrasing_is_recorded_as_expressed_not_confirmed(self):
+        context = merge_chat_update(
+            empty_design_context(),
+            user_text="我倾向于让右侧路线更清晰，请保持当前的箱子数量。",
+            stage_id="stage-2",
+            turn_id="turn-direction",
+        )
+
+        self.assertTrue(any(
+            item["authority"] == "explicit" and item["status"] == "active"
+            for item in context["userGoals"] + context["designConstraints"]
+        ))
+        self.assertEqual(context["confirmedDecisions"], [])
+
     def test_correction_keeps_old_provenance_and_supersedes_inference(self):
         context = merge_chat_update(
             empty_design_context(),
@@ -378,6 +392,95 @@ class DesignContextRepositoryTests(unittest.TestCase):
                         1,
                     )
                     self.assertNotIn("designContext", payload)
+            finally:
+                repository.DATABASE_PATH = original_path
+
+    def test_entity_binding_column_backfill_is_idempotent_and_keeps_internal_data_private(self):
+        original_path = repository.DATABASE_PATH
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            repository.DATABASE_PATH = Path(directory) / "entity-bindings.sqlite3"
+            try:
+                legacy = sqlite3.connect(repository.DATABASE_PATH)
+                legacy.executescript(
+                    repository.SCHEMA.replace("    entity_bindings_json TEXT,\n", "")
+                )
+                session_id = uuid.uuid4().hex
+                version_id = uuid.uuid4().hex
+                now = "2026-09-01T00:00:00Z"
+                rows = [
+                    "############",
+                    "#..........#",
+                    "#..........#",
+                    "#..........#",
+                    "#...p......#",
+                    "#...s.t....#",
+                    "#..........#",
+                    "#..........#",
+                    "#..........#",
+                    "############",
+                ]
+                legacy.execute(
+                    """
+                    INSERT INTO design_sessions(
+                        id, creation_key, access_hash, integration_hash, bootstrap_hash,
+                        initial_draft_method, language, status, current_version_id, created_at, updated_at
+                    ) VALUES (?, ?, 'a', 'b', 'c', 'partial_completion', 'en', 'active', ?, ?, ?)
+                    """,
+                    (session_id, uuid.uuid4().hex, version_id, now, now),
+                )
+                legacy.execute(
+                    """
+                    INSERT INTO level_versions(
+                        id, session_id, stage_number, parent_version_id, source,
+                        rows_json, summary, diff_json, validation_json,
+                        design_context_json, idempotency_key, created_at
+                    ) VALUES (?, ?, 1, NULL, 'initial', ?, '', '[]', '{}', ?, ?, ?)
+                    """,
+                    (
+                        version_id,
+                        session_id,
+                        json.dumps(rows),
+                        json.dumps(empty_design_context()),
+                        version_id,
+                        now,
+                    ),
+                )
+                legacy.commit()
+                legacy.close()
+
+                repository.initialize_database()
+                with repository.connect(immediate=True) as database:
+                    columns = {
+                        row[1] for row in database.execute(
+                            "PRAGMA table_info(level_versions)"
+                        ).fetchall()
+                    }
+                    self.assertIn("entity_bindings_json", columns)
+                    stored = database.execute(
+                        "SELECT entity_bindings_json FROM level_versions WHERE id = ?",
+                        (version_id,),
+                    ).fetchone()[0]
+                    self.assertEqual(json.loads(stored)["identityStatus"], "exact")
+                    event_count = database.execute(
+                        """
+                        SELECT COUNT(*) FROM audit_events
+                        WHERE session_id = ? AND event_type = 'entity_binding_backfilled'
+                        """,
+                        (session_id,),
+                    ).fetchone()[0]
+                    self.assertEqual(event_count, 1)
+                    repository.backfill_entity_bindings(database)
+                    repeated_count = database.execute(
+                        """
+                        SELECT COUNT(*) FROM audit_events
+                        WHERE session_id = ? AND event_type = 'entity_binding_backfilled'
+                        """,
+                        (session_id,),
+                    ).fetchone()[0]
+                    self.assertEqual(repeated_count, event_count)
+                    payload = repository.serialize_session(database, session_id)
+                    self.assertNotIn("entityBindings", payload)
+                    self.assertNotIn("entity_bindings_json", json.dumps(payload))
             finally:
                 repository.DATABASE_PATH = original_path
 

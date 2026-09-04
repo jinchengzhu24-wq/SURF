@@ -13,9 +13,11 @@ from proposal_search import (
     MAX_CONSTRUCTED_CANDIDATES,
     ProposalSearchExhausted,
     RevisionPlanError,
+    _anchor_positions,
     parse_revision_plan,
     search_revision_plan,
 )
+from level_validation import build_entity_bindings
 
 
 BASE_ROWS = [
@@ -57,6 +59,14 @@ def plan_for(effect, operator, *, focus=None, edit_budget=4, metric_goals=None):
 
 
 class ProposalSearchTests(unittest.TestCase):
+    def test_anchor_positions_use_server_identity_instead_of_box_sorting(self):
+        bindings = build_entity_bindings(BASE_ROWS)
+        self.assertEqual(
+            _anchor_positions(BASE_ROWS, ["B1"], bindings),
+            {(4, 5)},
+        )
+        self.assertEqual(_anchor_positions(BASE_ROWS, ["B2"], bindings), set())
+
     def test_revision_plan_schema_is_strict_and_adds_nonnegotiable_preservation(self):
         plan = plan_for("relocate_target", "move_target")
         strategy = plan.strategies[0]
