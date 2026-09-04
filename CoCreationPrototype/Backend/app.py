@@ -3400,8 +3400,10 @@ def _pending_assistant_translations(database, session_id, language, turn_ids):
     placeholders = ",".join("?" for _ in unique_turn_ids)
     rows = database.execute(
         f"""
-        SELECT turn.id, turn.content, turn.guidance_json, proposal.summary
+        SELECT turn.id, turn.content, turn.guidance_json, turn.version_id,
+               version.rows_json, version.entity_bindings_json, proposal.summary
         FROM conversation_turns AS turn
+        JOIN level_versions AS version ON version.id = turn.version_id
         LEFT JOIN change_proposals AS proposal
           ON proposal.assistant_turn_id = turn.id
         LEFT JOIN turn_translations AS translation
@@ -3442,6 +3444,11 @@ def _pending_assistant_translations(database, session_id, language, turn_ids):
             "proposalSummary": row["summary"],
             "disagreement": guidance.get("disagreement"),
             "guidance": guidance,
+            # These fields are never included in the translation-model prompt.
+            # They let the response validator apply the same immutable Stage
+            # snapshot check after the model has changed language.
+            "stageRows": load_json(row["rows_json"]) or [],
+            "entityBindings": load_json(row["entity_bindings_json"]) or {},
         }
         coordinate_links = guidance.get("coordinateLinks") or []
         if coordinate_links:

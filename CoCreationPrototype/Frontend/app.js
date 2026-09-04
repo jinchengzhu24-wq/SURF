@@ -1091,16 +1091,22 @@ function renderAssistantBody(node, body, links, turn) {
         if (candidate.start > cursor) {
             node.appendChild(document.createTextNode(text.slice(cursor, candidate.start)));
         }
-        const button = document.createElement("button");
-        button.type = "button";
+        const button = document.createElement("span");
         button.className = "coordinate-link";
         button.textContent = candidate.text;
         button.dataset.coordinateLinkIndex = String(candidate.linkIndex);
+        button.setAttribute("role", "button");
+        button.setAttribute("tabindex", "0");
         button.setAttribute(
             "aria-label",
             `Show route from ${formatCoordinatePoint(candidate.link.from)} to ${formatCoordinatePoint(candidate.link.to)}`
         );
         button.addEventListener("click", () => toggleCoordinateLink(turn, candidate.linkIndex, candidate.link));
+        button.addEventListener("keydown", event => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            toggleCoordinateLink(turn, candidate.linkIndex, candidate.link);
+        });
         node.appendChild(button);
         cursor = candidate.end;
     });

@@ -387,7 +387,7 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 }
 
 .coordinate-link {
-    appearance: none;
+    display: inline;
     padding: 0;
     border: 0;
     color: #8f2d22;
@@ -400,6 +400,11 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
     text-underline-offset: 3px;
     font-weight: 800;
     cursor: pointer;
+    white-space: normal;
+    overflow-wrap: normal;
+    word-break: normal;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
 }
 
 .coordinate-link:hover,

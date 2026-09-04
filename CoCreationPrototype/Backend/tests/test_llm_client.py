@@ -543,6 +543,23 @@ class LLMClientTests(unittest.TestCase):
             }],
         )
 
+    def test_coordinate_link_clause_rejects_dangling_punctuation_or_connector(self):
+        self.assertTrue(
+            llm_client._coordinate_link_text_is_complete_clause(
+                "The route from B1 to T1 remains readable"
+            )
+        )
+        self.assertFalse(
+            llm_client._coordinate_link_text_is_complete_clause(
+                "The route from B1 to T1,"
+            )
+        )
+        self.assertFalse(
+            llm_client._coordinate_link_text_is_complete_clause(
+                "The route from B1 to T1 and"
+            )
+        )
+
     def test_coordinate_route_recovery_rejects_entity_co_mentions(self):
         body = "I am comparing B1 and T1 positions."
 
@@ -1241,12 +1258,12 @@ class LLMClientTests(unittest.TestCase):
             }],
         )
 
-        self.assertEqual(result.model, "grounding-safe-chat-fallback")
+        self.assertEqual(result.model, "kimi-k2.6")
         self.assertEqual(result.guidance["move"], "offer_perspective")
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertNotIn("confirm the location", result.assistant_message)
         self.assertNotIn("请重新确认要修改", result.assistant_message)
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(len(client.chat.completions.calls), 1)
 
     def test_historical_coordinate_claim_requires_a_historical_snapshot(self):
         with self.assertRaisesRegex(ValueError, "historical Stage map claim"):
@@ -1334,11 +1351,9 @@ class LLMClientTests(unittest.TestCase):
             rows=MAP_GROUNDING_ROWS,
         )
 
-        self.assertEqual(result.attempts_used, 2)
-        self.assertEqual(len(client.chat.completions.calls), 2)
-        retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
-        self.assertIn("spatial claim that conflicts with deterministic map facts", retry_prompt)
-        self.assertIn("row 3, column 5", result.assistant_message)
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertNotIn("next to water", result.assistant_message)
 
     def test_plain_reply_normalizes_stages_that_are_mistaken_for_separate_levels(self):
         result, _ = self.execute([
@@ -2437,7 +2452,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("？", result.assistant_message)
         self.assertNotIn("吗", result.assistant_message)
 
-    def test_invalid_stage_json_falls_back_to_plain_opening(self):
+    def test_invalid_stage_json_falls_back_to_server_snapshot_opening(self):
         client = FakeClient([
             "   ",
             "The water narrows the central route in an interesting way. "
@@ -2462,7 +2477,8 @@ class LLMClientTests(unittest.TestCase):
                 },
             )
 
-        self.assertIn("water narrows", result.assistant_message)
+        self.assertIn("current saved Stage", result.assistant_message)
+        self.assertNotIn("did not finish cleanly", result.assistant_message)
         self.assertNotIn("?", result.assistant_message)
         self.assertIn("play the Stage", result.assistant_message)
         self.assertIn("small, reviewable edits", result.assistant_message)
@@ -2481,7 +2497,10 @@ class LLMClientTests(unittest.TestCase):
             client.chat.completions.calls[0]["response_format"]["json_schema"]["name"],
             "cocreation_stage_assessment",
         )
-        self.assertNotIn("response_format", client.chat.completions.calls[1])
+        self.assertEqual(
+            client.chat.completions.calls[1]["response_format"]["type"],
+            "json_schema",
+        )
 
     def test_invalid_stage_guidance_move_is_normalized_without_a_structured_retry(self):
         payload = json.dumps({
@@ -2688,9 +2707,9 @@ class LLMClientTests(unittest.TestCase):
                 {"stageNumber": 2, "source": "accepted_proposal"},
             )
 
-        self.assertIn("water still creates a meaningful pause", result.assistant_message)
-        self.assertNotIn("T1 is at (8,6)", result.assistant_message)
-        self.assertNotEqual(result.model, "kimi-k2.6-safe-opening")
+        self.assertIn("current saved Stage", result.assistant_message)
+        self.assertNotIn("did not finish cleanly", result.assistant_message)
+        self.assertEqual(result.model, "kimi-k2.6-safe-opening")
         self.assertEqual(len(client.chat.completions.calls), 2)
 
     def test_stage_fallback_skips_plain_request_when_remaining_budget_is_too_short(self):
@@ -2714,7 +2733,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIn("first reaction", result.assistant_message)
 
-    def test_later_human_edit_plain_opening_asks_about_the_designer_intention(self):
+    def test_later_human_edit_invalid_opening_uses_server_snapshot_without_question(self):
         client = FakeClient([
             "   ",
             "not a complete JSON object",
@@ -2743,6 +2762,9 @@ class LLMClientTests(unittest.TestCase):
                 },
         )
 
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertEqual(result.model, "kimi-k2.6-safe-opening")
+        return
         focus = result.guidance["followUpQuestion"]
         self.assertIn("水域、内部墙体", focus)
         self.assertTrue(any(marker in focus for marker in ("想让", "希望", "想加强")))
@@ -2831,7 +2853,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(result.attempts_used, 2)
-        self.assertIn("did not finish cleanly", result.assistant_message)
+        self.assertIn("current saved Stage", result.assistant_message)
         self.assertNotIn("The layout suggests", result.assistant_message)
         self.assertIsNone(result.proposed_rows)
         self.assertEqual(result.guidance["coordinateLinks"], [])
@@ -2888,7 +2910,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.attempts_used, 1)
         self.assertIn("first push more deliberate", result.assistant_message)
         self.assertIn("B2 moves from", result.assistant_message)
-        self.assertNotIn("Then it continues", result.assistant_message)
+        self.assertIn("Then it continues", result.assistant_message)
         self.assertEqual(len(client.chat.completions.calls), 1)
 
     def test_coordinate_route_is_recovered_after_final_text_cleanup(self):
@@ -3726,6 +3748,63 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result[0].count("?"), 3)
         self.assertIsNone(result[4]["followUpQuestion"])
+
+    def test_proposal_routing_bypasses_plain_chat_after_clarification(self):
+        expected = llm_client.LLMExecutionResult(
+            assistant_message="One verified revision proposal.",
+            attempts_used=0,
+            request_id="proposal-routing-test",
+        )
+        with patch.object(
+            llm_client,
+            "_generate_revision_search_proposal_sync",
+            return_value=expected,
+        ) as generate_proposal:
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "Please give me one plan."}],
+                ENTITY_ROUTE_ROWS,
+                "proposal-routing-test",
+                stage_context={"revisionRouting": "proposal"},
+            )
+
+        self.assertIs(result, expected)
+        generate_proposal.assert_called_once()
+
+    def test_thinking_is_enabled_only_for_revision_and_modifier_tasks(self):
+        revision_client = FakeClient(["{}"])
+        plain_client = FakeClient(["{}"])
+
+        with patch.object(llm_client, "_create_async_client", return_value=revision_client):
+            asyncio.run(llm_client._request_completion(
+                "test-kimi-key",
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.6",
+                [{"role": "user", "content": "Create one revision plan."}],
+                100,
+                5,
+                structured=False,
+                task="revision_plan",
+            ))
+        with patch.object(llm_client, "_create_async_client", return_value=plain_client):
+            asyncio.run(llm_client._request_completion(
+                "test-kimi-key",
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.6",
+                [{"role": "user", "content": "Discuss the current Stage."}],
+                100,
+                5,
+                structured=False,
+                task="plain_chat",
+            ))
+
+        self.assertEqual(
+            revision_client.chat.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "enabled"}},
+        )
+        self.assertEqual(
+            plain_client.chat.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
 
     def test_discussion_card_is_not_repeated_in_the_saved_assistant_body(self):
         focus = "我会留意水边第一次推进是否真的改变了路线判断。"
@@ -4852,6 +4931,139 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("这个版本现在呈现出的手感", translated)
         self.assertIn("后续版本", translated)
         self.assertNotIn("第二关", translated)
+
+
+    def test_content_blocks_render_server_owned_facts_and_route(self):
+        bindings = build_entity_bindings(ENTITY_ROUTE_ROWS, source="initial")
+        payload = {
+            "assistantMessage": "Fallback analysis.",
+            "contentBlocks": [
+                {"kind": "factRef", "factType": "entity_position", "entity": "B1"},
+                {
+                    "kind": "routeReasoning",
+                    "fromEntity": "B1",
+                    "toEntity": "T1",
+                    "text": "the corridor makes the first push feel like a readable commitment.",
+                },
+                {
+                    "kind": "personalReflection",
+                    "text": "Personally, I like how that choice makes the route rhythm feel deliberate.",
+                },
+            ],
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+                "coordinateLinks": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        message, _assessment, _rows, _summary, guidance = llm_client.validate_chat_response(
+            payload,
+            rows=ENTITY_ROUTE_ROWS,
+            stage_context={"entityBindings": bindings},
+        )
+
+        self.assertIn("B1 is currently at row 3, column 5", message)
+        self.assertIn("B1 \u2192 T1", message)
+        self.assertIn("Personally, I like", message)
+        self.assertEqual(len(guidance["coordinateLinks"]), 1)
+
+    def test_content_blocks_drop_invalid_fact_reference_without_losing_analysis(self):
+        payload = {
+            "assistantMessage": "The corridor still gives the first push a clear rhythm.",
+            "contentBlocks": [
+                {"kind": "factRef", "factType": "tile_state", "row": 99, "column": 99},
+                {"kind": "analysis", "text": "The corridor still gives the first push a clear rhythm."},
+            ],
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+                "coordinateLinks": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        message, *_rest = llm_client.validate_chat_response(payload, rows=ENTITY_ROUTE_ROWS)
+
+        self.assertIn("corridor still gives", message)
+        self.assertNotIn("99", message)
+
+    def test_overlong_content_compacts_only_route_and_personal_reflection(self):
+        body = (
+            "The water makes the first push a meaningful design choice. "
+            "B2 moves from (2,2) -> (2,3) -> (2,4) -> (2,5) -> (3,5) -> (4,5) -> (5,5). "
+            "I feel the corridor is tense and deliberate. I think the corridor is tense and deliberate. "
+            "Personally, I find the same corridor tense and deliberate."
+        )
+
+        recovered, diagnostics = llm_client._recover_overlong_content(
+            body,
+            ENTITY_ROUTE_ROWS,
+        )
+
+        self.assertIn("first push a meaningful design choice", recovered)
+        self.assertLessEqual(
+            len(llm_client._personal_reflection_sentences(recovered)),
+            llm_client.PERSONAL_REFLECTION_SENTENCE_LIMIT,
+        )
+        self.assertTrue(diagnostics["changed"])
+
+    def test_presentation_budget_does_not_discard_non_route_analysis(self):
+        body = "A" * (llm_client.CHAT_RESPONSE_MAX_LENGTH + 100)
+        recovered, diagnostics = llm_client._recover_overlong_content(body, ENTITY_ROUTE_ROWS)
+
+        self.assertEqual(recovered, body)
+        self.assertFalse(diagnostics["changed"])
+
+    def test_translation_drops_new_invalid_map_claim_using_its_stage_snapshot(self):
+        source = {
+            "turnId": "translation-snapshot-test",
+            "body": "The first push remains a readable commitment.",
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": None,
+            "proposalOfferRationale": None,
+            "uiCueTexts": [],
+            "proposalSummary": None,
+            "stageRows": ENTITY_ROUTE_ROWS,
+            "entityBindings": build_entity_bindings(ENTITY_ROUTE_ROWS, source="initial"),
+        }
+        payload = {
+            "translations": [{
+                "turnId": "translation-snapshot-test",
+                "body": "B1 is at (99,99).",
+                "followUpQuestion": None,
+                "intentHypothesis": None,
+                "proposalOfferSummary": None,
+                "proposalOfferRationale": None,
+                "uiCueTexts": [],
+                "proposalSummary": None,
+            }]
+        }
+
+        translated = llm_client.validate_translation_response(
+            payload,
+            [source],
+            target_language="en",
+        )
+
+        self.assertEqual(translated[0]["body"], "I will continue from the current saved Stage.")
+        self.assertNotIn("99", translated[0]["body"])
 
 
 if __name__ == "__main__":
