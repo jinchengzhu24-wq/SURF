@@ -11,6 +11,9 @@ from level_validation import (
     LevelValidationError,
     build_entity_bindings,
     build_map_facts,
+    build_stage_snapshot,
+    analyze_user_map_claims,
+    format_map_claim_correction,
     entity_binding_fingerprint,
     validate_and_solve,
     validate_rows,
@@ -108,6 +111,78 @@ class OuterWallValidationTests(unittest.TestCase):
 
 
 class EntityBindingTests(unittest.TestCase):
+    def test_stage_snapshot_is_one_authoritative_current_map(self):
+        bindings = build_entity_bindings(IDENTITY_ROWS)
+        snapshot = build_stage_snapshot(
+            IDENTITY_ROWS,
+            version_id="version-current",
+            stage_number=3,
+            entity_bindings=bindings,
+        )
+
+        self.assertEqual(snapshot["versionId"], "version-current")
+        self.assertEqual(snapshot["stageNumber"], 3)
+        self.assertEqual(snapshot["dimensions"], {"rows": 10, "columns": 12})
+        self.assertEqual(snapshot["rows"], IDENTITY_ROWS)
+        self.assertEqual(snapshot["mapFingerprint"], bindings["mapFingerprint"])
+        self.assertEqual(
+            snapshot["entityBindingFingerprint"], bindings["bindingFingerprint"]
+        )
+
+    def test_user_wrong_current_entity_claim_is_corrected_but_future_route_is_not(self):
+        bindings = build_entity_bindings(IDENTITY_ROWS)
+        snapshot = build_stage_snapshot(IDENTITY_ROWS, entity_bindings=bindings)
+        current_claim = "B1" + chr(0x5728) + chr(0xFF08) + "4" + chr(0xFF0C) + "4" + chr(0xFF09)
+        result = analyze_user_map_claims(current_claim, snapshot)
+
+        self.assertEqual(result["conflicts"][0]["entity"], "B1")
+        self.assertEqual(result["conflicts"][0]["expected"], {"row": 6, "column": 4})
+        correction = format_map_claim_correction(result["conflicts"], "zh-CN")
+        self.assertIn("B1", correction)
+        self.assertIn("6", correction)
+        self.assertIn("4", correction)
+
+        future = "if B1 moves to (4,4)"
+        self.assertEqual(analyze_user_map_claims(future, snapshot)["conflicts"], [])
+
+    def test_coordinate_tile_claim_uses_current_tile_not_any_other_cell(self):
+        bindings = build_entity_bindings(IDENTITY_ROWS)
+        snapshot = build_stage_snapshot(IDENTITY_ROWS, entity_bindings=bindings)
+        result = analyze_user_map_claims("(6,4)" + chr(0x662F) + chr(0x6C34) + chr(0x57DF), snapshot)
+
+        self.assertEqual(len(result["conflicts"]), 1)
+        self.assertEqual(result["conflicts"][0]["actualTile"], "s")
+
+    def test_user_map_claim_parser_supports_row_column_and_reverse_forms(self):
+        snapshot = build_stage_snapshot(
+            IDENTITY_ROWS,
+            entity_bindings=build_entity_bindings(IDENTITY_ROWS),
+        )
+        claims = [
+            "B1 is located in row 6, column 4",
+            "B1 sits on row 6, column 4",
+            "B1" + chr(0x5728) + chr(0x7B2C) + "6" + chr(0x884C) + chr(0x7B2C) + "4" + chr(0x5217),
+            chr(0x7B2C) + "6" + chr(0x884C) + chr(0x7B2C) + "4" + chr(0x5217) + chr(0x662F) + "B1",
+        ]
+        for claim in claims:
+            with self.subTest(claim=claim):
+                self.assertEqual(analyze_user_map_claims(claim, snapshot)["conflicts"], [])
+
+    def test_user_map_claim_parser_skips_future_and_hypothetical_row_claims(self):
+        snapshot = build_stage_snapshot(
+            IDENTITY_ROWS,
+            entity_bindings=build_entity_bindings(IDENTITY_ROWS),
+        )
+        claims = [
+            "B1 will be at row 4, column 4",
+            "If B1 sits on row 4, column 4, the detour changes.",
+            "\u5982\u679cB1\u5728\u7b2c4\u884c\u7b2c4\u5217\uff0c\u7ed5\u884c\u4f1a\u66f4\u660e\u663e\u3002",
+            "\u7b2c4\u884c\u7b2c4\u5217\u5c06\u662f\u6c34\u57df\u3002",
+        ]
+        for claim in claims:
+            with self.subTest(claim=claim):
+                self.assertEqual(analyze_user_map_claims(claim, snapshot)["conflicts"], [])
+
     def test_initial_bindings_and_map_facts_are_authoritative(self):
         bindings = build_entity_bindings(IDENTITY_ROWS)
 
@@ -197,6 +272,30 @@ class EntityBindingTests(unittest.TestCase):
         self.assertTrue(
             all(item["identityConfidence"] == "unknown" for item in facts["entities"])
         )
+
+    def test_unknown_entity_label_requires_neutral_coordinate_clarification(self):
+        parent = build_entity_bindings(IDENTITY_ROWS)
+        ambiguous = build_entity_bindings(
+            IDENTITY_ROWS,
+            parent_bindings=parent,
+            entity_transitions=[
+                {"row": 6, "column": 4, "from": "s", "to": "."},
+                {"row": 6, "column": 8, "from": ".", "to": "s"},
+                {"row": 8, "column": 8, "from": "s", "to": "."},
+                {"row": 8, "column": 4, "from": ".", "to": "s"},
+            ],
+        )
+        snapshot = build_stage_snapshot(IDENTITY_ROWS, entity_bindings=ambiguous)
+
+        result = analyze_user_map_claims("B1 is at (6,4)", snapshot)
+
+        self.assertEqual(
+            result["conflicts"][0]["reason"],
+            "entity_identity_unknown",
+        )
+        correction = format_map_claim_correction(result["conflicts"], "zh-CN")
+        self.assertIn("B1", correction)
+        self.assertIn("行列位置", correction)
 
     def test_legacy_semantic_breach_still_produces_safe_grounding_facts(self):
         rows = CLOSED_ROWS.copy()

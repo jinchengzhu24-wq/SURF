@@ -21,11 +21,75 @@ from design_context import (
     is_design_level_question,
     merge_chat_update,
     revision_projection,
+    sanitize_user_design_text,
     validate_design_context_patch,
 )
 
 
 class DesignContextUnitTests(unittest.TestCase):
+    def test_current_map_fact_is_not_persisted_as_user_direction(self):
+        user_text = (
+            "B1" + chr(0x5728) + "(4,4)" + chr(0xFF0C)
+            + chr(0x6211) + chr(0x5E0C) + chr(0x671B)
+            + chr(0x5B83) + chr(0x66F4) + chr(0x65E9)
+            + chr(0x5F62) + chr(0x6210) + chr(0x7ED5) + chr(0x884C)
+        )
+        context = merge_chat_update(
+            empty_design_context(),
+            user_text=user_text,
+            stage_id="stage-2",
+            turn_id="turn-1",
+        )
+
+        goals = [item["goal"] for item in context["userGoals"]]
+        self.assertTrue(goals)
+        self.assertTrue(all("4,4" not in goal for goal in goals))
+        self.assertTrue(any(chr(0x7ED5) + chr(0x884C) in goal for goal in goals))
+
+    def test_patch_current_map_fact_is_sanitized_before_memory_merge(self):
+        context = merge_chat_update(
+            empty_design_context(),
+            patch={
+                "goals": [{
+                    "goal": "B1 is at (4,4); I want a clearer detour.",
+                    "evidenceText": "B1 is at (4,4); I want a clearer detour.",
+                }],
+            },
+            user_text="B1 is at (4,4); I want a clearer detour.",
+            stage_id="stage-2",
+            turn_id="turn-1",
+        )
+
+        self.assertEqual(len(context["userGoals"]), 1)
+        self.assertNotIn("4,4", context["userGoals"][0]["goal"])
+        self.assertIn("detour", context["userGoals"][0]["goal"])
+
+    def test_reverse_row_claims_are_not_persisted_as_design_semantics(self):
+        reverse_chinese = (
+            "\u7b2c7\u884c\u7b2c5\u5217\u662fB1\uff0c"
+            "\u6211\u5e0c\u671b\u5b83\u66f4\u65e9\u5f62\u6210\u7ed5\u884c\u9009\u62e9\u3002"
+        )
+        reverse_english = (
+            "row 7, column 5 is B1; I want a clearer detour."
+        )
+
+        for source, expected in (
+            (reverse_chinese, "\u7ed5\u884c"),
+            (reverse_english, "detour"),
+        ):
+            with self.subTest(source=source):
+                cleaned = sanitize_user_design_text(source)
+                self.assertNotIn("7,5", cleaned)
+                self.assertNotIn("B1", cleaned)
+                self.assertIn(expected, cleaned)
+
+    def test_future_coordinates_remain_design_constraints(self):
+        future_chinese = "\u6211\u5e0c\u671bB1\u5728\uff08\u0034\uff0c\u0034\uff09\u65f6\u66f4\u65e9\u5f62\u6210\u7ed5\u884c\u9009\u62e9\u3002"
+        future_english = "I want B1 is at (4,4) in the proposed version, with a clearer detour."
+
+        self.assertIn("4", sanitize_user_design_text(future_chinese))
+        self.assertIn("4,4", sanitize_user_design_text(future_english))
+
     def test_design_question_filter_keeps_design_tradeoffs_but_drops_route_mechanics(self):
         self.assertTrue(
             is_design_level_question(

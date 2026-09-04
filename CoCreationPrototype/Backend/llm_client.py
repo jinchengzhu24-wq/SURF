@@ -24,7 +24,7 @@ from proposal_search import (
     search_revision_plan,
     validate_revision_plan_against_map,
 )
-from level_validation import build_map_facts, validate_and_solve
+from level_validation import build_map_facts, build_stage_snapshot, validate_and_solve
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
 
@@ -80,7 +80,7 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v44-kimi-route-salvage"
+PROMPT_VERSION = "cocreation-v45-fixed-stage-snapshot"
 
 
 def _structured_response_format(task=None):
@@ -226,7 +226,7 @@ GUIDANCE_MOVES = {
 }
 INTENT_CONFIDENCE_LEVELS = {"low", "medium", "high"}
 UI_CUE_TYPES = {"manual_edit", "warning", "tradeoff", "clarification"}
-GUIDANCE_REQUEST_MODES = {"revision_advice", "discussion", "none"}
+GUIDANCE_REQUEST_MODES = {"revision_advice", "discussion", "needs_clarification", "none"}
 DISAGREEMENT_STATUSES = {"active", "resolved"}
 DISAGREEMENT_SUBJECTS = {"ai_revision", "human_edit", "user_request"}
 DISAGREEMENT_RESOLUTIONS = {"user", "ai", "compromise", "retain_current"}
@@ -359,19 +359,18 @@ def build_chat_messages(
     assessment_only=False,
     stage_context=None,
 ):
-    serialized_map = "\n".join(rows)
-    numbered_map = "\n".join(
-        f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
-    )
+    # Kept as local compatibility variables for the compact prompt signature;
+    # the snapshot helper below is the only map payload sent to the model.
+    serialized_map = ""
+    numbered_map = ""
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
-    map_facts = (
-        _canonical_entity_table(rows, stage_context)
-        + "\n"
-        + _map_facts_for_prompt(rows, stage_context)
-    )
+    # Send one current Stage representation.  Multiple independently rendered
+    # map blocks were allowing the model to select a stale or differently
+    # numbered copy of the same Stage.
+    map_facts = _stage_snapshot_for_prompt(rows, stage_context)
     prompt_stage_context = _prompt_stage_context(rows, stage_context)
     design_context_prompt = _design_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
@@ -427,8 +426,11 @@ def build_chat_messages(
         "one primary conversational move: observe the Stage, clarify intention, offer "
         "your perspective, challenge a trade-off respectfully, reflect on play evidence, "
         "offer a revision direction, or deliver an explicitly requested revision. "
-         "Use as much space as the design question genuinely needs and at most one central "
-         "question. A simple factual answer may be shorter, but a design response should normally include "
+         "Use as much space as the design question genuinely needs. A simple factual answer may be shorter, "
+         "and an ordinary design response normally uses at most one central question; when the designer's "
+         "revision details are genuinely incomplete, you may ask up to three closely related clarification "
+         "questions and stop as soon as the direction is clear. "
+         "A design response should normally include "
         "a concrete observation, your own interpretation, and enough reasoning or a playable "
         "example to feel like a real person thinking alongside the designer. Do not pad the "
         "reply or turn it into a report. Vary the "
@@ -681,11 +683,7 @@ def build_chat_messages(
     )
     return [
         {"role": "system", "content": system_prompt},
-        *[
-            {"role": message["role"], "content": message["content"]}
-            for message in conversation
-            if message.get("role") in {"user", "assistant"}
-        ],
+        *_current_user_prompt_messages(conversation),
     ]
 
 
@@ -698,19 +696,13 @@ def build_plain_chat_messages(
     stage_context=None,
     stage_opening=False,
 ):
-    serialized_map = "\n".join(rows)
-    numbered_map = "\n".join(
-        f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
-    )
+    serialized_map = ""
+    numbered_map = ""
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     solver_metrics = _llm_solver_evidence(solver_metrics or {})
     play_summary = play_summary or {}
     stage_context = stage_context or {}
-    map_facts = (
-        _canonical_entity_table(rows, stage_context)
-        + "\n"
-        + _map_facts_for_prompt(rows, stage_context)
-    )
+    map_facts = _stage_snapshot_for_prompt(rows, stage_context)
     prompt_stage_context = _prompt_stage_context(rows, stage_context)
     design_context_prompt = _design_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
@@ -944,11 +936,7 @@ def build_plain_chat_messages(
     )
     return [
         {"role": "system", "content": system_prompt},
-        *[
-            {"role": message["role"], "content": message["content"]}
-            for message in conversation
-            if message.get("role") in {"user", "assistant"}
-        ],
+        *_current_user_prompt_messages(conversation),
     ]
 
 
@@ -972,6 +960,11 @@ def _compact_kimi_structured_prompt(
     historical_reference_instruction="",
 ):
     """Use a short, task-first contract for Kimi's structured responses."""
+    clarification_count = max(
+        0,
+        min(3, int((stage_context or {}).get("clarificationQuestionCount") or 0)),
+    )
+    clarification_budget = max(0, 3 - clarification_count)
     opening = (
         "This is a Stage opening. Describe only one or two concrete map choices "
         "and your subjective design reaction. Do not ask a question or a yes/no question, or "
@@ -1020,8 +1013,12 @@ def _compact_kimi_structured_prompt(
         "saved, or verified unless the server supplied that fact. Do not claim a map was changed, "
         "accepted, saved, or verified without server evidence. A revision offer is only "
         "conceptual and must include a complete hidden revisionPlan; never output map rows "
-        "in ordinary chat. At a real decision point, ask at most one concrete question whose "
-        "answer changes the next design judgment; otherwise let a useful observation stand. "
+        "in ordinary chat. At a real decision point, ask one concrete question whose answer changes "
+        "the next design judgment. If the revision direction is under-specified, you may ask up to "
+        "three tightly related clarification questions; stop early once the direction is sufficient, "
+        "and if the purpose and object are safely identifiable after those questions, complete the "
+        "missing implementation details conservatively instead of asking indefinitely. "
+        "Otherwise let a useful observation stand. "
         "Give a detailed, natural design response when the topic needs it; do not force a "
         "fixed paragraph count or compress away useful reasoning. For route reasoning only, "
         "show one main route in a short, verifiable passage with its key corridor, endpoint, "
@@ -1035,15 +1032,19 @@ def _compact_kimi_structured_prompt(
         route,
         schema,
         safety,
+        (
+            f"Clarification budget for this Stage: {clarification_count} related question(s) "
+            f"have already been asked; at most {clarification_budget} more may be asked before "
+            "you should complete safe missing details yourself. This budget never permits you "
+            "to guess between ambiguous entities or conflicting map claims."
+        ),
         f"Task-specific instructions:\n{task_instructions} {revision_contract}".strip(),
         f"Draft provenance and attribution:\n{provenance_guidance}",
         post_opening_progress_instruction,
         historical_reference_instruction,
         _map_grounding_contract(),
-        f"Deterministic Map Facts (authoritative):\n{map_facts}",
-        f"Current saved Stage (10 rows × 12 columns), one-based rows:\n{numbered_map}",
-        f"Canonical saved row strings:\n{serialized_map}",
-        "Legend: # wall, . floor, @ water, p player, s box, t target.",
+        f"Current Stage Snapshot (authoritative; 10 rows x 12 columns):\n{map_facts}",
+        "",
         design_context_prompt,
         continuity_context_prompt,
         f"Saved Stage context: {json.dumps(stage_context or {}, ensure_ascii=False)}",
@@ -1077,6 +1078,11 @@ def _compact_kimi_plain_prompt(
     historical_reference_instruction="",
 ):
     """Use the same compact facts/routing contract for text fallback."""
+    clarification_count = max(
+        0,
+        min(3, int((stage_context or {}).get("clarificationQuestionCount") or 0)),
+    )
+    clarification_budget = max(0, 3 - clarification_count)
     opening = (
         "This is a Stage opening. Describe one or two concrete map choices and your own "
         "design reaction. Do not ask a question or a yes/no question, or present an either-or "
@@ -1135,7 +1141,11 @@ def _compact_kimi_plain_prompt(
         "moment when explaining a design judgment. Give enough detail to make the reasoning useful; "
         "there is no fixed paragraph-count limit. If route reasoning is relevant, keep it to one "
         "short, verifiable route passage with at most a few key coordinates and no exhaustive "
-        "solver trace. At a real decision point, ask at most one specific design question. "
+        "solver trace. At a real decision point, ask one specific design question; for an under-specified "
+        "revision, ask no more than three tightly related clarification questions and stop early when "
+        "the direction becomes sufficient. If the purpose and object are safely identifiable after "
+        "that exchange, fill in the missing implementation details conservatively rather than asking "
+        "indefinitely. "
         "End with a complete sentence."
     )
     safety = (
@@ -1148,7 +1158,9 @@ def _compact_kimi_plain_prompt(
         "boundary, and merge adjacent one-sentence paragraphs about the same point. Keep the full "
         "reply to roughly six paragraphs and twelve sentences; a simple factual answer may be one "
         "short paragraph. Preserve useful route detail without an exhaustive solver trace. At a real "
-        "decision point, ask at most one specific design question. End with a complete sentence."
+        "decision point, ask one specific design question; for an under-specified revision, ask no "
+        "more than three tightly related clarification questions and stop early when the direction "
+        "becomes sufficient. End with a complete sentence."
     )
     return "\n\n".join([
         f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
@@ -1166,11 +1178,15 @@ def _compact_kimi_plain_prompt(
         route,
         metadata,
         safety,
+        (
+            f"Clarification budget for this Stage: {clarification_count} related question(s) "
+            f"have already been asked; at most {clarification_budget} more may be asked before "
+            "you should complete safe missing details yourself. This budget never permits you "
+            "to guess between ambiguous entities or conflicting map claims."
+        ),
         _map_grounding_contract(),
-        f"Deterministic Map Facts (authoritative):\n{map_facts}",
-        f"Current saved Stage (10 rows × 12 columns), one-based rows:\n{numbered_map}",
-        f"Canonical saved row strings:\n{serialized_map}",
-        "Legend: # wall, . floor, @ water, p player, s box, t target.",
+        f"Current Stage Snapshot (authoritative; 10 rows x 12 columns):\n{map_facts}",
+        "",
         design_context_prompt,
         continuity_context_prompt,
         f"Saved Stage context: {json.dumps(stage_context or {}, ensure_ascii=False)}",
@@ -1230,6 +1246,83 @@ def _map_facts_for_prompt(rows, stage_context):
     return json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
 
 
+def _stage_snapshot_for_prompt(rows, stage_context):
+    """Serialize exactly one server-derived current Stage snapshot.
+
+    ``stage_context`` is an internal compatibility envelope and may contain
+    stale parent annotations.  Those annotations are intentionally ignored for
+    the map payload; the current rows and the current binding are rebuilt here.
+    """
+    context = stage_context or {}
+    try:
+        snapshot = build_stage_snapshot(
+            rows,
+            version_id=context.get("versionId"),
+            stage_number=context.get("stageNumber"),
+            entity_bindings=context.get("entityBindings"),
+        )
+        ordered_entities = sorted(
+            snapshot.get("entities") or [],
+            key=lambda item: (
+                {"player": 0, "box": 1, "target": 2}.get(item.get("kind"), 9),
+                item.get("id") or "",
+            ),
+        )
+        snapshot["canonicalEntityTable"] = [
+            (
+                f"{item.get('id')} = {item.get('kind')} at row {item.get('row')}, "
+                f"column {item.get('column')} (identity exact)"
+            )
+            if item.get("identityConfidence") == "exact" and item.get("id")
+            else (
+                f"{item.get('kind')} at row {item.get('row')}, column {item.get('column')} "
+                "(identity unknown; do not use a historical label as a hard constraint)"
+            )
+            for item in ordered_entities
+        ]
+        # The UI may still display deterministic B1/B2 labels for an
+        # ambiguous historical Stage, but the LLM must not mistake those
+        # presentation labels for trusted cross-Stage identities.  Keep the
+        # coordinates as neutral facts and redact labels/opaque IDs wherever
+        # identity confidence is not exact.
+        for collection_name in ("entities", "boxes", "targets"):
+            for item in snapshot.get(collection_name) or []:
+                if item.get("identityConfidence") != "exact":
+                    item["id"] = None
+                    item["entityId"] = None
+        player = snapshot.get("player")
+        if isinstance(player, dict) and player.get("identityConfidence") != "exact":
+            player["id"] = None
+            player["entityId"] = None
+        claim_check = context.get("userMapClaims")
+        if isinstance(claim_check, dict):
+            snapshot["userMapClaimCheck"] = {
+                "conflicts": [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key != "sourceText"
+                    }
+                    for item in claim_check.get("conflicts", [])
+                    if isinstance(item, dict)
+                ],
+                "instruction": (
+                    "Correct conflicting present-tense user map claims in ordinary prose; "
+                    "do not treat them as design constraints or proposal coordinates."
+                ),
+            }
+    except (TypeError, ValueError):
+        return json.dumps(
+            {
+                "available": False,
+                "reason": "The supplied current Stage is not structurally complete.",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+
+
 def _canonical_entity_table(rows, stage_context=None):
     """Render the server-owned entity binding in a stable prompt format."""
     try:
@@ -1265,17 +1358,88 @@ def _canonical_entity_table(rows, stage_context=None):
 def _prompt_stage_context(rows, stage_context):
     """Expose only a consistent current snapshot in the chat prompt context."""
     context = dict(stage_context or {})
-    context["mapFacts"] = json.loads(_map_facts_for_prompt(rows, stage_context))
+    # Map facts are sent through Current Stage Snapshot exactly once.  Keep
+    # only non-map routing/memory fields in this compatibility context object.
+    context.pop("mapFacts", None)
+    context.pop("stageSnapshot", None)
+    context.pop("entityBindings", None)
+    context.pop("entityBindingFingerprint", None)
+    context.pop("beforeRows", None)
+    context.pop("afterRows", None)
+    context.pop("diff", None)
+    context.pop("changeSummary", None)
+    # A present-tense user map claim is an untrusted input that has already
+    # been checked by the application.  It must not be echoed beside the
+    # authoritative snapshot, especially when it contains the wrong B/T
+    # coordinate that prompted the check.
+    context.pop("userMapClaims", None)
+
+    # Keep continuity semantic.  A previous proposal's exact execution brief
+    # is a contract for its own card, not a second current-map authority.  The
+    # current snapshot is rebuilt below; only the short design rationale is
+    # useful to ordinary chat.  Card-action instructions receive their source
+    # proposal through the dedicated action instruction, so the raw contract
+    # does not need to be serialized again here.
+    recent = context.get("recentGuidance")
+    if isinstance(recent, dict):
+        projected_recent = {
+            key: recent.get(key)
+            for key in (
+                "discussionFocus",
+                "discussionFocusHistory",
+                "intentHypothesis",
+                "activeDisagreement",
+                "uiCues",
+            )
+            if key in recent
+        }
+        proposal = recent.get("proposalOffer")
+        if isinstance(proposal, dict):
+            projected_recent["proposalOffer"] = {
+                key: proposal.get(key)
+                for key in ("summary", "rationale")
+                if proposal.get(key) is not None
+            }
+        context["recentGuidance"] = projected_recent
+
+    for key in (
+        "sourceProposalOffer",
+        "challengeContext",
+        "challengeRevision",
+        "alternativeRevision",
+        "authorizedExecutionBrief",
+        "proposalBindingFrozen",
+        "deterministicExactExecution",
+    ):
+        context.pop(key, None)
     try:
         context["mapFingerprint"] = map_fingerprint(rows)
     except (TypeError, ValueError):
         context.pop("mapFingerprint", None)
-    # These are useful to the server's human-edit bookkeeping but are parent
-    # and child snapshots, not the current grid.  Sending them beside the
-    # current map gives the model an avoidable opportunity to mix snapshots.
-    context.pop("beforeRows", None)
-    context.pop("afterRows", None)
     return context
+
+
+def _current_user_prompt_messages(conversation):
+    """Keep only the current user turn in the LLM transcript.
+
+    Prior assistant prose is not an authority for map facts. DesignContext and
+    the current StageSnapshot carry the safe continuity needed by the model;
+    replaying historical assistant text here would give stale coordinates and
+    entity labels a second, competing source of truth.
+    """
+    latest = next(
+        (
+            {
+                "role": "user",
+                "content": str(message.get("content") or ""),
+            }
+            for message in reversed(conversation or [])
+            if message.get("role") == "user"
+            and str(message.get("content") or "").strip()
+        ),
+        None,
+    )
+    return [latest] if latest is not None else []
 
 
 def _design_context_prompt(stage_context, role="chat"):
@@ -1829,6 +1993,8 @@ def _validate_coordinate_claims(text, rows, *, entity_bindings=None):
     )
     height = len(rows)
     for match in claim_pattern.finditer(text):
+        if _entity_claim_is_non_current(text, match.start(), match.end()):
+            continue
         row, column = int(match.group(1)), int(match.group(2))
         expected = _tile_from_claim(match.group(3))
         if not (1 <= row <= height and 1 <= column <= len(rows[row - 1])):
@@ -1865,6 +2031,19 @@ def _map_entity_coordinates(rows, entity_bindings=None):
         key: {"row": value["row"], "column": value["column"]}
         for key, value in result.items()
     }
+
+
+def _entity_claim_is_non_current(text, start, end):
+    """Ignore future or hypothetical entity coordinates during grounding."""
+    window = str(text or "")[max(0, start - 36):end]
+    return bool(re.search(
+        r"(?:\bif\b|\bwhen\b|\bwould\b|\bwill\b|\bmove(?:s|d|ing)?\b|"
+        r"\bpush(?:es|ed|ing)?\b|\bto\b|\btoward(?:s)?\b|\bfrom\b|"
+        r"\u5982\u679c|\u82e5|\u5047\u8bbe|\u5c06|\u4f1a|\u79fb\u52a8|\u63a8\u5230|"
+        r"\u63a8\u5411|\u6539\u5230|\u53d8\u6210)",
+        window,
+        flags=re.IGNORECASE,
+    ))
 
 
 def _entity_coordinate_claims(text, rows):
@@ -1966,6 +2145,8 @@ def _entity_coordinate_claims(text, rows):
 
     for pattern in patterns:
         for match in pattern.finditer(str(text or "")):
+            if _entity_claim_is_non_current(str(text or ""), match.start(), match.end()):
+                continue
             entity_name = match.group("entity").upper()
             if entity_name in {"玩家", "起点"}:
                 entity_name = "P"
@@ -2698,31 +2879,13 @@ def _build_revision_plan_messages(
     )
     movement_rule = _movement_requirement_prompt(movement_requirement)
     preservation_rule = _preserved_components_prompt(preserved_components)
-    map_facts = (
-        _canonical_entity_table(rows, stage_context)
-        + "\n"
-        + _map_facts_for_prompt(rows, stage_context)
-    )
+    map_facts = _stage_snapshot_for_prompt(rows, stage_context)
     continuity_context = _continuity_context_prompt(stage_context, role="revision")
-    edit_facts = _editable_focus_facts(rows, execution_brief.get("focus"))
-    numbered_map = "\n".join(
-        f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
-    )
-    latest_user = next(
-        (
-            {
-                "role": "user",
-                "content": str(message.get("content") or "")[:2000],
-            }
-            for message in reversed(conversation or [])
-            if message.get("role") == "user"
-        ),
-        None,
-    )
-    # The modifier handoff must not receive a transcript.  The semantic Chat
-    # handoff has already distilled the authorized direction into the brief and
-    # DesignContext projection.
-    transcript = [latest_user] if latest_user else []
+    # The modifier handoff must not receive a transcript or raw user claims.
+    # The semantic Chat handoff has already distilled the authorized direction
+    # into the brief and DesignContext projection.
+    edit_facts = ""
+    numbered_map = ""
     system_prompt = (
         "You are the Sokoban co-creation revision-planning assistant. Compile a designer-authorized semantic RevisionPlan "
         "for one saved 10-row × 12-column Stage into a detailed, executable RevisionPlan. Resolve the intended "
@@ -2756,9 +2919,8 @@ def _build_revision_plan_messages(
         "request, select operators that can realize the effect, and use metricGoals when the "
         "designer clearly requests a measurable change. The first strategy is preferred and any "
         "later strategies are strict alternatives, not permission to weaken the request. Natural-language reasoning is internal. "
-        "The numbered map and Deterministic Map Facts below are generated from the same current "
-        "saved snapshot; never reconcile them by guessing or by preferring a coordinate from "
-        "conversation text. "
+         "The current Stage Snapshot below is the only map source. Never use a coordinate from "
+         "conversation text or an older Stage. "
         + _map_grounding_contract() + " "
         f"Interpret conversation in {response_language}."
     )
@@ -2773,11 +2935,9 @@ def _build_revision_plan_messages(
         f"{preservation_rule}\n\n"
         "Column ruler (one-based): 123456789012\n"
         f"Map snapshot fingerprint for this planning pass: {map_fingerprint(rows)}\n"
-        f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
-        f"Focus editable-cell facts (authoritative):\n{edit_facts}\n\n"
-        f"Current saved Stage:\n{numbered_map}\n\n"
-        "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
-        f"Authorized latest user confirmation JSON: {json.dumps(transcript, ensure_ascii=False)}"
+        f"Current Stage Snapshot (authoritative; 10 rows x 12 columns):\n{map_facts}\n"
+        ""
+        f"Authorized direction (no chat transcript): {revision_brief!r}"
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -3262,32 +3422,17 @@ def _build_map_operation_messages(
     baseline_metrics=None,
 ):
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
-    numbered_map = "\n".join(
-        f"row {index + 1:02d}: {row}" for index, row in enumerate(rows)
-    )
-    map_facts = (
-        _canonical_entity_table(rows, stage_context)
-        + "\n"
-        + _map_facts_for_prompt(rows, stage_context)
-    )
-    focus_facts = [
-        {
-            "strategyIndex": strategy.get("strategyIndex"),
-            "cells": json.loads(
-                _editable_focus_facts(rows, strategy.get("focus"))
-            ).get("cells", []),
-        }
-        for strategy in revision_contract.get("strategies") or []
-        if strategy.get("focus") is not None
-    ]
+    numbered_map = ""
+    map_facts = _stage_snapshot_for_prompt(rows, stage_context)
+    focus_facts = []
     solver_evidence = _llm_solver_evidence(baseline_metrics or {})
     modifier_contract = _modifier_contract_view(revision_contract)
     system_prompt = (
         "You are the Sokoban co-creation level revision assistant. The saved Stage has 10 rows × 12 columns and is "
         "immutable input. Execute only the supplied execution contract; do not reinterpret the "
         "designer's request, invent a broader goal, or use any conversation outside the contract. "
-        "Return only concrete cell-operation candidates. The numbered map and Deterministic "
-        "Map Facts in this request are one synchronized snapshot. The application constructs the complete "
+         "Return only concrete cell-operation candidates. The Stage Snapshot in this request is the only "
+         "map source. The application constructs the complete "
         "map, enforces the contract, checks structure, and runs the deterministic solver. "
         "Every candidate must make a meaningful, coherent local change within the contract. Do "
         "not add unrelated cells just to make a diff. Never edit void cells or the connected outer "
@@ -3312,10 +3457,7 @@ def _build_map_operation_messages(
         f"{json.dumps(modifier_contract, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "Column ruler (one-based): 123456789012\n"
         f"Map snapshot fingerprint for this execution pass: {map_fingerprint(rows)}\n"
-        f"Deterministic Map Facts (authoritative):\n{map_facts}\n\n"
-        f"Focus editable-cell facts (authoritative):\n{json.dumps(focus_facts, ensure_ascii=False, separators=(',', ':'))}\n\n"
-        f"Current saved Stage:\n{numbered_map}\n\n"
-        "Legend: # wall, . floor, @ water, p player, s box, t target.\n"
+         f"Current Stage Snapshot (authoritative; 10 rows x 12 columns):\n{map_facts}\n"
         f"Deterministic solver evidence (authoritative): {json.dumps(solver_evidence, ensure_ascii=False)}"
     )
     return [
@@ -4235,6 +4377,7 @@ def _generate_plain_chat_sync(
                     guidance_mode=guidance_mode,
                     validation_mode=validation_mode,
                     historical_reference=historical_reference,
+                    semantic_messages=conversation,
                     started_at=started_at,
                     deadline=deadline,
                 ),
@@ -4543,12 +4686,18 @@ async def _generate_plain_with_model_fallback(
     guidance_mode,
     validation_mode="ordinary_chat",
     historical_reference=False,
+    semantic_messages=None,
     started_at,
     deadline=None,
 ):
     last_error = None
     validation_feedback = None
     deadline = deadline or _request_deadline(started_at)
+    # The model receives only the current user turn plus the authoritative
+    # StageSnapshot.  Deterministic card/memory helpers may still use the
+    # server-owned semantic conversation (never as map facts) so a prior
+    # design judgment can be recognized without re-sending old prose to Kimi.
+    semantic_messages = semantic_messages or messages
 
     max_attempts = len(models)
     for attempt, model in enumerate(models[:max_attempts], start=1):
@@ -4725,7 +4874,7 @@ async def _generate_plain_with_model_fallback(
             proposal_binding_downgraded = False
             intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = (
                 _apply_deterministic_guidance_fallback(
-                    messages,
+                    semantic_messages,
                     visible_content,
                     language,
                     stage_context,
@@ -4753,7 +4902,7 @@ async def _generate_plain_with_model_fallback(
                 proposal_offer = _distill_proposal_offer(
                     proposal_offer,
                     visible_content,
-                    _latest_role_content(messages[:-1], "assistant"),
+                    _latest_role_content(semantic_messages[:-1], "assistant"),
                     language,
                 )
                 if proposal_offer is not None and proposal_offer_requires_execution_brief(
@@ -4761,7 +4910,7 @@ async def _generate_plain_with_model_fallback(
                     visible_content,
                     proposal_offer.get("summary"),
                     proposal_offer.get("rationale"),
-                    _latest_role_content(messages, "user"),
+                    _latest_role_content(semantic_messages, "user"),
                 ):
                     # Keep the model's visible prose, but do not expose a
                     # purple card that cannot be tied to a saved tile state. A
@@ -4797,7 +4946,7 @@ async def _generate_plain_with_model_fallback(
                     "The model returned only a low-information question."
                 )
 
-            if question and _question_repeats_recent_judgment(question, messages):
+            if question and _question_repeats_recent_judgment(question, semantic_messages):
                 question = None
 
             if stage_opening and _is_stage_one(stage_context):
@@ -4872,7 +5021,7 @@ async def _generate_plain_with_model_fallback(
                         warning_text,
                         language,
                         stage_context,
-                        user_position=_latest_role_content(messages, "user"),
+                        user_position=_latest_role_content(semantic_messages, "user"),
                     )
 
             if (stage_context or {}).get("revisionRequestState") == "needs_direction":
@@ -4924,7 +5073,7 @@ async def _generate_plain_with_model_fallback(
             guidance = _apply_guidance_card_policy(guidance)
             guidance = _ensure_required_guidance_card(
                 guidance,
-                messages,
+                semantic_messages,
                 language,
                 rows,
                 stage_opening,
@@ -4933,6 +5082,19 @@ async def _generate_plain_with_model_fallback(
                 guidance_mode=guidance_mode,
             )
             body = _deduplicate_assistant_body(body)
+            if (
+                guidance_mode in {"revision_advice", "needs_clarification"}
+                and not guidance.get("proposalOffer")
+                and not re.search(r"[?？]", body)
+            ):
+                # A missing binding is resolved in the visible conversation,
+                # never by manufacturing a failure card.
+                body = "\n\n".join(
+                    part for part in (
+                        body,
+                        _exact_revision_clarification(language),
+                    ) if str(part or "").strip()
+                )
             body = _remove_guidance_from_body(
                 body,
                 guidance.get("followUpQuestion"),
@@ -4956,7 +5118,7 @@ async def _generate_plain_with_model_fallback(
             proposal_binding_issue = _proposal_offer_binding_issue(
                 guidance.get("proposalOffer"),
                 body,
-                messages,
+                semantic_messages,
                 language,
             )
             # In the explicit advice route this is a hard contract. Ordinary chat may still
@@ -4970,7 +5132,7 @@ async def _generate_plain_with_model_fallback(
                     )
 
                 repaired = _repair_conceptual_proposal_binding(
-                    messages,
+                    semantic_messages,
                     body,
                     guidance.get("proposalOffer"),
                     visible_content,
@@ -5203,7 +5365,7 @@ async def _generate_plain_with_model_fallback(
             last_error.safe_message,
             validation_feedback,
         ):
-            clarification = _safe_grounding_clarification(language)
+            clarification = _safe_grounding_chat_reply(language)
             return LLMExecutionResult(
                 assistant_message=clarification,
                 assessment={},
@@ -5223,7 +5385,10 @@ async def _generate_plain_with_model_fallback(
                     "followUpQuestion": None,
                     "proposalOffer": None,
                     "disagreement": None,
-                    "uiCues": [{"type": "clarification", "text": clarification}],
+                    # Grounding recovery is ordinary body prose.  It must not
+                    # manufacture the legacy "cannot form a verifiable
+                    # proposal" card.
+                    "uiCues": [],
                     "coordinateLinks": [],
                 },
             )
@@ -5823,6 +5988,13 @@ def validate_translation_response(payload, source_items, target_language="en"):
                 )
                 for text in normalized["coordinateLinkTexts"]
             ]
+            if any(
+                link_text not in (normalized["body"] or "")
+                for link_text in normalized["coordinateLinkTexts"]
+            ):
+                raise ValueError(
+                    f"translations[{index}].coordinateLinkTexts must remain exact body substrings."
+                )
         if "disagreement" in item_expected_fields:
             source_disagreement = source.get("disagreement")
             translated_disagreement = translation.get("disagreement")
@@ -6064,8 +6236,18 @@ def validate_chat_response(
         guidance["followUpQuestion"] = None
         extracted_question = None
     else:
+        clarification_mode = classify_guidance_request(
+            [
+                {"role": "user", "content": ""},
+            ],
+            stage_context,
+            stage_opening=assessment_only,
+        )
         assistant_message, extracted_question = _extract_message_question(
             assistant_message,
+            max_questions=(
+                3 if clarification_mode == "needs_clarification" else 1
+            ),
         )
 
     if extracted_question is not None:
@@ -6331,7 +6513,7 @@ def validate_chat_response(
     )
 
 
-def _extract_message_question(message):
+def _extract_message_question(message, max_questions=1):
     if "?" not in message and "？" not in message:
         return message, None
 
@@ -6359,8 +6541,21 @@ def _extract_message_question(message):
             separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
             declarative_paragraphs.append(separator.join(declarative_sentences))
 
+    try:
+        max_questions = max(1, int(max_questions))
+    except (TypeError, ValueError):
+        max_questions = 1
+
+    if len(questions) > max_questions:
+        raise ValueError(
+            f"assistantMessage can contain at most {max_questions} question(s)."
+        )
+
     if len(questions) > 1:
-        raise ValueError("assistantMessage can contain at most one question.")
+        # A clarification turn may need two or three independent missing inputs.
+        # Keep those questions in ordinary body prose instead of forcing them
+        # into the single legacy followUpQuestion/card field.
+        return message, None
 
     if not declarative_paragraphs:
         raise ValueError(
@@ -8419,8 +8614,8 @@ def _stage_opening_safe_execution(
 def _safe_grounding_chat_reply(language):
     if language == "zh-CN":
         return (
-            "我理解你是在讨论当前布局带来的设计感受。刚才回复里有一处具体地图事实没有被可靠确认，"
-            "所以我先不把未验证的坐标或位置当成结论；我们仍然可以从空间分布、节奏和引导效果继续讨论。"
+            "我会以当前保存的地图为准继续分析；刚才回复中的一处具体地图事实没有被可靠确认，"
+            "所以我不会把未经验证的坐标当成结论。我们仍然可以继续讨论空间分布、节奏和引导效果。"
         )
     return (
         "I understand that you are discussing the design feel of the current layout. One concrete map fact "
@@ -8433,12 +8628,12 @@ def _safe_grounding_clarification(language):
     """Neutral user-facing recovery after bounded grounding retries."""
     if language == "zh-CN":
         return (
-            "当前还没有形成一份与已保存地图完全一致、可验证的方案。"
-            "地图没有被修改，请重新生成方案，或补充需要调整的具体方向。"
+            "我会以当前保存的地图为准继续分析；刚才回复中的具体位置还需要重新确认。"
+            "请指出你要讨论的实体或格子，我会直接按当前 Stage 的事实继续。"
         )
     return (
-        "I could not form a proposal that is fully consistent with the saved map. "
-        "The map was not changed; please regenerate the proposal or clarify the direction to adjust."
+        "I will continue from the current saved map. The specific location in the previous reply needs "
+        "to be rechecked; please name the entity or cell so I can use the current Stage facts."
     )
 
 
@@ -8640,7 +8835,7 @@ def _repair_conceptual_proposal_binding(
         "body": cleaned_body,
         "proposalOffer": None,
         "followUpQuestion": None,
-        "uiCues": [{"type": "clarification", "text": question}],
+        "uiCues": [],
     }
 
 
@@ -8782,7 +8977,7 @@ def _apply_deterministic_guidance_fallback(
     cue_by_type = {
         cue.get("type"): cue
         for cue in ui_cues
-        if cue.get("type") in {"warning", "manual_edit", "clarification"} and cue.get("text")
+        if cue.get("type") in {"warning", "manual_edit"} and cue.get("text")
     }
 
     warning_cue = cue_by_type.get("warning")
@@ -8822,7 +9017,7 @@ def _apply_deterministic_guidance_fallback(
 
     ordered_cues = [
         cue_by_type[cue_type]
-        for cue_type in ("clarification", "warning", "manual_edit")
+        for cue_type in ("warning", "manual_edit")
         if cue_type in cue_by_type
     ][:2]
     return intent_hypothesis, proposal_offer, ordered_cues, fallback_used
@@ -8840,7 +9035,7 @@ def _apply_guidance_card_policy(guidance):
     cues = [
         dict(cue)
         for cue in normalized.get("uiCues") or []
-        if cue.get("type") in {"warning", "tradeoff", "manual_edit", "clarification"}
+        if cue.get("type") in {"warning", "tradeoff", "manual_edit"}
         and cue.get("text")
     ]
     warning = next(
@@ -8851,10 +9046,7 @@ def _apply_guidance_card_policy(guidance):
         (cue for cue in cues if cue.get("type") == "manual_edit"),
         None,
     )
-    clarification = next(
-        (cue for cue in cues if cue.get("type") == "clarification"),
-        None,
-    )
+    clarification = None
 
     if isinstance(disagreement, dict) and disagreement.get("status") == "active":
         normalized["uiCues"] = [cue for cue in (warning, manual) if cue is not None]
@@ -8867,13 +9059,6 @@ def _apply_guidance_card_policy(guidance):
         normalized["uiCues"] = [
             cue for cue in (manual, warning) if cue is not None
         ]
-        return normalized
-
-    if clarification is not None:
-        normalized["intentHypothesis"] = None
-        normalized["intentConfidence"] = None
-        normalized["followUpQuestion"] = None
-        normalized["uiCues"] = [clarification]
         return normalized
 
     if manual is not None:
@@ -8976,6 +9161,15 @@ def _ensure_required_guidance_card(
         normalized["uiCues"] = []
         return normalized
 
+    if guidance_mode == "needs_clarification":
+        normalized["move"] = "clarify_intent"
+        normalized["proposalOffer"] = None
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
+        normalized["followUpQuestion"] = None
+        normalized["uiCues"] = []
+        return normalized
+
     if guidance_mode == "revision_advice":
         proposal_offer = normalized.get("proposalOffer")
         if _proposal_offer_has_exact_execution_plan(proposal_offer):
@@ -9006,10 +9200,10 @@ def _ensure_required_guidance_card(
         normalized["intentHypothesis"] = None
         normalized["intentConfidence"] = None
         clarification = normalized.get("followUpQuestion") or _exact_revision_clarification(language)
+        # Missing/invalid binding is a normal clarification turn, not a
+        # visible failure card.  The caller keeps the question in prose.
         normalized["followUpQuestion"] = None
-        normalized["uiCues"] = [
-            {"type": "clarification", "text": clarification}
-        ]
+        normalized["uiCues"] = []
         return normalized
 
     if guidance_mode == "discussion":
@@ -9107,6 +9301,11 @@ def classify_guidance_request(conversation, stage_context=None, stage_opening=Fa
         "authorized", "authorized_relaxed"
     }:
         return "revision_advice"
+    routing = context.get("revisionRouting")
+    if routing in {"confused", "needs_clarification"}:
+        return "needs_clarification"
+    if routing == "proposal":
+        return "revision_advice"
     if context.get("revisionRequestState") not in (None, "not_request"):
         return "none"
 
@@ -9165,6 +9364,18 @@ def _guidance_mode_instruction(guidance_mode):
             "playable moments. Do not output proposal fields or MANUAL_EDIT, and do not decide a map "
             "change on the designer's behalf. A blue card requires a separate structured active "
             "disagreement about a concrete decision."
+        )
+    if guidance_mode == "needs_clarification":
+        return (
+            "Deterministic routing found that the latest direction is either unclear, conflicted, "
+            "or addressed to more than one possible map object. Keep the response in ordinary "
+            "assistantMessage prose. Ask one to three tightly related high-value questions only "
+            "when multiple missing inputs are genuinely needed; stop early as soon as the user "
+            "has supplied enough information. If the purpose and object are safely identifiable "
+            "after the clarification exchange, complete the missing implementation details "
+            "conservatively and generate one complete proposal. Do not output proposal fields "
+            "while the object or direction is still ambiguous, and never output MANUAL_EDIT, a "
+            "clarification card, or a failure card. Do not guess coordinates or map identities."
         )
     if guidance_mode == "disagreement":
         return (

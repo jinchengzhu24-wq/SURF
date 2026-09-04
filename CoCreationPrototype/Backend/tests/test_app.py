@@ -24,6 +24,110 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
     def tearDown(self):
         self.client.close()
 
+    def test_adaptive_revision_routing_distinguishes_goal_from_undirected_edit(self):
+        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        empty_claims = {"conflicts": []}
+
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848\uff0c\u6211\u60f3\u8ba9\u73a9\u5bb6\u66f4\u660e\u663e\u611f\u53d7\u7ed5\u884c\u538b\u529b",
+                empty_claims,
+                snapshot,
+            ),
+            "proposal",
+        )
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848",
+                empty_claims,
+                snapshot,
+            ),
+            "needs_clarification",
+        )
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "\u5e2e\u6211\u6539\u4e00\u4e0b",
+                empty_claims,
+                snapshot,
+            ),
+            "needs_clarification",
+        )
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "\u6211\u6709\u70b9\u8ff7\u832b\uff0c\u7ed9\u6211\u4e00\u70b9\u601d\u8def",
+                empty_claims,
+                snapshot,
+            ),
+            "confused",
+        )
+
+    def test_clarification_budget_allows_safe_completion_for_unique_water(self):
+        snapshot = {
+            "identityStatus": "exact",
+            "waterCells": [
+                {"row": 2, "column": 2},
+                {"row": 2, "column": 3},
+            ],
+        }
+        self.assertFalse(
+            backend._allow_adaptive_proposal_completion(
+                "\u6c34\u57df\u600e\u4e48\u6539",
+                {"conflicts": []},
+                snapshot,
+                2,
+            )
+        )
+        self.assertTrue(
+            backend._allow_adaptive_proposal_completion(
+                "\u6c34\u57df\u600e\u4e48\u6539",
+                {"conflicts": []},
+                snapshot,
+                3,
+            )
+        )
+        self.assertFalse(
+            backend._allow_adaptive_proposal_completion(
+                "\u5e2e\u6211\u6539\u4e00\u4e0b",
+                {"conflicts": []},
+                snapshot,
+                3,
+            )
+        )
+
+    def test_clarification_budget_allows_completion_for_clear_outcome_goal(self):
+        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+
+        self.assertTrue(
+            backend._allow_adaptive_proposal_completion(
+                "\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848\uff0c\u6211\u60f3\u8ba9\u73a9\u5bb6\u66f4\u660e\u663e\u611f\u53d7\u7ed5\u884c\u538b\u529b",
+                {"conflicts": []},
+                snapshot,
+                3,
+            )
+        )
+        self.assertFalse(
+            backend._allow_adaptive_proposal_completion(
+                "\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848",
+                {"conflicts": []},
+                snapshot,
+                3,
+            )
+        )
+        self.assertFalse(
+            backend._allow_adaptive_proposal_completion(
+                "\u8bf7\u8c03\u6574\u7bb1\u5b50\u7684\u8def\u7ebf",
+                {"conflicts": []},
+                {
+                    **snapshot,
+                    "entities": [
+                        *snapshot["entities"],
+                        {"kind": "box", "id": "B2"},
+                    ],
+                },
+                3,
+            )
+        )
+
     def test_conservative_map_question_extraction_ignores_generic_question(self):
         self.assertEqual(
             backend._extract_conservative_map_question(
@@ -459,9 +563,13 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         )
         system_prompt = prompt_messages[0]["content"]
 
-        self.assertIn("\n".join(backend.SAMPLE_ROWS), system_prompt)
+        self.assertIn('"rows":["############"', system_prompt)
+        self.assertIn('"dimensions":{"rows":10,"columns":12}', system_prompt)
+        self.assertEqual(system_prompt.count("Current Stage Snapshot"), 1)
+        self.assertNotIn("beforeRows", system_prompt)
+        self.assertNotIn("afterRows", system_prompt)
         self.assertIn("authoritative", system_prompt)
-        self.assertIn("at most one concrete question", system_prompt)
+        self.assertIn("up to three tightly related clarification questions", system_prompt)
         self.assertIn("tentative", system_prompt)
         self.assertIn("one level with Stages as saved-version indices", system_prompt)
         self.assertIn("offer_revision", system_prompt)

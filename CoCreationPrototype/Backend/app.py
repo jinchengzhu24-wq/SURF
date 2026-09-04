@@ -29,6 +29,9 @@ from level_validation import (
     build_entity_bindings,
     build_untrusted_entity_bindings,
     build_map_facts,
+    build_stage_snapshot,
+    analyze_user_map_claims,
+    format_map_claim_correction,
     derive_entity_transitions,
     entity_binding_fingerprint,
     entity_bindings_match_rows,
@@ -45,6 +48,9 @@ from llm_client import (
     PROMPT_VERSION,
     PROPOSAL_GENERATION_ATTEMPTS,
     classify_revision_request,
+    _contains_user_design_direction,
+    _guidance_advice_request,
+    _guidance_confusion_request,
     execute_revision_operations,
     generate_chat_reply,
     generate_stage_assessment,
@@ -82,6 +88,7 @@ from design_context import (
     merge_chat_update,
     revision_projection,
     set_active_disagreement,
+    sanitize_user_design_text,
 )
 
 
@@ -1303,6 +1310,57 @@ def _send_message_locked(
         context = build_llm_context(database, session_id, current)
         language = session["language"]
         stage_context = context["stageContext"]
+        user_map_claims = analyze_user_map_claims(
+            content,
+            stage_context.get("stageSnapshot"),
+        )
+        stage_context["userMapClaims"] = user_map_claims
+        revision_routing = _adaptive_revision_routing(
+            content,
+            user_map_claims,
+            stage_context.get("stageSnapshot"),
+        )
+        stage_context["adaptiveProposalCompletion"] = (
+            revision_routing == "needs_clarification"
+            and _allow_adaptive_proposal_completion(
+                content,
+                user_map_claims,
+                stage_context.get("stageSnapshot"),
+                stage_context.get("clarificationQuestionCount", 0),
+            )
+        )
+        if stage_context["adaptiveProposalCompletion"]:
+            revision_routing = "proposal"
+        stage_context["revisionRouting"] = revision_routing
+        if user_map_claims.get("conflicts"):
+            # A conflicting present-tense map claim must not advance inferred
+            # assistant memory.  merge_chat_update still receives the user's
+            # text so its sanitizer can retain a separate, valid design goal
+            # while removing the untrusted map fact.
+            allow_progress = False
+            record_event(
+                database,
+                session_id,
+                "map_claim_conflict",
+                {
+                    "versionId": payload.baseVersionId,
+                    "messageKey": payload.idempotencyKey,
+                    "claimCount": len(user_map_claims.get("conflicts") or []),
+                    "conflicts": [
+                        {
+                            key: value
+                            for key, value in conflict.items()
+                            if key != "sourceText"
+                        }
+                        for conflict in user_map_claims["conflicts"]
+                    ],
+                    "mapFingerprint": stage_context.get("mapFingerprint"),
+                    "entityBindingFingerprint": stage_context.get(
+                        "entityBindingFingerprint"
+                    ),
+                },
+                utc_now(),
+            )
         stage_context["discussionCardMode"] = "disagreement_only"
         stage_context["explicitAction"] = payload.action
         stage_context["actionSourceTurnId"] = payload.sourceTurnId
@@ -1462,6 +1520,47 @@ def _send_message_locked(
         execution = _normalize_manual_edit_review_execution(
             execution,
             context["stageContext"],
+        )
+    if payload.action == "none" and user_map_claims.get("conflicts"):
+        # A wrong present-tense map claim must not become a proposal, an intent
+        # hard constraint, or a progress direction.  Preserve useful model
+        # prose, but put the server-verified correction first and remove all
+        # card metadata from this turn.
+        correction = format_map_claim_correction(
+            user_map_claims["conflicts"],
+            language,
+        )
+        visible_body = str(execution.assistant_message or "").strip()
+        if correction and correction not in visible_body:
+            visible_body = "\n\n".join(
+                part for part in (correction, visible_body) if part
+            )
+        corrected_guidance = dict(execution.guidance or {})
+        corrected_guidance.update({
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+            "coordinateLinks": [],
+        })
+        corrected_guidance.pop("designContextPatch", None)
+        corrected_guidance.pop("designContextPatchError", None)
+        execution = replace(
+            execution,
+            assistant_message=visible_body,
+            proposed_rows=None,
+            revision_plan={},
+            revision_contract={},
+            revision_operations=[],
+            proposal_binding={},
+            proposal_diagnostics={
+                **(execution.proposal_diagnostics or {}),
+                "category": "map_claim_conflict",
+            },
+            guidance=corrected_guidance,
         )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
     execution = _bind_execution_to_stage(
@@ -3119,9 +3218,15 @@ def _insert_version(
             if parent_version is not None:
                 parent_rows = load_json(parent_version["rows_json"])
         entity_transitions = derive_entity_transitions(parent_rows, validation.rows)
-    if isinstance(entity_bindings, dict):
+    if (
+        isinstance(entity_bindings, dict)
+        and entity_bindings_match_rows(entity_bindings, validation.rows)
+    ):
         version_bindings = dict(entity_bindings)
     else:
+        # Never persist a caller-supplied binding merely because its shape is
+        # JSON-compatible.  Rebuild it from the immutable parent and the
+        # explicit transition contract; ambiguous mappings stay unknown.
         version_bindings = build_entity_bindings(
             validation.rows,
             parent_bindings=parent_bindings,
@@ -3546,6 +3651,7 @@ def build_llm_context(database, session_id, version):
         """,
         (session_id, version["id"]),
     ).fetchall()
+    clarification_question_count = _clarification_question_count(turns)
     accepted_opening = database.execute(
         """
         SELECT proposal.id AS proposal_id, proposal.assistant_turn_id,
@@ -3792,6 +3898,16 @@ def build_llm_context(database, session_id, version):
         dump_json(evidence_payload).encode("utf-8")
     ).hexdigest()[:16]
 
+    # This is the only map snapshot that an LLM-facing caller should use.  The
+    # parent diff remains available below for server audit/review, but is not a
+    # second source of current map facts.
+    stage_snapshot = build_stage_snapshot(
+        current_rows,
+        version_id=version["id"],
+        stage_number=version["stage_number"],
+        entity_bindings=entity_bindings,
+    )
+
     if accepted_opening is not None and not any(
         turn["content"] == _verified_proposal_message(session["language"])
         and turn["role"] == accepted_opening["role"]
@@ -3828,6 +3944,7 @@ def build_llm_context(database, session_id, version):
                 parent_rows,
                 entity_bindings,
             ),
+            "stageSnapshot": stage_snapshot,
             "entityBindings": entity_bindings,
             "mapFingerprint": map_fingerprint(current_rows),
             "entityBindingFingerprint": entity_bindings.get("bindingFingerprint"),
@@ -3842,6 +3959,10 @@ def build_llm_context(database, session_id, version):
             "revisionDesignContext": revision_projection(design_context),
             "evaluatorDesignContext": evaluator_projection(design_context),
             "guidanceEvidenceSignature": guidance_evidence_signature,
+            "clarificationQuestionCount": clarification_question_count,
+            "clarificationQuestionBudget": max(
+                0, 3 - clarification_question_count
+            ),
             "openingTurnId": (
                 accepted_opening["assistant_turn_id"]
                 if accepted_opening is not None
@@ -3912,7 +4033,7 @@ def _latest_substantive_design_direction(turns):
     for turn in turns:
         if turn["role"] != "user":
             continue
-        content = turn["content"].strip().casefold()
+        content = sanitize_user_design_text(turn["content"]).casefold()
         normalized = re.sub(r"[\s,.!?。！？]+", "", content)
         if not content or normalized in generic_continuations:
             continue
@@ -3921,6 +4042,239 @@ def _latest_substantive_design_direction(turns):
         if len(normalized) >= 4:
             return content
     return ""
+
+
+def _adaptive_revision_routing(content, user_map_claims, snapshot):
+    """Choose proposal expansion versus one targeted clarification question."""
+    text = str(content or "").strip()
+    if not text:
+        return "none"
+    if _guidance_confusion_request(text):
+        return "confused"
+    if (user_map_claims or {}).get("conflicts"):
+        return "needs_clarification"
+
+    direct_edit = bool(re.search(
+        r"(?:把|将|請將|扩展|扩大|移动|移到|挪到|调整|修改|改成|放到|"
+        r"\b(?:move|shift|extend|expand|change|adjust|relocate)\b)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+    direct_edit = direct_edit or bool(re.search(
+        r"(?:\u5e2e\u6211|\u8bf7(?:\u4f60)?|\u628a|\u5c06).{0,48}"
+        r"(?:\u6539|\u4fee\u6539|\u8c03\u6574|\u79fb\u52a8|\u6269\u5c55|\u6269\u5927|\u6539\u6210|"
+        r"\u632a\u5230|\u7f29\u5c0f|\u589e\u52a0|\u51cf\u5c11|\b(?:move|shift|extend|expand|change|adjust|relocate)\b)|"
+        r"\b(?:move|shift|extend|expand|change|adjust|relocate)\b",
+        text,
+        flags=re.IGNORECASE,
+    ))
+    advice_request = _guidance_advice_request(text)
+    if not direct_edit and not advice_request:
+        return "none"
+    concrete_change = bool(re.search(
+        r"(?:\u628a|\u5c06|\u8ba9|\u5e0c\u671b|\u60f3(?:\u8981|\u8ba9|\u628a)?|"
+        r"\u589e\u52a0|\u51cf\u5c11|\u6269\u5c55|\u6269\u5927|\u7f29\u5c0f|\u6539\u6210|"
+        r"\u79fb\u52a8|\u8c03\u6574|\u4fee\u6539).{0,100}"
+        r"(?:\u6c34\u57df|\u6c34|\u5899|\u5899\u4f53|\u7bb1\u5b50|\u76ee\u6807|\u533a\u57df|\u901a\u9053|\u8def\u7ebf|"
+        r"water|wall|box|target|area|corridor|route).{0,80}"
+        r"(?:\u5411|\u5f80|\u5230|\u6269\u5c55|\u6269\u5927|\u79fb\u52a8|\u6539|\u8c03\u6574|"
+        r"up|down|left|right|add|remove|move|extend|expand|change|adjust)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+    has_direction = _contains_user_design_direction(text) or concrete_change
+    if not has_direction:
+        return "needs_clarification"
+
+    referenced_labels = re.findall(r"\b(?:P|B\d+|T\d+)\b", text, flags=re.IGNORECASE)
+    if referenced_labels and (snapshot or {}).get("identityStatus") != "exact":
+        return "needs_clarification"
+
+    # A vague quantifier is safe only when the referenced class has one
+    # connected region.  Do not choose between two possible water regions or
+    # entities merely because one is nearer in the grid.
+    vague_region = bool(re.search(
+        r"(?:一块|某个|一个|其中一个|a\s+water|one\s+of\s+the\s+water|some\s+water)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+    vague_region = vague_region and bool(re.search(
+        r"(?:\u6c34\u57df|\u6c34|\u5899|\u5899\u4f53|\u7bb1\u5b50|\u76ee\u6807|\u533a\u57df|\u901a\u9053|"
+        r"water|wall|box|target|area|corridor)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+    water_cells = {
+        (item.get("row"), item.get("column"))
+        for item in (snapshot or {}).get("waterCells", [])
+        if isinstance(item, dict)
+    }
+    components = 0
+    while water_cells:
+        components += 1
+        pending = [water_cells.pop()]
+        while pending:
+            row, column = pending.pop()
+            for neighbor in (
+                (row - 1, column), (row + 1, column),
+                (row, column - 1), (row, column + 1),
+            ):
+                if neighbor in water_cells:
+                    water_cells.remove(neighbor)
+                    pending.append(neighbor)
+    if vague_region:
+        if re.search(r"(?:\u6c34\u57df|\u6c34|water)", text, flags=re.IGNORECASE) and components != 1:
+            return "needs_clarification"
+        entity_counts = {
+            "box": sum(item.get("kind") == "box" for item in (snapshot or {}).get("entities", [])),
+            "target": sum(item.get("kind") == "target" for item in (snapshot or {}).get("entities", [])),
+        }
+        if re.search(r"(?:\u7bb1\u5b50|box)", text, flags=re.IGNORECASE) and entity_counts["box"] != 1:
+            return "needs_clarification"
+        if re.search(r"(?:\u76ee\u6807|target)", text, flags=re.IGNORECASE) and entity_counts["target"] != 1:
+            return "needs_clarification"
+    return "proposal"
+
+
+def _clarification_question_count(turns):
+    """Count the bounded clarification questions already asked in this Stage.
+
+    This is deliberately derived from the current Stage's assistant turns, not
+    from the whole session.  It lets the prompt stop an unproductive loop after
+    two or three targeted questions while leaving ordinary design questions
+    outside the clarification budget.
+    """
+    total = 0
+    for turn in turns or []:
+        if turn["role"] != "assistant":
+            continue
+        try:
+            guidance = load_json(turn["guidance_json"]) or {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            guidance = {}
+        if guidance.get("move") != "clarify_intent":
+            continue
+        total += str(turn["content"] or "").count("?")
+        total += str(turn["content"] or "").count("？")
+        if total >= 3:
+            return 3
+    return total
+
+
+def _allow_adaptive_proposal_completion(
+    content,
+    user_map_claims,
+    snapshot,
+    clarification_question_count,
+):
+    """Allow conservative completion after the clarification budget is used.
+
+    This escape hatch is intentionally narrower than ordinary proposal routing:
+    it requires three prior clarification questions, a non-conflicting turn,
+    and a recognizable design direction.  A broad, outcome-level direction
+    (for example, making detour pressure more legible) may be completed from
+    the current Stage snapshot.  A concrete but unnamed object is allowed only
+    when that object is uniquely identifiable; the function never resolves an
+    ambiguous entity or silently chooses between boxes, targets, or water
+    regions.
+    """
+    try:
+        clarification_question_count = int(clarification_question_count or 0)
+    except (TypeError, ValueError):
+        clarification_question_count = 0
+    if clarification_question_count < 3:
+        return False
+    text = str(content or "").strip()
+    if not text or (user_map_claims or {}).get("conflicts"):
+        return False
+    if _guidance_confusion_request(text):
+        return False
+    advice_request = _guidance_advice_request(text)
+    direct_change = bool(re.search(
+        r"(?:\u6539|\u8c03\u6574|\u6269\u5c55|\u6269\u5927|\u79fb\u52a8|\u6539\u6210|"
+        r"\b(?:change|adjust|extend|expand|move|relocate)\b)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+    if not (advice_request or direct_change):
+        return False
+
+    referenced_labels = re.findall(r"\b(?:P|B\d+|T\d+)\b", text, flags=re.IGNORECASE)
+    if referenced_labels:
+        return (snapshot or {}).get("identityStatus") == "exact"
+
+    # A named design outcome can be safely expanded without an explicit cell.
+    # These are goals for the proposal, not permission to invent an object.
+    outcome_direction = bool(re.search(
+        r"(?:\u7ed5\u884c|\u538b\u529b|\u9009\u62e9|\u8282\u594f|\u53ef\u8bfb|\u72b9\u8c6b|"
+        r"\u63a8\u7bb1\u987a\u5e8f|\u8def\u7ebf\u8fa8\u8bc6|\u96be\u5ea6|\u6311\u6218|"
+        r"detour|pressure|choice|pacing|readab(?:le|ility)|hesitation|"
+        r"push\s+order|difficulty|challenge)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+    object_terms = {
+        "water": bool(re.search(r"(?:\u6c34\u57df|\u6c34|water)", text, flags=re.IGNORECASE)),
+        "box": bool(re.search(r"(?:\u7bb1\u5b50|box|crate)", text, flags=re.IGNORECASE)),
+        "target": bool(re.search(r"(?:\u76ee\u6807|target)", text, flags=re.IGNORECASE)),
+        "wall": bool(re.search(r"(?:\u5899\u4f53|\u5899|wall)", text, flags=re.IGNORECASE)),
+        "region": bool(re.search(
+            r"(?:\u533a\u57df|\u901a\u9053|\u8def\u7ebf|\u4e00\u4fa7|\u5de6\u4fa7|\u53f3\u4fa7|"
+            r"\u4e0a\u65b9|\u4e0b\u65b9|area|corridor|route|left|right|upper|lower)",
+            text,
+            flags=re.IGNORECASE,
+        )),
+    }
+
+    # If the user names an object class but not a stable entity label, a
+    # proposal is safe only when the class can be uniquely bound.  Outcome-only
+    # goals such as "make the detour more obvious" have no object term and are
+    # deliberately allowed to let the model choose a defensible local edit.
+    if object_terms["box"]:
+        box_count = sum(
+            item.get("kind") == "box"
+            for item in (snapshot or {}).get("entities", [])
+            if isinstance(item, dict)
+        )
+        if box_count != 1:
+            return False
+    if object_terms["target"]:
+        target_count = sum(
+            item.get("kind") == "target"
+            for item in (snapshot or {}).get("entities", [])
+            if isinstance(item, dict)
+        )
+        if target_count != 1:
+            return False
+
+    water_cells = {
+        (item.get("row"), item.get("column"))
+        for item in (snapshot or {}).get("waterCells", [])
+        if isinstance(item, dict)
+    }
+    components = 0
+    while water_cells:
+        components += 1
+        pending = [water_cells.pop()]
+        while pending:
+            row, column = pending.pop()
+            for neighbor in (
+                (row - 1, column), (row + 1, column),
+                (row, column - 1), (row, column + 1),
+            ):
+                if neighbor in water_cells:
+                    water_cells.remove(neighbor)
+                    pending.append(neighbor)
+    if object_terms["water"] and components != 1:
+        return False
+
+    if object_terms["wall"] and not outcome_direction:
+        # The map contains many wall cells; without a named region or a clear
+        # design outcome, choosing one would be an ungrounded edit.
+        return False
+
+    return outcome_direction or any(object_terms.values())
 
 
 def require_browser_session(database, session_id, token):
@@ -4888,17 +5242,17 @@ def _proposal_binding_for_offer(offer, version_id, rows, entity_bindings=None):
 def _execution_binding_clarification(language):
     if language == "zh-CN":
         return (
-            "当前还没有形成一份与已保存地图完全一致、可验证的方案。"
-            "地图没有被修改；请重新生成方案，或补充需要调整的具体方向。"
+            "\u8bf7\u660e\u786e\u6307\u51fa\u8981\u8c03\u6574\u7684\u533a\u57df\u6216\u5b9e\u4f53\uff0c"
+            "\u4ee5\u53ca\u6bcf\u4e2a\u683c\u5b50\u4fee\u6539\u524d\u540e\u7684\u72b6\u6001\uff1b\u6211\u4f1a\u5148\u6309\u5f53\u524d\u4fdd\u5b58\u7684 Stage \u6838\u5bf9\uff0c\u518d\u7ee7\u7eed\u7ed9\u51fa\u4e00\u4e2a\u65b9\u5411\u3002"
         )
     return (
-        "I do not yet have a proposal that is fully consistent with the saved map and can be "
-        "verified. The map was not changed; please regenerate the proposal or clarify the exact direction."
+        "Please identify the area or entity to adjust and state each cell's current and desired tile. "
+        "I will check it against the current saved Stage before proposing a direction."
     )
 
 
 def _revision_contract_clarification_execution(*, language, request_id, exception):
-    """Expose contract rejection as a neutral, non-executable clarification card."""
+    """Expose contract rejection as ordinary, non-executable body prose."""
     execution = _revision_contract_invalid_execution(
         language=language,
         request_id=request_id,
@@ -4908,7 +5262,7 @@ def _revision_contract_clarification_execution(*, language, request_id, exceptio
     guidance = dict(execution.guidance or {})
     guidance["move"] = "clarify_intent"
     guidance["proposalOffer"] = None
-    guidance["uiCues"] = [{"type": "clarification", "text": clarification}]
+    guidance["uiCues"] = []
     return replace(
         execution,
         assistant_message=clarification,
@@ -4958,15 +5312,20 @@ def _bind_execution_to_stage(
     except (TypeError, ValueError):
         # An exact coordinate/action without a validated brief must never be
         # rendered as an executable card.  Preserve the conversation turn, but
-        # make the failed binding visible as a neutral clarification instead of
-        # silently dropping the only actionable feedback.
+        # keep the failed binding visible in ordinary prose instead of
+        # silently dropping the only actionable feedback or showing a failure card.
         clarification = _execution_binding_clarification(language)
         guidance["proposalOffer"] = None
         guidance["move"] = "clarify_intent"
         guidance["followUpQuestion"] = None
-        guidance["uiCues"] = [{"type": "clarification", "text": clarification}]
+        guidance["uiCues"] = []
         return replace(
             execution,
+            assistant_message=(
+                execution.assistant_message.strip()
+                if str(execution.assistant_message or "").strip()
+                else clarification
+            ),
             guidance=guidance,
             proposal_binding={},
             proposal_diagnostics={

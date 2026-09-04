@@ -932,7 +932,9 @@ function isLatestRevisionOfferTurn(turn) {
 
 function guidanceForDisplay(source, proposal = null) {
     const guidance = { ...source };
-    const cues = Array.isArray(source.uiCues) ? source.uiCues.filter(Boolean) : [];
+    const cues = (Array.isArray(source.uiCues) ? source.uiCues : [])
+        .filter(Boolean)
+        .filter(cue => !isInternalProposalFailureCue(cue));
     const warning = cues.find(cue => ["warning", "tradeoff"].includes(cue.type) && cue.text);
     let manual = cues.find(cue => cue.type === "manual_edit" && cue.text);
     const clarification = cues.find(cue => cue.type === "clarification" && cue.text);
@@ -961,6 +963,15 @@ function guidanceForDisplay(source, proposal = null) {
     }
     guidance.uiCues = warning ? [warning] : [];
     return guidance;
+}
+
+function isInternalProposalFailureCue(cue) {
+    if (!cue || cue.type !== "clarification") return false;
+    const text = String(cue.text || "").toLowerCase();
+    return text.includes("无法形成")
+        || text.includes("可验证的方案")
+        || text.includes("could not form a proposal")
+        || text.includes("fully consistent with the saved map");
 }
 
 function proposalCompanionManualText(pendingProposal) {

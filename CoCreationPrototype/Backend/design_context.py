@@ -139,6 +139,68 @@ def _text(value, maximum=MAX_TEXT):
     return value[:maximum]
 
 
+_CURRENT_MAP_FACT_FRAGMENT = re.compile(
+    r"(?:\b(?:P|B\d+|T\d+)\b\s*(?:在|位于|坐落于|occupies|is\s+at|"
+    r"is\s+located\s+at|sits\s+on)\s*(?:第\s*)?\d{1,2}\s*(?:行\s*[,，]?\s*第\s*|[,，])\s*\d{1,2}\s*(?:列)?"
+    r"|\b(?:P|B\d+|T\d+)\b\s*(?:在|位于|坐落于|occupies|is\s+at|"
+    r"is\s+located\s+at|sits\s+on)\s*[（(]\s*\d{1,2}\s*[,，]\s*\d{1,2}\s*[）)]"
+    r"|[（(]\s*\d{1,2}\s*[,，]\s*\d{1,2}\s*[）)]\s*(?:是|为|属于|is|contains)\s*"
+    r"(?:水域|水|墙|墙体|地面|空地|通道|water|wall|floor|ground|corridor))",
+    flags=re.IGNORECASE,
+)
+
+
+def sanitize_user_design_text(value):
+    """Remove present-tense map facts before semantic memory is persisted.
+
+    Coordinates describing a future edit remain intact.  This is deliberately
+    syntactic and conservative; the current StageSnapshot performs the actual
+    fact check in the application layer.
+    """
+    text = _text(value)
+    if not text:
+        return text
+    current_fact = re.compile(
+        r"(?:\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_])\s*(?:\u5728|\u4f4d\u4e8e|\u5750\u843d\u4e8e|occupies|is\s+at|is\s+located\s+at|sits\s+on)\s*"
+        r"(?:\u7b2c\s*)?\d{1,2}\s*(?:\u884c\s*[,\uFF0C]?\s*\u7b2c\s*|[,\uFF0C])\s*\d{1,2}\s*(?:\u5217)?"
+        r"|\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_])\s*(?:\u5728|\u4f4d\u4e8e|\u5750\u843d\u4e8e|occupies|is\s+at|is\s+located\s+at|sits\s+on)\s*[\uFF08(]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\uFF09)]"
+        r"|[\uFF08(]\s*\d{1,2}\s*[,\uFF0C]\s*\d{1,2}\s*[\uFF09)]\s*(?:\u662f|\u4e3a|\u5c5e\u4e8e|is|contains)\s*"
+        r"(?:\u6c34\u57df|\u6c34|\u5899|\u5899\u4f53|\u5730\u9762|\u7a7a\u5730|\u901a\u9053|water|wall|floor|ground|corridor)"
+        r"|(?:\u7b2c\s*)?\d{1,2}\s*\u884c\s*(?:\u7b2c\s*)?\d{1,2}\s*\u5217\s*(?:\u662f|\u4e3a)\s*(?:P|B\d+|T\d+)(?![A-Za-z0-9_])"
+        r"|\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_])\s*(?:occupies|is\s+at|is\s+located\s+(?:at|in)|sits\s+on)\s+row\s*\d{1,2}\s*,\s*column\s*\d{1,2}"
+        r"|\brow\s*\d{1,2}\s*[,，]\s*column\s*\d{1,2}\s*(?:is|contains)\s*(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))",
+        flags=re.IGNORECASE,
+    )
+    def remove_current_fact(match):
+        # Keep future or hypothetical design coordinates such as
+        # "I want B1 at (4,4)" and "if B1 is at (4,4)". A current fact
+        # followed by a preference is still removed because the marker is
+        # after, rather than before, the matched fact.
+        prefix = text[max(0, match.start() - 32):match.start()]
+        if re.search(
+            r"(?:\u5982\u679c|\u82e5|\u5047\u8bbe|\u5c06|\u4f1a|\u5e0c\u671b|\u60f3\u8981|\u60f3\u628a|\u60f3\u8ba9|"
+            r"\b(?:if|when|would|will|want|wish)\b)",
+            prefix,
+            flags=re.IGNORECASE,
+        ):
+            return match.group(0)
+        return " "
+
+    cleaned = current_fact.sub(remove_current_fact, text)
+    reverse_fact = re.compile(
+        r"\brow\s*\d{1,2}\s*[,\uFF0C]\s*column\s*\d{1,2}\s*"
+        r"(?:is|contains)\s*(?:P|B\d+|T\d+)(?![A-Za-z0-9_])",
+        flags=re.IGNORECASE,
+    )
+    cleaned = reverse_fact.sub(
+        lambda match: match.group(0)
+        if re.search(r"\b(?:if|when|would|will|want|wish)\b", cleaned[:match.start()], flags=re.IGNORECASE)
+        else " ",
+        cleaned,
+    )
+    return re.sub(r"\s+([\uFF0C\u3002\uFF1B;,.!?\uFF01\uFF1F])", r"\1", cleaned).strip()
+
+
 def _stable_id(kind, *values):
     seed = "|".join(_text(value, 500) for value in values)
     return f"dc_{kind}_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:20]}"
@@ -164,7 +226,7 @@ def _source(value):
 def _normalize_goal(item, field_name, index):
     if not isinstance(item, dict):
         return None
-    value = _text(item.get(field_name))
+    value = sanitize_user_design_text(item.get(field_name))
     if not value:
         return None
     status = item.get("status", "active")
@@ -210,7 +272,7 @@ def _normalize_decision(item, rejected=False, index=0):
 def _normalize_question(item, index=0):
     if not isinstance(item, dict):
         return None
-    question = _text(item.get("question"))
+    question = sanitize_user_design_text(item.get("question"))
     if not question:
         return None
     status = item.get("status", "open")
@@ -365,7 +427,7 @@ def _authority_rank(value):
 
 
 def _merge_goal(items, field_name, value, authority, stage_id, turn_id, confidence=0.5):
-    clean = _text(value)
+    clean = sanitize_user_design_text(value)
     if not clean:
         return None
     normalized = clean.casefold()
@@ -426,7 +488,7 @@ def _question_key(value):
 
 
 def _merge_open_question(result, entry, stage_id, turn_id, user_text):
-    question = _text(entry.get("question"))
+    question = sanitize_user_design_text(entry.get("question"))
     if not question or not is_design_level_question(
         question,
         entry.get("evidenceText"),
@@ -494,7 +556,7 @@ def add_open_question(context, question, stage_id=None, turn_id=None):
 
 def extract_explicit_user_memory(user_text):
     """Conservatively retain design language that came from the user's turn."""
-    text = _text(user_text)
+    text = sanitize_user_design_text(user_text)
     if not text or len(text) < 4:
         return [], []
 

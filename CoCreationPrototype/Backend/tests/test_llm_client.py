@@ -831,7 +831,7 @@ class LLMClientTests(unittest.TestCase):
         prompt = llm_client.build_plain_chat_messages(
             [], MAP_GROUNDING_ROWS, stage_context={"mapFacts": facts}
         )[0]["content"]
-        self.assertIn("Deterministic Map Facts (authoritative)", prompt)
+        self.assertIn("Current Stage Snapshot (authoritative; 10 rows x 12 columns)", prompt)
         self.assertIn('"id":"B1","row":3,"column":5', prompt)
         self.assertIn("Map-grounding rule", prompt)
 
@@ -846,6 +846,66 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIn('"id":"B1","row":6,"column":5', prompt)
         self.assertNotIn('"id":"B1","row":3,"column":5', prompt)
+
+    def test_chat_prompt_excludes_historical_assistant_map_facts(self):
+        prompt = llm_client.build_plain_chat_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": "STALE_ASSISTANT_COORDINATE (9,9) says B1 is there.",
+                },
+                {"role": "user", "content": "Please inspect the current route."},
+            ],
+            OPERATION_BASE_ROWS,
+            stage_context={
+                "mapFacts": llm_client.build_map_facts(MAP_GROUNDING_ROWS),
+                "beforeRows": MAP_GROUNDING_ROWS,
+                "afterRows": MAP_GROUNDING_ROWS,
+            },
+        )
+
+        self.assertEqual(len(prompt), 2)
+        self.assertEqual(prompt[-1]["content"], "Please inspect the current route.")
+        self.assertNotIn("STALE_ASSISTANT_COORDINATE", prompt[0]["content"])
+        self.assertNotIn("beforeRows", prompt[0]["content"])
+        self.assertNotIn("afterRows", prompt[0]["content"])
+        self.assertEqual(prompt[0]["content"].count("Current Stage Snapshot"), 1)
+
+    def test_chat_prompt_drops_untrusted_claims_and_raw_card_contracts(self):
+        prompt = llm_client.build_plain_chat_messages(
+            [],
+            OPERATION_BASE_ROWS,
+            stage_context={
+                "userMapClaims": {
+                    "conflicts": [{
+                        "sourceText": "UNTRUSTED_CLAIM_MARKER",
+                        "claimed": {"row": 9, "column": 9},
+                    }],
+                },
+                "recentGuidance": {
+                    "proposalOffer": {
+                        "summary": "Keep the local route readable",
+                        "rationale": "Preserve the route while testing the opening.",
+                        "executionBrief": {
+                            "requiredTransitions": [{
+                                "row": 9,
+                                "column": 9,
+                                "from": ".",
+                                "to": "#",
+                            }],
+                        },
+                        "proposalPresentation": {
+                            "changes": [{"row": 9, "column": 9}],
+                        },
+                    },
+                },
+            },
+        )
+
+        content = prompt[0]["content"]
+        self.assertNotIn("UNTRUSTED_CLAIM_MARKER", content)
+        self.assertNotIn("proposalPresentation", content)
+        self.assertEqual(content.count("Current Stage Snapshot"), 1)
 
     def test_execution_brief_validates_exact_tiles_and_keeps_tile_facts(self):
         brief = {
@@ -2101,8 +2161,10 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotEqual(result.guidance["move"], "offer_revision")
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertEqual(result.guidance["uiCues"][0]["type"], "clarification")
-        self.assertTrue(result.guidance["uiCues"][0]["text"].strip())
+        self.assertEqual(result.guidance["uiCues"], [])
+        self.assertNotIn("could not form a proposal", result.assistant_message.casefold())
+        self.assertNotIn("fully consistent with the saved map", result.assistant_message.casefold())
+        self.assertTrue(result.assistant_message.strip())
         self.assertIn(
             "REVISION_ADVICE",
             client.chat.completions.calls[0]["messages"][0]["content"],
@@ -2153,7 +2215,9 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertEqual(result.guidance["move"], "clarify_intent")
-        self.assertEqual(result.guidance["uiCues"][0]["type"], "clarification")
+        self.assertEqual(result.guidance["uiCues"], [])
+        self.assertNotIn("could not form a proposal", result.assistant_message.casefold())
+        self.assertNotIn("fully consistent with the saved map", result.assistant_message.casefold())
         self.assertNotIn("Option A", result.assistant_message)
 
     def test_response_paragraphs_are_balanced_without_dropping_route_detail(self):
@@ -3636,6 +3700,33 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result[0], "The two targets create distinct routes.")
 
+    def test_clarification_response_can_keep_three_body_questions(self):
+        result = llm_client.validate_chat_response(
+            {
+                "assistantMessage": (
+                    "I can make this revision, but I need to pin down the intended local effect.\n\n"
+                    "Which water region should carry the change?\n"
+                    "Should the new opening affect the first push or the return route?\n"
+                    "Which existing route must remain unchanged?"
+                ),
+                "guidance": {
+                    "move": "clarify_intent",
+                    "intentHypothesis": None,
+                    "intentConfidence": None,
+                    "followUpQuestion": None,
+                    "proposalOffer": None,
+                    "uiCues": [],
+                },
+                "assessment": None,
+                "proposedRows": None,
+                "modificationSummary": "",
+            },
+            stage_context={"revisionRouting": "needs_clarification"},
+        )
+
+        self.assertEqual(result[0].count("?"), 3)
+        self.assertIsNone(result[4]["followUpQuestion"])
+
     def test_discussion_card_is_not_repeated_in_the_saved_assistant_body(self):
         focus = "我会留意水边第一次推进是否真的改变了路线判断。"
         message = (
@@ -4717,7 +4808,7 @@ class LLMClientTests(unittest.TestCase):
         }]
         payload = {"translations": [{
             "turnId": "turn-route",
-            "body": "From (5,5) to (5,7).",
+            "body": "from (5,5) to (5,7).",
             "followUpQuestion": None,
             "intentHypothesis": None,
             "proposalOfferSummary": None,

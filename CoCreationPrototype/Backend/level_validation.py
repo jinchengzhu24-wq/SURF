@@ -2,6 +2,7 @@ from collections import deque
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 
 
 WIDTH = 12
@@ -818,23 +819,24 @@ def build_map_facts(rows, before_rows=None, entity_bindings=None):
         # entity labels non-authoritative until the Stage is backfilled/fixed.
         bindings = _build_untrusted_bindings(normalized)
     bound_entities = _binding_entities(bindings)
-    bound_by_kind = {
-        kind: sorted(
-            (item for item in bound_entities if item.get("kind") == kind),
-            key=lambda item: (item.get("row", 0), item.get("column", 0)),
-        )
-        for kind in ("player", "box", "target")
+    # Bind by the actual current coordinate, never by the order in which the
+    # grid happens to enumerate entities.  Row-major re-numbering here was a
+    # subtle source of B1/B2 and T1/T2 swaps after a child Stage was created.
+    bound_by_position = {
+        (item.get("kind"), item.get("row"), item.get("column")): item
+        for item in bound_entities
+        if isinstance(item, dict)
     }
+
+    def bound_entity(kind, position):
+        column, row = position
+        return bound_by_position.get((kind, row, column), {})
 
     targets = [point(position) for position in positions["t"]]
     boxes = []
     for index, position in enumerate(positions["s"], start=1):
         column, row = position
-        bound = (
-            bound_by_kind["box"][index - 1]
-            if index <= len(bound_by_kind["box"])
-            else {}
-        )
+        bound = bound_entity("box", position)
         boxes.append({
             "id": bound.get("label") or f"B{index}",
             **point(position),
@@ -844,11 +846,7 @@ def build_map_facts(rows, before_rows=None, entity_bindings=None):
             "gridDistancesToTargets": [
                 {
                     "targetId": (
-                        (
-                            bound_by_kind["target"][target_index - 1].get("label")
-                            if target_index <= len(bound_by_kind["target"])
-                            else None
-                        )
+                        bound_entity("target", (target_column, target_row)).get("label")
                         or f"T{target_index}"
                     ),
                     "gridDistance": abs(column - target_column) + abs(row - target_row),
@@ -868,9 +866,7 @@ def build_map_facts(rows, before_rows=None, entity_bindings=None):
         "coordinateSystem": "one-based row,column; row 1 is top and column 1 is left",
         "player": (
             {
-                "id": bound_by_kind["player"][0].get("label", "P")
-                if bound_by_kind["player"]
-                else "P",
+                "id": bound_entity("player", positions["p"][0]).get("label", "P"),
                 **point(positions["p"][0]),
             }
             if positions["p"]
@@ -880,20 +876,20 @@ def build_map_facts(rows, before_rows=None, entity_bindings=None):
         "targets": [
             {
                 "id": (
-                    bound_by_kind["target"][index - 1].get("label")
-                    if index <= len(bound_by_kind["target"])
-                    else None
+                    bound_entity(
+                        "target", (target["column"], target["row"])
+                    ).get("label")
                 ) or f"T{index}",
                 **target,
                 "entityId": (
-                    bound_by_kind["target"][index - 1].get("entityId")
-                    if index <= len(bound_by_kind["target"])
-                    else None
+                    bound_entity(
+                        "target", (target["column"], target["row"])
+                    ).get("entityId")
                 ),
                 "identityConfidence": (
-                    bound_by_kind["target"][index - 1].get("identityConfidence", "unknown")
-                    if index <= len(bound_by_kind["target"])
-                    else "unknown"
+                    bound_entity(
+                        "target", (target["column"], target["row"])
+                    ).get("identityConfidence", "unknown")
                 ),
             }
             for index, target in enumerate(targets, start=1)
@@ -945,6 +941,420 @@ def build_map_facts(rows, before_rows=None, entity_bindings=None):
         facts["verifiedEntityChangesFromParent"] = entity_changes
 
     return facts
+
+
+def build_stage_snapshot(
+    rows,
+    *,
+    version_id=None,
+    stage_number=None,
+    entity_bindings=None,
+):
+    """Build the one authoritative, current-Stage fact object.
+
+    This deliberately contains the grid and the server-owned identity facts in
+    one object.  Callers may add presentation metadata around it, but must not
+    send a second map representation to an LLM.
+    """
+    normalized = _normalize_rows_for_structural_comparison(rows)
+    facts = build_map_facts(normalized, entity_bindings=entity_bindings)
+    player = dict(facts.get("player") or {})
+    player_binding = next(
+        (
+            item for item in facts.get("entities") or []
+            if item.get("kind") == "player"
+        ),
+        {},
+    )
+    player["entityId"] = player_binding.get("entityId")
+    player["identityConfidence"] = player_binding.get(
+        "identityConfidence", "unknown"
+    )
+    snapshot = {
+        "schemaVersion": 1,
+        "versionId": version_id,
+        "stageNumber": stage_number,
+        "rows": list(normalized),
+        "dimensions": {"rows": HEIGHT, "columns": WIDTH},
+        "coordinateSystem": facts["coordinateSystem"],
+        "mapFingerprint": facts["mapFingerprint"],
+        "entityBindingFingerprint": facts["entityBindingFingerprint"],
+        "identityStatus": facts.get("identityStatus", "unknown"),
+        "entities": facts.get("entities", []),
+        "player": player,
+        "boxes": facts.get("boxes", []),
+        "targets": facts.get("targets", []),
+        "waterCells": facts.get("waterCells", []),
+        "tileAt": facts.get("tileAt", {}),
+    }
+    return snapshot
+
+
+def _claim_is_non_current(text, start, end):
+    """Do not treat future, hypothetical, or route wording as current fact."""
+    # Only look before the claimed fact.  A valid fact followed by a design
+    # intention such as “B1 is at (7,4), and I want...” must still be checked.
+    # Include the claim itself: future wording often sits between the entity
+    # label and its coordinate (for example, “B1 will be at (4,4)”).
+    window = str(text or "")[max(0, start - 28):end]
+    # Keep this expression ASCII-escaped because this module is also deployed
+    # on Windows environments with a non-UTF-8 console/code page.
+    return bool(re.search(
+        r"(?:\u5982\u679c|\u82e5|\u5047\u8bbe|\u5c06|\u4f1a|\u51c6\u5907|\u5e0c\u671b|\u60f3\u8981|\u60f3\u628a|\u60f3\u8ba9|\u79fb\u52a8\u5230|\u63a8\u5230|\u4ece[^\u3002\uff01\uff1f?]{0,18}(?:\u5230|\u5411)|"
+        r"\b(?:if|when|would|will|move|push|from|toward|through|via)\b)",
+        window,
+        flags=re.IGNORECASE,
+    ))
+def analyze_user_map_claims(text, snapshot):
+    """Compare only present-tense user map claims with one StageSnapshot.
+
+    The raw user turn is retained for audit, while callers use this result to
+    keep incorrect coordinates out of semantic memory and execution contracts.
+    """
+    value = str(text or "")
+    snapshot = snapshot or {}
+    entities = {
+        str(item.get("id")): item
+        for item in snapshot.get("entities", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    tile_at = snapshot.get("tileAt") or {}
+    claims = []
+    conflicts = []
+    seen = set()
+    entity_pattern = re.compile(
+        r"(?P<label>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))\s*"
+        r"(?:\u5728|\u4f4d\u4e8e|\u5750\u843d\u4e8e|occupies|is\s+at|is\s+located\s+(?:at|in)|sits\s+on)\s*"
+        r"(?:\u7b2c\s*)?(?P<row>\d{1,2})\s*(?:\u884c\s*[,，]?\s*\u7b2c\s*|[,，])\s*"
+        r"(?P<column>\d{1,2})\s*(?:\u5217)?|"
+        r"(?P<label_after>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))\s*"
+        r"(?:\u5728|\u4f4d\u4e8e|\u5750\u843d\u4e8e|occupies|is\s+at|is\s+located\s+(?:at|in)|sits\s+on)\s*"
+        r"[（(]\s*(?P<row_paren>\d{1,2})\s*[,，]\s*(?P<column_paren>\d{1,2})\s*[）)]|"
+        r"[（(]\s*(?P<row_reverse>\d{1,2})\s*[,，]\s*(?P<column_reverse>\d{1,2})\s*[）)]\s*"
+        r"(?:\u662f|\u4e3a|belongs\s+to)\s*(?P<label_reverse>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))",
+        flags=re.IGNORECASE,
+    )
+    tile_pattern = re.compile(
+        r"[（(]\s*(?P<row>\d{1,2})\s*[,，]\s*(?P<column>\d{1,2})\s*[）)]\s*"
+        r"(?:\u662f|\u4e3a|\u5c5e\u4e8e|is|contains)\s*"
+        r"(?P<tile>\u6c34\u57df|\u6c34|\u5899|\u5899\u4f53|\u5730\u9762|\u7a7a\u5730|\u901a\u9053|water|wall|floor|ground|corridor)",
+        flags=re.IGNORECASE,
+    )
+
+    # Re-declare with only ASCII source escapes.  This is intentionally kept
+    # local so the parser remains independent of the host console encoding.
+    entity_pattern = re.compile(
+        r"(?P<label>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))\s*"
+        r"(?:\u5728|\u4f4d\u4e8e|\u5750\u843d\u4e8e|occupies|is\s+at|is\s+located\s+at|sits\s+on)\s*"
+        r"(?:\u7b2c\s*)?(?P<row>\d{1,2})\s*(?:\u884c\s*[,\uFF0C]?\s*\u7b2c\s*|[,\uFF0C])\s*"
+        r"(?P<column>\d{1,2})\s*(?:\u5217)?|"
+        r"(?P<label_after>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))\s*"
+        r"(?:\u5728|\u4f4d\u4e8e|\u5750\u843d\u4e8e|occupies|is\s+at|is\s+located\s+at|sits\s+on)\s*"
+        r"[\uFF08(]\s*(?P<row_paren>\d{1,2})\s*[,\uFF0C]\s*(?P<column_paren>\d{1,2})\s*[\uFF09)]|"
+        r"[\uFF08(]\s*(?P<row_reverse>\d{1,2})\s*[,\uFF0C]\s*(?P<column_reverse>\d{1,2})\s*[\uFF09)]\s*"
+        r"(?:\u662f|\u4e3a|belongs\s+to)\s*(?P<label_reverse>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))",
+        flags=re.IGNORECASE,
+    )
+    tile_pattern = re.compile(
+        r"[\uFF08(]\s*(?P<row>\d{1,2})\s*[,\uFF0C]\s*(?P<column>\d{1,2})\s*[\uFF09)]\s*"
+        r"(?:\u662f|\u4e3a|\u5c5e\u4e8e|is|contains)\s*"
+        r"(?P<tile>\u6c34\u57df|\u6c34|\u5899|\u5899\u4f53|\u5730\u9762|\u7a7a\u5730|\u901a\u9053|water|wall|floor|ground|corridor)",
+        flags=re.IGNORECASE,
+    )
+    for match in entity_pattern.finditer(value):
+        if _claim_is_non_current(value, match.start(), match.end()):
+            continue
+        label = (
+            match.group("label")
+            or match.group("label_after")
+            or match.group("label_reverse")
+        )
+        row = (
+            match.group("row") or match.group("row_paren")
+            or match.group("row_reverse")
+        )
+        column = (
+            match.group("column") or match.group("column_paren")
+            or match.group("column_reverse")
+        )
+        if not label or row is None or column is None:
+            continue
+        key = ("entity", label.upper(), int(row), int(column))
+        if key in seen:
+            continue
+        seen.add(key)
+        expected = entities.get(label.upper())
+        claim = {
+            "kind": "entity",
+            "entity": label.upper(),
+            "row": int(row),
+            "column": int(column),
+            "sourceText": match.group(0),
+            "current": expected is not None and (
+                expected.get("row"), expected.get("column")
+            ) == (int(row), int(column)),
+        }
+        if expected is None:
+            claim["reason"] = "entity_not_bound_to_current_stage"
+            conflicts.append(claim)
+        elif expected.get("identityConfidence") != "exact":
+            claim["reason"] = "entity_identity_unknown"
+            claim["expected"] = {
+                "row": expected.get("row"),
+                "column": expected.get("column"),
+            }
+            conflicts.append(claim)
+        if (
+            expected is not None
+            and expected.get("identityConfidence") == "exact"
+            and not claim["current"]
+        ):
+            claim["expected"] = {
+                "row": expected.get("row"),
+                "column": expected.get("column"),
+            }
+            conflicts.append(claim)
+        claims.append(claim)
+
+    row_entity_pattern = re.compile(
+        r"(?P<label>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))\s*"
+        r"(?:is\s+located\s+(?:in|at)|is\s+sitting\s+in|sits\s+(?:in|on)|occupies)\s+row\s*"
+        r"(?P<row>\d{1,2})\s*[,\s]+(?:column\s*)?(?P<column>\d{1,2})"
+        r"|row\s*(?P<row_reverse>\d{1,2})\s*[,\s]+column\s*"
+        r"(?P<column_reverse>\d{1,2})\s*(?:is|contains)\s*"
+        r"(?P<label_reverse>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))",
+        flags=re.IGNORECASE,
+    )
+    for match in row_entity_pattern.finditer(value):
+        if _claim_is_non_current(value, match.start(), match.end()):
+            continue
+        label = match.group("label") or match.group("label_reverse")
+        row = match.group("row") or match.group("row_reverse")
+        column = match.group("column") or match.group("column_reverse")
+        if not label or row is None or column is None:
+            continue
+        key = ("entity", label.upper(), int(row), int(column))
+        if key in seen:
+            continue
+        seen.add(key)
+        expected = entities.get(label.upper())
+        claim = {
+            "kind": "entity",
+            "entity": label.upper(),
+            "row": int(row),
+            "column": int(column),
+            "sourceText": match.group(0),
+            "current": expected is not None and (
+                expected.get("row"), expected.get("column")
+            ) == (int(row), int(column)),
+        }
+        if expected is None:
+            claim["reason"] = "entity_not_bound_to_current_stage"
+            conflicts.append(claim)
+        if expected is not None and not claim["current"]:
+            claim["expected"] = {
+                "row": expected.get("row"),
+                "column": expected.get("column"),
+            }
+            conflicts.append(claim)
+        claims.append(claim)
+
+    chinese_row_entity_pattern = re.compile(
+        r"(?:\u7b2c\s*)?(?P<row>\d{1,2})\s*\u884c\s*"
+        r"(?:\u7b2c\s*)?(?P<column>\d{1,2})\s*\u5217\s*"
+        r"(?:\u662f|\u4e3a)\s*"
+        r"(?P<label>\b(?:P|B\d+|T\d+)(?![A-Za-z0-9_]))",
+        flags=re.IGNORECASE,
+    )
+    for match in chinese_row_entity_pattern.finditer(value):
+        if _claim_is_non_current(value, match.start(), match.end()):
+            continue
+        label = match.group("label").upper()
+        row, column = int(match.group("row")), int(match.group("column"))
+        key = ("entity", label, row, column)
+        if key in seen:
+            continue
+        seen.add(key)
+        expected = entities.get(label)
+        claim = {
+            "kind": "entity",
+            "entity": label,
+            "row": row,
+            "column": column,
+            "sourceText": match.group(0),
+            "current": expected is not None
+            and (expected.get("row"), expected.get("column")) == (row, column),
+        }
+        if expected is None:
+            claim["reason"] = "entity_not_bound_to_current_stage"
+            conflicts.append(claim)
+        elif expected.get("identityConfidence") != "exact":
+            claim["reason"] = "entity_identity_unknown"
+            claim["expected"] = {
+                "row": expected.get("row"),
+                "column": expected.get("column"),
+            }
+            conflicts.append(claim)
+        elif not claim["current"]:
+            claim["expected"] = {
+                "row": expected.get("row"),
+                "column": expected.get("column"),
+            }
+            conflicts.append(claim)
+        claims.append(claim)
+
+    tile_names = {
+        "水域": "@", "水": "@", "water": "@",
+        "墙": "#", "墙体": "#", "wall": "#",
+        "地面": ".", "空地": ".", "通道": ".", "floor": ".",
+        "ground": ".", "corridor": ".",
+    }
+    tile_names = {
+        "\u6c34\u57df": "@", "\u6c34": "@", "water": "@",
+        "\u5899": "#", "\u5899\u4f53": "#", "wall": "#",
+        "\u5730\u9762": ".", "\u7a7a\u5730": ".", "\u901a\u9053": ".", "floor": ".",
+        "ground": ".", "corridor": ".",
+    }
+    for match in tile_pattern.finditer(value):
+        if _claim_is_non_current(value, match.start(), match.end()):
+            continue
+        row, column = int(match.group("row")), int(match.group("column"))
+        key = ("tile", row, column, match.group("tile").casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        actual = tile_at.get(f"{row},{column}")
+        if actual is None:
+            snapshot_rows = snapshot.get("rows") or []
+            if 1 <= row <= HEIGHT and 1 <= column <= WIDTH:
+                actual = snapshot_rows[row - 1][column - 1]
+        expected_tile = tile_names.get(match.group("tile").casefold())
+        claim = {
+            "kind": "tile",
+            "row": row,
+            "column": column,
+            "claimedTile": expected_tile,
+            "sourceText": match.group(0),
+            "current": actual == expected_tile,
+        }
+        if not claim["current"]:
+            claim["actualTile"] = actual
+            conflicts.append(claim)
+        claims.append(claim)
+
+    row_tile_pattern = re.compile(
+        r"(?:\u7b2c\s*)?(?P<row>\d{1,2})\s*\u884c\s*"
+        r"(?:\u7b2c\s*)?(?P<column>\d{1,2})\s*\u5217\s*"
+        r"(?:\u662f|\u4e3a|\u5c5e\u4e8e)\s*"
+        r"(?P<tile>\u6c34\u57df|\u6c34|\u5899|\u5899\u4f53|\u5730\u9762|\u7a7a\u5730|\u901a\u9053)",
+        flags=re.IGNORECASE,
+    )
+    for match in row_tile_pattern.finditer(value):
+        if _claim_is_non_current(value, match.start(), match.end()):
+            continue
+        row, column = int(match.group("row")), int(match.group("column"))
+        key = ("tile", row, column, match.group("tile").casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        actual = tile_at.get(f"{row},{column}")
+        if actual is None:
+            snapshot_rows = snapshot.get("rows") or []
+            if 1 <= row <= HEIGHT and 1 <= column <= WIDTH:
+                actual = snapshot_rows[row - 1][column - 1]
+        expected_tile = tile_names.get(match.group("tile").casefold())
+        claim = {
+            "kind": "tile",
+            "row": row,
+            "column": column,
+            "claimedTile": expected_tile,
+            "sourceText": match.group(0),
+            "current": actual == expected_tile,
+        }
+        if not claim["current"]:
+            claim["actualTile"] = actual
+            conflicts.append(claim)
+        claims.append(claim)
+
+    return {"claims": claims, "conflicts": conflicts}
+
+
+def format_map_claim_correction(conflicts, language="en"):
+    """Return a short deterministic correction for the visible chat body."""
+    if not conflicts:
+        return ""
+    first = conflicts[0]
+    if language == "zh-CN" and first.get("kind") == "entity":
+        if first.get("reason") == "entity_identity_unknown":
+            return (
+                f"\u5f53\u524d Stage \u53ea\u80fd\u786e\u8ba4\u76f8\u5173\u683c\u5b50\u4e0a\u7684\u5b9e\u4f53\uff0c\u6682\u65f6\u65e0\u6cd5\u628a\u5b83\u4e0e\u5386\u53f2 {first.get('entity')} \u8eab\u4efd\u53ef\u9760\u5bf9\u5e94\u3002"
+                "\u8bf7\u7528\u5f53\u524d\u5730\u56fe\u7684\u884c\u5217\u4f4d\u7f6e\u63cf\u8ff0\u5b83\uff0c\u6211\u4f1a\u6309\u8fd9\u4e2a\u4e2d\u6027\u4f4d\u7f6e\u7ee7\u7eed\u5206\u6790\u3002"
+            )
+        if not first.get("expected"):
+            return (
+                f"\u5f53\u524d Stage \u4e2d\u6ca1\u6709\u53ef\u9a8c\u8bc1\u7684 {first.get('entity')} \u8eab\u4efd\u3002"
+                "\u8bf7\u6539\u7528\u5f53\u524d\u5730\u56fe\u7684\u884c\u5217\u4f4d\u7f6e\u63cf\u8ff0\u8981\u8ba8\u8bba\u7684\u5b9e\u4f53\u3002"
+            )
+    if language == "zh-CN":
+        if first.get("kind") == "entity":
+            if first.get("reason") == "entity_identity_unknown":
+                return (
+                    f"当前 Stage 只能确认相关格子上的实体，暂时无法把它与历史 {first.get('entity')} 身份可靠对应。"
+                    "请用当前地图的行列位置描述它，我会按这个中性位置继续分析。"
+                )
+            if not first.get("expected"):
+                return (
+                    f"当前 Stage 中没有可验证的 {first.get('entity')} 身份。"
+                    "请改用当前地图的行列位置描述要讨论的实体。"
+                )
+            expected = first.get("expected") or {}
+            return (
+                f"\u4f60\u63d0\u5230\u7684 {first.get('entity')} \u4f4d\u7f6e\u4e0e\u5f53\u524d Stage \u4e0d\u4e00\u81f4\u3002"
+                f"\u5f53\u524d\u4fdd\u5b58\u5730\u56fe\u4e2d {first.get('entity')} \u4f4d\u4e8e\u7b2c {expected.get('row')} \u884c\u7b2c {expected.get('column')} \u5217\uff0c\u6211\u4f1a\u4ee5\u8fd9\u4e2a\u4f4d\u7f6e\u7ee7\u7eed\u5206\u6790\u3002"
+            )
+        tile_names = {"@": "\u6c34\u57df", "#": "\u5899\u4f53", ".": "\u5730\u9762"}
+        actual_name = tile_names.get(first.get("actualTile"), "\u5f53\u524d\u683c\u5b50")
+        return (
+            f"\u4f60\u63d0\u5230\u7684\u7b2c {first.get('row')} \u884c\u7b2c {first.get('column')} \u5217\u4e0e\u5f53\u524d Stage \u4e0d\u4e00\u81f4\uff1b"
+            f"\u5f53\u524d\u4fdd\u5b58\u5730\u56fe\u4e2d\u8fd9\u91cc\u662f{actual_name}\uff0c\u6211\u4f1a\u4ee5\u8fd9\u4e2a\u683c\u5b50\u72b6\u6001\u7ee7\u7eed\u5206\u6790\u3002"
+        )
+    if language == "zh-CN":
+        if first.get("kind") == "entity":
+            label = first.get("entity")
+            expected = first.get("expected") or {}
+            return (
+                f"你提到的 {label} 位置与当前 Stage 不一致。当前保存地图中 {label} "
+                f"位于第 {expected.get('row')} 行第 {expected.get('column')} 列，我会以这个位置继续分析。"
+            )
+        tile_names = {"@": "水域", "#": "墙体", ".": "地面"}
+        actual = tile_names.get(first.get("actualTile"), "当前格子")
+        return (
+            f"你提到的第 {first.get('row')} 行第 {first.get('column')} 列与当前 Stage 不一致；"
+            f"当前保存地图中这里是{actual}，我会以这个格子状态继续分析。"
+        )
+    if first.get("kind") == "entity":
+        expected = first.get("expected") or {}
+        if first.get("reason") == "entity_identity_unknown":
+            return (
+                f"The current Stage confirms an entity at the claimed cell, but cannot reliably map it to historical {first.get('entity')} identity. "
+                "Please describe the entity by its current row and column so I can continue neutrally."
+            )
+        if not expected:
+            return (
+                f"The current Stage has no verifiable binding for {first.get('entity')}. "
+                "Please describe the entity by its current row and column."
+            )
+        return (
+            f"The position you gave for {first.get('entity')} does not match the current Stage. "
+            f"The saved map places it at row {expected.get('row')}, column {expected.get('column')}; "
+            "I will use that position for the analysis."
+        )
+    tile_names = {"@": "water", "#": "a wall", ".": "floor"}
+    return (
+        f"The tile you gave at row {first.get('row')}, column {first.get('column')} "
+        f"does not match the current Stage; the saved map has {tile_names.get(first.get('actualTile'), 'a different tile')} there. "
+        "I will use the saved tile for the analysis."
+    )
 
 
 def _boundary_wall_cells(rows):
