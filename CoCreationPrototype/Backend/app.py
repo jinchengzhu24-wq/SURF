@@ -1557,7 +1557,12 @@ def _send_message_locked(
                         utc_now(),
                     )
     if payload.action == "challenge_revision":
-        execution = _sanitize_challenge_execution(execution, source_offer, language)
+        execution = _sanitize_challenge_execution(
+            execution,
+            source_offer,
+            language,
+            source_binding,
+        )
     elif payload.action != "execute_revision" and execution.proposed_rows is not None:
         if revision_state == "proposal_requested":
             execution = _materialize_verified_automatic_offer(
@@ -2094,6 +2099,134 @@ def _retry_exhausted_execution(language, exception):
     )
 
 
+def _inline_display_text(value):
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _paragraph_display_text(value):
+    paragraphs = re.split(r"(?:\r?\n\s*){2,}", str(value or "").strip())
+    return "\n\n".join(
+        normalized
+        for paragraph in paragraphs
+        if (normalized := _inline_display_text(paragraph))
+    )
+
+
+def _verified_transition_description(brief, language, limit=4):
+    transitions = list((brief or {}).get("requiredTransitions") or [])
+    displayed = transitions[:limit]
+    if language == "zh-CN":
+        details = "、".join(
+            f"（{item['row']},{item['column']}）从"
+            f"{_proposal_tile_label(item['from'], language)}改为"
+            f"{_proposal_tile_label(item['to'], language)}"
+            for item in displayed
+        )
+        suffix = f"等共 {len(transitions)} 处" if len(transitions) > limit else ""
+        return f"{details}{suffix}" if details else "已冻结的局部格子变化"
+    details = "; ".join(
+        f"row {item['row']}, column {item['column']} from "
+        f"{_proposal_tile_label(item['from'], language)} to "
+        f"{_proposal_tile_label(item['to'], language)}"
+        for item in displayed
+    )
+    suffix = f" among {len(transitions)} changes" if len(transitions) > limit else ""
+    return f"{details}{suffix}" if details else "the frozen local tile changes"
+
+
+def _verified_offer_summary(brief, language):
+    effect = str((brief or {}).get("effect") or "")
+    effect_labels = {
+        "zh-CN": {
+            "adjust_internal_walls": "调整内部墙体与通路",
+            "open_route": "打开局部通路",
+            "reshape_water": "调整水域与通路关系",
+            "relocate_start": "调整玩家起点",
+            "relocate_box": "调整箱子位置",
+            "relocate_target": "调整目标位置",
+        },
+        "en": {
+            "adjust_internal_walls": "Adjust the internal wall and route",
+            "open_route": "Open the local route",
+            "reshape_water": "Reshape the water-route relationship",
+            "relocate_start": "Relocate the player start",
+            "relocate_box": "Relocate a box",
+            "relocate_target": "Relocate a target",
+        },
+    }
+    locale = "zh-CN" if language == "zh-CN" else "en"
+    lead = effect_labels[locale].get(
+        effect,
+        "落实一处局部路线调整" if locale == "zh-CN" else "Apply a local route adjustment",
+    )
+    detail = _verified_transition_description(brief, language, limit=2)
+    value = f"{lead}：{detail}" if locale == "zh-CN" else f"{lead}: {detail}"
+    return value[:180 if locale == "zh-CN" else 240]
+
+
+def _metric_evidence_text(mechanism, language):
+    if not isinstance(mechanism, dict) or not mechanism.get("passed"):
+        return ""
+    facts = []
+    if mechanism.get("routeAffected"):
+        facts.append("改动贴近已验证解法路线" if language == "zh-CN" else "the change touches the verified solution route")
+    if mechanism.get("bothBoxesUsed"):
+        facts.append("两只箱子都参与解法" if language == "zh-CN" else "both boxes participate in the solution")
+    labels = {
+        "solutionSteps": ("解法步数", "solution steps"),
+        "solutionPushes": ("推动次数", "solution pushes"),
+        "minimumPushes": ("最少推动数", "minimum pushes"),
+        "pushBlocks": ("推动分段数", "push blocks"),
+        "boxAlternations": ("箱子交替次数", "box alternations"),
+    }
+    for key, delta in (mechanism.get("metricDeltas") or {}).items():
+        if key not in labels or not isinstance(delta, int) or delta == 0:
+            continue
+        label = labels[key][0 if language == "zh-CN" else 1]
+        if language == "zh-CN":
+            facts.append(f"{label}{'增加' if delta > 0 else '减少'} {abs(delta)}")
+        else:
+            facts.append(f"{label} {'increases' if delta > 0 else 'decreases'} by {abs(delta)}")
+    if language == "zh-CN":
+        return "、".join(facts)
+    return ", ".join(facts)
+
+
+def _verified_offer_rationale(authorized, brief, mechanism, validation, language):
+    need = _inline_display_text(authorized)[:220].rstrip()
+    objective = _inline_display_text((brief or {}).get("playObjective"))[:180].rstrip()
+    change = _verified_transition_description(brief, language)
+    evidence = _metric_evidence_text(mechanism, language)
+    validation_payload = validation.as_dict()
+    steps = validation_payload.get("solutionSteps")
+    pushes = validation_payload.get("solutionPushes")
+    if language == "zh-CN":
+        need_text = need or "让局部路线产生更清楚、可观察的判断"
+        objective_text = objective or "让这处局部变化参与玩家的路线判断，而不是只改变外观"
+        proof = "地图结构与可解性已经通过确定性验证"
+        if isinstance(steps, int) and isinstance(pushes, int):
+            proof += f"，验证解法为 {steps} 步、{pushes} 次推动"
+        if evidence:
+            proof += f"；机制检查还显示{evidence}"
+        return (
+            f"回应你的需求：{need_text}\n\n"
+            f"这次怎么改、为什么：{change}。这样处理是为了{objective_text.rstrip('。')}。\n\n"
+            f"验证与边界：{proof}。这些证据支持它会作用于目标机制，但是否真的形成你期待的思考时间与体验，仍需要试玩确认。"
+        )
+    need_text = need or "make the local route ask for a clearer, observable judgment"
+    objective_text = objective or "make the local change affect route judgment rather than appearance alone"
+    proof = "The map structure and solvability passed deterministic validation"
+    if isinstance(steps, int) and isinstance(pushes, int):
+        proof += f", with a verified solution of {steps} steps and {pushes} pushes"
+    if evidence:
+        proof += f"; the mechanism check also shows that {evidence}"
+    return (
+        f"How this answers your request: {need_text}\n\n"
+        f"What changes and why: {change}. This treatment is intended to {objective_text.rstrip('.')}.\n\n"
+        f"Evidence and limits: {proof}. This supports the intended mechanism, but whether it creates the desired thinking time and experience still requires playtesting."
+    )
+
+
 def _materialize_verified_automatic_offer(execution, base_rows, language, stage_context):
     """Freeze a validated semantic candidate into the existing exact purple-card binding."""
     _execute_revision_candidate_or_api_error(base_rows, execution)
@@ -2129,31 +2262,24 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
         "preserve": list(strategy.get("preserve") or []),
         "playObjective": strategy.get("playObjective"),
     }, base_rows, (stage_context or {}).get("entityBindings"))
-    objective_policy = (execution.proposal_diagnostics or {}).get("objectivePolicy") or {}
     mechanism = (execution.proposal_diagnostics or {}).get("mechanismEvidence") or {}
     authorized = str(
         (execution.revision_contract or {}).get("authorizedBrief") or ""
     ).strip()
+    summary = _verified_offer_summary(brief, language)
+    rationale = _verified_offer_rationale(
+        authorized,
+        brief,
+        mechanism,
+        validation,
+        language,
+    )
     if language == "zh-CN":
-        summary = authorized[:180] or "一份已经过验证的局部修改候选"
-        verified_text = "已验证具体格子变化、执行合同、地图结构和可解性。"
-        expected_text = (
-            "对目标体验的影响有路线与机制证据支持，但仍需要通过试玩确认。"
-            if objective_policy.get("requiresMechanismEvidence")
-            else "对节奏和体验的影响仍需要通过试玩确认。"
-        )
         body = (
             "我已经把刚才确认的方向落实成一份可审查候选。"
             "这张紫色方案卡绑定的是已经验证过的真实格子变化；地图目前还没有改变。"
         )
     else:
-        summary = authorized[:240] or "A verified local revision candidate"
-        verified_text = "The exact tile changes, execution contract, structure, and solvability are verified."
-        expected_text = (
-            "Its intended play effect has route and mechanism evidence, but still needs playtesting."
-            if objective_policy.get("requiresMechanismEvidence")
-            else "Its pacing and play effect still need playtesting."
-        )
         body = (
             "I turned the direction we confirmed into a reviewable candidate. "
             "The purple card is bound to verified tile changes; the current map has not changed yet."
@@ -2164,7 +2290,7 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
         "followUpQuestion": None,
         "proposalOffer": {
             "summary": summary,
-            "rationale": f"{verified_text} {expected_text}",
+            "rationale": rationale,
             "executionBrief": brief,
         },
         "uiCues": [],
@@ -5654,22 +5780,88 @@ def _action_for_message_key(database, session_id, message_key):
     return payload.get("action"), payload.get("sourceTurnId")
 
 
-def _sanitize_challenge_execution(execution, offer, language):
-    summary = str(offer.get("summary") or "").strip()
-    rationale = str(offer.get("rationale") or "").strip()
+def _challenge_body_has_two_tentative_hypotheses(body, language):
+    text = _inline_display_text(body).casefold()
     if language == "zh-CN":
-        body = (
-            f"我先把这份方案说清楚：建议是“{summary}”。我提出它，是因为{rationale} "
-            "我想改善的是相关箱子第一次接近这段路线时的判断，而不是只改变外观。"
-            "你具体不认同方案中的哪一部分？是修改方向、游玩效果，还是我对当前地图的判断？请告诉我你的理由。"
+        primary = any(marker in text for marker in (
+            "我最先猜", "我的主要猜测", "我的第一个猜测", "我首先想到",
+        ))
+        secondary = any(marker in text for marker in (
+            "另一个可能", "第二个猜测", "我的次要猜测", "也可能",
+        ))
+        correctable = any(marker in text for marker in (
+            "请纠正", "如果我猜错", "哪个更接近", "还是你的",
+        ))
+        return primary and secondary and correctable and "？" in body
+    primary = any(marker in text for marker in (
+        "my primary guess", "my first guess", "what i first suspect",
+    ))
+    secondary = any(marker in text for marker in (
+        "my secondary guess", "another possibility", "my second guess", "you may also",
+    ))
+    correctable = any(marker in text for marker in (
+        "correct me", "if i am wrong", "which is closer", "or is your",
+    ))
+    return primary and secondary and correctable and "?" in body
+
+
+def _challenge_preserve_description(brief, language):
+    labels = {
+        "outer_shell": ("外壳", "outer shell"),
+        "unrelated_areas": ("其他区域", "unrelated areas"),
+        "player": ("玩家起点", "player start"),
+        "boxes": ("箱子位置", "box positions"),
+        "targets": ("目标位置", "target positions"),
+        "water": ("水域", "water"),
+        "walls": ("墙体", "walls"),
+    }
+    index = 0 if language == "zh-CN" else 1
+    values = [
+        labels[item][index]
+        for item in (brief or {}).get("preserve") or []
+        if item in labels and item not in {"outer_shell", "unrelated_areas"}
+    ]
+    if not values:
+        return "原有的开局判断节奏" if language == "zh-CN" else "the original opening judgment"
+    return ("、" if language == "zh-CN" else ", ").join(values[:4])
+
+
+def _challenge_fallback_body(offer, source_binding, language):
+    summary = _inline_display_text((offer or {}).get("summary"))
+    brief = (
+        (source_binding or {}).get("executionBrief")
+        if isinstance(source_binding, dict)
+        else {}
+    ) or {}
+    change = _verified_transition_description(brief, language, limit=3)
+    objective = _inline_display_text(brief.get("playObjective"))
+    preserved = _challenge_preserve_description(brief, language)
+    if language == "zh-CN":
+        proposal = summary[:220] or change
+        target = objective[:260] or "让这处局部变化真正影响玩家的路线判断"
+        return (
+            f"我先把被质疑的方案说清楚：{proposal}。\n\n"
+            f"我最先猜，你是在怀疑{change}是否真的足以实现“{target}”，而不只是缩窄通路或增加走动。"
+            f"另一个可能是，你担心这项改动会削弱方案承诺保留的{preserved}。这两点都只是我的暂定判断，并不是在替你下结论。\n\n"
+            "这两个猜测哪个更接近你的顾虑，还是你的质疑来自别的地方？请直接纠正我。"
         )
-    else:
-        body = (
-            f"Let me make the proposal explicit: “{summary}.” I suggested it because {rationale} "
-            "The play moment I want to improve is the relevant box's first approach to this route, "
-            "not just its appearance. Which part do you disagree with—the revision direction, the "
-            "intended play effect, or my reading of the current map? Please tell me why."
-        )
+    proposal = summary[:280] or change
+    target = objective[:320] or "make this local change genuinely affect the player's route judgment"
+    return (
+        f"Let me restate the challenged proposal: {proposal}.\n\n"
+        f"My primary guess is that you doubt whether {change} is enough to {target}, rather than merely narrowing the route or adding walking. "
+        f"Another possibility is that you are concerned it may weaken the promised preservation of {preserved}. These are tentative readings, not claims about your reason.\n\n"
+        "Which guess is closer to your concern, or is your challenge about something else? Please correct me directly."
+    )
+
+
+def _sanitize_challenge_execution(execution, offer, language, source_binding=None):
+    model_body = _paragraph_display_text(execution.assistant_message)
+    body = (
+        model_body
+        if _challenge_body_has_two_tentative_hypotheses(model_body, language)
+        else _challenge_fallback_body(offer, source_binding, language)
+    )
     return replace(
         execution,
         assistant_message=body,

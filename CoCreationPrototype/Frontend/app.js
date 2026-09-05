@@ -170,6 +170,8 @@ const translations = {
         error_PROPOSAL_STALE: "This proposal is based on an older Stage or map snapshot and is no longer active.",
         error_PROPOSAL_PRECONDITION_FAILED: "The current map no longer matches this proposal's prerequisite.",
         error_PROPOSAL_SEARCH_EXHAUSTED: "No verified map proposal could be produced for this direction. The current map was not changed.",
+        error_REVISION_EXECUTION_INVALID: "The frozen revision did not pass the internal execution-contract check. The current map was not changed.",
+        error_REVISION_EXECUTION_MISMATCH: "The replayed revision did not match its frozen tile changes. The current map was not changed.",
         error_DISAGREEMENT_ACTIVE: "Resolve the current disagreement before choosing another revision card.",
         playSyncFailed: "The Stage was completed, but the play result could not be synchronized. This attempt will be recorded as interrupted.",
         playLoadFailed: "The selected Stage could not be loaded in Unity. Please review the Stage and try again.",
@@ -408,6 +410,8 @@ const chineseApiErrors = {
     PROPOSAL_STALE: "该方案基于旧 Stage 或旧地图快照，已失效。",
     PROPOSAL_PRECONDITION_FAILED: "当前地图状态已不再符合这项方案的执行前提。",
     PROPOSAL_SEARCH_EXHAUSTED: "没有找到通过验证的地图方案，当前地图未改变。",
+    REVISION_EXECUTION_INVALID: "已冻结的修改没有通过内部执行合同检查，当前地图未改变。",
+    REVISION_EXECUTION_MISMATCH: "重放结果与已冻结的格子变化不一致，当前地图未改变。",
     DISAGREEMENT_ACTIVE: "当前仍有未解决的分歧，请先继续协商后再选择修改方案。"
 };
 

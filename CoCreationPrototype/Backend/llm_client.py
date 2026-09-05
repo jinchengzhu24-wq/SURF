@@ -5237,6 +5237,7 @@ def _deterministic_exact_revision(
         revision_operations=operations,
         proposal_diagnostics={
             "source": "deterministic_contract",
+            "selectedStrategyIndex": 1,
             "changedCellCount": changed,
             "candidateCount": 1,
             "modifierAttempts": 0,
@@ -8823,11 +8824,42 @@ def _sanitize_visible_guidance(guidance, language="en"):
     offer = result.get("proposalOffer")
     if isinstance(offer, dict):
         offer = dict(offer)
-        for field_name in ("summary", "rationale"):
-            if offer.get(field_name) is not None:
-                offer[field_name] = _sanitize_visible_model_text(
-                    offer[field_name], language
+        if offer.get("summary") is not None:
+            offer["summary"] = re.sub(
+                r"\s+",
+                " ",
+                _sanitize_visible_model_text(offer["summary"], language),
+            ).strip()
+        if offer.get("rationale") is not None:
+            offer["rationale"] = "\n\n".join(
+                normalized
+                for paragraph in re.split(
+                    r"(?:\r?\n\s*){2,}",
+                    _sanitize_visible_model_text(offer["rationale"], language),
                 )
+                if (normalized := re.sub(r"\s+", " ", paragraph).strip())
+            )
+        presentation = offer.get("proposalPresentation")
+        if isinstance(presentation, dict):
+            presentation = dict(presentation)
+            if presentation.get("summary") is not None:
+                presentation["summary"] = re.sub(
+                    r"\s+",
+                    " ",
+                    _sanitize_visible_model_text(presentation["summary"], language),
+                ).strip()
+            if presentation.get("rationale") is not None:
+                presentation["rationale"] = "\n\n".join(
+                    normalized
+                    for paragraph in re.split(
+                        r"(?:\r?\n\s*){2,}",
+                        _sanitize_visible_model_text(
+                            presentation["rationale"], language
+                        ),
+                    )
+                    if (normalized := re.sub(r"\s+", " ", paragraph).strip())
+                )
+            offer["proposalPresentation"] = presentation
         result["proposalOffer"] = offer
 
     disagreement = result.get("disagreement")
@@ -10206,6 +10238,39 @@ def _proposal_body_has_playable_support(body, language):
         for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(body or ""))
         if sentence.strip() and not _proposal_card_is_meta_language(sentence)
     ]
+    text = " ".join(sentences).strip().casefold()
+    if len(text) < (18 if language == "zh-CN" else 35):
+        return False
+
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        anchors = (
+            "水", "箱", "目标", "墙", "通道", "路线", "推动", "推箱", "空间",
+            "难度", "时间", "游玩", "障碍",
+        )
+        actions = (
+            "移动", "调整", "挪", "改", "增加", "减少", "绕", "形成", "让", "使",
+            "重排", "保留", "延长", "停留", "多花",
+        )
+        effects = (
+            "玩家", "游玩", "试玩", "观察", "判断", "路线", "选择", "顺序", "体验",
+            "时间", "停留", "推",
+        )
+    else:
+        anchors = (
+            "water", "box", "crate", "target", "wall", "corridor", "route", "push",
+            "space", "difficulty", "time", "play", "obstacle",
+        )
+        actions = (
+            "move", "adjust", "shift", "change", "add", "remove", "detour", "make",
+            "let", "rearrange", "preserve", "extend", "slow",
+        )
+        effects = (
+            "player", "play", "playtest", "observe", "judge", "route", "choice", "order",
+            "experience", "time", "push",
+        )
+    return any(marker in text for marker in anchors) and any(
+        marker in text for marker in actions
+    ) and any(marker in text for marker in effects)
 
 
 def _proposal_offer_has_exact_execution_plan(proposal_offer):
@@ -10253,7 +10318,11 @@ def _plain_action_instruction(stage_context):
         return (
             "CARD ACTION: challenge_revision. This is only the first invitation to discuss the cited "
             f"proposal ({offer_text}). Write ordinary prose that restates it, explains its reason and "
-            "target play moment, and asks the designer to give a concrete objection. Do not emit any "
+            "target play moment. Then give exactly two explicitly tentative, correctable hypotheses "
+            "about why the designer challenged it: one primary concern about whether the exact change "
+            "really creates the intended mechanism, and one secondary concern about whether it harms "
+            "an experience the designer asked to preserve. Ask one open question that invites correction. "
+            "Do not claim either hypothesis as the designer's actual reason. Do not emit any "
             "GUIDANCE fields, including DISCUSS, WARNING, or proposal fields."
         )
     if action == "alternative_revision":
@@ -10290,39 +10359,6 @@ def _plain_action_instruction(stage_context):
             "specific unresolved design decision supported by map evidence."
         )
     return ""
-    text = " ".join(sentences).strip().casefold()
-    if len(text) < (18 if language == "zh-CN" else 35):
-        return False
-
-    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
-        anchors = (
-            "水", "箱", "目标", "墙", "通道", "路线", "推动", "推箱", "空间",
-            "难度", "时间", "游玩", "障碍",
-        )
-        actions = (
-            "移动", "调整", "挪", "改", "增加", "减少", "绕", "形成", "让", "使",
-            "重排", "保留", "延长", "停留", "多花",
-        )
-        effects = (
-            "玩家", "游玩", "试玩", "观察", "判断", "路线", "选择", "顺序", "体验",
-            "时间", "停留", "推",
-        )
-    else:
-        anchors = (
-            "water", "box", "crate", "target", "wall", "corridor", "route", "push",
-            "space", "difficulty", "time", "play", "obstacle",
-        )
-        actions = (
-            "move", "adjust", "shift", "change", "add", "remove", "detour", "make",
-            "let", "rearrange", "preserve", "extend", "slow",
-        )
-        effects = (
-            "player", "play", "playtest", "observe", "judge", "route", "choice", "order",
-            "experience", "time", "push",
-        )
-    return any(marker in text for marker in anchors) and any(
-        marker in text for marker in actions
-    ) and any(marker in text for marker in effects)
 
 
 def _proposal_offer_binding_issue(proposal_offer, body, messages, language):
@@ -12938,7 +12974,10 @@ def _build_task_instructions(assessment_only, stage_context=None):
         action_instruction = (
             "This is the first response after the designer clicked challenge_revision on a purple card. "
             "Use ordinary prose only: restate the cited proposal, explain why it was suggested and which "
-            "play moment it targets, then invite the designer to state the precise disagreement and reason. "
+            "play moment it targets. Then state exactly two explicitly tentative and correctable hypotheses "
+            "for the challenge: first, whether the exact change truly creates the intended mechanism; second, "
+            "whether it may damage an experience the designer asked to preserve. End with one open invitation "
+            "to correct these guesses and give the precise disagreement. Never claim a guess is the user's reason. "
             "Do not output proposalOffer, disagreement, followUpQuestion, uiCues, or map rows."
         )
     elif explicit_action == "alternative_revision":

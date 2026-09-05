@@ -16,6 +16,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import app as backend
+import llm_client
 import repository
 from llm_client import (
     LLMExecutionResult,
@@ -158,6 +159,38 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
+    def offer_bound_revision(self, brief, *, summary, message_key):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "I see one exact revision worth reviewing.",
+            1,
+            message_key,
+            model="mock-model",
+            guidance={
+                "move": "offer_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": {
+                    "summary": summary,
+                    "rationale": "This exact change should affect the first route decision.",
+                    "executionBrief": brief,
+                },
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            offered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please review this exact revision.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": message_key,
+                },
+            )
+        self.assertEqual(offered.status_code, 200, offered.text)
+        return offered.json()["turns"][-1]
+
     def test_initial_stage_matches_unity_rows_and_bootstrap_is_single_use(self):
         session = self.read_session()
 
@@ -267,6 +300,91 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(stale.json()["code"], "PROPOSAL_STALE")
         self.assertEqual(stale.json()["details"]["reason"], "map_changed")
         generate_reply.assert_not_called()
+
+    def test_one_cell_frozen_revision_executes_without_an_llm_call(self):
+        version_id = self.read_session()["currentVersionId"]
+        brief = {
+            "schemaVersion": 1,
+            "effect": "adjust_internal_walls",
+            "anchors": [],
+            "focus": {"row": 2, "column": 2, "radius": 1},
+            "requiredTransitions": [
+                {"row": 2, "column": 2, "from": ".", "to": "#"},
+            ],
+            "allowedOperators": ["add_wall"],
+            "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+            "playObjective": "route_choice",
+        }
+        source_turn = self.offer_bound_revision(
+            brief,
+            summary="Add a wall\nat (2,2)",
+            message_key="exact-wall-offer-001",
+        )
+        self.assertEqual(
+            source_turn["guidance"]["proposalOffer"]["summary"],
+            "Add a wall at (2,2)",
+        )
+        with repository.connect() as database:
+            stored = database.execute(
+                "SELECT guidance_json FROM conversation_turns WHERE id = ?",
+                (source_turn["turnId"],),
+            ).fetchone()
+        self.assertIn("Add a wall\\nat", stored["guidance_json"])
+
+        with patch.object(
+            llm_client,
+            "_create_async_client",
+            side_effect=AssertionError("frozen execution must not call Kimi"),
+        ):
+            executed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Execute this frozen wall proposal.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "exact-wall-execute-001",
+                    "action": "execute_revision",
+                    "sourceTurnId": source_turn["turnId"],
+                },
+            )
+
+        self.assertEqual(executed.status_code, 200, executed.text)
+        proposal = executed.json()["proposals"][0]
+        self.assertEqual(proposal["proposedRows"][1], "##.........#")
+        self.assertEqual(proposal["diff"], [
+            {"x": 1, "y": 1, "before": ".", "after": "#"},
+        ])
+
+    def test_multi_cell_entity_revision_replays_its_complete_frozen_diff(self):
+        version_id = self.read_session()["currentVersionId"]
+        source_turn = self.offer_bound_revision(
+            PLAYER_MOVE_BRIEF,
+            summary="Move the player start left",
+            message_key="exact-player-offer-001",
+        )
+
+        with patch.object(
+            llm_client,
+            "_create_async_client",
+            side_effect=AssertionError("frozen execution must not call Kimi"),
+        ):
+            executed = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Execute this frozen player proposal.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "exact-player-execute-001",
+                    "action": "execute_revision",
+                    "sourceTurnId": source_turn["turnId"],
+                },
+            )
+
+        self.assertEqual(executed.status_code, 200, executed.text)
+        proposal = executed.json()["proposals"][0]
+        self.assertEqual(proposal["proposedRows"], EDITED_ROWS)
+        self.assertEqual(
+            {(item["x"], item["y"], item["before"], item["after"]) for item in proposal["diff"]},
+            {(4, 4, "p", "."), (3, 4, ".", "p")},
+        )
 
     def test_already_satisfied_binding_stops_before_revision_generation(self):
         version_id = self.read_session()["currentVersionId"]
@@ -2423,7 +2541,12 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(offered.json()["proposals"], [])
 
         challenge_execution = LLMExecutionResult(
-            "ignored by the deterministic challenge wrapper",
+            (
+                "My primary guess is that you doubt whether the exact change\n"
+                "really creates the intended detour.\n\n"
+                "Another possibility is that you worry it weakens the opening route.\n\n"
+                "Which is closer to your concern, or is your reason different? Please correct me."
+            ),
             1,
             "challenge-001",
             model="mock-model",
@@ -2451,6 +2574,11 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(challenged.status_code, 200, challenged.text)
         challenge_turn = challenged.json()["turns"][-1]
         self.assertEqual(challenge_turn["role"], "assistant")
+        self.assertIn("My primary guess", challenge_turn["content"])
+        self.assertIn("Another possibility", challenge_turn["content"])
+        self.assertIn("Please correct me", challenge_turn["content"])
+        self.assertNotIn("change\nreally", challenge_turn["content"])
+        self.assertEqual(challenge_turn["content"].count("\n\n"), 2)
         self.assertIsNone(challenge_turn["guidance"]["proposalOffer"])
         self.assertIsNone(challenge_turn["guidance"]["disagreement"])
         self.assertEqual(challenged.json()["proposals"], [])
@@ -2818,6 +2946,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             )
         self.assertEqual(challenged.status_code, 200, challenged.text)
+        challenge_body = challenged.json()["turns"][-1]["content"]
+        self.assertIn("My primary guess", challenge_body)
+        self.assertIn("Another possibility", challenge_body)
+        self.assertIn("tentative readings", challenge_body)
+        self.assertIn("Please correct me", challenge_body)
 
         active = {
             "status": "active",

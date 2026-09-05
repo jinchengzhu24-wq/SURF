@@ -177,6 +177,47 @@ class SlowClient:
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_proposal_body_playable_support_executes_its_complete_validator(self):
+        self.assertTrue(llm_client._proposal_body_has_playable_support(
+            "我会增加中央墙体，让玩家在第一次推箱前比较两条路线。",
+            "zh-CN",
+        ))
+        self.assertTrue(llm_client._proposal_body_has_playable_support(
+            "I would add a wall beside the box so the player must compare the routes before the first push.",
+            "en",
+        ))
+        self.assertFalse(llm_client._proposal_body_has_playable_support(
+            "这个方案已经验证。",
+            "zh-CN",
+        ))
+        self.assertFalse(llm_client._proposal_body_has_playable_support(
+            "This proposal is verified.",
+            "en",
+        ))
+
+    def test_visible_proposal_copy_collapses_hard_wraps_but_keeps_paragraphs(self):
+        guidance = llm_client._sanitize_visible_guidance({
+            "proposalOffer": {
+                "summary": "Add a wall\nto the central route",
+                "rationale": "Answer the request by\nchanging the route.\n\nKeep the existing\nbox positions.",
+                "proposalPresentation": {
+                    "summary": "Add a wall\nto the central route",
+                    "rationale": "Answer the request by\nchanging the route.\n\nKeep the existing\nbox positions.",
+                },
+            },
+        })
+
+        offer = guidance["proposalOffer"]
+        self.assertEqual(offer["summary"], "Add a wall to the central route")
+        self.assertEqual(
+            offer["rationale"],
+            "Answer the request by changing the route.\n\nKeep the existing box positions.",
+        )
+        self.assertEqual(
+            offer["proposalPresentation"]["summary"],
+            "Add a wall to the central route",
+        )
+
     def test_objective_policy_keeps_qualitative_difficulty_soft(self):
         policy = llm_client._proposal_objective_policy(
             [{"role": "user", "content": "我希望玩家花更多时间，并增加推箱深度"}],
@@ -3446,6 +3487,35 @@ class LLMClientTests(unittest.TestCase):
             {"row": 2, "column": 2, "from": ".", "to": "#"},
         ])
         self.assertEqual(result.proposal_diagnostics["source"], "deterministic_contract")
+
+    def test_frozen_exact_revision_declares_its_selected_strategy(self):
+        brief = {
+            "schemaVersion": 1,
+            "effect": "adjust_internal_walls",
+            "anchors": [],
+            "focus": {"row": 2, "column": 2, "radius": 1},
+            "requiredTransitions": [
+                {"row": 2, "column": 2, "from": ".", "to": "#"},
+            ],
+            "allowedOperators": ["add_wall"],
+            "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+            "playObjective": "route_choice",
+        }
+
+        result = llm_client.generate_chat_reply(
+            [{"role": "user", "content": "Execute the frozen proposal."}],
+            OPERATION_BASE_ROWS,
+            "frozen-exact-strategy-test",
+            stage_context={
+                "explicitAction": "execute_revision",
+                "deterministicExactExecution": True,
+                "authorizedExecutionBrief": brief,
+            },
+            proposal_validator=llm_client.validate_and_solve,
+        )
+
+        self.assertEqual(result.proposal_diagnostics["selectedStrategyIndex"], 1)
+        self.assertEqual(result.proposed_rows[1], "##.........#")
 
     def test_confirmed_concrete_chinese_plan_immediately_uses_proposal_workflow(self):
         response = revision_plan_payload(

@@ -44,7 +44,12 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             proposal_diagnostics={
                 "selectedStrategyIndex": 1,
                 "objectivePolicy": {"requiresMechanismEvidence": True},
-                "mechanismEvidence": {"passed": True},
+                "mechanismEvidence": {
+                    "passed": True,
+                    "routeAffected": True,
+                    "bothBoxesUsed": False,
+                    "metricDeltas": {"solutionSteps": 2},
+                },
             },
             guidance={"move": "deliver_revision", "proposalOffer": None},
         )
@@ -63,6 +68,15 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             [{"row": 2, "column": 2, "from": ".", "to": "#"}],
         )
         self.assertEqual(frozen.guidance["move"], "offer_revision")
+        self.assertNotIn("\n", offer["summary"])
+        self.assertIn("（2,2）", offer["summary"])
+        rationale_parts = offer["rationale"].split("\n\n")
+        self.assertEqual(len(rationale_parts), 3)
+        self.assertIn("回应你的需求：增加局部路线判断", rationale_parts[0])
+        self.assertIn("（2,2）", rationale_parts[1])
+        self.assertIn("为什么", rationale_parts[1])
+        self.assertIn("解法步数增加 2", rationale_parts[2])
+        self.assertIn("仍需要试玩确认", rationale_parts[2])
 
     def test_candidate_failure_is_not_mislabeled_as_upstream_rejection(self):
         exception = LLMServiceError(
