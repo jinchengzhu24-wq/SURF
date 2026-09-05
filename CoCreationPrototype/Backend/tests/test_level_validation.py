@@ -14,6 +14,7 @@ from level_validation import (
     build_stage_snapshot,
     analyze_user_map_claims,
     format_map_claim_correction,
+    minimum_pushes,
     entity_binding_fingerprint,
     validate_and_solve,
     validate_rows,
@@ -61,6 +62,9 @@ IDENTITY_ROWS = [
 
 
 class OuterWallValidationTests(unittest.TestCase):
+    def test_minimum_pushes_is_computed_independently(self):
+        self.assertEqual(minimum_pushes(CLOSED_ROWS), 2)
+
     def test_closed_rectangular_map_passes(self):
         self.assertEqual(validate_rows(CLOSED_ROWS), tuple(CLOSED_ROWS))
 

@@ -742,9 +742,9 @@ def serialize_session(database, session_id):
             try:
                 # This is a display-time compatibility repair; historical
                 # database rows remain unchanged.
-                from llm_client import _ensure_stage_one_orientation
+                from llm_client import _repair_stage_one_opening_display
 
-                content = _ensure_stage_one_orientation(
+                content = _repair_stage_one_opening_display(
                     content,
                     version_rows.get(turn["version_id"]),
                     turn["language"],
@@ -1173,6 +1173,8 @@ def _public_guidance(value):
     result = dict(value or {}) if isinstance(value, dict) else {}
     result.pop("designContextPatch", None)
     result.pop("designContextPatchError", None)
+    result.pop("proposalDiscovery", None)
+    result.pop("openingPresentation", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and "executionBrief" in offer:
         offer = dict(offer)

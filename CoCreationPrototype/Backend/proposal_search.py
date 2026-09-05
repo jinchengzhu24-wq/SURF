@@ -1,17 +1,19 @@
 from collections import deque
 from dataclasses import dataclass
+import hashlib
+import json
 import time
 
-from level_validation import build_map_facts
+from level_validation import build_map_facts, minimum_pushes
 
 
 WIDTH = 12
 HEIGHT = 10
-BEAM_WIDTH = 16
+BEAM_WIDTH = 24
 BEAM_DEPTH = 3
 PRIMITIVE_LIMIT = 32
-MAX_CONSTRUCTED_CANDIDATES = 64
-MAX_VALID_CANDIDATES = 8
+MAX_CONSTRUCTED_CANDIDATES = 128
+MAX_VALID_CANDIDATES = 12
 # A revision is a meaningful but bounded local experiment.  The operation
 # agent uses this same upper bound for its machine-checkable edit contract.
 MAX_EDIT_BUDGET = 12
@@ -44,7 +46,7 @@ PRESERVE_COMPONENTS = {
     "walls",
     "unrelated_areas",
 }
-METRICS = {"solutionSteps", "solutionPushes", "searchedStates"}
+METRICS = {"solutionSteps", "solutionPushes", "minimumPushes", "searchedStates"}
 METRIC_DIRECTIONS = {"increase", "decrease", "preserve"}
 
 EFFECT_OPERATORS = {
@@ -87,6 +89,7 @@ class Focus:
 class MetricGoal:
     metric: str
     direction: str
+    minimum_delta: int = 1
 
 
 @dataclass(frozen=True)
@@ -118,7 +121,15 @@ class RevisionStrategy:
             "preserve": sorted(self.preserve),
             "editBudget": self.edit_budget,
             "metricGoals": [
-                {"metric": goal.metric, "direction": goal.direction}
+                {
+                    "metric": goal.metric,
+                    "direction": goal.direction,
+                    **(
+                        {"minimumDelta": goal.minimum_delta}
+                        if goal.minimum_delta != 1
+                        else {}
+                    ),
+                }
                 for goal in self.metric_goals
             ],
             "requiredTransitions": [
@@ -272,14 +283,29 @@ def _parse_strategy(payload, index):
     parsed_goals = []
     seen_metrics = set()
     for goal in metric_goals:
-        if not isinstance(goal, dict) or set(goal) != {"metric", "direction"}:
+        if (
+            not isinstance(goal, dict)
+            or not {"metric", "direction"}.issubset(goal)
+            or set(goal) - {"metric", "direction", "minimumDelta"}
+        ):
             raise RevisionPlanError(f"strategy {index} has an invalid metric goal.")
         if goal["metric"] not in METRICS or goal["direction"] not in METRIC_DIRECTIONS:
             raise RevisionPlanError(f"strategy {index} has an unsupported metric goal.")
         if goal["metric"] in seen_metrics:
             raise RevisionPlanError(f"strategy {index} repeats a metric goal.")
         seen_metrics.add(goal["metric"])
-        parsed_goals.append(MetricGoal(goal["metric"], goal["direction"]))
+        minimum_delta = goal.get("minimumDelta", 1)
+        if (
+            isinstance(minimum_delta, bool)
+            or not isinstance(minimum_delta, int)
+            or not 1 <= minimum_delta <= 1000
+        ):
+            raise RevisionPlanError(f"strategy {index} has an invalid metric delta.")
+        parsed_goals.append(MetricGoal(
+            goal["metric"],
+            goal["direction"],
+            minimum_delta,
+        ))
     required_transitions, transition_entities = _parse_required_transitions(
         payload.get("requiredTransitions", []),
         index,
@@ -541,6 +567,7 @@ def search_revision_plan(
     preserved_components=None,
     required_transitions=None,
     entity_bindings=None,
+    excluded_map_fingerprints=None,
 ):
     search_started_at = time.monotonic()
     base_rows = tuple(base_rows)
@@ -573,6 +600,7 @@ def search_revision_plan(
         ]
     verified = []
     seen_maps = {base_rows}
+    excluded_map_fingerprints = set(excluded_map_fingerprints or ())
 
     for strategy_index, strategy in enumerate(plan.strategies, start=1):
         if _deadline_reached(deadline):
@@ -606,6 +634,10 @@ def search_revision_plan(
                 if state.rows not in seen_maps:
                     seen_maps.add(state.rows)
                     diagnostics["constructedCandidates"] += 1
+                    if _map_fingerprint(state.rows) in excluded_map_fingerprints:
+                        diagnostics["staticRejectedCandidates"] += 1
+                        _count_failure(diagnostics, "CANDIDATE_DUPLICATED")
+                        continue
                     _evaluate_state(
                         state,
                         strategy,
@@ -1006,16 +1038,22 @@ def _metric_matches(goals, baseline, validation):
     values = {
         "solutionSteps": getattr(validation, "solution_steps", None),
         "solutionPushes": getattr(validation, "solution_pushes", None),
+        "minimumPushes": None,
         "searchedStates": getattr(validation, "searched_states", None),
     }
     for goal in goals:
         before = baseline.get(goal.metric)
+        if goal.metric == "minimumPushes":
+            try:
+                values[goal.metric] = minimum_pushes(validation.rows)
+            except Exception:
+                values[goal.metric] = None
         after = values.get(goal.metric)
         if before is None or after is None:
             continue
         if (
-            (goal.direction == "increase" and after > before)
-            or (goal.direction == "decrease" and after < before)
+            (goal.direction == "increase" and after - before >= goal.minimum_delta)
+            or (goal.direction == "decrease" and before - after >= goal.minimum_delta)
             or (goal.direction == "preserve" and after == before)
         ):
             matches += 1
@@ -1096,6 +1134,15 @@ def _primitive_key(primitive):
 
 def _deadline_reached(deadline):
     return time.monotonic() >= deadline
+
+
+def _map_fingerprint(rows):
+    canonical = json.dumps(
+        list(rows or []),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _count_failure(diagnostics, reason):

@@ -19,12 +19,18 @@ from openai import (
 
 from proposal_search import (
     Focus,
+    MetricGoal,
     ProposalSearchExhausted,
     parse_revision_plan,
     search_revision_plan,
     validate_revision_plan_against_map,
 )
-from level_validation import build_map_facts, build_stage_snapshot, validate_and_solve
+from level_validation import (
+    build_map_facts,
+    build_stage_snapshot,
+    minimum_pushes,
+    validate_and_solve,
+)
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
 
@@ -46,17 +52,29 @@ MIN_RETRY_BUDGET_SECONDS = 20.0
 CHAT_TIMEOUT_SECONDS = BACKEND_REQUEST_TIMEOUT_SECONDS
 CHAT_MAX_ATTEMPTS = 2
 PROPOSAL_GENERATION_ATTEMPTS = 2
-PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS = 22.0
-PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS = 8.0
-PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS = 30.0
+# Ordinary chat and Stage openings retain the 120-second public budget. A
+# proposal is a multi-phase pipeline (RevisionPlan, operation candidates,
+# deterministic validation), so it receives a separate, slightly longer
+# request budget rather than making every chat wait longer.
+PROPOSAL_REQUEST_TIMEOUT_SECONDS = 300.0
+PROPOSAL_INTERNAL_DEADLINE_SECONDS = 296.0
+# The semantic RevisionPlan gets a long first attempt and a compact corrective
+# retry. The phase cap leaves the remainder for operation candidates and
+# deterministic validation.
+PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS = 140.0
+PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS = 35.0
+PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS = 180.0
 PROPOSAL_SEARCH_DEADLINE_SECONDS = 56.0
 # The authorized revision now has two bounded LLM phases: a semantic plan and
 # concrete operation candidates.  Both use the existing proposal model config.
 REVISION_CONTRACT_SCHEMA_VERSION = 1
 REVISION_MIN_CHANGED_CELLS = 1
 REVISION_MAX_CHANGED_CELLS = 12
-# Compatibility for older diagnostics and integrations that imported these names.
-PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
+# Compatibility for older diagnostics and integrations that imported this
+# name. Operation candidates are a separate phase and must not inherit the
+# longer semantic RevisionPlan timeout.
+PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS = 30.0
+PROPOSAL_ATTEMPT_TIMEOUT_SECONDS = PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS
 CHAT_MAX_COMPLETION_TOKENS = 2600
 # Compatibility alias for integrations that import the old constant name.
 CHAT_MAX_TOKENS = CHAT_MAX_COMPLETION_TOKENS
@@ -66,7 +84,10 @@ PLAIN_CHAT_MAX_COMPLETION_TOKENS = 2200
 PLAIN_CHAT_MAX_TOKENS = PLAIN_CHAT_MAX_COMPLETION_TOKENS
 PROPOSAL_MAX_COMPLETION_TOKENS = 2400
 PROPOSAL_MAX_TOKENS = PROPOSAL_MAX_COMPLETION_TOKENS
-PROPOSAL_PLAN_MAX_COMPLETION_TOKENS = 1400
+# RevisionPlan uses direct JSON generation with thinking disabled. Keep enough
+# room for the complete contract while preventing an unexpectedly verbose
+# response from consuming the proposal phase.
+PROPOSAL_PLAN_MAX_COMPLETION_TOKENS = 2400
 PROPOSAL_PLAN_MAX_TOKENS = PROPOSAL_PLAN_MAX_COMPLETION_TOKENS
 PROPOSAL_OPERATION_MAX_COMPLETION_TOKENS = 1400
 PROPOSAL_OPERATION_MAX_TOKENS = PROPOSAL_OPERATION_MAX_COMPLETION_TOKENS
@@ -86,7 +107,7 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v46-server-facts-content-blocks"
+PROMPT_VERSION = "cocreation-v48-objective-policy-candidates"
 
 
 def _structured_response_format(task=None):
@@ -97,7 +118,18 @@ def _structured_response_format(task=None):
     the model to infer the wire shape from the much larger design rules.
     """
     task = str(task or "chat")
-    if task == "translation":
+    if task == "proposal_clarification":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "body": {"type": "string"},
+                "question": {"type": "string"},
+            },
+            "required": ["body", "question"],
+        }
+        name = "cocreation_proposal_clarification"
+    elif task == "translation":
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -235,7 +267,9 @@ GUIDANCE_MOVES = {
 }
 INTENT_CONFIDENCE_LEVELS = {"low", "medium", "high"}
 UI_CUE_TYPES = {"manual_edit", "warning", "tradeoff", "clarification"}
-GUIDANCE_REQUEST_MODES = {"revision_advice", "discussion", "needs_clarification", "none"}
+GUIDANCE_REQUEST_MODES = {
+    "revision_advice", "discussion", "needs_clarification", "proposal_blocked", "none"
+}
 DISAGREEMENT_STATUSES = {"active", "resolved"}
 DISAGREEMENT_SUBJECTS = {"ai_revision", "human_edit", "user_request"}
 DISAGREEMENT_RESOLUTIONS = {"user", "ai", "compromise", "retain_current"}
@@ -266,9 +300,14 @@ def _llm_credentials():
     return api_key, base_url
 
 
-def _request_deadline(started_at=None):
+def _request_deadline(started_at=None, budget_seconds=None):
     base = time.monotonic() if started_at is None else started_at
-    return base + LLM_INTERNAL_DEADLINE_SECONDS
+    budget = (
+        LLM_INTERNAL_DEADLINE_SECONDS
+        if budget_seconds is None
+        else float(budget_seconds)
+    )
+    return base + budget
 
 
 def _remaining_until(deadline):
@@ -341,6 +380,11 @@ class LLMServiceError(Exception):
         retryable,
         attempts_used,
         status_code,
+        provider_status=None,
+        provider_error_type=None,
+        provider_error_code=None,
+        provider_param=None,
+        provider_message=None,
     ):
         super().__init__(message)
         self.code = str(code)
@@ -349,6 +393,13 @@ class LLMServiceError(Exception):
         self.retryable = bool(retryable)
         self.attempts_used = int(attempts_used)
         self.status_code = int(status_code)
+        self.provider_status = (
+            int(provider_status) if provider_status not in (None, "") else None
+        )
+        self.provider_error_type = str(provider_error_type or "")
+        self.provider_error_code = str(provider_error_code or "")
+        self.provider_param = str(provider_param or "")
+        self.provider_message = str(provider_message or "")
 
 
 class EmptyModelResponse(ValueError):
@@ -708,11 +759,20 @@ def build_plain_chat_messages(
     serialized_map = ""
     numbered_map = ""
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
-    solver_metrics = _llm_solver_evidence(solver_metrics or {})
+    raw_solver_metrics = solver_metrics or {}
+    solver_metrics = _llm_solver_evidence(raw_solver_metrics)
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     map_facts = _stage_snapshot_for_prompt(rows, stage_context)
     prompt_stage_context = _prompt_stage_context(rows, stage_context)
+    if isinstance(prompt_stage_context.get("proposalClarification"), dict):
+        clarification = dict(prompt_stage_context["proposalClarification"])
+        clarification["routeEvidence"] = _proposal_clarification_route_evidence(
+            rows,
+            raw_solver_metrics,
+            stage_context,
+        )
+        prompt_stage_context["proposalClarification"] = clarification
     design_context_prompt = _design_context_prompt(
         stage_context, role=(stage_context.get("agentRole") or "chat")
     )
@@ -974,12 +1034,25 @@ def _compact_kimi_structured_prompt(
         min(3, int((stage_context or {}).get("clarificationQuestionCount") or 0)),
     )
     clarification_budget = max(0, 3 - clarification_count)
+    human_edit_opening = assessment_only and _is_human_edit_stage_opening(
+        assessment_only, stage_context
+    )
     opening = (
-        "This is a Stage opening. Write one or two declarative observations about concrete "
-        "map choices and your own design reaction. Keep followUpQuestion and "
-        "assessment.satisfactionQuestion null; do not put questions, choices, workflow, or "
-        "editor instructions in the opening. The server owns optional discussion metadata and "
-        "adds the Stage 1 closing."
+        (
+            "This is the opening after a verified human edit. Write two short paragraphs with four "
+            "or five declarative sentences: acknowledge the saved, solvable edit once, discuss two "
+            "or three likely play effects of the changed components, and include one first-person "
+            "design reflection. Do not "
+            "inventory the layout, list entity locations or coordinates, narrate every changed tile, "
+            "or say that the designer placed a particular object."
+            if human_edit_opening
+            else "This is a Stage opening. Write two short paragraphs with four or five declarative "
+            "sentences: one or two concrete map observations, their likely play effects, and your "
+            "own design reaction."
+        )
+        + " Keep followUpQuestion and assessment.satisfactionQuestion null; do not put questions, "
+        "choices, workflow, or editor instructions in the opening. The server owns optional "
+        "discussion metadata and adds the Stage 1 closing."
         if assessment_only
         else "Respond directly to the latest designer message in natural prose."
     )
@@ -1133,11 +1206,78 @@ def _compact_kimi_plain_prompt(
         min(3, int((stage_context or {}).get("clarificationQuestionCount") or 0)),
     )
     clarification_budget = max(0, 3 - clarification_count)
+    human_edit_opening = stage_opening and _is_human_edit_stage_opening(
+        stage_opening, stage_context
+    )
+    proposal_clarification = (
+        (stage_context or {}).get("proposalClarification")
+        if guidance_mode == "needs_clarification"
+        else None
+    )
+    if isinstance(proposal_clarification, dict) and proposal_clarification.get("questionKey"):
+        discovery = (stage_context or {}).get("proposalDiscovery") or {}
+        topic_brief = str(discovery.get("brief") or "").strip()[-2400:]
+        target_key = str(proposal_clarification.get("questionKey") or "").strip()
+        question_intent = str(
+            proposal_clarification.get("questionIntent") or ""
+        ).strip()
+        allowed_labels = [
+            str(label).strip()
+            for label in proposal_clarification.get("allowedEntityLabels") or []
+            if str(label).strip()
+        ]
+        route_evidence = proposal_clarification.get("routeEvidence") or {
+            "mode": "unavailable"
+        }
+        return "\n\n".join([
+            f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
+            (
+                "This is a bounded proposal-clarification turn. You own the natural wording: "
+                "write a warm first-person design response and exactly one useful clarification "
+                "question. Do not use a stock acknowledgement or repeat the user's words as a report."
+            ),
+            (
+                "Return JSON only with exactly two string fields: "
+                '{"body":"...","question":"...?"}. The body must contain two paragraphs and '
+                "five to eight declarative sentences in total, with no question. The question field must contain exactly "
+                "one question and must address the target dimension below."
+            ),
+            (
+                "You may discuss design effects, push transport, judgment cost, local mechanisms, "
+                "the allowed entity labels and the private authoritative route-analysis context below. "
+                "Use that evidence to explain how two or three relevant design directions could affect "
+                "push order, dependency, recovery or backtracking cost, and player judgment. Treat it as "
+                "one verified solution witness, never as the unique solution or a direct difficulty measure. "
+                "You may internally replay the supplied rows and verified solution trace to compare the options. "
+                "Do not state or infer coordinates, positions, adjacency, route endpoints, tile states, "
+                "the complete move sequence, unverified routes, or applied changes. "
+                "Do not ask the designer for coordinates, per-cell edits, or implementation data. "
+                "Do not output cards, proposal metadata, or editing instructions."
+            ),
+            (
+                "If the final question offers named choices, the body must explain every offered choice. "
+                "For an open question, discuss plausible directions without claiming they are exhaustive. "
+                "Describe hypothetical changes conditionally; only later deterministic validation may call them solvable."
+            ),
+            f"Target question dimension: {target_key}. Intent: {question_intent}.",
+            f"Allowed exact entity labels (labels only, never positions): {json.dumps(allowed_labels, ensure_ascii=False)}.",
+            f"Private authoritative route-analysis context (reason from it, never reproduce its rows, coordinates, or trace): {json.dumps(route_evidence, ensure_ascii=False, separators=(',', ':'))}.",
+            f"Confirmed user evidence for this one proposal topic:\n{topic_brief}",
+            "Make the question feel like a natural next step; it may be open-ended and need not be a binary choice.",
+        ])
     opening = (
-        "This is a Stage opening. Write one or two declarative observations about concrete "
-        "map choices and your own design reaction. Do not include questions, choices, or "
-        "process/editor instructions; the server owns optional discussion metadata and appends "
-        "the Stage 1 closing."
+        (
+            "This is the opening after a verified human edit. Write two short paragraphs with four "
+            "or five declarative sentences: acknowledge the saved, solvable edit once, give two or "
+            "three likely play effects, and include your first-person design reflection. Do not inventory the "
+            "layout, list entity locations or coordinates, narrate every changed tile, or say the "
+            "designer placed a particular object."
+            if human_edit_opening
+            else "This is a Stage opening. Write two short paragraphs with four or five declarative "
+            "sentences: concrete map observations, their likely play effects, and your own design reaction."
+        )
+        + " Do not include questions, choices, or process/editor instructions; the server owns "
+        "optional discussion metadata and appends the Stage 1 closing."
         if stage_opening
         else "Respond to the latest designer message first, in natural conversational prose."
     )
@@ -1285,6 +1425,104 @@ def _llm_solver_evidence(solver_metrics):
         for field in allowed_fields
         if field in solver_metrics
     }
+
+
+def _proposal_clarification_route_evidence(rows, solver_metrics, stage_context=None):
+    """Derive a coordinate-free witness-route summary from server-verified data."""
+    metrics = solver_metrics or {}
+    summary = {
+        key: metrics[key]
+        for key in ("solutionSteps", "solutionPushes")
+        if isinstance(metrics.get(key), int) and metrics.get(key) >= 0
+    }
+    solution = str(metrics.get("solution") or "").strip().upper()
+    bindings = (stage_context or {}).get("entityBindings") or {}
+    if not solution or bindings.get("identityStatus") != "exact":
+        return {"mode": "totals_only", **summary} if summary else {"mode": "unavailable"}
+
+    entities = bindings.get("entities") or []
+    player_records = [item for item in entities if item.get("kind") == "player"]
+    box_records = [item for item in entities if item.get("kind") == "box"]
+    target_records = [item for item in entities if item.get("kind") == "target"]
+    if len(player_records) != 1 or not box_records or len(box_records) != len(target_records):
+        return {"mode": "totals_only", **summary} if summary else {"mode": "unavailable"}
+
+    try:
+        normalized = tuple(str(row) for row in rows)
+        player = (int(player_records[0]["column"]) - 1, int(player_records[0]["row"]) - 1)
+        boxes = {
+            (int(item["column"]) - 1, int(item["row"]) - 1): str(item["label"])
+            for item in box_records
+        }
+        targets = {
+            (int(item["column"]) - 1, int(item["row"]) - 1): str(item["label"])
+            for item in target_records
+        }
+        directions = {"U": (0, -1), "D": (0, 1), "L": (-1, 0), "R": (1, 0)}
+        push_sequence = []
+        push_counts = {str(item["label"]): 0 for item in box_records}
+        for move in solution:
+            if move not in directions:
+                raise ValueError("invalid move")
+            dx, dy = directions[move]
+            destination = (player[0] + dx, player[1] + dy)
+            if not (0 <= destination[0] < len(normalized[0]) and 0 <= destination[1] < len(normalized)):
+                raise ValueError("move outside map")
+            if normalized[destination[1]][destination[0]] in {"#", " ", "@"}:
+                raise ValueError("move into blocked tile")
+            if destination in boxes:
+                box_destination = (destination[0] + dx, destination[1] + dy)
+                if not (0 <= box_destination[0] < len(normalized[0]) and 0 <= box_destination[1] < len(normalized)):
+                    raise ValueError("push outside map")
+                if normalized[box_destination[1]][box_destination[0]] in {"#", " ", "@"} or box_destination in boxes:
+                    raise ValueError("invalid push")
+                label = boxes.pop(destination)
+                boxes[box_destination] = label
+                push_sequence.append(label)
+                push_counts[label] += 1
+            player = destination
+        if set(boxes) != set(targets):
+            raise ValueError("solution does not finish on targets")
+        if "solutionSteps" in summary and summary["solutionSteps"] != len(solution):
+            raise ValueError("step count mismatch")
+        if "solutionPushes" in summary and summary["solutionPushes"] != len(push_sequence):
+            raise ValueError("push count mismatch")
+
+        compressed = []
+        for label in push_sequence:
+            if compressed and compressed[-1]["box"] == label:
+                compressed[-1]["pushes"] += 1
+            else:
+                compressed.append({"box": label, "pushes": 1})
+        return {
+            "mode": "verified_route_summary",
+            **summary,
+            "pushesByBox": push_counts,
+            "pushOrder": compressed,
+            "boxAlternations": sum(
+                left != right for left, right in zip(push_sequence, push_sequence[1:])
+            ),
+            "targetAssignments": {
+                label: targets[position]
+                for position, label in boxes.items()
+            },
+            "analysisContext": {
+                "authoritativeRows": list(normalized),
+                "legend": {"#": "wall", ".": "floor", "@": "water", "p": "player", "s": "box", "t": "target", " ": "void"},
+                "exactEntities": [
+                    {
+                        "label": str(item.get("label") or ""),
+                        "kind": str(item.get("kind") or ""),
+                        "row": int(item.get("row")),
+                        "column": int(item.get("column")),
+                    }
+                    for item in entities
+                ],
+                "verifiedSolutionTrace": solution,
+            },
+        }
+    except (KeyError, TypeError, ValueError, IndexError):
+        return {"mode": "totals_only", **summary} if summary else {"mode": "unavailable"}
 
 
 def _map_facts_for_prompt(rows, stage_context):
@@ -2399,7 +2637,8 @@ def generate_chat_reply(
     _max_attempts=CHAT_MAX_ATTEMPTS,
     _deadline=None,
 ):
-    deadline = _deadline or _request_deadline()
+    request_started_at = time.monotonic() if _deadline is None else None
+    deadline = _deadline or _request_deadline(request_started_at)
     effective_stage_context = dict(stage_context or {})
     explicit_action = effective_stage_context.get("explicitAction") or "none"
 
@@ -2473,8 +2712,15 @@ def generate_chat_reply(
             effective_stage_context["authorizedExecutionBrief"] = source_offer[
                 "executionBrief"
             ]
-    elif explicit_action in {"challenge_revision", "alternative_revision"}:
+    elif explicit_action == "challenge_revision":
         revision_state, revision_brief = "not_request", None
+    elif explicit_action == "alternative_revision":
+        source_offer = effective_stage_context.get("sourceProposalOffer") or {}
+        revision_state = "proposal_requested"
+        revision_brief = " ".join(
+            str(source_offer.get(field) or "").strip()
+            for field in ("summary", "rationale")
+        ).strip() or revision_brief
 
     if explicit_action == "alternative_revision":
         cited_offer = effective_stage_context.get("sourceProposalOffer") or {}
@@ -2492,8 +2738,13 @@ def generate_chat_reply(
     if revision_brief:
         effective_stage_context["authorizedRevisionBrief"] = revision_brief
 
+    automatic_proposal = effective_stage_context.get("revisionRouting") in {
+        "proposal", "proposal_conservative"
+    }
     proposal_request = not assessment_only and (
         explicit_action == "execute_revision"
+        or explicit_action == "alternative_revision"
+        or automatic_proposal
         or (
             not effective_stage_context.get("deferRevisionExecution")
             and (
@@ -2502,10 +2753,20 @@ def generate_chat_reply(
                 # current StageSnapshot and clarification budget. A designer
                 # asking for an actionable proposal must use the constrained
                 # RevisionPlan path, not the permissive plain-chat parser.
-                or effective_stage_context.get("revisionRouting") == "proposal"
+                or automatic_proposal
             )
         )
     )
+
+    # Proposals need a longer end-to-end budget than ordinary chat, but do not
+    # change the timeout used by openings or normal discussion. Keep an
+    # explicitly supplied deadline authoritative for tests and callers that
+    # already own request budgeting.
+    if proposal_request and _deadline is None:
+        deadline = _request_deadline(
+            request_started_at,
+            budget_seconds=PROPOSAL_INTERNAL_DEADLINE_SECONDS,
+        )
 
     if revision_state == "authorized_relaxed":
         effective_stage_context["revisionRelaxed"] = True
@@ -2514,6 +2775,16 @@ def generate_chat_reply(
                 "originalBrief"
             )
             or ""
+        )
+
+    if automatic_proposal and not proposal_request:
+        raise LLMServiceError(
+            "PROPOSAL_ROUTING_INVARIANT",
+            "A ready automatic proposal cannot enter the plain-chat path.",
+            request_id,
+            False,
+            0,
+            500,
         )
 
     if not assessment_only and not proposal_request:
@@ -2614,6 +2885,419 @@ def generate_chat_reply(
         ) from exception
 
 
+class ObjectiveEvidenceError(ValueError):
+    def __init__(self, evidence):
+        super().__init__(
+            "soft objective evidence missing: "
+            + ", ".join(evidence.get("missing") or ["no verified mechanism delta"])
+        )
+        self.evidence = evidence
+
+
+class HardObjectiveError(ValueError):
+    def __init__(self, metric, direction, before, after, minimum_delta, verifiable=True):
+        self.metric = metric
+        self.direction = direction
+        self.before = before
+        self.after = after
+        self.minimum_delta = minimum_delta
+        self.verifiable = verifiable
+        if verifiable:
+            message = (
+                f"metric goal {metric} {direction} was not met "
+                f"(baseline={before}, candidate={after}, minimumDelta={minimum_delta})"
+            )
+        else:
+            message = f"metric goal {metric} cannot be verified"
+        super().__init__(message)
+
+
+def _proposal_objective_policy(conversation, stage_context):
+    """Derive metric authority from designer text; model metrics are never hard by default."""
+    user_text = " ".join(
+        str(item.get("content") or "")
+        for item in (conversation or [])[-12:]
+        if item.get("role") == "user"
+    )
+    brief = str((stage_context or {}).get("authorizedRevisionBrief") or "")
+    text = " ".join((brief, user_text)).strip()
+    lowered = text.casefold()
+    mandatory_pattern = re.compile(
+        r"(?:必须|至少|不得少于|务必|minimum|at least|must|required)"
+    )
+    clauses = [
+        item.strip()
+        for item in re.split(r"[。！？!?；;\n]+", lowered)
+        if item.strip()
+    ]
+
+    def requested_delta(keywords):
+        matching = [
+            clause
+            for clause in clauses
+            if mandatory_pattern.search(clause)
+            and any(word in clause for word in keywords)
+        ]
+        if not matching:
+            return None
+        numbers = re.findall(r"\d+", matching[-1])
+        return max(1, int(numbers[-1])) if numbers else 1
+
+    hard_metrics = []
+    step_delta = requested_delta(("最短解", "最短路径", "最短路线", "solution steps", "shortest solution"))
+    push_delta = requested_delta(("最少推动", "最小推动", "推动次数", "推箱次数", "minimum pushes", "push count"))
+    if step_delta is not None:
+        hard_metrics.append({
+            "metric": "solutionSteps",
+            "direction": "increase",
+            "minimumDelta": step_delta,
+            "source": "explicit_user",
+        })
+    if push_delta is not None:
+        hard_metrics.append({
+            "metric": "minimumPushes",
+            "direction": "increase",
+            "minimumDelta": push_delta,
+            "source": "explicit_user",
+        })
+
+    objective_class = "general"
+    if any(word in lowered for word in ("运输", "长距离推", "推箱深度", "transport")):
+        objective_class = "longer_transport"
+    elif any(word in lowered for word in ("互相牵制", "顺序依赖", "互相阻挡", "先后顺序", "dependency", "interlock")):
+        objective_class = "box_dependency"
+    elif any(word in lowered for word in ("共享通道", "共享走廊", "局部阻挡", "shared corridor", "shared passage")):
+        objective_class = "shared_blocking"
+    elif any(word in lowered for word in ("绕行", "更长规划", "花更多时间", "宏观规划", "规划再执行", "detour", "planning")):
+        objective_class = "planning_depth"
+    elif any(word in lowered for word in ("空间压迫", "路线选择", "扩展探索", "space pressure", "route choice")):
+        objective_class = "space_route_choice"
+
+    exact_labels = {
+        str(item.get("label") or item.get("id") or "").upper()
+        for item in ((stage_context or {}).get("entityBindings") or {}).get("entities") or []
+        if item.get("identityConfidence") == "exact"
+    }
+    target_entities = sorted({
+        label.upper()
+        for label in re.findall(r"\b(?:B\d+|T\d+|P)\b", text, flags=re.IGNORECASE)
+        if label.upper() in exact_labels
+    })
+
+    return {
+        "schemaVersion": 1,
+        "hardMetricGoals": hard_metrics,
+        "softObjectiveClass": objective_class,
+        "targetEntities": target_entities,
+        "requiresMechanismEvidence": objective_class != "general",
+    }
+
+
+def _apply_objective_policy_to_plan(plan, policy, preserved_components=None):
+    hard_goals = tuple(
+        MetricGoal(
+            item["metric"],
+            item["direction"],
+            int(item.get("minimumDelta") or 1),
+        )
+        for item in policy.get("hardMetricGoals") or []
+    )
+    # Metric directions emitted by Kimi are hypotheses. Only server-derived,
+    # explicit user requirements are allowed to reject an otherwise valid map.
+    return replace(plan, strategies=tuple(
+        replace(
+            strategy,
+            metric_goals=hard_goals,
+            preserve=frozenset(strategy.preserve).union(preserved_components or ()),
+        )
+        for strategy in plan.strategies
+    ))
+
+
+def _proposal_route_features(rows, validation, entity_bindings=None):
+    metrics = validation.as_dict() if hasattr(validation, "as_dict") else {}
+    evidence = _proposal_clarification_route_evidence(
+        rows,
+        metrics,
+        {"entityBindings": entity_bindings or {}},
+    )
+    try:
+        minimum = minimum_pushes(rows)
+    except Exception:
+        minimum = None
+    push_order = evidence.get("pushOrder") or []
+    return {
+        "solutionSteps": metrics.get("solutionSteps"),
+        "solutionPushes": metrics.get("solutionPushes"),
+        "minimumPushes": minimum,
+        "pushBlocks": len(push_order),
+        "boxAlternations": evidence.get("boxAlternations"),
+        "pushesByBox": evidence.get("pushesByBox") or {},
+        "routeMode": evidence.get("mode"),
+        "solution": metrics.get("solution") or "",
+    }
+
+
+def _trace_cells_for_solution(rows, solution):
+    player = next(
+        ((x, y) for y, row in enumerate(rows) for x, tile in enumerate(row) if tile == "p"),
+        None,
+    )
+    if player is None:
+        return set()
+    boxes = {(x, y) for y, row in enumerate(rows) for x, tile in enumerate(row) if tile == "s"}
+    traced = {player, *boxes}
+    for move in str(solution or "").upper():
+        delta = {"U": (0, -1), "D": (0, 1), "L": (-1, 0), "R": (1, 0)}.get(move)
+        if delta is None:
+            return set()
+        destination = (player[0] + delta[0], player[1] + delta[1])
+        traced.add(destination)
+        if destination in boxes:
+            box_destination = (destination[0] + delta[0], destination[1] + delta[1])
+            boxes.remove(destination)
+            boxes.add(box_destination)
+            traced.add(box_destination)
+        player = destination
+    return traced
+
+
+def _objective_mechanism_evidence(
+    base_rows,
+    candidate_rows,
+    baseline_features,
+    candidate_features,
+    policy,
+):
+    changed = {
+        (x, y)
+        for y, (before_row, after_row) in enumerate(zip(base_rows, candidate_rows))
+        for x, (before, after) in enumerate(zip(before_row, after_row))
+        if before != after
+    }
+    trace = _trace_cells_for_solution(candidate_rows, candidate_features.get("solution"))
+    route_affected = any(
+        abs(cx - tx) + abs(cy - ty) <= 1
+        for cx, cy in changed
+        for tx, ty in trace
+    )
+    deltas = {}
+    for key in ("solutionSteps", "solutionPushes", "minimumPushes", "pushBlocks", "boxAlternations"):
+        before = baseline_features.get(key)
+        after = candidate_features.get(key)
+        if isinstance(before, int) and isinstance(after, int):
+            deltas[key] = after - before
+    both_boxes = sum(
+        value > 0 for value in (candidate_features.get("pushesByBox") or {}).values()
+    ) >= 2
+    objective = policy.get("softObjectiveClass") or "general"
+    passed = True
+    missing = []
+    if objective == "longer_transport":
+        target_boxes = [
+            item for item in policy.get("targetEntities") or []
+            if str(item).startswith("B")
+        ]
+        if target_boxes:
+            before_pushes = baseline_features.get("pushesByBox") or {}
+            after_pushes = candidate_features.get("pushesByBox") or {}
+            passed = any(
+                int(after_pushes.get(label) or 0) > int(before_pushes.get(label) or 0)
+                for label in target_boxes
+            )
+        else:
+            passed = any(
+                deltas.get(key, 0) > 0
+                for key in ("minimumPushes", "solutionPushes", "pushBlocks")
+            )
+        missing = [] if passed else ["longer_transport_delta"]
+    elif objective == "box_dependency":
+        passed = both_boxes and route_affected and any(
+            deltas.get(key, 0) > 0 for key in ("pushBlocks", "boxAlternations")
+        )
+        missing = [] if passed else ["box_dependency_delta"]
+    elif objective == "shared_blocking":
+        passed = both_boxes and route_affected and any(
+            deltas.get(key, 0) != 0 for key in ("pushBlocks", "boxAlternations", "minimumPushes")
+        )
+        missing = [] if passed else ["shared_blocking_route_effect"]
+    elif objective == "planning_depth":
+        passed = route_affected and any(
+            deltas.get(key, 0) > 0
+            for key in ("solutionSteps", "minimumPushes", "pushBlocks", "boxAlternations")
+        )
+        missing = [] if passed else ["planning_depth_delta"]
+    elif objective == "space_route_choice":
+        structural_change = any(
+            base_rows[y][x] in {".", "#", "@"}
+            and candidate_rows[y][x] in {".", "#", "@"}
+            for x, y in changed
+        )
+        passed = route_affected and structural_change
+        missing = [] if passed else ["route_relevant_space_change"]
+    return {
+        "passed": bool(passed),
+        "objectiveClass": objective,
+        "routeAffected": route_affected,
+        "bothBoxesUsed": both_boxes,
+        "metricDeltas": deltas,
+        "missing": missing,
+    }
+
+
+def _objective_validating_proposal_validator(
+    proposal_validator,
+    base_rows,
+    baseline_validation,
+    policy,
+    entity_bindings,
+    evidence_by_fingerprint,
+):
+    baseline_features = _proposal_route_features(
+        base_rows,
+        baseline_validation,
+        entity_bindings,
+    )
+
+    def validate(candidate_rows):
+        validation = (
+            proposal_validator(candidate_rows)
+            if proposal_validator is not None
+            else validate_and_solve(candidate_rows)
+        )
+        features = _proposal_route_features(candidate_rows, validation, entity_bindings)
+        evidence = _objective_mechanism_evidence(
+            base_rows,
+            candidate_rows,
+            baseline_features,
+            features,
+            policy,
+        )
+        evidence_by_fingerprint[map_fingerprint(candidate_rows)] = evidence
+        if policy.get("requiresMechanismEvidence") and not evidence["passed"]:
+            raise ObjectiveEvidenceError(evidence)
+        return validation
+
+    return validate
+
+
+def _attempt_semantic_revision_replan(
+    *,
+    api_key,
+    base_url,
+    model,
+    original_messages,
+    rows,
+    request_id,
+    language,
+    stage_context,
+    objective_policy,
+    objective_validator,
+    baseline_metrics,
+    movement_requirement,
+    preserved_components,
+    started_at,
+    deadline,
+    first_failure,
+    evidence_by_fingerprint,
+    excluded_map_fingerprints=None,
+):
+    if _remaining_until(deadline) < MIN_RETRY_BUDGET_SECONDS:
+        raise first_failure
+    messages = [dict(item) for item in original_messages]
+    failure_summary = json.dumps(
+        (getattr(first_failure, "proposal_diagnostics", {}) or {}).get("rejectionRecords", [])[-3:],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )[:1000]
+    messages[0]["content"] += (
+        "\n\nThe previous semantic plan produced no admissible candidate. Create one materially "
+        "different local strategy while preserving the authorized direction, explicit anchors, "
+        "prohibitions, and objectivePolicy. Change focus, effect, or allowed operators as needed. "
+        "Do not repeat the previous concrete treatment and keep requiredTransitions empty unless "
+        "the supplied execution brief itself froze exact transitions. Previous safe rejection summary: "
+        + failure_summary
+    )
+    replan_deadline = min(deadline, time.monotonic() + PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS)
+    plan, plan_attempts, _ = asyncio.run(asyncio.wait_for(
+        _compile_revision_plan(
+            api_key=api_key,
+            base_url=base_url,
+            models=[model],
+            messages=messages,
+            request_id=request_id,
+            started_at=started_at,
+            deadline=replan_deadline,
+        ),
+        timeout=max(0.001, _remaining_until(replan_deadline)),
+    ))
+    plan = _apply_objective_policy_to_plan(
+        plan,
+        objective_policy,
+        preserved_components,
+    )
+    validate_revision_plan_against_map(
+        rows,
+        plan,
+        stage_context.get("entityBindings"),
+    )
+    _validate_revision_plan_entities(plan, rows, stage_context.get("entityBindings"))
+    contract = _build_revision_execution_contract(
+        plan,
+        stage_context.get("authorizedRevisionBrief") or "",
+        stage_context,
+    )
+    contract["objectivePolicy"] = objective_policy
+    operation_messages = _build_map_operation_messages(
+        contract,
+        rows,
+        language,
+        stage_context,
+        baseline_metrics,
+    )
+    try:
+        result = asyncio.run(asyncio.wait_for(
+            _generate_map_operation_candidates(
+                api_key=api_key,
+                base_url=base_url,
+                models=[model],
+                messages=operation_messages,
+                base_rows=rows,
+                request_id=request_id,
+                language=language,
+                proposal_validator=objective_validator,
+                revision_contract=contract,
+                baseline_metrics=baseline_metrics,
+                started_at=started_at,
+                deadline=deadline,
+                candidate_evidence=evidence_by_fingerprint,
+                excluded_map_fingerprints=excluded_map_fingerprints,
+            ),
+            timeout=max(0.001, _remaining_until(deadline)),
+        ))
+    except LLMServiceError as operation_error:
+        if operation_error.code != "PROPOSAL_SEARCH_EXHAUSTED":
+            raise
+        result = _deterministic_revision_fallback(
+            rows=rows,
+            plan=plan,
+            revision_contract=contract,
+            request_id=request_id,
+            language=language,
+            proposal_validator=objective_validator,
+            baseline_metrics=baseline_metrics,
+            movement_requirement=movement_requirement,
+            preserved_components=preserved_components,
+            entity_bindings=stage_context.get("entityBindings"),
+            started_at=started_at,
+            deadline=deadline,
+            excluded_map_fingerprints=excluded_map_fingerprints,
+        )
+    diagnostics = dict(result.proposal_diagnostics or {})
+    diagnostics.update({"replanAttempted": True, "replanSucceeded": True})
+    return replace(result, proposal_diagnostics=diagnostics), plan, contract, plan_attempts
+
+
 def _generate_revision_search_proposal_sync(
     *,
     api_key,
@@ -2629,6 +3313,18 @@ def _generate_revision_search_proposal_sync(
 ):
     started_at = time.monotonic()
     deadline = deadline or _request_deadline(started_at)
+    objective_policy = _proposal_objective_policy(conversation, stage_context)
+    stage_context = dict(stage_context or {})
+    stage_context["objectivePolicy"] = objective_policy
+    excluded_candidate_fingerprints = {
+        str(stage_context.get("excludedProposalCandidateFingerprint") or "").strip()
+    } - {""}
+    baseline_metrics = dict(baseline_metrics or {})
+    if "minimumPushes" not in baseline_metrics:
+        try:
+            baseline_metrics["minimumPushes"] = minimum_pushes(rows)
+        except Exception:
+            baseline_metrics["minimumPushes"] = None
     models = _unified_model_attempts(PROPOSAL_GENERATION_ATTEMPTS)
     movement_requirement = _authorized_movement_requirement(conversation)
     preserved_components = _authorized_preserved_components(
@@ -2649,7 +3345,12 @@ def _generate_revision_search_proposal_sync(
         task="revision_plan",
         primaryModel=models[0],
         fallbackModel=None,
-        timeoutSeconds=CHAT_TIMEOUT_SECONDS,
+        timeoutSeconds=PROPOSAL_REQUEST_TIMEOUT_SECONDS,
+        internalDeadlineSeconds=PROPOSAL_INTERNAL_DEADLINE_SECONDS,
+        revisionPlanPhaseSeconds=PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+        revisionPlanTokenLimit=PROPOSAL_PLAN_MAX_COMPLETION_TOKENS,
+        operationAttemptSeconds=PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS,
+        deterministicSearchSeconds=PROPOSAL_SEARCH_DEADLINE_SECONDS,
         responseMode="revision_plan",
     )
     try:
@@ -2694,6 +3395,15 @@ def _generate_revision_search_proposal_sync(
             504,
         ) from exception
     except LLMServiceError as exception:
+        if exception.code in {
+            "MODEL_RESPONSE_INVALID",
+            "MODEL_EMPTY_RESPONSE",
+            "MODEL_LOW_QUALITY_RESPONSE",
+        }:
+            exception.code = "REVISION_PLAN_INVALID"
+            exception.safe_message = (
+                "Kimi did not return a complete valid RevisionPlan after the bounded repair attempt."
+            )
         _log_llm_event(
             "llm_request_completed",
             requestId=request_id,
@@ -2703,6 +3413,7 @@ def _generate_revision_search_proposal_sync(
             attemptsUsed=exception.attempts_used,
             latencyMs=int((time.monotonic() - started_at) * 1000),
             responseMode="revision_plan",
+            **_provider_error_fields(exception),
         )
         raise
 
@@ -2710,16 +3421,21 @@ def _generate_revision_search_proposal_sync(
         plan,
         stage_context.get("authorizedExecutionBrief") if stage_context else None,
     )
+    plan = _apply_objective_policy_to_plan(
+        plan,
+        objective_policy,
+        preserved_components,
+    )
     try:
-        _require_exact_revision_plan(plan)
         revision_contract = _build_revision_execution_contract(
             plan,
             stage_context.get("authorizedRevisionBrief") if stage_context else "",
             stage_context,
         )
+        revision_contract["objectivePolicy"] = objective_policy
     except ValueError as exception:
         error = LLMServiceError(
-            "REVISION_CONTRACT_INVALID",
+            "REVISION_CONTRACT_CONFLICT",
             str(exception),
             request_id,
             False,
@@ -2743,7 +3459,7 @@ def _generate_revision_search_proposal_sync(
         )
     except ValueError as exception:
         error = LLMServiceError(
-            "REVISION_CONTRACT_INVALID",
+            "REVISION_CONTRACT_CONFLICT",
             str(exception),
             request_id,
             False,
@@ -2754,11 +3470,104 @@ def _generate_revision_search_proposal_sync(
         error.revision_contract = revision_contract
         error.proposal_diagnostics = {"category": "coordinate_or_contract_conflict"}
         raise error from exception
+    evidence_by_fingerprint = {}
+    baseline_validation = validate_and_solve(rows)
+    objective_validator = _objective_validating_proposal_validator(
+        proposal_validator,
+        rows,
+        baseline_validation,
+        objective_policy,
+        stage_context.get("entityBindings"),
+        evidence_by_fingerprint,
+    )
+    exact_strategies = [
+        item for item in revision_contract.get("strategies") or []
+        if item.get("requiredTransitions")
+    ]
+    can_execute_exactly = (
+        exact_strategies
+        and len(exact_strategies) == len(revision_contract.get("strategies") or [])
+        and (
+            exact_strategies[0].get("effect")
+            not in {"relocate_start", "relocate_box", "relocate_target"}
+            or bool(stage_context.get("entityBindings"))
+        )
+    )
+    if can_execute_exactly:
+        strategy = exact_strategies[0]
+        exact_brief = {
+            "schemaVersion": 1,
+            "effect": strategy.get("effect"),
+            "anchors": strategy.get("anchorEntities") or [],
+            "focus": strategy.get("focus"),
+            "requiredTransitions": strategy.get("requiredTransitions") or [],
+            "allowedOperators": strategy.get("allowedOperators") or [],
+            "preserve": strategy.get("preserve") or [],
+            "playObjective": strategy.get("playObjective"),
+        }
+        try:
+            exact = _deterministic_exact_revision(
+                rows,
+                exact_brief,
+                request_id,
+                language,
+                objective_validator,
+                stage_context.get("entityBindings"),
+            )
+        except Exception as exception:
+            error = LLMServiceError(
+                "EXACT_TRANSITION_INFEASIBLE",
+                "The frozen tile transitions could not produce a valid solvable proposal.",
+                request_id,
+                False,
+                attempts_used,
+                422,
+            )
+            error.revision_plan = plan.as_dict()
+            error.revision_contract = revision_contract
+            error.proposal_diagnostics = {
+                "category": "exact_transition_infeasible",
+                "reason": _safe_validation_reason(exception),
+            }
+            raise error from exception
+        if exact is not None:
+            exact_fingerprint = map_fingerprint(exact.proposed_rows or [])
+            if exact_fingerprint in excluded_candidate_fingerprints:
+                error = LLMServiceError(
+                    "CANDIDATE_DUPLICATED",
+                    "The exact alternative repeats the candidate stored in the cited purple card.",
+                    request_id,
+                    False,
+                    attempts_used,
+                    422,
+                )
+                error.revision_plan = plan.as_dict()
+                error.revision_contract = revision_contract
+                error.proposal_diagnostics = {
+                    "category": "candidate_duplicated",
+                    "excludedCandidateCount": len(excluded_candidate_fingerprints),
+                }
+                raise error
+            evidence = evidence_by_fingerprint.get(exact_fingerprint)
+            return replace(
+                exact,
+                attempts_used=attempts_used,
+                revision_plan=plan.as_dict(),
+                revision_contract=revision_contract,
+                proposal_diagnostics={
+                    **(exact.proposal_diagnostics or {}),
+                    "selectedStrategyIndex": 1,
+                    "planAttempts": attempts_used,
+                    "modifierAttempts": 0,
+                    "objectivePolicy": objective_policy,
+                    "mechanismEvidence": evidence,
+                },
+            )
     remaining_seconds = _remaining_until(deadline)
     if remaining_seconds <= 0:
         error = LLMServiceError(
-            "UPSTREAM_TIMEOUT",
-            "Kimi did not create executable revision operations before the 120 second limit.",
+            "GLOBAL_PROPOSAL_TIMEOUT",
+            "The complete proposal pipeline exhausted its global time budget.",
             request_id,
             True,
             attempts_used,
@@ -2786,19 +3595,26 @@ def _generate_revision_search_proposal_sync(
                     base_rows=rows,
                     request_id=request_id,
                     language=language,
-                    proposal_validator=proposal_validator,
+                    proposal_validator=objective_validator,
                     revision_contract=revision_contract,
                     baseline_metrics=baseline_metrics,
                     started_at=started_at,
                     deadline=deadline,
+                    candidate_evidence=evidence_by_fingerprint,
+                    excluded_map_fingerprints=excluded_candidate_fingerprints,
                 ),
                 timeout=remaining_seconds,
             )
         )
     except asyncio.TimeoutError as exception:
+        exhausted_global_budget = _remaining_until(deadline) <= 0.05
         error = LLMServiceError(
-            "UPSTREAM_TIMEOUT",
-            "Kimi did not create executable revision operations before the 120 second limit.",
+            "GLOBAL_PROPOSAL_TIMEOUT" if exhausted_global_budget else "UPSTREAM_TIMEOUT",
+            (
+                "The complete proposal pipeline exhausted its global time budget."
+                if exhausted_global_budget
+                else "Kimi did not create executable revision operations before the operation-phase time limit."
+            ),
             request_id,
             True,
             attempts_used + PROPOSAL_GENERATION_ATTEMPTS,
@@ -2813,27 +3629,112 @@ def _generate_revision_search_proposal_sync(
         exception.revision_contract = revision_contract
         if exception.code != "PROPOSAL_SEARCH_EXHAUSTED":
             raise
+        fallback = None
+        replan_failure = None
+        semantic_contract = not any(
+            item.get("requiredTransitions")
+            for item in revision_contract.get("strategies") or []
+        )
+        if semantic_contract:
+            try:
+                fallback, plan, revision_contract, replan_attempts = (
+                    _attempt_semantic_revision_replan(
+                        api_key=api_key,
+                        base_url=base_url,
+                        model=models[0],
+                        original_messages=messages,
+                        rows=rows,
+                        request_id=request_id,
+                        language=language,
+                        stage_context=stage_context,
+                        objective_policy=objective_policy,
+                        objective_validator=objective_validator,
+                        baseline_metrics=baseline_metrics,
+                        movement_requirement=movement_requirement,
+                        preserved_components=preserved_components,
+                        started_at=started_at,
+                        deadline=deadline,
+                        first_failure=exception,
+                        evidence_by_fingerprint=evidence_by_fingerprint,
+                        excluded_map_fingerprints=excluded_candidate_fingerprints,
+                    )
+                )
+                attempts_used += replan_attempts
+            except Exception as replan_exception:
+                replan_failure = _safe_validation_reason(replan_exception)
         try:
-            fallback = _deterministic_revision_fallback(
-                rows=rows,
-                plan=plan,
-                revision_contract=revision_contract,
-                request_id=request_id,
-                language=language,
-                proposal_validator=proposal_validator,
-                baseline_metrics=baseline_metrics,
-                movement_requirement=movement_requirement,
-                preserved_components=preserved_components,
-                entity_bindings=(stage_context or {}).get("entityBindings"),
-                started_at=started_at,
-                deadline=deadline,
-            )
+            if fallback is None:
+                fallback = _deterministic_revision_fallback(
+                    rows=rows,
+                    plan=plan,
+                    revision_contract=revision_contract,
+                    request_id=request_id,
+                    language=language,
+                    proposal_validator=objective_validator,
+                    baseline_metrics=baseline_metrics,
+                    movement_requirement=movement_requirement,
+                    preserved_components=preserved_components,
+                    entity_bindings=(stage_context or {}).get("entityBindings"),
+                    started_at=started_at,
+                    deadline=deadline,
+                    excluded_map_fingerprints=excluded_candidate_fingerprints,
+                )
         except ProposalSearchExhausted as search_exception:
             diagnostics = dict(getattr(exception, "proposal_diagnostics", {}) or {})
             diagnostics["deterministicFallback"] = search_exception.diagnostics
+            diagnostics["replanAttempted"] = semantic_contract
+            diagnostics["replanSucceeded"] = False
+            if replan_failure:
+                diagnostics["replanFailure"] = replan_failure[:500]
             exception.proposal_diagnostics = diagnostics
+            rejection_categories = {
+                item.get("category")
+                for item in diagnostics.get("rejectionRecords") or []
+                if isinstance(item, dict)
+            }
+            fallback_reasons = set(
+                (search_exception.diagnostics.get("failureReasons") or {}).keys()
+            )
+            if (
+                rejection_categories
+                and rejection_categories <= {"soft_objective_evidence_missing", "candidate_duplicated"}
+                and fallback_reasons <= {"ObjectiveEvidenceError"}
+            ):
+                exception.code = "SOFT_OBJECTIVE_EVIDENCE_MISSING"
+                exception.safe_message = (
+                    "Solvable local candidates were found, but none produced verified evidence for the requested play mechanism."
+                )
+            elif (
+                "hard_objective_not_met" in rejection_categories
+                or "metric_goal_not_met" in fallback_reasons
+            ):
+                exception.code = "HARD_OBJECTIVE_NOT_MET"
+                exception.safe_message = (
+                    "No candidate satisfied the designer's explicit measurable requirement."
+                )
+            elif (
+                rejection_categories
+                and rejection_categories <= {"candidate_duplicated"}
+                and fallback_reasons <= {"CANDIDATE_DUPLICATED"}
+            ):
+                exception.code = "CANDIDATE_DUPLICATED"
+                exception.safe_message = "Every candidate repeated a previously rejected or cited proposal."
+            elif (
+                rejection_categories
+                and rejection_categories <= {"candidate_unsolvable", "candidate_duplicated"}
+                and fallback_reasons <= {"UNSOLVABLE_LEVEL", "CANDIDATE_DUPLICATED"}
+            ):
+                exception.code = "CANDIDATE_UNSOLVABLE"
+                exception.safe_message = "Every distinct candidate failed deterministic solvability validation."
+            else:
+                exception.code = "DETERMINISTIC_SEARCH_EXHAUSTED"
+                exception.safe_message = (
+                    "The modifier and bounded deterministic search found no admissible solvable candidate."
+                )
             raise exception
         fallback_diagnostics = dict(fallback.proposal_diagnostics or {})
+        fallback_diagnostics.setdefault("replanAttempted", semantic_contract)
+        fallback_diagnostics.setdefault("replanSucceeded", bool(semantic_contract and not replan_failure))
         fallback_diagnostics["modifierFailure"] = (
             getattr(exception, "proposal_diagnostics", {}) or {}
         ).get("modifierFailure")
@@ -2865,6 +3766,11 @@ def _generate_revision_search_proposal_sync(
     guidance["intentHypothesis"] = intent_hypothesis
     guidance["intentConfidence"] = "medium" if intent_hypothesis else None
     diagnostics = dict(operation_result.proposal_diagnostics)
+    selected_evidence = evidence_by_fingerprint.get(
+        map_fingerprint(operation_result.proposed_rows or [])
+    )
+    diagnostics["objectivePolicy"] = objective_policy
+    diagnostics["mechanismEvidence"] = selected_evidence
     diagnostics["planAttempts"] = attempts_used
     diagnostics["modifierAttempts"] = operation_result.attempts_used
     diagnostics["revisionContract"] = revision_contract
@@ -3008,6 +3914,14 @@ def _build_revision_plan_messages(
         if stage_context.get("revisionRelaxed")
         else "Do not weaken or reinterpret the authorized direction."
     )
+    conservative_binding_rule = (
+        "The designer confirmed the experience direction but did not name the exact map objects. "
+        "Choose exactly one existing entity combination or one uniquely identifiable connected region from "
+        "the current Stage Snapshot. Prefer the smallest local change, preserve every unrelated component, "
+        "and treat that binding only as this reviewable candidate, never as a confirmed designer instruction."
+        if stage_context.get("proposalBindingMode") == "conservative"
+        else "If the direction is under-specified, do not guess; the caller will ask the designer for clarification."
+    )
     movement_rule = _movement_requirement_prompt(movement_requirement)
     preservation_rule = _preserved_components_prompt(preserved_components)
     map_facts = _stage_snapshot_for_prompt(rows, stage_context)
@@ -3025,7 +3939,7 @@ def _build_revision_plan_messages(
         "the frozen transitions, while the application owns all cell changes, structural "
         "validation, and solvability. Preserve the authorized direction and every explicit "
         "prohibition. Treat unmentioned areas as protected. Return JSON only with exactly one key, strategies, "
-        "containing one to three objects. Every strategy has exactly: effect, focus, operators, "
+        "containing one or two objects. Every strategy has exactly: effect, focus, operators, "
         "preserve, editBudget, metricGoals, requiredTransitions, anchorEntities, and playObjective. "
         "effect is one of open_route, narrow_route, "
         "adjust_internal_walls, relocate_start, relocate_box, relocate_target, reshape_water, "
@@ -3034,22 +3948,22 @@ def _build_revision_plan_messages(
         "add_wall, remove_wall, move_player, move_box, move_target, add_water, remove_water. "
         "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
         "walls, unrelated_areas. Never list an operator that edits a preserved component. "
-        "Each strategy must include requiredTransitions (a non-empty list of every exact one-based "
-        "row/column/from/to changes), anchorEntities (P, B1, B2, T1, T2), and playObjective. "
-        "requiredTransitions is mandatory and hard: do not replace a requested cell with a nearby cell "
-        "or another operator. If the direction is under-specified, do not guess; the caller will ask "
-        "the designer for clarification. "
+        "Each strategy must include requiredTransitions, anchorEntities (P, B1, B2, T1, T2), and "
+        "playObjective. requiredTransitions must be the exact supplied transitions only when the "
+        "structured execution brief already contains them; otherwise return an empty list so the "
+        "modifier can explore concrete cells inside focus and the allowed operators. Never invent a "
+        "hard coordinate binding from a qualitative experience goal. " + conservative_binding_rule + " "
         "focus must contain every required transition. editBudget is an integer 1..12; a single "
         "structural tile change may use budget 1, while moving a player, box, or target requires "
         "two paired cells. Set the budget to the smallest honest upper bound, never a range that "
         "cannot be satisfied. "
-        "entity. metricGoals is an empty list or up to three distinct objects with metric "
-        "solutionSteps, solutionPushes, or searchedStates and direction increase, decrease, or "
-        "preserve. Use objective metrics only when the designer's direction clearly implies them. "
+        "entity. metricGoals must be an empty list. The server separately derives hard measurable "
+        "requirements from explicit designer wording; searchedStates is never a player-experience goal. "
         "Always preserve outer_shell and unrelated_areas. Choose a concrete focus for a local "
         "request, select operators that can realize the effect, and use metricGoals when the "
         "designer clearly requests a measurable change. The first strategy is preferred and any "
-        "later strategies are strict alternatives, not permission to weaken the request. Natural-language reasoning is internal. "
+        "second strategy is a strict alternative, not permission to weaken the request. Do not output analysis, "
+        "thinking, explanations, or markdown: emit the complete compact JSON object immediately. "
          "The current Stage Snapshot below is the only map source. Never use a coordinate from "
          "conversation text or an older Stage. "
         + _map_grounding_contract() + " "
@@ -3062,6 +3976,7 @@ def _build_revision_plan_messages(
         f"Alternative proposal constraint: {alternative_brief!r}. "
         f"Structured execution brief (authoritative when present): "
         f"{json.dumps(execution_brief, ensure_ascii=False, separators=(',', ':'))}. "
+        f"Server objective policy (authoritative): {json.dumps(stage_context.get('objectivePolicy') or {}, ensure_ascii=False, separators=(',', ':'))}. "
         f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule} {movement_rule} "
         f"{preservation_rule}\n\n"
         "Column ruler (one-based): 123456789012\n"
@@ -3256,6 +4171,7 @@ async def _compile_revision_plan(
     first_attempt_timeout=PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS,
 ):
     last_error = None
+    attempt_failures = []
     validation_feedback = initial_validation_feedback
     first_failure_code = None
     deadline = deadline or min(
@@ -3283,6 +4199,8 @@ async def _compile_revision_plan(
             attempt=attempt,
             maxAttempts=max_attempts,
             timeoutSeconds=round(attempt_timeout, 3),
+            completionTokenLimit=PROPOSAL_PLAN_MAX_COMPLETION_TOKENS,
+            deadlineRemainingSeconds=round(remaining, 3),
             responseMode="revision_plan",
         )
         try:
@@ -3334,11 +4252,26 @@ async def _compile_revision_plan(
             "retryable": last_error.retryable,
             "latencyMs": int((time.monotonic() - started_at) * 1000),
             "responseMode": "revision_plan",
+            "failureClass": _llm_failure_class(last_error, failure_reason),
             **response_fields,
+            **_provider_error_fields(last_error),
         }
         if failure_reason:
             fields["validationReason"] = failure_reason
         _log_llm_event("llm_attempt_failed", **fields)
+        attempt_failures.append({
+            "attempt": attempt,
+            "code": last_error.code,
+            "failureClass": fields["failureClass"],
+            "finishReason": response_fields.get("finishReason"),
+            "completionTokens": response_fields.get("completionTokens"),
+            "validationReason": failure_reason,
+        })
+        last_error.proposal_diagnostics = {
+            "failureStage": "revision_plan",
+            "attemptFailures": attempt_failures,
+            "remainingSeconds": round(_remaining_until(deadline), 3),
+        }
         if not last_error.retryable:
             raise last_error
         if attempt == 1 and last_error.code not in {
@@ -3380,7 +4313,9 @@ def _revision_plan_messages_with_feedback(messages, validation_feedback):
         f"{validation_feedback} Return a fresh RevisionPlan JSON object. Keep the authorized "
         "brief, explicit prohibitions, and preserve-unlisted contract unchanged. Return every "
         "intended edit as an exact requiredTransition. Do not return map rows or tile operations; do not return full map rows or leave the "
-        "transition list empty."
+        "transition list empty. If the prior response reached the token limit, stop reasoning and emit "
+        "the complete compact JSON immediately. Return exactly one strategy unless "
+        "the authorized brief explicitly requires alternatives, and include no explanatory prose."
     )
     corrected[0]["content"] = f"{corrected[0]['content']}\n\n{instruction}"
     return corrected
@@ -3450,7 +4385,7 @@ def _generate_map_proposal_sync(
         )
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
-            "Kimi did not complete the request before the 120 second limit.",
+            "Kimi did not complete the legacy proposal request before its time limit.",
             request_id,
             True,
             PROPOSAL_GENERATION_ATTEMPTS,
@@ -3575,6 +4510,10 @@ def _build_map_operation_messages(
         "frozen edit set: when they are present, return exactly those transitions and do not add "
         "optional or compensating edits. Never replace a required remove_wall with a box/player "
         "move. "
+        "The server objectivePolicy distinguishes hard metrics from a soft play objective. Hard "
+        "metricGoals must be met. For a soft objective, create candidates whose changed area affects "
+        "the verified route and changes the relevant push order, alternation, transport, or detour "
+        "mechanism; do not add irrelevant cells merely to change a metric. "
         "A moved player, box, or target requires paired operations that clear the old cell and place "
         "the entity on a current floor cell. Return JSON only with exactly this shape: "
         "{\"candidates\":[{\"strategyIndex\":1,\"operations\":[{\"row\":5,"
@@ -3629,6 +4568,7 @@ def _modifier_contract_view(revision_contract):
     return {
         "schemaVersion": revision_contract.get("schemaVersion", 1),
         "strategies": strategies,
+        "objectivePolicy": revision_contract.get("objectivePolicy") or {},
     }
 
 
@@ -3646,10 +4586,16 @@ async def _generate_map_operation_candidates(
     baseline_metrics,
     started_at,
     deadline=None,
+    candidate_evidence=None,
+    excluded_map_fingerprints=None,
 ):
     last_error = None
     validation_feedback = None
     attempted_candidate_count = 0
+    rejected_operation_signatures = set()
+    rejected_map_signatures = set()
+    rejection_records = []
+    excluded_map_fingerprints = set(excluded_map_fingerprints or ())
     deadline = deadline or _request_deadline(started_at)
     attempted_models = list(models[:PROPOSAL_GENERATION_ATTEMPTS])
     while len(attempted_models) < PROPOSAL_GENERATION_ATTEMPTS:
@@ -3708,6 +4654,11 @@ async def _generate_map_operation_candidates(
                 revision_contract,
                 proposal_validator,
                 baseline_metrics,
+                rejected_operation_signatures,
+                rejected_map_signatures,
+                rejection_records,
+                candidate_evidence,
+                excluded_map_fingerprints,
             )
             latency_ms = int((time.monotonic() - started_at) * 1000)
             changed_cell_count = _changed_cell_count(base_rows, selected_rows)
@@ -3774,7 +4725,11 @@ async def _generate_map_operation_candidates(
             last_error = classify_exception(exception, request_id, attempt)
             if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
                 last_error.safe_message = failure_reason[:1200]
-                validation_feedback = failure_reason[:1200]
+                validation_feedback = json.dumps(
+                    rejection_records[-3:] or [{"reason": failure_reason[:500]}],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )[:1200]
         failure_fields = {
             "requestId": request_id,
             "task": "map_proposal",
@@ -3784,7 +4739,9 @@ async def _generate_map_operation_candidates(
             "retryable": last_error.retryable,
             "latencyMs": int((time.monotonic() - started_at) * 1000),
             "responseMode": "operation_candidates",
+            "failureClass": _llm_failure_class(last_error, failure_reason),
             **response_fields,
+            **_provider_error_fields(last_error),
         }
         if failure_reason:
             failure_fields["validationReason"] = failure_reason[:1200]
@@ -3811,6 +4768,7 @@ async def _generate_map_operation_candidates(
         attemptsUsed=last_error.attempts_used,
         latencyMs=int((time.monotonic() - started_at) * 1000),
         responseMode="operation_candidates",
+        **_provider_error_fields(last_error),
     )
     if last_error.code == "MODEL_RESPONSE_INVALID":
         error = LLMServiceError(
@@ -3827,6 +4785,9 @@ async def _generate_map_operation_candidates(
             "constructedCandidates": attempted_candidate_count,
             "validCandidates": 0,
             "candidateCount": attempted_candidate_count,
+            "rejectionRecords": rejection_records[-12:],
+            "uniqueRejectedOperationSets": len(rejected_operation_signatures),
+            "uniqueRejectedMaps": len(rejected_map_signatures),
         }
         error.revision_contract = revision_contract
         raise error from last_error
@@ -3847,6 +4808,7 @@ def _deterministic_revision_fallback(
     started_at,
     entity_bindings=None,
     deadline=None,
+    excluded_map_fingerprints=None,
 ):
     """Use the bounded local search when the modifier model cannot supply a valid candidate."""
     result = search_revision_plan(
@@ -3854,13 +4816,17 @@ def _deterministic_revision_fallback(
         plan,
         proposal_validator or validate_and_solve,
         baseline_metrics=baseline_metrics,
+        # Search is a bounded fallback *phase*. Its budget starts when the
+        # modifier phase hands control to deterministic search, rather than
+        # being consumed by the preceding RevisionPlan request.
         deadline=min(
             deadline or _request_deadline(started_at),
-            started_at + PROPOSAL_SEARCH_DEADLINE_SECONDS,
+            time.monotonic() + PROPOSAL_SEARCH_DEADLINE_SECONDS,
         ),
         movement_requirement=movement_requirement,
         preserved_components=preserved_components,
         entity_bindings=entity_bindings,
+        excluded_map_fingerprints=excluded_map_fingerprints,
     )
     strategy_index = result.strategy_index
     selected_contract = (revision_contract.get("strategies") or [])[result.strategy_index - 1]
@@ -3962,6 +4928,11 @@ def _select_operation_candidate(
     revision_contract,
     proposal_validator,
     baseline_metrics=None,
+    rejected_operation_signatures=None,
+    rejected_map_signatures=None,
+    rejection_records=None,
+    candidate_evidence=None,
+    excluded_map_fingerprints=None,
 ):
     if not isinstance(payload, dict):
         raise ValueError("The map proposal must be a JSON object.")
@@ -3969,11 +4940,24 @@ def _select_operation_candidate(
     if not isinstance(candidates, list) or not 1 <= len(candidates) <= PROPOSAL_CANDIDATE_LIMIT:
         raise ValueError("candidates must contain one to three operation candidates.")
     failures = []
-    canonical = set()
+    rejected_operation_signatures = (
+        rejected_operation_signatures
+        if rejected_operation_signatures is not None
+        else set()
+    )
+    rejected_map_signatures = (
+        rejected_map_signatures if rejected_map_signatures is not None else set()
+    )
+    rejection_records = rejection_records if rejection_records is not None else []
+    candidate_evidence = candidate_evidence if candidate_evidence is not None else {}
+    excluded_map_fingerprints = set(excluded_map_fingerprints or ())
+    valid = []
     strategies = revision_contract.get("strategies") or []
     if not strategies:
         raise ValueError("The revision contract must contain at least one strategy.")
     for index, candidate in enumerate(candidates, start=1):
+        operation_hash = None
+        map_hash = None
         try:
             if not isinstance(candidate, dict) or set(candidate) != {"strategyIndex", "operations"}:
                 raise ValueError("candidate must be an object")
@@ -3986,6 +4970,13 @@ def _select_operation_candidate(
                 raise ValueError("candidate strategyIndex is invalid")
             strategy = strategies[strategy_index - 1]
             operations = candidate.get("operations")
+            operation_signature = _canonical_operation_signature(operations)
+            operation_hash = hashlib.sha256(
+                repr(operation_signature).encode("utf-8")
+            ).hexdigest()[:16]
+            if operation_signature in rejected_operation_signatures:
+                raise ValueError("candidate repeats an operation set rejected in an earlier attempt")
+            rejected_operation_signatures.add(operation_signature)
             rows = execute_revision_operations(
                 base_rows,
                 operations,
@@ -3993,9 +4984,13 @@ def _select_operation_candidate(
                 strategy_index,
             )
             signature = tuple(rows)
-            if signature in canonical:
+            full_map_hash = map_fingerprint(rows)
+            map_hash = full_map_hash[:16]
+            if full_map_hash in excluded_map_fingerprints:
+                raise ValueError("candidate duplicates the cited proposal result")
+            if signature in rejected_map_signatures:
                 raise ValueError("candidate duplicates an earlier operation result")
-            canonical.add(signature)
+            rejected_map_signatures.add(signature)
             changed_cells = _changed_cell_count(base_rows, rows)
             if not (
                 strategy["minimumChangedCells"]
@@ -4016,10 +5011,88 @@ def _select_operation_candidate(
                 baseline_metrics or {},
                 validation,
             )
-            return rows, index, len(candidates), list(operations)
+            evidence = candidate_evidence.get(full_map_hash) or {}
+            positive_deltas = [
+                value
+                for value in (evidence.get("metricDeltas") or {}).values()
+                if isinstance(value, int) and value > 0
+            ]
+            valid.append((
+                (
+                    int(bool(evidence.get("passed", True))),
+                    len(positive_deltas),
+                    sum(positive_deltas),
+                    -changed_cells,
+                    tuple(rows),
+                ),
+                rows,
+                index,
+                list(operations),
+            ))
         except Exception as exception:
-            failures.append(f"candidate {index}: {_safe_validation_reason(exception)}")
+            reason = _safe_validation_reason(exception)
+            failures.append(f"candidate {index}: {reason}")
+            metric_detail = {}
+            if isinstance(exception, HardObjectiveError):
+                metric_detail = {
+                    "metric": exception.metric,
+                    "direction": exception.direction,
+                    "baselineValue": exception.before,
+                    "candidateValue": exception.after,
+                    "minimumDelta": exception.minimum_delta,
+                    "metricVerifiable": exception.verifiable,
+                }
+            rejection_records.append({
+                "candidate": index,
+                "category": _candidate_rejection_category(exception),
+                "reason": reason[:500],
+                **({"operationSignature": operation_hash} if operation_hash else {}),
+                **({"mapFingerprint": map_hash} if map_hash else {}),
+                **metric_detail,
+            })
+    if valid:
+        _, rows, index, operations = max(valid, key=lambda item: item[0])
+        return rows, index, len(candidates), operations
     raise ValueError("; ".join(failures)[:1200])
+
+
+def _canonical_operation_signature(operations):
+    if not isinstance(operations, list):
+        return ("invalid", repr(operations)[:200])
+    normalized = []
+    for item in operations:
+        if not isinstance(item, dict):
+            normalized.append(("invalid", repr(item)[:120]))
+            continue
+        normalized.append((
+            item.get("row"),
+            item.get("column"),
+            item.get("from"),
+            item.get("to"),
+        ))
+    return tuple(sorted(normalized, key=repr))
+
+
+def _candidate_rejection_category(exception):
+    if isinstance(exception, ObjectiveEvidenceError):
+        return "soft_objective_evidence_missing"
+    if isinstance(exception, HardObjectiveError):
+        return "hard_objective_not_met"
+    code = str(getattr(exception, "code", "") or "")
+    if code:
+        if code == "UNSOLVABLE_LEVEL":
+            return "candidate_unsolvable"
+        if "BUDGET" in code:
+            return "solver_budget_exhausted"
+        return code.casefold()
+    text = _safe_validation_reason(exception).casefold()
+    if "metric goal" in text:
+        return "hard_objective_not_met"
+    if "duplicate" in text or "repeats" in text:
+        return "candidate_duplicated"
+    if "contract" in text or "outside" in text or "preserved" in text:
+        return "contract_mismatch"
+    return "candidate_invalid"
 
 
 def _candidate_strategy_index(payload, candidate_index):
@@ -4330,22 +5403,42 @@ def _validate_metric_goals(goals, baseline_metrics, validation):
     values = {
         "solutionSteps": getattr(validation, "solution_steps", None),
         "solutionPushes": getattr(validation, "solution_pushes", None),
+        "minimumPushes": None,
         "searchedStates": getattr(validation, "searched_states", None),
     }
     for goal in goals:
         metric = goal.get("metric")
+        if metric == "minimumPushes":
+            try:
+                values[metric] = minimum_pushes(validation.rows)
+            except Exception:
+                values[metric] = None
         before = baseline_metrics.get(metric)
         after = values.get(metric)
         if before is None or after is None:
-            raise ValueError(f"metric goal {metric} cannot be verified")
+            raise HardObjectiveError(
+                metric,
+                goal.get("direction"),
+                before,
+                after,
+                int(goal.get("minimumDelta") or 1),
+                verifiable=False,
+            )
         direction = goal.get("direction")
+        minimum_delta = int(goal.get("minimumDelta") or 1)
         matched = {
-            "increase": after > before,
-            "decrease": after < before,
+            "increase": after - before >= minimum_delta,
+            "decrease": before - after >= minimum_delta,
             "preserve": after == before,
         }.get(direction, False)
         if not matched:
-            raise ValueError(f"metric goal {metric} {direction} was not met")
+            raise HardObjectiveError(
+                metric,
+                direction,
+                before,
+                after,
+                minimum_delta,
+            )
 
 
 def _connected_outer_shell(rows):
@@ -4447,6 +5540,16 @@ def _generate_plain_chat_sync(
             503,
         )
 
+    effective_stage_context = dict(stage_context or {})
+    if isinstance(effective_stage_context.get("proposalClarification"), dict):
+        clarification = dict(effective_stage_context["proposalClarification"])
+        clarification["routeEvidence"] = _proposal_clarification_route_evidence(
+            rows,
+            solver_metrics or {},
+            effective_stage_context,
+        )
+        effective_stage_context["proposalClarification"] = clarification
+
     effective_max_attempts = (
         1 if stage_opening else CHAT_MAX_ATTEMPTS
     ) if max_attempts is None else max(1, int(max_attempts))
@@ -4458,18 +5561,18 @@ def _generate_plain_chat_sync(
         language,
         solver_metrics,
         play_summary,
-        stage_context,
+        effective_stage_context,
         stage_opening=stage_opening,
     )
     guidance_mode = classify_guidance_request(
         conversation,
-        stage_context,
+        effective_stage_context,
         stage_opening=stage_opening,
     )
     task = "stage_assessment_fallback" if stage_opening else "chat"
     validation_mode = _chat_validation_mode(
         conversation,
-        stage_context,
+        effective_stage_context,
         stage_opening=stage_opening,
         guidance_mode=guidance_mode,
     )
@@ -4504,7 +5607,7 @@ def _generate_plain_chat_sync(
                     rows=rows,
                     play_summary=play_summary,
                     stage_opening=stage_opening,
-                    stage_context=stage_context,
+                    stage_context=effective_stage_context,
                     guidance_mode=guidance_mode,
                     validation_mode=validation_mode,
                     historical_reference=historical_reference,
@@ -4761,7 +5864,9 @@ async def _translate_with_model_fallback(
             "retryable": last_error.retryable,
             "latencyMs": int((time.monotonic() - started_at) * 1000),
             "responseMode": "json_object",
+            "failureClass": _llm_failure_class(last_error, failure_reason),
             **response_fields,
+            **_provider_error_fields(last_error),
         }
 
         if failure_reason:
@@ -4797,6 +5902,7 @@ async def _translate_with_model_fallback(
             failureClass=failure_class,
             salvageAction="none",
             remainingSeconds=round(_remaining_until(deadline), 3),
+            **_provider_error_fields(last_error),
         )
         raise last_error
 
@@ -4839,6 +5945,16 @@ async def _generate_plain_with_model_fallback(
     # server-owned semantic conversation (never as map facts) so a prior
     # design judgment can be recognized without re-sending old prose to Kimi.
     semantic_messages = semantic_messages or messages
+    proposal_clarification = (
+        (stage_context or {}).get("proposalClarification")
+        if guidance_mode == "needs_clarification"
+        else None
+    )
+    clarification_active = bool(
+        isinstance(proposal_clarification, dict)
+        and proposal_clarification.get("questionKey")
+    )
+    clarification_body_candidate = ""
 
     max_attempts = len(models)
     for attempt, model in enumerate(models[:max_attempts], start=1):
@@ -4853,6 +5969,7 @@ async def _generate_plain_with_model_fallback(
         )
         response_fields = _empty_response_diagnostics()
         grounding_dropped_count = 0
+        clarification_fallback_used = False
         _log_llm_event(
             "llm_attempt_started",
             requestId=request_id,
@@ -4880,8 +5997,12 @@ async def _generate_plain_with_model_fallback(
                     attempt_messages,
                     PLAIN_CHAT_MAX_TOKENS,
                     attempt_timeout,
-                    structured=False,
-                    task="stage_assessment_fallback" if stage_opening else "plain_chat",
+                    structured=clarification_active,
+                    task=(
+                        "proposal_clarification"
+                        if clarification_active
+                        else "stage_assessment_fallback" if stage_opening else "plain_chat"
+                    ),
                 ),
                 timeout=attempt_timeout,
             )
@@ -4896,6 +6017,49 @@ async def _generate_plain_with_model_fallback(
 
             if len(content.strip()) > CHAT_RESPONSE_HARD_LENGTH:
                 raise ValueError("The model response exceeded the transport safety limit.")
+
+            clarification_question = ""
+            clarification_question_issue = ""
+            clarification_question_repair_attempts = max(0, attempt - 1)
+            clarification_body_dropped = 0
+            clarification_author = None
+            clarification_fallback_reason = None
+            if clarification_active:
+                (
+                    parsed_body,
+                    clarification_question,
+                    clarification_question_issue,
+                    clarification_body_dropped,
+                ) = _parse_proposal_clarification_payload(
+                    content,
+                    language,
+                    stage_context,
+                )
+                grounding_dropped_count += clarification_body_dropped
+                if parsed_body:
+                    clarification_body_candidate = parsed_body
+                if clarification_question_issue and attempt < max_attempts:
+                    raise ValueError(clarification_question_issue)
+                if clarification_question_issue:
+                    clarification_question = _proposal_clarification_fallback_question(
+                        language,
+                        stage_context,
+                    )
+                    clarification_fallback_reason = clarification_question_issue
+                content = parsed_body or clarification_body_candidate
+                if not content:
+                    content = _proposal_clarification_fallback_message(
+                        language,
+                        stage_context,
+                    )
+                    clarification_fallback_used = True
+                clarification_author = (
+                    "server_fallback"
+                    if clarification_fallback_used and clarification_question_issue
+                    else "mixed"
+                    if clarification_fallback_used or clarification_question_issue
+                    else "kimi"
+                )
 
             content = _sanitize_visible_model_text(
                 _normalize_unsaved_change_claims(
@@ -4918,6 +6082,14 @@ async def _generate_plain_with_model_fallback(
                 rows=rows,
                 strict_metadata=validation_mode not in {"ordinary_chat", "route_discussion"},
             )
+            if clarification_active:
+                # The proposal topic and its one next question are server-owned.
+                # Model questions and metadata cannot advance or redirect it.
+                visible_content = _questionless_body(visible_content)
+                intent_hypothesis = None
+                proposal_offer = None
+                ui_cues = []
+                discussion_focus = None
             proposal_text = " ".join(
                 part for part in (
                     visible_content,
@@ -4991,10 +6163,15 @@ async def _generate_plain_with_model_fallback(
                         ],
                     )
                 if not visible_content:
-                    visible_content = _server_snapshot_fallback_message(
-                        rows,
-                        language,
-                        stage_context=stage_context,
+                    clarification_fallback_used = clarification_active
+                    visible_content = (
+                        _proposal_clarification_fallback_message(language, stage_context)
+                        if clarification_active
+                        else _server_snapshot_fallback_message(
+                            rows,
+                            language,
+                            stage_context=stage_context,
+                        )
                     )
 
             # The plain compatibility path has no structured factRef envelope.
@@ -5003,11 +6180,16 @@ async def _generate_plain_with_model_fallback(
             # deterministic endpoint and BFS checks.
             visible_content = _strip_unreferenced_current_map_claims(visible_content)
             if not visible_content:
-                visible_content = _server_snapshot_fallback_message(
-                    rows,
-                    language,
-                    stage_context=stage_context,
-                    stage_opening=stage_opening,
+                clarification_fallback_used = clarification_active
+                visible_content = (
+                    _proposal_clarification_fallback_message(language, stage_context)
+                    if clarification_active
+                    else _server_snapshot_fallback_message(
+                        rows,
+                        language,
+                        stage_context=stage_context,
+                        stage_opening=stage_opening,
+                    )
                 )
 
             visible_content, route_recovery = _recover_overlong_content(
@@ -5027,6 +6209,10 @@ async def _generate_plain_with_model_fallback(
             design_context_patch, design_context_patch_error = (
                 _extract_plain_design_context_patch(content)
             )
+            if clarification_active:
+                coordinate_links = []
+                design_context_patch = None
+                design_context_patch_error = None
             disagreement = _extract_plain_disagreement(
                 content,
                 language,
@@ -5098,6 +6284,29 @@ async def _generate_plain_with_model_fallback(
                 visible_content,
                 language,
             )
+
+            if clarification_active:
+                body = _questionless_body(body)
+                question = clarification_question
+                pure_low_quality = False
+                if not body:
+                    clarification_fallback_used = True
+                    body = _proposal_clarification_fallback_message(
+                        language,
+                        stage_context,
+                    )
+                    clarification_author = (
+                        "server_fallback"
+                        if clarification_question_issue
+                        else "mixed"
+                    )
+                # Proposal clarification is visible conversation prose, never
+                # a discussion card. Keep the private field only in diagnostics
+                # so the server can count the question it actually displayed.
+                body = "\n\n".join(
+                    part for part in (body.strip(), question.strip()) if part
+                )
+                question = None
 
             if discussion_focus is not None:
                 question = discussion_focus
@@ -5362,9 +6571,12 @@ async def _generate_plain_with_model_fallback(
                 else {}
             )
             latency_ms = int((time.monotonic() - started_at) * 1000)
+            opening_body = body
+            if stage_opening and _is_human_edit_stage_opening(True, stage_context):
+                opening_body = _compact_human_edit_opening_inventory(body, language)
             result = LLMExecutionResult(
                 assistant_message=_compose_assistant_message(
-                    _format_stage_opening_paragraphs(body) if stage_opening else body,
+                    _format_stage_opening_paragraphs(opening_body) if stage_opening else body,
                     guidance,
                     language,
                     stage_opening,
@@ -5378,6 +6590,43 @@ async def _generate_plain_with_model_fallback(
                 model=model,
                 latency_ms=latency_ms,
                 guidance=guidance,
+                proposal_diagnostics=(
+                    {
+                        "groundingSentencesDropped": grounding_dropped_count,
+                        "clarificationRecoveryMode": (
+                            "server_fallback"
+                            if clarification_fallback_used and clarification_question_issue
+                            else "question_replaced"
+                            if clarification_question_issue
+                            else "body_recovered"
+                            if clarification_fallback_used
+                            else "kimi_complete"
+                        ),
+                        "clarificationAuthor": (
+                            "server_fallback"
+                            if clarification_fallback_used and clarification_question_issue
+                            else "mixed"
+                            if clarification_fallback_used or clarification_question_issue
+                            else "kimi"
+                        ),
+                        "clarificationTargetDimension": (
+                            proposal_clarification or {}
+                        ).get("questionKey"),
+                        "clarificationQuestion": clarification_question,
+                        "clarificationQuestionValidated": not bool(
+                            clarification_question_issue
+                        ),
+                        "clarificationQuestionRepairAttempts": clarification_question_repair_attempts,
+                        "clarificationFallbackReason": clarification_fallback_reason,
+                        **_proposal_clarification_observability(
+                            content,
+                            clarification_question,
+                            stage_context,
+                        ),
+                    }
+                    if clarification_active
+                    else {}
+                ),
             )
             _log_llm_event(
                 "llm_request_completed",
@@ -5407,6 +6656,42 @@ async def _generate_plain_with_model_fallback(
                 routeCoordinateCount=route_recovery["routeCoordinateCount"],
                 droppedSentenceCount=route_recovery["droppedSentenceCount"],
                 coordinateLinksDropped=route_recovery["coordinateLinksDropped"],
+                clarificationAuthor=(
+                    "server_fallback"
+                    if clarification_active and clarification_fallback_used and clarification_question_issue
+                    else "mixed"
+                    if clarification_active and (clarification_fallback_used or clarification_question_issue)
+                    else "kimi"
+                    if clarification_active
+                    else None
+                ),
+                clarificationTargetDimension=(
+                    (proposal_clarification or {}).get("questionKey")
+                    if clarification_active
+                    else None
+                ),
+                clarificationQuestionValidated=(
+                    not bool(clarification_question_issue)
+                    if clarification_active
+                    else None
+                ),
+                clarificationQuestionRepairAttempts=(
+                    clarification_question_repair_attempts
+                    if clarification_active
+                    else None
+                ),
+                clarificationFallbackReason=(
+                    clarification_fallback_reason if clarification_active else None
+                ),
+                **(
+                    _proposal_clarification_observability(
+                        content,
+                        clarification_question,
+                        stage_context,
+                    )
+                    if clarification_active
+                    else {}
+                ),
                 remainingSeconds=round(_remaining_until(deadline), 3),
                 **response_fields,
             )
@@ -5437,6 +6722,7 @@ async def _generate_plain_with_model_fallback(
             "latencyMs": int((time.monotonic() - started_at) * 1000),
             "responseMode": "plain_text",
             **response_fields,
+            **_provider_error_fields(last_error),
         }
         if failure_reason:
             failure_fields["validationReason"] = failure_reason
@@ -5482,6 +6768,7 @@ async def _generate_plain_with_model_fallback(
             droppedSentenceCount=0,
             coordinateLinksDropped=False,
             remainingSeconds=round(_remaining_until(deadline), 3),
+            **_provider_error_fields(last_error),
         )
         if stage_opening:
             # A Stage opening has already spent its one structured attempt and
@@ -5499,10 +6786,14 @@ async def _generate_plain_with_model_fallback(
                 solver_metrics=solver_metrics,
             )
         if _is_length_failure(last_error, validation_feedback):
-            fallback_message = _safe_incomplete_chat_reply(
-                language,
-                stage_opening=stage_opening,
-                rows=rows,
+            fallback_message = (
+                _proposal_clarification_fallback_message(language, stage_context)
+                if clarification_active
+                else _safe_incomplete_chat_reply(
+                    language,
+                    stage_opening=stage_opening,
+                    rows=rows,
+                )
             )
             return LLMExecutionResult(
                 assistant_message=fallback_message,
@@ -5523,6 +6814,14 @@ async def _generate_plain_with_model_fallback(
                     "uiCues": [],
                     "coordinateLinks": [],
                 },
+                proposal_diagnostics=(
+                    {
+                        "groundingSentencesDropped": 0,
+                        "clarificationRecoveryMode": "deterministic_clarification",
+                    }
+                    if clarification_active
+                    else {}
+                ),
             )
         if rows is not None and _is_map_grounding_failure(
             last_error.safe_message,
@@ -5558,6 +6857,14 @@ async def _generate_plain_with_model_fallback(
                     "uiCues": [],
                     "coordinateLinks": [],
                 },
+                proposal_diagnostics=(
+                    {
+                        "groundingSentencesDropped": 0,
+                        "clarificationRecoveryMode": "deterministic_clarification",
+                    }
+                    if _has_proposal_clarification(stage_context)
+                    else {}
+                ),
             )
             if validation_mode in {"ordinary_chat", "route_discussion"}:
                 return LLMExecutionResult(
@@ -5780,11 +7087,7 @@ async def _generate_with_model_fallback(
             latency_ms = int((time.monotonic() - started_at) * 1000)
             result = LLMExecutionResult(
                 assistant_message=_compose_assistant_message(
-                    (
-                        _ensure_stage_one_orientation(validated[0], rows, language)
-                        if assessment_only and _is_stage_one(stage_context)
-                        else validated[0]
-                    ),
+                    validated[0],
                     validated[4],
                     language,
                     assessment_only,
@@ -5800,6 +7103,17 @@ async def _generate_with_model_fallback(
                 guidance=validated[4],
             )
             opening_recovery = validated[4].get("openingRecovery") or []
+            opening_presentation = dict(
+                validated[4].get("openingPresentation") or {}
+            )
+            if assessment_only:
+                opening_presentation["sentenceCount"] = len([
+                    item.strip()
+                    for item in re.split(
+                        r"(?<=[.!?。！？])\s*", result.assistant_message or ""
+                    )
+                    if item.strip()
+                ])
             _log_llm_event(
                 "llm_request_completed",
                 requestId=request_id,
@@ -5817,6 +7131,7 @@ async def _generate_with_model_fallback(
                 coordinateLinksDropped=route_recovery["coordinateLinksDropped"],
                 bodyPreserved=bool(validated[0].strip()),
                 openingRecoveryActions=opening_recovery,
+                openingPresentation=opening_presentation,
                 remainingSeconds=round(_remaining_until(deadline), 3),
                 **response_fields,
             )
@@ -5847,6 +7162,7 @@ async def _generate_with_model_fallback(
             "retryable": last_error.retryable,
             "latencyMs": int((time.monotonic() - started_at) * 1000),
             "responseMode": "json_object",
+            **_provider_error_fields(last_error),
         }
 
         failure_fields.update(response_fields)
@@ -5897,6 +7213,7 @@ async def _generate_with_model_fallback(
             droppedSentenceCount=0,
             coordinateLinksDropped=False,
             remainingSeconds=round(_remaining_until(deadline), 3),
+            **_provider_error_fields(last_error),
         )
         raise last_error
 
@@ -5959,7 +7276,16 @@ def _plain_messages_with_validation_feedback(
     corrected = [dict(message) for message in messages]
     feedback_text = str(validation_feedback)
     feedback_lower = feedback_text.casefold()
-    if "token limit" in feedback_lower or "too long" in feedback_lower:
+    if _has_proposal_clarification(stage_context):
+        specification = (stage_context or {}).get("proposalClarification") or {}
+        instruction = (
+            "Your previous private proposal-clarification envelope was rejected: "
+            f"{feedback_text} Return fresh JSON with exactly body and question. Preserve "
+            "the useful design interpretation, write exactly one question for target dimension "
+            f"{specification.get('questionKey')}, and do not mention this repair. Do not ask "
+            "for coordinates, cells, positions, adjacency, routes, or implementation details."
+        )
+    elif "token limit" in feedback_lower or "too long" in feedback_lower:
         instruction = (
             "Your previous reply for this same request was cut off or exceeded the visible "
             "response limit. Write a fresh, complete reply rather than continuing the partial "
@@ -6268,14 +7594,15 @@ async def _request_completion(
     request_options = {
         "model": model,
         "messages": messages,
+        # Every 8010 task uses direct generation. In particular, structured
+        # RevisionPlan and operation-candidate requests must not spend their
+        # completion budget on hidden reasoning before emitting JSON.
         "temperature": 0.6,
         "max_completion_tokens": max_completion_tokens,
         "stream": False,
         "extra_body": {
             "thinking": {
-                "type": "enabled"
-                if task in {"revision_plan", "operation_candidates"}
-                else "disabled"
+                "type": "disabled"
             }
         },
     }
@@ -6425,6 +7752,58 @@ def _server_fact_text(block, rows, stage_context, language, records):
             return f"\u7b2c{row}\u884c\u7b2c{column}\u5217\u662f{label[0]}\u3002"
         return f"Row {row}, column {column} is {label[1]}."
     return None
+
+
+_PROVIDER_DETAIL_LIMIT = 360
+
+
+def _sanitize_provider_message(value):
+    """Return a short provider diagnostic without reflecting request secrets."""
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    # Error messages should not normally contain credentials, but provider
+    # gateways occasionally echo a rejected header or URL.  Redact those
+    # patterns before putting the message in audit data or a failure turn.
+    text = re.sub(
+        r"(?i)(authorization\s*:\s*bearer\s+|api[_ -]?key\s*[:=]\s*)\S+",
+        r"\1[redacted]",
+        text,
+    )
+    text = re.sub(r"(?i)\b(?:sk|key)-[A-Za-z0-9_-]{12,}\b", "[redacted]", text)
+    text = re.sub(r"https?://\S+", "[url redacted]", text)
+    return text[:_PROVIDER_DETAIL_LIMIT]
+
+
+def _provider_error_details(exception):
+    """Extract only the provider error allowlist from an APIStatusError."""
+    if not isinstance(exception, APIStatusError):
+        return {}
+    body = getattr(exception, "body", None)
+    if not isinstance(body, dict):
+        return {}
+    error = body.get("error") if isinstance(body.get("error"), dict) else body
+    if not isinstance(error, dict):
+        return {}
+    details = {
+        "providerStatus": int(getattr(exception, "status_code", 0) or 0) or None,
+        "providerErrorType": _sanitize_provider_message(error.get("type")),
+        "providerErrorCode": _sanitize_provider_message(error.get("code")),
+        "providerParam": _sanitize_provider_message(error.get("param")),
+        "providerMessage": _sanitize_provider_message(error.get("message")),
+    }
+    return {key: value for key, value in details.items() if value not in (None, "")}
+
+
+def _provider_error_fields(error):
+    """Map an LLMServiceError's safe provider details into audit fields."""
+    return {
+        "providerStatus": getattr(error, "provider_status", None),
+        "providerErrorType": getattr(error, "provider_error_type", "") or None,
+        "providerErrorCode": getattr(error, "provider_error_code", "") or None,
+        "providerParam": getattr(error, "provider_param", "") or None,
+        "providerMessage": getattr(error, "provider_message", "") or None,
+    }
 
 
 def _render_content_blocks(content_blocks, fallback_message, rows, stage_context, language):
@@ -6921,8 +8300,40 @@ def validate_chat_response(
     ):
         guidance["followUpQuestion"] = None
 
+    opening_presentation = {}
     if assessment_only:
+        opening_before_sentences = [
+            item.strip()
+            for item in re.split(r"(?<=[.!?。！？])\s*", assistant_message or "")
+            if item.strip()
+        ]
+        if _is_human_edit_stage_opening(assessment_only, stage_context):
+            assistant_message = _compact_human_edit_opening_inventory(
+                assistant_message, language
+            )
+        opening_after_sentences = [
+            item.strip()
+            for item in re.split(r"(?<=[.!?。！？])\s*", assistant_message or "")
+            if item.strip()
+        ]
+        compacted_inventory_count = max(
+            0, len(opening_before_sentences) - len(opening_after_sentences)
+        )
+        if compacted_inventory_count:
+            opening_recovery_actions.append("human_edit_inventory_compacted")
         assistant_message = _format_stage_opening_paragraphs(assistant_message)
+        opening_presentation = {
+            "sentenceCount": len(opening_after_sentences),
+            "confirmationSentenceCount": sum(
+                1
+                for item in opening_after_sentences
+                if re.search(r"(?:已保存|可解|确认|saved|solvable|confirmed)", item, re.IGNORECASE)
+            ),
+            "compactedInventorySentenceCount": compacted_inventory_count,
+            "displayMode": "human_edit_balanced"
+            if _is_human_edit_stage_opening(assessment_only, stage_context)
+            else "stage_opening_balanced",
+        }
     assessment_payload = payload.get("assessment")
 
     if assessment_payload is None:
@@ -7017,6 +8428,8 @@ def validate_chat_response(
     )
     if assessment_only and opening_recovery_actions:
         guidance["openingRecovery"] = sorted(set(opening_recovery_actions))
+    if assessment_only:
+        guidance["openingPresentation"] = opening_presentation
     proposed_rows = payload.get("proposedRows")
 
     if assessment_only and proposed_rows is not None:
@@ -9258,6 +10671,8 @@ def _llm_failure_class(exception, validation_feedback=None):
         return "map_grounding"
     if code == "UPSTREAM_TIMEOUT":
         return "upstream_timeout"
+    if code == "UPSTREAM_REQUEST_REJECTED":
+        return "upstream_request_rejected"
     if code.startswith("UPSTREAM_"):
         return "upstream_transport"
     return "schema_or_model_validation"
@@ -9406,6 +10821,8 @@ def _stage_opening_safe_execution(
 
 
 def _safe_grounding_chat_reply(language, rows=None, stage_context=None):
+    if _has_proposal_clarification(stage_context):
+        return _proposal_clarification_fallback_message(language, stage_context)
     if rows:
         return _server_snapshot_fallback_message(
             rows,
@@ -9422,6 +10839,195 @@ def _safe_grounding_chat_reply(language, rows=None, stage_context=None):
         "in the previous reply could not be verified, so I will not treat an unverified coordinate as fact; "
         "we can still continue from the layout, rhythm, and guidance effect."
     )
+
+
+def _has_proposal_clarification(stage_context):
+    specification = (stage_context or {}).get("proposalClarification")
+    return bool(
+        isinstance(specification, dict)
+        and str(specification.get("questionKey") or "").strip()
+    )
+
+
+def _proposal_clarification_fallback_message(language, stage_context=None):
+    """Recover a proposal discussion without restating the Stage snapshot."""
+    specification = (stage_context or {}).get("proposalClarification") or {}
+    acknowledgement = str(
+        specification.get("fallbackAcknowledgement") or ""
+    ).strip()
+    if acknowledgement:
+        return acknowledgement
+    if language == "zh-CN":
+        return "我会沿着你刚才确认的设计方向继续收敛这份方案。"
+    return "I will keep narrowing the proposal around the design direction you just confirmed."
+
+
+def _proposal_clarification_fallback_question(language, stage_context=None):
+    specification = (stage_context or {}).get("proposalClarification") or {}
+    configured = str(specification.get("fallbackQuestion") or "").strip()
+    if configured:
+        return configured
+    key = str(specification.get("questionKey") or "").strip()
+    chinese = language == "zh-CN"
+    questions = {
+        "experience_goal": (
+            "你希望额外的解题时间主要消耗在哪种判断或操作上？"
+            if chinese else
+            "What kind of judgment or action should account for the extra solving time?"
+        ),
+        "mechanism": (
+            "你希望通过哪种局部机制增加实际推箱次数？"
+            if chinese else
+            "What local mechanism should create the additional box pushes?"
+        ),
+        "binding": (
+            "你希望先围绕哪个箱子或局部区域增加运输长度？"
+            if chinese else
+            "Which box or local area should carry the longer transport first?"
+        ),
+        "preserve": (
+            "增加这部分挑战时，当前体验中的哪一点必须保持不变？"
+            if chinese else
+            "Which part of the current play experience must remain unchanged while adding this challenge?"
+        ),
+    }
+    return questions.get(
+        key,
+        "你还希望为这份方案补充哪项关键限制？"
+        if chinese else
+        "What remaining constraint should guide this proposal?",
+    )
+
+
+def _proposal_clarification_dimension_matches(question, question_key):
+    text = str(question or "").casefold()
+    patterns = {
+        "experience_goal": (
+            r"(?:时间|难度|体验|节奏|压力|思考|判断|操作|"
+            r"time|difficulty|experience|pacing|pressure|judg|action|thinking)"
+        ),
+        "mechanism": (
+            r"(?:机制|推箱|推动|运输|顺序|陷阱|绕行|试错|误导|死角|"
+            r"mechanism|push|transport|order|trap|detour|mistake|deadlock)"
+        ),
+        "binding": (
+            r"(?:哪个(?:箱子|对象|区域)|哪(?:个|一)(?:箱子|对象|区域|片局部)|箱子|区域|局部|对象|B\d+|"
+            r"which|what (?:box|area|region)|box|crate|area|region|local)"
+        ),
+        "preserve": (
+            r"(?:保留|保持|不变|不能改变|约束|"
+            r"preserve|keep|remain|unchanged|constraint|must not change)"
+        ),
+    }
+    pattern = patterns.get(str(question_key or ""))
+    return True if pattern is None else bool(re.search(pattern, text, re.IGNORECASE))
+
+
+def _proposal_clarification_forbidden_detail(value):
+    text = str(value or "")
+    return bool(re.search(
+        r"(?:\(\s*\d+\s*[,，]\s*\d+\s*\)|第\s*\d+\s*行|第\s*\d+\s*列|"
+        r"坐标|逐格|每个格子|格子修改|具体格子|"
+        r"\brow\s*\d+\b|\bcol(?:umn)?\s*\d+\b|coordinates?|per[- ]cell|"
+        r"each cell|exact cells?|located at|positioned at|adjacent to|next to|"
+        r"route endpoint|路线端点|相邻|位于)",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def _proposal_clarification_allowed_labels(value, stage_context):
+    specification = (stage_context or {}).get("proposalClarification") or {}
+    allowed = {
+        str(label).upper()
+        for label in specification.get("allowedEntityLabels") or []
+        if str(label).strip()
+    }
+    mentioned = {
+        label.upper()
+        for label in re.findall(r"\b(?:P|B\d+|T\d+)\b", str(value or ""), re.IGNORECASE)
+    }
+    return mentioned.issubset(allowed)
+
+
+def _clean_proposal_clarification_body(body, stage_context):
+    kept = []
+    dropped = 0
+    for sentence in _content_block_sentences(body):
+        if (
+            sentence.endswith(("?", "？"))
+            or _proposal_clarification_forbidden_detail(sentence)
+            or not _proposal_clarification_allowed_labels(sentence, stage_context)
+            or re.search(
+                r"(?:请.{0,12}(?:提供|指出|说明).{0,12}(?:坐标|格子|修改)|"
+                r"please.{0,16}(?:provide|specify|list).{0,16}(?:coordinate|cell|edit))",
+                sentence,
+                re.IGNORECASE,
+            )
+        ):
+            dropped += 1
+            continue
+        kept.append(sentence)
+    separator = "" if re.search(r"[\u3400-\u9fff]", str(body or "")) else " "
+    return separator.join(kept).strip(), dropped
+
+
+def _parse_proposal_clarification_payload(content, language, stage_context):
+    """Parse Kimi's private body/question envelope and validate only the question."""
+    try:
+        payload = json.loads(str(content or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "", "", "The clarification response must be valid JSON.", 0
+    if not isinstance(payload, dict) or set(payload) != {"body", "question"}:
+        return "", "", "The clarification response must contain only body and question.", 0
+    raw_body = payload.get("body")
+    raw_question = payload.get("question")
+    if not isinstance(raw_body, str) or not isinstance(raw_question, str):
+        return "", "", "The clarification body and question must be strings.", 0
+    body = _sanitize_visible_model_text(raw_body.strip(), language)
+    question = _sanitize_visible_model_text(raw_question.strip(), language)
+    body, dropped = _clean_proposal_clarification_body(body, stage_context)
+    issue = ""
+    if not question or sum(question.count(mark) for mark in ("?", "？")) != 1:
+        issue = "The clarification must contain exactly one question."
+    elif not question.endswith(("?", "？")):
+        issue = "The clarification question must end with a question mark."
+    elif _proposal_clarification_forbidden_detail(question):
+        issue = "The clarification question asks for or asserts forbidden map details."
+    elif not _proposal_clarification_allowed_labels(question, stage_context):
+        issue = "The clarification question uses an entity label not supplied by the server."
+    else:
+        key = ((stage_context or {}).get("proposalClarification") or {}).get(
+            "questionKey"
+        )
+        if not _proposal_clarification_dimension_matches(question, key):
+            issue = f"The clarification question does not address the target dimension {key}."
+    return body, question if not issue else "", issue, dropped
+
+
+def _proposal_clarification_observability(body, question, stage_context):
+    specification = (stage_context or {}).get("proposalClarification") or {}
+    route_evidence = specification.get("routeEvidence") or {}
+    choice_question = bool(re.search(
+        r"(?:\bor\b|\bversus\b|\bvs\.?\b|还是|或者|或是)",
+        str(question or ""),
+        re.IGNORECASE,
+    ))
+    question_labels = set(re.findall(
+        r"\b(?:P|B\d+|T\d+)\b", str(question or ""), re.IGNORECASE
+    ))
+    body_labels = set(re.findall(
+        r"\b(?:P|B\d+|T\d+)\b", str(body or ""), re.IGNORECASE
+    ))
+    return {
+        "clarificationRouteEvidenceMode": route_evidence.get("mode", "unavailable"),
+        "clarificationBodySentenceCount": len(_content_block_sentences(body)),
+        "clarificationAnalysisOptionCount": 2 if choice_question else None,
+        "clarificationQuestionForm": "choice" if choice_question else "open",
+        "clarificationOptionsCovered": (
+            question_labels.issubset(body_labels) if choice_question and question_labels else None
+        ),
+    }
 
 
 def _safe_grounding_clarification(language):
@@ -10104,7 +11710,9 @@ def classify_guidance_request(conversation, stage_context=None, stage_opening=Fa
     routing = context.get("revisionRouting")
     if routing in {"confused", "needs_clarification"}:
         return "needs_clarification"
-    if routing == "proposal":
+    if routing == "proposal_blocked":
+        return "proposal_blocked"
+    if routing in {"proposal", "proposal_conservative"}:
         return "revision_advice"
     if context.get("revisionRequestState") not in (None, "not_request"):
         return "none"
@@ -10169,13 +11777,19 @@ def _guidance_mode_instruction(guidance_mode):
         return (
             "Deterministic routing found that the latest direction is either unclear, conflicted, "
             "or addressed to more than one possible map object. Keep the response in ordinary "
-            "assistantMessage prose. Ask one to three tightly related high-value questions only "
-            "when multiple missing inputs are genuinely needed; stop early as soon as the user "
+            "assistantMessage prose. Ask exactly one open, high-value question about the single "
+            "missing input; never present a menu of choices or add a second question. Stop early as soon as the user "
             "has supplied enough information. If the purpose and object are safely identifiable "
             "after the clarification exchange, complete the missing implementation details "
             "conservatively and generate one complete proposal. Do not output proposal fields "
             "while the object or direction is still ambiguous, and never output MANUAL_EDIT, a "
             "clarification card, or a failure card. Do not guess coordinates or map identities."
+        )
+    if guidance_mode == "proposal_blocked":
+        return (
+            "The bounded proposal clarification budget is exhausted, but the current map object "
+            "is still ambiguous. Give one concise, neutral explanation of the exact missing binding "
+            "and do not ask another question, create a proposal, emit a card, or guess coordinates."
         )
     if guidance_mode == "disagreement":
         return (
@@ -10931,6 +12545,163 @@ def _ensure_stage_one_orientation(message, rows, language):
     if compact_guidance.casefold() in body.casefold():
         return body
     return f"{body}\n\n{compact_guidance}" if body else compact_guidance
+
+
+def _stage_one_coordinate_summary(rows, language):
+    """Render one compact, current-snapshot entity position sentence."""
+    if not rows:
+        return ""
+    try:
+        snapshot = build_stage_snapshot(rows)
+    except (TypeError, ValueError, KeyError):
+        return ""
+    entities = {
+        str(item.get("id") or "").upper(): item
+        for item in snapshot.get("entities") or []
+        if isinstance(item, dict)
+        and item.get("identityConfidence") == "exact"
+        and item.get("id")
+    }
+    ordered = [label for label in ("P", "B1", "B2", "T1", "T2") if label in entities]
+    if not ordered:
+        return ""
+    if language == "zh-CN":
+        values = [
+            f"{label}\u4f4d\u4e8e\u7b2c{entities[label]['row']}\u884c\u7b2c{entities[label]['column']}\u5217"
+            for label in ordered
+        ]
+        return "\u5f53\u524d\u5feb\u7167\u4e2d\u7684\u5b9e\u4f53\u4f4d\u7f6e\u662f\uff1a" + "\uff1b".join(values) + "\u3002"
+    values = [
+        f"{label} is at row {entities[label]['row']}, column {entities[label]['column']}"
+        for label in ordered
+    ]
+    return "Verified current entity positions: " + "; ".join(values) + "."
+
+
+def _repair_stage_one_opening_display(message, rows, language):
+    """Give legacy Stage 1 openings the current two-paragraph presentation.
+
+    This is deliberately a read-time repair: it never rewrites the archived
+    turn.  The operation guidance still appears exactly once, while old
+    coordinate-heavy openings gain the same concise observation/reflection
+    rhythm used for new Stage openings.
+    """
+    oriented = _ensure_stage_one_orientation(message, rows, language)
+    paragraphs = [part.strip() for part in oriented.split("\n\n") if part.strip()]
+    if not paragraphs:
+        return oriented
+
+    is_chinese = language == "zh-CN" or bool(re.search(r"[\u3400-\u9fff]", oriented))
+    guidance_markers = (
+        ("\u5c0f\u8303\u56f4\u66f4\u6539", "\u53ef\u5ba1\u67e5", "\u4eb2\u624b\u8bd5")
+        if is_chinese
+        else ("small, reviewable", "broad rebuild", "designer-led")
+    )
+    guidance_paragraphs = [
+        item for item in paragraphs
+        if any(marker.casefold() in item.casefold() for marker in guidance_markers)
+    ]
+    body = " ".join(
+        item for item in paragraphs if item not in guidance_paragraphs
+    ).strip()
+    if not body:
+        body = ""
+
+    # Coordinates are current-map facts, not disposable presentation noise.
+    # Older code removed every parenthesized coordinate here and left strings
+    # such as "B2 \u4f4d\u4e8e\uff0c" behind. Replace position-inventory sentences
+    # with one server-rendered snapshot summary instead.
+    coordinate_summary = _stage_one_coordinate_summary(rows, language)
+    if coordinate_summary:
+        try:
+            coordinate_snapshot = build_stage_snapshot(rows)
+            coordinate_labels = [
+                str(item.get("id")).upper()
+                for item in coordinate_snapshot.get("entities") or []
+                if isinstance(item, dict)
+                and item.get("identityConfidence") == "exact"
+                and item.get("id")
+            ]
+        except (TypeError, ValueError, KeyError):
+            coordinate_labels = []
+        entity_position = re.compile(
+            r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+)(?![A-Za-z0-9]).{0,36}?"
+            r"(?:\u4f4d\u4e8e|\u5728(?:\u7b2c)?|\u5750\u843d\u4e8e|"
+            r"is\s+(?:at|located\s+at)|sits\s+at)",
+            flags=re.IGNORECASE,
+        )
+        future = re.compile(
+            r"(?:\u5c06|\u4f1a|\u5e0c\u671b|\u60f3(?:\u8981)?|\u63a8\u5230|\u79fb\u52a8|"
+            r"\b(?:will|would|move|push|toward|from)\b)",
+            flags=re.IGNORECASE,
+        )
+        complete_inventory = all(
+            re.search(
+                rf"(?<![A-Za-z0-9]){label}(?![A-Za-z0-9]).{{0,48}}"
+                r"(?:\u4f4d\u4e8e|\u5728|\u5750\u843d\u4e8e|is\s+(?:at|located\s+at))"
+                r".{0,32}(?:\(\s*\d+\s*[,，]\s*\d+\s*\)|"
+                r"\u7b2c\s*\d+\s*\u884c\s*\u7b2c\s*\d+\s*\u5217)",
+                body,
+                flags=re.IGNORECASE,
+            )
+            for label in coordinate_labels
+        )
+        cleaned_sentences = []
+        for sentence in re.split(
+            r"(?<=[.!?\u3002\uff01\uff1f])\s*|[\r\n]+", body
+        ):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if entity_position.search(sentence) and not future.search(sentence):
+                malformed = re.search(
+                    r"(?:\u4f4d\u4e8e|\u5728|\u5750\u843d\u4e8e|is\s+(?:at|located))"
+                    r"\s*(?:[，,、]|\u548c\s*[，,。]|$)",
+                    sentence,
+                    flags=re.IGNORECASE,
+                )
+                # Preserve a complete, snapshot-validated model inventory;
+                # otherwise remove all position inventory so the server can
+                # provide one authoritative replacement.
+                if malformed or not complete_inventory:
+                    continue
+            cleaned_sentences.append(sentence)
+        body_parts = [" ".join(cleaned_sentences)]
+        if not complete_inventory:
+            body_parts.insert(0, coordinate_summary)
+        body = "\n\n".join(part for part in body_parts if part).strip()
+
+    sentences = [
+        item.strip()
+        for item in re.split(r"(?<=[.!?\u3002\uff01\uff1f])\s*", body)
+        if item.strip()
+    ]
+    reflections = (
+        [
+            "\u6211\u4f1a\u5148\u628a\u8fd9\u79cd\u5206\u9694\u5e26\u6765\u7684\u9996\u6b65\u9009\u62e9\uff0c\u5f53\u4f5c\u5173\u5361\u8282\u594f\u662f\u5426\u6e05\u6670\u7684\u4fe1\u53f7\u3002",
+            "\u5728\u6211\u770b\u6765\uff0c\u5148\u89c2\u5bdf\u73a9\u5bb6\u5982\u4f55\u8bfb\u61c2\u7a7a\u95f4\uff0c\u6bd4\u7acb\u5373\u5224\u65ad\u8981\u6539\u54ea\u91cc\u66f4\u6709\u4ef7\u503c\u3002",
+        ]
+        if is_chinese
+        else [
+            "I would first treat that split as a signal of whether the opening rhythm reads clearly.",
+            "For me, watching how a player reads the space matters before deciding what needs to change.",
+        ]
+    )
+    for reflection in reflections:
+        if len(sentences) >= 4:
+            break
+        sentences.append(reflection)
+    body = " ".join(sentences[:5]).strip()
+    body = _format_stage_opening_paragraphs(body) if body else ""
+    guidance = " ".join(guidance_paragraphs).strip()
+    if not guidance:
+        return body
+    if not body:
+        return guidance
+    body_paragraphs = [part.strip() for part in body.split("\n\n") if part.strip()]
+    if len(body_paragraphs) == 1:
+        return f"{body_paragraphs[0]}\n\n{guidance}"
+    return f"{body_paragraphs[0]}\n\n{' '.join(body_paragraphs[1:])} {guidance}"
 
 
 def _latest_user_states_direction(messages):
@@ -12790,11 +14561,60 @@ def _normalize_opening_question(question):
     raise ValueError("A Stage opening question cannot anchor the designer with choices.")
 
 
+def _compact_human_edit_opening_inventory(message, language):
+    """Prefer design effects over duplicate status and coordinate inventories."""
+    sentences = [
+        item.strip()
+        for item in re.split(r"(?<=[.!?。！？])\s*", str(message or ""))
+        if item.strip()
+    ]
+    confirmation = re.compile(
+        r"(?:已保存|已通过|确认可解|确定性检查|saved|solvable|verified)",
+        flags=re.IGNORECASE,
+    )
+    coordinate = re.compile(r"(?:\(\s*\d+\s*[,，]\s*\d+\s*\)|第\s*\d+\s*行\s*第\s*\d+\s*列)")
+    entity = re.compile(r"\b(?:P|B\d+|T\d+)\b", flags=re.IGNORECASE)
+    non_inventory = [
+        sentence for sentence in sentences
+        if not (coordinate.search(sentence) or len(entity.findall(sentence)) >= 2)
+    ]
+    # Never turn a valid opening into an empty or mechanical fallback merely to
+    # satisfy a presentation preference.  Inventory prose is removed only when
+    # there is already enough grounded design material to retain.
+    can_drop_inventory = len(non_inventory) >= 3
+    kept = []
+    seen_confirmation = False
+    for sentence in sentences:
+        if confirmation.search(sentence):
+            if seen_confirmation:
+                continue
+            seen_confirmation = True
+        if can_drop_inventory and (
+            coordinate.search(sentence) or len(entity.findall(sentence)) >= 2
+        ):
+            continue
+        kept.append(sentence)
+    return " ".join(kept).strip()
+
+
 def _format_stage_opening_paragraphs(message):
     paragraphs = [part.strip() for part in message.split("\n\n") if part.strip()]
 
     if len(paragraphs) > 3:
         paragraphs = [paragraphs[0], paragraphs[1], " ".join(paragraphs[2:])]
+
+    if len(paragraphs) == 1:
+        sentences = [
+            item.strip()
+            for item in re.split(r"(?<=[.!?。！？])\s*", paragraphs[0])
+            if item.strip()
+        ]
+        if len(sentences) >= 4:
+            midpoint = 2 if len(sentences) <= 5 else len(sentences) // 2
+            paragraphs = [
+                " ".join(sentences[:midpoint]),
+                " ".join(sentences[midpoint:]),
+            ]
 
     return "\n\n".join(paragraphs)
 
@@ -12814,8 +14634,14 @@ def _compose_assistant_message(
     if assessment_only and _is_stage_one(stage_context):
         # This is the final visible-text gate.  Keeping it here makes the
         # fixed Stage 1 guidance apply to every structured/plain/fallback path
-        # and makes the operation idempotent for legacy openings.
-        message = _ensure_stage_one_orientation(message, None, language)
+        # and gives short model replies the same balanced opening shape as
+        # historical Stage 1 records.
+        snapshot_rows = (stage_context.get("stageSnapshot") or {}).get("rows")
+        message = _repair_stage_one_opening_display(
+            message,
+            snapshot_rows,
+            language,
+        )
     change_summary = stage_context.get("changeSummary") or {}
     components = change_summary.get("components") or []
 
@@ -12955,13 +14781,25 @@ def classify_exception(exception, request_id, attempts_used):
     if isinstance(exception, APIStatusError):
         upstream_status = int(getattr(exception, "status_code", 0) or 0)
         retryable = upstream_status == 429 or upstream_status >= 500
+        provider_details = _provider_error_details(exception)
+        provider_message = provider_details.get("providerMessage", "")
+        safe_message = (
+            f"Kimi returned HTTP {upstream_status or 'error'}: {provider_message}"
+            if provider_message
+            else f"Kimi returned HTTP {upstream_status or 'error'}."
+        )
         return LLMServiceError(
             "UPSTREAM_SERVER_ERROR" if retryable else "UPSTREAM_REQUEST_REJECTED",
-            f"Kimi returned HTTP {upstream_status or 'error'}.",
+            safe_message,
             request_id,
             retryable,
             attempts_used,
             503 if upstream_status == 429 else 502,
+            provider_status=provider_details.get("providerStatus", upstream_status or None),
+            provider_error_type=provider_details.get("providerErrorType"),
+            provider_error_code=provider_details.get("providerErrorCode"),
+            provider_param=provider_details.get("providerParam"),
+            provider_message=provider_message,
         )
 
     if isinstance(exception, (json.JSONDecodeError, ValueError, TypeError, KeyError)):

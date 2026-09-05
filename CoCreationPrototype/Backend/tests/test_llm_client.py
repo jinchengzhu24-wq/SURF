@@ -3,13 +3,14 @@ import json
 import os
 import re
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
 import httpx
-from openai import APITimeoutError
+from openai import APIStatusError, APITimeoutError
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import llm_client
-from level_validation import build_entity_bindings
+from level_validation import build_entity_bindings, validate_and_solve
 
 
 OPERATION_BASE_ROWS = [
@@ -176,6 +177,110 @@ class SlowClient:
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_objective_policy_keeps_qualitative_difficulty_soft(self):
+        policy = llm_client._proposal_objective_policy(
+            [{"role": "user", "content": "我希望玩家花更多时间，并增加推箱深度"}],
+            {"authorizedRevisionBrief": "增加互相牵制和规划感"},
+        )
+
+        self.assertEqual(policy["hardMetricGoals"], [])
+        self.assertTrue(policy["requiresMechanismEvidence"])
+
+    def test_objective_policy_promotes_only_explicit_measurable_requirement(self):
+        policy = llm_client._proposal_objective_policy(
+            [{"role": "user", "content": "最短解必须至少增加 5 步"}],
+            {},
+        )
+
+        self.assertEqual(policy["hardMetricGoals"], [{
+            "metric": "solutionSteps",
+            "direction": "increase",
+            "minimumDelta": 5,
+            "source": "explicit_user",
+        }])
+
+    def test_objective_policy_does_not_join_unrelated_mandatory_clause_to_metric(self):
+        policy = llm_client._proposal_objective_policy(
+            [{
+                "role": "user",
+                "content": "必须保留左侧水域。整体上我希望最短路线更长一些。",
+            }],
+            {},
+        )
+
+        self.assertEqual(policy["hardMetricGoals"], [])
+
+    def test_objective_policy_uses_minimum_pushes_for_explicit_push_requirement(self):
+        policy = llm_client._proposal_objective_policy(
+            [{"role": "user", "content": "最少推动次数必须增加"}],
+            {},
+        )
+
+        self.assertEqual(policy["hardMetricGoals"], [{
+            "metric": "minimumPushes",
+            "direction": "increase",
+            "minimumDelta": 1,
+            "source": "explicit_user",
+        }])
+
+    def test_candidate_selector_excludes_cited_alternative_map(self):
+        contract = llm_client._build_revision_execution_contract(
+            llm_client.parse_revision_plan(json.loads(revision_plan_payload())),
+            "move target",
+        )
+        payload = json.loads(operation_payload(TARGET_SHIFT_OPERATIONS))
+        candidate_rows = llm_client.execute_revision_operations(
+            OPERATION_BASE_ROWS,
+            TARGET_SHIFT_OPERATIONS,
+            contract,
+            1,
+        )
+
+        with self.assertRaises(ValueError) as raised:
+            llm_client._select_operation_candidate(
+                payload,
+                OPERATION_BASE_ROWS,
+                contract,
+                llm_client.validate_and_solve,
+                {},
+                excluded_map_fingerprints={llm_client.map_fingerprint(candidate_rows)},
+            )
+
+        self.assertIn("cited proposal", str(raised.exception))
+
+    def test_operation_candidate_registry_rejects_same_set_across_attempts(self):
+        contract = llm_client._build_revision_execution_contract(
+            llm_client.parse_revision_plan(json.loads(revision_plan_payload())),
+            "move target",
+        )
+        operation_signatures = set()
+        map_signatures = set()
+        records = []
+        payload = json.loads(operation_payload(TARGET_SHIFT_OPERATIONS))
+        first = llm_client._select_operation_candidate(
+            payload,
+            OPERATION_BASE_ROWS,
+            contract,
+            llm_client.validate_and_solve,
+            {},
+            operation_signatures,
+            map_signatures,
+            records,
+        )
+        self.assertIsNotNone(first[0])
+        with self.assertRaises(ValueError) as raised:
+            llm_client._select_operation_candidate(
+                payload,
+                OPERATION_BASE_ROWS,
+                contract,
+                llm_client.validate_and_solve,
+                {},
+                operation_signatures,
+                map_signatures,
+                records,
+            )
+        self.assertIn("earlier attempt", str(raised.exception))
+
     def setUp(self):
         self.kimi_environment = patch.dict(
             os.environ,
@@ -1355,6 +1460,228 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertNotIn("next to water", result.assistant_message)
 
+    def test_proposal_clarification_grounding_failure_never_uses_snapshot_fallback(self):
+        result, client = self.execute(
+            [
+                json.dumps({
+                    "body": "P位于第9行第9列，所以可以从这里延长路线。",
+                    "question": "你希望先围绕 B1 还是 B2 增加运输长度？",
+                }, ensure_ascii=False),
+            ],
+            rows=ENTITY_ROUTE_ROWS,
+            language="zh-CN",
+            conversation=[
+                {"role": "user", "content": "增加推箱子的总步数"},
+            ],
+            stage_context={
+                "revisionRouting": "needs_clarification",
+                "proposalDiscovery": {
+                    "topicId": "request",
+                    "status": "clarifying",
+                    "brief": "希望玩家花费更多时间\n增加推箱子的总步数",
+                    "clarificationQuestionCount": 1,
+                },
+                "proposalClarification": {
+                    "questionKey": "binding",
+                    "questionIntent": "clarify which entity should carry the change",
+                    "allowedEntityLabels": ["P", "B1", "B2", "T1", "T2"],
+                    "fallbackQuestion": "你希望先围绕哪个箱子增加运输长度？",
+                    "fallbackAcknowledgement": "明白，你希望通过增加实际推箱次数来延长解题时间。",
+                },
+            },
+        )
+
+        self.assertNotIn("以当前保存的 Stage 为准", result.assistant_message)
+        self.assertNotIn("第9行第9列", result.assistant_message)
+        self.assertIn("增加实际推箱次数", result.assistant_message)
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(
+            result.proposal_diagnostics["clarificationRecoveryMode"],
+            "body_recovered",
+        )
+        self.assertEqual(result.proposal_diagnostics["clarificationAuthor"], "mixed")
+
+    def test_proposal_clarification_prompt_forbids_coordinates_and_model_questions(self):
+        messages = llm_client.build_plain_chat_messages(
+            [{"role": "user", "content": "增加推箱子的总步数"}],
+            ENTITY_ROUTE_ROWS,
+            language="zh-CN",
+            stage_context={
+                "revisionRouting": "needs_clarification",
+                "proposalDiscovery": {
+                    "brief": "希望玩家花费更多时间\n增加推箱子的总步数",
+                    "clarificationQuestionCount": 1,
+                },
+                "proposalClarification": {
+                    "questionKey": "binding",
+                    "questionIntent": "clarify which entity should carry the change",
+                    "allowedEntityLabels": ["P", "B1", "B2", "T1", "T2"],
+                    "fallbackQuestion": "你希望先围绕哪个箱子增加运输长度？",
+                    "fallbackAcknowledgement": "明白，你希望通过增加实际推箱次数来延长解题时间。",
+                },
+            },
+        )
+        prompt = messages[0]["content"]
+
+        self.assertIn("exactly one useful clarification question", prompt)
+        self.assertIn("Do not state or infer coordinates", prompt)
+        self.assertIn("Target question dimension: binding", prompt)
+        self.assertIn("five to eight declarative sentences", prompt)
+        self.assertIn("Private authoritative route-analysis context", prompt)
+        self.assertIn("internally replay", prompt)
+        self.assertIn("one verified solution witness", prompt)
+        self.assertNotIn("你希望先围绕哪个箱子", prompt)
+        self.assertNotIn("Current Stage Snapshot", prompt)
+
+    def test_proposal_clarification_route_evidence_replays_verified_solution(self):
+        bindings = build_entity_bindings(ENTITY_ROUTE_ROWS, source="initial")
+        validation = validate_and_solve(ENTITY_ROUTE_ROWS).as_dict()
+
+        evidence = llm_client._proposal_clarification_route_evidence(
+            ENTITY_ROUTE_ROWS,
+            validation,
+            {"entityBindings": bindings},
+        )
+
+        self.assertEqual(evidence["mode"], "verified_route_summary")
+        self.assertEqual(sum(evidence["pushesByBox"].values()), validation["solutionPushes"])
+        self.assertEqual(set(evidence["targetAssignments"]), {"B1", "B2"})
+        self.assertEqual(
+            evidence["analysisContext"]["verifiedSolutionTrace"],
+            validation["solution"],
+        )
+        self.assertEqual(evidence["analysisContext"]["authoritativeRows"], ENTITY_ROUTE_ROWS)
+
+    def test_proposal_clarification_route_evidence_degrades_without_exact_bindings(self):
+        validation = validate_and_solve(ENTITY_ROUTE_ROWS).as_dict()
+        evidence = llm_client._proposal_clarification_route_evidence(
+            ENTITY_ROUTE_ROWS,
+            validation,
+            {"entityBindings": {"identityStatus": "unknown", "entities": []}},
+        )
+
+        self.assertEqual(evidence["mode"], "totals_only")
+        self.assertEqual(evidence["solutionSteps"], validation["solutionSteps"])
+        self.assertNotIn("pushOrder", evidence)
+
+    def test_kimi_authors_complete_proposal_clarification(self):
+        response = json.dumps({
+            "body": (
+                "我更在意运输变长后是否会形成持续的规划压力。"
+                "如果把变化集中在一个箱子上，玩家会更容易感受到路线代价。"
+            ),
+            "question": "你更希望先让 B1 还是 B2 承担这段额外运输？",
+        }, ensure_ascii=False)
+        result, client = self.execute(
+            [response],
+            rows=ENTITY_ROUTE_ROWS,
+            language="zh-CN",
+            conversation=[{"role": "user", "content": "更长的推箱运输"}],
+            stage_context={
+                "revisionRouting": "needs_clarification",
+                "discussionCardMode": "disagreement_only",
+                "proposalDiscovery": {
+                    "topicId": "request",
+                    "status": "clarifying",
+                    "brief": "希望玩家花费更多时间\n更长的推箱运输",
+                },
+                "proposalClarification": {
+                    "questionKey": "binding",
+                    "questionIntent": "clarify which entity should carry the change",
+                    "allowedEntityLabels": ["P", "B1", "B2", "T1", "T2"],
+                    "fallbackQuestion": "你希望先围绕哪个箱子增加运输长度？",
+                    "fallbackAcknowledgement": "我会继续收敛这个方向。",
+                },
+            },
+        )
+
+        self.assertIn("持续的规划压力", result.assistant_message)
+        self.assertIn("B1 还是 B2", result.assistant_message)
+        self.assertEqual(result.assistant_message.count("？"), 1)
+        self.assertEqual(result.proposal_diagnostics["clarificationAuthor"], "kimi")
+        self.assertTrue(result.proposal_diagnostics["clarificationQuestionValidated"])
+        self.assertIn("response_format", client.chat.completions.calls[0])
+        self.assertEqual(
+            client.chat.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
+
+    def test_proposal_clarification_repairs_wrong_dimension_once(self):
+        invalid = json.dumps({
+            "body": "更长的运输会把时间成本放到实际操作上。",
+            "question": "你希望保留当前体验中的哪一点？",
+        }, ensure_ascii=False)
+        repaired = json.dumps({
+            "body": "更长的运输会把时间成本放到实际操作上。",
+            "question": "你希望先让哪个箱子承担额外运输？",
+        }, ensure_ascii=False)
+        result, client = self.execute(
+            [invalid, repaired],
+            rows=ENTITY_ROUTE_ROWS,
+            language="zh-CN",
+            conversation=[{"role": "user", "content": "更长的推箱运输"}],
+            stage_context={
+                "revisionRouting": "needs_clarification",
+                "discussionCardMode": "disagreement_only",
+                "proposalDiscovery": {
+                    "topicId": "request", "status": "clarifying",
+                    "brief": "更长的推箱运输",
+                },
+                "proposalClarification": {
+                    "questionKey": "binding",
+                    "questionIntent": "clarify which entity should carry the change",
+                    "allowedEntityLabels": ["P", "B1", "B2", "T1", "T2"],
+                    "fallbackQuestion": "你希望先围绕哪个箱子增加运输长度？",
+                    "fallbackAcknowledgement": "我会继续收敛这个方向。",
+                },
+            },
+        )
+
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertIn("哪个箱子承担额外运输", result.assistant_message)
+        self.assertNotIn("保留当前体验", result.assistant_message)
+        self.assertEqual(result.proposal_diagnostics["clarificationAuthor"], "kimi")
+        self.assertEqual(
+            result.proposal_diagnostics["clarificationQuestionRepairAttempts"], 1
+        )
+
+    def test_proposal_clarification_replaces_coordinate_request_only(self):
+        invalid = json.dumps({
+            "body": "更长的运输会让每次推动更有累积感。",
+            "question": "请给出要修改的具体坐标？",
+        }, ensure_ascii=False)
+        result, _ = self.execute(
+            [invalid, invalid],
+            rows=ENTITY_ROUTE_ROWS,
+            language="zh-CN",
+            conversation=[{"role": "user", "content": "更长的推箱运输"}],
+            stage_context={
+                "revisionRouting": "needs_clarification",
+                "discussionCardMode": "disagreement_only",
+                "proposalDiscovery": {
+                    "topicId": "request", "status": "clarifying",
+                    "brief": "更长的推箱运输",
+                },
+                "proposalClarification": {
+                    "questionKey": "binding",
+                    "questionIntent": "clarify which entity should carry the change",
+                    "allowedEntityLabels": ["P", "B1", "B2", "T1", "T2"],
+                    "fallbackQuestion": "你希望先围绕哪个箱子增加运输长度？",
+                    "fallbackAcknowledgement": "我会继续收敛这个方向。",
+                },
+            },
+        )
+
+        self.assertIn("每次推动更有累积感", result.assistant_message)
+        self.assertIn("围绕哪个箱子", result.assistant_message)
+        self.assertNotIn("具体坐标", result.assistant_message)
+        self.assertEqual(result.proposal_diagnostics["clarificationAuthor"], "mixed")
+        self.assertFalse(result.proposal_diagnostics["clarificationQuestionValidated"])
+        self.assertEqual(
+            result.proposal_diagnostics["clarificationRecoveryMode"],
+            "question_replaced",
+        )
+
     def test_plain_reply_normalizes_stages_that_are_mistaken_for_separate_levels(self):
         result, _ = self.execute([
             "这种留一点犹豫空间的做法，很符合第二关该有的手感。"
@@ -2311,6 +2638,67 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("小范围更改、提供可审查的改动内容", body)
         self.assertIn("较大的改动我建议由你亲手试一试", body)
 
+    def test_legacy_stage_one_display_uses_balanced_two_paragraph_opening(self):
+        body = llm_client._repair_stage_one_opening_display(
+            "地图中央偏下有一片由8格水域组成的矩形区域（第7-8行、第3-6列），将下方通道与上半部分隔开。"
+            "这种布局让两个箱子各自偏向不同目标，但可通行的纵路空间被水域压缩。\n\n"
+            "你可以先说说你的第一反应或试玩当前关卡，之后不满意的话，你可以指出来。",
+            OPERATION_BASE_ROWS,
+            "zh-CN",
+        )
+        self.assertIn("当前快照中的实体位置", body)
+        self.assertEqual(body.count("当前快照中的实体位置"), 1)
+        self.assertEqual(body.count("\n\n"), 1)
+        self.assertIn("我会先把这种分隔", body)
+        self.assertIn("小范围更改、提供可审查的改动内容", body)
+
+    def test_stage_one_display_replaces_missing_entity_coordinates_from_snapshot(self):
+        body = llm_client._repair_stage_one_opening_display(
+            "地图中有一块水域。玩家P位于，两个箱子B1和B2分别位于和，目标T1和T2分别位于和。",
+            OPERATION_BASE_ROWS,
+            "zh-CN",
+        )
+        self.assertIn("当前快照中的实体位置", body)
+        self.assertNotIn("位于，", body)
+        self.assertNotIn("分别位于和", body)
+        self.assertEqual(body.count("当前快照中的实体位置"), 1)
+
+    def test_stage_one_display_keeps_complete_coordinate_sentence(self):
+        body = llm_client._repair_stage_one_opening_display(
+            "P位于第5行第5列，B1位于第6行第5列，B2位于第6行第4列，T1位于第6行第7列，T2位于第6行第8列。水域让中间路线更有分隔。",
+            OPERATION_BASE_ROWS,
+            "zh-CN",
+        )
+        self.assertIn("P位于第5行第5列", body)
+        self.assertNotIn("当前快照中的实体位置", body)
+
+    def test_provider_http_error_details_are_safe_and_structured(self):
+        response = httpx.Response(
+            400,
+            request=httpx.Request("POST", "https://api.moonshot.cn/v1/chat/completions"),
+        )
+        exception = APIStatusError(
+            "bad request",
+            response=response,
+            body={
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_parameter",
+                    "param": "response_format",
+                    "message": "invalid schema; api_key=sk-secret-value-1234567890",
+                }
+            },
+        )
+        classified = llm_client.classify_exception(exception, "provider-test", 1)
+        self.assertEqual(classified.code, "UPSTREAM_REQUEST_REJECTED")
+        self.assertEqual(classified.provider_status, 400)
+        self.assertEqual(classified.provider_error_type, "invalid_request_error")
+        self.assertEqual(classified.provider_error_code, "invalid_parameter")
+        self.assertEqual(classified.provider_param, "response_format")
+        self.assertIn("invalid schema", classified.provider_message)
+        self.assertNotIn("sk-secret-value", classified.provider_message)
+        self.assertIn("[redacted]", classified.provider_message)
+
     def test_stage_one_opening_keeps_map_observation_but_compacts_process_guidance(self):
         body = llm_client._ensure_stage_one_orientation(
             "我觉得中间水域让箱子第一次靠近目标时需要重新判断路线。\n\n"
@@ -2807,6 +3195,8 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertIn("small, reviewable edits", result.assistant_message)
+        self.assertGreaterEqual(result.assistant_message.count("."), 4)
+        self.assertEqual(result.assistant_message.count("\n\n"), 1)
         self.assertEqual(result.attempts_used, 1)
 
     def test_length_truncation_uses_fallback_model(self):
@@ -3055,7 +3445,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.revision_operations, [
             {"row": 2, "column": 2, "from": ".", "to": "#"},
         ])
-        self.assertEqual(result.proposal_diagnostics["source"], "deterministic_search")
+        self.assertEqual(result.proposal_diagnostics["source"], "deterministic_contract")
 
     def test_confirmed_concrete_chinese_plan_immediately_uses_proposal_workflow(self):
         response = revision_plan_payload(
@@ -3233,7 +3623,7 @@ class LLMClientTests(unittest.TestCase):
                 "proposal-required-test",
             )
 
-        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+        self.assertEqual(raised.exception.code, "REVISION_PLAN_INVALID")
         self.assertEqual(raised.exception.attempts_used, 2)
         self.assertEqual(len(client.chat.completions.calls), 2)
         retry_prompt = client.chat.completions.calls[1]["messages"][0]["content"]
@@ -3651,15 +4041,19 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(llm_client.UNIFIED_MODEL, "kimi-k2.6")
         self.assertEqual(llm_client.BACKEND_REQUEST_TIMEOUT_SECONDS, 120.0)
         self.assertEqual(llm_client.LLM_INTERNAL_DEADLINE_SECONDS, 116.0)
+        self.assertEqual(llm_client.PROPOSAL_REQUEST_TIMEOUT_SECONDS, 300.0)
+        self.assertEqual(llm_client.PROPOSAL_INTERNAL_DEADLINE_SECONDS, 296.0)
         self.assertEqual(llm_client.CHAT_TIMEOUT_SECONDS, 120.0)
         self.assertEqual(llm_client.PLAIN_CHAT_TIMEOUT_SECONDS, 120.0)
         self.assertEqual(llm_client.PRIMARY_ATTEMPT_TIMEOUT_SECONDS, 70.0)
         self.assertEqual(llm_client.CHAT_MAX_ATTEMPTS, 2)
         self.assertEqual(llm_client.PROPOSAL_GENERATION_ATTEMPTS, 2)
-        self.assertEqual(llm_client.PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, 22.0)
-        self.assertEqual(llm_client.PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, 8.0)
-        self.assertEqual(llm_client.PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, 30.0)
+        self.assertEqual(llm_client.PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, 140.0)
+        self.assertEqual(llm_client.PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, 35.0)
+        self.assertEqual(llm_client.PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, 180.0)
+        self.assertEqual(llm_client.PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS, 30.0)
         self.assertEqual(llm_client.PROPOSAL_SEARCH_DEADLINE_SECONDS, 56.0)
+        self.assertEqual(llm_client.PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, 2400)
         self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
         self.assertEqual(raised.exception.attempts_used, 2)
         self.assertEqual(len(client.chat.completions.calls), 2)
@@ -3763,13 +4157,71 @@ class LLMClientTests(unittest.TestCase):
                 [{"role": "user", "content": "Please give me one plan."}],
                 ENTITY_ROUTE_ROWS,
                 "proposal-routing-test",
-                stage_context={"revisionRouting": "proposal"},
+                stage_context={
+                    "revisionRouting": "proposal_conservative",
+                    "deferRevisionExecution": True,
+                    "proposalBindingMode": "conservative",
+                },
             )
 
         self.assertIs(result, expected)
         generate_proposal.assert_called_once()
+        proposal_deadline = generate_proposal.call_args.kwargs["deadline"]
+        self.assertGreater(proposal_deadline - time.monotonic(), 170.0)
 
-    def test_thinking_is_enabled_only_for_revision_and_modifier_tasks(self):
+    def test_thinking_is_disabled_for_revision_and_ordinary_tasks(self):
+        revision_client = FakeClient(["{}"])
+        operation_client = FakeClient(["{}"])
+        plain_client = FakeClient(["{}"])
+
+        with patch.object(llm_client, "_create_async_client", return_value=revision_client):
+            asyncio.run(llm_client._request_completion(
+                "test-kimi-key",
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.6",
+                [{"role": "user", "content": "Create one revision plan."}],
+                100,
+                5,
+                structured=False,
+                task="revision_plan",
+            ))
+        with patch.object(llm_client, "_create_async_client", return_value=operation_client):
+            asyncio.run(llm_client._request_completion(
+                "test-kimi-key",
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.6",
+                [{"role": "user", "content": "Create operation candidates."}],
+                100,
+                5,
+                structured=False,
+                task="operation_candidates",
+            ))
+        with patch.object(llm_client, "_create_async_client", return_value=plain_client):
+            asyncio.run(llm_client._request_completion(
+                "test-kimi-key",
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.6",
+                [{"role": "user", "content": "Discuss the current Stage."}],
+                100,
+                5,
+                structured=False,
+                task="plain_chat",
+            ))
+
+        self.assertEqual(
+            revision_client.chat.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
+        self.assertEqual(
+            operation_client.chat.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
+        self.assertEqual(
+            plain_client.chat.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
+
+    def test_kimi_temperature_matches_thinking_mode(self):
         revision_client = FakeClient(["{}"])
         plain_client = FakeClient(["{}"])
 
@@ -3793,17 +4245,11 @@ class LLMClientTests(unittest.TestCase):
                 100,
                 5,
                 structured=False,
-                task="plain_chat",
+                task="stage_assessment",
             ))
 
-        self.assertEqual(
-            revision_client.chat.completions.calls[0]["extra_body"],
-            {"thinking": {"type": "enabled"}},
-        )
-        self.assertEqual(
-            plain_client.chat.completions.calls[0]["extra_body"],
-            {"thinking": {"type": "disabled"}},
-        )
+        self.assertEqual(revision_client.chat.completions.calls[0]["temperature"], 0.6)
+        self.assertEqual(plain_client.chat.completions.calls[0]["temperature"], 0.6)
 
     def test_discussion_card_is_not_repeated_in_the_saved_assistant_body(self):
         focus = "我会留意水边第一次推进是否真的改变了路线判断。"
@@ -4005,7 +4451,7 @@ class LLMClientTests(unittest.TestCase):
                 proposal_validator=reject_proposal,
             )
 
-        self.assertEqual(raised.exception.code, "PROPOSAL_SEARCH_EXHAUSTED")
+        self.assertEqual(raised.exception.code, "DETERMINISTIC_SEARCH_EXHAUSTED")
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(raised.exception.attempts_used, 3)
         self.assertEqual(len(client.chat.completions.calls), 3)
@@ -4764,13 +5210,50 @@ class LLMClientTests(unittest.TestCase):
         )
         prompt = messages[0]["content"]
 
-        self.assertIn("one or two declarative observations", prompt)
+        self.assertIn("two short paragraphs with four or five declarative sentences", prompt)
         self.assertIn("your own design reaction", prompt)
         self.assertIn("do not put questions, choices", prompt)
         self.assertIn("The server owns optional discussion metadata", prompt)
         self.assertIn("satisfactionQuestion must be null", prompt)
         self.assertNotIn("At a real decision point, ask one concrete question", prompt)
         self.assertNotIn("at most 3 more may be asked", prompt)
+
+    def test_human_edit_opening_prompt_avoids_a_map_inventory(self):
+        context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "changeSummary": {"components": ["water", "boxes"]},
+        }
+        structured = llm_client.build_chat_messages(
+            [], OPERATION_BASE_ROWS, assessment_only=True, stage_context=context
+        )[0]["content"]
+        plain = llm_client.build_plain_chat_messages(
+            [], OPERATION_BASE_ROWS, stage_opening=True, stage_context=context
+        )[0]["content"]
+
+        for prompt in (structured, plain):
+            self.assertIn("opening after a verified human edit", prompt)
+            self.assertIn("two short paragraphs with four or five declarative sentences", prompt)
+            self.assertIn("saved, solvable edit once", prompt)
+            self.assertIn("Do not inventory the layout", prompt)
+            self.assertIn("list entity locations or coordinates", prompt)
+            self.assertIn("designer placed a particular object", prompt)
+
+    def test_human_edit_opening_prefers_effects_over_coordinate_inventory(self):
+        body = (
+            "The saved edit is solvable. "
+            "In my view, the new bottleneck makes the first push more deliberate. "
+            "It should make the player pause before committing to the corridor. "
+            "That trade-off gives the revision a clearer rhythm. "
+            "B1 at (6,6) and B2 at (8,9) now sit beside T1 at (5,8)."
+        )
+
+        compacted = llm_client._compact_human_edit_opening_inventory(body, "en")
+        formatted = llm_client._format_stage_opening_paragraphs(compacted)
+
+        self.assertNotIn("B1 at (6,6)", compacted)
+        self.assertEqual(compacted.count("solvable"), 1)
+        self.assertEqual(len(formatted.split("\n\n")), 2)
 
     def test_dg_initial_provenance_does_not_attribute_exact_tiles(self):
         guidance = llm_client._build_draft_provenance_guidance(

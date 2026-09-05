@@ -57,7 +57,7 @@ from llm_client import (
     normalize_revision_plan,
     translate_turns,
     validate_execution_brief,
-    _ensure_stage_one_orientation,
+    _repair_stage_one_opening_display,
 )
 from repository import (
     DATABASE_PATH,
@@ -983,7 +983,7 @@ def assess_version(
         if existing is not None:
             existing_opening_text = existing["assistant_text"]
             if version["stage_number"] == 1:
-                existing_opening_text = _ensure_stage_one_orientation(
+                existing_opening_text = _repair_stage_one_opening_display(
                     existing_opening_text,
                     load_json(version["rows_json"]),
                     existing["language"],
@@ -1149,7 +1149,7 @@ def assess_version(
         else:
             existing_opening_text = existing["assistant_text"]
             if version["stage_number"] == 1:
-                existing_opening_text = _ensure_stage_one_orientation(
+                existing_opening_text = _repair_stage_one_opening_display(
                     existing_opening_text,
                     load_json(version["rows_json"]),
                     existing["language"],
@@ -1315,10 +1315,12 @@ def _send_message_locked(
             stage_context.get("stageSnapshot"),
         )
         stage_context["userMapClaims"] = user_map_claims
+        proposal_discovery = stage_context.get("proposalDiscovery") or {}
         revision_routing = _adaptive_revision_routing(
             content,
             user_map_claims,
             stage_context.get("stageSnapshot"),
+            proposal_discovery=proposal_discovery,
         )
         stage_context["adaptiveProposalCompletion"] = (
             revision_routing == "needs_clarification"
@@ -1332,6 +1334,33 @@ def _send_message_locked(
         if stage_context["adaptiveProposalCompletion"]:
             revision_routing = "proposal"
         stage_context["revisionRouting"] = revision_routing
+        proposal_state = {
+            "proposal": "ready_with_explicit_binding",
+            "proposal_conservative": "ready_with_conservative_binding",
+            "proposal_blocked": "blocked_by_fact_conflict",
+        }.get(revision_routing, "clarifying")
+        stage_context["proposalState"] = proposal_state
+        stage_context["proposalBindingMode"] = {
+            "ready_with_explicit_binding": "explicit",
+            "ready_with_conservative_binding": "conservative",
+        }.get(proposal_state)
+        stage_context["responseLanguage"] = language
+        if (
+            payload.action == "none"
+            and
+            revision_routing == "needs_clarification"
+            and proposal_discovery
+            and not user_map_claims.get("conflicts")
+        ):
+            stage_context["proposalClarification"] = _proposal_clarification_spec(
+                proposal_discovery,
+                stage_context.get("stageSnapshot"),
+                language,
+            )
+        if proposal_state.startswith("ready_") and proposal_discovery.get("brief"):
+            # The RevisionPlan agent receives only the user's own request and
+            # answers from this one topic, never the model's speculative prose.
+            stage_context["authorizedRevisionBrief"] = proposal_discovery["brief"]
         if user_map_claims.get("conflicts"):
             # A conflicting present-tense map claim must not advance inferred
             # assistant memory.  merge_chat_update still receives the user's
@@ -1373,16 +1402,18 @@ def _send_message_locked(
             transitions = source_binding.get("executionBrief", {}).get(
                 "requiredTransitions", []
             )
-            # A single-cell structural transition can be applied from the
-            # frozen contract directly.  Entity relocation and multi-cell
-            # edits still go through the constrained Revision path because
-            # they need paired-cell/solver reasoning.
-            stage_context["deterministicExactExecution"] = bool(
-                len(transitions) == 1
-                and transitions[0].get("from") in {".", "#", "@"}
-                and transitions[0].get("to") in {".", "#", "@"}
-            )
-        stage_context["deferRevisionExecution"] = payload.action != "execute_revision"
+            # Every actionable purple card is already bound to a complete,
+            # validated diff. Execution replays that immutable diff and runs
+            # the same entity, contract, structure, and solver checks again;
+            # no LLM is allowed to choose a different cell after consent.
+            stage_context["deterministicExactExecution"] = bool(transitions)
+        # Candidate generation is not map execution.  A converged automatic
+        # proposal must reach RevisionPlan, while explicit execution remains
+        # the only map-mutating authority.
+        stage_context["deferRevisionExecution"] = (
+            payload.action != "execute_revision"
+            and not proposal_state.startswith("ready_")
+        )
         if payload.action != "none" and stage_context.get("activeDisagreement"):
             raise ApiError(
                 409,
@@ -1399,6 +1430,14 @@ def _send_message_locked(
                 "sourceTurnId": payload.sourceTurnId,
                 "proposalOffer": source_offer,
             }
+            excluded_rows = _rows_after_frozen_proposal(
+                context["rows"],
+                (source_binding or {}).get("executionBrief"),
+            )
+            if excluded_rows is not None:
+                stage_context["excludedProposalCandidateFingerprint"] = map_fingerprint(
+                    excluded_rows
+                )
 
     revision_state, revision_brief = classify_revision_request(
         context["conversation"],
@@ -1410,8 +1449,20 @@ def _send_message_locked(
             str(source_offer.get(field) or "").strip()
             for field in ("summary", "rationale")
         ).strip()
-    elif payload.action in {"challenge_revision", "alternative_revision"}:
+    elif payload.action == "challenge_revision":
         revision_state, revision_brief = "not_request", None
+    elif payload.action == "alternative_revision":
+        revision_state = "proposal_requested"
+        revision_brief = " ".join(
+            str(source_offer.get(field) or "").strip()
+            for field in ("summary", "rationale")
+        ).strip()
+        context["stageContext"]["authorizedRevisionBrief"] = revision_brief
+    elif context["stageContext"].get("proposalState", "").startswith("ready_"):
+        revision_state = "proposal_requested"
+        revision_brief = str(
+            context["stageContext"].get("authorizedRevisionBrief") or revision_brief or ""
+        ).strip()
     context["stageContext"]["revisionRequestState"] = revision_state
     revision_failure = None
     if revision_state == "relaxation_confirmed":
@@ -1437,7 +1488,16 @@ def _send_message_locked(
             )
         except LLMServiceError as exception:
             revision_failure = exception
-            if exception.code == "REVISION_CONTRACT_INVALID":
+            if revision_state == "proposal_requested":
+                execution = _automatic_proposal_failure_execution(
+                    language=language,
+                    request_id=exception.request_id,
+                    exception=exception,
+                )
+            elif exception.code in {
+                "REVISION_CONTRACT_INVALID",
+                "REVISION_CONTRACT_CONFLICT",
+            }:
                 execution = _revision_contract_clarification_execution(
                     language=language,
                     request_id=exception.request_id,
@@ -1499,16 +1559,23 @@ def _send_message_locked(
     if payload.action == "challenge_revision":
         execution = _sanitize_challenge_execution(execution, source_offer, language)
     elif payload.action != "execute_revision" and execution.proposed_rows is not None:
-        # The only web path allowed to create a map proposal is the explicit
-        # purple-card execution action.  Discard unsolicited legacy rows here.
-        execution = replace(
-            execution,
-            proposed_rows=None,
-            revision_plan={},
-            revision_contract={},
-            revision_operations=[],
-            proposal_diagnostics={},
-        )
+        if revision_state == "proposal_requested":
+            execution = _materialize_verified_automatic_offer(
+                execution,
+                context["rows"],
+                language,
+                context["stageContext"],
+            )
+        else:
+            # Unsolicited legacy rows are never allowed to become a proposal.
+            execution = replace(
+                execution,
+                proposed_rows=None,
+                revision_plan={},
+                revision_contract={},
+                revision_operations=[],
+                proposal_diagnostics={},
+            )
     if payload.action == "alternative_revision":
         execution = _ensure_alternative_revision_execution(
             execution,
@@ -1563,6 +1630,7 @@ def _send_message_locked(
             guidance=corrected_guidance,
         )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
+    execution = _mark_proposal_discovery_guidance(execution, context["stageContext"])
     execution = _bind_execution_to_stage(
         execution,
         payload.baseVersionId,
@@ -1622,6 +1690,18 @@ def _send_message_locked(
                             "deterministicFallback"
                         )
                     ),
+                    "providerStatus": getattr(revision_failure, "provider_status", None),
+                    "providerErrorType": getattr(
+                        revision_failure, "provider_error_type", ""
+                    ) or None,
+                    "providerErrorCode": getattr(
+                        revision_failure, "provider_error_code", ""
+                    ) or None,
+                    "providerParam": getattr(revision_failure, "provider_param", "")
+                    or None,
+                    "providerMessage": getattr(
+                        revision_failure, "provider_message", ""
+                    ) or None,
                 },
                 utc_now(),
             )
@@ -1641,6 +1721,13 @@ def _send_message_locked(
                 proposal_validation.rows,
                 language,
             )
+            if context["stageContext"].get("proposalBindingMode") == "conservative":
+                prefix = (
+                    "这是基于当前布局补全对象关系的一份最小改动候选，仍等待你审查。"
+                    if language == "zh-CN"
+                    else "This is a minimal-change candidate whose object binding was completed from the current layout; it remains yours to review."
+                )
+                verified_summary = f"{prefix}\n\n{verified_summary}"
             execution = replace(
                 execution,
                 assistant_message=_verified_proposal_message(language),
@@ -1666,6 +1753,86 @@ def _send_message_locked(
                 payload.idempotencyKey,
                 execution,
             )
+
+            discovery_marker = (execution.guidance or {}).get("proposalDiscovery")
+            if isinstance(discovery_marker, dict):
+                record_event(
+                    database,
+                    session_id,
+                    "proposal_discovery_progress",
+                    {
+                        "stageId": payload.baseVersionId,
+                        "turnId": assistant_turn_id,
+                        "topicId": discovery_marker.get("topicId"),
+                        "status": discovery_marker.get("status"),
+                        "clarificationQuestionCount": discovery_marker.get(
+                            "clarificationQuestionCount"
+                        ),
+                        "clarificationQuestionKey": discovery_marker.get(
+                            "clarificationQuestionKey"
+                        ),
+                        "clarificationCountBefore": discovery_marker.get(
+                            "clarificationCountBefore"
+                        ),
+                        "clarificationCountAfter": discovery_marker.get(
+                            "clarificationCountAfter"
+                        ),
+                        "groundingSentencesDropped": (
+                            execution.proposal_diagnostics or {}
+                        ).get("groundingSentencesDropped", 0),
+                        "clarificationRecoveryMode": discovery_marker.get(
+                            "clarificationRecoveryMode"
+                        ) or (execution.proposal_diagnostics or {}).get(
+                            "clarificationRecoveryMode"
+                        ),
+                        "clarificationAuthor": discovery_marker.get(
+                            "clarificationAuthor"
+                        ) or (execution.proposal_diagnostics or {}).get(
+                            "clarificationAuthor"
+                        ),
+                        "clarificationTargetDimension": (
+                            execution.proposal_diagnostics or {}
+                        ).get("clarificationTargetDimension"),
+                        "clarificationQuestionValidated": (
+                            execution.proposal_diagnostics or {}
+                        ).get("clarificationQuestionValidated"),
+                        "clarificationQuestionRepairAttempts": (
+                            execution.proposal_diagnostics or {}
+                        ).get("clarificationQuestionRepairAttempts"),
+                        "clarificationFallbackReason": (
+                            execution.proposal_diagnostics or {}
+                        ).get("clarificationFallbackReason"),
+                        "proposalTopicContinued": discovery_marker.get(
+                            "proposalTopicContinued"
+                        ),
+                        "routing": context["stageContext"].get("revisionRouting"),
+                        "proposalState": context["stageContext"].get("proposalState"),
+                        "bindingMode": context["stageContext"].get("proposalBindingMode"),
+                        "enteredRevisionPlan": bool(execution.revision_plan),
+                        "failureClass": (execution.proposal_diagnostics or {}).get(
+                            "failureClass"
+                        ) or (execution.proposal_diagnostics or {}).get("category"),
+                        "failureCode": (execution.proposal_diagnostics or {}).get(
+                            "failureCode"
+                        ),
+                        "providerStatus": (execution.proposal_diagnostics or {}).get(
+                            "providerStatus"
+                        ),
+                        "providerErrorType": (execution.proposal_diagnostics or {}).get(
+                            "providerErrorType"
+                        ),
+                        "providerErrorCode": (execution.proposal_diagnostics or {}).get(
+                            "providerErrorCode"
+                        ),
+                        "providerParam": (execution.proposal_diagnostics or {}).get(
+                            "providerParam"
+                        ),
+                        "providerMessage": (execution.proposal_diagnostics or {}).get(
+                            "providerMessage"
+                        ),
+                    },
+                    utc_now(),
+                )
 
             if execution.proposal_binding:
                 record_event(
@@ -1927,6 +2094,97 @@ def _retry_exhausted_execution(language, exception):
     )
 
 
+def _materialize_verified_automatic_offer(execution, base_rows, language, stage_context):
+    """Freeze a validated semantic candidate into the existing exact purple-card binding."""
+    _execute_revision_candidate_or_api_error(base_rows, execution)
+    validation = _solve_changed_proposal_or_api_error(base_rows, execution.proposed_rows)
+    strategies = (execution.revision_contract or {}).get("strategies") or []
+    selected_index = (execution.proposal_diagnostics or {}).get("selectedStrategyIndex")
+    if not isinstance(selected_index, int) or not 1 <= selected_index <= len(strategies):
+        raise ApiError(
+            502,
+            "REVISION_EXECUTION_INVALID",
+            "The verified proposal has no selected execution strategy.",
+        )
+    strategy = strategies[selected_index - 1]
+    transitions = []
+    for operation in execution.revision_operations or []:
+        row = operation.get("row")
+        column = operation.get("column")
+        if not isinstance(row, int) or not isinstance(column, int):
+            raise ApiError(502, "REVISION_EXECUTION_INVALID", "A proposal operation is invalid.")
+        transitions.append({
+            "row": row,
+            "column": column,
+            "from": base_rows[row - 1][column - 1],
+            "to": operation.get("to"),
+        })
+    brief = validate_execution_brief({
+        "schemaVersion": 1,
+        "effect": strategy.get("effect"),
+        "anchors": list(strategy.get("anchorEntities") or []),
+        "focus": strategy.get("focus"),
+        "requiredTransitions": transitions,
+        "allowedOperators": list(strategy.get("allowedOperators") or []),
+        "preserve": list(strategy.get("preserve") or []),
+        "playObjective": strategy.get("playObjective"),
+    }, base_rows, (stage_context or {}).get("entityBindings"))
+    objective_policy = (execution.proposal_diagnostics or {}).get("objectivePolicy") or {}
+    mechanism = (execution.proposal_diagnostics or {}).get("mechanismEvidence") or {}
+    authorized = str(
+        (execution.revision_contract or {}).get("authorizedBrief") or ""
+    ).strip()
+    if language == "zh-CN":
+        summary = authorized[:180] or "一份已经过验证的局部修改候选"
+        verified_text = "已验证具体格子变化、执行合同、地图结构和可解性。"
+        expected_text = (
+            "对目标体验的影响有路线与机制证据支持，但仍需要通过试玩确认。"
+            if objective_policy.get("requiresMechanismEvidence")
+            else "对节奏和体验的影响仍需要通过试玩确认。"
+        )
+        body = (
+            "我已经把刚才确认的方向落实成一份可审查候选。"
+            "这张紫色方案卡绑定的是已经验证过的真实格子变化；地图目前还没有改变。"
+        )
+    else:
+        summary = authorized[:240] or "A verified local revision candidate"
+        verified_text = "The exact tile changes, execution contract, structure, and solvability are verified."
+        expected_text = (
+            "Its intended play effect has route and mechanism evidence, but still needs playtesting."
+            if objective_policy.get("requiresMechanismEvidence")
+            else "Its pacing and play effect still need playtesting."
+        )
+        body = (
+            "I turned the direction we confirmed into a reviewable candidate. "
+            "The purple card is bound to verified tile changes; the current map has not changed yet."
+        )
+    guidance = dict(execution.guidance or {})
+    guidance.update({
+        "move": "offer_revision",
+        "followUpQuestion": None,
+        "proposalOffer": {
+            "summary": summary,
+            "rationale": f"{verified_text} {expected_text}",
+            "executionBrief": brief,
+        },
+        "uiCues": [],
+    })
+    diagnostics = dict(execution.proposal_diagnostics or {})
+    diagnostics.update({
+        "candidateFrozen": True,
+        "mechanismEvidence": mechanism,
+        "verifiedValidation": validation.as_dict(),
+    })
+    return replace(
+        execution,
+        assistant_message=body,
+        proposed_rows=None,
+        modification_summary="",
+        guidance=guidance,
+        proposal_diagnostics=diagnostics,
+    )
+
+
 def _verified_proposal_message(language):
     if language == "zh-CN":
         return (
@@ -2129,6 +2387,11 @@ def _proposal_search_failure_execution(
         "revisionPlan": revision_plan,
         "executionContract": revision_contract,
         "search": diagnostics,
+        "providerStatus": getattr(exception, "provider_status", None),
+        "providerErrorType": getattr(exception, "provider_error_type", "") or None,
+        "providerErrorCode": getattr(exception, "provider_error_code", "") or None,
+        "providerParam": getattr(exception, "provider_param", "") or None,
+        "providerMessage": getattr(exception, "provider_message", "") or None,
     }
 
     with connect(immediate=True) as database:
@@ -2195,6 +2458,235 @@ def _proposal_search_failure_execution(
         },
         revision_plan=revision_plan,
         revision_contract=revision_contract,
+        proposal_diagnostics=diagnostics,
+    )
+
+
+def _automatic_proposal_failure_execution(*, language, request_id, exception):
+    """Never turn a failed automatic proposal into ordinary-chat fallback prose."""
+    failure_code = str(getattr(exception, "code", "") or "")
+    provider_status = getattr(exception, "provider_status", None)
+    provider_message = str(getattr(exception, "provider_message", "") or "").strip()
+    diagnostics = getattr(exception, "proposal_diagnostics", {}) or {}
+    attempt_failures = diagnostics.get("attemptFailures") or []
+    truncated_then_timed_out = (
+        failure_code == "UPSTREAM_TIMEOUT"
+        and any(item.get("failureClass") == "truncated_output" for item in attempt_failures[:-1])
+        and bool(attempt_failures)
+        and attempt_failures[-1].get("code") == "UPSTREAM_TIMEOUT"
+    )
+    provider_detail = ""
+    if provider_status or provider_message:
+        provider_detail = f"Moonshot HTTP {provider_status or 'error'}"
+        if provider_message:
+            provider_detail += f": {provider_message}"
+    if failure_code not in {"UPSTREAM_TIMEOUT", "UPSTREAM_REQUEST_REJECTED", "UPSTREAM_SERVER_ERROR"}:
+        return _classified_proposal_failure_execution(
+            language=language,
+            request_id=request_id,
+            exception=exception,
+        )
+    if language == "zh-CN":
+        if truncated_then_timed_out:
+            message = (
+                "我已经按刚才确认的方向尝试生成待审查方案。首次 RevisionPlan 回复达到输出上限，"
+                "随后修复重试超时，因此没有得到完整可验证的方案。地图没有改变，我不会把截断结果当成方案。"
+            )
+        elif failure_code == "UPSTREAM_TIMEOUT":
+            message = (
+                "我已经按刚才确认的方向尝试生成待审查方案，但上游模型在本次方案生成的时间预算内未返回（请求超时）。"
+                "这不是地图或合同验证失败；地图没有改变，我不会把不完整的生成结果当成方案。"
+            )
+        elif provider_detail:
+            message = (
+                "我已经按刚才确认的方向尝试生成待审查方案，但上游方案接口拒绝了这次请求（"
+                f"{provider_detail}）。这不是地图或合同验证结果，地图没有改变。"
+                "我不会把不完整的生成结果当成方案。"
+            )
+        else:
+            message = (
+                "我已经按刚才确认的方向尝试生成待审查方案，但上游方案接口拒绝了这次请求。"
+                "地图没有改变；我不会把不完整的生成结果当成方案。"
+            )
+    else:
+        if truncated_then_timed_out:
+            message = (
+                "I tried to generate a reviewable proposal. The first RevisionPlan response reached its "
+                "output limit, and the corrective retry then timed out, so no complete verifiable proposal "
+                "was produced. The map is unchanged and I will not present the truncated result as a proposal."
+            )
+        elif failure_code == "UPSTREAM_TIMEOUT":
+            message = (
+                "I tried to generate a reviewable proposal, but the upstream model did not respond "
+                "within the proposal time budget. This is not a map or contract-validation result; "
+                "the map is unchanged and I will not present an incomplete generation as a proposal."
+            )
+        elif provider_detail:
+            message = (
+                "I tried to generate a reviewable proposal, but the upstream proposal endpoint rejected "
+                f"the request ({provider_detail}). This is not a map or contract-validation result; "
+                "the map is unchanged and I will not present an incomplete generation as a proposal."
+            )
+        else:
+            message = (
+                "I tried to generate a reviewable proposal, but the upstream proposal endpoint rejected "
+                "the request. The map is unchanged; I will not present an incomplete generation as a proposal."
+            )
+    return LLMExecutionResult(
+        assistant_message=message,
+        attempts_used=exception.attempts_used,
+        request_id=request_id,
+        model="automatic-proposal-failure",
+        guidance={
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+        },
+        revision_plan=getattr(exception, "revision_plan", {}) or {},
+        revision_contract=getattr(exception, "revision_contract", {}) or {},
+        proposal_diagnostics={
+            **(getattr(exception, "proposal_diagnostics", {}) or {}),
+            "category": "automatic_proposal_failed",
+            "failureCode": exception.code,
+            "failureClass": (
+                "upstream_timeout"
+                if failure_code == "UPSTREAM_TIMEOUT"
+                else "upstream_request_rejected"
+                if failure_code == "UPSTREAM_REQUEST_REJECTED"
+                else "proposal_generation_failed"
+            ),
+            "providerStatus": provider_status,
+            "providerErrorType": getattr(exception, "provider_error_type", "") or None,
+            "providerErrorCode": getattr(exception, "provider_error_code", "") or None,
+            "providerParam": getattr(exception, "provider_param", "") or None,
+            "providerMessage": provider_message or None,
+        },
+    )
+
+
+def _classified_proposal_failure_execution(*, language, request_id, exception):
+    code = str(getattr(exception, "code", "") or "INTERNAL_PIPELINE_ERROR")
+    diagnostics = dict(getattr(exception, "proposal_diagnostics", {}) or {})
+    rejections = [
+        item for item in diagnostics.get("rejectionRecords") or []
+        if isinstance(item, dict)
+    ]
+    constructed = int(
+        diagnostics.get("constructedCandidates")
+        or (diagnostics.get("deterministicFallback") or {}).get("constructedCandidates")
+        or 0
+    )
+    model_candidates = int(diagnostics.get("candidateCount") or 0)
+    search_diagnostics = diagnostics.get("deterministicFallback") or {}
+    search_candidates = int(search_diagnostics.get("constructedCandidates") or 0)
+    search_deadline_reached = bool(search_diagnostics.get("deadlineReached"))
+    replan_attempted = bool(diagnostics.get("replanAttempted"))
+    labels_zh = {
+        "REVISION_PLAN_INVALID": "RevisionPlan 的结构化内容无法解析",
+        "MODEL_RESPONSE_INVALID": "RevisionPlan 的结构化内容无法解析",
+        "REVISION_CONTRACT_INVALID": "RevisionPlan 与当前地图或执行合同冲突",
+        "REVISION_CONTRACT_CONFLICT": "RevisionPlan 与当前地图或执行合同冲突",
+        "EXACT_TRANSITION_INFEASIBLE": "你明确指定的格子变化无法形成合法且可解的候选",
+        "HARD_OBJECTIVE_NOT_MET": "候选没有满足你明确提出的可量化硬指标",
+        "SOFT_OBJECTIVE_EVIDENCE_MISSING": "候选虽然可能可解，但缺少支持目标体验的可核验机制变化",
+        "CANDIDATE_DUPLICATED": "所有候选都重复了已拒绝或正在替换的方案",
+        "CANDIDATE_UNSOLVABLE": "所有不同候选都未通过确定性可解性验证",
+        "DETERMINISTIC_SEARCH_EXHAUSTED": "修改助手和确定性局部搜索都没有找到满足当前约束的候选",
+        "GLOBAL_PROPOSAL_TIMEOUT": "完整提案管线耗尽了 300 秒总预算",
+        "INTERNAL_PIPELINE_ERROR": "提案管线发生内部错误",
+        "PROPOSAL_SEARCH_EXHAUSTED": "候选搜索没有找到满足当前约束的可解改动",
+        "PROPOSAL_ROUTING_INVARIANT": "提案状态机发生内部路由错误",
+        "CONFIGURATION_ERROR": "提案服务配置不完整",
+    }
+    labels_en = {
+        "REVISION_PLAN_INVALID": "the structured RevisionPlan could not be parsed",
+        "MODEL_RESPONSE_INVALID": "the structured RevisionPlan could not be parsed",
+        "REVISION_CONTRACT_INVALID": "the RevisionPlan conflicts with the current map or execution contract",
+        "REVISION_CONTRACT_CONFLICT": "the RevisionPlan conflicts with the current map or execution contract",
+        "EXACT_TRANSITION_INFEASIBLE": "the exact requested tile transitions could not form a valid solvable candidate",
+        "HARD_OBJECTIVE_NOT_MET": "no candidate met the explicit measurable requirement",
+        "SOFT_OBJECTIVE_EVIDENCE_MISSING": "solvable candidates lacked verified evidence for the requested play mechanism",
+        "CANDIDATE_DUPLICATED": "every candidate repeated a rejected or cited proposal",
+        "CANDIDATE_UNSOLVABLE": "every distinct candidate failed deterministic solvability validation",
+        "DETERMINISTIC_SEARCH_EXHAUSTED": "the modifier and deterministic local search found no admissible candidate",
+        "GLOBAL_PROPOSAL_TIMEOUT": "the complete proposal pipeline exhausted its 300-second budget",
+        "INTERNAL_PIPELINE_ERROR": "the proposal pipeline encountered an internal error",
+        "PROPOSAL_SEARCH_EXHAUSTED": "candidate search found no solvable change satisfying the current constraints",
+        "PROPOSAL_ROUTING_INVARIANT": "the proposal state machine encountered an internal routing error",
+        "CONFIGURATION_ERROR": "the proposal service configuration is incomplete",
+    }
+    rejection_categories = []
+    for item in rejections:
+        category = str(item.get("category") or "")
+        if category and category not in rejection_categories:
+            rejection_categories.append(category)
+    if language == "zh-CN":
+        reason = labels_zh.get(code, "提案管线发生内部错误")
+        details = []
+        if model_candidates:
+            details.append(f"修改助手给出了 {model_candidates} 个候选")
+        if search_candidates:
+            details.append(f"确定性搜索检查了 {search_candidates} 个候选")
+        if replan_attempted:
+            details.append("已尝试一次语义重规划")
+        if search_deadline_reached:
+            details.append("确定性搜索到达阶段截止时间")
+        detail = ("；".join(details) + "。") if details else ""
+        if rejection_categories:
+            detail += " 主要拒绝类型：" + "、".join(rejection_categories[:3]) + "。"
+        message = (
+            f"RevisionPlan 阶段已经进入正式提案管线，但{reason}。{detail}"
+            "当前地图没有改变，也没有生成紫色方案卡；这不是 Moonshot 接口拒绝。"
+        )
+    else:
+        reason = labels_en.get(code, "the proposal pipeline encountered an internal error")
+        details = []
+        if model_candidates:
+            details.append(f"the modifier returned {model_candidates} candidates")
+        if search_candidates:
+            details.append(f"deterministic search checked {search_candidates} candidates")
+        if replan_attempted:
+            details.append("one semantic replan was attempted")
+        if search_deadline_reached:
+            details.append("deterministic search reached its phase deadline")
+        detail = (" " + "; ".join(details) + ".") if details else ""
+        if rejection_categories:
+            detail += " Main rejection classes: " + ", ".join(rejection_categories[:3]) + "."
+        message = (
+            f"The request entered the formal proposal pipeline, but {reason}.{detail} "
+            "The current map is unchanged and no purple proposal card was created; this was not a Moonshot endpoint rejection."
+        )
+    diagnostics.update({
+        "category": "proposal_pipeline_failed",
+        "failureClass": code.casefold(),
+        "failureCode": code,
+        "constructedCandidates": constructed,
+        "modelCandidateCount": model_candidates,
+        "deterministicSearchCandidateCount": search_candidates,
+        "deterministicSearchDeadlineReached": search_deadline_reached,
+        "replanAttempted": replan_attempted,
+    })
+    return LLMExecutionResult(
+        assistant_message=message,
+        attempts_used=getattr(exception, "attempts_used", 0),
+        request_id=request_id,
+        model="classified-proposal-failure",
+        latency_ms=0,
+        guidance={
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+        },
+        revision_plan=getattr(exception, "revision_plan", {}) or {},
+        revision_contract=getattr(exception, "revision_contract", {}) or {},
         proposal_diagnostics=diagnostics,
     )
 
@@ -3074,7 +3566,7 @@ def synchronize_turn_with_online_match(session_id, request_id):
             if earlier_user_turn is None:
                 opening_text = opening_turn["content"]
                 if version is not None and version["stage_number"] == 1:
-                    opening_text = _ensure_stage_one_orientation(
+                    opening_text = _repair_stage_one_opening_display(
                         opening_text,
                         load_json(version["rows_json"]),
                         opening_turn["language"],
@@ -3659,6 +4151,7 @@ def build_llm_context(database, session_id, version):
         (session_id, version["id"]),
     ).fetchall()
     clarification_question_count = _clarification_question_count(turns)
+    proposal_discovery = _proposal_discovery_from_turns(turns, version["id"])
     accepted_opening = database.execute(
         """
         SELECT proposal.id AS proposal_id, proposal.assistant_turn_id,
@@ -3970,6 +4463,7 @@ def build_llm_context(database, session_id, version):
             "clarificationQuestionBudget": max(
                 0, 3 - clarification_question_count
             ),
+            "proposalDiscovery": proposal_discovery,
             "openingTurnId": (
                 accepted_opening["assistant_turn_id"]
                 if accepted_opening is not None
@@ -4051,7 +4545,296 @@ def _latest_substantive_design_direction(turns):
     return ""
 
 
-def _adaptive_revision_routing(content, user_map_claims, snapshot):
+def _proposal_discovery_from_turns(turns, version_id):
+    """Rebuild one pending proposal topic from private turn metadata."""
+    ordered = sorted(turns or [], key=lambda turn: turn["sequence_number"])
+    active = None
+    for turn in ordered:
+        content = str(turn["content"] or "").strip()
+        if turn["role"] == "user":
+            starts_new_topic = (
+                active is None
+                or active.get("status") in {"proposal_ready", "blocked"}
+                or _proposal_topic_reset_requested(content)
+            )
+            if _guidance_advice_request(content) and starts_new_topic:
+                active = {
+                    "topicId": turn["id"],
+                    "sourceTurnId": turn["id"],
+                    "sourceSequence": turn["sequence_number"],
+                    "versionId": version_id,
+                    "userEvidence": [content],
+                    "clarificationQuestionCount": 0,
+                    "askedQuestionKeys": [],
+                    "lastQuestionKey": None,
+                    "status": "clarifying",
+                }
+            elif active is not None:
+                active["userEvidence"].append(content)
+                if (
+                    active.get("status") == "failed"
+                    and _contains_user_design_direction(content)
+                ):
+                    # A failed candidate is not a dead-end: a new concrete
+                    # designer direction re-opens the same Stage topic.
+                    active["status"] = "clarifying"
+            continue
+        if active is None or turn["role"] != "assistant":
+            continue
+        try:
+            guidance = load_json(turn["guidance_json"]) or {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            guidance = {}
+        marker = guidance.get("proposalDiscovery")
+        if not isinstance(marker, dict) or marker.get("topicId") != active["topicId"]:
+            continue
+        active["clarificationQuestionCount"] = max(
+            active["clarificationQuestionCount"],
+            int(marker.get("clarificationQuestionCount") or 0),
+        )
+        asked_keys = marker.get("askedQuestionKeys")
+        if not isinstance(asked_keys, list):
+            asked_keys = []
+        question_key = str(
+            marker.get("clarificationQuestionKey")
+            or marker.get("lastQuestionKey")
+            or ""
+        ).strip()
+        if not question_key and int(marker.get("clarificationQuestionCount") or 0) > 0:
+            question_key = _infer_legacy_clarification_question_key(content)
+        for key in [*asked_keys, question_key]:
+            if key and key not in active["askedQuestionKeys"]:
+                active["askedQuestionKeys"].append(key)
+        if question_key:
+            active["lastQuestionKey"] = question_key
+        marker_status = marker.get("status") or active["status"]
+        # Earlier releases marked proposal_ready from routing alone, even when
+        # no validated candidate existed.  Do not let that historical marker
+        # suppress a later, correctly routed proposal attempt.
+        if marker_status == "proposal_ready" and not marker.get("hasValidatedCandidate"):
+            marker_status = "failed"
+        active["status"] = marker_status
+    if active is None:
+        return None
+    active["userEvidence"] = [item for item in active["userEvidence"] if item][-8:]
+    active["brief"] = "\n".join(active["userEvidence"])[-2400:]
+    return active
+
+
+def _proposal_topic_reset_requested(content):
+    """Only explicit topic changes replace an unfinished proposal discussion."""
+    return bool(re.search(
+        r"(?:换个(?:方向|目标|话题)|另一个(?:方向|目标|问题)|放弃(?:刚才|这个)|"
+        r"重新开始|不讨论这个了|new\s+(?:direction|goal|topic)|"
+        r"different\s+(?:direction|goal)|drop\s+this|start\s+over)",
+        str(content or ""),
+        flags=re.IGNORECASE,
+    ))
+
+
+def _infer_legacy_clarification_question_key(content):
+    """Classify old question turns so read-time reconstruction avoids repeats."""
+    text = str(content or "").casefold()
+    if re.search(r"(?:B1|B2|哪个箱子|哪只箱子|which\s+(?:box|crate))", text, re.IGNORECASE):
+        return "binding"
+    if re.search(
+        r"(?:推箱.*(?:步|次数)|陷阱|走错|绕行|顺序|运输|路线|"
+        r"push(?:es|ing)?|mistake|trap|detour|order|transport|route)",
+        text,
+        re.IGNORECASE,
+    ):
+        return "mechanism"
+    if re.search(r"(?:保留|不变|不能改|约束|preserve|keep|unchanged|constraint)", text):
+        return "preserve"
+    if re.search(r"(?:时间|难度|思考|挑战|体验|time|difficulty|challenge|experience)", text):
+        return "experience_goal"
+    return "legacy_question"
+
+
+def _proposal_clarification_spec(discovery, snapshot, language):
+    """Choose one server-owned question for an active proposal topic."""
+    if not discovery or discovery.get("status") != "clarifying":
+        return None
+
+    evidence = "\n".join(discovery.get("userEvidence") or []).strip()
+    lowered = evidence.casefold()
+    asked = [
+        str(key).strip()
+        for key in discovery.get("askedQuestionKeys") or []
+        if str(key).strip()
+    ]
+    count_before = max(0, min(3, int(discovery.get("clarificationQuestionCount") or 0)))
+    has_goal = bool(re.search(
+        r"(?:时间|难度|思考|挑战|体验|节奏|压力|选择|"
+        r"time|difficulty|challenge|experience|pacing|pressure|choice)",
+        lowered,
+        re.IGNORECASE,
+    ))
+    has_mechanism = bool(re.search(
+        r"(?:推箱.*(?:步|次数)|总步数|陷阱|走错|绕行|顺序|运输|路线|死角|"
+        r"push(?:es|ing)?|move\s+count|trap|mistake|detour|order|transport|route|deadlock)",
+        lowered,
+        re.IGNORECASE,
+    ))
+    labels = sorted(set(
+        label.upper()
+        for label in re.findall(r"\b(?:P|B\d+|T\d+)\b", evidence, re.IGNORECASE)
+    ))
+    entities = (snapshot or {}).get("entities") or []
+    box_labels = sorted(
+        str(item.get("id") or "").strip()
+        for item in entities
+        if item.get("kind") == "box" and str(item.get("id") or "").strip()
+    )
+
+    candidates = []
+    if not has_goal:
+        candidates.append("experience_goal")
+    if not has_mechanism:
+        candidates.append("mechanism")
+    if not labels and len(box_labels) > 1:
+        candidates.append("binding")
+    candidates.append("preserve")
+    question_key = next((key for key in candidates if key not in asked), None)
+    if question_key is None:
+        question_key = f"implementation_detail_{count_before + 1}"
+
+    chinese = language == "zh-CN"
+    if question_key == "experience_goal":
+        question = (
+            "你希望玩家增加的时间主要花在规划推箱顺序上，还是花在执行更长的运输路线上？"
+            if chinese else
+            "Should the added solving time come mainly from planning the push order or from executing a longer transport route?"
+        )
+    elif question_key == "mechanism":
+        question = (
+            "你希望额外时间主要来自更长的推箱运输，还是来自需要反复判断顺序的局部陷阱？"
+            if chinese else
+            "Should the extra time come mainly from longer box transport or from a local trap that demands repeated order judgments?"
+        )
+    elif question_key == "binding" and len(box_labels) > 1:
+        first, second = box_labels[:2]
+        question = (
+            f"如果只先改一个局部，你希望围绕 {first} 还是 {second} 增加运输长度？这会决定方案绑定哪条箱子路线。"
+            if chinese else
+            f"If we revise one local area first, should the longer transport center on {first} or {second}? That determines which box route the proposal binds."
+        )
+    else:
+        question_key = "preserve" if question_key == "preserve" else question_key
+        question = (
+            "为了增加这部分挑战，当前布局中哪一种体验必须保留不变？"
+            if chinese else
+            "While adding this challenge, which part of the current play experience must remain unchanged?"
+        )
+
+    latest = (discovery.get("userEvidence") or [""])[-1].strip()
+    if chinese:
+        if re.search(r"(?:增加|提高).{0,8}推箱.{0,8}(?:步|次数)", latest):
+            acknowledgement = "明白，你希望通过增加实际推箱次数来延长解题时间。"
+        elif re.search(r"(?:陷阱|走错|误导)", latest):
+            acknowledgement = "明白，你希望额外的思考时间主要来自可识别但需要判断的局部风险。"
+        else:
+            acknowledgement = "我会沿着你刚才确认的方向继续收敛方案。"
+    else:
+        if re.search(r"(?:increase|more).{0,16}(?:push|move)", latest, re.IGNORECASE):
+            acknowledgement = "Understood: you want the longer solve time to come from additional box pushes."
+        elif re.search(r"(?:trap|mistake|mislead)", latest, re.IGNORECASE):
+            acknowledgement = "Understood: you want the added thinking time to come from a readable local risk."
+        else:
+            acknowledgement = "I will keep narrowing the proposal around the direction you just confirmed."
+
+    # Recovery questions remain open-ended. They are not shown to Kimi and are
+    # used only when its independently authored question cannot be retained.
+    fallback_questions = {
+        "experience_goal": (
+            "你希望额外的解题时间主要消耗在哪种判断或操作上？"
+            if chinese else
+            "What kind of judgment or action should account for the extra solving time?"
+        ),
+        "mechanism": (
+            "你希望通过哪种局部机制增加实际推箱次数？"
+            if chinese else
+            "What local mechanism should create the additional box pushes?"
+        ),
+        "binding": (
+            "你希望先围绕哪个箱子或局部区域增加运输长度？"
+            if chinese else
+            "Which box or local area should carry the longer transport first?"
+        ),
+        "preserve": (
+            "增加这部分挑战时，当前体验中的哪一点必须保持不变？"
+            if chinese else
+            "Which part of the current play experience must remain unchanged while adding this challenge?"
+        ),
+    }
+    question = fallback_questions.get(question_key, question)
+
+    return {
+        "questionKey": question_key,
+        # These two strings are deterministic recovery only. Kimi receives the
+        # target dimension and safe labels, but never the fallback wording.
+        "fallbackQuestion": question,
+        "fallbackAcknowledgement": acknowledgement,
+        "questionIntent": {
+            "experience_goal": "clarify where the added player time or difficulty should come from",
+            "mechanism": "clarify the local play mechanism that should create the requested effect",
+            "binding": "clarify which existing entity or local area should carry the change",
+            "preserve": "clarify which current play quality must remain unchanged",
+        }.get(question_key, "clarify one remaining implementation detail"),
+        "allowedEntityLabels": (
+            [
+                str(item.get("id") or "").strip()
+                for item in entities
+                if str(item.get("id") or "").strip()
+            ]
+            if (snapshot or {}).get("identityStatus") == "exact"
+            else []
+        ),
+        "countBefore": count_before,
+        "askedQuestionKeys": asked,
+        "topicContinued": len(discovery.get("userEvidence") or []) > 1,
+    }
+
+
+def _proposal_discovery_has_unique_anchor(discovery, snapshot):
+    evidence = "\n".join((discovery or {}).get("userEvidence") or [])
+    labels = set(re.findall(r"\b(?:P|B\d+|T\d+)\b", evidence, flags=re.IGNORECASE))
+    if labels:
+        return (snapshot or {}).get("identityStatus") == "exact"
+    lowered = evidence.casefold()
+    entities = (snapshot or {}).get("entities") or []
+    if re.search(r"(?:箱子|box|crate)", lowered):
+        return sum(item.get("kind") == "box" for item in entities) == 1
+    if re.search(r"(?:目标|target|goal)", lowered):
+        return sum(item.get("kind") == "target" for item in entities) == 1
+    if re.search(r"(?:\u73a9\u5bb6|player)", lowered):
+        # A Sokoban Stage owns exactly one player. Treat a plain player
+        # reference as the stable P binding when snapshot identities are exact.
+        return (
+            (snapshot or {}).get("identityStatus") == "exact"
+            and sum(item.get("kind") == "player" for item in entities) == 1
+        )
+    return False
+
+
+def _proposal_discovery_can_be_completed_conservatively(discovery, snapshot):
+    """Allow one reviewed minimal candidate after a bounded, clear direction."""
+    if not discovery or (snapshot or {}).get("identityStatus") not in {None, "exact"}:
+        return False
+    evidence = "\n".join(discovery.get("userEvidence") or [])
+    return bool(_contains_user_design_direction(evidence))
+
+
+def _proposal_discovery_is_sufficient(discovery, snapshot):
+    if not discovery or (snapshot or {}).get("identityStatus") not in {None, "exact"}:
+        return False
+    evidence = "\n".join(discovery.get("userEvidence") or [])
+    return bool(_contains_user_design_direction(evidence)) and (
+        _proposal_discovery_has_unique_anchor(discovery, snapshot)
+    )
+
+
+def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_discovery=None):
     """Choose proposal expansion versus one targeted clarification question."""
     text = str(content or "").strip()
     if not text:
@@ -4059,6 +4842,20 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot):
     if _guidance_confusion_request(text):
         return "confused"
     if (user_map_claims or {}).get("conflicts"):
+        return "needs_clarification"
+
+    discovery = proposal_discovery or {}
+    if discovery and discovery.get("status") == "clarifying":
+        if _proposal_discovery_is_sufficient(discovery, snapshot):
+            return "proposal"
+        if int(discovery.get("clarificationQuestionCount") or 0) >= 3:
+            if _proposal_discovery_has_unique_anchor(discovery, snapshot):
+                return "proposal"
+            return (
+                "proposal_conservative"
+                if _proposal_discovery_can_be_completed_conservatively(discovery, snapshot)
+                else "proposal_blocked"
+            )
         return "needs_clarification"
 
     direct_edit = bool(re.search(
@@ -4159,6 +4956,10 @@ def _clarification_question_count(turns):
             guidance = load_json(turn["guidance_json"]) or {}
         except (TypeError, ValueError, json.JSONDecodeError):
             guidance = {}
+        marker = guidance.get("proposalDiscovery")
+        if isinstance(marker, dict):
+            total = max(total, int(marker.get("clarificationQuestionCount") or 0))
+            continue
         if guidance.get("move") != "clarify_intent":
             continue
         total += str(turn["content"] or "").count("?")
@@ -4952,6 +5753,11 @@ def _ensure_alternative_revision_execution(
         )
         if isinstance(item, dict)
     } if isinstance(offer.get("executionBrief"), dict) else set()
+    if candidate_transitions and candidate_transitions != original_transitions:
+        # A generated alternative that reached this point has already passed
+        # the same candidate, contract, mechanism-evidence, and solver gates as
+        # an automatic proposal. Preserve its exact frozen binding verbatim.
+        return execution
     if (
         " ".join(str(value or "") for value in offer.values()).strip() == original_text.strip()
         or candidate_summary == original_summary
@@ -4992,6 +5798,28 @@ def _ensure_alternative_revision_execution(
         proposal_diagnostics={},
         guidance=guidance,
     )
+
+
+def _rows_after_frozen_proposal(rows, execution_brief):
+    """Replay a card's exact diff only to exclude it from alternative search."""
+    if not isinstance(execution_brief, dict):
+        return None
+    transitions = execution_brief.get("requiredTransitions")
+    if not isinstance(transitions, list) or not transitions:
+        return None
+    candidate = [list(row) for row in rows]
+    try:
+        for item in transitions:
+            row = int(item["row"])
+            column = int(item["column"])
+            before = str(item["from"])
+            after = str(item["to"])
+            if candidate[row - 1][column - 1] != before:
+                return None
+            candidate[row - 1][column - 1] = after
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    return tuple("".join(row) for row in candidate)
 
 
 def _normalize_manual_edit_review_execution(execution, stage_context):
@@ -5054,6 +5882,159 @@ def _mark_new_discussion_guidance(execution, stage_context):
     return replace(execution, guidance=guidance)
 
 
+def _limit_proposal_discovery_questions(message):
+    """A bounded proposal topic may ask one question per assistant turn."""
+    sentences = re.split(r"(?<=[.!?。！？])\s*", str(message or "").strip())
+    seen_question = False
+    kept = []
+    for sentence in sentences:
+        if not sentence:
+            continue
+        is_question = sentence.endswith(("?", "？"))
+        if is_question and seen_question:
+            continue
+        kept.append(sentence)
+        seen_question = seen_question or is_question
+    return " ".join(kept).strip(), seen_question
+
+
+def _without_model_questions(message):
+    """Keep declarative model prose; the server owns proposal questions."""
+    sentences = re.split(r"(?<=[.!?。！？])\s*", str(message or "").strip())
+    return " ".join(
+        sentence.strip()
+        for sentence in sentences
+        if sentence.strip() and not sentence.rstrip().endswith(("?", "？"))
+    ).strip()
+
+
+def _is_snapshot_chat_fallback(message):
+    text = str(message or "").strip().casefold()
+    return (
+        "我会以当前保存的 stage 为准继续分析" in text
+        or "i will continue from the current saved stage" in text
+    )
+
+
+def _mark_proposal_discovery_guidance(execution, stage_context):
+    """Persist server-owned proposal-topic progress without exposing a card."""
+    discovery = (stage_context or {}).get("proposalDiscovery") or {}
+    routing = (stage_context or {}).get("revisionRouting")
+    if not discovery or not discovery.get("topicId"):
+        return execution
+    guidance = dict(execution.guidance or {})
+    marker = {
+        "topicId": discovery["topicId"],
+        "sourceTurnId": discovery.get("sourceTurnId"),
+        "status": "clarifying",
+        "hasValidatedCandidate": False,
+        "clarificationQuestionCount": int(
+            discovery.get("clarificationQuestionCount") or 0
+        ),
+        "askedQuestionKeys": list(discovery.get("askedQuestionKeys") or []),
+        "lastQuestionKey": discovery.get("lastQuestionKey"),
+    }
+    body = execution.assistant_message
+    if routing in {"proposal", "proposal_conservative"}:
+        offer = guidance.get("proposalOffer")
+        marker["hasValidatedCandidate"] = execution.proposed_rows is not None
+        marker["status"] = (
+            "proposal_ready"
+            if execution.proposed_rows is not None
+            or (execution.revision_plan and isinstance(offer, dict))
+            else "failed"
+        )
+    if routing == "needs_clarification":
+        specification = (stage_context or {}).get("proposalClarification")
+        if isinstance(specification, dict) and specification.get("questionKey"):
+            question_key = str(specification.get("questionKey") or "").strip()
+            diagnostics = dict(execution.proposal_diagnostics or {})
+            question = str(diagnostics.get("clarificationQuestion") or "").strip()
+            fallback_question = str(
+                specification.get("fallbackQuestion") or ""
+            ).strip()
+            fallback_acknowledgement = str(
+                specification.get("fallbackAcknowledgement") or ""
+            ).strip()
+            recovery_mode = str(
+                diagnostics.get("clarificationRecoveryMode") or "kimi_complete"
+            )
+            clarification_author = str(
+                diagnostics.get("clarificationAuthor") or ""
+            ).strip()
+            if not question or question not in str(body or ""):
+                cleaned_body = _without_model_questions(body)
+                if not cleaned_body or _is_snapshot_chat_fallback(cleaned_body):
+                    cleaned_body = fallback_acknowledgement
+                    clarification_author = "server_fallback"
+                    recovery_mode = "server_fallback"
+                else:
+                    clarification_author = "mixed"
+                    recovery_mode = "question_replaced"
+                question = fallback_question
+                body = "\n\n".join(
+                    part for part in (cleaned_body, question) if part
+                )
+            else:
+                clarification_author = clarification_author or "kimi"
+
+            asked_keys = marker["askedQuestionKeys"]
+            count_before = max(
+                marker["clarificationQuestionCount"],
+                int(specification.get("countBefore") or 0),
+            )
+            if question_key and question_key not in asked_keys:
+                asked_keys.append(question_key)
+                count_after = min(3, count_before + 1)
+            else:
+                count_after = count_before
+            marker.update({
+                "clarificationQuestionKey": question_key or None,
+                "lastQuestionKey": question_key or marker.get("lastQuestionKey"),
+                "askedQuestionKeys": asked_keys,
+                "clarificationCountBefore": count_before,
+                "clarificationCountAfter": count_after,
+                "clarificationQuestionCount": count_after,
+                "clarificationRecoveryMode": recovery_mode,
+                "clarificationAuthor": clarification_author,
+                "proposalTopicContinued": bool(
+                    specification.get("topicContinued")
+                ),
+            })
+            guidance.update({
+                "move": "clarify_intent",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+                "coordinateLinks": [],
+            })
+            diagnostics.update({
+                "clarificationQuestionKey": question_key or None,
+                "clarificationCountBefore": count_before,
+                "clarificationCountAfter": count_after,
+                "clarificationRecoveryMode": recovery_mode,
+                "clarificationAuthor": clarification_author,
+                "clarificationTargetDimension": question_key or None,
+                "proposalTopicContinued": bool(
+                    specification.get("topicContinued")
+                ),
+            })
+            execution = replace(execution, proposal_diagnostics=diagnostics)
+        else:
+            body, asked_question = _limit_proposal_discovery_questions(body)
+            if asked_question:
+                marker["clarificationQuestionCount"] = min(
+                    3, marker["clarificationQuestionCount"] + 1
+                )
+    elif routing == "proposal_blocked":
+        marker["status"] = "blocked"
+    guidance["proposalDiscovery"] = marker
+    return replace(execution, assistant_message=body, guidance=guidance)
+
+
 def _record_disagreement_event(database, session_id, version_id, turn_id, guidance):
     disagreement = (guidance or {}).get("disagreement")
     if not isinstance(disagreement, dict):
@@ -5101,6 +6082,7 @@ def _public_guidance(guidance):
     result.pop("designContextPatch", None)
     result.pop("designContextPatchError", None)
     result.pop("openingRecovery", None)
+    result.pop("openingPresentation", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and (
         "executionBrief" in offer or "revisionPlan" in offer
@@ -5116,6 +6098,8 @@ def _design_context_guidance(guidance):
     """Keep semantic patches while excluding display-only and execution metadata."""
     result = dict(guidance or {})
     result.pop("coordinateLinks", None)
+    result.pop("proposalDiscovery", None)
+    result.pop("openingPresentation", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and (
         "executionBrief" in offer

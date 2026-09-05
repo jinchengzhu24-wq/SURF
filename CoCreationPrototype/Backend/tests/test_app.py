@@ -18,6 +18,76 @@ from llm_client import LLMExecutionResult, LLMServiceError, build_chat_messages
 
 
 class CoCreationPrototypeApiTests(unittest.TestCase):
+    def test_automatic_candidate_is_frozen_into_actionable_purple_offer(self):
+        proposed = list(backend.SAMPLE_ROWS)
+        proposed[1] = "##.........#"
+        execution = LLMExecutionResult(
+            assistant_message="candidate",
+            attempts_used=2,
+            request_id="automatic-offer-test",
+            proposed_rows=proposed,
+            revision_plan={"strategies": [{}]},
+            revision_contract={
+                "authorizedBrief": "增加局部路线判断",
+                "strategies": [{
+                    "strategyIndex": 1,
+                    "effect": "adjust_internal_walls",
+                    "focus": {"row": 2, "column": 2, "radius": 1},
+                    "allowedOperators": ["add_wall"],
+                    "preserve": ["outer_shell", "unrelated_areas"],
+                    "requiredTransitions": [],
+                    "anchorEntities": [],
+                    "playObjective": "route_choice",
+                }],
+            },
+            revision_operations=[{"row": 2, "column": 2, "from": ".", "to": "#"}],
+            proposal_diagnostics={
+                "selectedStrategyIndex": 1,
+                "objectivePolicy": {"requiresMechanismEvidence": True},
+                "mechanismEvidence": {"passed": True},
+            },
+            guidance={"move": "deliver_revision", "proposalOffer": None},
+        )
+
+        frozen = backend._materialize_verified_automatic_offer(
+            execution,
+            backend.SAMPLE_ROWS,
+            "zh-CN",
+            {},
+        )
+
+        self.assertIsNone(frozen.proposed_rows)
+        offer = frozen.guidance["proposalOffer"]
+        self.assertEqual(
+            offer["executionBrief"]["requiredTransitions"],
+            [{"row": 2, "column": 2, "from": ".", "to": "#"}],
+        )
+        self.assertEqual(frozen.guidance["move"], "offer_revision")
+
+    def test_candidate_failure_is_not_mislabeled_as_upstream_rejection(self):
+        exception = LLMServiceError(
+            "HARD_OBJECTIVE_NOT_MET",
+            "metric failed",
+            "hard-objective-failure-test",
+            False,
+            3,
+            422,
+        )
+        exception.proposal_diagnostics = {
+            "constructedCandidates": 2,
+            "rejectionRecords": [{"category": "hard_objective_not_met"}],
+        }
+
+        execution = backend._automatic_proposal_failure_execution(
+            language="zh-CN",
+            request_id=exception.request_id,
+            exception=exception,
+        )
+
+        self.assertIn("可量化硬指标", execution.assistant_message)
+        self.assertIn("不是 Moonshot 接口拒绝", execution.assistant_message)
+        self.assertIsNone(execution.guidance["proposalOffer"])
+
     def setUp(self):
         self.client = TestClient(backend.app)
 
@@ -60,6 +130,351 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             ),
             "confused",
         )
+
+    def test_proposal_discovery_keeps_answers_until_a_bound_plan_is_ready(self):
+        turns = [
+            {
+                "id": "request", "role": "user", "content": "先给我个方案吧，如何制造局部死局",
+                "sequence_number": 1, "guidance_json": None,
+            },
+            {
+                "id": "ask-1", "role": "assistant", "content": "你希望哪种死局？",
+                "sequence_number": 2,
+                "guidance_json": '{"proposalDiscovery":{"topicId":"request","clarificationQuestionCount":1,"status":"clarifying"}}',
+            },
+            {
+                "id": "answer-1", "role": "user", "content": "单箱误入死角",
+                "sequence_number": 3, "guidance_json": None,
+            },
+            {
+                "id": "ask-2", "role": "assistant", "content": "它应当可逆吗？",
+                "sequence_number": 4,
+                "guidance_json": '{"proposalDiscovery":{"topicId":"request","clarificationQuestionCount":2,"status":"clarifying"}}',
+            },
+            {
+                "id": "answer-2", "role": "user", "content": "可以重新回到左侧通道",
+                "sequence_number": 5, "guidance_json": None,
+            },
+            {
+                "id": "ask-3", "role": "assistant", "content": "谁先开路？",
+                "sequence_number": 6,
+                "guidance_json": '{"proposalDiscovery":{"topicId":"request","clarificationQuestionCount":3,"status":"clarifying"}}',
+            },
+            {
+                "id": "answer-3", "role": "user",
+                "content": "先让 B2 去某个位置打开通路，B1 才能安全进入再被拉回",
+                "sequence_number": 7, "guidance_json": None,
+            },
+        ]
+        snapshot = {
+            "identityStatus": "exact",
+            "entities": [{"kind": "box"}, {"kind": "box"}],
+        }
+
+        discovery = backend._proposal_discovery_from_turns(turns, "stage-2")
+
+        self.assertEqual(discovery["clarificationQuestionCount"], 3)
+        self.assertIn("B2", discovery["brief"])
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                turns[-1]["content"], {"conflicts": []}, snapshot,
+                proposal_discovery=discovery,
+            ),
+            "proposal",
+        )
+
+    def test_proposal_clarification_continues_topic_and_owns_next_question(self):
+        turns = [
+            {
+                "id": "request", "role": "user",
+                "content": "我希望用户花费更多时间来解决这个关卡，可以如何改善",
+                "sequence_number": 1, "guidance_json": None,
+            },
+            {
+                "id": "ask-1", "role": "assistant",
+                "content": "你希望增加推箱子的总步数，还是增加容易走错的陷阱点？",
+                "sequence_number": 2,
+                "guidance_json": '{"proposalDiscovery":{"topicId":"request","clarificationQuestionCount":1,"status":"clarifying"}}',
+            },
+            {
+                "id": "answer-1", "role": "user",
+                "content": "增加推箱子的总步数",
+                "sequence_number": 3, "guidance_json": None,
+            },
+        ]
+        snapshot = {
+            "identityStatus": "exact",
+            "entities": [
+                {"id": "B1", "kind": "box"},
+                {"id": "B2", "kind": "box"},
+            ],
+        }
+
+        discovery = backend._proposal_discovery_from_turns(turns, "stage-1")
+        specification = backend._proposal_clarification_spec(
+            discovery, snapshot, "zh-CN"
+        )
+
+        self.assertEqual(discovery["topicId"], "request")
+        self.assertEqual(discovery["askedQuestionKeys"], ["mechanism"])
+        self.assertEqual(specification["questionKey"], "binding")
+        self.assertIn("B1", specification["allowedEntityLabels"])
+        self.assertIn("B2", specification["allowedEntityLabels"])
+        self.assertTrue(specification["fallbackQuestion"].endswith(("?", "？")))
+        self.assertIn("增加实际推箱次数", specification["fallbackAcknowledgement"])
+
+    def test_server_clarification_replaces_snapshot_fallback_and_advances_count(self):
+        execution = LLMExecutionResult(
+            assistant_message=(
+                "我会以当前保存的 Stage 为准继续分析。当前可确认："
+                "B1位于第3行第6列、T1位于第7行第7列。"
+            ),
+            attempts_used=2,
+            request_id="clarification-recovery",
+            guidance={"move": "offer_perspective"},
+            proposal_diagnostics={
+                "groundingSentencesDropped": 2,
+                "clarificationRecoveryMode": "deterministic_clarification",
+            },
+        )
+        marked = backend._mark_proposal_discovery_guidance(
+            execution,
+            {
+                "revisionRouting": "needs_clarification",
+                "proposalDiscovery": {
+                    "topicId": "request",
+                    "sourceTurnId": "request",
+                    "status": "clarifying",
+                    "clarificationQuestionCount": 1,
+                    "askedQuestionKeys": ["mechanism"],
+                },
+                "proposalClarification": {
+                    "questionKey": "binding",
+                    "fallbackQuestion": "你希望先围绕哪个箱子增加运输长度？",
+                    "fallbackAcknowledgement": "明白，你希望通过增加实际推箱次数来延长解题时间。",
+                    "countBefore": 1,
+                    "askedQuestionKeys": ["mechanism"],
+                    "topicContinued": True,
+                },
+            },
+        )
+
+        marker = marked.guidance["proposalDiscovery"]
+        self.assertNotIn("以当前保存的 Stage 为准", marked.assistant_message)
+        self.assertIn("增加实际推箱次数", marked.assistant_message)
+        self.assertEqual(marked.assistant_message.count("？"), 1)
+        self.assertEqual(marker["clarificationQuestionKey"], "binding")
+        self.assertEqual(marker["clarificationCountBefore"], 1)
+        self.assertEqual(marker["clarificationCountAfter"], 2)
+        self.assertEqual(marker["clarificationQuestionCount"], 2)
+        self.assertEqual(marker["askedQuestionKeys"], ["mechanism", "binding"])
+        self.assertTrue(marker["proposalTopicContinued"])
+
+    def test_one_exact_entity_binding_can_converge_before_third_question(self):
+        discovery = {
+            "topicId": "request",
+            "status": "clarifying",
+            "clarificationQuestionCount": 1,
+            "userEvidence": ["请给方案", "增加推箱子的总步数", "围绕 B1 调整"],
+        }
+        snapshot = {
+            "identityStatus": "exact",
+            "entities": [
+                {"id": "B1", "kind": "box"},
+                {"id": "B2", "kind": "box"},
+            ],
+        }
+
+        self.assertTrue(
+            backend._proposal_discovery_is_sufficient(discovery, snapshot)
+        )
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "围绕 B1 调整", {"conflicts": []}, snapshot,
+                proposal_discovery=discovery,
+            ),
+            "proposal",
+        )
+
+    def test_server_counts_the_kimi_question_that_was_actually_displayed(self):
+        message = (
+            "我更在意额外运输是否会形成持续的规划压力。\n\n"
+            "你希望先让哪个箱子承担这段额外运输？"
+        )
+        execution = LLMExecutionResult(
+            assistant_message=message,
+            attempts_used=1,
+            request_id="kimi-clarification",
+            guidance={"move": "clarify_intent"},
+            proposal_diagnostics={
+                "clarificationQuestion": "你希望先让哪个箱子承担这段额外运输？",
+                "clarificationQuestionValidated": True,
+                "clarificationAuthor": "kimi",
+                "clarificationRecoveryMode": "kimi_complete",
+            },
+        )
+        marked = backend._mark_proposal_discovery_guidance(
+            execution,
+            {
+                "revisionRouting": "needs_clarification",
+                "proposalDiscovery": {
+                    "topicId": "request",
+                    "sourceTurnId": "request",
+                    "status": "clarifying",
+                    "clarificationQuestionCount": 1,
+                    "askedQuestionKeys": ["mechanism"],
+                },
+                "proposalClarification": {
+                    "questionKey": "binding",
+                    "fallbackQuestion": "你希望先围绕哪个箱子增加运输长度？",
+                    "fallbackAcknowledgement": "我会继续收敛这个方向。",
+                    "countBefore": 1,
+                    "askedQuestionKeys": ["mechanism"],
+                    "topicContinued": True,
+                },
+            },
+        )
+
+        self.assertEqual(marked.assistant_message, message)
+        marker = marked.guidance["proposalDiscovery"]
+        self.assertEqual(marker["clarificationQuestionCount"], 2)
+        self.assertEqual(marker["clarificationAuthor"], "kimi")
+        self.assertEqual(marker["clarificationRecoveryMode"], "kimi_complete")
+
+    def test_proposal_discovery_completes_conservatively_after_three_when_object_is_ambiguous(self):
+        discovery = {
+            "topicId": "request",
+            "status": "clarifying",
+            "clarificationQuestionCount": 3,
+            "userEvidence": ["请给我一个让箱子更难处理的方案"],
+        }
+        snapshot = {
+            "identityStatus": "exact",
+            "entities": [{"kind": "box"}, {"kind": "box"}],
+        }
+
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "请继续", {"conflicts": []}, snapshot,
+                proposal_discovery=discovery,
+            ),
+            "proposal_conservative",
+        )
+
+    def test_automatic_proposal_failure_never_uses_snapshot_fallback(self):
+        exception = LLMServiceError(
+            "MODEL_RESPONSE_INVALID",
+            "The RevisionPlan response was not valid JSON.",
+            "automatic-proposal-failure-test",
+            True,
+            2,
+            422,
+        )
+        execution = backend._automatic_proposal_failure_execution(
+            language="zh-CN",
+            request_id="automatic-proposal-failure-test",
+            exception=exception,
+        )
+        marked = backend._mark_proposal_discovery_guidance(
+            execution,
+            {
+                "revisionRouting": "proposal_conservative",
+                "proposalDiscovery": {
+                    "topicId": "topic", "clarificationQuestionCount": 3,
+                },
+            },
+        )
+
+        self.assertEqual(marked.guidance["proposalDiscovery"]["status"], "failed")
+        self.assertNotIn("当前保存的 Stage 为准", marked.assistant_message)
+        self.assertIsNone(marked.guidance["proposalOffer"])
+
+    def test_automatic_proposal_failure_exposes_safe_provider_reason(self):
+        exception = LLMServiceError(
+            "UPSTREAM_REQUEST_REJECTED",
+            "Kimi returned HTTP 400: response_format is unsupported.",
+            "automatic-provider-failure-test",
+            False,
+            1,
+            502,
+            provider_status=400,
+            provider_error_type="invalid_request_error",
+            provider_error_code="unsupported_parameter",
+            provider_param="response_format",
+            provider_message="response_format is unsupported",
+        )
+        execution = backend._automatic_proposal_failure_execution(
+            language="zh-CN",
+            request_id="automatic-provider-failure-test",
+            exception=exception,
+        )
+        self.assertIn("HTTP 400", execution.assistant_message)
+        self.assertIn("response_format is unsupported", execution.assistant_message)
+        self.assertIn("providerMessage", execution.proposal_diagnostics)
+        self.assertIsNone(execution.guidance["proposalOffer"])
+
+    def test_automatic_proposal_timeout_is_not_described_as_rejection(self):
+        exception = LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "Kimi did not compile the revision plan before the proposal time limit.",
+            "automatic-timeout-test",
+            True,
+            1,
+            504,
+        )
+        execution = backend._automatic_proposal_failure_execution(
+            language="zh-CN",
+            request_id="automatic-timeout-test",
+            exception=exception,
+        )
+
+        self.assertIn("请求超时", execution.assistant_message)
+        self.assertNotIn("接口拒绝", execution.assistant_message)
+        self.assertEqual(
+            execution.proposal_diagnostics["failureClass"],
+            "upstream_timeout",
+        )
+        self.assertIsNone(execution.guidance["proposalOffer"])
+
+    def test_automatic_proposal_reports_truncation_before_retry_timeout(self):
+        exception = LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "Kimi did not compile the revision plan before the proposal time limit.",
+            "automatic-truncated-timeout-test",
+            True,
+            2,
+            504,
+        )
+        exception.proposal_diagnostics = {
+            "failureStage": "revision_plan",
+            "attemptFailures": [
+                {"attempt": 1, "code": "MODEL_RESPONSE_INVALID", "failureClass": "truncated_output"},
+                {"attempt": 2, "code": "UPSTREAM_TIMEOUT", "failureClass": "upstream_timeout"},
+            ],
+        }
+
+        execution = backend._automatic_proposal_failure_execution(
+            language="en",
+            request_id="automatic-truncated-timeout-test",
+            exception=exception,
+        )
+
+        self.assertIn("first RevisionPlan response reached its output limit", execution.assistant_message)
+        self.assertIn("corrective retry then timed out", execution.assistant_message)
+        self.assertIsNone(execution.guidance["proposalOffer"])
+
+    def test_failed_proposal_topic_reopens_for_a_new_concrete_direction(self):
+        turns = [
+            {"id": "request", "role": "user", "content": "请给我一个方案", "sequence_number": 1, "guidance_json": None},
+            {"id": "failed", "role": "assistant", "content": "候选未通过", "sequence_number": 2,
+             "guidance_json": '{"proposalDiscovery":{"topicId":"request","status":"failed","clarificationQuestionCount":3}}'},
+            {"id": "retry", "role": "user", "content": "让 B1 阻挡 B2 的通道", "sequence_number": 3, "guidance_json": None},
+        ]
+
+        discovery = backend._proposal_discovery_from_turns(turns, "stage")
+
+        self.assertEqual(discovery["status"], "clarifying")
+        self.assertIn("B1", discovery["brief"])
 
     def test_clarification_budget_allows_safe_completion_for_unique_water(self):
         snapshot = {
@@ -228,8 +643,11 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('chatWaitingPrimary', js_response.text)
         self.assertIn('chatWaitingFallback', js_response.text)
         self.assertIn('LLM_REQUEST_TIMEOUT_MS = 120000', js_response.text)
+        self.assertIn('MESSAGE_REQUEST_TIMEOUT_MS = 320000', js_response.text)
+        self.assertIn('PROPOSAL_DISPLAY_LIMIT_SECONDS = 300', js_response.text)
         self.assertIn('elapsedSeconds < LLM_PRIMARY_WAIT_SECONDS', js_response.text)
-        self.assertIn('elapsedSeconds} / ${timeoutSeconds}', js_response.text)
+        self.assertIn('elapsedSeconds} / ${PROPOSAL_DISPLAY_LIMIT_SECONDS}', js_response.text)
+        self.assertIn('timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS', js_response.text)
         self.assertNotIn('elapsedSeconds} / 65', js_response.text)
         self.assertIn('translationFailures', js_response.text)
         self.assertIn('translationUnavailable', js_response.text)

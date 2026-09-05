@@ -594,10 +594,11 @@ class CoCreationSessionTests(unittest.TestCase):
         turn = next(event for event in events if event["eventType"] == "turn")
         self.assertEqual(
             turn["openingAssistantText"],
-            opening.assistant_message
-            + "\n\nYou can share a first reaction or play the Stage; I support only "
-            "small, reviewable edits and thinking through them, while a broad rebuild "
-            "stays designer-led.",
+            backend._repair_stage_one_opening_display(
+                opening.assistant_message,
+                SAMPLE_ROWS,
+                "en",
+            ),
         )
         self.assertEqual(turn["userText"], "Could the route feel fair?")
         self.assertEqual(turn["assistantText"], reply.assistant_message)
@@ -1888,7 +1889,7 @@ class CoCreationSessionTests(unittest.TestCase):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Please propose a concrete revision.",
+                    "content": "I want P's opening position shifted left; please suggest a concrete revision.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "unchanged_offer_001",
                 },
@@ -1957,7 +1958,7 @@ class CoCreationSessionTests(unittest.TestCase):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Please propose a concrete revision.",
+                    "content": "I want P's opening position shifted left; please suggest a concrete revision.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "tamper_offer_001",
                 },
@@ -2411,7 +2412,7 @@ class CoCreationSessionTests(unittest.TestCase):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Please suggest a concrete route revision.",
+                    "content": "I want B1's first push to create a detour choice; please suggest a concrete revision.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "bidirectional-offer-001",
                 },
@@ -2472,7 +2473,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=alternative_execution):
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            return_value=alternative_execution,
+        ) as alternative_generator:
             alternative = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -2483,6 +2488,14 @@ class CoCreationSessionTests(unittest.TestCase):
                     "sourceTurnId": source_turn["turnId"],
                 },
             )
+        alternative_context = alternative_generator.call_args.kwargs["stage_context"]
+        self.assertEqual(
+            alternative_context["revisionRequestState"],
+            "proposal_requested",
+        )
+        self.assertTrue(
+            alternative_context.get("excludedProposalCandidateFingerprint")
+        )
         self.assertEqual(alternative.status_code, 200, alternative.text)
         self.assertEqual(
             alternative.json()["turns"][-1]["guidance"]["proposalOffer"]["summary"],
@@ -2682,7 +2695,7 @@ class CoCreationSessionTests(unittest.TestCase):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Suggest a route revision.",
+                    "content": "I want B1's first route to stay readable; suggest a concrete revision.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "latest-card-normal-offer-001",
                 },
@@ -2772,7 +2785,7 @@ class CoCreationSessionTests(unittest.TestCase):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Please suggest a concrete route revision.",
+                    "content": "I want B1's first push to create a detour choice; please suggest a concrete revision.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "challenge-reason-offer-001",
                 },

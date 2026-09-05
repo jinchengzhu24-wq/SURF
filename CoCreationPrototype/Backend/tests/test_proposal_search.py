@@ -183,7 +183,7 @@ class ProposalSearchTests(unittest.TestCase):
             first.diagnostics["constructedCandidates"],
             MAX_CONSTRUCTED_CANDIDATES,
         )
-        self.assertLessEqual(first.diagnostics["validCandidates"], 8)
+        self.assertLessEqual(first.diagnostics["validCandidates"], 12)
 
     def test_requested_metric_direction_precedes_stable_map_order(self):
         checked_rows = []

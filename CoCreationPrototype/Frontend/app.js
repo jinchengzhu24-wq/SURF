@@ -2,6 +2,8 @@
 
 const MAX_MESSAGE_LENGTH = 2000;
 const LLM_REQUEST_TIMEOUT_MS = 120000;
+const MESSAGE_REQUEST_TIMEOUT_MS = 320000;
+const PROPOSAL_DISPLAY_LIMIT_SECONDS = 300;
 const LLM_PRIMARY_WAIT_SECONDS = 70;
 const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
 const API_PREFIX = window.location.pathname.startsWith("/cocreation")
@@ -61,6 +63,8 @@ const translations = {
         thinking: "Assistant is considering the current Stage...",
         chatWaitingPrimary: "Waiting for the primary assistant",
         chatWaitingFallback: "The assistant is taking longer than usual; retrying once",
+        chatWaitingProposal: "A proposal may still be compiling and validating",
+        chatWaitingServerResult: "Waiting for the server's final result",
         chatRetryPending: "The previous message did not finish. Retry it without creating a duplicate.",
         messageLabel: "Message the level design assistant",
         messagePlaceholder: "Explain what you want to change or ask about the level...",
@@ -197,6 +201,8 @@ const translations = {
         thinking: "助手正在分析当前 Stage……",
         chatWaitingPrimary: "正在等待首选模型生成回复",
         chatWaitingFallback: "助手响应较慢，正在重试一次",
+        chatWaitingProposal: "方案可能仍在生成并进行确定性验证",
+        chatWaitingServerResult: "正在等待服务器返回最终结果",
         chatRetryPending: "上一条消息尚未完成，可安全重试且不会产生重复记录。",
         messageLabel: "给关卡设计助手发送消息",
         messagePlaceholder: "说明你想修改什么，或询问这个关卡的设计……",
@@ -1568,15 +1574,14 @@ function renderTranslationStatus() {
 }
 
 function chatWaitingMessage() {
-    const timeoutSeconds = LLM_REQUEST_TIMEOUT_MS / 1000;
-    const elapsedSeconds = Math.min(
-        timeoutSeconds,
-        Math.max(0, Math.floor((Date.now() - state.chatStartedAt) / 1000))
-    );
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - state.chatStartedAt) / 1000));
+    if (elapsedSeconds > PROPOSAL_DISPLAY_LIMIT_SECONDS) {
+        return `${t("chatWaitingServerResult")} · ${elapsedSeconds} ${t("seconds")}`;
+    }
     const phase = elapsedSeconds < LLM_PRIMARY_WAIT_SECONDS
         ? t("chatWaitingPrimary")
-        : t("chatWaitingFallback");
-    return `${phase} · ${elapsedSeconds} / ${timeoutSeconds} ${t("seconds")}`;
+        : t("chatWaitingProposal");
+    return `${phase} · ${elapsedSeconds} / ${PROPOSAL_DISPLAY_LIMIT_SECONDS} ${t("seconds")}`;
 }
 
 function startChatTimer() {
@@ -1656,7 +1661,7 @@ async function submitPendingMessage() {
         state.session = await api(`/api/sessions/${state.sessionId}/messages`, {
             method: "POST",
             body: pending,
-            timeoutMs: LLM_REQUEST_TIMEOUT_MS
+            timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS
         });
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());

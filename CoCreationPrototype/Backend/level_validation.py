@@ -115,6 +115,73 @@ def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES):
     )
 
 
+def minimum_pushes(rows, maximum_search_states=MAX_SEARCH_STATES):
+    """Return the fewest pushes needed to solve a valid Stage.
+
+    The ordinary validator optimizes total player moves and reports the pushes
+    on that witness route.  Proposal contracts that explicitly constrain push
+    count need a different metric, so this bounded 0-1 search minimizes pushes
+    directly without changing the public validator result.
+    """
+    normalized = validate_rows(rows)
+    walkable = {
+        (x, y)
+        for y, row in enumerate(normalized)
+        for x, tile in enumerate(row)
+        if tile in WALKABLE_TILES
+    }
+    player = _find_one(normalized, "p")
+    boxes = tuple(sorted(_find_all(normalized, "s")))
+    targets = frozenset(_find_all(normalized, "t"))
+    pending = deque([(player, boxes)])
+    costs = {(player, boxes): 0}
+    directions = ((0, -1), (0, 1), (-1, 0), (1, 0))
+
+    while pending:
+        current_player, current_boxes = pending.popleft()
+        current_state = (current_player, current_boxes)
+        current_cost = costs[current_state]
+        if set(current_boxes) == set(targets):
+            return current_cost
+        if len(costs) >= maximum_search_states:
+            raise LevelValidationError(
+                "MIN_PUSH_SEARCH_BUDGET_EXCEEDED",
+                "Minimum-push validation exceeded the search budget.",
+                {"searchedStates": len(costs)},
+            )
+
+        box_set = set(current_boxes)
+        for dx, dy in directions:
+            destination = (current_player[0] + dx, current_player[1] + dy)
+            if destination not in walkable:
+                continue
+            next_boxes = current_boxes
+            push_cost = 0
+            if destination in box_set:
+                box_destination = (destination[0] + dx, destination[1] + dy)
+                if box_destination not in walkable or box_destination in box_set:
+                    continue
+                moved = list(current_boxes)
+                moved[moved.index(destination)] = box_destination
+                next_boxes = tuple(sorted(moved))
+                push_cost = 1
+            next_state = (destination, next_boxes)
+            next_cost = current_cost + push_cost
+            if next_cost >= costs.get(next_state, float("inf")):
+                continue
+            costs[next_state] = next_cost
+            if push_cost:
+                pending.append(next_state)
+            else:
+                pending.appendleft(next_state)
+
+    raise LevelValidationError(
+        "UNSOLVABLE_LEVEL",
+        "The level has no Sokoban solution.",
+        {"searchedStates": len(costs)},
+    )
+
+
 def validate_rows(rows):
     if not isinstance(rows, (list, tuple)) or len(rows) != HEIGHT:
         raise LevelValidationError(
