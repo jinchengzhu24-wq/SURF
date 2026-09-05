@@ -2477,7 +2477,7 @@ class LLMClientTests(unittest.TestCase):
                 },
             )
 
-        self.assertIn("current saved Stage", result.assistant_message)
+        self.assertIn("first readable corridor", result.assistant_message)
         self.assertNotIn("did not finish cleanly", result.assistant_message)
         self.assertNotIn("?", result.assistant_message)
         self.assertIn("play the Stage", result.assistant_message)
@@ -2488,7 +2488,7 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertIn("deterministic solver", result.assessment["solutionSummary"])
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(len(client.chat.completions.calls), 3)
         self.assertEqual(
             client.chat.completions.calls[0]["response_format"]["type"],
             "json_schema",
@@ -2707,10 +2707,10 @@ class LLMClientTests(unittest.TestCase):
                 {"stageNumber": 2, "source": "accepted_proposal"},
             )
 
-        self.assertIn("current saved Stage", result.assistant_message)
+        self.assertIn("first readable corridor", result.assistant_message)
         self.assertNotIn("did not finish cleanly", result.assistant_message)
         self.assertEqual(result.model, "kimi-k2.6-safe-opening")
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(len(client.chat.completions.calls), 3)
 
     def test_stage_fallback_skips_plain_request_when_remaining_budget_is_too_short(self):
         client = FakeClient(["not valid JSON"])
@@ -2731,9 +2731,9 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result.model, "kimi-k2.6-safe-opening")
         self.assertEqual(len(client.chat.completions.calls), 1)
-        self.assertIn("first reaction", result.assistant_message)
+        self.assertIn("first readable corridor", result.assistant_message)
 
-    def test_later_human_edit_invalid_opening_uses_server_snapshot_without_question(self):
+    def test_later_human_edit_invalid_opening_uses_grounded_plain_recovery(self):
         client = FakeClient([
             "   ",
             "not a complete JSON object",
@@ -2762,10 +2762,9 @@ class LLMClientTests(unittest.TestCase):
                 },
         )
 
-        self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertEqual(result.model, "kimi-k2.6-safe-opening")
-        return
+        self.assertEqual(result.model, "kimi-k2.6")
         focus = result.guidance["followUpQuestion"]
+        self.assertIsNotNone(focus)
         self.assertIn("水域、内部墙体", focus)
         self.assertTrue(any(marker in focus for marker in ("想让", "希望", "想加强")))
         self.assertNotIn("试玩时", focus)
@@ -4315,6 +4314,124 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result[4]["followUpQuestion"])
         self.assertIsNone(result[1]["satisfactionQuestion"])
 
+    def test_stage_opening_repairs_blank_guidance_and_keeps_grounded_body(self):
+        payload = {
+            "assistantMessage": (
+                "The water makes the first route feel deliberately narrow. "
+                "In my view, that gives the opening a clear rhythm."
+            ),
+            "guidance": {
+                "move": "offer_revision",
+                "intentHypothesis": "The designer wants a harder map.",
+                "intentConfidence": "high",
+                "followUpQuestion": "   ",
+                "proposalOffer": {"summary": "Change the map"},
+                "uiCues": [{"type": "unknown", "text": "Ignore this."}],
+            },
+            "assessment": {"solutionSummary": ""},
+            "proposedRows": ["############"] * 10,
+            "modificationSummary": 42,
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="en",
+            stage_context={"stageNumber": 2},
+            rows=ENTITY_ROUTE_ROWS,
+        )
+
+        self.assertIn("deliberately narrow", result[0])
+        self.assertEqual(result[4]["move"], "observe_stage")
+        self.assertIsNone(result[4]["proposalOffer"])
+        self.assertTrue(result[4]["openingRecovery"])
+
+    def test_stage_opening_drops_multiple_or_leading_body_questions_but_keeps_body(self):
+        payload = {
+            "assistantMessage": (
+                "The first push is readable from the central corridor. "
+                "Should the player take the water route or the wall route? "
+                "Does that make the opening feel fair? "
+                "In my view, the remaining space still makes the first commitment clear."
+            ),
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": {
+                "solutionSummary": "The solver found a route.",
+                "difficultyOpinion": "In my view, the opening is readable.",
+                "features": ["Central corridor"],
+                "suggestions": ["Observe the first push"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="en",
+            stage_context={"stageNumber": 2},
+            rows=ENTITY_ROUTE_ROWS,
+        )
+
+        self.assertIn("first push is readable", result[0])
+        self.assertIn("remaining space", result[0])
+        self.assertNotIn("?", result[0])
+        self.assertIsNone(result[4]["followUpQuestion"])
+        self.assertIn("leading_or_extra_questions_removed", result[4]["openingRecovery"])
+
+    def test_human_edit_opening_drops_invalid_risk_card_but_keeps_body(self):
+        payload = {
+            "assistantMessage": (
+                "The edited corridor now gives the first push more room to read. "
+                "In my view, the new spacing makes that commitment easier to notice."
+            ),
+            "guidance": {
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [{"type": "warning", "text": "Something might be bad."}],
+                "disagreement": {"not": "a valid disagreement"},
+            },
+            "assessment": {
+                "solutionSummary": "The saved edit remains solvable.",
+                "difficultyOpinion": "In my view, the opening is easier to inspect.",
+                "features": ["Edited corridor"],
+                "suggestions": ["Observe the first push"],
+                "satisfactionQuestion": None,
+            },
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(
+            payload,
+            assessment_only=True,
+            language="en",
+            stage_context={
+                "stageNumber": 2,
+                "source": "human_edit",
+                "discussionCardMode": "disagreement_only",
+            },
+            rows=ENTITY_ROUTE_ROWS,
+        )
+
+        self.assertIn("first push more room", result[0])
+        self.assertEqual(result[4]["uiCues"], [])
+        self.assertIn(
+            "invalid_human_edit_risk_metadata_dropped",
+            result[4]["openingRecovery"],
+        )
+
     def test_stage_one_opening_removes_question_and_adds_natural_orientation(self):
         payload = {
             "assistantMessage": (
@@ -4639,7 +4756,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("My reading of this version", result[4]["followUpQuestion"])
         self.assertEqual(result[1]["satisfactionQuestion"], result[4]["followUpQuestion"])
 
-    def test_stage_opening_prompt_is_concrete_and_non_anchoring(self):
+    def test_stage_opening_prompt_has_a_short_non_conflicting_contract(self):
         messages = llm_client.build_chat_messages(
             [],
             ["############"] * 10,
@@ -4647,15 +4764,13 @@ class LLMClientTests(unittest.TestCase):
         )
         prompt = messages[0]["content"]
 
-        self.assertIn("one to three short paragraphs", prompt)
-        self.assertIn("one or two concrete map choices", prompt)
-        self.assertIn("grounded personal perspective", prompt)
-        self.assertIn("Do not force a question", prompt)
-        self.assertIn("Do not say Welcome to Stage", prompt)
-        self.assertIn("either-or choice", prompt)
-        self.assertIn("还是/或者/或是", prompt)
-        self.assertIn("Do not ask a question or a yes/no question", prompt)
-        self.assertIn("not as the prose style", prompt)
+        self.assertIn("one or two declarative observations", prompt)
+        self.assertIn("your own design reaction", prompt)
+        self.assertIn("do not put questions, choices", prompt)
+        self.assertIn("The server owns optional discussion metadata", prompt)
+        self.assertIn("satisfactionQuestion must be null", prompt)
+        self.assertNotIn("At a real decision point, ask one concrete question", prompt)
+        self.assertNotIn("at most 3 more may be asked", prompt)
 
     def test_dg_initial_provenance_does_not_attribute_exact_tiles(self):
         guidance = llm_client._build_draft_provenance_guidance(

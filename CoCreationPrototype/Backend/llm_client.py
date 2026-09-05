@@ -975,10 +975,11 @@ def _compact_kimi_structured_prompt(
     )
     clarification_budget = max(0, 3 - clarification_count)
     opening = (
-        "This is a Stage opening. Describe only one or two concrete map choices "
-        "and your subjective design reaction. Do not ask a question or a yes/no question, or "
-        "present an either-or choice using or/versus/vs or 还是/或者/或是, or write "
-        "workflow/editor instructions; the server adds the Stage 1 closing."
+        "This is a Stage opening. Write one or two declarative observations about concrete "
+        "map choices and your own design reaction. Keep followUpQuestion and "
+        "assessment.satisfactionQuestion null; do not put questions, choices, workflow, or "
+        "editor instructions in the opening. The server owns optional discussion metadata and "
+        "adds the Stage 1 closing."
         if assessment_only
         else "Respond directly to the latest designer message in natural prose."
     )
@@ -1016,7 +1017,8 @@ def _compact_kimi_structured_prompt(
         'proposalOffer, disagreement, uiCues, and coordinateLinks. You may add the optional '
         'designContextPatch object. For a Stage opening, assessment must contain exactly '
         'solutionSummary, difficultyOpinion, features, suggestions, and satisfactionQuestion; '
-        'for ordinary chat assessment is null. Use null/[] when a field is not warranted.'
+        'for ordinary chat assessment is null. Use null/[] when a field is not warranted. '
+        'For a Stage opening, use null for followUpQuestion and satisfactionQuestion.'
     )
     safety = (
         "Visible text must not mention JSON keys or internal labels such as gridDistance, "
@@ -1037,6 +1039,42 @@ def _compact_kimi_structured_prompt(
         "reflection; do not enumerate every solver step, alternative route, or internal search "
         "state. End every response with a complete sentence."
     )
+    if assessment_only:
+        # Stage openings deliberately have a much smaller contract than chat.
+        # In particular, do not append the normal clarification/revision rules:
+        # they used to contradict the opening's no-question requirement and made
+        # an otherwise useful first response needlessly fragile.
+        return "\n\n".join([
+            f"You are the Kimi K2.6 Sokoban co-creation design peer. Write all new natural-language fields in {response_language}.",
+            opening,
+            (
+                "Set guidance.move to observe_stage. Set intentHypothesis, "
+                "intentConfidence, followUpQuestion, proposalOffer, disagreement, and "
+                "designContextPatch to null; set uiCues and coordinateLinks to []. "
+                "Set proposedRows to null and modificationSummary to an empty string. "
+                "Do not offer an edit, infer the designer's intention, or add any card metadata."
+            ),
+            (
+                "Provide a concise assessment with solutionSummary, difficultyOpinion, features, "
+                "suggestions, and satisfactionQuestion. features and suggestions are short string "
+                "arrays; satisfactionQuestion must be null."
+            ),
+            route,
+            (
+                "Visible text must not mention JSON keys or internal labels. Use only the "
+                "authoritative Stage Snapshot below. Treat this saved Stage as read-only, and "
+                "do not claim an edit, save, acceptance, verification, old-Stage fact, or full "
+                "solver trace. If a map fact cannot be supported by the snapshot, omit that "
+                "sentence rather than guessing."
+            ),
+            f"Draft provenance and attribution:\n{provenance_guidance}",
+            _map_grounding_contract(),
+            f"Current Stage Snapshot (authoritative; 10 rows x 12 columns):\n{map_facts}",
+            f"Saved Stage context: {json.dumps(stage_context or {}, ensure_ascii=False)}",
+            f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}",
+            f"Task: {task}.",
+        ])
+
     return "\n\n".join([
         f"You are the Kimi K2.6 Sokoban co-creation design peer. Write all new natural-language fields in {response_language}.",
         opening,
@@ -1096,10 +1134,10 @@ def _compact_kimi_plain_prompt(
     )
     clarification_budget = max(0, 3 - clarification_count)
     opening = (
-        "This is a Stage opening. Describe one or two concrete map choices and your own "
-        "design reaction. Do not ask a question or a yes/no question, or present an either-or "
-        "choice using or/versus/vs or 还是/或者/或是, or include process/editor instructions; "
-        "the server appends the Stage 1 closing."
+        "This is a Stage opening. Write one or two declarative observations about concrete "
+        "map choices and your own design reaction. Do not include questions, choices, or "
+        "process/editor instructions; the server owns optional discussion metadata and appends "
+        "the Stage 1 closing."
         if stage_opening
         else "Respond to the latest designer message first, in natural conversational prose."
     )
@@ -1177,6 +1215,29 @@ def _compact_kimi_plain_prompt(
         "more than three tightly related clarification questions and stop early when the direction "
         "becomes sufficient. End with a complete sentence."
     )
+    if stage_opening:
+        # The recovery prompt must be just as unambiguous as the structured
+        # opening contract.  Do not inherit chat's clarification, revision, or
+        # metadata instructions while asking for a recoverable prose body.
+        return "\n\n".join([
+            f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
+            opening,
+            (
+                "Return only the visible opening prose: no JSON, metadata block, question, "
+                "choice, card, proposal, edit instruction, or workflow wording."
+            ),
+            (
+                "Use only the authoritative Stage Snapshot below. Treat the Stage as read-only. "
+                "Do not claim an edit, save, acceptance, verification, old-Stage fact, or full "
+                "solver trace. If a current-map fact is not supported by the snapshot, omit it."
+            ),
+            f"Draft provenance and attribution:\n{provenance_guidance}",
+            _map_grounding_contract(),
+            f"Current Stage Snapshot (authoritative; 10 rows x 12 columns):\n{map_facts}",
+            f"Saved Stage context: {json.dumps(stage_context or {}, ensure_ascii=False)}",
+            f"Deterministic solver evidence: {json.dumps(solver_metrics, ensure_ascii=False)}",
+        ])
+
     return "\n\n".join([
         f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
         opening,
@@ -2223,8 +2284,9 @@ def generate_stage_assessment(
             play_summary=play_summary,
             assessment_only=True,
             stage_context=stage_context,
-            # Keep retries in the same structured, snapshot-bound contract.
-            # A free-text opening fallback can invent a second set of map facts.
+            # Keep the primary retries in the structured, snapshot-bound
+            # contract.  A later bounded prose recovery is independently
+            # revalidated against the same snapshot.
             _max_attempts=2,
             _deadline=deadline,
         )
@@ -2237,6 +2299,73 @@ def generate_stage_assessment(
         }:
             raise
 
+        can_attempt_plain_recovery = (
+            _remaining_until(deadline) >= MIN_RETRY_BUDGET_SECONDS
+        )
+        _log_llm_event(
+            (
+                "llm_stage_opening_structured_failed"
+                if can_attempt_plain_recovery
+                else "llm_stage_opening_fallback"
+            ),
+            requestId=request_id,
+            fromCode=exception.code,
+            responseMode=(
+                "plain_text_recovery"
+                if can_attempt_plain_recovery
+                else "server_snapshot"
+            ),
+            remainingSeconds=round(_remaining_until(deadline), 3),
+            fallbackReason=exception.code,
+        )
+        # Formatting-only structured failures should not immediately turn a
+        # usable opening into mechanical server copy.  A single bounded prose
+        # recovery is still snapshot-grounded and cannot authorize map edits.
+        if can_attempt_plain_recovery:
+            try:
+                recovered = _generate_plain_chat_sync(
+                    conversation=conversation,
+                    rows=rows,
+                    request_id=request_id,
+                    language=language,
+                    solver_metrics=solver_metrics,
+                    play_summary=play_summary,
+                    stage_context=stage_context,
+                    stage_opening=True,
+                    deadline=deadline,
+                    max_attempts=1,
+                )
+                _log_llm_event(
+                    (
+                        "llm_stage_opening_recovered"
+                        if recovered.model != "kimi-k2.6-safe-opening"
+                        else "llm_stage_opening_recovery_exhausted"
+                    ),
+                    requestId=request_id,
+                    fromCode=exception.code,
+                    responseMode=(
+                        "plain_text"
+                        if recovered.model != "kimi-k2.6-safe-opening"
+                        else "server_snapshot"
+                    ),
+                    finalDisplayMode=(
+                        "plain_text_recovery"
+                        if recovered.model != "kimi-k2.6-safe-opening"
+                        else "server_snapshot"
+                    ),
+                    bodyPreserved=bool(recovered.assistant_message.strip()),
+                    droppedSentenceCount=0,
+                    remainingSeconds=round(_remaining_until(deadline), 3),
+                )
+                return recovered
+            except LLMServiceError as recovery_exception:
+                _log_llm_event(
+                    "llm_stage_opening_recovery_failed",
+                    requestId=request_id,
+                    fromCode=exception.code,
+                    recoveryCode=recovery_exception.code,
+                    remainingSeconds=round(_remaining_until(deadline), 3),
+                )
         _log_llm_event(
             "llm_stage_opening_fallback",
             requestId=request_id,
@@ -5670,6 +5799,7 @@ async def _generate_with_model_fallback(
                 latency_ms=latency_ms,
                 guidance=validated[4],
             )
+            opening_recovery = validated[4].get("openingRecovery") or []
             _log_llm_event(
                 "llm_request_completed",
                 requestId=request_id,
@@ -5685,6 +5815,8 @@ async def _generate_with_model_fallback(
                 routeCoordinateCount=route_recovery["routeCoordinateCount"],
                 droppedSentenceCount=route_recovery["droppedSentenceCount"],
                 coordinateLinksDropped=route_recovery["coordinateLinksDropped"],
+                bodyPreserved=bool(validated[0].strip()),
+                openingRecoveryActions=opening_recovery,
                 remainingSeconds=round(_remaining_until(deadline), 3),
                 **response_fields,
             )
@@ -6397,6 +6529,197 @@ def _sanitize_assessment_grounding(assessment, rows, stage_context, language, hi
     return result
 
 
+def _stage_opening_assessment_defaults(language):
+    """Provide archival fields without making display metadata a hard failure."""
+    if language == "zh-CN":
+        observation = "这个当前 Stage 可以继续从第一次推动时的选择来观察。"
+        difficulty = "在我看来，还需要结合实际试玩来判断它的体验难度。"
+        feature = "当前布局中的首次推进判断"
+        suggestion = "留意玩家最先读到的通道如何影响推动顺序"
+    else:
+        observation = "This current Stage can be observed through the first push choice."
+        difficulty = "In my view, play evidence is still needed to judge the experienced difficulty."
+        feature = "The first-push judgment in the current layout"
+        suggestion = "Watch how the first readable corridor affects push order"
+    return {
+        "solutionSummary": observation,
+        "difficultyOpinion": difficulty,
+        "features": [feature],
+        "suggestions": [suggestion],
+        "satisfactionQuestion": None,
+    }
+
+
+def _opening_discussion_candidate(value, language):
+    """Return a safe optional opening focus, never a leading question."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    question_marks = text.count("?") + text.count("？")
+    if question_marks > 1:
+        return None
+    if question_marks == 1:
+        try:
+            return _normalize_opening_question(text)
+        except ValueError:
+            return None
+    return text if _discussion_insight_is_useful(text, language) else None
+
+
+def _split_opening_questions(message, follow_up_question, language, stage_one):
+    """Keep declarative opening prose when question placement is imperfect.
+
+    Questions in a Stage opening are presentation metadata, not map evidence.
+    A leading, duplicated, or misplaced question must therefore be dropped (or
+    moved to the discussion field), never make an otherwise grounded body fail.
+    """
+    paragraphs = []
+    body_questions = []
+    for paragraph in (part.strip() for part in str(message or "").split("\n\n")):
+        if not paragraph:
+            continue
+        declarative = []
+        for sentence in (
+            part.strip()
+            for part in re.split(r"(?<=[.!?。！？])\s*", paragraph)
+            if part.strip()
+        ):
+            if sentence.endswith(("?", "？")):
+                body_questions.append(sentence)
+            else:
+                declarative.append(sentence)
+        if declarative:
+            separator = "" if re.search(r"[\u3400-\u9fff]", paragraph) else " "
+            paragraphs.append(separator.join(declarative))
+
+    body = "\n\n".join(paragraphs).strip()
+    if stage_one:
+        return body, None, ["opening_questions_removed"] if body_questions else []
+
+    candidate = _opening_discussion_candidate(follow_up_question, language)
+    actions = []
+    if follow_up_question and candidate is None:
+        actions.append("invalid_opening_focus_dropped")
+    if candidate is None:
+        for question in body_questions:
+            candidate = _opening_discussion_candidate(question, language)
+            if candidate is not None:
+                actions.append("body_question_moved_to_discussion")
+                break
+    if body_questions and candidate is None:
+        actions.append("leading_or_extra_questions_removed")
+    elif len(body_questions) > 1:
+        actions.append("extra_opening_questions_removed")
+    return body, candidate, actions
+
+
+def _recover_stage_opening_payload(payload, stage_context, language):
+    """Normalize recoverable opening envelope errors before strict validation.
+
+    This deliberately leaves map-grounding, revision execution, and human-edit
+    risk checks to their existing validators.  It only makes display-only
+    fields non-fatal so useful prose reaches those validators first.
+    """
+    if not isinstance(payload, dict):
+        return payload, []
+
+    actions = []
+    allowed = {
+        "assistantMessage", "contentBlocks", "guidance", "assessment",
+        "proposedRows", "modificationSummary", "designContextPatch",
+    }
+    normalized = {key: value for key, value in payload.items() if key in allowed}
+    if set(payload) != set(normalized):
+        actions.append("unexpected_opening_fields_dropped")
+
+    raw_guidance = payload.get("guidance")
+    if not isinstance(raw_guidance, dict):
+        raw_guidance = {}
+        actions.append("malformed_opening_guidance_replaced")
+    human_edit = _is_human_edit_stage_opening(True, stage_context)
+    follow_up = _opening_discussion_candidate(
+        raw_guidance.get("followUpQuestion"), language
+    )
+    if raw_guidance.get("followUpQuestion") and follow_up is None:
+        actions.append("invalid_opening_focus_dropped")
+    guidance = {
+        "move": "observe_stage",
+        "intentHypothesis": None,
+        "intentConfidence": None,
+        "followUpQuestion": follow_up,
+        "proposalOffer": None,
+        "disagreement": raw_guidance.get("disagreement") if human_edit else None,
+        "uiCues": raw_guidance.get("uiCues") if human_edit else [],
+        "coordinateLinks": [],
+    }
+    if (
+        any(raw_guidance.get(key) is not None for key in (
+            "intentHypothesis", "proposalOffer", "designContextPatch"
+        ))
+        or payload.get("designContextPatch") is not None
+    ):
+        actions.append("opening_metadata_dropped")
+
+    if human_edit and (
+        raw_guidance.get("uiCues") is not None
+        or raw_guidance.get("disagreement") is not None
+    ):
+        # A verified human edit still receives its deterministic risk review,
+        # but an unusable model card must not discard the opening body.  Keep
+        # only a card that passes the same strict validator it would face
+        # later; otherwise omit that optional presentation metadata.
+        candidate = dict(guidance)
+        candidate["followUpQuestion"] = None
+        candidate["uiCues"] = raw_guidance.get("uiCues") or []
+        candidate["disagreement"] = raw_guidance.get("disagreement")
+        try:
+            checked = _validate_guidance(
+                candidate,
+                True,
+                language,
+                stage_context,
+                rows=(stage_context or {}).get("snapshotRows"),
+            )
+            guidance["uiCues"] = checked["uiCues"]
+            guidance["disagreement"] = checked["disagreement"]
+        except (TypeError, ValueError):
+            guidance["uiCues"] = []
+            guidance["disagreement"] = None
+            actions.append("invalid_human_edit_risk_metadata_dropped")
+    normalized["guidance"] = guidance
+    normalized["proposedRows"] = None
+    normalized["modificationSummary"] = ""
+    normalized["designContextPatch"] = None
+
+    defaults = _stage_opening_assessment_defaults(language)
+    raw_assessment = payload.get("assessment")
+    if isinstance(raw_assessment, dict):
+        assessment = dict(defaults)
+        for key in ("solutionSummary", "difficultyOpinion"):
+            value = raw_assessment.get(key)
+            if isinstance(value, str) and value.strip():
+                assessment[key] = value
+            elif value is not None:
+                actions.append("opening_assessment_fields_normalized")
+        for key in ("features", "suggestions"):
+            value = raw_assessment.get(key)
+            if isinstance(value, list) and value and all(
+                isinstance(item, str) and item.strip() for item in value
+            ):
+                assessment[key] = value
+            elif value is not None:
+                actions.append("opening_assessment_fields_normalized")
+        if set(raw_assessment) != set(assessment):
+            actions.append("opening_assessment_fields_normalized")
+    else:
+        assessment = defaults
+        actions.append("opening_assessment_rebuilt")
+    normalized["assessment"] = assessment
+    return normalized, actions
+
+
 def validate_chat_response(
     payload,
     assessment_only=False,
@@ -6406,8 +6729,12 @@ def validate_chat_response(
     validation_mode="strict",
     historical_reference=False,
 ):
+    opening_recovery_actions = []
     if assessment_only:
         payload = _canonicalize_stage_assessment_payload(payload, stage_context)
+        payload, opening_recovery_actions = _recover_stage_opening_payload(
+            payload, stage_context, language
+        )
     if not isinstance(payload, dict):
         raise ValueError("The model response must be a JSON object.")
 
@@ -6451,6 +6778,22 @@ def validate_chat_response(
         )
         if not assistant_message:
             raise ValueError("A Stage opening has no grounded visible analysis left.")
+    if assessment_only:
+        stage_one = _is_stage_one(stage_context)
+        assistant_message, recovered_focus, question_actions = _split_opening_questions(
+            assistant_message,
+            (payload.get("guidance") or {}).get("followUpQuestion"),
+            language,
+            stage_one,
+        )
+        opening_recovery_actions.extend(question_actions)
+        payload = dict(payload)
+        payload_guidance = dict(payload.get("guidance") or {})
+        payload_guidance["followUpQuestion"] = recovered_focus
+        payload["guidance"] = payload_guidance
+        if not assistant_message:
+            raise ValueError("A Stage opening has no grounded visible analysis left.")
+
     guidance = _validate_guidance(
         payload.get("guidance"),
         assessment_only,
@@ -6498,6 +6841,7 @@ def validate_chat_response(
         )
     stage_one_opening = assessment_only and _is_stage_one(stage_context)
     deterministic_opening_question = None
+    extracted_question = None
 
     if stage_one_opening:
         assistant_message = _questionless_body(assistant_message)
@@ -6510,7 +6854,7 @@ def validate_chat_response(
         )
         guidance["followUpQuestion"] = None
         extracted_question = None
-    else:
+    elif not assessment_only:
         clarification_mode = classify_guidance_request(
             [
                 {"role": "user", "content": ""},
@@ -6671,6 +7015,8 @@ def validate_chat_response(
         language,
         historical_reference,
     )
+    if assessment_only and opening_recovery_actions:
+        guidance["openingRecovery"] = sorted(set(opening_recovery_actions))
     proposed_rows = payload.get("proposedRows")
 
     if assessment_only and proposed_rows is not None:
@@ -8945,6 +9291,22 @@ def _safe_incomplete_chat_reply(language, stage_opening=False, rows=None):
 
 def _server_snapshot_fallback_message(rows, language, *, stage_context=None, stage_opening=False):
     """Produce a useful body from server facts when model prose is unusable."""
+    if stage_opening:
+        if language == "zh-CN":
+            message = (
+                "我先从这个版本的第一次推动来观察：最先被读到的通道，"
+                "会不会让推动顺序显得清楚而自然。"
+            )
+        else:
+            message = (
+                "I would begin with this version's first push: whether the first readable "
+                "corridor makes the push order feel clear and natural."
+            )
+        return (
+            _ensure_stage_one_orientation(message, rows, language)
+            if _is_stage_one(stage_context)
+            else message
+        )
     records = _snapshot_entity_records(rows, stage_context)
     boxes = [item for item in records.values() if item.get("kind") == "box"]
     targets = [item for item in records.values() if item.get("kind") == "target"]
@@ -9011,6 +9373,9 @@ def _stage_opening_safe_execution(
         requestId=request_id,
         task="stage_assessment_fallback",
         fallbackReason=fallback_reason,
+        finalDisplayMode="server_snapshot",
+        bodyPreserved=bool(fallback_message.strip()),
+        droppedSentenceCount=0,
         remainingSeconds=round(_remaining_until(_request_deadline(started_at)), 3),
     )
     return LLMExecutionResult(

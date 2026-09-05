@@ -5100,6 +5100,7 @@ def _public_guidance(guidance):
     result = dict(guidance or {})
     result.pop("designContextPatch", None)
     result.pop("designContextPatchError", None)
+    result.pop("openingRecovery", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and (
         "executionBrief" in offer or "revisionPlan" in offer
