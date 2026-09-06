@@ -112,6 +112,14 @@ Chat 读取完整带来源快照；Revision 只读取 active explicit/confirmed 
 
 ## Prompt 文件
 
+## 2026-09-06 implementation synchronization
+
+- The 8010 composer now has a `Proposal` button beside `Send`. `Send` and Enter submit ordinary chat (`requestProposal=false`); the button submits the unchanged user text with `requestProposal=true` and forces proposal discovery. The mode is audit-recorded as `proposal_request_requested`, survives refresh/retry recovery, and is part of idempotency validation.
+- A proposal request uses the existing bounded discovery flow: a sufficiently bound direction enters the formal `RevisionPlan -> executionContract -> operation candidates -> deterministic validation` pipeline; an incomplete direction receives at most three targeted clarification turns. An active disagreement blocks both proposal requests and revision-card actions.
+- `challenge_revision` remains prose-only on its first response and records one primary and one secondary tentative hypothesis. A later reason is independently classified as `primary`, `secondary`, `different`, or `unclear`. A `different` reason uses `ai_revision_challenge` with `phase=reason_review|choice_pending` and server-owned `displayCard` visibility: the immediately reasonable branch displays one blue card; the initially unreasonable branch displays one at entry and one when it later becomes reasonable. Hidden cards do not end the active disagreement.
+- `choice_pending` accepts only a clear yes/no. Yes resolves to `ai` and carries the accepted concern as a soft goal; no resolves to `user` and makes the new concern the primary direction. Both outcomes start a newly generated and validated purple proposal; the old proposal is never reactivated. Ambiguous answers remain active ordinary discussion without another blue card.
+- Manual-edit review, the 8010 revision assistant contract, and both 8000 Agent roles are unchanged by this synchronization.
+
 - [Draft首版理解助手（8000）.md](Draft首版理解助手（8000）.md)
 - [关卡蓝图规划助手（8000）.md](关卡蓝图规划助手（8000）.md)
 - [共创聊天助手（8010）.md](共创聊天助手（8010）.md)
