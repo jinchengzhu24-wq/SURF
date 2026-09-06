@@ -51,6 +51,7 @@ PRIMARY_ATTEMPT_TIMEOUT_SECONDS = 70.0
 MIN_RETRY_BUDGET_SECONDS = 20.0
 CHAT_TIMEOUT_SECONDS = BACKEND_REQUEST_TIMEOUT_SECONDS
 CHAT_MAX_ATTEMPTS = 2
+ORDINARY_CHAT_MAX_ATTEMPTS = 3
 PROPOSAL_GENERATION_ATTEMPTS = 2
 # Ordinary chat and Stage openings retain the 120-second public budget. A
 # proposal is a multi-phase pipeline (RevisionPlan, operation candidates,
@@ -80,6 +81,7 @@ CHAT_MAX_COMPLETION_TOKENS = 2600
 CHAT_MAX_TOKENS = CHAT_MAX_COMPLETION_TOKENS
 PLAIN_CHAT_TIMEOUT_SECONDS = BACKEND_REQUEST_TIMEOUT_SECONDS
 PLAIN_PRIMARY_TIMEOUT_SECONDS = 70.0
+ORDINARY_CHAT_ATTEMPT_TIMEOUTS = (55.0, 35.0)
 PLAIN_CHAT_MAX_COMPLETION_TOKENS = 2200
 PLAIN_CHAT_MAX_TOKENS = PLAIN_CHAT_MAX_COMPLETION_TOKENS
 PROPOSAL_MAX_COMPLETION_TOKENS = 2400
@@ -118,7 +120,24 @@ def _structured_response_format(task=None):
     the model to infer the wire shape from the much larger design rules.
     """
     task = str(task or "chat")
-    if task == "proposal_clarification":
+    if task == "challenge_reason_classification":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "relation": {
+                    "type": "string",
+                    "enum": ["primary", "secondary", "different", "unclear"],
+                },
+                "merit": {
+                    "type": "string",
+                    "enum": ["reasonable", "not_yet_reasonable", "unclear"],
+                },
+            },
+            "required": ["relation", "merit"],
+        }
+        name = "cocreation_challenge_reason_classification"
+    elif task == "proposal_clarification":
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -755,6 +774,7 @@ def build_plain_chat_messages(
     play_summary=None,
     stage_context=None,
     stage_opening=False,
+    validation_mode="ordinary_chat",
 ):
     serialized_map = ""
     numbered_map = ""
@@ -791,13 +811,13 @@ def build_plain_chat_messages(
          "fill the panel. Never put your own route calculation, coordinate trace, next movement, "
          "reachability check, or solver reasoning in DESIGN_CONTEXT_PATCH, and never use the patch "
          "to create a confirmed decision or rejection. "
-        "For a map-related reply, strongly prefer one concise concrete route description when "
-        "the facts support one and it helps "
-        "the designer see the judgment—such as player or box to target, coordinate to "
-        "coordinate, or through a named corridor. It must be a real route supported by the "
-        "authoritative map facts, not a complete solver sequence. Repeat the exact visible "
-        "route substring in COORDINATE_LINKS with authoritative from/to endpoints. Do not "
-        "force route prose into ordinary non-map chat."
+        + (
+            "The designer is explicitly discussing a route. Include at most two concise route "
+            "passages only when they help answer that point, and repeat a genuine movement "
+            "substring in COORDINATE_LINKS with authoritative endpoints. "
+            if validation_mode == "route_discussion"
+            else "Do not introduce a route, coordinate, or entity-position inventory merely to make an ordinary design reply sound concrete. "
+        )
         if not stage_opening
         else ""
     )
@@ -1002,6 +1022,7 @@ def build_plain_chat_messages(
         provenance_guidance=provenance_guidance,
         post_opening_progress_instruction=post_opening_progress_instruction,
         historical_reference_instruction=historical_reference_instruction,
+        validation_mode=validation_mode,
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -1199,6 +1220,7 @@ def _compact_kimi_plain_prompt(
     provenance_guidance,
     post_opening_progress_instruction,
     historical_reference_instruction="",
+    validation_mode="ordinary_chat",
 ):
     """Use the same compact facts/routing contract for text fallback."""
     clarification_count = max(
@@ -1292,28 +1314,12 @@ def _compact_kimi_plain_prompt(
         )
     )
     route = (
-        "For map-related prose, include detailed design reasoning when useful, and up to four "
-        "compact route passages or clauses. Split independent route relations instead of combining "
-        "them into one long sentence. Each passage must explicitly describe movement between real "
-        "anchors, such as B1 toward T1 or (2,3) through the corridor to (2,8). Do not list a full "
-        "the key corridor and design consequence. Do not list a full solver sequence or every "
-        "the key corridor and design consequence, but should stay within 2–4 sentences and "
-        "alternative. "
-        "Do not mark location, adjacency, comparison, or direction-only descriptions as routes. "
-        "When a route is present, COORDINATE_LINKS must repeat the exact visible route sentence "
-        "and use current authoritative endpoints; omit it when uncertain. If no short, grounded "
-        "route is available, omit the route and complete the detailed design analysis instead; "
-        "route metadata must never replace an otherwise useful reply."
-    )
-    route = (
-        "For map-related prose, include detailed design reasoning when useful, and up to four "
-        "compact route passages or clauses. Split independent route relations instead of combining "
-        "them into one long sentence. Each passage must explicitly describe movement between real "
-        "anchors, such as B1 toward T1 or (2,3) through the corridor to (2,8). Do not list a full "
-        "solver sequence or every alternative. Do not mark location, adjacency, comparison, or "
-        "direction-only descriptions as routes. When a route is present, COORDINATE_LINKS must "
-        "repeat the exact visible route text and use current authoritative endpoints; omit it when "
-        "uncertain. Route metadata must never replace otherwise useful design reasoning."
+        "The designer is explicitly discussing a route. Use at most two concise route passages, "
+        "only when they directly answer the latest point. A route must describe movement between "
+        "real anchors and use current authoritative endpoints in COORDINATE_LINKS. Do not list a "
+        "solver sequence or every alternative."
+        if validation_mode == "route_discussion"
+        else "This is ordinary design conversation. Answer the latest point directly. Do not add coordinates, current entity positions, adjacency claims, or route endpoints merely to sound concrete."
     )
     progress = (
         "After the opening, add DESIGN_CONTEXT_PATCH only for a genuine map-specific unresolved "
@@ -1322,21 +1328,6 @@ def _compact_kimi_plain_prompt(
         "in it. Do not add generic questions and do not create confirmed decisions."
         if not stage_opening
         else "The opening must not add progress questions or decisions."
-    )
-    safety = (
-        "Never mention internal keys or labels such as gridDistance, _solver, tileAt, mapFacts, "
-        "solutionSteps, DESIGN_CONTEXT_PATCH, or COORDINATE_LINKS in visible prose. Do not claim "
-        "an edit was applied or saved. If the designer asks for a change, describe or clarify "
-        "the direction; the server controls execution. Connect specific map details to a playable "
-        "moment when explaining a design judgment. Give enough detail to make the reasoning useful; "
-        "there is no fixed paragraph-count limit. If route reasoning is relevant, keep it to one "
-        "short, verifiable route passage with at most a few key coordinates and no exhaustive "
-        "solver trace. At a real decision point, ask one specific design question; for an under-specified "
-        "revision, ask no more than three tightly related clarification questions and stop early when "
-        "the direction becomes sufficient. If the purpose and object are safely identifiable after "
-        "that exchange, fill in the missing implementation details conservatively rather than asking "
-        "indefinitely. "
-        "End with a complete sentence."
     )
     safety = (
         "Never mention internal keys or labels such as gridDistance, _solver, tileAt, mapFacts, "
@@ -1945,27 +1936,35 @@ def _validate_named_entity_relations(text, facts):
         item = records.get(label)
         return (item.get("row"), item.get("column")) if item else None
 
-    relation = re.compile(
-        r"(?:\bnear\b|\bclose\s+to\b|\badjacent\s+to\b|\bbeside\b|"
-        r"\bnext\s+to\b|\u9760\u8fd1|\u76f8\u90bb|\u65c1\u8fb9|\u7d27\u6328)",
+    label = r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+)(?![A-Za-z0-9])"
+    relation = (
+        r"(?:is\s+|are\s+)?(?:near|close\s+to|adjacent\s+to|beside|next\s+to)|"
+        r"靠近|相邻|在.{0,4}旁边|旁边|紧挨"
+    )
+    pair_pattern = re.compile(
+        rf"(?P<first>{label})\s*(?:与|和|跟)?\s*(?:{relation})\s*"
+        rf"(?P<second>{label})",
         flags=re.IGNORECASE,
     )
-    future = re.compile(
-        r"(?:\bif\b|\bwould\b|\bwill\b|\bmove(?:s|d|ing)?\b|\bpush(?:es|ed|ing)?\b|"
-        r"\btoward(?:s)?\b|\bfrom\b|\u5982\u679c|\u82e5|\u5c06|\u4f1a|\u79fb\u52a8|"
-        r"\u63a8\u5230|\u63a8\u5411)",
-        flags=re.IGNORECASE,
+    box_water_patterns = (
+        re.compile(
+            rf"(?P<box>\bB\d+\b)\s*(?:is\s+|在)?(?:adjacent\s+to|beside|"
+            rf"next\s+to|相邻|紧挨|紧贴|贴着|靠着|在.{0,4}旁边)\s*(?:the\s+)?(?:water|水域|水边|水)",
+            flags=re.IGNORECASE,
+        ),
+        re.compile(
+            rf"(?:the\s+)?(?:water|水域|水边|水)\s*(?:is\s+|在)?(?:adjacent\s+to|beside|"
+            rf"next\s+to|相邻|紧挨|紧贴|贴着|靠着|在.{0,4}旁边)\s*(?P<box>\bB\d+\b)",
+            flags=re.IGNORECASE,
+        ),
     )
-    labels = re.compile(
-        r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+)(?![A-Za-z0-9])",
-        flags=re.IGNORECASE,
-    )
-    for sentence in re.split(r"(?<=[.!?\u3002\uff01\uff1f])|[\r\n]+", str(text or "")):
-        if not relation.search(sentence) or future.search(sentence):
+    clauses = re.split(r"[,，;；.!?。！？\r\n]+", str(text or ""))
+    for clause in clauses:
+        if not clause.strip() or _entity_claim_is_non_current(clause):
             continue
-        named = list(dict.fromkeys(match.group(0).upper() for match in labels.finditer(sentence)))
-        if len(named) >= 2:
-            first, second = named[0], named[1]
+        for match in pair_pattern.finditer(clause):
+            first = match.group("first").upper()
+            second = match.group("second").upper()
             first_point, second_point = point(first), point(second)
             if first_point and second_point:
                 distance = abs(first_point[0] - second_point[0]) + abs(first_point[1] - second_point[1])
@@ -1973,13 +1972,10 @@ def _validate_named_entity_relations(text, facts):
                     raise ValueError(
                         f"The reply claims {first} is close to {second}, but the saved map does not support that relation."
                     )
-        if re.search(
-            r"(?:\b(?:B\d+)\b).{0,28}(?:\b(?:water)\b|\u6c34\u57df|\u6c34\u8fb9)",
-            sentence,
-            flags=re.IGNORECASE,
-        ):
-            for label in named:
-                item = records.get(label)
+        for pattern in box_water_patterns:
+            for match in pattern.finditer(clause):
+                box_label = match.group("box").upper()
+                item = records.get(box_label)
                 if item and item.get("kind") == "box":
                     adjacent = any(
                         cell["row"] == item["row"] + row_delta
@@ -1989,7 +1985,7 @@ def _validate_named_entity_relations(text, facts):
                     )
                     if not adjacent:
                         raise ValueError(
-                            f"The reply claims {label} is beside water, but the saved map does not support that relation."
+                            f"The reply claims {box_label} is beside water, but the saved map does not support that relation."
                         )
 
 
@@ -2085,18 +2081,26 @@ def _validate_map_grounding_texts(
         + abs(facts["player"]["column"] - target["column"]) <= 2
         for target in target_positions
     )
-    closeness = r"(?:很近|靠近|紧挨|相邻|close to|near|adjacent to)"
-    if not close_box_target and (
-        re.search(rf"(?:箱子|箱).{{0,18}}(?:目标点|目标|终点).{{0,18}}{closeness}", text)
-        or re.search(rf"(?:目标点|目标|终点).{{0,18}}(?:箱子|箱).{{0,18}}{closeness}", text)
-    ):
+    closeness = r"(?:很近|靠近|紧挨|相邻|close\s+to|near|adjacent\s+to)"
+    box_target_claim = re.search(
+        rf"(?:箱子|箱|boxes?|crates?)\s*(?:与|和|跟|is\s+|are\s+)?"
+        rf"{closeness}\s*(?:目标点|目标|终点|targets?|goals?)|"
+        rf"(?:目标点|目标|终点|targets?|goals?)\s*(?:与|和|跟|is\s+|are\s+)?"
+        rf"{closeness}\s*(?:箱子|箱|boxes?|crates?)",
+        text,
+    )
+    if not close_box_target and box_target_claim:
         raise ValueError(
             "The reply claims that a current box is close to a target, which conflicts with deterministic map facts."
         )
-    if not close_player_target and (
-        re.search(rf"(?:玩家|起点).{{0,18}}(?:目标点|目标|终点).{{0,18}}{closeness}", text)
-        or re.search(rf"(?:目标点|目标|终点).{{0,18}}(?:玩家|起点).{{0,18}}{closeness}", text)
-    ):
+    player_target_claim = re.search(
+        rf"(?:玩家|起点|players?)\s*(?:与|和|跟|is\s+|are\s+)?"
+        rf"{closeness}\s*(?:目标点|目标|终点|targets?|goals?)|"
+        rf"(?:目标点|目标|终点|targets?|goals?)\s*(?:与|和|跟|is\s+|are\s+)?"
+        rf"{closeness}\s*(?:玩家|起点|players?)",
+        text,
+    )
+    if not close_player_target and player_target_claim:
         raise ValueError(
             "The reply claims that the current player is close to a target, which conflicts with deterministic map facts."
         )
@@ -2247,6 +2251,8 @@ def _chat_validation_mode(
         return "edit_request"
     if guidance_mode == "revision_advice":
         return "edit_request"
+    if guidance_mode in {"needs_clarification", "disagreement"}:
+        return "edit_request"
     if context.get("revisionRequestState") in {
         "authorized",
         "authorized_relaxed",
@@ -2347,9 +2353,10 @@ def _map_entity_coordinates(rows, entity_bindings=None):
     }
 
 
-def _entity_claim_is_non_current(text, start, end):
-    """Ignore future or hypothetical entity coordinates during grounding."""
-    window = str(text or "")[max(0, start - 36):end]
+def _entity_claim_is_non_current(text, start=0, end=None):
+    """Ignore a future or hypothetical claim within its own clause only."""
+    value = str(text or "")
+    window = value[start:end]
     return bool(re.search(
         r"(?:\bif\b|\bwhen\b|\bwould\b|\bwill\b|\bmove(?:s|d|ing)?\b|"
         r"\bpush(?:es|ed|ing)?\b|\bto\b|\btoward(?:s)?\b|\bfrom\b|"
@@ -2361,116 +2368,75 @@ def _entity_claim_is_non_current(text, start, end):
 
 
 def _entity_coordinate_claims(text, rows):
-    """Yield explicit entity-to-coordinate claims in either writing order."""
-    coordinate = r"[\(\uFF08]\s*(\d{1,2})\s*[,，]\s*(\d{1,2})\s*[\)\uFF09]"
-    # ``\b`` does not create a boundary between an ASCII entity id and a
-    # Chinese character, so ``B1在(6,3)`` used to evade validation.  Boundary
-    # only against ASCII identifier characters while allowing natural Chinese
-    # prose to touch the id.
-    entity = r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+|玩家|起点)(?![A-Za-z0-9])"
-    marker = (
-        r"(?:at|located\s+at|is\s+at|in|on|位于|在|处于|坐落于|起点为)"
-    )
-    patterns = (
-        re.compile(
-            rf"(?P<entity>{entity}).{{0,24}}?{marker}\s*{coordinate}",
-            flags=re.IGNORECASE,
-        ),
-        re.compile(
-            rf"{coordinate}.{{0,24}}?{marker}\s*(?P<entity>{entity})",
-            flags=re.IGNORECASE,
-        ),
-    )
-    # The original compact matcher is retained for legacy wording.  These
-    # explicit forms cover the common English/Chinese current-fact statements
-    # without treating a future route or an ``if`` clause as a saved fact.
-    stable_entity = (
-        r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+|"
-        r"\u73a9\u5bb6|\u8d77\u70b9)(?![A-Za-z0-9])"
-    )
-    current_marker = re.compile(
-        r"(?:\bis\b|\bwas\b|\boccup(?:y|ies|ied)\b|\bsits?\b|"
-        r"\blocated\b|\bpositioned\b|\bplaced\b|"
-        r"\u5728|\u4f4d\u4e8e|\u5750\u843d\u4e8e|\u5904\u5728|\u662f)",
-        flags=re.IGNORECASE,
-    )
-    future_marker = re.compile(
-        r"(?:\bif\b|\bwould\b|\bwill\b|\bmove(?:s|d|ing)?\b|"
-        r"\bpush(?:es|ed|ing)?\b|\bto\b|\btoward(?:s)?\b|\bfrom\b|"
-        r"\u5982\u679c|\u82e5|\u5c06|\u4f1a|\u79fb\u52a8|\u63a8\u5230|\u63a8\u5411|"
-        r"\u6539\u5230|\u53d8\u6210)",
-        flags=re.IGNORECASE,
-    )
-    stable_patterns = (
-        re.compile(
-            rf"(?P<entity>{stable_entity})(?P<between>.{{0,60}}?)"
-            rf"[\(\uFF08]\s*(?P<row>\d{{1,2}})\s*[,，]\s*(?P<column>\d{{1,2}})\s*[\)\uFF09]",
-            flags=re.IGNORECASE,
-        ),
-        re.compile(
-            rf"(?P<entity>{stable_entity})(?P<between>.{{0,60}}?)"
-            rf"(?:row|line)\s*(?P<row>\d{{1,2}})\s*,?\s*(?:column|col)\s*(?P<column>\d{{1,2}})",
-            flags=re.IGNORECASE,
-        ),
-        re.compile(
-            rf"(?P<entity>{stable_entity})(?P<between>.{{0,60}}?)"
-            rf"\u7b2c\s*(?P<row>\d{{1,2}})\s*\u884c\s*\u7b2c\s*(?P<column>\d{{1,2}})\s*\u5217",
-            flags=re.IGNORECASE,
-        ),
-        re.compile(
-            rf"[\(\uFF08]\s*(?P<row>\d{{1,2}})\s*[,，]\s*(?P<column>\d{{1,2}})\s*[\)\uFF09]"
-            rf"(?P<between>.{{0,60}}?)(?P<entity>{stable_entity})",
-            flags=re.IGNORECASE,
-        ),
-        re.compile(
-            rf"(?:row|line)\s*(?P<row>\d{{1,2}})\s*,?\s*(?:column|col)\s*(?P<column>\d{{1,2}})"
-            rf"(?P<between>.{{0,60}}?)(?P<entity>{stable_entity})",
-            flags=re.IGNORECASE,
-        ),
-        re.compile(
-            rf"\u7b2c\s*(?P<row>\d{{1,2}})\s*\u884c\s*\u7b2c\s*(?P<column>\d{{1,2}})\s*\u5217"
-            rf"(?P<between>.{{0,60}}?)(?P<entity>{stable_entity})",
-            flags=re.IGNORECASE,
-        ),
-        re.compile(
-            rf"\u7b2c\s*(?P<row>\d{{1,2}})\s*\u884c\s*\u7b2c\s*(?P<column>\d{{1,2}})\s*\u5217"
-            rf"(?P<between>.{{0,60}}?)(?:\u662f|\u4e3a|\u5c5e\u4e8e)\s*(?P<entity>{stable_entity})",
-            flags=re.IGNORECASE,
-        ),
-    )
-    seen_claims = set()
-    for stable_pattern in stable_patterns:
-        for match in stable_pattern.finditer(str(text or "")):
-            between = match.group("between")
-            if not current_marker.search(between) or future_marker.search(between):
-                continue
-            entity_name = match.group("entity").upper()
-            if entity_name in {"玩家", "起点"}:
-                entity_name = "P"
-            claim = (
-                entity_name,
-                int(match.group("row")),
-                int(match.group("column")),
-            )
-            if claim in seen_claims:
-                continue
-            seen_claims.add(claim)
-            yield claim[0], {"row": claim[1], "column": claim[2]}
+    """Yield only explicit entity-to-coordinate claims inside one clause.
 
-    for pattern in patterns:
-        for match in pattern.finditer(str(text or "")):
-            if _entity_claim_is_non_current(str(text or ""), match.start(), match.end()):
-                continue
-            entity_name = match.group("entity").upper()
-            if entity_name in {"玩家", "起点"}:
-                entity_name = "P"
-            coordinate_match = re.search(coordinate, match.group(0))
-            if coordinate_match is None:
-                continue
-            yield entity_name, {
-                "row": int(coordinate_match.group(1)),
-                "column": int(coordinate_match.group(2)),
-            }
+    Do not infer ownership from proximity. In particular, a coordinate before a
+    semicolon or another entity must never be attached to that later entity.
+    """
+    entity = r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+|玩家|起点)(?![A-Za-z0-9])"
+    coordinate = (
+        r"(?:[\(\uFF08]\s*(?P<row_paren>\d{1,2})\s*[,，]\s*"
+        r"(?P<column_paren>\d{1,2})\s*[\)\uFF09]|"
+        r"(?:row|line)\s*(?P<row_en>\d{1,2})\s*,?\s*"
+        r"(?:column|col)\s*(?P<column_en>\d{1,2})|"
+        r"第\s*(?P<row_zh>\d{1,2})\s*行\s*第\s*"
+        r"(?P<column_zh>\d{1,2})\s*列)"
+    )
+    forward = re.compile(
+        rf"(?P<entity>{entity})\s*(?:当前|目前|currently\s+)?"
+        rf"(?:(?:的)?坐标\s*(?:是|为|位于|:|：)?|"
+        rf"(?:'s\s+)?coordinates?\s*(?:is|are|:)?|"
+        rf"位于|在|处于|坐落于|起点为|is\s+(?:currently\s+)?(?:at|in|on)|"
+        rf"(?:is\s+)?located\s+(?:at|in|on)|sits?\s+(?:at|in|on)|"
+        rf"occup(?:y|ies|ied)|positioned\s+(?:at|in|on)|placed\s+(?:at|in|on))\s*"
+        rf"{coordinate}",
+        flags=re.IGNORECASE,
+    )
+    reverse = re.compile(
+        rf"{coordinate}\s*(?:的位置|这个位置|该位置|the\s+(?:cell|position)\s+)?"
+        rf"(?:是|为|属于|is|contains?)\s*(?P<entity>{entity})",
+        flags=re.IGNORECASE,
+    )
+
+    def coordinates(match):
+        for suffix in ("paren", "en", "zh"):
+            row = match.groupdict().get(f"row_{suffix}")
+            column = match.groupdict().get(f"column_{suffix}")
+            if row is not None and column is not None:
+                return int(row), int(column)
+        raise ValueError("An entity coordinate claim could not be parsed.")
+
+    seen_claims = set()
+    protected = re.sub(
+        r"(?<=\d)[,，](?=\s*\d)",
+        "\x00",
+        str(text or ""),
+    )
+    protected = re.sub(
+        r"((?:row|line)\s*\d{1,2})\s*,\s*((?:column|col)\b)",
+        lambda match: f"{match.group(1)}\x00 {match.group(2)}",
+        protected,
+        flags=re.IGNORECASE,
+    )
+    clauses = (
+        clause.replace("\x00", ",")
+        for clause in re.split(r"[,，;；.!?。！？\r\n]+", protected)
+    )
+    for clause in clauses:
+        clause = clause.strip()
+        if not clause or _entity_claim_is_non_current(clause):
+            continue
+        for pattern in (forward, reverse):
+            for match in pattern.finditer(clause):
+                row, column = coordinates(match)
+                entity_name = match.group("entity").upper()
+                if entity_name in {"玩家", "起点"}:
+                    entity_name = "P"
+                claim = (entity_name, row, column)
+                if claim in seen_claims:
+                    continue
+                seen_claims.add(claim)
+                yield claim[0], {"row": claim[1], "column": claim[2]}
 
 
 def _validate_entity_coordinate_claims(text, rows, *, entity_bindings=None):
@@ -5551,20 +5517,6 @@ def _generate_plain_chat_sync(
         )
         effective_stage_context["proposalClarification"] = clarification
 
-    effective_max_attempts = (
-        1 if stage_opening else CHAT_MAX_ATTEMPTS
-    ) if max_attempts is None else max(1, int(max_attempts))
-    models = _unified_model_attempts(effective_max_attempts)
-
-    messages = build_plain_chat_messages(
-        conversation,
-        rows,
-        language,
-        solver_metrics,
-        play_summary,
-        effective_stage_context,
-        stage_opening=stage_opening,
-    )
     guidance_mode = classify_guidance_request(
         conversation,
         effective_stage_context,
@@ -5576,6 +5528,28 @@ def _generate_plain_chat_sync(
         effective_stage_context,
         stage_opening=stage_opening,
         guidance_mode=guidance_mode,
+    )
+    if max_attempts is None:
+        effective_max_attempts = (
+            1
+            if stage_opening
+            else ORDINARY_CHAT_MAX_ATTEMPTS
+            if validation_mode in {"ordinary_chat", "route_discussion"}
+            else CHAT_MAX_ATTEMPTS
+        )
+    else:
+        effective_max_attempts = max(1, int(max_attempts))
+    models = _unified_model_attempts(effective_max_attempts)
+
+    messages = build_plain_chat_messages(
+        conversation,
+        rows,
+        language,
+        solver_metrics,
+        play_summary,
+        effective_stage_context,
+        stage_opening=stage_opening,
+        validation_mode=validation_mode,
     )
     historical_reference = _has_historical_stage_reference(
         _latest_user_text(conversation)
@@ -5593,6 +5567,7 @@ def _generate_plain_chat_sync(
         guidanceMode=guidance_mode,
     )
 
+    attempt_state = {"count": 0}
     try:
         return asyncio.run(
             asyncio.wait_for(
@@ -5615,6 +5590,7 @@ def _generate_plain_chat_sync(
                     semantic_messages=conversation,
                     started_at=started_at,
                     deadline=deadline,
+                    attempt_state=attempt_state,
                 ),
                 timeout=min(PLAIN_CHAT_TIMEOUT_SECONDS, _remaining_until(deadline)),
             )
@@ -5627,7 +5603,7 @@ def _generate_plain_chat_sync(
             task=task,
             outcome="error",
             code="UPSTREAM_TIMEOUT",
-            attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS),
+            attemptsUsed=attempt_state["count"],
             latencyMs=elapsed_ms,
             responseMode="plain_text",
         )
@@ -5636,7 +5612,7 @@ def _generate_plain_chat_sync(
             "Kimi did not complete the request before the 120 second limit.",
             request_id,
             True,
-            min(len(models), CHAT_MAX_ATTEMPTS),
+            attempt_state["count"],
             504,
         ) from exception
 
@@ -5745,6 +5721,100 @@ def translate_turns(items, target_language, request_id):
             min(len(models), CHAT_MAX_ATTEMPTS),
             504,
         ) from exception
+
+
+def classify_challenge_reason(
+    user_reason,
+    hypotheses,
+    proposal_summary,
+    request_id,
+    *,
+    _deadline=None,
+):
+    """Classify one post-challenge reason without map or chat-history context."""
+    primary = str((hypotheses or {}).get("primary") or "").strip()
+    secondary = str((hypotheses or {}).get("secondary") or "").strip()
+    reason = str(user_reason or "").strip()
+    if not primary or not secondary or not reason:
+        raise LLMServiceError(
+            "MODEL_RESPONSE_INVALID",
+            "The challenge reason could not be compared with the two saved hypotheses.",
+            request_id,
+            True,
+            0,
+            502,
+        )
+
+    api_key, base_url = _llm_credentials()
+    if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR",
+            "The configured LLM API key is missing.",
+            request_id,
+            False,
+            0,
+            503,
+        )
+    deadline = _deadline or (time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS)
+    timeout_seconds = min(20.0, _remaining_until(deadline))
+    if timeout_seconds <= 0:
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "Kimi did not classify the challenge reason before the request deadline.",
+            request_id,
+            True,
+            0,
+            504,
+        )
+    messages = [{
+        "role": "system",
+        "content": (
+            "Classify the designer's latest reason against exactly two earlier tentative guesses. "
+            "Return JSON only. relation is primary, secondary, different, or unclear. "
+            "merit is reasonable, not_yet_reasonable, or unclear. A materially new concern is "
+            "different even when it is reasonable. Do not invent map facts.\n\n"
+            f"Proposal summary: {str(proposal_summary or '')[:500]}\n"
+            f"Primary guess: {primary[:800]}\n"
+            f"Secondary guess: {secondary[:800]}\n"
+            f"Latest designer reason: {reason[:1200]}"
+        ),
+    }]
+    try:
+        response = asyncio.run(asyncio.wait_for(
+            _request_completion(
+                api_key,
+                base_url,
+                KIMI_MODEL,
+                messages,
+                180,
+                timeout_seconds,
+                task="challenge_reason_classification",
+            ),
+            timeout=timeout_seconds,
+        ))
+        payload = json.loads(str(response.choices[0].message.content or ""))
+        relation = payload.get("relation")
+        merit = payload.get("merit")
+        if relation not in {"primary", "secondary", "different", "unclear"}:
+            raise ValueError("challenge reason relation is invalid")
+        if merit not in {"reasonable", "not_yet_reasonable", "unclear"}:
+            raise ValueError("challenge reason merit is invalid")
+        return {"relation": relation, "merit": merit}
+    except asyncio.TimeoutError as exception:
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT",
+            "Kimi did not classify the challenge reason before the request deadline.",
+            request_id,
+            True,
+            1,
+            504,
+        ) from exception
+    except LLMServiceError:
+        raise
+    except Exception as exception:
+        error = classify_exception(exception, request_id, 1)
+        error.retryable = True
+        raise error from exception
 
 
 async def _translate_with_model_fallback(
@@ -5937,6 +6007,7 @@ async def _generate_plain_with_model_fallback(
     semantic_messages=None,
     started_at,
     deadline=None,
+    attempt_state=None,
 ):
     last_error = None
     validation_feedback = None
@@ -5956,18 +6027,31 @@ async def _generate_plain_with_model_fallback(
         and proposal_clarification.get("questionKey")
     )
     clarification_body_candidate = ""
+    total_grounding_dropped_count = 0
 
     max_attempts = len(models)
+    ordinary_discussion = validation_mode in {"ordinary_chat", "route_discussion"}
     for attempt, model in enumerate(models[:max_attempts], start=1):
         remaining = _remaining_until(deadline)
 
         if remaining <= 0:
             raise asyncio.TimeoutError()
+        if ordinary_discussion and attempt == 3 and remaining < 20.0:
+            break
 
-        attempt_timeout = min(
-            PLAIN_PRIMARY_TIMEOUT_SECONDS if attempt == 1 else remaining,
-            remaining,
-        )
+        if attempt_state is not None:
+            attempt_state["count"] = attempt
+
+        if ordinary_discussion and attempt <= len(ORDINARY_CHAT_ATTEMPT_TIMEOUTS):
+            attempt_timeout = min(
+                ORDINARY_CHAT_ATTEMPT_TIMEOUTS[attempt - 1],
+                remaining,
+            )
+        else:
+            attempt_timeout = min(
+                PLAIN_PRIMARY_TIMEOUT_SECONDS if attempt == 1 else remaining,
+                remaining,
+            )
         response_fields = _empty_response_diagnostics()
         grounding_dropped_count = 0
         clarification_fallback_used = False
@@ -5977,7 +6061,7 @@ async def _generate_plain_with_model_fallback(
             task=task,
             model=model,
             attempt=attempt,
-            maxAttempts=len(models[:CHAT_MAX_ATTEMPTS]),
+            maxAttempts=max_attempts,
             timeoutSeconds=round(attempt_timeout, 3),
             responseMode="plain_text",
         )
@@ -5989,6 +6073,7 @@ async def _generate_plain_with_model_fallback(
                 validation_mode=validation_mode,
                 rows=rows,
                 stage_context=stage_context,
+                coordinate_free_recovery=(ordinary_discussion and attempt == max_attempts),
             )
             response = await asyncio.wait_for(
                 _request_completion(
@@ -6037,6 +6122,7 @@ async def _generate_plain_with_model_fallback(
                     stage_context,
                 )
                 grounding_dropped_count += clarification_body_dropped
+                total_grounding_dropped_count += clarification_body_dropped
                 if parsed_body:
                     clarification_body_candidate = parsed_body
                 if clarification_question_issue and attempt < max_attempts:
@@ -6121,6 +6207,7 @@ async def _generate_plain_with_model_fallback(
                 )
                 if removed_grounding:
                     grounding_dropped_count += len(removed_grounding)
+                    total_grounding_dropped_count += len(removed_grounding)
                     _log_llm_event(
                         "llm_grounding_sentences_dropped",
                         requestId=request_id,
@@ -6153,6 +6240,7 @@ async def _generate_plain_with_model_fallback(
                 )
                 if removed_grounding:
                     grounding_dropped_count += len(removed_grounding)
+                    total_grounding_dropped_count += len(removed_grounding)
                     _log_llm_event(
                         "llm_grounding_sentences_dropped",
                         requestId=request_id,
@@ -6164,23 +6252,26 @@ async def _generate_plain_with_model_fallback(
                         ],
                     )
                 if not visible_content:
-                    clarification_fallback_used = clarification_active
-                    visible_content = (
-                        _proposal_clarification_fallback_message(language, stage_context)
-                        if clarification_active
-                        else _server_snapshot_fallback_message(
-                            rows,
-                            language,
-                            stage_context=stage_context,
-                        )
+                    raise LowQualityModelResponse(
+                        "No reliable model prose remained after map-grounding cleanup."
                     )
+                discussion_focus = _extract_plain_discussion_focus(
+                    visible_content,
+                    language,
+                    stage_opening,
+                    stage_context,
+                )
 
-            # The plain compatibility path has no structured factRef envelope.
-            # Never let it become a second authority for current coordinates or
-            # entity relations; routes remain available only through the later
-            # deterministic endpoint and BFS checks.
-            visible_content = _strip_unreferenced_current_map_claims(visible_content)
+            # Ordinary discussion has already revalidated current-map claims
+            # against the StageSnapshot. Other compatibility modes still require
+            # server-owned fact references before displaying such claims.
+            if not ordinary_discussion:
+                visible_content = _strip_unreferenced_current_map_claims(visible_content)
             if not visible_content:
+                if ordinary_discussion:
+                    raise LowQualityModelResponse(
+                        "No reliable model prose remained after current-map cleanup."
+                    )
                 clarification_fallback_used = clarification_active
                 visible_content = (
                     _proposal_clarification_fallback_message(language, stage_context)
@@ -6497,7 +6588,7 @@ async def _generate_plain_with_model_fallback(
             # already removes bare confirmations and transition metadata from that family.
             binding_is_required = guidance_mode == "revision_advice"
             if proposal_binding_issue and binding_is_required:
-                if attempt < len(models[:CHAT_MAX_ATTEMPTS]):
+                if attempt < max_attempts:
                     raise ValueError(
                         f"proposalOffer binding failed: {proposal_binding_issue}"
                     )
@@ -6575,14 +6666,29 @@ async def _generate_plain_with_model_fallback(
             opening_body = body
             if stage_opening and _is_human_edit_stage_opening(True, stage_context):
                 opening_body = _compact_human_edit_opening_inventory(body, language)
+            assistant_message = _compose_assistant_message(
+                _format_stage_opening_paragraphs(opening_body) if stage_opening else body,
+                guidance,
+                language,
+                stage_opening,
+                stage_context,
+            )
+            if ordinary_discussion:
+                _validate_map_grounding_texts(
+                    [assistant_message],
+                    rows,
+                    historical_reference=historical_reference,
+                    entity_bindings=(stage_context or {}).get("entityBindings"),
+                )
+            visible_body_source = (
+                "kimi_salvaged"
+                if grounding_dropped_count
+                else "kimi_corrective"
+                if ordinary_discussion and attempt > 1
+                else "kimi"
+            )
             result = LLMExecutionResult(
-                assistant_message=_compose_assistant_message(
-                    _format_stage_opening_paragraphs(opening_body) if stage_opening else body,
-                    guidance,
-                    language,
-                    stage_opening,
-                    stage_context,
-                ),
+                assistant_message=assistant_message,
                 assessment=assessment,
                 proposed_rows=None,
                 modification_summary="",
@@ -6593,7 +6699,7 @@ async def _generate_plain_with_model_fallback(
                 guidance=guidance,
                 proposal_diagnostics=(
                     {
-                        "groundingSentencesDropped": grounding_dropped_count,
+                        "groundingSentencesDropped": total_grounding_dropped_count,
                         "clarificationRecoveryMode": (
                             "server_fallback"
                             if clarification_fallback_used and clarification_question_issue
@@ -6626,6 +6732,11 @@ async def _generate_plain_with_model_fallback(
                         ),
                     }
                     if clarification_active
+                    else {
+                        "visibleBodySource": visible_body_source,
+                        "groundingSentencesDropped": total_grounding_dropped_count,
+                    }
+                    if ordinary_discussion
                     else {}
                 ),
             )
@@ -6640,6 +6751,7 @@ async def _generate_plain_with_model_fallback(
                 responseMode="plain_text",
                 guidanceMode=guidance_mode,
                 guidanceFallbackUsed=guidance_fallback_used,
+                visibleBodySource=visible_body_source,
                 intentCard=bool(guidance.get("intentHypothesis")),
                 questionCard=bool(guidance.get("followUpQuestion")),
                 proposalCard=bool(guidance.get("proposalOffer")),
@@ -6655,7 +6767,7 @@ async def _generate_plain_with_model_fallback(
                 salvageAction=route_recovery["salvageAction"],
                 routeSentenceCount=route_recovery["routeSentenceCount"],
                 routeCoordinateCount=route_recovery["routeCoordinateCount"],
-                droppedSentenceCount=route_recovery["droppedSentenceCount"],
+                droppedSentenceCount=total_grounding_dropped_count,
                 coordinateLinksDropped=route_recovery["coordinateLinksDropped"],
                 clarificationAuthor=(
                     "server_fallback"
@@ -6732,7 +6844,9 @@ async def _generate_plain_with_model_fallback(
             validation_feedback,
         )
         failure_fields["remainingSeconds"] = round(_remaining_until(deadline), 3)
-        failure_fields["salvageAction"] = "pending_retry_or_fallback"
+        failure_fields["salvageAction"] = (
+            "pending_retry" if ordinary_discussion else "pending_retry_or_fallback"
+        )
         _log_llm_event(
             "llm_attempt_failed",
             **failure_fields,
@@ -6763,10 +6877,10 @@ async def _generate_plain_with_model_fallback(
             latencyMs=int((time.monotonic() - started_at) * 1000),
             responseMode="plain_text",
             failureClass=_llm_failure_class(last_error, validation_feedback),
-            salvageAction="pending_fallback",
+            salvageAction="return_error" if ordinary_discussion else "pending_fallback",
             routeSentenceCount=0,
             routeCoordinateCount=0,
-            droppedSentenceCount=0,
+            droppedSentenceCount=total_grounding_dropped_count,
             coordinateLinksDropped=False,
             remainingSeconds=round(_remaining_until(deadline), 3),
             **_provider_error_fields(last_error),
@@ -6786,6 +6900,8 @@ async def _generate_plain_with_model_fallback(
                 stage_context=stage_context,
                 solver_metrics=solver_metrics,
             )
+        if ordinary_discussion:
+            raise last_error
         if _is_length_failure(last_error, validation_feedback):
             fallback_message = (
                 _proposal_clarification_fallback_message(language, stage_context)
@@ -6866,59 +6982,6 @@ async def _generate_plain_with_model_fallback(
                     if _has_proposal_clarification(stage_context)
                     else {}
                 ),
-            )
-            if validation_mode in {"ordinary_chat", "route_discussion"}:
-                return LLMExecutionResult(
-                    assistant_message=_safe_grounding_chat_reply(
-                        language,
-                        rows=rows,
-                        stage_context=stage_context,
-                    ),
-                    assessment={},
-                    proposed_rows=None,
-                    modification_summary="",
-                    attempts_used=last_error.attempts_used,
-                    request_id=request_id,
-                    model="grounding-safe-chat-fallback",
-                    latency_ms=int((time.monotonic() - started_at) * 1000),
-                    guidance={
-                        "move": "offer_perspective",
-                        "intentHypothesis": None,
-                        "intentConfidence": None,
-                        "followUpQuestion": None,
-                        "proposalOffer": None,
-                        "disagreement": None,
-                        "uiCues": [],
-                        "coordinateLinks": [],
-                    },
-                )
-            # A repeated coordinate/brief conflict is a grounding problem, not a
-            # reason to manufacture a proposal card from an abstract fallback.
-            # Return ordinary clarification prose so the designer can correct the
-            # location or tile state explicitly.
-            return LLMExecutionResult(
-                assistant_message=(
-                    "我发现刚才提到的具体坐标或格子状态与当前已保存地图对不上。"
-                    "我不会猜测邻近格，也不会改动当前地图；请重新确认要修改的位置，"
-                    "以及它当前是墙、地板、水域还是其他元素。"
-                    if language == "zh-CN"
-                    else "The precise coordinate or tile state in that suggestion does not match "
-                    "the saved map. I will not guess a neighboring cell or change the map; please "
-                    "confirm the location and whether it is currently a wall, floor, water, or entity."
-                ),
-                attempts_used=last_error.attempts_used,
-                request_id=request_id,
-                model="execution-brief-grounding-guard",
-                latency_ms=int((time.monotonic() - started_at) * 1000),
-                guidance={
-                    "move": "clarify_intent",
-                    "intentHypothesis": None,
-                    "intentConfidence": None,
-                    "followUpQuestion": None,
-                    "proposalOffer": None,
-                    "disagreement": None,
-                    "uiCues": [],
-                },
             )
         raise last_error
 
@@ -7270,14 +7333,23 @@ def _plain_messages_with_validation_feedback(
     validation_mode="ordinary_chat",
     rows=None,
     stage_context=None,
+    coordinate_free_recovery=False,
 ):
-    if not validation_feedback:
+    if not validation_feedback and not coordinate_free_recovery:
         return messages
 
     corrected = [dict(message) for message in messages]
     feedback_text = str(validation_feedback)
     feedback_lower = feedback_text.casefold()
-    if _has_proposal_clarification(stage_context):
+    if coordinate_free_recovery:
+        instruction = (
+            "This is the final corrective attempt for an ordinary conversation. Return only a fresh, "
+            "complete visible reply that directly answers the designer's latest message. Preserve the "
+            "useful design interpretation, but do not state coordinates, current entity positions, "
+            "adjacency, tile states, route endpoints, or map inventories. Do not output a GUIDANCE block, "
+            "cards, metadata, workflow language, or mention this correction."
+        )
+    elif _has_proposal_clarification(stage_context):
         specification = (stage_context or {}).get("proposalClarification") or {}
         instruction = (
             "Your previous private proposal-clarification envelope was rejected: "
@@ -7329,7 +7401,7 @@ def _plain_messages_with_validation_feedback(
             "fresh grounded reply. Use only verified entity IDs or coordinates for current map "
             "relations, and do not mention this correction to the designer."
         )
-    if rows is not None and any(
+    if validation_mode not in {"ordinary_chat", "route_discussion"} and rows is not None and any(
         marker in feedback_lower
         for marker in (
             "spatial",
@@ -7545,10 +7617,13 @@ def validate_translation_response(payload, source_items, target_language="en"):
 def _validate_translated_disagreement(value, source, field_name):
     if not isinstance(value, dict) or set(value) != set(source):
         raise ValueError(f"{field_name} must preserve the disagreement fields.")
-    for field in ("status", "subject", "resolution"):
+    for field in ("status", "subject", "resolution", "phase", "displayCard"):
         if value.get(field) != source.get(field):
             raise ValueError(f"{field_name}.{field} must remain unchanged.")
-    result = {field: value[field] for field in ("status", "subject", "resolution")}
+    # Workflow metadata and saved challenge hypotheses are backend state, not
+    # visible copy. Preserve them byte-for-byte across translation so hiding a
+    # discussion card never changes whether the disagreement is active.
+    result = dict(source)
     for field in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion"):
         result[field] = _validate_translated_text(
             value.get(field),
@@ -10335,6 +10410,48 @@ def _plain_action_instruction(stage_context):
             "entity movement. Do not emit map rows or a disagreement. If the current facts cannot "
             "support a different exact proposal, ask for clarification and omit proposalOffer. "
             f"{alternative_brief}"
+        )
+    classification = context.get("challengeReasonClassification") or {}
+    if classification:
+        relation = classification.get("relation")
+        merit = classification.get("merit")
+        if relation == "different" and merit == "reasonable":
+            return (
+                "CHALLENGE REASON REVIEW: the designer gave a new reason that differs from both saved "
+                "hypotheses, and the independent reviewer found it reasonable. Explicitly acknowledge "
+                "that the new reason has merit, then ask whether the designer still wants to use the "
+                "AI's original approach. Ask for a yes-or-no answer. Do not resolve the disagreement, "
+                "produce a proposal, or claim a map change. The server owns the discussion-card state."
+            )
+        if relation == "different" and merit == "not_yet_reasonable":
+            return (
+                "CHALLENGE REASON REVIEW: the designer gave a new reason that differs from both saved "
+                "hypotheses, but it is not yet persuasive. Explain the precise design disagreement in "
+                "warm first-person prose and ask one open question that could change your judgment. "
+                "Do not resolve it or produce a proposal. The server owns the discussion-card state."
+            )
+        if relation == "unclear" or merit == "unclear":
+            return (
+                "CHALLENGE REASON REVIEW: the latest message does not yet express a reason that can be "
+                "compared with the two saved hypotheses. Ask one concise ordinary-prose clarification. "
+                "Do not emit a disagreement card or proposal."
+            )
+        return (
+            "CHALLENGE REASON REVIEW: the independent reviewer matched the designer's reason to one of "
+            "the two saved hypotheses. Continue the existing challenge flow: accept and resolve only if "
+            "the reason persuades you; otherwise keep a concrete active disagreement. Do not add a card "
+            "merely because the classification matched a hypothesis."
+        )
+    active = context.get("activeDisagreement") or {}
+    if (
+        active.get("subject") == "ai_revision_challenge"
+        and active.get("phase") == "choice_pending"
+    ):
+        return (
+            "CHALLENGE CHOICE: only determine whether the designer clearly answered yes or no to using "
+            "the AI's original approach. If ambiguous, ask that same concise yes-or-no question in "
+            "ordinary prose. Do not add a proposal or change the disagreement; the server performs the "
+            "deterministic transition and proposal routing for clear answers."
         )
     if context.get("challengeContext"):
         return (

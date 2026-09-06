@@ -305,6 +305,19 @@ def _normalize_disagreement(value):
         "resolution",
     ):
         result[field] = _text(value.get(field), MAX_TEXT) or None
+    phase = value.get("phase")
+    if phase in {"reason_review", "choice_pending"}:
+        result["phase"] = phase
+    result["displayCard"] = bool(value.get("displayCard", True))
+    for field in (
+        "primaryHypothesis",
+        "secondaryHypothesis",
+        "proposalSummary",
+        "acceptedReason",
+    ):
+        text = _text(value.get(field), MAX_TEXT)
+        if text:
+            result[field] = text
     if status == "active":
         result["resolution"] = None
     return result

@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import replace
@@ -45,8 +46,10 @@ from demo_level_generator import generate_demo_level
 from llm_client import (
     LLMExecutionResult,
     LLMServiceError,
+    LLM_INTERNAL_DEADLINE_SECONDS,
     PROMPT_VERSION,
     PROPOSAL_GENERATION_ATTEMPTS,
+    classify_challenge_reason,
     classify_revision_request,
     _contains_user_design_direction,
     _guidance_advice_request,
@@ -331,6 +334,7 @@ class MessageRequest(StrictModel):
     content: str
     baseVersionId: str
     idempotencyKey: str
+    requestProposal: bool = False
     action: Literal[
         "none",
         "execute_revision",
@@ -1238,6 +1242,17 @@ def _send_message_locked(
                 "IDEMPOTENCY_CONFLICT",
                 "The message key was already used by an ordinary message.",
             )
+        prior_proposal_request = _proposal_request_for_message_key(
+            database,
+            session_id,
+            payload.idempotencyKey,
+        )
+        if prior_user is not None and bool(prior_proposal_request) != payload.requestProposal:
+            raise ApiError(
+                409,
+                "IDEMPOTENCY_CONFLICT",
+                "The message key was already used with a different proposal-request mode.",
+            )
 
         prior_assistant = database.execute(
             """
@@ -1293,7 +1308,7 @@ def _send_message_locked(
         )
 
         if prior_user is None:
-            insert_turn(
+            user_turn_id = insert_turn(
                 database,
                 session,
                 "user",
@@ -1302,6 +1317,18 @@ def _send_message_locked(
                 payload.idempotencyKey,
                 None,
             )
+            if payload.requestProposal:
+                record_event(
+                    database,
+                    session_id,
+                    "proposal_request_requested",
+                    {
+                        "messageKey": payload.idempotencyKey,
+                        "turnId": user_turn_id,
+                        "baseVersionId": payload.baseVersionId,
+                    },
+                    utc_now(),
+                )
 
         if payload.action != "none" and prior_action is None:
             _record_card_action(database, session_id, payload, source_offer)
@@ -1391,6 +1418,7 @@ def _send_message_locked(
                 utc_now(),
             )
         stage_context["discussionCardMode"] = "disagreement_only"
+        stage_context["explicitProposalRequest"] = payload.requestProposal
         stage_context["explicitAction"] = payload.action
         stage_context["actionSourceTurnId"] = payload.sourceTurnId
         stage_context["sourceProposalOffer"] = source_offer
@@ -1414,7 +1442,9 @@ def _send_message_locked(
             payload.action != "execute_revision"
             and not proposal_state.startswith("ready_")
         )
-        if payload.action != "none" and stage_context.get("activeDisagreement"):
+        if (
+            payload.action != "none" or payload.requestProposal
+        ) and stage_context.get("activeDisagreement"):
             raise ApiError(
                 409,
                 "DISAGREEMENT_ACTIVE",
@@ -1439,6 +1469,44 @@ def _send_message_locked(
                     excluded_rows
                 )
 
+    challenge_reason_classification = None
+    challenge_choice_resolution = None
+    challenge_deadline = None
+    if payload.action == "none":
+        stage_context = context["stageContext"]
+        active_disagreement = stage_context.get("activeDisagreement") or {}
+        if (
+            active_disagreement.get("subject") == "ai_revision_challenge"
+            and active_disagreement.get("phase") == "choice_pending"
+        ):
+            challenge_choice_resolution = _challenge_choice(content, language)
+            stage_context["challengeChoiceResolution"] = challenge_choice_resolution
+        else:
+            challenge_context = stage_context.get("challengeContext") or {}
+            hypotheses = challenge_context.get("hypotheses") or {}
+            if (
+                active_disagreement.get("subject") == "ai_revision_challenge"
+                and active_disagreement.get("phase") == "reason_review"
+            ):
+                hypotheses = {
+                    "primary": active_disagreement.get("primaryHypothesis"),
+                    "secondary": active_disagreement.get("secondaryHypothesis"),
+                }
+            if hypotheses.get("primary") and hypotheses.get("secondary"):
+                challenge_deadline = time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS
+                challenge_reason_classification = classify_challenge_reason(
+                    content,
+                    hypotheses,
+                    active_disagreement.get("proposalSummary")
+                    or hypotheses.get("proposalSummary")
+                    or challenge_context.get("proposalSummary"),
+                    request.state.request_id,
+                    _deadline=challenge_deadline,
+                )
+                stage_context["challengeReasonClassification"] = (
+                    challenge_reason_classification
+                )
+
     revision_state, revision_brief = classify_revision_request(
         context["conversation"],
         context["stageContext"],
@@ -1458,6 +1526,25 @@ def _send_message_locked(
             for field in ("summary", "rationale")
         ).strip()
         context["stageContext"]["authorizedRevisionBrief"] = revision_brief
+    elif challenge_choice_resolution is not None:
+        active_disagreement = context["stageContext"].get("activeDisagreement") or {}
+        accepted_reason = str(active_disagreement.get("acceptedReason") or "").strip()
+        proposal_summary = str(active_disagreement.get("proposalSummary") or "").strip()
+        if challenge_choice_resolution == "ai":
+            revision_brief = (
+                f"{proposal_summary}\nAccepted designer concern to address as a soft goal: {accepted_reason}"
+            ).strip()
+        else:
+            revision_brief = (
+                f"Use the designer's accepted reason as the primary direction: {accepted_reason}"
+            ).strip()
+        revision_state = "proposal_requested"
+        context["stageContext"]["revisionRouting"] = "proposal"
+        context["stageContext"]["proposalState"] = "ready_with_explicit_binding"
+        context["stageContext"]["authorizedRevisionBrief"] = revision_brief
+        context["stageContext"]["activeDisagreement"] = None
+    elif challenge_reason_classification is not None:
+        revision_state, revision_brief = "not_request", None
     elif context["stageContext"].get("proposalState", "").startswith("ready_"):
         revision_state = "proposal_requested"
         revision_brief = str(
@@ -1485,6 +1572,7 @@ def _send_message_locked(
                     proposed_rows,
                 ),
                 stage_context=context["stageContext"],
+                _deadline=challenge_deadline,
             )
         except LLMServiceError as exception:
             revision_failure = exception
@@ -1515,7 +1603,11 @@ def _send_message_locked(
                     exception=exception,
                 )
             if execution is None:
-                if not retrying_failed_message:
+                ordinary_message_failure = (
+                    payload.action == "none"
+                    and revision_state == "not_request"
+                )
+                if not retrying_failed_message or ordinary_message_failure:
                     with connect(immediate=True) as database:
                         active_session = require_active_session(
                             database,
@@ -1532,6 +1624,7 @@ def _send_message_locked(
                                 "messageKey": payload.idempotencyKey,
                                 "code": exception.code,
                                 "attemptsUsed": exception.attempts_used,
+                                "retryingExistingUserTurn": retrying_failed_message,
                             },
                             utc_now(),
                         )
@@ -1563,7 +1656,20 @@ def _send_message_locked(
             language,
             source_binding,
         )
-    elif payload.action != "execute_revision" and execution.proposed_rows is not None:
+    elif challenge_reason_classification is not None:
+        execution = _enforce_challenge_reason_execution(
+            execution,
+            challenge_reason_classification,
+            content,
+            context["stageContext"].get("challengeContext") or {},
+            active_disagreement,
+            language,
+        )
+    if (
+        payload.action != "challenge_revision"
+        and payload.action != "execute_revision"
+        and execution.proposed_rows is not None
+    ):
         if revision_state == "proposal_requested":
             execution = _materialize_verified_automatic_offer(
                 execution,
@@ -1587,6 +1693,17 @@ def _send_message_locked(
             source_offer,
             language,
             source_binding,
+        )
+    if (
+        payload.action == "none"
+        and active_disagreement.get("subject") == "ai_revision_challenge"
+        and active_disagreement.get("phase") == "choice_pending"
+    ):
+        execution = _enforce_challenge_choice_execution(
+            execution,
+            active_disagreement,
+            challenge_choice_resolution,
+            language,
         )
     if payload.action == "none" and context["stageContext"].get("source") == "human_edit":
         execution = _normalize_manual_edit_review_execution(
@@ -1758,6 +1875,27 @@ def _send_message_locked(
                 payload.idempotencyKey,
                 execution,
             )
+
+            if payload.action == "challenge_revision":
+                hypotheses = (execution.proposal_diagnostics or {}).get(
+                    "challengeHypotheses"
+                )
+                if isinstance(hypotheses, dict):
+                    record_event(
+                        database,
+                        session_id,
+                        "proposal_challenge_hypotheses_recorded",
+                        {
+                            "messageKey": payload.idempotencyKey,
+                            "challengeTurnId": assistant_turn_id,
+                            "sourceTurnId": payload.sourceTurnId,
+                            "baseVersionId": payload.baseVersionId,
+                            "proposalSummary": (source_offer or {}).get("summary"),
+                            "primary": hypotheses.get("primary"),
+                            "secondary": hypotheses.get("secondary"),
+                        },
+                        utc_now(),
+                    )
 
             discovery_marker = (execution.guidance or {}).get("proposalDiscovery")
             if isinstance(discovery_marker, dict):
@@ -3547,7 +3685,11 @@ def _displayed_cards(guidance):
         cue_text = str(cue.get("text") or "").strip()
         if cue_type and cue_text:
             cards.append({"type": cue_type, "text": cue_text})
-    if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+    if (
+        isinstance(disagreement, dict)
+        and disagreement.get("status") == "active"
+        and disagreement.get("displayCard", True) is not False
+    ):
         cards.append({
             "type": "discussion",
             "text": disagreement.get("coreDisagreement") or disagreement.get("nextQuestion"),
@@ -4276,8 +4418,24 @@ def build_llm_context(database, session_id, version):
         """,
         (session_id, version["id"]),
     ).fetchall()
+    proposal_request_keys = {
+        str(row["message_key"])
+        for row in database.execute(
+            """
+            SELECT json_extract(payload_json, '$.messageKey') AS message_key
+            FROM audit_events
+            WHERE session_id = ? AND event_type = 'proposal_request_requested'
+            """,
+            (session_id,),
+        ).fetchall()
+        if row["message_key"]
+    }
     clarification_question_count = _clarification_question_count(turns)
-    proposal_discovery = _proposal_discovery_from_turns(turns, version["id"])
+    proposal_discovery = _proposal_discovery_from_turns(
+        turns,
+        version["id"],
+        proposal_request_keys,
+    )
     accepted_opening = database.execute(
         """
         SELECT proposal.id AS proposal_id, proposal.assistant_turn_id,
@@ -4513,7 +4671,25 @@ def build_llm_context(database, session_id, version):
                     for turn in turns
                 )
                 if not later_assistant and later_user:
-                    challenge_context = candidate
+                    hypotheses_row = database.execute(
+                        """
+                        SELECT payload_json FROM audit_events
+                        WHERE session_id = ?
+                          AND event_type = 'proposal_challenge_hypotheses_recorded'
+                          AND json_extract(payload_json, '$.messageKey') = ?
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (session_id, candidate.get("messageKey")),
+                    ).fetchone()
+                    hypotheses = (
+                        load_json(hypotheses_row["payload_json"])
+                        if hypotheses_row is not None
+                        else None
+                    )
+                    challenge_context = {
+                        **candidate,
+                        "hypotheses": hypotheses,
+                    }
             break
     evidence_payload = {
         "versionId": version["id"],
@@ -4546,6 +4722,17 @@ def build_llm_context(database, session_id, version):
                 "content": _verified_proposal_message(session["language"]),
             },
         )
+
+    # DesignContext is the durable authority for an active disagreement.
+    # The latest turn normally mirrors it, but hidden discussion cards and
+    # compatibility reads must remain active even when no visible card exists.
+    durable_disagreement = design_context.get("activeDisagreement")
+    if (
+        recent_guidance["activeDisagreement"] is None
+        and isinstance(durable_disagreement, dict)
+        and durable_disagreement.get("status") == "active"
+    ):
+        recent_guidance["activeDisagreement"] = durable_disagreement
 
     return {
         "rows": current_rows,
@@ -4671,8 +4858,9 @@ def _latest_substantive_design_direction(turns):
     return ""
 
 
-def _proposal_discovery_from_turns(turns, version_id):
+def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None):
     """Rebuild one pending proposal topic from private turn metadata."""
+    forced_keys = set(proposal_request_keys or ())
     ordered = sorted(turns or [], key=lambda turn: turn["sequence_number"])
     active = None
     for turn in ordered:
@@ -4683,7 +4871,14 @@ def _proposal_discovery_from_turns(turns, version_id):
                 or active.get("status") in {"proposal_ready", "blocked"}
                 or _proposal_topic_reset_requested(content)
             )
-            if _guidance_advice_request(content) and starts_new_topic:
+            if (
+                _guidance_advice_request(content)
+                or (
+                    turn["request_id"]
+                    if "request_id" in turn.keys()
+                    else None
+                ) in forced_keys
+            ) and starts_new_topic:
                 active = {
                     "topicId": turn["id"],
                     "sourceTurnId": turn["id"],
@@ -4965,8 +5160,6 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_d
     text = str(content or "").strip()
     if not text:
         return "none"
-    if _guidance_confusion_request(text):
-        return "confused"
     if (user_map_claims or {}).get("conflicts"):
         return "needs_clarification"
 
@@ -4983,6 +5176,9 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_d
                 else "proposal_blocked"
             )
         return "needs_clarification"
+
+    if _guidance_confusion_request(text):
+        return "confused"
 
     direct_edit = bool(re.search(
         r"(?:把|将|請將|扩展|扩大|移动|移到|挪到|调整|修改|改成|放到|"
@@ -5274,6 +5470,12 @@ def _validate_message_action_payload(payload):
         raise ApiError(400, "INVALID_MESSAGE_ACTION", "The message action is invalid.")
 
     source_turn_id = payload.sourceTurnId
+    if payload.requestProposal and action != "none":
+        raise ApiError(
+            400,
+            "INVALID_MESSAGE_ACTION",
+            "A proposal request cannot also be a revision-card action.",
+        )
     if action == "none" and source_turn_id:
         raise ApiError(
             400,
@@ -5780,6 +5982,20 @@ def _action_for_message_key(database, session_id, message_key):
     return payload.get("action"), payload.get("sourceTurnId")
 
 
+def _proposal_request_for_message_key(database, session_id, message_key):
+    row = database.execute(
+        """
+        SELECT 1 FROM audit_events
+        WHERE session_id = ?
+          AND event_type = 'proposal_request_requested'
+          AND json_extract(payload_json, '$.messageKey') = ?
+        LIMIT 1
+        """,
+        (session_id, message_key),
+    ).fetchone()
+    return row is not None
+
+
 def _challenge_body_has_two_tentative_hypotheses(body, language):
     text = _inline_display_text(body).casefold()
     if language == "zh-CN":
@@ -5803,6 +6019,205 @@ def _challenge_body_has_two_tentative_hypotheses(body, language):
         "correct me", "if i am wrong", "which is closer", "or is your",
     ))
     return primary and secondary and correctable and "?" in body
+
+
+def _challenge_hypotheses_from_body(body, language):
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?。！？])\s*|[\r\n]+", str(body or ""))
+        if sentence.strip()
+    ]
+    if language == "zh-CN":
+        primary_markers = ("我最先猜", "我的主要猜测", "我的第一个猜测", "我首先想到")
+        secondary_markers = ("另一个可能", "第二个猜测", "我的次要猜测", "也可能")
+    else:
+        primary_markers = ("my primary guess", "my first guess", "what i first suspect")
+        secondary_markers = ("my secondary guess", "another possibility", "my second guess", "you may also")
+
+    def matching(markers):
+        return next(
+            (
+                sentence
+                for sentence in sentences
+                if any(marker in sentence.casefold() for marker in markers)
+            ),
+            "",
+        )
+
+    primary = _inline_display_text(matching(primary_markers))
+    secondary = _inline_display_text(matching(secondary_markers))
+    return {
+        "primary": primary[:800],
+        "secondary": secondary[:800],
+    } if primary and secondary else None
+
+
+def _challenge_choice(value, language):
+    raw = str(value or "").strip().casefold()
+    normalized = re.sub(r"[\s,.!?。！？]+", "", raw)
+    yes = {"是", "是的", "可以", "沿用", "继续沿用", "yes", "yesplease", "useyourapproach"}
+    no = {"否", "不是", "不要", "不沿用", "用我的", "no", "noplease", "usemyreason"}
+    if normalized in no:
+        return "user"
+    if normalized in yes:
+        return "ai"
+    if re.search(r"(?:不沿用|不要|不用|用我的|do\s+not|don't|use\s+my)", raw):
+        return "user"
+    english_yes = bool(re.match(r"^yes\b", raw))
+    english_no = bool(re.match(r"^no\b", raw))
+    chinese_no = bool(re.match(r"^(?:否|不|不要|不用|别)", raw))
+    chinese_yes = bool(re.match(r"^(?:是(?:的)?|好(?:的)?|可以|沿用|继续沿用)", raw))
+    if (english_yes or chinese_yes) and not (english_no or chinese_no):
+        return "ai"
+    if (english_no or chinese_no) and not (english_yes or chinese_yes):
+        return "user"
+    return None
+
+
+def _enforce_challenge_reason_execution(
+    execution,
+    classification,
+    user_reason,
+    challenge_context,
+    active_disagreement,
+    language,
+):
+    relation = (classification or {}).get("relation")
+    merit = (classification or {}).get("merit")
+    if relation == "unclear" or merit == "unclear":
+        guidance = dict(execution.guidance or {})
+        guidance["proposalOffer"] = None
+        if (
+            isinstance(active_disagreement, dict)
+            and active_disagreement.get("subject") == "ai_revision_challenge"
+            and active_disagreement.get("status") == "active"
+        ):
+            preserved = dict(active_disagreement)
+            preserved["displayCard"] = False
+            guidance["disagreement"] = preserved
+        else:
+            guidance["disagreement"] = None
+        return replace(
+            execution,
+            guidance=guidance,
+            proposed_rows=None,
+            revision_plan={},
+            revision_contract={},
+            revision_operations=[],
+            proposal_binding={},
+        )
+    if relation != "different" and not (
+        isinstance(active_disagreement, dict)
+        and active_disagreement.get("subject") == "ai_revision_challenge"
+        and active_disagreement.get("phase") == "reason_review"
+    ):
+        return execution
+
+    source = active_disagreement or {}
+    hypotheses = (challenge_context or {}).get("hypotheses") or {}
+    primary = str(source.get("primaryHypothesis") or hypotheses.get("primary") or "").strip()
+    secondary = str(source.get("secondaryHypothesis") or hypotheses.get("secondary") or "").strip()
+    proposal_summary = str(
+        source.get("proposalSummary")
+        or hypotheses.get("proposalSummary")
+        or (challenge_context or {}).get("proposalSummary")
+        or ""
+    ).strip()
+    reasonable = merit == "reasonable"
+    next_question = (
+        "你是否仍希望沿用我原来提出的办法？请回答是或否。"
+        if language == "zh-CN"
+        else "Do you still want to use my original approach? Please answer yes or no."
+    ) if reasonable else (
+        "你愿意再说明这个理由会怎样改善实际游玩判断吗？"
+        if language == "zh-CN"
+        else "Could you explain how this reason would improve the actual play judgment?"
+    )
+    disagreement = {
+        "status": "active",
+        "subject": "ai_revision_challenge",
+        "userPosition": str(user_reason or "").strip()[:1200],
+        "aiPosition": str(execution.assistant_message or "").strip()[:1200],
+        "coreDisagreement": (
+            "是否应根据用户提出的新理由调整这份 AI 方案。"
+            if language == "zh-CN"
+            else "Whether the AI revision should change in response to the designer's new reason."
+        ),
+        "nextQuestion": next_question,
+        "resolution": None,
+        "phase": "choice_pending" if reasonable else "reason_review",
+        "displayCard": not bool(active_disagreement) or reasonable,
+        "primaryHypothesis": primary,
+        "secondaryHypothesis": secondary,
+        "proposalSummary": proposal_summary,
+        "acceptedReason": str(user_reason or "").strip()[:1200] if reasonable else "",
+    }
+    guidance = dict(execution.guidance or {})
+    guidance.update({
+        "move": "offer_perspective",
+        "intentHypothesis": None,
+        "intentConfidence": None,
+        "followUpQuestion": None,
+        "proposalOffer": None,
+        "disagreement": disagreement,
+        "uiCues": [],
+    })
+    return replace(
+        execution,
+        proposed_rows=None,
+        revision_plan={},
+        revision_contract={},
+        revision_operations=[],
+        proposal_binding={},
+        guidance=guidance,
+    )
+
+
+def _enforce_challenge_choice_execution(
+    execution,
+    active_disagreement,
+    resolution,
+    language,
+):
+    guidance = dict(execution.guidance or {})
+    if resolution not in {"ai", "user"}:
+        pending = dict(active_disagreement or {})
+        pending.update({
+            "status": "active",
+            "phase": "choice_pending",
+            "displayCard": False,
+            "nextQuestion": (
+                "请只确认：你是否仍希望沿用我原来提出的办法？回答“是”或“否”即可。"
+                if language == "zh-CN"
+                else "Please confirm only whether you still want to use my original approach: yes or no."
+            ),
+        })
+        guidance.update({
+            "proposalOffer": None,
+            "disagreement": pending,
+            "followUpQuestion": None,
+            "uiCues": [],
+        })
+        return replace(
+            execution,
+            proposed_rows=None,
+            revision_plan={},
+            revision_contract={},
+            revision_operations=[],
+            proposal_binding={},
+            guidance=guidance,
+        )
+
+    resolved = dict(active_disagreement or {})
+    resolved.update({
+        "status": "resolved",
+        "phase": "choice_pending",
+        "displayCard": False,
+        "resolution": resolution,
+        "nextQuestion": None,
+    })
+    guidance["disagreement"] = resolved
+    return replace(execution, guidance=guidance)
 
 
 def _challenge_preserve_description(brief, language):
@@ -5862,6 +6277,7 @@ def _sanitize_challenge_execution(execution, offer, language, source_binding=Non
         if _challenge_body_has_two_tentative_hypotheses(model_body, language)
         else _challenge_fallback_body(offer, source_binding, language)
     )
+    hypotheses = _challenge_hypotheses_from_body(body, language)
     return replace(
         execution,
         assistant_message=body,
@@ -5869,7 +6285,7 @@ def _sanitize_challenge_execution(execution, offer, language, source_binding=Non
         revision_plan={},
         revision_contract={},
         revision_operations=[],
-        proposal_diagnostics={},
+        proposal_diagnostics={"challengeHypotheses": hypotheses} if hypotheses else {},
         guidance={
             "move": "offer_perspective",
             "intentHypothesis": None,

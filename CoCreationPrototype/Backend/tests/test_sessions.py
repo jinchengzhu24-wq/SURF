@@ -1333,7 +1333,7 @@ class CoCreationSessionTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(count, 0)
 
-    def test_retry_after_model_failure_saves_a_self_edit_guidance_reply(self):
+    def test_retry_after_ordinary_chat_failure_never_saves_server_prose(self):
         version_id = self.read_session()["currentVersionId"]
         request_payload = {
             "content": "I think the route is too easy.",
@@ -1349,11 +1349,18 @@ class CoCreationSessionTests(unittest.TestCase):
             502,
         )
 
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            side_effect=empty_response,
-        ) as mocked:
+        with (
+            patch.object(
+                backend,
+                "generate_chat_reply",
+                side_effect=empty_response,
+            ) as mocked,
+            patch.object(
+                backend,
+                "_retry_exhausted_execution",
+                side_effect=AssertionError("ordinary chat used retry-exhausted prose"),
+            ),
+        ):
             first = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json=request_payload,
@@ -1366,25 +1373,34 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(first.status_code, 502)
         self.assertEqual(first.json()["code"], "MODEL_EMPTY_RESPONSE")
         self.assertTrue(first.json()["retryable"])
-        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.status_code, 502, second.text)
+        self.assertEqual(second.json()["code"], "MODEL_EMPTY_RESPONSE")
+        self.assertTrue(second.json()["retryable"])
         self.assertEqual(mocked.call_count, 2)
         stored = self.read_session()
         matching_turns = [
             turn for turn in stored["turns"]
             if turn["requestId"] == request_payload["idempotencyKey"]
         ]
-        self.assertEqual([turn["role"] for turn in matching_turns], ["user", "assistant"])
-        self.assertIn("tried generating the revision again", matching_turns[1]["content"])
-        self.assertIn("make the change yourself", matching_turns[1]["content"])
+        self.assertEqual([turn["role"] for turn in matching_turns], ["user"])
         with repository.connect() as database:
-            retry_event = database.execute(
+            retry_event_count = database.execute(
                 """
-                SELECT payload_json FROM audit_events
+                SELECT COUNT(*) FROM audit_events
                 WHERE session_id = ? AND event_type = 'message_retry_exhausted'
                 """,
                 (self.session_id,),
-            ).fetchone()
-        self.assertIsNotNone(retry_event)
+            ).fetchone()[0]
+            failure_count = database.execute(
+                """
+                SELECT COUNT(*) FROM audit_events
+                WHERE session_id = ? AND event_type = 'message_generation_failed'
+                  AND json_extract(payload_json, '$.messageKey') = ?
+                """,
+                (self.session_id, request_payload["idempotencyKey"]),
+            ).fetchone()[0]
+        self.assertEqual(retry_event_count, 0)
+        self.assertEqual(failure_count, 2)
 
     def test_retry_exhausted_reply_uses_the_requested_chinese_copy(self):
         failure = LLMServiceError(
@@ -2951,6 +2967,25 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertIn("Another possibility", challenge_body)
         self.assertIn("tentative readings", challenge_body)
         self.assertIn("Please correct me", challenge_body)
+        challenge_guidance = challenged.json()["turns"][-1]["guidance"]
+        self.assertIsNone(challenge_guidance.get("disagreement"))
+        self.assertFalse(
+            any(card["type"] == "discussion" for card in backend._displayed_cards(challenge_guidance))
+        )
+        with repository.connect() as database:
+            saved_hypotheses = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ?
+                  AND event_type = 'proposal_challenge_hypotheses_recorded'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (self.session_id,),
+            ).fetchone()
+        self.assertIsNotNone(saved_hypotheses)
+        hypothesis_payload = json.loads(saved_hypotheses["payload_json"])
+        self.assertTrue(hypothesis_payload["primary"])
+        self.assertTrue(hypothesis_payload["secondary"])
 
         active = {
             "status": "active",
@@ -2976,7 +3011,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=active_execution) as active_mock:
+        with patch.object(
+            backend,
+            "classify_challenge_reason",
+            return_value={"relation": "primary", "merit": "not_yet_reasonable"},
+        ), patch.object(backend, "generate_chat_reply", return_value=active_execution) as active_mock:
             still_active = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -3024,6 +3063,304 @@ class CoCreationSessionTests(unittest.TestCase):
         latest = resolved_response.json()["turns"][-1]["guidance"]
         self.assertEqual(latest["disagreement"]["resolution"], "user")
         self.assertIsNotNone(latest["proposalOffer"])
+
+    def test_proposal_button_mode_is_audited_restored_and_idempotent(self):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "I can help narrow that direction.",
+            1,
+            "proposal-button-mode",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        contexts = []
+
+        def reply(*args, **kwargs):
+            contexts.append(kwargs["stage_context"])
+            return execution
+
+        with patch.object(backend, "generate_chat_reply", side_effect=reply):
+            ordinary = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "The left side feels crowded.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "proposal-button-ordinary",
+                },
+            )
+            requested = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Make the opening more deliberate.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "proposal-button-requested",
+                    "requestProposal": True,
+                },
+            )
+            concrete = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Move P one cell left so the opening commitment takes longer.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "proposal-button-concrete",
+                    "requestProposal": True,
+                },
+            )
+
+        self.assertEqual(ordinary.status_code, 200, ordinary.text)
+        self.assertEqual(requested.status_code, 200, requested.text)
+        self.assertEqual(concrete.status_code, 200, concrete.text)
+        self.assertEqual(contexts[0]["revisionRouting"], "none")
+        self.assertTrue(contexts[1]["explicitProposalRequest"])
+        self.assertEqual(contexts[1]["revisionRouting"], "needs_clarification")
+        self.assertEqual(contexts[2]["revisionRouting"], "proposal")
+        requested_user = next(
+            turn
+            for turn in requested.json()["turns"]
+            if turn["requestId"] == "proposal-button-requested" and turn["role"] == "user"
+        )
+        self.assertTrue(requested_user["requestProposal"])
+        with repository.connect() as database:
+            event = database.execute(
+                """
+                SELECT 1 FROM audit_events
+                WHERE session_id = ? AND event_type = 'proposal_request_requested'
+                  AND json_extract(payload_json, '$.messageKey') = ?
+                """,
+                (self.session_id, "proposal-button-requested"),
+            ).fetchone()
+        self.assertIsNotNone(event)
+
+        repeated = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Make the opening more deliberate.",
+                "baseVersionId": version_id,
+                "idempotencyKey": "proposal-button-requested",
+                "requestProposal": True,
+            },
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        conflict = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Make the opening more deliberate.",
+                "baseVersionId": version_id,
+                "idempotencyKey": "proposal-button-requested",
+                "requestProposal": False,
+            },
+        )
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()["code"], "IDEMPOTENCY_CONFLICT")
+
+    def test_different_challenge_reason_enforces_one_or_two_discussion_cards(self):
+        execution = LLMExecutionResult(
+            "I am not yet persuaded by that reason.",
+            1,
+            "challenge-card-count",
+            model="mock-model",
+            guidance={"proposalOffer": {"summary": "must be removed"}},
+        )
+        context = {
+            "proposalSummary": "Move the wall beside B1",
+            "hypotheses": {
+                "primary": "Primary tentative hypothesis",
+                "secondary": "Secondary tentative hypothesis",
+            },
+        }
+        initial = backend._enforce_challenge_reason_execution(
+            execution,
+            {"relation": "different", "merit": "not_yet_reasonable"},
+            "My concern is visual density.",
+            context,
+            {},
+            "en",
+        )
+        first = initial.guidance["disagreement"]
+        self.assertTrue(first["displayCard"])
+        self.assertEqual(len(backend._displayed_cards(initial.guidance)), 1)
+
+        continued = backend._enforce_challenge_reason_execution(
+            execution,
+            {"relation": "different", "merit": "not_yet_reasonable"},
+            "The clustered colors still dominate the left side.",
+            {},
+            first,
+            "en",
+        )
+        middle = continued.guidance["disagreement"]
+        self.assertFalse(middle["displayCard"])
+        self.assertEqual(backend._displayed_cards(continued.guidance), [])
+
+        accepted = backend._enforce_challenge_reason_execution(
+            execution,
+            {"relation": "different", "merit": "reasonable"},
+            "The clustered colors still dominate the left side.",
+            {},
+            middle,
+            "en",
+        )
+        final = accepted.guidance["disagreement"]
+        self.assertEqual(final["phase"], "choice_pending")
+        self.assertTrue(final["displayCard"])
+        self.assertEqual(len(backend._displayed_cards(accepted.guidance)), 1)
+
+        immediately_accepted = backend._enforce_challenge_reason_execution(
+            execution,
+            {"relation": "different", "merit": "reasonable"},
+            "My concern is visual density.",
+            context,
+            {},
+            "en",
+        )
+        self.assertTrue(immediately_accepted.guidance["disagreement"]["displayCard"])
+        self.assertEqual(
+            immediately_accepted.guidance["disagreement"]["phase"],
+            "choice_pending",
+        )
+
+    def test_challenge_choice_hides_card_until_clear_yes_or_no(self):
+        active = {
+            "status": "active",
+            "subject": "ai_revision_challenge",
+            "phase": "choice_pending",
+            "displayCard": True,
+            "coreDisagreement": "Which direction should lead the next revision?",
+            "nextQuestion": "Use the original AI approach?",
+            "acceptedReason": "Reduce visual density.",
+        }
+        execution = LLMExecutionResult(
+            "Could you confirm that choice?",
+            1,
+            "choice-pending",
+            model="mock-model",
+            guidance={},
+        )
+        pending = backend._enforce_challenge_choice_execution(
+            execution, active, None, "en"
+        )
+        self.assertEqual(pending.guidance["disagreement"]["status"], "active")
+        self.assertFalse(pending.guidance["disagreement"]["displayCard"])
+        self.assertEqual(backend._displayed_cards(pending.guidance), [])
+        for answer, resolution in (("yes", "ai"), ("no", "user"), ("是", "ai"), ("否", "user")):
+            self.assertEqual(
+                backend._challenge_choice(answer, "en"),
+                resolution,
+            )
+            resolved = backend._enforce_challenge_choice_execution(
+                execution, active, resolution, "en"
+            )
+            self.assertEqual(
+                resolved.guidance["disagreement"]["resolution"],
+                resolution,
+            )
+            self.assertFalse(resolved.guidance["disagreement"]["displayCard"])
+
+    def test_proposal_request_is_rejected_while_hidden_disagreement_is_active(self):
+        version_id = self.read_session()["currentVersionId"]
+        with repository.connect(immediate=True) as database:
+            context = repository.load_design_context(
+                database, self.session_id, version_id
+            )
+            context["activeDisagreement"] = {
+                "status": "active",
+                "subject": "ai_revision_challenge",
+                "userPosition": "Reduce visual density.",
+                "aiPosition": "Keep the original mechanism.",
+                "coreDisagreement": "Which concern should lead the revision?",
+                "nextQuestion": "Can you explain the visual cost?",
+                "resolution": None,
+                "phase": "reason_review",
+                "displayCard": False,
+            }
+            repository.save_design_context(database, version_id, context)
+        response = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Generate a proposal now.",
+                "baseVersionId": version_id,
+                "idempotencyKey": "proposal-hidden-disagreement",
+                "requestProposal": True,
+            },
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["code"], "DISAGREEMENT_ACTIVE")
+
+    def test_choice_pending_yes_runs_a_new_validated_proposal_pipeline(self):
+        version_id = self.read_session()["currentVersionId"]
+        with repository.connect(immediate=True) as database:
+            context = repository.load_design_context(
+                database, self.session_id, version_id
+            )
+            context["activeDisagreement"] = {
+                "status": "active",
+                "subject": "ai_revision_challenge",
+                "userPosition": "Reduce visual density.",
+                "aiPosition": "Keep the original opening mechanism.",
+                "coreDisagreement": "Which concern should lead the revision?",
+                "nextQuestion": "Should we keep the original approach?",
+                "resolution": None,
+                "phase": "choice_pending",
+                "displayCard": True,
+                "proposalSummary": "Move the player start left.",
+                "acceptedReason": "Reduce visual density.",
+                "primaryHypothesis": "The mechanism may not work.",
+                "secondaryHypothesis": "The preserved experience may be harmed.",
+            }
+            repository.save_design_context(database, version_id, context)
+
+        execution = LLMExecutionResult(
+            "I prepared a new validated proposal.",
+            1,
+            "choice-new-proposal",
+            proposed_rows=EDITED_ROWS,
+            modification_summary="Moved the player start left.",
+            model="mock-model",
+            guidance={
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            revision_plan=PLAYER_MOVE_CONTRACT["revisionPlan"],
+            proposal_diagnostics={
+                "selectedStrategyIndex": 1,
+                "changedCellCount": 2,
+            },
+            revision_contract=PLAYER_MOVE_CONTRACT,
+            revision_operations=PLAYER_MOVE_OPERATIONS,
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution) as generated:
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Yes, use your original approach.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "choice-new-proposal",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        stage_context = generated.call_args.kwargs["stage_context"]
+        self.assertEqual(stage_context["revisionRequestState"], "proposal_requested")
+        self.assertIsNone(stage_context["activeDisagreement"])
+        latest = response.json()["turns"][-1]["guidance"]
+        self.assertEqual(latest["disagreement"]["status"], "resolved")
+        self.assertEqual(latest["disagreement"]["resolution"], "ai")
+        self.assertFalse(latest["disagreement"]["displayCard"])
+        self.assertIsNotNone(latest["proposalOffer"])
+        self.assertEqual(
+            response.json()["turns"][-1]["proposalState"]["status"],
+            "active",
+        )
 
     def test_active_disagreement_cards_keep_warning_and_four_summaries(self):
         disagreement = {

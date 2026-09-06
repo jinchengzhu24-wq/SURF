@@ -68,6 +68,8 @@ const translations = {
         chatRetryPending: "The previous message did not finish. Retry it without creating a duplicate.",
         messageLabel: "Message the level design assistant",
         messagePlaceholder: "Explain what you want to change or ask about the level...",
+        requestProposal: "Proposal",
+        requestProposalHint: "Ask the assistant to turn this message into a validated level proposal",
         send: "Send",
         sending: "Sending...",
         sendHint: "Enter to send · Shift+Enter for a new line",
@@ -164,7 +166,12 @@ const translations = {
         error_SEARCH_BUDGET_EXCEEDED: "Map validation reached its search budget before it could finish.",
         error_OPEN_OUTER_WALL: "The outer boundary must be closed with wall (#) tiles; water cannot replace a wall.",
         error_CLIENT_TIMEOUT: "The assistant did not finish within the browser safety limit. You can retry without creating a duplicate message.",
+        error_UPSTREAM_TIMEOUT: "Kimi did not finish within the response limit. Retry without creating a duplicate message.",
+        error_UPSTREAM_CONNECTION_ERROR: "Kimi is temporarily unreachable. Retry without creating a duplicate message.",
+        error_UPSTREAM_SERVER_ERROR: "Kimi temporarily could not complete the response. Retry without creating a duplicate message.",
         error_MODEL_EMPTY_RESPONSE: "The latest model attempt returned blank content, and no earlier attempt produced a valid result. Retry without creating a duplicate.",
+        error_MODEL_RESPONSE_INVALID: "Kimi did not produce a reliably grounded reply after three attempts. Retry without creating a duplicate message.",
+        error_MODEL_LOW_QUALITY_RESPONSE: "Kimi did not produce a sufficiently complete reply after three attempts. Retry without creating a duplicate message.",
         error_INVALID_MESSAGE_ACTION: "That card action is invalid. Refresh and try again.",
         error_INVALID_CARD_SOURCE: "That revision card no longer belongs to the current Stage. Refresh and choose the current card.",
         error_PROPOSAL_STALE: "This proposal is based on an older Stage or map snapshot and is no longer active.",
@@ -208,6 +215,8 @@ const translations = {
         chatRetryPending: "上一条消息尚未完成，可安全重试且不会产生重复记录。",
         messageLabel: "给关卡设计助手发送消息",
         messagePlaceholder: "说明你想修改什么，或询问这个关卡的设计……",
+        requestProposal: "方案",
+        requestProposalHint: "请助手将这条消息作为方案申请并生成经过验证的关卡方案",
         send: "发送",
         sending: "发送中……",
         sendHint: "Enter 发送 · Shift+Enter 换行",
@@ -402,7 +411,10 @@ const chineseApiErrors = {
     OPEN_OUTER_WALL: "外部边界必须由墙（#）封闭，水域不能替代外墙。",
     UPSTREAM_TIMEOUT: "LLM 响应超时，请稍后重试。",
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
+    UPSTREAM_SERVER_ERROR: "Kimi 服务暂时未能完成本次回复，可使用原消息安全重试，不会产生重复记录。",
     MODEL_EMPTY_RESPONSE: "最后一次模型尝试返回了空白内容，且此前尝试也未产生有效结果；可使用原消息安全重试，不会产生重复记录。",
+    MODEL_RESPONSE_INVALID: "Kimi 连续三次未能生成通过当前 Stage 事实校验的回复；可使用原消息安全重试，不会产生重复记录。",
+    MODEL_LOW_QUALITY_RESPONSE: "Kimi 连续三次未能生成足够完整的回复；可使用原消息安全重试，不会产生重复记录。",
     CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。",
     INVALID_MESSAGE_ACTION: "卡片操作无效，请刷新后重试。",
@@ -443,7 +455,7 @@ const elements = Object.fromEntries([
     "languageButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "progressPanel", "progressSummary", "expressedDirectionsList", "confirmedDecisionsList", "unresolvedQuestionsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
-    "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
+    "proposalRequestButton", "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
     "restoreStageButton", "playButton", "playAttemptCount", "playAttemptList", "finalActions",
     "finalizeButton", "intentionForm", "intentionInput", "completeCard", "returnUnityButton", "finalizeModal",
@@ -467,6 +479,7 @@ elements.progressPanel.addEventListener("toggle", () => {
     );
 });
 elements.chatForm.addEventListener("submit", sendMessage);
+elements.proposalRequestButton.addEventListener("click", requestProposal);
 elements.messageInput.addEventListener("input", handleComposerInput);
 elements.messageInput.addEventListener("keydown", handleComposerKeydown);
 elements.saveStageButton.addEventListener("click", saveManualStage);
@@ -792,6 +805,7 @@ function renderAssistantBubble(turn, bubble) {
     const question = String(guidance.followUpQuestion || "").trim();
     const uiCues = Array.isArray(guidance.uiCues) ? guidance.uiCues : [];
     const activeDisagreement = guidance.disagreement?.status === "active"
+        && guidance.disagreement?.displayCard !== false
         ? guidance.disagreement
         : null;
     const bodyNode = document.createElement("div");
@@ -1546,6 +1560,10 @@ function updateControls() {
     elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
     elements.languageButton.disabled = state.busy || expired || state.translationInProgress;
     elements.messageInput.disabled = state.busy || !editable;
+    elements.proposalRequestButton.disabled = state.busy
+        || !editable
+        || !elements.messageInput.value.trim()
+        || selectedStageHasActiveDisagreement();
     elements.sendButton.disabled = state.busy || !editable || !elements.messageInput.value.trim();
     elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
     elements.typingRow.hidden = !state.chatBusy;
@@ -1628,14 +1646,34 @@ async function sendMessage(event) {
         !state.pendingMessage
         || state.pendingMessage.content !== content
         || state.pendingMessage.baseVersionId !== state.session.currentVersionId
+        || state.pendingMessage.requestProposal === true
     ) {
         state.pendingMessage = {
             content,
             baseVersionId: state.session.currentVersionId,
-            idempotencyKey: uniqueId("message")
+            idempotencyKey: uniqueId("message"),
+            requestProposal: false
         };
     }
 
+    persistPendingMessage();
+    await submitPendingMessage();
+}
+
+async function requestProposal() {
+    const content = elements.messageInput.value.trim();
+    if (
+        !content
+        || state.busy
+        || !canEditSelected()
+        || selectedStageHasActiveDisagreement()
+    ) return;
+    state.pendingMessage = {
+        content,
+        baseVersionId: state.session.currentVersionId,
+        idempotencyKey: uniqueId("proposal-request"),
+        requestProposal: true
+    };
     persistPendingMessage();
     await submitPendingMessage();
 }
@@ -2252,6 +2290,8 @@ function applyTranslations() {
     document.documentElement.lang = state.language;
     document.querySelectorAll("[data-i18n]").forEach(element => element.textContent = t(element.dataset.i18n));
     document.querySelectorAll("[data-i18n-placeholder]").forEach(element => element.placeholder = t(element.dataset.i18nPlaceholder));
+    document.querySelectorAll("[data-i18n-title]").forEach(element => element.title = t(element.dataset.i18nTitle));
+    document.querySelectorAll("[data-i18n-aria-label]").forEach(element => element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel)));
     elements.languageButton.textContent = state.language === "en" ? "中文" : "English";
     updateCharacterCount();
     renderChatRequestStatus();
@@ -2290,7 +2330,8 @@ function recoverPendingMessage() {
         ? {
             content: finalTurn.content,
             baseVersionId: finalTurn.versionId,
-            idempotencyKey: finalTurn.requestId
+            idempotencyKey: finalTurn.requestId,
+            requestProposal: finalTurn.requestProposal === true
         }
         : null;
     const pending = stored || unmatched;
@@ -2347,6 +2388,10 @@ function readPendingMessage() {
             || typeof pending.content !== "string"
             || typeof pending.baseVersionId !== "string"
             || typeof pending.idempotencyKey !== "string"
+        ) return null;
+        if (
+            pending.requestProposal !== undefined
+            && typeof pending.requestProposal !== "boolean"
         ) return null;
         if (pending.action !== undefined && ![
             "none",

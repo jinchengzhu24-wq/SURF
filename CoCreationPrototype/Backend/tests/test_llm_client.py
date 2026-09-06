@@ -218,6 +218,105 @@ class LLMClientTests(unittest.TestCase):
             "Add a wall to the central route",
         )
 
+    def test_entity_coordinates_do_not_cross_clauses_or_later_entities(self):
+        rows = [
+            " #########  ",
+            " #t......## ",
+            "##.....@@.# ",
+            "#.t....@@.##",
+            "#...p......#",
+            "##.s.##@@..#",
+            " #...#.@@.##",
+            " #..s.....# ",
+            " ##.......# ",
+            "  ######### ",
+        ]
+        cases = (
+            (
+                "T1位于第2行第3列，是左侧视觉密度的一部分；玩家会先看到这一侧。",
+                [("T1", {"row": 2, "column": 3})],
+            ),
+            (
+                "B1位于第6行第4列，是左侧箱子；T1在更上方。",
+                [("B1", {"row": 6, "column": 4})],
+            ),
+            (
+                "B2位于第8行第5列，是下方箱子；玩家在进入左侧前会看到它。",
+                [("B2", {"row": 8, "column": 5})],
+            ),
+            (
+                "T1 is at (2,3); the player notices the left side first.",
+                [("T1", {"row": 2, "column": 3})],
+            ),
+            (
+                "T1坐标为第2行第3列；玩家会先看到这一侧。",
+                [("T1", {"row": 2, "column": 3})],
+            ),
+            (
+                "B1 coordinates are (6,4); T1 remains above it.",
+                [("B1", {"row": 6, "column": 4})],
+            ),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    list(llm_client._entity_coordinate_claims(text, rows)),
+                    expected,
+                )
+                llm_client._validate_entity_coordinate_claims(text, rows)
+
+    def test_explicit_coordinate_grammar_still_validates_lists_and_hypotheticals(self):
+        rows = [
+            " #########  ",
+            " #t......## ",
+            "##.....@@.# ",
+            "#.t....@@.##",
+            "#...p......#",
+            "##.s.##@@..#",
+            " #...#.@@.##",
+            " #..s.....# ",
+            " ##.......# ",
+            "  ######### ",
+        ]
+        valid = (
+            "P位于第5行第5列，B1位于第6行第4列，B2位于第8行第5列。",
+            "B1 is located in row 6, column 4; T1 is at (2,3).",
+            "第6行第4列是B1，第2行第3列为T1。",
+            "如果B1移动到第5行第4列，左侧会更松一些。",
+        )
+        for text in valid:
+            with self.subTest(text=text):
+                llm_client._validate_entity_coordinate_claims(text, rows)
+        with self.assertRaisesRegex(ValueError, "places B1"):
+            llm_client._validate_entity_coordinate_claims(
+                "B1位于第1行第1列。",
+                rows,
+            )
+
+    def test_ordinary_chat_keeps_a_revalidated_current_coordinate_sentence(self):
+        rows = [
+            " #########  ",
+            " #t......## ",
+            "##.....@@.# ",
+            "#.t....@@.##",
+            "#...p......#",
+            "##.s.##@@..#",
+            " #...#.@@.##",
+            " #..s.....# ",
+            " ##.......# ",
+            "  ######### ",
+        ]
+        result, client = self.execute(
+            ["B1位于第6行第4列。这个位置会让左侧的视觉重量更集中。"],
+            rows=rows,
+            language="zh-CN",
+            conversation=[{"role": "user", "content": "左侧为什么显得拥挤？"}],
+        )
+
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertIn("B1位于第6行第4列", result.assistant_message)
+        self.assertIn("视觉重量", result.assistant_message)
+
     def test_objective_policy_keeps_qualitative_difficulty_soft(self):
         policy = llm_client._proposal_objective_policy(
             [{"role": "user", "content": "我希望玩家花更多时间，并增加推箱深度"}],
@@ -1394,22 +1493,75 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.guidance["move"], "offer_perspective")
         self.assertEqual(len(client.chat.completions.calls), 1)
 
-    def test_ordinary_grounding_failure_uses_chat_fallback_not_edit_clarification(self):
-        result, client = self.execute(
-            ["B1 is at (1,1), so the lower-left cluster is the key design issue."] * 2,
-            rows=ENTITY_ROUTE_ROWS,
-            conversation=[{
-                "role": "user",
-                "content": "I only feel the lower-left cluster in the first version is crowded.",
-            }],
-        )
+    def test_ordinary_grounding_failure_returns_error_without_server_prose(self):
+        client = FakeClient([
+            "B1 is at (1,1), so the lower-left cluster is the key design issue."
+        ] * 3)
+        with (
+            patch.object(llm_client, "_create_async_client", return_value=client),
+            patch.object(
+                llm_client,
+                "_server_snapshot_fallback_message",
+                side_effect=AssertionError("ordinary chat used snapshot prose"),
+            ),
+            patch.object(
+                llm_client,
+                "_safe_grounding_chat_reply",
+                side_effect=AssertionError("ordinary chat used grounding prose"),
+            ),
+            self.assertRaises(llm_client.LLMServiceError) as raised,
+        ):
+            llm_client.generate_chat_reply(
+                [{
+                    "role": "user",
+                    "content": "I only feel the lower-left cluster is crowded.",
+                }],
+                ENTITY_ROUTE_ROWS,
+                "ordinary-no-fallback-test",
+            )
+
+        self.assertEqual(raised.exception.code, "MODEL_LOW_QUALITY_RESPONSE")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.attempts_used, 3)
+        self.assertEqual(len(client.chat.completions.calls), 3)
+        final_prompt = client.chat.completions.calls[2]["messages"][0]["content"]
+        self.assertIn("final corrective attempt", final_prompt)
+        self.assertIn("do not state coordinates", final_prompt)
+
+    def test_ordinary_chat_third_kimi_attempt_answers_latest_density_concern(self):
+        client = FakeClient([
+            "B1 is at (1,1), so the left side feels crowded.",
+            "B1 is at (1,1), so the left side feels crowded.",
+            "我也会把重点放在左侧的空间密度上。目标、水域和箱子的视觉重量集中在同一区域，可能让玩家难以迅速分出主次。",
+        ])
+        with (
+            patch.object(llm_client, "_create_async_client", return_value=client),
+            patch.object(
+                llm_client,
+                "_server_snapshot_fallback_message",
+                side_effect=AssertionError("ordinary chat used snapshot prose"),
+            ),
+            patch.object(
+                llm_client,
+                "_safe_grounding_chat_reply",
+                side_effect=AssertionError("ordinary chat used grounding prose"),
+            ),
+        ):
+            result = llm_client.generate_chat_reply(
+                [{"role": "user", "content": "我还是感觉左侧要素太多"}],
+                ENTITY_ROUTE_ROWS,
+                "ordinary-third-kimi-test",
+                language="zh-CN",
+            )
 
         self.assertEqual(result.model, "kimi-k2.6")
-        self.assertEqual(result.guidance["move"], "offer_perspective")
+        self.assertEqual(result.attempts_used, 3)
+        self.assertEqual(result.proposal_diagnostics["visibleBodySource"], "kimi_corrective")
+        self.assertIn("左侧的空间密度", result.assistant_message)
+        self.assertNotIn("第一次推箱", result.assistant_message)
         self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertNotIn("confirm the location", result.assistant_message)
-        self.assertNotIn("请重新确认要修改", result.assistant_message)
-        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertIsNone(result.guidance["disagreement"])
+        self.assertEqual(len(client.chat.completions.calls), 3)
 
     def test_historical_coordinate_claim_requires_a_historical_snapshot(self):
         with self.assertRaisesRegex(ValueError, "historical Stage map claim"):
@@ -1488,7 +1640,7 @@ class LLMClientTests(unittest.TestCase):
                 ["The box is next to water."], MAP_GROUNDING_ROWS
             )
 
-    def test_plain_reply_retries_once_after_a_map_grounding_error(self):
+    def test_plain_reply_retries_after_a_map_grounding_error_removes_all_prose(self):
         result, client = self.execute(
             [
                 "The upper-right box is next to water.",
@@ -1497,8 +1649,8 @@ class LLMClientTests(unittest.TestCase):
             rows=MAP_GROUNDING_ROWS,
         )
 
-        self.assertEqual(result.attempts_used, 1)
-        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertNotIn("next to water", result.assistant_message)
 
     def test_proposal_clarification_grounding_failure_never_uses_snapshot_fallback(self):
@@ -1771,15 +1923,14 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertIsNone(intent)
 
-    def test_plain_discuss_card_can_hold_a_first_person_design_insight(self):
+    def test_ordinary_discuss_metadata_is_not_reinjected_after_body_cleanup(self):
         result, _ = self.execute([
             "这个版本的下半区水边多了一点回旋空间。\n"
             "<GUIDANCE>DISCUSS: 我更喜欢水边这次留下的路线犹豫，它让第一次推动的选择更有分量。</GUIDANCE>"
         ], language="zh-CN")
 
-        focus = result.guidance["followUpQuestion"]
-        self.assertIn("我更喜欢", focus)
-        self.assertIn("第一次推动", focus)
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertIn("下半区水边", result.assistant_message)
         self.assertNotIn("GUIDANCE", result.assistant_message)
 
     def test_repeated_plain_discuss_card_is_omitted_when_no_new_focus_is_needed(self):
@@ -2093,7 +2244,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("whenever no card is warranted", messages[0]["content"])
         self.assertIn("never produce four cards", messages[0]["content"])
         self.assertIn("2-4 paragraphs with 2-4 sentences per paragraph", messages[0]["content"])
-        self.assertIn("up to four compact route passages", messages[0]["content"])
+        self.assertIn("one or two concise passages", messages[0]["content"])
+        self.assertIn(
+            "Do not introduce a route, coordinate, or entity-position inventory",
+            messages[0]["content"],
+        )
         self.assertIn("Connect specific map details to a playable moment", messages[0]["content"])
         self.assertIn("Post-opening progress and route rule", messages[0]["content"])
         self.assertIn("COORDINATE_LINKS", messages[0]["content"])
@@ -2162,7 +2317,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_two_pure_generic_questions_return_low_quality_error(self):
-        client = FakeClient(["What do you think?", "Is this direction okay?"])
+        client = FakeClient([
+            "What do you think?",
+            "Is this direction okay?",
+            "Would you like a different direction?",
+        ])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -2176,7 +2335,7 @@ class LLMClientTests(unittest.TestCase):
                 )
 
         self.assertEqual(raised.exception.code, "MODEL_LOW_QUALITY_RESPONSE")
-        self.assertEqual(raised.exception.attempts_used, 2)
+        self.assertEqual(raised.exception.attempts_used, 3)
 
     def test_multiple_questions_stay_in_body_without_failing(self):
         reply = "What should stay? What should change?"
@@ -3263,31 +3422,29 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.attempts_used, 2)
         self.assertEqual(result.model, "kimi-k2.6")
 
-    def test_repeated_length_truncation_returns_a_complete_safe_reply(self):
+    def test_repeated_length_truncation_returns_retryable_error_without_safe_reply(self):
         truncated = SimpleNamespace(
             choices=[SimpleNamespace(
                 finish_reason="length",
                 message=SimpleNamespace(content="The layout suggests that the route"),
             )]
         )
-        client = FakeClient([truncated, truncated])
+        client = FakeClient([truncated, truncated, truncated])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
             patch.object(llm_client, "_create_async_client", return_value=client),
+            self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
-            result = llm_client.generate_chat_reply(
+            llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Assess the design trade-off."}],
                 ["############"] * 10,
                 "repeated-length-safe-fallback-test",
             )
 
-        self.assertEqual(result.attempts_used, 2)
-        self.assertIn("current saved Stage", result.assistant_message)
-        self.assertNotIn("The layout suggests", result.assistant_message)
-        self.assertIsNone(result.proposed_rows)
-        self.assertEqual(result.guidance["coordinateLinks"], [])
-        self.assertNotIn("designContextPatch", result.guidance)
+        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.attempts_used, 3)
 
     def test_route_reasoning_is_bounded_without_limiting_design_analysis(self):
         long_route = (
@@ -4071,7 +4228,7 @@ class LLMClientTests(unittest.TestCase):
         )
 
     def test_two_empty_plain_responses_use_fallback_then_fail(self):
-        client = FakeClient(["   ", "\n\t"])
+        client = FakeClient(["   ", "\n\t", " "])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -4085,8 +4242,8 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "MODEL_EMPTY_RESPONSE")
-        self.assertEqual(raised.exception.attempts_used, 2)
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(raised.exception.attempts_used, 3)
+        self.assertEqual(len(client.chat.completions.calls), 3)
 
     def test_revision_plan_timeout_uses_two_attempts_and_reserves_search_time(self):
         timeout = APITimeoutError(
@@ -5732,6 +5889,40 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(translated[0]["body"], "I will continue from the current saved Stage.")
         self.assertNotIn("99", translated[0]["body"])
+
+    def test_translation_preserves_hidden_disagreement_workflow_state(self):
+        source = {
+            "status": "active",
+            "subject": "ai_revision_challenge",
+            "resolution": None,
+            "userPosition": "Reduce visual density.",
+            "aiPosition": "Keep the original mechanism.",
+            "coreDisagreement": "Which concern should lead the revision?",
+            "nextQuestion": "Should we keep the original approach?",
+            "phase": "choice_pending",
+            "displayCard": False,
+            "primaryHypothesis": "The mechanism may not work.",
+            "secondaryHypothesis": "The preserved experience may be harmed.",
+            "proposalSummary": "Move one wall beside B1.",
+            "acceptedReason": "The left side is visually dense.",
+        }
+        translated_input = {
+            **source,
+            "userPosition": "降低视觉密度。",
+            "aiPosition": "保留原有机制。",
+            "coreDisagreement": "下一方案应优先考虑哪个问题？",
+            "nextQuestion": "是否沿用原来的办法？",
+        }
+        translated = llm_client._validate_translated_disagreement(
+            translated_input,
+            source,
+            "disagreement",
+        )
+        self.assertEqual(translated["phase"], "choice_pending")
+        self.assertFalse(translated["displayCard"])
+        self.assertEqual(
+            translated["primaryHypothesis"], source["primaryHypothesis"]
+        )
 
 
 if __name__ == "__main__":

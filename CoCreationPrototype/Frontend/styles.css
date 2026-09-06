@@ -241,6 +241,8 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 .composer { display: flex; align-items: flex-end; gap: 9px; padding: 12px 13px 7px; border-top: 1px solid var(--border); background: var(--surface); }
 .composer textarea, .intention-form textarea { width: 100%; resize: vertical; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--text); background: var(--surface); font-size: 12px; line-height: 1.45; }
 .composer textarea { min-height: 52px; max-height: 150px; padding: 9px 10px; }
+.composer-actions { display: flex; align-items: stretch; gap: 7px; }
+.composer-actions button { min-width: 76px; }
 .composer textarea:focus, .intention-form textarea:focus { border-color: var(--brand); outline: 3px solid rgba(22, 122, 103, .12); }
 .composer-meta { display: flex; justify-content: space-between; padding: 0 14px 10px; color: var(--muted); background: var(--surface); font-size: 9px; }
 
@@ -345,7 +347,8 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
     .chat-scroll { height: clamp(300px, 55vh, 520px); min-height: 0; padding: 12px 10px; }
     .message-content { max-width: 88%; }
     .composer { align-items: stretch; flex-direction: column; padding: 10px 10px 6px; }
-    .composer .primary-button { width: 100%; }
+    .composer-actions { width: 100%; }
+    .composer-actions button { flex: 1; }
     .composer-meta { padding: 0 11px 9px; }
     .composer-meta span:first-child { display: none; }
     .proposal-heading { display: block; }

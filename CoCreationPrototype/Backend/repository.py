@@ -631,6 +631,18 @@ def serialize_session(database, session_id):
         """,
         (session_id,),
     ).fetchone()
+    proposal_request_keys = {
+        str(row["message_key"])
+        for row in database.execute(
+            """
+            SELECT json_extract(payload_json, '$.messageKey') AS message_key
+            FROM audit_events
+            WHERE session_id = ? AND event_type = 'proposal_request_requested'
+            """,
+            (session_id,),
+        ).fetchall()
+        if row["message_key"]
+    }
 
     attempts_by_version = {}
     translations_by_turn = {}
@@ -1076,6 +1088,10 @@ def serialize_session(database, session_id):
                 "language": turn["language"],
                 "versionId": turn["version_id"],
                 "requestId": turn["request_id"],
+                "requestProposal": (
+                    turn["role"] == "user"
+                    and turn["request_id"] in proposal_request_keys
+                ),
                 "guidance": public_guidance_by_turn.get(turn["id"], {}),
                 "proposalState": proposal_state(
                     turn,
