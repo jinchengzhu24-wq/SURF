@@ -1151,6 +1151,15 @@ main {
     transform: translate(-1px, -1px);
 }
 
+.composer-actions .secondary-button.is-active {
+    border-color: #62410e;
+    color: #fff6c9;
+    background: #9a6a1d;
+    box-shadow:
+        inset 0 0 0 2px #d6ad50,
+        2px 2px 0 #3d2b16;
+}
+
 .play-button {
     border-color: #29451f;
     color: #fff6c9;
@@ -1350,6 +1359,14 @@ main {
     font-weight: 800;
 }
 
+.progress-panel[open] {
+    display: flex;
+    max-height: var(--progress-panel-max-height, 50%);
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+}
+
 .progress-panel > summary {
     padding: 8px 3px 7px;
     border-bottom: 0;
@@ -1360,6 +1377,7 @@ main {
     font-size: 12px;
     font-weight: 900;
     letter-spacing: 0.04em;
+    flex: 0 0 auto;
 }
 
 .progress-panel > summary::before {
@@ -1389,7 +1407,23 @@ main {
     border-top: 0;
     background: transparent;
     font-weight: 800;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-color: #6f7b7b #cfd3d0;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
 }
+
+.progress-panel[open] .progress-panel-body {
+    max-height: var(--progress-panel-body-max-height, calc(50vh - 36px));
+}
+
+.progress-panel-body::-webkit-scrollbar { width: 10px; }
+.progress-panel-body::-webkit-scrollbar-track { background: #cfd3d0; }
+.progress-panel-body::-webkit-scrollbar-thumb { border: 2px solid #cfd3d0; border-radius: 3px; background: #6f7b7b; }
+.progress-panel-body::-webkit-scrollbar-thumb:hover { background: #425c58; }
 
 .progress-section {
     padding: 2px 8px 5px;

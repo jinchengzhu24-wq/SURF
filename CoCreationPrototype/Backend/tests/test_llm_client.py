@@ -177,6 +177,32 @@ class SlowClient:
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_challenge_reason_classifier_returns_visible_comparison(self):
+        comparison = (
+            "I agree with the designer because the new concern exposes a presentation cost. "
+            "Their priority is visual balance, while the original proposal prioritizes the first "
+            "push; the disagreement is which effect should lead the revision."
+        )
+        client = FakeClient([json.dumps({
+            "relation": "different",
+            "merit": "reasonable",
+            "comparison": comparison,
+        })])
+
+        with patch.object(llm_client, "_create_async_client", return_value=client):
+            result = llm_client.classify_challenge_reason(
+                "The left side is visually crowded.",
+                {"primary": "The mechanism may fail.", "secondary": "The route may lose tension."},
+                "Add one wall before the first push.",
+                "challenge-comparison-test",
+            )
+
+        self.assertEqual(result["relation"], "different")
+        self.assertEqual(result["merit"], "reasonable")
+        self.assertEqual(result["comparison"], comparison)
+        prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+        self.assertIn("Core disagreement", prompt)
+
     def test_proposal_body_playable_support_executes_its_complete_validator(self):
         self.assertTrue(llm_client._proposal_body_has_playable_support(
             "我会增加中央墙体，让玩家在第一次推箱前比较两条路线。",

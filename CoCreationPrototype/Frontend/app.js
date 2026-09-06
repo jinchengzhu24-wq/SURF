@@ -69,7 +69,7 @@ const translations = {
         messageLabel: "Message the level design assistant",
         messagePlaceholder: "Explain what you want to change or ask about the level...",
         requestProposal: "Proposal",
-        requestProposalHint: "Ask the assistant to turn this message into a validated level proposal",
+        requestProposalHint: "Toggle proposal mode for the next message",
         send: "Send",
         sending: "Sending...",
         sendHint: "Enter to send · Shift+Enter for a new line",
@@ -216,7 +216,7 @@ const translations = {
         messageLabel: "给关卡设计助手发送消息",
         messagePlaceholder: "说明你想修改什么，或询问这个关卡的设计……",
         requestProposal: "方案",
-        requestProposalHint: "请助手将这条消息作为方案申请并生成经过验证的关卡方案",
+        requestProposalHint: "切换下一条消息是否作为方案申请",
         send: "发送",
         sending: "发送中……",
         sendHint: "Enter 发送 · Shift+Enter 换行",
@@ -375,6 +375,7 @@ const state = {
     chatTimerId: null,
     deadlineTimerId: null,
     pendingMessage: null,
+    proposalMode: false,
     assessing: new Set(),
     translating: new Set(),
     translationFailures: new Set(),
@@ -477,9 +478,10 @@ elements.progressPanel.addEventListener("toggle", () => {
         progressPanelStorageKey(),
         elements.progressPanel.open ? "open" : "closed",
     );
+    requestAnimationFrame(updateProgressPanelMaxHeight);
 });
 elements.chatForm.addEventListener("submit", sendMessage);
-elements.proposalRequestButton.addEventListener("click", requestProposal);
+elements.proposalRequestButton.addEventListener("click", toggleProposalMode);
 elements.messageInput.addEventListener("input", handleComposerInput);
 elements.messageInput.addEventListener("keydown", handleComposerKeydown);
 elements.saveStageButton.addEventListener("click", saveManualStage);
@@ -496,6 +498,7 @@ elements.intentionForm.addEventListener("submit", submitIntention);
 elements.returnUnityButton.addEventListener("click", returnToUnity);
 window.addEventListener("resize", () => {
     if (state.activeCoordinateLink) requestAnimationFrame(drawActiveCoordinateRoute);
+    requestAnimationFrame(updateProgressPanelMaxHeight);
 });
 
 applyTranslations();
@@ -677,6 +680,30 @@ function renderProgressContext() {
         context.unresolvedQuestions,
         "question",
         "noUnresolvedQuestions",
+    );
+    requestAnimationFrame(updateProgressPanelMaxHeight);
+}
+
+function updateProgressPanelMaxHeight() {
+    if (!elements.progressPanel) return;
+    const chatPanel = elements.progressPanel.closest(".chat-panel");
+    const panelHeight = chatPanel?.getBoundingClientRect().height || 0;
+    if (panelHeight <= 0) return;
+    const progressHeight = elements.progressPanel.open
+        ? elements.progressPanel.getBoundingClientRect().height
+        : 0;
+    const summaryHeight = elements.progressSummary?.getBoundingClientRect().height || 0;
+    const referenceHeight = window.matchMedia("(min-width: 1201px)").matches
+        ? panelHeight
+        : panelHeight - Math.max(0, progressHeight - summaryHeight);
+    const progressMaxHeight = Math.floor(Math.max(summaryHeight, referenceHeight) / 2);
+    elements.progressPanel.style.setProperty(
+        "--progress-panel-max-height",
+        `${progressMaxHeight}px`,
+    );
+    elements.progressPanel.style.setProperty(
+        "--progress-panel-body-max-height",
+        `${Math.max(0, progressMaxHeight - Math.ceil(summaryHeight))}px`,
     );
 }
 
@@ -1031,7 +1058,6 @@ function createDisagreementCard(disagreement) {
 
     const fields = [
         ["discussionUser", disagreement.userPosition],
-        ["discussionAi", disagreement.aiPosition],
         ["discussionCore", disagreement.coreDisagreement],
         ["discussionNext", disagreement.nextQuestion]
     ];
@@ -1560,10 +1586,13 @@ function updateControls() {
     elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
     elements.languageButton.disabled = state.busy || expired || state.translationInProgress;
     elements.messageInput.disabled = state.busy || !editable;
-    elements.proposalRequestButton.disabled = state.busy
-        || !editable
-        || !elements.messageInput.value.trim()
-        || selectedStageHasActiveDisagreement();
+    const disagreementActive = selectedStageHasActiveDisagreement();
+    if ((!editable || disagreementActive) && state.proposalMode) {
+        setProposalMode(false);
+    }
+    elements.proposalRequestButton.disabled = state.busy || !editable || disagreementActive;
+    elements.proposalRequestButton.classList.toggle("is-active", state.proposalMode);
+    elements.proposalRequestButton.setAttribute("aria-pressed", state.proposalMode ? "true" : "false");
     elements.sendButton.disabled = state.busy || !editable || !elements.messageInput.value.trim();
     elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
     elements.typingRow.hidden = !state.chatBusy;
@@ -1646,13 +1675,13 @@ async function sendMessage(event) {
         !state.pendingMessage
         || state.pendingMessage.content !== content
         || state.pendingMessage.baseVersionId !== state.session.currentVersionId
-        || state.pendingMessage.requestProposal === true
+        || state.pendingMessage.requestProposal !== state.proposalMode
     ) {
         state.pendingMessage = {
             content,
             baseVersionId: state.session.currentVersionId,
-            idempotencyKey: uniqueId("message"),
-            requestProposal: false
+            idempotencyKey: uniqueId(state.proposalMode ? "proposal-request" : "message"),
+            requestProposal: state.proposalMode
         };
     }
 
@@ -1660,22 +1689,10 @@ async function sendMessage(event) {
     await submitPendingMessage();
 }
 
-async function requestProposal() {
-    const content = elements.messageInput.value.trim();
-    if (
-        !content
-        || state.busy
-        || !canEditSelected()
-        || selectedStageHasActiveDisagreement()
-    ) return;
-    state.pendingMessage = {
-        content,
-        baseVersionId: state.session.currentVersionId,
-        idempotencyKey: uniqueId("proposal-request"),
-        requestProposal: true
-    };
-    persistPendingMessage();
-    await submitPendingMessage();
+function toggleProposalMode() {
+    if (state.busy || !canEditSelected() || selectedStageHasActiveDisagreement()) return;
+    setProposalMode(!state.proposalMode);
+    updateControls();
 }
 
 async function retryPendingMessage() {
@@ -1705,6 +1722,7 @@ async function submitPendingMessage() {
             body: pending,
             timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS
         });
+        setProposalMode(false);
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());
         clearPendingMessage();
@@ -1875,7 +1893,12 @@ async function toggleLanguage() {
 
 function selectVersion(versionId, shouldRender = true) {
     if (!findVersion(versionId)) return;
+    if (state.selectedVersionId && state.selectedVersionId !== versionId) {
+        setProposalMode(false);
+    }
     state.selectedVersionId = versionId;
+    localStorage.removeItem(proposalModeKey());
+    state.proposalMode = false;
     state.activeCoordinateLink = null;
     localStorage.setItem(selectedStageKey(), versionId);
     syncHash();
@@ -2314,6 +2337,10 @@ function restoreComposerDraft() {
     elements.messageInput.value = canEditSelected()
         ? localStorage.getItem(composerKey()) || ""
         : "";
+    const proposalModeAllowed = canEditSelected() && !selectedStageHasActiveDisagreement();
+    state.proposalMode = proposalModeAllowed
+        && localStorage.getItem(proposalModeKey()) === "on";
+    if (!proposalModeAllowed) localStorage.removeItem(proposalModeKey());
     updateCharacterCount();
     updateControls();
 }
@@ -2360,6 +2387,7 @@ function recoverPendingMessage() {
     }
 
     state.pendingMessage = pending;
+    setProposalMode(pending.requestProposal === true);
     persistPendingMessage();
     elements.messageInput.value = pending.content;
     localStorage.setItem(composerKey(), pending.content);
@@ -2426,10 +2454,18 @@ function clearPendingMessage() {
     localStorage.removeItem(`cocreationPendingMessage:${state.sessionId}`);
 }
 
+function setProposalMode(enabled) {
+    state.proposalMode = Boolean(enabled);
+    if (!state.sessionId || !state.session) return;
+    if (state.proposalMode) localStorage.setItem(proposalModeKey(), "on");
+    else localStorage.removeItem(proposalModeKey());
+}
+
 function updateCharacterCount() { elements.characterCount.textContent = `${elements.messageInput.value.length} / ${MAX_MESSAGE_LENGTH}`; }
 function handleComposerKeydown(event) { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.chatForm.requestSubmit(); } }
 function composerKey() { return `cocreationComposer:${state.sessionId}:${state.session?.currentVersionId || "none"}`; }
 function pendingMessageKey() { return `cocreationPendingMessage:${state.sessionId}:${state.session?.currentVersionId || "none"}`; }
+function proposalModeKey() { return `cocreationProposalMode:${state.sessionId}:${state.selectedVersionId || "none"}`; }
 function selectedStageKey() { return `cocreationStage:${state.sessionId}`; }
 function progressPanelKey() { return `${state.sessionId}:${state.selectedVersionId || "none"}`; }
 function progressPanelStorageKey() { return `cocreationProgress:${progressPanelKey()}`; }

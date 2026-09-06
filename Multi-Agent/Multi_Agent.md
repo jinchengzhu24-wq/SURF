@@ -78,9 +78,13 @@
 - 紫色 `REVISION`：已经形成、可执行但仍须用户决定的 AI/协商方案。
 - 绿色 `MANUAL EDIT`：用户可自行在右侧编辑器实践的路径。
 - 红色 `WARNING`：有具体地图或试玩证据支持的机械风险。
-- 蓝色 `LET'S DISCUSS`：结构化的尚未解决分歧，包含用户立场、AI 立场、核心分歧和下一问题。
+- 蓝色 `LET'S DISCUSS`：结构化的尚未解决分歧；可见卡片只展示用户方向、详细的分歧核心和下一问题。`aiPosition` 仅用于历史兼容和内部状态，不再单独展示。
 
 普通解释、普通提问、普通建议留在正文；它们不自动生成新蓝卡。`guidance.disagreement.status == "active"` 时不得带 `proposalOffer`。只有 resolved 的 `user`、`ai` 或 `compromise` 才能重新形成紫卡；`retain_current` 只结束分歧，不创建地图版本。旧 turn 缺少 `disagreement` 时，前端继续按旧 `followUpQuestion` 兼容显示历史蓝卡。
+
+`coreDisagreement` 是蓝卡中的主要 AI 分析，必须用第一人称明确是否认同用户、说明原因、比较用户关注点与 AI 方案或风险关注点，并指出需要共同决定的具体取舍。该规则同时适用于方案质疑和人工编辑风险讨论。
+
+输入区的“方案”是一次性模式开关，不直接发送消息。开启后，“发送”或 Enter 才会把用户原文以 `requestProposal=true` 提交；成功后自动恢复普通聊天，失败和幂等重试期间保持方案模式。同一 Stage 刷新会恢复草稿与模式，Stage 切换、只读状态或 active disagreement 会清除该模式。
 
 ## 8010 交接与保护
 

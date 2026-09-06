@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=cocreation-kimi-20260906-1">
+    <link rel="stylesheet" href="./styles.css?v=cocreation-kimi-20260906-3">
 </head>
 <body>
     <div class="app">
@@ -111,7 +111,7 @@
                         <label class="sr-only" for="messageInput" data-i18n="messageLabel">Message the level design assistant</label>
                         <textarea id="messageInput" rows="2" maxlength="2000" data-i18n-placeholder="messagePlaceholder" placeholder="Explain what you want to change or ask about the level..."></textarea>
                         <div class="composer-actions">
-                            <button class="secondary-button" id="proposalRequestButton" type="button" data-i18n="requestProposal" data-i18n-title="requestProposalHint" data-i18n-aria-label="requestProposalHint">Proposal</button>
+                            <button class="secondary-button" id="proposalRequestButton" type="button" aria-pressed="false" data-i18n="requestProposal" data-i18n-title="requestProposalHint" data-i18n-aria-label="requestProposalHint">Proposal</button>
                             <button class="primary-button" id="sendButton" type="submit" data-i18n="send">Send</button>
                         </div>
                     </form>
@@ -192,6 +192,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=cocreation-kimi-20260906-1"></script>
+    <script src="./app.js?v=cocreation-kimi-20260906-3"></script>
 </body>
 </html>

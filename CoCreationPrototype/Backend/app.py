@@ -1503,6 +1503,24 @@ def _send_message_locked(
                     request.state.request_id,
                     _deadline=challenge_deadline,
                 )
+                comparison = challenge_reason_classification.get("comparison")
+                if comparison:
+                    from llm_client import _validate_map_grounding_texts
+                    try:
+                        _validate_map_grounding_texts(
+                            [comparison],
+                            context["rows"],
+                            entity_bindings=stage_context.get("entityBindings"),
+                        )
+                    except ValueError as exception:
+                        raise LLMServiceError(
+                            "MODEL_RESPONSE_INVALID",
+                            "Kimi's challenge comparison did not match the current Stage.",
+                            request.state.request_id,
+                            True,
+                            1,
+                            502,
+                        ) from exception
                 stage_context["challengeReasonClassification"] = (
                     challenge_reason_classification
                 )
@@ -6124,6 +6142,20 @@ def _enforce_challenge_reason_execution(
         or ""
     ).strip()
     reasonable = merit == "reasonable"
+    model_disagreement = (execution.guidance or {}).get("disagreement") or {}
+    comparison = str(
+        (classification or {}).get("comparison")
+        or model_disagreement.get("coreDisagreement")
+        or execution.assistant_message
+        or ""
+    ).strip()
+    from llm_client import _detailed_disagreement_core
+    comparison = _detailed_disagreement_core(
+        str(user_reason or "").strip(),
+        str(execution.assistant_message or "").strip(),
+        comparison,
+        language,
+    )
     next_question = (
         "你是否仍希望沿用我原来提出的办法？请回答是或否。"
         if language == "zh-CN"
@@ -6138,11 +6170,7 @@ def _enforce_challenge_reason_execution(
         "subject": "ai_revision_challenge",
         "userPosition": str(user_reason or "").strip()[:1200],
         "aiPosition": str(execution.assistant_message or "").strip()[:1200],
-        "coreDisagreement": (
-            "是否应根据用户提出的新理由调整这份 AI 方案。"
-            if language == "zh-CN"
-            else "Whether the AI revision should change in response to the designer's new reason."
-        ),
+        "coreDisagreement": comparison,
         "nextQuestion": next_question,
         "resolution": None,
         "phase": "choice_pending" if reasonable else "reason_review",

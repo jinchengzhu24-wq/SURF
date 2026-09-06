@@ -3177,7 +3177,16 @@ class CoCreationSessionTests(unittest.TestCase):
         }
         initial = backend._enforce_challenge_reason_execution(
             execution,
-            {"relation": "different", "merit": "not_yet_reasonable"},
+            {
+                "relation": "different",
+                "merit": "not_yet_reasonable",
+                "comparison": (
+                    "I do not yet agree because visual density alone does not show that the push "
+                    "decision is weaker. Your concern focuses on visual balance, while my proposal "
+                    "focuses on the first route commitment; our disagreement is which effect should "
+                    "lead the revision."
+                ),
+            },
             "My concern is visual density.",
             context,
             {},
@@ -3185,6 +3194,9 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         first = initial.guidance["disagreement"]
         self.assertTrue(first["displayCard"])
+        self.assertIn("visual balance", first["coreDisagreement"])
+        self.assertIn("my proposal focuses", first["coreDisagreement"])
+        self.assertNotEqual(first["coreDisagreement"], execution.assistant_message)
         self.assertEqual(len(backend._displayed_cards(initial.guidance)), 1)
 
         continued = backend._enforce_challenge_reason_execution(
@@ -3225,6 +3237,19 @@ class CoCreationSessionTests(unittest.TestCase):
             immediately_accepted.guidance["disagreement"]["phase"],
             "choice_pending",
         )
+
+    def test_manual_edit_warning_builds_detailed_comparative_core(self):
+        disagreement = llm_client._disagreement_from_warning(
+            "the changed wall narrows the only verified box entry",
+            "en",
+            {"source": "human_edit", "changeSummary": {"components": ["wall"]}},
+        )
+
+        core = disagreement["coreDisagreement"]
+        self.assertIn("I understand", core)
+        self.assertIn("because", core)
+        self.assertIn("while my concern", core)
+        self.assertIn("our disagreement", core)
 
     def test_challenge_choice_hides_card_until_clear_yes_or_no(self):
         active = {

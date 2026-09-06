@@ -657,6 +657,10 @@ def build_chat_messages(
         "face, and what each observed outcome would mean for the next revision. Avoid abstract "
         "phrases such as 'route weight', 'readability', or 'route choice' without explaining "
         "the concrete play situation they refer to. "
+        "For every active disagreement, coreDisagreement is the visible comparison: write two to "
+        "four first-person sentences that say whether you agree with the designer, explain why, "
+        "contrast the designer's priority with your proposal or concern, and identify the concrete "
+        "decision separating the two positions. Do not treat aiPosition as the visible explanation. "
         "The discussion card must continue the exact unresolved judgment in assistantMessage; "
         "do not replace a stated concern about a target, opening, wall, or ordering with a "
         "generic question about water and boxes merely because those tiles also appear. "
@@ -906,7 +910,7 @@ def build_plain_chat_messages(
             "specific map elements and a concrete push moment. Keep ordinary uncertainty, "
             "route trade-offs, and aesthetic opinions in the visible reply. A warning should "
             "sound like a natural first-person aside, not a formal alert or stock phrase. "
-            "Use DISCUSS only when the four-part DISAGREEMENT object describes a genuine "
+            "Use DISCUSS only when the DISAGREEMENT object describes a genuine "
             "unresolved decision: userPosition, aiPosition, coreDisagreement, and nextQuestion. "
             "Ordinary questions stay in assistantMessage. An active disagreement cannot include "
             "a proposal. A resolved disagreement may lead to a new conceptual proposal, except "
@@ -5770,9 +5774,15 @@ def classify_challenge_reason(
         "role": "system",
         "content": (
             "Classify the designer's latest reason against exactly two earlier tentative guesses. "
-            "Return JSON only. relation is primary, secondary, different, or unclear. "
+            "Return JSON only with relation, merit, and comparison. relation is primary, secondary, "
+            "different, or unclear. "
             "merit is reasonable, not_yet_reasonable, or unclear. A materially new concern is "
-            "different even when it is reasonable. Do not invent map facts.\n\n"
+            "different even when it is reasonable. comparison must be a warm first-person design "
+            "judgment of two to four sentences: explicitly say whether you currently agree with the "
+            "designer, explain why, contrast what the designer's concern prioritizes with what the "
+            "original proposal prioritizes, and name the decision at the heart of the disagreement. "
+            "Write comparison in the same language as the latest designer reason. It must be suitable "
+            "for the visible Core disagreement section. Do not invent map facts.\n\n"
             f"Proposal summary: {str(proposal_summary or '')[:500]}\n"
             f"Primary guess: {primary[:800]}\n"
             f"Secondary guess: {secondary[:800]}\n"
@@ -5795,11 +5805,18 @@ def classify_challenge_reason(
         payload = json.loads(str(response.choices[0].message.content or ""))
         relation = payload.get("relation")
         merit = payload.get("merit")
+        comparison = _normalize_response_paragraphs(str(payload.get("comparison") or ""))
         if relation not in {"primary", "secondary", "different", "unclear"}:
             raise ValueError("challenge reason relation is invalid")
         if merit not in {"reasonable", "not_yet_reasonable", "unclear"}:
             raise ValueError("challenge reason merit is invalid")
-        return {"relation": relation, "merit": merit}
+        if relation != "unclear" and merit != "unclear" and len(comparison) < 40:
+            raise ValueError("challenge reason comparison is not detailed enough")
+        return {
+            "relation": relation,
+            "merit": merit,
+            "comparison": comparison[:1200] or None,
+        }
     except asyncio.TimeoutError as exception:
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
@@ -10420,15 +10437,20 @@ def _plain_action_instruction(stage_context):
                 "CHALLENGE REASON REVIEW: the designer gave a new reason that differs from both saved "
                 "hypotheses, and the independent reviewer found it reasonable. Explicitly acknowledge "
                 "that the new reason has merit, then ask whether the designer still wants to use the "
-                "AI's original approach. Ask for a yes-or-no answer. Do not resolve the disagreement, "
-                "produce a proposal, or claim a map change. The server owns the discussion-card state."
+                "AI's original approach. Ask for a yes-or-no answer. Also return an active disagreement "
+                "whose coreDisagreement contains the complete first-person comparison: why the reason is "
+                "persuasive, what it prioritizes, what the original proposal prioritizes, and what choice "
+                "remains. Do not resolve the disagreement, produce a proposal, or claim a map change. "
+                "The server owns status, phase, displayCard, and card-count state."
             )
         if relation == "different" and merit == "not_yet_reasonable":
             return (
                 "CHALLENGE REASON REVIEW: the designer gave a new reason that differs from both saved "
                 "hypotheses, but it is not yet persuasive. Explain the precise design disagreement in "
                 "warm first-person prose and ask one open question that could change your judgment. "
-                "Do not resolve it or produce a proposal. The server owns the discussion-card state."
+                "Return an active disagreement whose coreDisagreement contains that complete comparison, "
+                "including both priorities and the exact decision separating them. Do not resolve it or "
+                "produce a proposal. The server owns status, phase, displayCard, and card-count state."
             )
         if relation == "unclear" or merit == "unclear":
             return (
@@ -10466,7 +10488,8 @@ def _plain_action_instruction(stage_context):
         return (
             "CARD STATE: an unresolved disagreement is active. Use DISAGREEMENT as an object with "
             "status active/resolved, subject, userPosition, aiPosition, coreDisagreement, "
-            "nextQuestion, and resolution. Keep it active unless the latest reason truly resolves "
+            "nextQuestion, and resolution. Put the detailed first-person comparison in coreDisagreement, "
+            "including stance, reason, both priorities, and the concrete choice. Keep it active unless the latest reason truly resolves "
             "the issue; do not use an ordinary DISCUSS field as a substitute."
         )
     if context.get("discussionCardMode") == "disagreement_only":
@@ -14540,8 +14563,49 @@ def _validate_disagreement(value, language):
         normalized[field_name] = _normalize_single_level_language(
             _clean_text(value.get(field_name), f"guidance.disagreement.{field_name}")
         )[:1200]
+    if status == "active":
+        normalized["coreDisagreement"] = _detailed_disagreement_core(
+            normalized["userPosition"],
+            normalized["aiPosition"],
+            normalized["coreDisagreement"],
+            language,
+        )
     normalized["resolution"] = resolution
     return normalized
+
+
+def _detailed_disagreement_core(user_position, ai_position, core, language):
+    """Keep a model comparison, expanding legacy terse cards from validated fields."""
+    text = _normalize_response_paragraphs(str(core or ""))[:1200]
+    user_summary = _normalize_response_paragraphs(str(user_position or "")).rstrip(".。")[:320]
+    ai_summary = _normalize_response_paragraphs(str(ai_position or "")).rstrip(".。")[:420]
+    core_summary = text.rstrip(".。")[:320]
+    if language == "zh-CN":
+        has_stance = any(token in text for token in ("认同", "同意", "不同意", "不认同", "理解", "担心"))
+        has_reason = any(token in text for token in ("因为", "由于", "原因", "风险", "证据"))
+        has_contrast = any(token in text for token in ("但是", "不过", "而我", "相比", "分歧", "更关注"))
+        if len(text) >= 48 and has_stance and has_reason and has_contrast:
+            return text
+        expanded = (
+            f"我理解你的观点是：{user_summary}。"
+            f"我目前仍有不同意见，因为{ai_summary}。"
+            f"你的方向更关注前一种体验，而我的判断更关注已经指出的玩法风险；"
+            f"我们的分歧主要来源于：{core_summary}。"
+        )
+    else:
+        lowered = text.lower()
+        has_stance = any(token in lowered for token in ("agree", "understand", "concern", "accept"))
+        has_reason = any(token in lowered for token in ("because", "since", "reason", "risk", "evidence"))
+        has_contrast = any(token in lowered for token in ("but", "however", "while", "whereas", "difference", "focus"))
+        if len(text) >= 80 and has_stance and has_reason and has_contrast:
+            return text
+        expanded = (
+            f"I understand your position as: {user_summary}. "
+            f"I still see it differently because {ai_summary}. "
+            "Your direction prioritizes that intended experience, while my judgment prioritizes the "
+            f"identified play risk; the concrete decision at the heart of our disagreement is: {core_summary}."
+        )
+    return _normalize_response_paragraphs(expanded)[:1200]
 
 
 def _disagreement_from_warning(warning_text, language, stage_context, user_position=None):
@@ -14554,14 +14618,25 @@ def _disagreement_from_warning(warning_text, language, stage_context, user_posit
             f"用户刚刚完成了{components or '这处地图'}的手动修改，并希望保留这次调整。"
         )
         ai_position = f"我担心这次修改在具体游玩时刻带来问题：{warning}"
-        core = "是否保留当前手动修改，以及如何在不牺牲可解性和设计目标的前提下实现用户想要的效果。"
+        core = (
+            f"我理解你希望保留这次修改，因为它更接近你想要的地图体验。"
+            f"但是我目前不能完全认同直接保留，因为已经确认的风险是：{warning}。"
+            "你的方向更关注修改带来的体验，而我的判断更关注具体推动风险和可解性；"
+            "我们的分歧主要来源于是否应原样保留当前布局，还是先处理风险再保留它的设计目标。"
+        )
         next_question = "这次修改最想保留的游玩效果是什么？如果保留当前布局，如何处理我指出的具体风险？"
     else:
         user_position = user_position or (
             f"The designer just saved a manual change to {components or 'this part of the map'} and wants to keep it."
         )
         ai_position = f"I am concerned that the change creates a concrete play problem: {warning}"
-        core = "Whether to keep the current manual edit and how to preserve its intended effect without sacrificing solvability or the stated design goal."
+        core = (
+            "I understand why you want to keep this edit because it is closer to the experience you "
+            f"intend. However, I do not yet agree that it should remain unchanged because the verified "
+            f"risk is: {warning}. Your direction focuses more on the edit's intended experience, while "
+            "my concern focuses on the concrete push risk and solvability; our disagreement is whether "
+            "to keep this layout as-is or address the risk while preserving its goal."
+        )
         next_question = "Which play effect is most important to preserve, and how should we address the concrete risk I observed?"
     return {
         "status": "active",
