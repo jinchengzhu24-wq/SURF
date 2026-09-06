@@ -1151,13 +1151,74 @@ main {
     transform: translate(-1px, -1px);
 }
 
-.composer-actions .secondary-button.is-active {
+.composer-actions .proposal-mode-toggle {
+    min-width: 126px;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 8px 6px 12px;
+    text-transform: none;
+}
+
+.proposal-toggle-label {
+    letter-spacing: .04em;
+    white-space: nowrap;
+}
+
+.proposal-toggle-track {
+    position: relative;
+    display: inline-flex;
+    width: 48px;
+    height: 26px;
+    flex: 0 0 48px;
+    align-items: center;
+    padding: 3px;
+    border: 3px solid #394343;
+    border-radius: 999px;
+    background: #ebe9df;
+    box-shadow:
+        inset 2px 2px 0 rgba(45, 52, 51, .22),
+        1px 1px 0 #ffffff;
+    transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.proposal-toggle-thumb {
+    width: 14px;
+    height: 14px;
+    border: 2px solid #202827;
+    border-radius: 50%;
+    background: #3d4745;
+    box-shadow: 1px 1px 0 rgba(20, 26, 25, .45);
+    transform: translateX(0);
+    transition: transform 140ms ease, background-color 120ms ease, border-color 120ms ease;
+}
+
+.composer-actions .proposal-mode-toggle.is-active {
     border-color: #62410e;
-    color: #fff6c9;
+    color: #5c3c0b;
+    background: #f2d273;
+    box-shadow:
+        inset 0 0 0 2px #fff0a9,
+        2px 2px 0 #3d2b16;
+}
+
+.proposal-mode-toggle.is-active .proposal-toggle-track {
+    border-color: #62410e;
     background: #9a6a1d;
     box-shadow:
-        inset 0 0 0 2px #d6ad50,
-        2px 2px 0 #3d2b16;
+        inset 2px 2px 0 #684513,
+        1px 1px 0 #fff0a9;
+}
+
+.proposal-mode-toggle.is-active .proposal-toggle-thumb {
+    border-color: #fff2b5;
+    background: #fff8d6;
+    box-shadow: 1px 1px 0 #49300c;
+    transform: translateX(20px);
+}
+
+.proposal-mode-toggle:disabled .proposal-toggle-track,
+.proposal-mode-toggle:disabled .proposal-toggle-thumb {
+    transition: none;
 }
 
 .play-button {
