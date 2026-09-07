@@ -780,7 +780,10 @@ function updateProgressPanelMaxHeight() {
     const referenceHeight = window.matchMedia("(min-width: 1201px)").matches
         ? panelHeight
         : panelHeight - Math.max(0, progressHeight - summaryHeight);
-    const progressMaxHeight = Math.floor(Math.max(summaryHeight, referenceHeight) / 2);
+    const progressMaxHeight = Math.max(
+        summaryHeight,
+        Math.floor(Math.max(summaryHeight, referenceHeight) * 0.44),
+    );
     elements.progressPanel.style.setProperty(
         "--progress-panel-max-height",
         `${progressMaxHeight}px`,
