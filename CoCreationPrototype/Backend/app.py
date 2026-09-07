@@ -51,6 +51,7 @@ from llm_client import (
     PROPOSAL_GENERATION_ATTEMPTS,
     classify_challenge_reason,
     classify_revision_request,
+    review_intent_feedback,
     _contains_user_design_direction,
     _guidance_advice_request,
     _guidance_confusion_request,
@@ -87,8 +88,12 @@ from design_context import (
     clone_design_context,
     design_level_open_questions,
     evaluator_projection,
+    empty_design_context,
+    infer_intent_topic,
     is_design_level_question,
+    merge_intent_hypothesis,
     merge_chat_update,
+    resolve_intent_hypothesis,
     revision_projection,
     set_active_disagreement,
     sanitize_user_design_text,
@@ -233,6 +238,167 @@ def record_intent_hypothesis(
     )
 
 
+def record_intent_evidence(
+    database,
+    session_id,
+    version_id,
+    kind,
+    observation,
+    *,
+    turn_id=None,
+    proposal_id=None,
+    play_attempt_id=None,
+    details=None,
+    created_at=None,
+):
+    """Append an immutable observation; evidence never confirms intention by itself."""
+    evidence_id = "ie_" + uuid.uuid4().hex
+    version = get_version(database, session_id, version_id)
+    rows = load_json(version["rows_json"]) if version is not None else []
+    record_event(
+        database,
+        session_id,
+        "intent_evidence_recorded",
+        {
+            "schemaVersion": 1,
+            "evidenceId": evidence_id,
+            "kind": str(kind),
+            "versionId": version_id,
+            "turnId": turn_id,
+            "proposalId": proposal_id,
+            "playAttemptId": play_attempt_id,
+            "mapFingerprint": map_fingerprint(rows) if rows else None,
+            "observation": str(observation or "").strip()[:1200],
+            "details": details or {},
+            "authority": "evidence_only",
+        },
+        created_at or utc_now(),
+    )
+    return evidence_id
+
+
+def _pending_intent_evidence(database, session_id, version, design_context, limit=12):
+    lineage_ids = {item["versionId"] for item in _stage_lineage(database, session_id, version)}
+    processed = set(design_context.get("processedEvidenceIds") or [])
+    result = []
+    rows = database.execute(
+        """
+        SELECT payload_json, created_at FROM audit_events
+        WHERE session_id = ? AND event_type = 'intent_evidence_recorded'
+        ORDER BY id DESC LIMIT 96
+        """,
+        (session_id,),
+    ).fetchall()
+    for row in rows:
+        payload = load_json(row["payload_json"]) or {}
+        evidence_id = payload.get("evidenceId")
+        if (
+            not evidence_id
+            or evidence_id in processed
+            or payload.get("versionId") not in lineage_ids
+        ):
+            continue
+        observation = re.sub(r"\s+", " ", str(payload.get("observation") or "")).strip()
+        if re.search(
+            r"(?:ignore (?:all|any|the) (?:previous|prior)|system prompt|developer message|"
+            r"reveal (?:the )?prompt|\u5ffd\u7565(?:\u4e0a\u8ff0|\u4e4b\u524d)|\u7cfb\u7edf\u63d0\u793a|\u5f00\u53d1\u8005\u6d88\u606f)",
+            observation,
+            flags=re.IGNORECASE,
+        ):
+            observation = "[instruction-like evidence text withheld]"
+        result.append({
+            "evidenceId": evidence_id,
+            "kind": payload.get("kind"),
+            "versionId": payload.get("versionId"),
+            "turnId": payload.get("turnId"),
+            "observation": observation[:320],
+            "details": _safe_intent_evidence_details(
+                payload.get("kind"),
+                payload.get("details"),
+            ),
+            "createdAt": row["created_at"],
+        })
+        if len(result) >= limit:
+            break
+    return list(reversed(result))
+
+
+def _safe_intent_evidence_details(kind, value):
+    """Project audit detail into bounded facts suitable for an LLM prompt."""
+    if not isinstance(value, dict):
+        return {}
+
+    allowed_fields = {
+        "conversation": {"requestProposal"},
+        "manual_edit": {"parentVersionId", "diff", "validation"},
+        "proposal_accept": {"decision", "reason", "baseVersionId"},
+        "proposal_reject": {"decision", "reason", "baseVersionId"},
+        "stage_restore": {"sourceVersionId", "replacedVersionId"},
+        "disagreement_active": {
+            "subject", "resolution", "userPosition", "aiPosition",
+        },
+        "disagreement_resolved": {
+            "subject", "resolution", "userPosition", "aiPosition",
+        },
+        "play_completed": {
+            "status", "moveCount", "pushCount", "restartCount",
+            "durationSeconds", "minimumMoves", "minimumPushes",
+        },
+        "play_abandoned": {
+            "status", "moveCount", "pushCount", "restartCount",
+            "durationSeconds", "minimumMoves", "minimumPushes",
+        },
+    }.get(str(kind), set())
+
+    def bounded(item, depth=0):
+        if depth > 3:
+            return None
+        if isinstance(item, bool) or item is None:
+            return item
+        if isinstance(item, (int, float)):
+            return item
+        if isinstance(item, str):
+            clean = re.sub(r"\s+", " ", item).strip()[:240]
+            if re.search(
+                r"(?:ignore (?:all|any|the) (?:previous|prior)|system prompt|"
+                r"developer message|reveal (?:the )?prompt|"
+                r"\u5ffd\u7565(?:\u4e0a\u8ff0|\u4e4b\u524d)|\u7cfb\u7edf\u63d0\u793a|\u5f00\u53d1者\u6d88\u606f)",
+                clean,
+                flags=re.IGNORECASE,
+            ):
+                return "[instruction-like evidence text withheld]"
+            return clean
+        if isinstance(item, list):
+            return [bounded(entry, depth + 1) for entry in item[:24]]
+        if isinstance(item, dict):
+            return {
+                str(key)[:64]: bounded(entry, depth + 1)
+                for key, entry in list(item.items())[:24]
+            }
+        return str(item)[:120]
+
+    return {
+        field: bounded(value.get(field))
+        for field in allowed_fields
+        if field in value
+    }
+
+
+def _relevant_intent_evidence(hypothesis, evidence, current_turn_id=None):
+    topic = infer_intent_topic(hypothesis)
+    matched = []
+    for item in evidence:
+        searchable = " ".join((
+            str(item.get("observation") or ""),
+            dump_json(item.get("details") or {}),
+        ))
+        if infer_intent_topic(searchable) == topic and topic != "other":
+            matched.append(item)
+    current = [item for item in evidence if item.get("turnId") == current_turn_id]
+    selected = matched or current or evidence[-1:]
+    return selected[-4:]
+
+
 load_dotenv(BACKEND_DIR / ".env")
 PUBLIC_BASE_URL = os.getenv(
     "COCREATION_PUBLIC_BASE_URL",
@@ -359,6 +525,14 @@ class FinalizeRequest(StrictModel):
 
 class IntentionRequest(StrictModel):
     content: str
+    idempotencyKey: str
+
+
+class IntentFeedbackRequest(StrictModel):
+    action: Literal["confirm", "reject", "revise"]
+    candidateText: str | None = None
+    sourceTurnId: str
+    baseVersionId: str
     idempotencyKey: str
 
 
@@ -604,15 +778,8 @@ def _create_session_record(
                     initial_summary,
                     dump_json(validation.as_dict()),
                     dump_json({
-                        "schemaVersion": 1,
-                        "userGoals": [],
-                        "designConstraints": [],
-                        "confirmedDecisions": [],
-                        "rejectedDecisions": [],
-                        "openQuestions": [],
-                        "activeDisagreement": None,
+                        **empty_design_context(),
                         "updatedFromStageId": version_id,
-                        "updatedFromTurnId": None,
                     }),
                     dump_json(initial_bindings),
                     "initial:" + idempotency_key,
@@ -894,6 +1061,18 @@ def create_manual_version(
                 payload.idempotencyKey,
                 current,
             )
+            record_intent_evidence(
+                database,
+                session_id,
+                version_id,
+                "manual_edit",
+                clean_optional(payload.summary, 1000) or "Designer saved a validated manual edit.",
+                details={
+                    "parentVersionId": current["id"],
+                    "diff": describe_diff(current_rows, validation.rows),
+                    "validation": validation.as_dict(),
+                },
+            )
         session_payload = serialize_session(database, session_id)
 
     synchronize_version_with_online_match(session_id, version_id, "stage")
@@ -948,6 +1127,17 @@ def restore_version(
             "restore",
             "",
             payload.idempotencyKey,
+        )
+        record_intent_evidence(
+            database,
+            session_id,
+            new_version_id,
+            "stage_restore",
+            f"Designer chose to continue from Stage {source['stage_number']}.",
+            details={
+                "sourceVersionId": source["id"],
+                "replacedVersionId": current["id"],
+            },
         )
         return serialize_session(database, session_id)
 
@@ -1172,6 +1362,358 @@ def assess_version(
     return session_payload
 
 
+def _intent_feedback_event(database, session_id, idempotency_key):
+    rows = database.execute(
+        """
+        SELECT event_type, payload_json FROM audit_events
+        WHERE session_id = ?
+          AND event_type IN (
+            'intent_hypothesis_feedback_applied',
+            'intent_hypothesis_feedback_pending'
+          )
+        ORDER BY id DESC
+        """,
+        (session_id,),
+    ).fetchall()
+    for row in rows:
+        event = load_json(row["payload_json"]) or {}
+        if event.get("idempotencyKey") == idempotency_key:
+            return event
+    return None
+
+
+def _intent_feedback_signature(payload, hypothesis_id, candidate):
+    return {
+        "hypothesisId": hypothesis_id,
+        "action": payload.action,
+        "candidateText": candidate or None,
+        "sourceTurnId": payload.sourceTurnId,
+        "baseVersionId": payload.baseVersionId,
+    }
+
+
+def _require_actionable_intent_card(
+    database,
+    session_id,
+    version_id,
+    hypothesis_id,
+    source_turn_id,
+):
+    latest = None
+    for row in database.execute(
+        """
+        SELECT id, guidance_json FROM conversation_turns
+        WHERE session_id = ? AND version_id = ? AND role = 'assistant'
+        ORDER BY sequence_number
+        """,
+        (session_id, version_id),
+    ).fetchall():
+        guidance = load_json(row["guidance_json"]) or {}
+        if guidance.get("_intentHypothesisId"):
+            latest = (row, guidance)
+    if (
+        latest is None
+        or latest[0]["id"] != source_turn_id
+        or latest[1].get("_intentHypothesisId") != hypothesis_id
+    ):
+        raise ApiError(
+            409,
+            "INVALID_CARD_SOURCE",
+            "This intent card is no longer the current actionable card.",
+        )
+    return latest
+
+
+@app.post("/api/sessions/{session_id}/intent-hypotheses/{hypothesis_id}/feedback")
+def submit_intent_feedback(
+    session_id: str,
+    hypothesis_id: str,
+    payload: IntentFeedbackRequest,
+    request: Request,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
+):
+    """Resolve one displayed, current-Stage tentative intent card."""
+    _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    _validate_identifier(hypothesis_id, "hypothesisId")
+    candidate = sanitize_user_design_text(payload.candidateText)
+    if payload.action == "revise":
+        if not candidate or len(candidate) < 4 or len(candidate) > 1200:
+            raise ApiError(
+                400,
+                "INVALID_INTENT_FEEDBACK",
+                "The revised inclination must contain 4 to 1200 meaningful characters.",
+            )
+    elif candidate:
+        raise ApiError(
+            400,
+            "INVALID_INTENT_FEEDBACK",
+            "candidateText is accepted only when revising an inclination.",
+        )
+
+    signature = _intent_feedback_signature(payload, hypothesis_id, candidate)
+    with message_request_lock(session_id, payload.idempotencyKey):
+        with connect(immediate=True) as database:
+            session = require_browser_session(database, session_id, access_cookie)
+            prior = _intent_feedback_event(
+                database, session_id, payload.idempotencyKey
+            )
+            if prior is not None:
+                if prior.get("request") != signature:
+                    raise ApiError(
+                        409,
+                        "IDEMPOTENCY_CONFLICT",
+                        "The feedback key was already used for a different request.",
+                    )
+                return {
+                    "outcome": prior["outcome"],
+                    "session": serialize_session(database, session_id),
+                }
+            session = require_active_session(database, session_id, access_cookie)
+            require_current_base(session, payload.baseVersionId)
+            _, source_guidance = _require_actionable_intent_card(
+                database,
+                session_id,
+                payload.baseVersionId,
+                hypothesis_id,
+                payload.sourceTurnId,
+            )
+            context = load_design_context(
+                database, session_id, payload.baseVersionId
+            )
+            target = next((
+                item for item in context.get("intentHypotheses", [])
+                if item.get("id") == hypothesis_id
+            ), None)
+            if (
+                target is None
+                or target.get("status") != "tentative"
+                or not target.get("displayed")
+            ):
+                raise ApiError(
+                    409,
+                    "STALE_INTENT_CARD",
+                    "This intent card has already been handled or has expired.",
+                )
+            review_state = source_guidance.get("_intentReviewState") or {}
+            if (
+                review_state.get("interactionMode") == "adjust_only"
+                and payload.action != "revise"
+            ):
+                raise ApiError(
+                    409,
+                    "STALE_INTENT_CARD",
+                    "This intent needs a revised statement before it can be saved.",
+                )
+            statement = candidate if payload.action == "revise" else target["statement"]
+            active = [
+                {
+                    "hypothesisId": item["id"],
+                    "statement": item["statement"],
+                }
+                for item in context.get("intentHypotheses", [])
+                if item.get("status") == "confirmed" and item.get("id") != hypothesis_id
+            ]
+
+            if payload.action == "reject" or (
+                payload.action == "confirm" and not active
+            ):
+                evidence_id = record_intent_evidence(
+                    database,
+                    session_id,
+                    payload.baseVersionId,
+                    "intent_feedback",
+                    statement,
+                    turn_id=payload.sourceTurnId,
+                    details={"action": payload.action},
+                )
+                context, _ = resolve_intent_hypothesis(
+                    context,
+                    hypothesis_id,
+                    payload.action,
+                    evidence_id=evidence_id,
+                    stage_id=payload.baseVersionId,
+                    turn_id=payload.sourceTurnId,
+                )
+                save_design_context(database, payload.baseVersionId, context)
+                outcome = "rejected" if payload.action == "reject" else "applied"
+                record_event(
+                    database,
+                    session_id,
+                    "intent_hypothesis_feedback_applied",
+                    {
+                        "request": signature,
+                        "idempotencyKey": payload.idempotencyKey,
+                        "hypothesisId": hypothesis_id,
+                        "versionId": payload.baseVersionId,
+                        "outcome": outcome,
+                        "evidenceId": evidence_id,
+                        "supersedesHypothesisIds": [],
+                    },
+                    utc_now(),
+                )
+                return {
+                    "outcome": outcome,
+                    "session": serialize_session(database, session_id),
+                }
+
+            evidence_summary = [
+                str(item.get("observation") or "")[:500]
+                for item in _pending_intent_evidence(
+                    database,
+                    session_id,
+                    get_version(database, session_id, payload.baseVersionId),
+                    context,
+                    limit=8,
+                )
+            ]
+
+        review = review_intent_feedback(
+            statement,
+            active,
+            evidence_summary,
+            session["language"],
+            request.state.request_id,
+        )
+
+        with connect(immediate=True) as database:
+            session = require_browser_session(database, session_id, access_cookie)
+            prior = _intent_feedback_event(
+                database, session_id, payload.idempotencyKey
+            )
+            if prior is not None:
+                if prior.get("request") != signature:
+                    raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The feedback key was reused.")
+                return {
+                    "outcome": prior["outcome"],
+                    "session": serialize_session(database, session_id),
+                }
+            session = require_active_session(database, session_id, access_cookie)
+            require_current_base(session, payload.baseVersionId)
+            _require_actionable_intent_card(
+                database,
+                session_id,
+                payload.baseVersionId,
+                hypothesis_id,
+                payload.sourceTurnId,
+            )
+            context = load_design_context(
+                database, session_id, payload.baseVersionId
+            )
+            target = next((
+                item for item in context.get("intentHypotheses", [])
+                if item.get("id") == hypothesis_id
+            ), None)
+            if target is None or target.get("status") != "tentative":
+                raise ApiError(409, "STALE_INTENT_CARD", "This intent card is stale.")
+
+            if review["verdict"] == "compatible":
+                evidence_id = record_intent_evidence(
+                    database,
+                    session_id,
+                    payload.baseVersionId,
+                    "intent_feedback",
+                    statement,
+                    turn_id=payload.sourceTurnId,
+                    details={"action": payload.action},
+                )
+                context, _ = resolve_intent_hypothesis(
+                    context,
+                    hypothesis_id,
+                    payload.action,
+                    candidate_text=candidate,
+                    supersedes_ids=review["supersedesHypothesisIds"],
+                    evidence_id=evidence_id,
+                    stage_id=payload.baseVersionId,
+                    turn_id=payload.sourceTurnId,
+                )
+                save_design_context(database, payload.baseVersionId, context)
+                record_event(
+                    database,
+                    session_id,
+                    "intent_hypothesis_feedback_applied",
+                    {
+                        "request": signature,
+                        "idempotencyKey": payload.idempotencyKey,
+                        "hypothesisId": hypothesis_id,
+                        "versionId": payload.baseVersionId,
+                        "outcome": "applied",
+                        "evidenceId": evidence_id,
+                        "supersedesHypothesisIds": review["supersedesHypothesisIds"],
+                    },
+                    utc_now(),
+                )
+                return {
+                    "outcome": "applied",
+                    "session": serialize_session(database, session_id),
+                }
+
+            user_text = (
+                candidate
+                if payload.action == "revise"
+                else ("符合我的想法" if session["language"] == "zh-CN" else "This matches my idea.")
+            )
+            insert_turn(
+                database,
+                session,
+                "user",
+                user_text,
+                payload.baseVersionId,
+                payload.idempotencyKey,
+                None,
+            )
+            explanation = review["explanation"]
+            execution = LLMExecutionResult(
+                assistant_message=explanation,
+                attempts_used=1,
+                request_id=request.state.request_id,
+                model="kimi-k2.6",
+                guidance={
+                    "move": "clarify_intent",
+                    "intentHypothesis": statement,
+                    "intentConfidence": "low",
+                    "followUpQuestion": None,
+                    "proposalOffer": None,
+                    "disagreement": None,
+                    "uiCues": [],
+                    "_intentHypothesisId": hypothesis_id,
+                    "_intentReviewState": {
+                        "interactionMode": "adjust_only",
+                        "reviewOutcome": review["verdict"],
+                        "reviewExplanation": explanation,
+                    },
+                },
+            )
+            assistant_turn_id = insert_turn(
+                database,
+                session,
+                "assistant",
+                explanation,
+                payload.baseVersionId,
+                payload.idempotencyKey,
+                execution,
+            )
+            record_event(
+                database,
+                session_id,
+                "intent_hypothesis_feedback_pending",
+                {
+                    "request": signature,
+                    "idempotencyKey": payload.idempotencyKey,
+                    "hypothesisId": hypothesis_id,
+                    "versionId": payload.baseVersionId,
+                    "outcome": review["verdict"],
+                    "candidateText": statement,
+                    "assistantTurnId": assistant_turn_id,
+                    "explanation": explanation,
+                },
+                utc_now(),
+            )
+            return {
+                "outcome": review["verdict"],
+                "session": serialize_session(database, session_id),
+            }
+
+
 @app.post("/api/sessions/{session_id}/messages")
 def send_message(
     session_id: str,
@@ -1317,6 +1859,16 @@ def _send_message_locked(
                 payload.idempotencyKey,
                 None,
             )
+            if payload.action == "none":
+                record_intent_evidence(
+                    database,
+                    session_id,
+                    payload.baseVersionId,
+                    "conversation",
+                    sanitize_user_design_text(content),
+                    turn_id=user_turn_id,
+                    details={"requestProposal": bool(payload.requestProposal)},
+                )
             if payload.requestProposal:
                 record_event(
                     database,
@@ -1771,6 +2323,31 @@ def _send_message_locked(
         )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
     execution = _mark_proposal_discovery_guidance(execution, context["stageContext"])
+    execution_guidance = dict(execution.guidance or {})
+    active_disagreement_card = (
+        isinstance(execution_guidance.get("disagreement"), dict)
+        and execution_guidance["disagreement"].get("status") == "active"
+    )
+    candidate_intent = str(execution_guidance.get("intentHypothesis") or "").strip()
+    confirmed_intent_texts = {
+        str(item.get("statement") or "").strip().casefold()
+        for item in (
+            context["stageContext"].get("designContext", {}).get(
+                "intentHypotheses", []
+            )
+        )
+        if item.get("status") == "confirmed"
+    }
+    if candidate_intent and (
+        payload.requestProposal
+        or payload.action != "none"
+        or execution_guidance.get("proposalOffer")
+        or active_disagreement_card
+        or candidate_intent.casefold() in confirmed_intent_texts
+    ):
+        execution_guidance["intentHypothesis"] = None
+        execution_guidance["intentConfidence"] = None
+        execution = replace(execution, guidance=execution_guidance)
     execution = _bind_execution_to_stage(
         execution,
         payload.baseVersionId,
@@ -3261,6 +3838,21 @@ def decide_proposal(
                 clean_optional(payload.reason, 2000) or "",
                 payload.idempotencyKey,
             )
+            record_intent_evidence(
+                database,
+                session_id,
+                new_version_id or proposal["base_version_id"],
+                "proposal_" + payload.decision,
+                proposal["summary"],
+                turn_id=proposal["assistant_turn_id"],
+                proposal_id=proposal_id,
+                details={
+                    "decision": payload.decision,
+                    "reason": clean_optional(payload.reason, 2000) or "",
+                    "baseVersionId": proposal["base_version_id"],
+                },
+                created_at=now,
+            )
             if payload.decision == "reject":
                 current_context = load_design_context(
                     database, session_id, proposal["base_version_id"]
@@ -3964,6 +4556,25 @@ def update_play_attempt(attempt_id, payload, requested_status):
             },
             now,
         )
+        if terminal:
+            record_intent_evidence(
+                database,
+                attempt["session_id"],
+                attempt["version_id"],
+                "play_" + requested_status,
+                "Designer play evidence was recorded for the saved Stage.",
+                play_attempt_id=attempt_id,
+                details={
+                    "status": requested_status,
+                    "durationSeconds": payload.durationSeconds,
+                    "moveCount": payload.moveCount,
+                    "pushCount": payload.pushCount,
+                    "restartCount": payload.restartCount,
+                    "minimumMoves": payload.minimumMoves,
+                    "minimumPushes": payload.minimumPushes,
+                },
+                created_at=now,
+            )
         return {"attemptId": attempt_id, "status": requested_status}
 
 
@@ -4520,6 +5131,12 @@ def build_llm_context(database, session_id, version):
                 source="runtime_legacy_untrusted",
             )
     design_context = load_design_context(database, session_id, version["id"])
+    pending_intent_evidence = _pending_intent_evidence(
+        database,
+        session_id,
+        version,
+        design_context,
+    )
     parent = (
         get_version(database, session_id, version["parent_version_id"])
         if version["parent_version_id"]
@@ -4642,6 +5259,28 @@ def build_llm_context(database, session_id, version):
         latest_user_direction,
         latest_play,
     )
+    progress_context["intentEvidence"] = pending_intent_evidence
+    pending_reviews = []
+    for row in database.execute(
+        """
+        SELECT payload_json FROM audit_events
+        WHERE session_id = ? AND event_type = 'intent_hypothesis_feedback_pending'
+        ORDER BY id DESC LIMIT 8
+        """,
+        (session_id,),
+    ).fetchall():
+        item = load_json(row["payload_json"]) or {}
+        if item.get("versionId") not in lineage_ids:
+            continue
+        pending_reviews.append({
+            "hypothesisId": item.get("hypothesisId"),
+            "candidate": str(item.get("candidateText") or "")[:600],
+            "verdict": item.get("outcome"),
+            "explanation": str(item.get("explanation") or "")[:600],
+        })
+        if len(pending_reviews) >= 2:
+            break
+    progress_context["pendingIntentReviews"] = pending_reviews
     challenge_rows = database.execute(
         """
         SELECT payload_json FROM audit_events
@@ -6710,6 +7349,20 @@ def _record_disagreement_event(database, session_id, version_id, turn_id, guidan
         },
         utc_now(),
     )
+    record_intent_evidence(
+        database,
+        session_id,
+        version_id,
+        "disagreement_" + status,
+        disagreement.get("coreDisagreement") or disagreement.get("nextQuestion") or "",
+        turn_id=turn_id,
+        details={
+            "subject": disagreement.get("subject"),
+            "resolution": disagreement.get("resolution"),
+            "userPosition": disagreement.get("userPosition"),
+            "aiPosition": disagreement.get("aiPosition"),
+        },
+    )
 
 
 def _public_guidance(guidance):
@@ -6719,6 +7372,8 @@ def _public_guidance(guidance):
     result.pop("designContextPatchError", None)
     result.pop("openingRecovery", None)
     result.pop("openingPresentation", None)
+    result.pop("_intentHypothesisId", None)
+    result.pop("_intentReviewState", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and (
         "executionBrief" in offer or "revisionPlan" in offer
@@ -7104,7 +7759,104 @@ def _update_design_context_from_turn(
             },
             utc_now(),
         )
-        context = load_design_context(database, session_id, version_id)
+        context = previous
+
+    hypothesis_id = None
+    hypothesis = str(guidance.get("intentHypothesis") or "").strip()
+    if allow_progress and hypothesis:
+        pending_evidence = _pending_intent_evidence(
+            database,
+            session_id,
+            get_version(database, session_id, version_id),
+            context,
+        )
+        relevant_evidence = _relevant_intent_evidence(
+            hypothesis,
+            pending_evidence,
+            turn_id,
+        )
+        evidence_ids = [item["evidenceId"] for item in relevant_evidence]
+        evidence_kinds = {item.get("kind") for item in relevant_evidence}
+        confidence = 0.55 if len(evidence_kinds) >= 2 else 0.35
+        context, hypothesis_id = merge_intent_hypothesis(
+            context,
+            hypothesis,
+            evidence_ids,
+            version_id,
+            turn_id,
+            confidence,
+            displayed=True,
+        )
+        stored_turn = database.execute(
+            "SELECT guidance_json FROM conversation_turns WHERE id = ?",
+            (turn_id,),
+        ).fetchone()
+        if stored_turn is not None:
+            stored_guidance = load_json(stored_turn["guidance_json"]) or {}
+            stored_guidance["_intentHypothesisId"] = hypothesis_id
+            database.execute(
+                "UPDATE conversation_turns SET guidance_json = ? WHERE id = ?",
+                (dump_json(stored_guidance), turn_id),
+            )
+        record_event(
+            database,
+            session_id,
+            "intent_hypothesis_memory_updated",
+            {
+                "versionId": version_id,
+                "turnId": turn_id,
+                "hypothesisId": hypothesis_id,
+                "evidenceIds": evidence_ids,
+                "confidence": confidence,
+            },
+            utc_now(),
+        )
+    elif allow_progress and isinstance(patch, dict):
+        patch_hypotheses = [
+            entry.get("goal")
+            for entry in patch.get("goals", [])
+            if isinstance(entry, dict) and entry.get("goal")
+        ] + [
+            entry.get("constraint")
+            for entry in patch.get("constraints", [])
+            if isinstance(entry, dict) and entry.get("constraint")
+        ]
+        for patch_hypothesis in patch_hypotheses[:2]:
+            pending_evidence = _pending_intent_evidence(
+                database,
+                session_id,
+                get_version(database, session_id, version_id),
+                context,
+            )
+            relevant_evidence = _relevant_intent_evidence(
+                patch_hypothesis,
+                pending_evidence,
+                turn_id,
+            )
+            context, hypothesis_id = merge_intent_hypothesis(
+                context,
+                patch_hypothesis,
+                [item["evidenceId"] for item in relevant_evidence],
+                version_id,
+                turn_id,
+                0.35,
+            )
+            record_event(
+                database,
+                session_id,
+                "intent_hypothesis_memory_updated",
+                {
+                    "versionId": version_id,
+                    "turnId": turn_id,
+                    "hypothesisId": hypothesis_id,
+                    "evidenceIds": [
+                        item["evidenceId"] for item in relevant_evidence
+                    ],
+                    "confidence": 0.35,
+                    "source": "design_context_patch",
+                },
+                utc_now(),
+            )
 
     disagreement = guidance.get("disagreement")
     if isinstance(disagreement, dict) and disagreement.get("status") == "active":
@@ -7163,7 +7915,15 @@ def _update_design_context_from_turn(
                 any(item.get("sourceTurnId") == turn_id and item.get("authority") == "explicit"
                     for item in context.get("userGoals", []) + context.get("designConstraints", []))
             ),
-            "hasInferredMemory": bool(patch) and allow_progress,
+            "hasInferredMemory": bool(hypothesis_id) or bool(
+                allow_progress
+                and isinstance(patch, dict)
+                and (patch.get("goals") or patch.get("constraints"))
+            ),
+            "hypothesisId": hypothesis_id,
+            # Free-text acknowledgements no longer resolve intent cards;
+            # feedback is accepted only by the dedicated card endpoint.
+            "hypothesisFeedback": None,
             "progressApplied": bool(allow_progress),
             "autoOpenQuestionCount": len(auto_open_questions),
             "disagreementStatus": (

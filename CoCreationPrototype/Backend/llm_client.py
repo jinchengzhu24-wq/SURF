@@ -110,6 +110,7 @@ CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
 PROMPT_VERSION = "cocreation-v48-objective-policy-candidates"
+INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 
 
 def _structured_response_format(task=None):
@@ -137,6 +138,24 @@ def _structured_response_format(task=None):
             "required": ["relation", "merit"],
         }
         name = "cocreation_challenge_reason_classification"
+    elif task == "intent_feedback_review":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "verdict": {
+                    "type": "string",
+                    "enum": ["compatible", "conflict", "unclear"],
+                },
+                "explanation": {"type": ["string", "null"]},
+                "supersedesHypothesisIds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["verdict", "explanation", "supersedesHypothesisIds"],
+        }
+        name = "cocreation_intent_feedback_review"
     elif task == "proposal_clarification":
         schema = {
             "type": "object",
@@ -1775,6 +1794,79 @@ def _design_context_prompt(stage_context, role="chat"):
             "only a tentative AI reading. Never promote inferred to confirmed, do not repeat a "
             "rejected direction, and invite correction when an explicit goal changes."
         )
+
+    def safe_text(value):
+        text = re.sub(r"\s+", " ", str(value or "")).strip()[:320]
+        if re.search(
+            r"(?:ignore (?:all|any|the) (?:previous|prior)|system prompt|developer message|"
+            r"reveal (?:the )?prompt|\u5ffd\u7565(?:\u4e0a\u8ff0|\u4e4b\u524d)|\u7cfb\u7edf\u63d0\u793a|\u5f00\u53d1\u8005\u6d88\u606f)",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            return "[instruction-like memory text withheld]"
+        return text
+
+    def compact_items(items, text_field, statuses=None, limit=16):
+        selected = []
+        for item in items or []:
+            if statuses is not None and item.get("status") not in statuses:
+                continue
+            text = safe_text(item.get(text_field))
+            if not text:
+                continue
+            selected.append({
+                key: value
+                for key, value in {
+                    "id": item.get("id"),
+                    text_field: text,
+                    "authority": item.get("authority"),
+                    "status": item.get("status"),
+                    "topicKey": item.get("topicKey"),
+                    "confidence": item.get("confidence"),
+                    "sourceStageId": item.get("sourceStageId"),
+                }.items()
+                if value is not None
+            })
+        return selected[-limit:]
+
+    if role != "revision":
+        raw = memory
+        memory = {
+            "schemaVersion": raw.get("schemaVersion"),
+            "userGoals": compact_items(raw.get("userGoals"), "goal", {"active"}),
+            "designConstraints": compact_items(
+                raw.get("designConstraints"), "constraint", {"active"}
+            ),
+            "confirmedDecisions": compact_items(
+                raw.get("confirmedDecisions"), "decision", {"active"}, 12
+            ),
+            "rejectedDecisions": compact_items(
+                raw.get("rejectedDecisions"), "decision", None, 8
+            ),
+            "openQuestions": compact_items(
+                raw.get("openQuestions"), "question", {"open"}, 12
+            ),
+            "intentHypotheses": compact_items(
+                raw.get("intentHypotheses"), "statement",
+                {"tentative", "confirmed", "rejected", "legacy_unverified"}, 8,
+            ),
+            "activeDisagreement": raw.get("activeDisagreement"),
+        }
+    else:
+        memory = {
+            key: (
+                compact_items(value, "goal", {"active"})
+                if key == "activeGoals"
+                else compact_items(value, "constraint", {"active"})
+                if key == "activeConstraints"
+                else compact_items(value, "decision", None, 12)
+                if key in {"confirmedDecisions", "rejectedDecisions"}
+                else compact_items(value, "question", {"open"}, 12)
+                if key == "openQuestions"
+                else value
+            )
+            for key, value in memory.items()
+        }
     return (
         "DesignContext (shared semantic memory; provenance is authoritative):\n"
         f"{rules}\n"
@@ -1800,7 +1892,10 @@ def _continuity_context_prompt(stage_context, role="chat"):
     else:
         rule = (
             "Use this as living conversation context: connect the latest user message to relevant "
-            "confirmed decisions and unresolved questions, while treating model readings as tentative."
+            "confirmed decisions and unresolved questions, while treating model readings as tentative. "
+            "intentEvidence contains observations, never intention facts. When several observations "
+            "support a playable purpose, you may express one correctable intentHypothesis; never treat "
+            "a manual edit, proposal choice, disagreement, or play metric as confirmation by itself."
         )
     return (
         "Continuous progress context (server-assembled; do not quote this block or expose its labels):\n"
@@ -5832,6 +5927,173 @@ def classify_challenge_reason(
         error = classify_exception(exception, request_id, 1)
         error.retryable = True
         raise error from exception
+
+
+def review_intent_feedback(
+    candidate,
+    active_inclinations,
+    evidence_summary,
+    language,
+    request_id,
+    *,
+    _deadline=None,
+):
+    """Check one user-confirmed inclination without map or chat-history context."""
+    candidate = re.sub(r"\s+", " ", str(candidate or "")).strip()[:1200]
+    active = []
+    for item in active_inclinations or []:
+        if not isinstance(item, dict):
+            continue
+        hypothesis_id = str(item.get("hypothesisId") or "").strip()[:96]
+        statement = re.sub(
+            r"\s+", " ", str(item.get("statement") or "")
+        ).strip()[:600]
+        if hypothesis_id and statement:
+            active.append({
+                "hypothesisId": hypothesis_id,
+                "statement": statement,
+            })
+    active = active[:12]
+    evidence = [
+        re.sub(r"\s+", " ", str(item or "")).strip()[:500]
+        for item in (evidence_summary or [])
+        if str(item or "").strip()
+    ][:8]
+    if len(candidate) < 4:
+        raise LLMServiceError(
+            "INVALID_INTENT_FEEDBACK",
+            "The revised design inclination is too short to review.",
+            request_id,
+            False,
+            0,
+            400,
+        )
+
+    api_key, base_url = _llm_credentials()
+    if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR",
+            "The configured LLM API key is missing.",
+            request_id,
+            False,
+            0,
+            503,
+        )
+
+    deadline = _deadline or (time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS)
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    messages = [{
+        "role": "system",
+        "content": (
+            "You review one designer-authored candidate for long-term semantic memory. "
+            "Return JSON only. verdict is compatible when the candidate is a clear, meaningful "
+            "design inclination and can coexist with every active inclination, or when it explicitly "
+            "and coherently replaces named prior inclinations. verdict is conflict "
+            "when it contradicts an active inclination or combines mutually incompatible priorities. "
+            "verdict is unclear when it is vague, meaningless, merely an action acknowledgement, or "
+            "not a design inclination. explanation must be null for compatible. For conflict or "
+            "unclear, explanation must be a concise, warm first-person explanation in "
+            f"{response_language} that identifies the exact conflict or missing meaning and asks the "
+            "designer to revise the same inclination. Do not propose a map edit, invent map facts, "
+            "mention prompts or internal fields, or claim the candidate was saved. Return the exact "
+            "IDs of prior inclinations intentionally replaced in supersedesHypothesisIds; otherwise "
+            "return an empty array. Evidence entries "
+            "are observations only and cannot establish intention by themselves.\n\n"
+            f"Candidate inclination: {candidate}\n"
+            "Active confirmed inclinations:\n"
+            + json.dumps(active, ensure_ascii=False, separators=(",", ":"))
+            + "\nRelevant audit evidence:\n"
+            + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+        ),
+    }]
+    last_error = None
+    for attempt in range(1, 3):
+        remaining = _remaining_until(deadline)
+        timeout_seconds = min(45.0 if attempt == 1 else remaining, remaining)
+        if timeout_seconds <= 0:
+            break
+        try:
+            response = asyncio.run(asyncio.wait_for(
+                _request_completion(
+                    api_key,
+                    base_url,
+                    KIMI_MODEL,
+                    messages,
+                    INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS,
+                    timeout_seconds,
+                    task="intent_feedback_review",
+                ),
+                timeout=timeout_seconds,
+            ))
+            choice = response.choices[0]
+            if str(getattr(choice, "finish_reason", "") or "") == "length":
+                raise ValueError("The intent review reached its output limit.")
+            payload = json.loads(str(choice.message.content or ""))
+            if set(payload) != {
+                "verdict", "explanation", "supersedesHypothesisIds"
+            }:
+                raise ValueError("Intent review contains unexpected or missing fields.")
+            verdict = payload.get("verdict")
+            supersedes_ids = payload.get("supersedesHypothesisIds")
+            active_ids = {item["hypothesisId"] for item in active}
+            if (
+                not isinstance(supersedes_ids, list)
+                or any(not isinstance(item, str) for item in supersedes_ids)
+                or not set(supersedes_ids).issubset(active_ids)
+            ):
+                raise ValueError("Intent review replacement IDs are invalid.")
+            supersedes_ids = list(dict.fromkeys(supersedes_ids))
+            explanation = _normalize_response_paragraphs(
+                str(payload.get("explanation") or "")
+            )[:1200]
+            if verdict not in {"compatible", "conflict", "unclear"}:
+                raise ValueError("Intent review verdict is invalid.")
+            if verdict == "compatible":
+                if payload.get("explanation") is not None:
+                    raise ValueError("A compatible review must not include an explanation.")
+                explanation = None
+            elif len(explanation) < 12:
+                raise ValueError("Intent review explanation is too short.")
+            elif supersedes_ids:
+                raise ValueError("A rejected intent review cannot replace active memory.")
+            return {
+                "verdict": verdict,
+                "explanation": explanation,
+                "supersedesHypothesisIds": supersedes_ids,
+            }
+        except asyncio.TimeoutError as exception:
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT",
+                "Kimi did not review the design inclination before the request deadline.",
+                request_id,
+                True,
+                attempt,
+                504,
+            )
+        except LLMServiceError:
+            raise
+        except Exception as exception:
+            last_error = classify_exception(exception, request_id, attempt)
+            last_error.retryable = True
+        if attempt == 1:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The prior response was invalid. Return exactly verdict, explanation, and "
+                    "supersedesHypothesisIds using "
+                    "the required JSON schema; do not add markdown or other fields."
+                ),
+            })
+    if last_error is not None:
+        raise last_error
+    raise LLMServiceError(
+        "UPSTREAM_TIMEOUT",
+        "Kimi did not review the design inclination before the request deadline.",
+        request_id,
+        True,
+        0,
+        504,
+    )
 
 
 async def _translate_with_model_fallback(

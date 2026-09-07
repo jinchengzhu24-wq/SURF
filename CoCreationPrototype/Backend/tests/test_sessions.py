@@ -154,6 +154,243 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(exchange.status_code, 200, exchange.text)
         return payload["sessionId"]
 
+    def create_intent_card(self, statement, key):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I notice a compact, solvable opening.",
+            1,
+            f"{key}-opening",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": f"{key}-opening"[:64]},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+        execution = LLMExecutionResult(
+            "I may be seeing a longer-term preference here.",
+            1,
+            key,
+            model="mock-model",
+            guidance={
+                "move": "clarify_intent",
+                "intentHypothesis": statement,
+                "intentConfidence": "medium",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "I care about how the level's decisions feel.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": key,
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        turn = response.json()["turns"][-1]
+        self.assertTrue(turn["guidance"]["intentState"]["actionable"])
+        return version_id, turn, response.json()
+
+    def test_intent_card_reject_is_immediate_and_does_not_call_kimi(self):
+        version_id, turn, _ = self.create_intent_card(
+            "You may prefer the opening choice to remain readable.",
+            "intent-reject-card",
+        )
+        state = turn["guidance"]["intentState"]
+        with patch.object(backend, "review_intent_feedback") as mocked:
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/intent-hypotheses/{state['hypothesisId']}/feedback",
+                json={
+                    "action": "reject",
+                    "candidateText": None,
+                    "sourceTurnId": turn["turnId"],
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "intent-reject-feedback",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["outcome"], "rejected")
+        mocked.assert_not_called()
+        latest = response.json()["session"]["turns"][-1]["guidance"]["intentState"]
+        self.assertEqual(latest["status"], "rejected")
+        progress = response.json()["session"]["progressContexts"][0]
+        self.assertEqual(progress["designInclinations"], [])
+
+    def test_intent_confirm_conflict_then_revision_keeps_stable_id(self):
+        version_id, first_turn, _ = self.create_intent_card(
+            "You prefer planning order over simply extending the route.",
+            "intent-first-card",
+        )
+        first_state = first_turn["guidance"]["intentState"]
+        first_response = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{first_state['hypothesisId']}/feedback",
+            json={
+                "action": "confirm",
+                "candidateText": None,
+                "sourceTurnId": first_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-first-confirm",
+            },
+        )
+        self.assertEqual(first_response.status_code, 200, first_response.text)
+
+        _, second_turn, _ = self.create_intent_card(
+            "You prefer difficulty to come only from a much longer route.",
+            "intent-second-card",
+        )
+        second_state = second_turn["guidance"]["intentState"]
+        conflict = {
+            "verdict": "conflict",
+            "explanation": "I see a conflict with your confirmed preference for planning order; please revise this inclination.",
+            "supersedesHypothesisIds": [],
+        }
+        with patch.object(backend, "review_intent_feedback", return_value=conflict):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+                json={
+                    "action": "confirm",
+                    "candidateText": None,
+                    "sourceTurnId": second_turn["turnId"],
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "intent-second-conflict",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["outcome"], "conflict")
+        pending_turn = response.json()["session"]["turns"][-1]
+        pending_state = pending_turn["guidance"]["intentState"]
+        self.assertEqual(pending_state["hypothesisId"], second_state["hypothesisId"])
+        self.assertEqual(pending_state["interactionMode"], "adjust_only")
+        self.assertTrue(pending_state["actionable"])
+        with patch.object(backend, "review_intent_feedback") as mocked_retry:
+            duplicate = self.client.post(
+                f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+                json={
+                    "action": "confirm",
+                    "candidateText": None,
+                    "sourceTurnId": second_turn["turnId"],
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "intent-second-conflict",
+                },
+            )
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertEqual(duplicate.json()["outcome"], "conflict")
+        mocked_retry.assert_not_called()
+        stale = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+            json={
+                "action": "reject",
+                "candidateText": None,
+                "sourceTurnId": second_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-second-stale",
+            },
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["code"], "INVALID_CARD_SOURCE")
+        self.assertEqual(
+            len(response.json()["session"]["progressContexts"][0]["designInclinations"]),
+            1,
+        )
+
+        compatible = {
+            "verdict": "compatible",
+            "explanation": None,
+            "supersedesHypothesisIds": [first_state["hypothesisId"]],
+        }
+        with patch.object(backend, "review_intent_feedback", return_value=compatible):
+            resolved = self.client.post(
+                f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+                json={
+                    "action": "revise",
+                    "candidateText": "I prefer route length only when it reinforces meaningful push-order planning.",
+                    "sourceTurnId": pending_turn["turnId"],
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "intent-second-revise",
+                },
+            )
+        self.assertEqual(resolved.status_code, 200, resolved.text)
+        progress = resolved.json()["session"]["progressContexts"][0]
+        self.assertEqual(len(progress["designInclinations"]), 1)
+        self.assertEqual(
+            progress["designInclinations"][0]["hypothesisId"],
+            second_state["hypothesisId"],
+        )
+        self.assertTrue(progress["designInclinations"][0]["evidenceTrail"])
+
+    def test_historical_stage_progress_does_not_leak_later_inclination(self):
+        parent_id, parent_turn, _ = self.create_intent_card(
+            "You prefer a readable first push.",
+            "intent-history-parent",
+        )
+        parent_state = parent_turn["guidance"]["intentState"]
+        confirmed = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{parent_state['hypothesisId']}/feedback",
+            json={
+                "action": "confirm",
+                "candidateText": None,
+                "sourceTurnId": parent_turn["turnId"],
+                "baseVersionId": parent_id,
+                "idempotencyKey": "intent-history-confirm-parent",
+            },
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": parent_id,
+                "idempotencyKey": "intent-history-child",
+                "summary": "Move the player start left.",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        child_id, child_turn, _ = self.create_intent_card(
+            "You prefer compact routes that emphasize push order.",
+            "intent-history-child-card",
+        )
+        self.assertEqual(child_id, saved.json()["currentVersionId"])
+        child_state = child_turn["guidance"]["intentState"]
+        compatible = {
+            "verdict": "compatible",
+            "explanation": None,
+            "supersedesHypothesisIds": [],
+        }
+        with patch.object(backend, "review_intent_feedback", return_value=compatible):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/intent-hypotheses/{child_state['hypothesisId']}/feedback",
+                json={
+                    "action": "confirm",
+                    "candidateText": None,
+                    "sourceTurnId": child_turn["turnId"],
+                    "baseVersionId": child_id,
+                    "idempotencyKey": "intent-history-confirm-child",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        progress = {
+            item["versionId"]: item["designInclinations"]
+            for item in response.json()["session"]["progressContexts"]
+        }
+        self.assertEqual(len(progress[parent_id]), 1)
+        self.assertEqual(len(progress[child_id]), 2)
+
     def read_session(self):
         response = self.client.get(f"/api/sessions/{self.session_id}")
         self.assertEqual(response.status_code, 200, response.text)
@@ -640,6 +877,100 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(progress["confirmedDecisions"], [])
         self.assertEqual(progress["unresolvedQuestions"], [])
+
+    def test_next_ordinary_chat_links_evidence_to_persistent_hypothesis(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I notice a compact route.",
+            1,
+            "intent-opening",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        reply = LLMExecutionResult(
+            "I would watch how clearly the first push reads.",
+            1,
+            "intent-reply",
+            model="mock-model",
+            guidance={
+                "move": "clarify_intent",
+                "intentHypothesis": "It sounds to me like you care about route readability.",
+                "intentConfidence": "medium",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "intent-opening-key"},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+        with patch.object(backend, "generate_chat_reply", return_value=reply):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "I want players to read the first push clearly.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "intent-message-key",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("_intentHypothesisId", response.text)
+        with repository.connect() as database:
+            context = repository.load_design_context(database, self.session_id, version_id)
+            hypotheses = context["intentHypotheses"]
+            evidence = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'intent_evidence_recorded'
+                """,
+                (self.session_id,),
+            ).fetchall()
+        self.assertEqual(len(hypotheses), 1)
+        self.assertEqual(hypotheses[0]["status"], "tentative")
+        self.assertTrue(hypotheses[0]["supportingEvidenceIds"])
+        self.assertTrue(any(
+            json.loads(row["payload_json"])["kind"] == "conversation"
+            for row in evidence
+        ))
+
+    def test_saved_manual_edit_records_evidence_without_confirming_intent(self):
+        version_id = self.read_session()["currentVersionId"]
+        response = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": version_id,
+                "idempotencyKey": "manual-intent-evidence",
+                "summary": "Move the player start left.",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        child_id = response.json()["currentVersionId"]
+        with repository.connect() as database:
+            context = repository.load_design_context(database, self.session_id, child_id)
+            row = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'intent_evidence_recorded'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (self.session_id,),
+            ).fetchone()
+        self.assertEqual(context["intentHypotheses"], [])
+        self.assertEqual(json.loads(row["payload_json"])["kind"], "manual_edit")
 
     def test_opening_and_first_user_turn_sync_as_three_part_record(self):
         version_id = self.read_session()["currentVersionId"]
@@ -1133,10 +1464,9 @@ class CoCreationSessionTests(unittest.TestCase):
 
         recent = mocked.call_args_list[1].kwargs["stage_context"]["recentGuidance"]
         self.assertIn("water-side hesitation", recent["discussionFocus"])
-        self.assertEqual(
-            recent["intentHypothesis"],
-            "I think you may want the water to shape the route.",
-        )
+        # A purple proposal owns this turn; the orange tentative-intent card
+        # is intentionally suppressed rather than co-rendered.
+        self.assertIsNone(recent["intentHypothesis"])
         self.assertEqual(
             recent["proposalOffer"]["summary"],
             "Link the lower target to the water edge",
@@ -1964,17 +2294,10 @@ class CoCreationSessionTests(unittest.TestCase):
             True,
         )
 
-        self.assertEqual(len(hypotheses), 2)
-        proposed_payload = repository.load_json(hypotheses[0]["payload_json"])
-        rejected_payload = repository.load_json(hypotheses[1]["payload_json"])
-        self.assertEqual(proposed_payload["status"], "proposed")
-        self.assertEqual(proposed_payload["artifact"]["confidence"], "medium")
-        self.assertEqual(
-            proposed_payload["artifact"]["hypothesis"],
-            "I think you want the first route choice to feel more deliberate.",
-        )
-        self.assertEqual(rejected_payload["status"], "rejected")
-        self.assertEqual(rejected_payload["proposalId"], proposal_id)
+        # Purple proposal and execute-revision turns cannot also create orange
+        # tentative-intent artifacts. Their accept/reject evidence remains in
+        # the independent DesignContext audit stream.
+        self.assertEqual(len(hypotheses), 0)
         self.assertIsNone(
             llm_context["stageContext"]["recentGuidance"]["intentHypothesis"]
         )

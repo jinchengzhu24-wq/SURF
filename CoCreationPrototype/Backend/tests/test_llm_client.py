@@ -4426,6 +4426,7 @@ class LLMClientTests(unittest.TestCase):
         revision_client = FakeClient(["{}"])
         operation_client = FakeClient(["{}"])
         plain_client = FakeClient(["{}"])
+        intent_client = FakeClient(["{}"])
 
         with patch.object(llm_client, "_create_async_client", return_value=revision_client):
             asyncio.run(llm_client._request_completion(
@@ -4460,6 +4461,17 @@ class LLMClientTests(unittest.TestCase):
                 structured=False,
                 task="plain_chat",
             ))
+        with patch.object(llm_client, "_create_async_client", return_value=intent_client):
+            asyncio.run(llm_client._request_completion(
+                "test-kimi-key",
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.6",
+                [{"role": "user", "content": "Review this inclination."}],
+                100,
+                5,
+                structured=True,
+                task="intent_feedback_review",
+            ))
 
         self.assertEqual(
             revision_client.chat.completions.calls[0]["extra_body"],
@@ -4472,6 +4484,15 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(
             plain_client.chat.completions.calls[0]["extra_body"],
             {"thinking": {"type": "disabled"}},
+        )
+        self.assertEqual(
+            intent_client.chat.completions.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
+        intent_format = intent_client.chat.completions.calls[0]["response_format"]
+        self.assertEqual(
+            intent_format["json_schema"]["name"],
+            "cocreation_intent_feedback_review",
         )
 
     def test_kimi_temperature_matches_thinking_mode(self):

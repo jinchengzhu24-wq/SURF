@@ -13,6 +13,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 import repository
 from design_context import (
+    apply_hypothesis_feedback,
     add_confirmed_decision,
     add_open_question,
     add_rejected_decision,
@@ -20,13 +21,169 @@ from design_context import (
     design_level_open_questions,
     is_design_level_question,
     merge_chat_update,
+    merge_intent_hypothesis,
     revision_projection,
+    resolve_intent_hypothesis,
     sanitize_user_design_text,
     validate_design_context_patch,
 )
 
 
 class DesignContextUnitTests(unittest.TestCase):
+    def test_resolved_revision_supersedes_old_inclination_and_confirmed_goal(self):
+        context, old_id = merge_intent_hypothesis(
+            empty_design_context(),
+            "I prefer difficulty from longer routes.",
+            ["old-evidence"],
+            "stage-1",
+            "turn-1",
+            0.5,
+            displayed=True,
+        )
+        context, _ = resolve_intent_hypothesis(
+            context,
+            old_id,
+            "confirm",
+            evidence_id="old-feedback",
+            stage_id="stage-1",
+            turn_id="turn-1",
+        )
+        context, new_id = merge_intent_hypothesis(
+            context,
+            "I prefer difficulty from push-order planning.",
+            ["new-evidence"],
+            "stage-2",
+            "turn-2",
+            0.5,
+            displayed=True,
+        )
+        context, _ = resolve_intent_hypothesis(
+            context,
+            new_id,
+            "revise",
+            candidate_text="I prefer route length only when it reinforces push-order planning.",
+            supersedes_ids=[old_id],
+            evidence_id="new-feedback",
+            stage_id="stage-2",
+            turn_id="turn-3",
+        )
+        statuses = {item["id"]: item["status"] for item in context["intentHypotheses"]}
+        self.assertEqual(statuses[old_id], "superseded")
+        self.assertEqual(statuses[new_id], "confirmed")
+        active_confirmed_goals = [
+            item for item in context["userGoals"]
+            if item["authority"] == "confirmed" and item["status"] == "active"
+        ]
+        self.assertEqual(len(active_confirmed_goals), 1)
+        self.assertIn("push-order planning", active_confirmed_goals[0]["goal"])
+
+    def test_model_evidence_quote_cannot_promote_unrelated_goal_to_explicit(self):
+        context = merge_chat_update(
+            empty_design_context(),
+            patch={"goals": [{
+                "goal": "Make the level punishingly difficult",
+                "evidenceText": "I want help",
+            }]},
+            user_text="I want help understanding this route.",
+            stage_id="stage-1",
+            turn_id="turn-1",
+        )
+
+        arbitrary = next(
+            item for item in context["userGoals"]
+            if item["goal"] == "Make the level punishingly difficult"
+        )
+        self.assertEqual(arbitrary["authority"], "inferred")
+
+    def test_route_question_is_not_an_explicit_goal(self):
+        context = merge_chat_update(
+            empty_design_context(),
+            user_text="How do I move B1 to the target?",
+            stage_id="stage-1",
+            turn_id="turn-question",
+        )
+        self.assertEqual(context["userGoals"], [])
+
+    def test_unrelated_explicit_goal_does_not_supersede_inferred_memory(self):
+        context = merge_chat_update(
+            empty_design_context(),
+            patch={"goals": [{"goal": "Maybe prioritize a winding route"}]},
+            user_text="Let us inspect it.",
+            stage_id="stage-1",
+            turn_id="turn-1",
+        )
+        context = merge_chat_update(
+            context,
+            user_text="I want the first push to be readable.",
+            stage_id="stage-1",
+            turn_id="turn-2",
+        )
+        inferred = next(
+            item for item in context["userGoals"]
+            if item["authority"] == "inferred"
+        )
+        self.assertEqual(inferred["status"], "active")
+
+    def test_memory_capacity_prefers_recent_active_inferences(self):
+        context = empty_design_context()
+        for index in range(35):
+            context = merge_chat_update(
+                context,
+                patch={"goals": [{"goal": f"tentative goal {index}"}]},
+                user_text="Observe the Stage.",
+                stage_id="stage-1",
+                turn_id=f"turn-{index}",
+            )
+        values = [item["goal"] for item in context["userGoals"]]
+        self.assertIn("tentative goal 34", values)
+        self.assertNotIn("tentative goal 0", values)
+
+    def test_hypothesis_feedback_updates_same_stable_item(self):
+        context, hypothesis_id = merge_intent_hypothesis(
+            empty_design_context(),
+            "It sounds to me like you care about route readability.",
+            ["ie-1"],
+            "stage-1",
+            "turn-1",
+            displayed=True,
+        )
+        context, feedback = apply_hypothesis_feedback(
+            context,
+            "Yes, that's what I mean.",
+            "stage-1",
+            "turn-2",
+        )
+        hypothesis = next(
+            item for item in context["intentHypotheses"]
+            if item["id"] == hypothesis_id
+        )
+        self.assertEqual(feedback, {"id": hypothesis_id, "status": "confirmed"})
+        self.assertEqual(hypothesis["status"], "confirmed")
+        self.assertTrue(any(
+            item["authority"] == "confirmed" for item in context["userGoals"]
+        ))
+
+    def test_hidden_hypothesis_cannot_be_confirmed_by_short_reply(self):
+        context, hypothesis_id = merge_intent_hypothesis(
+            empty_design_context(),
+            "The designer may prefer a winding route rhythm.",
+            ["ie-1"],
+            "stage-1",
+            "turn-1",
+        )
+        context, feedback = apply_hypothesis_feedback(
+            context,
+            "Yes, that's what I mean.",
+            "stage-1",
+            "turn-2",
+        )
+        hypothesis = next(
+            item for item in context["intentHypotheses"]
+            if item["id"] == hypothesis_id
+        )
+        self.assertIsNone(feedback)
+        self.assertEqual(hypothesis["status"], "tentative")
+
     def test_current_map_fact_is_not_persisted_as_user_direction(self):
         user_text = (
             "B1" + chr(0x5728) + "(4,4)" + chr(0xFF0C)
@@ -336,6 +493,79 @@ class DesignContextUnitTests(unittest.TestCase):
 
 
 class DesignContextRepositoryTests(unittest.TestCase):
+    def test_schema_one_snapshot_migrates_without_model_inference(self):
+        original_path = repository.DATABASE_PATH
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            repository.DATABASE_PATH = Path(directory) / "schema-v1.sqlite3"
+            try:
+                repository.initialize_database()
+                session_id = uuid.uuid4().hex
+                version_id = uuid.uuid4().hex
+                now = "2026-09-01T00:00:00Z"
+                legacy = empty_design_context()
+                legacy["schemaVersion"] = 1
+                legacy["userGoals"] = [{
+                    "goal": "Maybe preserve a readable route",
+                    "authority": "inferred",
+                    "status": "active",
+                    "sourceStageId": version_id,
+                    "sourceTurnId": "turn-legacy",
+                    "confidence": 0.8,
+                }]
+                legacy.pop("intentHypotheses", None)
+                legacy.pop("processedEvidenceIds", None)
+                with repository.connect(immediate=True) as database:
+                    database.execute(
+                        """
+                        INSERT INTO design_sessions(
+                            id, creation_key, access_hash, integration_hash, bootstrap_hash,
+                            initial_draft_method, language, status, current_version_id,
+                            created_at, updated_at
+                        ) VALUES (?, ?, 'a', 'b', 'c', 'partial_completion', 'en',
+                                  'active', ?, ?, ?)
+                        """,
+                        (session_id, uuid.uuid4().hex, version_id, now, now),
+                    )
+                    database.execute(
+                        """
+                        INSERT INTO level_versions(
+                            id, session_id, stage_number, parent_version_id, source,
+                            rows_json, summary, diff_json, validation_json,
+                            design_context_json, idempotency_key, created_at
+                        ) VALUES (?, ?, 1, NULL, 'initial', ?, '', '[]', '{}', ?, ?, ?)
+                        """,
+                        (
+                            version_id,
+                            session_id,
+                            json.dumps(["############"] * 10),
+                            json.dumps(legacy),
+                            version_id,
+                            now,
+                        ),
+                    )
+                    self.assertEqual(repository.backfill_design_contexts(database), 1)
+                    migrated = repository.load_design_context(
+                        database, session_id, version_id
+                    )
+                    events = database.execute(
+                        """
+                        SELECT COUNT(*) FROM audit_events
+                        WHERE session_id = ? AND event_type = 'design_context_migrated'
+                        """,
+                        (session_id,),
+                    ).fetchone()[0]
+                self.assertEqual(migrated["schemaVersion"], 2)
+                self.assertEqual(events, 1)
+                self.assertEqual(
+                    migrated["intentHypotheses"][0]["status"],
+                    "legacy_unverified",
+                )
+                self.assertLessEqual(
+                    migrated["intentHypotheses"][0]["confidence"], 0.5
+                )
+            finally:
+                repository.DATABASE_PATH = original_path
+
     def test_database_migrates_design_context_column_and_backfill_is_idempotent(self):
         original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

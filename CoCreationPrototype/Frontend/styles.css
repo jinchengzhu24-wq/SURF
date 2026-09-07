@@ -996,6 +996,36 @@ main {
     opacity: 0.52;
 }
 
+.intent-card-actions,
+.intent-edit-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2px;
+}
+
+.intent-edit-form {
+    display: grid;
+    gap: 6px;
+    margin-top: 9px;
+}
+
+.intent-edit-form textarea {
+    width: 100%;
+    min-height: 78px;
+    padding: 8px;
+    border: 2px solid #9a6a1d;
+    border-radius: 3px;
+    background: #fffaf0;
+    color: #2f2f29;
+    font: inherit;
+    resize: vertical;
+}
+
+.intent-character-count,
+.intent-resolution {
+    color: #684513;
+}
+
 .guidance-cue-stale-note {
     display: block;
     margin-top: 7px;
@@ -1462,7 +1492,7 @@ main {
 }
 
 .progress-panel-body {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
     padding: 9px 3px 11px;
     border-top: 0;
@@ -1547,6 +1577,28 @@ main {
     background: #fff4d8;
 }
 
+.progress-item-inclination {
+    border-left-color: #684513;
+    background: #fff7de;
+}
+
+.inclination-why {
+    display: block;
+    margin-top: 9px;
+    color: #684513;
+    font-size: 10px;
+}
+
+.inclination-evidence {
+    display: grid;
+    gap: 5px;
+    margin: 6px 0 0;
+    padding-left: 18px;
+    color: #4d514b;
+    font-size: 10px;
+    line-height: 1.45;
+}
+
 .progress-item-reason {
     color: #4d514b;
     font-size: 10px;
@@ -1606,6 +1658,10 @@ textarea:focus-visible {
 
     .progress-panel {
         margin: 0 10px;
+    }
+
+    .progress-panel-body {
+        grid-template-columns: 1fr;
     }
 
     body {

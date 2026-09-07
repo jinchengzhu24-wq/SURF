@@ -9,12 +9,18 @@ import hashlib
 import re
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 AUTHORITIES = {"explicit", "confirmed", "inferred"}
 GOAL_STATUSES = {"active", "superseded", "rejected"}
 DECISION_STATUSES = {"active", "superseded"}
 QUESTION_STATUSES = {"open", "resolved"}
-MAX_ITEMS = 32
+HYPOTHESIS_STATUSES = {"tentative", "confirmed", "rejected", "superseded", "legacy_unverified"}
+INTENT_TOPICS = {
+    "difficulty", "route_readability", "push_dependency", "space_distribution",
+    "route_rhythm", "water_function", "entity_placement", "preservation", "other",
+}
+MAX_ACTIVE_INFERRED = 16
+MAX_INACTIVE_ITEMS = 16
 MAX_PATCH_ITEMS = 8
 MAX_TEXT = 1200
 
@@ -128,10 +134,43 @@ def empty_design_context():
         "confirmedDecisions": [],
         "rejectedDecisions": [],
         "openQuestions": [],
+        "intentHypotheses": [],
+        "processedEvidenceIds": [],
         "activeDisagreement": None,
         "updatedFromStageId": None,
         "updatedFromTurnId": None,
     }
+
+
+def _bounded_semantic_items(items):
+    """Keep authoritative active memory and prefer recent tentative/history items."""
+    authoritative = [
+        item for item in items
+        if item.get("status") == "active"
+        and item.get("authority") in {"explicit", "confirmed"}
+    ]
+    inferred = [
+        item for item in items
+        if item.get("status") == "active" and item.get("authority") == "inferred"
+    ][-MAX_ACTIVE_INFERRED:]
+    inactive = [item for item in items if item.get("status") != "active"][-MAX_INACTIVE_ITEMS:]
+    return authoritative + inferred + inactive
+
+
+def _bounded_status_items(items, active_status):
+    active = [item for item in items if item.get("status") == active_status]
+    inactive = [item for item in items if item.get("status") != active_status][-MAX_INACTIVE_ITEMS:]
+    return active + inactive
+
+
+def _bounded_hypotheses(items):
+    confirmed = [item for item in items if item.get("status") == "confirmed"]
+    tentative = [item for item in items if item.get("status") == "tentative"][-MAX_ACTIVE_INFERRED:]
+    inactive = [
+        item for item in items
+        if item.get("status") not in {"confirmed", "tentative"}
+    ][-MAX_INACTIVE_ITEMS:]
+    return confirmed + tentative + inactive
 
 
 def _text(value, maximum=MAX_TEXT):
@@ -198,7 +237,9 @@ def sanitize_user_design_text(value):
         else " ",
         cleaned,
     )
-    return re.sub(r"\s+([\uFF0C\u3002\uFF1B;,.!?\uFF01\uFF1F])", r"\1", cleaned).strip()
+    return re.sub(
+        r"\s+([\uFF0C\u3002\uFF1B;,.!?\uFF01\uFF1F])", r"\1", cleaned
+    ).strip(" \t\r\n,;\uFF0C\uFF1B")
 
 
 def _stable_id(kind, *values):
@@ -289,6 +330,55 @@ def _normalize_question(item, index=0):
     }
 
 
+def _normalize_hypothesis(item, index=0):
+    if not isinstance(item, dict):
+        return None
+    statement = sanitize_user_design_text(item.get("statement"))
+    if not statement:
+        return None
+    topic = _text(item.get("topicKey"), 64)
+    if topic not in INTENT_TOPICS:
+        topic = "other"
+    status = item.get("status", "tentative")
+    if status not in HYPOTHESIS_STATUSES:
+        status = "tentative"
+    supporting = [
+        _source(value) for value in item.get("supportingEvidenceIds", [])
+        if _source(value)
+    ][:32]
+    contradicting = [
+        _source(value) for value in item.get("contradictingEvidenceIds", [])
+        if _source(value)
+    ][:32]
+    return {
+        "id": _text(item.get("id"), 96) or _stable_id("hypothesis", topic, statement, index),
+        "topicKey": topic,
+        "statement": statement,
+        "status": status,
+        "confidence": min(_confidence(item.get("confidence"), 0.35), 0.75)
+        if status in {"tentative", "legacy_unverified"}
+        else _confidence(item.get("confidence"), 1.0 if status == "confirmed" else 0.0),
+        "supportingEvidenceIds": list(dict.fromkeys(supporting)),
+        "contradictingEvidenceIds": list(dict.fromkeys(contradicting)),
+        "sourceStageId": _source(item.get("sourceStageId")),
+        "sourceTurnId": _source(item.get("sourceTurnId")),
+        "lastUpdatedStageId": _source(
+            item.get("lastUpdatedStageId") or item.get("sourceStageId")
+        ),
+        "origin": _text(item.get("origin"), 32) or "model",
+        "displayed": bool(item.get("displayed", False)),
+        "originalStatement": sanitize_user_design_text(
+            item.get("originalStatement")
+        ) or None,
+        "confirmedAtStageId": _source(item.get("confirmedAtStageId")),
+        "feedbackAction": (
+            item.get("feedbackAction")
+            if item.get("feedbackAction") in {"confirm", "revise"}
+            else None
+        ),
+    }
+
+
 def _normalize_disagreement(value):
     if not isinstance(value, dict):
         return None
@@ -329,31 +419,62 @@ def normalize_design_context(value):
         return empty_design_context()
 
     result = empty_design_context()
-    result["userGoals"] = [
+    result["userGoals"] = _bounded_semantic_items([
         item
         for index, raw in enumerate(value.get("userGoals") or [])
         if (item := _normalize_goal(raw, "goal", index)) is not None
-    ][:MAX_ITEMS]
-    result["designConstraints"] = [
+    ])
+    result["designConstraints"] = _bounded_semantic_items([
         item
         for index, raw in enumerate(value.get("designConstraints") or [])
         if (item := _normalize_goal(raw, "constraint", index)) is not None
-    ][:MAX_ITEMS]
-    result["confirmedDecisions"] = [
+    ])
+    result["confirmedDecisions"] = _bounded_status_items([
         item
         for index, raw in enumerate(value.get("confirmedDecisions") or [])
         if (item := _normalize_decision(raw, index=index)) is not None
-    ][:MAX_ITEMS]
+    ], "active")
     result["rejectedDecisions"] = [
         item
         for index, raw in enumerate(value.get("rejectedDecisions") or [])
         if (item := _normalize_decision(raw, rejected=True, index=index)) is not None
-    ][:MAX_ITEMS]
-    result["openQuestions"] = [
+    ][-MAX_INACTIVE_ITEMS:]
+    result["openQuestions"] = _bounded_status_items([
         item
         for index, raw in enumerate(value.get("openQuestions") or [])
         if (item := _normalize_question(raw, index=index)) is not None
-    ][:MAX_ITEMS]
+    ], "open")
+    result["intentHypotheses"] = _bounded_hypotheses([
+        item
+        for index, raw in enumerate(value.get("intentHypotheses") or [])
+        if (item := _normalize_hypothesis(raw, index=index)) is not None
+    ])
+    if not result["intentHypotheses"] and value.get("schemaVersion") == 1:
+        legacy_inferred = [
+            ("goal", item)
+            for item in result["userGoals"]
+            if item.get("authority") == "inferred" and item.get("status") == "active"
+        ] + [
+            ("constraint", item)
+            for item in result["designConstraints"]
+            if item.get("authority") == "inferred" and item.get("status") == "active"
+        ]
+        result["intentHypotheses"] = [
+            _normalize_hypothesis({
+                "id": _stable_id("legacy_hypothesis", item.get("id")),
+                "topicKey": infer_intent_topic(item.get(field_name)),
+                "statement": item.get(field_name),
+                "status": "legacy_unverified",
+                "confidence": min(item.get("confidence", 0.5), 0.5),
+                "sourceStageId": item.get("sourceStageId"),
+                "sourceTurnId": item.get("sourceTurnId"),
+                "origin": "legacy",
+            }, index)
+            for index, (field_name, item) in enumerate(legacy_inferred)
+        ][-MAX_ACTIVE_INFERRED:]
+    result["processedEvidenceIds"] = list(dict.fromkeys(
+        _source(value) for value in value.get("processedEvidenceIds", []) if _source(value)
+    ))[-128:]
     result["activeDisagreement"] = _normalize_disagreement(
         value.get("activeDisagreement")
     )
@@ -435,6 +556,228 @@ def validate_design_context_patch(value):
     return result
 
 
+def infer_intent_topic(value):
+    text = _text(value).casefold()
+    topic_markers = (
+        ("water_function", ("water", "\u6c34\u57df", "\u6c34")),
+        ("push_dependency", ("push order", "dependency", "first push", "\u63a8\u52a8\u987a\u5e8f", "\u5148\u540e", "\u7b2c\u4e00\u63a8")),
+        ("route_readability", ("readable", "readability", "clear route", "\u53ef\u8bfb", "\u8bfb\u61c2", "\u6e05\u6670")),
+        ("route_rhythm", ("rhythm", "pacing", "detour", "winding", "\u8282\u594f", "\u7ed5\u8def", "\u8fc2\u56de")),
+        ("space_distribution", ("space", "open area", "corridor", "\u7a7a\u95f4", "\u901a\u9053", "\u5f00\u653e")),
+        ("difficulty", ("difficulty", "harder", "easier", "\u96be\u5ea6", "\u66f4\u96be", "\u66f4\u5bb9\u6613")),
+        ("preservation", ("preserve", "keep", "unchanged", "\u4fdd\u7559", "\u4fdd\u6301", "\u4e0d\u53d8")),
+        ("entity_placement", ("position", "placement", "move the box", "move the target", "\u4f4d\u7f6e", "\u79fb\u52a8\u7bb1\u5b50", "\u79fb\u52a8\u76ee\u6807")),
+    )
+    for topic, markers in topic_markers:
+        if any(marker in text for marker in markers):
+            return topic
+    return "other"
+
+
+def merge_intent_hypothesis(
+    context,
+    statement,
+    evidence_ids=None,
+    stage_id=None,
+    turn_id=None,
+    confidence=0.35,
+    displayed=False,
+):
+    """Upsert one model hypothesis; it always remains tentative until user confirmation."""
+    result = normalize_design_context(context)
+    clean = sanitize_user_design_text(statement)
+    if not clean:
+        return result, None
+    topic = infer_intent_topic(clean)
+    evidence_ids = list(dict.fromkeys(
+        _source(value) for value in (evidence_ids or []) if _source(value)
+    ))[:32]
+    exact = next((
+        item for item in result["intentHypotheses"]
+        if item.get("status") == "tentative"
+        and item.get("statement", "").casefold() == clean.casefold()
+    ), None)
+    if exact is not None:
+        exact["supportingEvidenceIds"] = list(dict.fromkeys(
+            exact.get("supportingEvidenceIds", []) + evidence_ids
+        ))[:32]
+        exact["confidence"] = min(0.75, max(
+            exact.get("confidence", 0.35), confidence,
+        ))
+        exact["lastUpdatedStageId"] = _source(stage_id)
+        exact["displayed"] = bool(exact.get("displayed") or displayed)
+        hypothesis_id = exact["id"]
+    else:
+        for item in result["intentHypotheses"]:
+            if item.get("status") == "tentative" and item.get("topicKey") == topic:
+                item["status"] = "superseded"
+        hypothesis_id = _stable_id("hypothesis", topic, clean, stage_id, turn_id)
+        result["intentHypotheses"].append({
+            "id": hypothesis_id,
+            "topicKey": topic,
+            "statement": clean,
+            "status": "tentative",
+            "confidence": min(0.75, _confidence(confidence, 0.35)),
+            "supportingEvidenceIds": evidence_ids,
+            "contradictingEvidenceIds": [],
+            "sourceStageId": _source(stage_id),
+            "sourceTurnId": _source(turn_id),
+            "lastUpdatedStageId": _source(stage_id),
+            "origin": "model",
+            "displayed": bool(displayed),
+        })
+    result["processedEvidenceIds"] = list(dict.fromkeys(
+        result.get("processedEvidenceIds", []) + evidence_ids
+    ))[-128:]
+    result["updatedFromStageId"] = _source(stage_id)
+    result["updatedFromTurnId"] = _source(turn_id)
+    return normalize_design_context(result), hypothesis_id
+
+
+def apply_hypothesis_feedback(
+    context,
+    user_text,
+    stage_id=None,
+    turn_id=None,
+    target_hypothesis_id=None,
+):
+    """Resolve only the most recent displayed tentative reading from explicit feedback."""
+    result = normalize_design_context(context)
+    text = _text(user_text).casefold()
+    active = [
+        item for item in result["intentHypotheses"]
+        if item.get("status") == "tentative"
+        and item.get("sourceTurnId")
+        and item.get("displayed")
+        and (
+            target_hypothesis_id is None
+            or item.get("id") == target_hypothesis_id
+        )
+    ]
+    if not text or not active:
+        return result, None
+    target = active[-1]
+    compact = re.sub(r"[\s,.!?\u3002\uFF0C\uFF01\uFF1F]+", " ", text).strip()
+    confirmations = {
+        "yes that is what i mean", "yes that's what i mean", "that is what i mean",
+        "exactly", "correct", "\u5bf9 \u5c31\u662f\u8fd9\u4e2a\u610f\u601d", "\u5bf9\u7684 \u5c31\u662f\u8fd9\u4e2a\u610f\u601d",
+        "\u6ca1\u9519", "\u6b63\u662f\u8fd9\u6837",
+    }
+    rejection_markers = (
+        "no that is not", "no that's not", "not what i mean", "you misunderstood",
+        "\u4e0d\u662f\u8fd9\u4e2a\u610f\u601d", "\u4f60\u7406\u89e3\u9519", "\u6211\u4e0d\u662f\u60f3",
+    )
+    if compact in confirmations:
+        target["status"] = "confirmed"
+        target["confidence"] = 1.0
+        _merge_goal(
+            result["userGoals"], "goal", target["statement"], "confirmed",
+            stage_id, turn_id, 1.0,
+        )
+        outcome = "confirmed"
+    elif any(marker in compact for marker in rejection_markers):
+        target["status"] = "rejected"
+        target["confidence"] = 0.0
+        outcome = "rejected"
+    else:
+        return result, None
+    target["lastUpdatedStageId"] = _source(stage_id)
+    result["updatedFromStageId"] = _source(stage_id)
+    result["updatedFromTurnId"] = _source(turn_id)
+    return normalize_design_context(result), {"id": target["id"], "status": outcome}
+
+
+def resolve_intent_hypothesis(
+    context,
+    hypothesis_id,
+    action,
+    *,
+    candidate_text=None,
+    supersedes_ids=None,
+    evidence_id=None,
+    stage_id=None,
+    turn_id=None,
+):
+    """Apply explicit card feedback to one displayed tentative hypothesis."""
+    result = normalize_design_context(context)
+    target = next((
+        item for item in result["intentHypotheses"]
+        if item.get("id") == _source(hypothesis_id)
+    ), None)
+    if target is None:
+        raise ValueError("INTENT_HYPOTHESIS_NOT_FOUND")
+    if target.get("status") != "tentative" or not target.get("displayed"):
+        raise ValueError("INTENT_HYPOTHESIS_STALE")
+    if action not in {"confirm", "reject", "revise"}:
+        raise ValueError("INVALID_INTENT_FEEDBACK")
+
+    if action == "reject":
+        target["status"] = "rejected"
+        target["confidence"] = 0.0
+        if evidence_id:
+            target["contradictingEvidenceIds"] = list(dict.fromkeys(
+                target.get("contradictingEvidenceIds", []) + [_source(evidence_id)]
+            ))[:32]
+    else:
+        original = target.get("statement")
+        replacement = (
+            sanitize_user_design_text(candidate_text)
+            if action == "revise"
+            else original
+        )
+        if not replacement or len(replacement) < 4:
+            raise ValueError("INVALID_INTENT_FEEDBACK")
+        supersedes = set(
+            _source(value) for value in (supersedes_ids or []) if _source(value)
+        )
+        supersedes.discard(target["id"])
+        known_confirmed = {
+            item["id"] for item in result["intentHypotheses"]
+            if item.get("status") == "confirmed"
+        }
+        if not supersedes.issubset(known_confirmed):
+            raise ValueError("INVALID_INTENT_SUPERSEDES")
+        superseded_statements = set()
+        for item in result["intentHypotheses"]:
+            if item.get("id") in supersedes:
+                superseded_statements.add(_text(item.get("statement")).casefold())
+                item["status"] = "superseded"
+                item["lastUpdatedStageId"] = _source(stage_id)
+        for goal in result["userGoals"]:
+            if (
+                goal.get("authority") == "confirmed"
+                and goal.get("status") == "active"
+                and _text(goal.get("goal")).casefold() in superseded_statements
+            ):
+                goal["status"] = "superseded"
+        target["originalStatement"] = original if replacement != original else None
+        target["statement"] = replacement
+        target["topicKey"] = infer_intent_topic(replacement)
+        target["status"] = "confirmed"
+        target["confidence"] = 1.0
+        target["origin"] = "user_revision" if action == "revise" else target.get("origin")
+        target["confirmedAtStageId"] = _source(stage_id)
+        target["feedbackAction"] = action
+        if evidence_id:
+            target["supportingEvidenceIds"] = list(dict.fromkeys(
+                target.get("supportingEvidenceIds", []) + [_source(evidence_id)]
+            ))[:32]
+        _merge_goal(
+            result["userGoals"],
+            "goal",
+            replacement,
+            "confirmed",
+            stage_id,
+            turn_id,
+            1.0,
+        )
+
+    target["lastUpdatedStageId"] = _source(stage_id)
+    result["updatedFromStageId"] = _source(stage_id)
+    result["updatedFromTurnId"] = _source(turn_id)
+    return normalize_design_context(result), target["id"]
+
+
 def _authority_rank(value):
     return {"inferred": 0, "explicit": 1, "confirmed": 2}.get(value, 0)
 
@@ -459,13 +802,6 @@ def _merge_goal(items, field_name, value, authority, stage_id, turn_id, confiden
         supersedes_id = existing["id"]
     else:
         supersedes_id = None
-        for item in items:
-            if (
-                item.get("status") == "active"
-                and _authority_rank(item.get("authority")) < _authority_rank(authority)
-            ):
-                item["status"] = "superseded"
-                supersedes_id = item["id"]
 
     item = {
         "id": _stable_id(field_name, clean, stage_id, turn_id),
@@ -573,26 +909,43 @@ def extract_explicit_user_memory(user_text):
     if not text or len(text) < 4:
         return [], []
 
-    lowered = text.casefold()
-    goal_markers = (
-        "i want", "i prefer", "i'd like", "would like", "make ", "change ", "adjust ",
-        "keep ", "increase ", "reduce ", "move ", "i lean toward", "i tend to",
-        "\u5e0c\u671b", "\u6211\u60f3", "\u6211\u60f3\u8981", "\u6211\u503e\u5411\u4e8e",
-        "\u6211\u503e\u5411", "\u6211\u5e0c\u671b", "\u6211\u66f4\u5728\u610f", "\u8bf7\u4fdd\u6301",
-        "\u4fdd\u6301", "\u589e\u52a0", "\u51cf\u5c11", "\u8c03\u6574", "\u6539",
+    goal_pattern = re.compile(
+        r"(?:\b(?:i\s+(?:want|prefer|would\s+like|lean\s+toward|care\s+more\s+about)|"
+        r"please\s+(?:make|change|adjust|keep|increase|reduce|move))\b|"
+        r"\u6211(?:\u60f3\u8981?|\u5e0c\u671b|\u503e\u5411(?:\u4e8e)?|\u66f4\u5728\u610f)|"
+        r"\u8bf7(?:\u4fdd\u6301|\u589e\u52a0|\u51cf\u5c11|\u8c03\u6574|\u6539|\u79fb\u52a8))",
+        flags=re.IGNORECASE,
     )
-    constraint_markers = (
-        "avoid", "must not", "do not", "don't", "preserve", "fair", "solvable", "readable",
-        "\u907f\u514d", "\u4e0d\u8981", "\u4e0d\u80fd", "\u5fc5\u987b", "\u516c\u5e73",
-        "\u53ef\u89e3", "\u53ef\u8bfb", "\u4e0d\u7834\u574f", "\u4fdd\u7559",
+    constraint_pattern = re.compile(
+        r"(?:\b(?:i\s+(?:do\s+not|don't)\s+want|please\s+(?:avoid|preserve)|"
+        r"must\s+not|do\s+not|don't)\b|"
+        r"\u6211\u4e0d\u60f3|\u8bf7(?:\u907f\u514d|\u4fdd\u7559|\u4e0d\u8981)|"
+        r"\b(?:keep|preserve|fair|solvable|readable)\b|\u4e0d\u8981|\u4e0d\u80fd|\u5fc5\u987b|\u4e0d\u7834\u574f|"
+        r"\u4fdd\u6301|\u4fdd\u7559|\u516c\u5e73|\u53ef\u89e3)",
+        flags=re.IGNORECASE,
     )
-    if any(marker in text for marker in ("?", "\uFF1F")):
-        if not any(marker in lowered or marker in text for marker in goal_markers + constraint_markers):
-            return [], []
-
-    has_constraint = any(marker in lowered or marker in text for marker in constraint_markers)
-    has_goal = any(marker in lowered or marker in text for marker in goal_markers)
-    return ([text] if has_goal else []), ([text] if has_constraint else [])
+    question_start = re.compile(
+        r"^(?:how|what|which|where|why|can|could|would|should|do|does|is|are|"
+        r"\u5982\u4f55|\u600e\u4e48|\u4ec0\u4e48|\u54ea|\u662f\u5426|\u80fd\u5426|\u53ef\u4ee5\u5417|\u6211\u8be5)",
+        flags=re.IGNORECASE,
+    )
+    clauses = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?\u3002\uFF01\uFF1F;\uFF1B])\s*|\n+", text)
+        if part.strip()
+    ]
+    goals = []
+    constraints = []
+    for clause in clauses:
+        lowered = clause.casefold()
+        is_question = clause.endswith(("?", "\uFF1F")) or bool(question_start.search(lowered))
+        if is_question:
+            continue
+        if goal_pattern.search(clause):
+            goals.append(clause)
+        if constraint_pattern.search(clause):
+            constraints.append(clause)
+    return goals, constraints
 
 
 def merge_chat_update(context, patch=None, user_text=None, stage_id=None, turn_id=None):
@@ -609,13 +962,13 @@ def merge_chat_update(context, patch=None, user_text=None, stage_id=None, turn_i
 
     if patch:
         for entry in patch["goals"]:
-            authority = "explicit" if _verified_user_evidence(entry.get("evidenceText"), user_text) else "inferred"
+            authority = "inferred"
             _merge_goal(
                 result["userGoals"], "goal", entry["goal"], authority,
                 stage_id, turn_id, 1.0 if authority == "explicit" else entry.get("confidence", 0.5),
             )
         for entry in patch["constraints"]:
-            authority = "explicit" if _verified_user_evidence(entry.get("evidenceText"), user_text) else "inferred"
+            authority = "inferred"
             _merge_goal(
                 result["designConstraints"], "constraint", entry["constraint"], authority,
                 stage_id, turn_id, 1.0 if authority == "explicit" else entry.get("confidence", 0.5),
@@ -638,9 +991,12 @@ def merge_chat_update(context, patch=None, user_text=None, stage_id=None, turn_i
         "\u4e0d\u8981", "\u4e0d\u60f3", "\u4e0d\u662f", "\u6539\u6210", "\u800c\u662f",
     )
     if user_value and any(marker in user_value for marker in correction_markers):
-        for item in result["userGoals"] + result["designConstraints"]:
-            if item.get("authority") == "inferred" and item.get("status") == "active":
-                item["status"] = "superseded"
+        inferred = [
+            item for item in result["userGoals"] + result["designConstraints"]
+            if item.get("authority") == "inferred" and item.get("status") == "active"
+        ]
+        if len(inferred) == 1:
+            inferred[0]["status"] = "superseded"
 
     result["updatedFromStageId"] = _source(stage_id)
     result["updatedFromTurnId"] = _source(turn_id)

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from contextlib import contextmanager
@@ -10,6 +11,7 @@ from design_context import (
     add_rejected_decision,
     design_level_open_questions,
     empty_design_context,
+    infer_intent_topic,
     merge_chat_update,
     normalize_design_context,
     set_active_disagreement,
@@ -345,7 +347,7 @@ def _has_valid_design_context(raw):
         value = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
-    return isinstance(value, dict) and value.get("schemaVersion") == 1
+    return isinstance(value, dict) and value.get("schemaVersion") == 2
 
 
 def _has_valid_entity_bindings(raw, rows=None):
@@ -456,6 +458,36 @@ def backfill_design_contexts(database):
             if _has_valid_design_context(version["design_context_json"]):
                 continue
 
+            legacy_context = None
+            if version["design_context_json"]:
+                try:
+                    raw_context = load_json(version["design_context_json"])
+                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") == 1:
+                        legacy_context = normalize_design_context(raw_context)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    legacy_context = None
+
+            if legacy_context is not None:
+                legacy_context["updatedFromStageId"] = version["id"]
+                save_design_context(database, version["id"], legacy_context)
+                database.execute(
+                    """
+                    INSERT INTO audit_events(session_id, event_type, payload_json, created_at)
+                    VALUES (?, 'design_context_migrated', ?, ?)
+                    """,
+                    (
+                        session["id"],
+                        dump_json({
+                            "versionId": version["id"],
+                            "fromSchemaVersion": 1,
+                            "toSchemaVersion": 2,
+                        }),
+                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    ),
+                )
+                changed += 1
+                continue
+
             context = (
                 load_design_context(database, session["id"], version["parent_version_id"])
                 if version["parent_version_id"]
@@ -537,7 +569,7 @@ def backfill_design_contexts(database):
                     """,
                     (
                         session["id"],
-                        dump_json({"versionId": version["id"], "schemaVersion": 1}),
+                        dump_json({"versionId": version["id"], "schemaVersion": 2}),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
                 )
@@ -643,6 +675,39 @@ def serialize_session(database, session_id):
         ).fetchall()
         if row["message_key"]
     }
+    intent_audit_rows = database.execute(
+        """
+        SELECT id, event_type, payload_json, created_at FROM audit_events
+        WHERE session_id = ? AND event_type IN (
+          'intent_evidence_recorded',
+          'intent_hypothesis_feedback_applied',
+          'intent_hypothesis_feedback_pending'
+        )
+        ORDER BY id
+        """,
+        (session_id,),
+    ).fetchall()
+    intent_evidence_by_id = {}
+    latest_intent_feedback = {}
+    for row in intent_audit_rows:
+        payload = load_json(row["payload_json"]) or {}
+        if row["event_type"] == "intent_evidence_recorded":
+            evidence_id = payload.get("evidenceId")
+            if evidence_id:
+                intent_evidence_by_id[evidence_id] = {
+                    **payload,
+                    "auditId": row["id"],
+                    "createdAt": row["created_at"],
+                }
+        else:
+            hypothesis_id = payload.get("hypothesisId")
+            version_id = payload.get("versionId")
+            if hypothesis_id and version_id:
+                latest_intent_feedback[(version_id, hypothesis_id)] = {
+                    **payload,
+                    "eventType": row["event_type"],
+                    "createdAt": row["created_at"],
+                }
 
     attempts_by_version = {}
     translations_by_turn = {}
@@ -808,6 +873,62 @@ def serialize_session(database, session_id):
         for turn in turns
     }
 
+    latest_intent_turn = {}
+    stored_guidance_by_turn = {}
+    for turn in turns:
+        guidance = load_json(turn["guidance_json"]) or {}
+        stored_guidance_by_turn[turn["id"]] = guidance
+        hypothesis_id = guidance.get("_intentHypothesisId")
+        if turn["role"] == "assistant" and hypothesis_id:
+            latest_intent_turn[turn["version_id"]] = turn["id"]
+
+    def intent_state(turn):
+        guidance = stored_guidance_by_turn.get(turn["id"], {})
+        hypothesis_id = guidance.get("_intentHypothesisId")
+        if turn["role"] != "assistant" or not hypothesis_id:
+            return None
+        context = load_design_context(database, session_id, turn["version_id"])
+        hypothesis = next((
+            item for item in context.get("intentHypotheses", [])
+            if item.get("id") == hypothesis_id
+        ), None)
+        if hypothesis is None:
+            return None
+        is_latest = latest_intent_turn.get(turn["version_id"]) == turn["id"]
+        status = hypothesis.get("status", "tentative")
+        review = guidance.get("_intentReviewState") or {}
+        actionable = bool(
+            is_latest
+            and status == "tentative"
+            and turn["version_id"] == session["current_version_id"]
+            and session["status"] == "active"
+            and not _deadline_expired(session["deadline_at"])
+        )
+        mode = (
+            review.get("interactionMode", "full")
+            if actionable
+            else "resolved"
+        )
+        return {
+            "hypothesisId": hypothesis_id,
+            "status": status,
+            "interactionMode": mode,
+            "actionable": actionable,
+            "resolvedStatement": (
+                hypothesis.get("statement")
+                if status in {"confirmed", "superseded"}
+                else None
+            ),
+            "reviewExplanation": (
+                review.get("reviewExplanation") if actionable else None
+            ),
+        }
+
+    for turn in turns:
+        state = intent_state(turn)
+        if state is not None:
+            public_guidance_by_turn[turn["id"]]["intentState"] = state
+
     def source_stage_number(source_version_id, current_version):
         return stage_numbers.get(source_version_id, current_version["stage_number"])
 
@@ -952,6 +1073,99 @@ def serialize_session(database, session_id):
         }
 
     progress_contexts = []
+    parent_by_version = {
+        version["id"]: version["parent_version_id"] for version in versions
+    }
+
+    def lineage_ids(version_id):
+        result = set()
+        cursor = version_id
+        while cursor and cursor not in result:
+            result.add(cursor)
+            cursor = parent_by_version.get(cursor)
+        return result
+
+    def clean_evidence_text(value):
+        text = " ".join(str(value or "").split())
+        # Evidence explanations are historical semantics, not a second source
+        # of current-map coordinate truth.
+        text = re.sub(
+            r"[\(（]\s*\d{1,2}\s*[,，]\s*\d{1,2}\s*[\)）]",
+            "",
+            text,
+        )
+        return " ".join(text.split())[:500]
+
+    def evidence_projection(evidence, language):
+        kind = str(evidence.get("kind") or "feedback")
+        details = evidence.get("details") if isinstance(evidence.get("details"), dict) else {}
+        labels = {
+            "zh-CN": {
+                "conversation": "已表达方向",
+                "proposal_accept": "已确认方案",
+                "proposal_reject": "方案反馈",
+                "manual_edit": "手动修改观察",
+                "play_completed": "试玩记录",
+                "play_abandoned": "试玩记录",
+                "disagreement_active": "分歧记录",
+                "disagreement_resolved": "分歧解决",
+                "stage_restore": "历史恢复",
+                "intent_feedback": "倾向确认或修订",
+            },
+            "en": {
+                "conversation": "Expressed direction",
+                "proposal_accept": "Confirmed proposal",
+                "proposal_reject": "Proposal feedback",
+                "manual_edit": "Manual-edit observation",
+                "play_completed": "Playtest record",
+                "play_abandoned": "Playtest record",
+                "disagreement_active": "Disagreement",
+                "disagreement_resolved": "Disagreement resolved",
+                "stage_restore": "Stage restore",
+                "intent_feedback": "Inclination feedback",
+            },
+        }
+        text = clean_evidence_text(evidence.get("observation"))
+        label = labels["zh-CN" if language == "zh-CN" else "en"].get(
+            kind, labels["zh-CN" if language == "zh-CN" else "en"]["intent_feedback"]
+        )
+        if kind == "manual_edit":
+            changed = len(details.get("diff") or [])
+            suffix = (
+                f"\u786e\u5b9a\u6027 diff \u8bb0\u5f55\u4e86 {changed} \u4e2a\u683c\u5b50\u53d8\u5316\uff0c\u4e14\u4fdd\u5b58\u65f6\u5df2\u901a\u8fc7\u9a8c\u8bc1\u3002"
+                if language == "zh-CN"
+                else f"The deterministic diff recorded {changed} changed tiles and validation passed on save."
+            )
+            text = " ".join(part for part in (text, suffix) if part)
+        elif kind.startswith("play_"):
+            suffix = (
+                f"{details.get('moveCount', 0)} \u6b21\u79fb\u52a8\u3001{details.get('pushCount', 0)} \u6b21\u63a8\u52a8\u3001{details.get('restartCount', 0)} \u6b21\u91cd\u5f00\u3002"
+                if language == "zh-CN"
+                else f"{details.get('moveCount', 0)} moves, {details.get('pushCount', 0)} pushes, and {details.get('restartCount', 0)} restarts were recorded."
+            )
+            text = " ".join(part for part in (text, suffix) if part)
+        elif kind.startswith("proposal_") and details.get("reason"):
+            text = " ".join((text, clean_evidence_text(details["reason"])))
+        elif kind == "intent_feedback":
+            action = details.get("action")
+            suffix = {
+                "confirm": "\u4f60\u786e\u8ba4\u4e86\u8fd9\u6761\u503e\u5411\u3002" if language == "zh-CN" else "You confirmed this inclination.",
+                "revise": "\u4f60\u4fee\u8ba2\u5e76\u786e\u8ba4\u4e86\u8fd9\u6761\u503e\u5411\u3002" if language == "zh-CN" else "You revised and confirmed this inclination.",
+                "reject": "\u4f60\u5426\u5b9a\u4e86\u8fd9\u6761\u63a8\u6d4b\u3002" if language == "zh-CN" else "You rejected this hypothesis.",
+            }.get(action, "")
+            text = " ".join(part for part in (text, suffix) if part)
+        if text:
+            text = f"{label}：{text}" if language == "zh-CN" else f"{label}: {text}"
+        else:
+            text = label
+        return {
+            "evidenceId": evidence["evidenceId"],
+            "stageNumber": stage_numbers.get(evidence.get("versionId"), 1),
+            "kind": kind,
+            "text": text,
+            "createdAt": evidence.get("createdAt"),
+        }
+
     for version in versions:
         context = load_design_context(database, session_id, version["id"])
         expressed_directions = []
@@ -974,11 +1188,63 @@ def serialize_session(database, session_id):
                     "updatedAt": turn_created_at.get(item.get("sourceTurnId")),
                     "label": "explicit",
                 })
+        confirmed_hypotheses = [
+            item for item in context.get("intentHypotheses", [])
+            if item.get("status") == "confirmed"
+        ]
+        confirmed_by_topic = {}
+        for item in confirmed_hypotheses:
+            confirmed_by_topic.setdefault(item.get("topicKey"), []).append(item)
+        lineage = lineage_ids(version["id"])
+        design_inclinations = []
+        for hypothesis in confirmed_hypotheses:
+            evidence_ids = list(hypothesis.get("supportingEvidenceIds") or [])
+            for evidence in intent_evidence_by_id.values():
+                if evidence.get("versionId") not in lineage:
+                    continue
+                topic = infer_intent_topic(evidence.get("observation"))
+                if (
+                    topic != "other"
+                    and hypothesis.get("topicKey") != "other"
+                    and topic == hypothesis.get("topicKey")
+                    and len(confirmed_by_topic.get(topic, [])) == 1
+                ):
+                    evidence_ids.append(evidence["evidenceId"])
+            evidence = [
+                intent_evidence_by_id[evidence_id]
+                for evidence_id in dict.fromkeys(evidence_ids)
+                if evidence_id in intent_evidence_by_id
+                and intent_evidence_by_id[evidence_id].get("versionId") in lineage
+            ]
+            evidence.sort(key=lambda item: (item.get("createdAt") or "", item["auditId"]))
+            trail = [
+                evidence_projection(item, session["language"])
+                for item in evidence[-12:]
+            ]
+            feedback = latest_intent_feedback.get(
+                (version["id"], hypothesis["id"]), {}
+            )
+            design_inclinations.append({
+                "hypothesisId": hypothesis["id"],
+                "statement": hypothesis["statement"],
+                "confirmedAtStageNumber": source_stage_number(
+                    hypothesis.get("confirmedAtStageId")
+                    or hypothesis.get("sourceStageId"),
+                    version,
+                ),
+                "updatedAt": (
+                    feedback.get("createdAt")
+                    or (trail[-1]["createdAt"] if trail else None)
+                    or turn_created_at.get(hypothesis.get("sourceTurnId"))
+                ),
+                "evidenceTrail": trail,
+            })
         progress_contexts.append({
             "versionId": version["id"],
             "stageNumber": version["stage_number"],
             "parentVersionId": version["parent_version_id"],
             "expressedDirections": expressed_directions[-16:],
+            "designInclinations": design_inclinations[-16:],
             "confirmedDecisions": [
                 {
                     "decision": item["decision"],
@@ -1028,6 +1294,11 @@ def serialize_session(database, session_id):
                 translation["language"],
                 version_bindings.get(translation_turn["version_id"]),
             )
+            source_intent_state = public_guidance_by_turn.get(
+                translation["turn_id"], {}
+            ).get("intentState")
+            if source_intent_state is not None:
+                translation_guidance["intentState"] = source_intent_state
         translations_by_turn.setdefault(translation["turn_id"], {})[
             translation["language"]
         ] = {
@@ -1191,6 +1462,8 @@ def _public_guidance(value):
     result.pop("designContextPatchError", None)
     result.pop("proposalDiscovery", None)
     result.pop("openingPresentation", None)
+    result.pop("_intentHypothesisId", None)
+    result.pop("_intentReviewState", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and "executionBrief" in offer:
         offer = dict(offer)

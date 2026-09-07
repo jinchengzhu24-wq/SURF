@@ -325,6 +325,24 @@ translations["zh-CN"].entityLegend = "P\uFF1A\u73A9\u5BB6 \u00B7 B1/B2\uFF1A\u7B
 translations.en.progressTitle = "Co-creation progress";
 translations.en.expressedDirections = "Expressed directions";
 translations.en.noExpressedDirections = "No explicit directions yet.";
+translations.en.designInclinations = "Design inclinations";
+translations.en.noDesignInclinations = "No confirmed design inclinations yet.";
+translations.en.whyUnderstand = "Why I understand it this way";
+translations.en.confirmedAtStage = "Confirmed at Stage {stage}";
+translations.en.intentMatches = "Matches my idea";
+translations.en.intentReject = "Not what I mean";
+translations.en.intentAdjust = "I want to adjust it";
+translations.en.intentModify = "Modify inclination";
+translations.en.intentSave = "Save inclination";
+translations.en.intentCancel = "Cancel";
+translations.en.intentCharacters = "{count} / 1200";
+translations.en.intentConfirmed = "Confirmed";
+translations.en.intentRejected = "Rejected";
+translations.en.intentRevised = "Revised and confirmed";
+translations.en.intentSuperseded = "Replaced by a later inclination";
+translations.en.intentStale = "This intent card is read-only.";
+translations.en.error_STALE_INTENT_CARD = "This intent card was already handled or is no longer current.";
+translations.en.error_INVALID_INTENT_FEEDBACK = "Enter a clear design inclination between 4 and 1200 characters.";
 translations.en.confirmedDecisions = "Confirmed decisions";
 translations.en.unresolvedQuestions = "Unresolved questions";
 translations.en.noConfirmedDecisions = "No confirmed decisions yet.";
@@ -342,6 +360,22 @@ translations.en.executeBoundProposal = "Execute the bound proposal.";
 translations["zh-CN"].progressTitle = "\u5171\u521b\u8fdb\u5ea6";
 translations["zh-CN"].expressedDirections = "\u5df2\u8868\u8fbe\u65b9\u5411";
 translations["zh-CN"].noExpressedDirections = "\u6682\u65e0\u660e\u786e\u8868\u8fbe\u7684\u65b9\u5411\u3002";
+translations["zh-CN"].designInclinations = "\u8bbe\u8ba1\u503e\u5411";
+translations["zh-CN"].noDesignInclinations = "\u6682\u65e0\u7ecf\u4f60\u786e\u8ba4\u6216\u4fee\u8ba2\u7684\u8bbe\u8ba1\u503e\u5411\u3002";
+translations["zh-CN"].whyUnderstand = "\u4e3a\u4ec0\u4e48\u6211\u4f1a\u8fd9\u6837\u7406\u89e3";
+translations["zh-CN"].confirmedAtStage = "\u5728 Stage {stage} \u786e\u8ba4";
+translations["zh-CN"].intentMatches = "\u7b26\u5408\u6211\u7684\u60f3\u6cd5";
+translations["zh-CN"].intentReject = "\u4e0d\u662f\u6211\u7684\u610f\u601d";
+translations["zh-CN"].intentAdjust = "\u6211\u60f3\u8c03\u6574\u4e00\u4e0b";
+translations["zh-CN"].intentModify = "\u4fee\u6539\u503e\u5411";
+translations["zh-CN"].intentSave = "\u4fdd\u5b58\u503e\u5411";
+translations["zh-CN"].intentCancel = "\u53d6\u6d88";
+translations["zh-CN"].intentCharacters = "{count} / 1200";
+translations["zh-CN"].intentConfirmed = "\u5df2\u786e\u8ba4";
+translations["zh-CN"].intentRejected = "\u5df2\u5426\u5b9a";
+translations["zh-CN"].intentRevised = "\u5df2\u4fee\u8ba2\u5e76\u786e\u8ba4";
+translations["zh-CN"].intentSuperseded = "\u5df2\u88ab\u540e\u7eed\u503e\u5411\u66ff\u4ee3";
+translations["zh-CN"].intentStale = "\u8fd9\u5f20\u503e\u5411\u5361\u73b0\u5728\u53ea\u8bfb\u3002";
 translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
 translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
 translations["zh-CN"].noConfirmedDecisions = "\u6682\u65e0\u5df2\u786e\u8ba4\u51b3\u7b56\u3002";
@@ -389,6 +423,8 @@ const state = {
 };
 
 const chineseApiErrors = {
+    STALE_INTENT_CARD: "\u8fd9\u5f20\u503e\u5411\u5361\u5df2\u5904\u7406\u6216\u4e0d\u518d\u662f\u5f53\u524d\u53ef\u64cd\u4f5c\u5361\u7247\u3002",
+    INVALID_INTENT_FEEDBACK: "\u8bf7\u8f93\u5165 4 \u5230 1200 \u4e2a\u5b57\u7b26\u7684\u6e05\u6670\u8bbe\u8ba1\u503e\u5411\u3002",
     VERSION_CONFLICT: "当前 Stage 已发生变化，请刷新后再继续。",
     IDEMPOTENCY_CONFLICT: "该操作标识已用于不同内容，请重新发起操作。",
     UNCHANGED_LEVEL: "地图没有变化，无法保存为新 Stage。",
@@ -454,7 +490,7 @@ const validationTileNames = {
 const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
     "languageButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
-    "returnCurrentButton", "progressPanel", "progressSummary", "expressedDirectionsList", "confirmedDecisionsList", "unresolvedQuestionsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
+    "returnCurrentButton", "progressPanel", "progressSummary", "expressedDirectionsList", "designInclinationsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
     "proposalRequestButton", "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
@@ -660,7 +696,7 @@ function renderProgressContext() {
 
     const context = (state.session.progressContexts || []).find(
         item => item.versionId === state.selectedVersionId
-    ) || { expressedDirections: [], confirmedDecisions: [], unresolvedQuestions: [] };
+    ) || { expressedDirections: [], designInclinations: [] };
 
     elements.progressPanel.hidden = false;
     renderProgressItems(
@@ -669,18 +705,7 @@ function renderProgressContext() {
         "direction",
         "noExpressedDirections",
     );
-    renderProgressItems(
-        elements.confirmedDecisionsList,
-        context.confirmedDecisions,
-        "decision",
-        "noConfirmedDecisions",
-    );
-    renderProgressItems(
-        elements.unresolvedQuestionsList,
-        context.unresolvedQuestions,
-        "question",
-        "noUnresolvedQuestions",
-    );
+    renderDesignInclinations(context.designInclinations);
     requestAnimationFrame(updateProgressPanelMaxHeight);
 }
 
@@ -748,6 +773,46 @@ function renderProgressItems(container, items, type, emptyKey) {
             ? t("updatedAt").replace("{time}", updated)
             : "";
         meta.textContent = [label, source, updatedLabel].filter(Boolean).join(" \u00b7 ");
+        record.appendChild(meta);
+        container.appendChild(record);
+    });
+}
+
+function renderDesignInclinations(items) {
+    const container = elements.designInclinationsList;
+    if (!container) return;
+    container.textContent = "";
+    const entries = Array.isArray(items) ? items : [];
+    if (!entries.length) {
+        const empty = document.createElement("p");
+        empty.className = "progress-empty";
+        empty.textContent = t("noDesignInclinations");
+        container.appendChild(empty);
+        return;
+    }
+    entries.forEach(item => {
+        const record = document.createElement("article");
+        record.className = "progress-item progress-item-inclination";
+        const statement = document.createElement("p");
+        statement.className = "progress-item-text";
+        statement.textContent = String(item?.statement || "").trim();
+        record.appendChild(statement);
+        const why = document.createElement("strong");
+        why.className = "inclination-why";
+        why.textContent = t("whyUnderstand");
+        record.appendChild(why);
+        const trail = document.createElement("ol");
+        trail.className = "inclination-evidence";
+        (Array.isArray(item?.evidenceTrail) ? item.evidenceTrail : []).forEach(evidence => {
+            const entry = document.createElement("li");
+            entry.textContent = `${t("stage")} ${evidence.stageNumber} \u00b7 ${evidence.text}`;
+            trail.appendChild(entry);
+        });
+        record.appendChild(trail);
+        const meta = document.createElement("small");
+        meta.textContent = t("confirmedAtStage").replace(
+            "{stage}", String(item?.confirmedAtStageNumber || "")
+        );
         record.appendChild(meta);
         container.appendChild(record);
     });
@@ -923,7 +988,11 @@ function renderAssistantBubble(turn, bubble) {
             localizedProposalSummary(proposal)
         ));
     } else if (guidance.intentHypothesis) {
-        cueList.appendChild(createGuidanceCue("intent", guidance.intentHypothesis));
+        cueList.appendChild(createIntentGuidanceCue(
+            guidance.intentHypothesis,
+            guidance.intentState,
+            turn,
+        ));
     }
 
     uiCues.forEach(cue => {
@@ -1270,6 +1339,140 @@ function createGuidanceCue(type, text, detail = "") {
     }
 
     return cue;
+}
+
+function createIntentGuidanceCue(text, intentState, turn) {
+    const cue = createGuidanceCue("intent", text);
+    const cardState = intentState && typeof intentState === "object"
+        ? intentState
+        : { status: "tentative", interactionMode: "resolved", actionable: false };
+    cue.classList.add("intent-feedback-card");
+    cue.setAttribute("aria-busy", "false");
+
+    if (!cardState.actionable || !canEditSelected()) {
+        const status = document.createElement("small");
+        status.className = "guidance-cue-stale-note intent-resolution";
+        if (cardState.status === "confirmed") {
+            status.textContent = cardState.resolvedStatement
+                && String(cardState.resolvedStatement).trim() !== String(text).trim()
+                ? t("intentRevised")
+                : t("intentConfirmed");
+        } else if (cardState.status === "rejected") {
+            status.textContent = t("intentRejected");
+        } else if (cardState.status === "superseded") {
+            status.textContent = t("intentSuperseded");
+        } else {
+            status.textContent = t("intentStale");
+        }
+        cue.appendChild(status);
+        return cue;
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "intent-card-actions";
+    const openEditor = () => {
+        if (state.busy || cue.querySelector(".intent-edit-form")) return;
+        actions.hidden = true;
+        const form = document.createElement("form");
+        form.className = "intent-edit-form";
+        const label = document.createElement("label");
+        label.className = "sr-only";
+        label.textContent = t("intentModify");
+        const input = document.createElement("textarea");
+        input.rows = 3;
+        input.maxLength = 1200;
+        input.value = String(text || "");
+        label.htmlFor = `intent-edit-${turn.turnId}`;
+        input.id = label.htmlFor;
+        const counter = document.createElement("small");
+        counter.className = "intent-character-count";
+        const updateCount = () => {
+            counter.textContent = t("intentCharacters").replace(
+                "{count}", String(input.value.length)
+            );
+        };
+        input.addEventListener("input", updateCount);
+        updateCount();
+        const editActions = document.createElement("div");
+        editActions.className = "intent-edit-actions";
+        editActions.append(
+            makeButton(t("intentSave"), "secondary-button guidance-cue-button", null),
+            makeButton(t("intentCancel"), "secondary-button guidance-cue-button", () => {
+                form.remove();
+                actions.hidden = false;
+            })
+        );
+        const saveButton = editActions.firstElementChild;
+        form.addEventListener("submit", event => {
+            event.preventDefault();
+            const candidate = input.value.trim();
+            if (candidate.length < 4) {
+                input.focus();
+                return;
+            }
+            void submitIntentFeedback("revise", turn, cardState, candidate, cue);
+        });
+        saveButton.addEventListener("click", event => {
+            event.preventDefault();
+            form.requestSubmit();
+        });
+        form.append(label, input, counter, editActions);
+        cue.appendChild(form);
+        input.focus();
+        input.select();
+    };
+
+    if (cardState.interactionMode === "full") {
+        actions.append(
+            makeButton(t("intentMatches"), "secondary-button guidance-cue-button", () => {
+                void submitIntentFeedback("confirm", turn, cardState, null, cue);
+            }),
+            makeButton(t("intentReject"), "secondary-button guidance-cue-button", () => {
+                void submitIntentFeedback("reject", turn, cardState, null, cue);
+            }),
+            makeButton(t("intentAdjust"), "secondary-button guidance-cue-button", openEditor),
+        );
+    } else {
+        actions.appendChild(makeButton(
+            t("intentModify"),
+            "secondary-button guidance-cue-button",
+            openEditor,
+        ));
+    }
+    cue.appendChild(actions);
+    return cue;
+}
+
+async function submitIntentFeedback(action, turn, intentState, candidateText, cue) {
+    if (state.busy || !canEditSelected() || !intentState?.actionable) return;
+    cue.setAttribute("aria-busy", "true");
+    cue.querySelectorAll("button, textarea").forEach(control => {
+        control.disabled = true;
+    });
+    await withBusy(async () => {
+        const result = await api(
+            `/api/sessions/${state.sessionId}/intent-hypotheses/${intentState.hypothesisId}/feedback`,
+            {
+                method: "POST",
+                body: {
+                    action,
+                    candidateText: action === "revise" ? candidateText : null,
+                    sourceTurnId: turn.turnId,
+                    baseVersionId: state.session.currentVersionId,
+                    idempotencyKey: uniqueId(`intent-${action}`),
+                },
+                timeoutMs: LLM_REQUEST_TIMEOUT_MS,
+            },
+        );
+        state.session = result.session;
+        selectVersion(state.session.currentVersionId, false);
+        render();
+    }, () => {
+        cue.setAttribute("aria-busy", "false");
+        cue.querySelectorAll("button, textarea").forEach(control => {
+            control.disabled = false;
+        });
+    });
 }
 
 function proposalPresentationTileLabel(tile) {
