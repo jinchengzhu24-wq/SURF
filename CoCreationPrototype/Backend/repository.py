@@ -8,6 +8,7 @@ from pathlib import Path
 
 from design_context import (
     add_confirmed_decision,
+    add_open_question,
     add_rejected_decision,
     design_level_open_questions,
     empty_design_context,
@@ -347,7 +348,36 @@ def _has_valid_design_context(raw):
         value = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
-    return isinstance(value, dict) and value.get("schemaVersion") == 2
+    return isinstance(value, dict) and value.get("schemaVersion") == 3
+
+
+def _legacy_visible_questions(content, guidance):
+    """Extract questions from fields old clients actually rendered, excluding intent cards."""
+    guidance = guidance if isinstance(guidance, dict) else {}
+    values = [content, guidance.get("followUpQuestion")]
+    disagreement = guidance.get("disagreement")
+    if isinstance(disagreement, dict):
+        values.extend([disagreement.get("coreDisagreement"), disagreement.get("nextQuestion")])
+    offer = guidance.get("proposalOffer")
+    if isinstance(offer, dict):
+        values.extend([offer.get("summary"), offer.get("rationale")])
+    values.extend(
+        cue.get("text")
+        for cue in guidance.get("uiCues") or []
+        if isinstance(cue, dict)
+    )
+    result = []
+    seen = set()
+    for value in values:
+        for segment in re.split(
+            r"\s*(?:\n+|(?<=[.!?\u3002\uFF01\uFF1F]))\s*", str(value or "")
+        ):
+            question = re.sub(r"\s+", " ", segment).strip()
+            key = question.strip("?\uFF1F").casefold()
+            if question.endswith(("?", "\uFF1F")) and key and key not in seen:
+                seen.add(key)
+                result.append(question[:1200])
+    return result
 
 
 def _has_valid_entity_bindings(raw, rows=None):
@@ -459,15 +489,48 @@ def backfill_design_contexts(database):
                 continue
 
             legacy_context = None
+            legacy_schema_version = None
             if version["design_context_json"]:
                 try:
                     raw_context = load_json(version["design_context_json"])
-                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") == 1:
+                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") in {1, 2}:
+                        legacy_schema_version = raw_context.get("schemaVersion")
                         legacy_context = normalize_design_context(raw_context)
                 except (TypeError, ValueError, json.JSONDecodeError):
                     legacy_context = None
 
             if legacy_context is not None:
+                if version["parent_version_id"]:
+                    parent_context = load_design_context(
+                        database, session["id"], version["parent_version_id"]
+                    )
+                    known = {item.get("id") for item in legacy_context["openQuestions"]}
+                    legacy_context["openQuestions"] = [
+                        *[
+                            item for item in parent_context.get("openQuestions", [])
+                            if item.get("id") not in known
+                        ],
+                        *legacy_context["openQuestions"],
+                    ]
+                assistant_turns = database.execute(
+                    """
+                    SELECT id, content, guidance_json FROM conversation_turns
+                    WHERE session_id = ? AND version_id = ? AND role = 'assistant'
+                    ORDER BY sequence_number
+                    """,
+                    (session["id"], version["id"]),
+                ).fetchall()
+                for turn in assistant_turns:
+                    for question in _legacy_visible_questions(
+                        turn["content"], load_json(turn["guidance_json"]) or {}
+                    ):
+                        legacy_context = add_open_question(
+                            legacy_context,
+                            question,
+                            version["id"],
+                            turn["id"],
+                            source_kind="visible_output",
+                        )
                 legacy_context["updatedFromStageId"] = version["id"]
                 save_design_context(database, version["id"], legacy_context)
                 database.execute(
@@ -479,8 +542,8 @@ def backfill_design_contexts(database):
                         session["id"],
                         dump_json({
                             "versionId": version["id"],
-                            "fromSchemaVersion": 1,
-                            "toSchemaVersion": 2,
+                            "fromSchemaVersion": legacy_schema_version,
+                            "toSchemaVersion": 3,
                         }),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
@@ -512,6 +575,14 @@ def backfill_design_contexts(database):
                     )
                     continue
                 guidance = load_json(turn["guidance_json"]) or {}
+                for question in _legacy_visible_questions(turn["content"], guidance):
+                    context = add_open_question(
+                        context,
+                        question,
+                        version["id"],
+                        turn["id"],
+                        source_kind="visible_output",
+                    )
                 disagreement = guidance.get("disagreement")
                 if isinstance(disagreement, dict) and disagreement.get("status") == "active":
                     context = set_active_disagreement(
@@ -569,7 +640,7 @@ def backfill_design_contexts(database):
                     """,
                     (
                         session["id"],
-                        dump_json({"versionId": version["id"], "schemaVersion": 2}),
+                        dump_json({"versionId": version["id"], "schemaVersion": 3}),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
                 )
@@ -681,7 +752,8 @@ def serialize_session(database, session_id):
         WHERE session_id = ? AND event_type IN (
           'intent_evidence_recorded',
           'intent_hypothesis_feedback_applied',
-          'intent_hypothesis_feedback_pending'
+          'intent_hypothesis_feedback_pending',
+          'intent_progress_rewrite'
         )
         ORDER BY id
         """,
@@ -689,6 +761,7 @@ def serialize_session(database, session_id):
     ).fetchall()
     intent_evidence_by_id = {}
     latest_intent_feedback = {}
+    progress_rewrites = {}
     for row in intent_audit_rows:
         payload = load_json(row["payload_json"]) or {}
         if row["event_type"] == "intent_evidence_recorded":
@@ -699,6 +772,11 @@ def serialize_session(database, session_id):
                     "auditId": row["id"],
                     "createdAt": row["created_at"],
                 }
+        elif row["event_type"] == "intent_progress_rewrite":
+            artifact_type = payload.get("artifactType")
+            artifact_id = payload.get("artifactId")
+            if artifact_type and artifact_id:
+                progress_rewrites[(artifact_type, artifact_id)] = payload
         else:
             hypothesis_id = payload.get("hypothesisId")
             version_id = payload.get("versionId")
@@ -1098,6 +1176,12 @@ def serialize_session(database, session_id):
 
     def evidence_projection(evidence, language):
         kind = str(evidence.get("kind") or "feedback")
+        public_kind = {
+            "expressed_direction": "expressed_direction",
+            "proposal_accept": "confirmed_decision",
+            "disagreement_resolved": "confirmed_decision",
+            "manual_edit": "manual_edit",
+        }.get(kind, kind)
         details = evidence.get("details") if isinstance(evidence.get("details"), dict) else {}
         labels = {
             "zh-CN": {
@@ -1114,6 +1198,8 @@ def serialize_session(database, session_id):
             },
             "en": {
                 "conversation": "Expressed direction",
+                "expressed_direction": "Expressed direction",
+                "confirmed_decision": "Confirmed decision",
                 "proposal_accept": "Confirmed proposal",
                 "proposal_reject": "Proposal feedback",
                 "manual_edit": "Manual-edit observation",
@@ -1126,10 +1212,25 @@ def serialize_session(database, session_id):
             },
         }
         text = clean_evidence_text(evidence.get("observation"))
-        label = labels["zh-CN" if language == "zh-CN" else "en"].get(
-            kind, labels["zh-CN" if language == "zh-CN" else "en"]["intent_feedback"]
-        )
+        if public_kind == "confirmed_decision":
+            rewrite = progress_rewrites.get((
+                "confirmed_decision", evidence.get("proposalId")
+            )) or {}
+            if rewrite.get("summaryText"):
+                text = clean_evidence_text(rewrite["summaryText"])
+        if language == "zh-CN" and public_kind == "expressed_direction":
+            label = "\u5df2\u8868\u8fbe\u65b9\u5411"
+        elif language == "zh-CN" and public_kind == "confirmed_decision":
+            label = "\u5df2\u786e\u8ba4\u51b3\u7b56"
+        else:
+            label = labels["zh-CN" if language == "zh-CN" else "en"].get(
+                public_kind,
+                labels["zh-CN" if language == "zh-CN" else "en"]["intent_feedback"],
+            )
         if kind == "manual_edit":
+            rewrite = progress_rewrites.get(("manual_edit", evidence.get("versionId"))) or {}
+            if rewrite.get("summaryText"):
+                text = clean_evidence_text(rewrite["summaryText"])
             changed = len(details.get("diff") or [])
             suffix = (
                 f"\u786e\u5b9a\u6027 diff \u8bb0\u5f55\u4e86 {changed} \u4e2a\u683c\u5b50\u53d8\u5316\uff0c\u4e14\u4fdd\u5b58\u65f6\u5df2\u901a\u8fc7\u9a8c\u8bc1\u3002"
@@ -1161,9 +1262,17 @@ def serialize_session(database, session_id):
         return {
             "evidenceId": evidence["evidenceId"],
             "stageNumber": stage_numbers.get(evidence.get("versionId"), 1),
-            "kind": kind,
+            "kind": public_kind,
             "text": text,
             "createdAt": evidence.get("createdAt"),
+            "detailedText": (
+                clean_evidence_text(
+                    (progress_rewrites.get(("manual_edit", evidence.get("versionId"))) or {}).get(
+                        "detailedText"
+                    )
+                ) or None
+                if kind == "manual_edit" else None
+            ),
         }
 
     for version in versions:
@@ -1215,6 +1324,12 @@ def serialize_session(database, session_id):
                 for evidence_id in dict.fromkeys(evidence_ids)
                 if evidence_id in intent_evidence_by_id
                 and intent_evidence_by_id[evidence_id].get("versionId") in lineage
+                and intent_evidence_by_id[evidence_id].get("kind") in {
+                    "expressed_direction",
+                    "proposal_accept",
+                    "disagreement_resolved",
+                    "manual_edit",
+                }
             ]
             evidence.sort(key=lambda item: (item.get("createdAt") or "", item["auditId"]))
             trail = [
@@ -1226,7 +1341,7 @@ def serialize_session(database, session_id):
             )
             design_inclinations.append({
                 "hypothesisId": hypothesis["id"],
-                "statement": hypothesis["statement"],
+                "statement": hypothesis.get("displayStatement") or hypothesis["statement"],
                 "confirmedAtStageNumber": source_stage_number(
                     hypothesis.get("confirmedAtStageId")
                     or hypothesis.get("sourceStageId"),
@@ -1272,6 +1387,32 @@ def serialize_session(database, session_id):
                     "label": "open",
                 }
                 for item in design_level_open_questions(context)
+            ],
+            "questionRecords": [
+                {
+                    "questionId": item.get("id"),
+                    "question": item.get("question"),
+                    "status": (
+                        "answered" if item.get("status") in {"answered", "resolved"}
+                        else "unanswered"
+                    ),
+                    "askedAtStageNumber": source_stage_number(
+                        item.get("sourceStageId"), version
+                    ),
+                    "answeredAtStageNumber": (
+                        source_stage_number(item.get("answeredAtStageId"), version)
+                        if item.get("answeredAtStageId") else None
+                    ),
+                    "sourceTurnId": item.get("sourceTurnId"),
+                    "answeredByTurnId": item.get("resolvedByTurnId"),
+                    "updatedAt": turn_created_at.get(
+                        item.get("resolvedByTurnId")
+                        or item.get("updatedFromTurnId")
+                        or item.get("sourceTurnId")
+                    ),
+                }
+                for item in context.get("openQuestions", [])
+                if item.get("sourceKind") in {"visible_output", "legacy"}
             ],
         })
 

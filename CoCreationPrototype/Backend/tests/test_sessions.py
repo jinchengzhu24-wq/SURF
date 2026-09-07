@@ -332,7 +332,7 @@ class CoCreationSessionTests(unittest.TestCase):
             progress["designInclinations"][0]["hypothesisId"],
             second_state["hypothesisId"],
         )
-        self.assertTrue(progress["designInclinations"][0]["evidenceTrail"])
+        self.assertEqual(progress["designInclinations"][0]["evidenceTrail"], [])
 
     def test_historical_stage_progress_does_not_leak_later_inclination(self):
         parent_id, parent_turn, _ = self.create_intent_card(
@@ -876,7 +876,11 @@ class CoCreationSessionTests(unittest.TestCase):
             if item["versionId"] == version_id
         )
         self.assertEqual(progress["confirmedDecisions"], [])
-        self.assertEqual(progress["unresolvedQuestions"], [])
+        self.assertEqual(
+            progress["unresolvedQuestions"][0]["question"],
+            "What would you like another player to notice first?",
+        )
+        self.assertEqual(progress["questionRecords"][0]["status"], "unanswered")
 
     def test_next_ordinary_chat_links_evidence_to_persistent_hypothesis(self):
         version_id = self.read_session()["currentVersionId"]
@@ -942,7 +946,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(hypotheses[0]["status"], "tentative")
         self.assertTrue(hypotheses[0]["supportingEvidenceIds"])
         self.assertTrue(any(
-            json.loads(row["payload_json"])["kind"] == "conversation"
+            json.loads(row["payload_json"])["kind"] == "expressed_direction"
             for row in evidence
         ))
 
@@ -4004,6 +4008,51 @@ class CoCreationSessionTests(unittest.TestCase):
             progress["unresolvedQuestions"][0]["question"],
             "Should we keep this corridor open?",
         )
+        self.assertEqual(
+            progress["questionRecords"][0]["status"], "unanswered"
+        )
+
+        answer_execution = LLMExecutionResult(
+            "That gives us a clear direction.",
+            1,
+            "fallback-question-answer-001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        question_id = progress["questionRecords"][0]["questionId"]
+        with (
+            patch.object(backend, "generate_chat_reply", return_value=answer_execution),
+            patch.object(
+                backend,
+                "review_question_answers",
+                return_value={
+                    "results": [{"questionId": question_id, "status": "answered"}],
+                    "answeredQuestionIds": [question_id],
+                },
+            ),
+        ):
+            answered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Keep the corridor open so the first route stays readable.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "fallback-question-answer-001",
+                },
+            )
+        answered_progress = next(
+            item for item in answered.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(answered_progress["questionRecords"][0]["status"], "answered")
+        self.assertEqual(answered_progress["questionRecords"][0]["answeredAtStageNumber"], 1)
 
     def test_active_disagreement_next_question_enters_progress_after_opening(self):
         version_id = self.read_session()["currentVersionId"]

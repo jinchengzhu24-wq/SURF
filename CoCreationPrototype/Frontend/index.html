@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=cocreation-intent-memory-20260907-1">
+    <link rel="stylesheet" href="./styles.css?v=cocreation-question-memory-20260907-3">
 </head>
 <body>
     <div class="app">
@@ -71,9 +71,13 @@
                     <details class="progress-panel" id="progressPanel">
                         <summary id="progressSummary" aria-controls="progressPanelBody" aria-expanded="false"><span data-i18n="progressTitle">Co-creation progress</span></summary>
                         <div class="progress-panel-body" id="progressPanelBody">
-                            <section class="progress-section progress-section-expressed" aria-labelledby="expressedDirectionsTitle">
-                                <h3 id="expressedDirectionsTitle" data-i18n="expressedDirections">Expressed directions</h3>
-                                <div class="progress-items" id="expressedDirectionsList" aria-live="polite"></div>
+                            <section class="progress-section progress-section-questions" aria-labelledby="progressQuestionsTitle">
+                                <h3 id="progressQuestionsTitle" data-i18n="unresolvedQuestions">Unresolved questions</h3>
+                                <div class="progress-items" id="unresolvedQuestionsList" aria-live="polite"></div>
+                                <details class="answered-questions" id="answeredQuestionsPanel">
+                                    <summary id="answeredQuestionsSummary" aria-controls="answeredQuestionsList" aria-expanded="false" data-i18n="answeredQuestions">Answered questions</summary>
+                                    <div class="progress-items" id="answeredQuestionsList" aria-live="polite"></div>
+                                </details>
                             </section>
                             <section class="progress-section progress-section-inclinations" aria-labelledby="designInclinationsTitle">
                                 <h3 id="designInclinationsTitle" data-i18n="designInclinations">Design inclinations</h3>
@@ -191,6 +195,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=cocreation-intent-memory-20260907-1"></script>
+    <script src="./app.js?v=cocreation-question-memory-20260907-3"></script>
 </body>
 </html>

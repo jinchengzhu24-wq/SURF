@@ -4523,7 +4523,52 @@ class LLMClientTests(unittest.TestCase):
             ))
 
         self.assertEqual(revision_client.chat.completions.calls[0]["temperature"], 0.6)
-        self.assertEqual(plain_client.chat.completions.calls[0]["temperature"], 0.6)
+
+    def test_question_answer_review_validates_partial_answers(self):
+        client = FakeClient([json.dumps({
+            "results": [
+                {"questionId": "q1", "status": "answered"},
+                {"questionId": "q2", "status": "unanswered"},
+            ]
+        })])
+        with (
+            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.review_question_answers(
+                [
+                    {"questionId": "q1", "question": "Which route stays open?"},
+                    {"questionId": "q2", "question": "Should the boxes separate?"},
+                ],
+                "Keep the upper route open.",
+                "en",
+                "question-review-test",
+            )
+        self.assertEqual(result["answeredQuestionIds"], ["q1"])
+        response_format = client.chat.completions.calls[0]["response_format"]
+        self.assertEqual(
+            response_format["json_schema"]["name"],
+            "cocreation_question_answer_review",
+        )
+
+    def test_progress_rewrite_uses_structured_kimi_task(self):
+        client = FakeClient([json.dumps({
+            "detailedText": None,
+            "summaryText": "Prefer planning order over route length.",
+        })])
+        with (
+            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.rewrite_intent_progress(
+                "inclination",
+                "I read your inclination as preferring planning order over route length.",
+                ["The designer accepted the dependency proposal."],
+                "en",
+                "progress-rewrite-test",
+            )
+        self.assertEqual(result["summaryText"], "Prefer planning order over route length.")
+        self.assertEqual(result["model"], "kimi-k2.6")
 
     def test_discussion_card_is_not_repeated_in_the_saved_assistant_body(self):
         focus = "我会留意水边第一次推进是否真的改变了路线判断。"

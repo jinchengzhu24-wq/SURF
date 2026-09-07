@@ -347,6 +347,12 @@ translations.en.confirmedDecisions = "Confirmed decisions";
 translations.en.unresolvedQuestions = "Unresolved questions";
 translations.en.noConfirmedDecisions = "No confirmed decisions yet.";
 translations.en.noUnresolvedQuestions = "No unresolved questions yet.";
+translations.en.answeredQuestions = "Answered questions";
+translations.en.noAnsweredQuestions = "No answered questions yet.";
+translations.en.askedAtStage = "Asked at Stage {stage}";
+translations.en.answeredAtStage = "Answered at Stage {stage}";
+translations.en.answeredLabel = "Answered";
+translations.en.viewDetailedObservation = "View detailed observation";
 translations.en.fromStage = "From Stage {stage}";
 translations.en.explicitLabel = "Explicit";
 translations.en.confirmedLabel = "Confirmed";
@@ -380,6 +386,12 @@ translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
 translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
 translations["zh-CN"].noConfirmedDecisions = "\u6682\u65e0\u5df2\u786e\u8ba4\u51b3\u7b56\u3002";
 translations["zh-CN"].noUnresolvedQuestions = "\u6682\u65e0\u672a\u89e3\u51b3\u95ee\u9898\u3002";
+translations["zh-CN"].answeredQuestions = "\u5df2\u4f5c\u7b54";
+translations["zh-CN"].noAnsweredQuestions = "\u6682\u65e0\u5df2\u4f5c\u7b54\u95ee\u9898\u3002";
+translations["zh-CN"].askedAtStage = "\u63d0\u95ee\u4e8e Stage {stage}";
+translations["zh-CN"].answeredAtStage = "\u4f5c\u7b54\u4e8e Stage {stage}";
+translations["zh-CN"].answeredLabel = "\u5df2\u4f5c\u7b54";
+translations["zh-CN"].viewDetailedObservation = "\u67e5\u770b\u8be6\u7ec6\u89c2\u5bdf";
 translations["zh-CN"].fromStage = "\u6765\u81ea Stage {stage}";
 translations["zh-CN"].explicitLabel = "\u5df2\u660e\u786e\u8868\u8fbe";
 translations["zh-CN"].confirmedLabel = "\u5df2\u786e\u8ba4";
@@ -490,7 +502,7 @@ const validationTileNames = {
 const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
     "languageButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
-    "returnCurrentButton", "progressPanel", "progressSummary", "expressedDirectionsList", "designInclinationsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
+    "returnCurrentButton", "progressPanel", "progressSummary", "unresolvedQuestionsList", "answeredQuestionsPanel", "answeredQuestionsSummary", "answeredQuestionsList", "designInclinationsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
     "proposalRequestButton", "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
     "mapToolbar", "mapMode", "validationCard", "saveStageButton", "discardDraftButton",
@@ -513,6 +525,13 @@ elements.progressPanel.addEventListener("toggle", () => {
     localStorage.setItem(
         progressPanelStorageKey(),
         elements.progressPanel.open ? "open" : "closed",
+    );
+    requestAnimationFrame(updateProgressPanelMaxHeight);
+});
+elements.answeredQuestionsPanel.addEventListener("toggle", () => {
+    elements.answeredQuestionsSummary.setAttribute(
+        "aria-expanded",
+        elements.answeredQuestionsPanel.open ? "true" : "false",
     );
     requestAnimationFrame(updateProgressPanelMaxHeight);
 });
@@ -696,17 +715,57 @@ function renderProgressContext() {
 
     const context = (state.session.progressContexts || []).find(
         item => item.versionId === state.selectedVersionId
-    ) || { expressedDirections: [], designInclinations: [] };
+    ) || { questionRecords: [], designInclinations: [] };
 
     elements.progressPanel.hidden = false;
-    renderProgressItems(
-        elements.expressedDirectionsList,
-        context.expressedDirections,
-        "direction",
-        "noExpressedDirections",
+    const questions = Array.isArray(context.questionRecords) ? context.questionRecords : [];
+    renderQuestionRecords(
+        elements.unresolvedQuestionsList,
+        questions.filter(item => item?.status !== "answered"),
+        false,
     );
+    renderQuestionRecords(
+        elements.answeredQuestionsList,
+        questions.filter(item => item?.status === "answered"),
+        true,
+    );
+    if (elements.answeredQuestionsPanel) {
+        elements.answeredQuestionsPanel.hidden = !questions.some(item => item?.status === "answered");
+    }
     renderDesignInclinations(context.designInclinations);
     requestAnimationFrame(updateProgressPanelMaxHeight);
+}
+
+function renderQuestionRecords(container, items, answered) {
+    if (!container) return;
+    container.textContent = "";
+    const entries = Array.isArray(items) ? items : [];
+    if (!entries.length) {
+        const empty = document.createElement("p");
+        empty.className = "progress-empty";
+        empty.textContent = t(answered ? "noAnsweredQuestions" : "noUnresolvedQuestions");
+        container.appendChild(empty);
+        return;
+    }
+    entries.forEach(item => {
+        const record = document.createElement("article");
+        record.className = `progress-item progress-item-question ${answered ? "answered" : "unanswered"}`;
+        const text = document.createElement("p");
+        text.className = "progress-item-text";
+        text.textContent = String(item?.question || "").trim();
+        record.appendChild(text);
+        const meta = document.createElement("small");
+        const asked = Number(item?.askedAtStageNumber);
+        const answeredAt = Number(item?.answeredAtStageNumber);
+        const values = [answered ? t("answeredLabel") : t("unresolvedLabel")];
+        if (Number.isInteger(asked)) values.push(t("askedAtStage").replace("{stage}", String(asked)));
+        if (answered && Number.isInteger(answeredAt)) {
+            values.push(t("answeredAtStage").replace("{stage}", String(answeredAt)));
+        }
+        meta.textContent = values.join(" \u00b7 ");
+        record.appendChild(meta);
+        container.appendChild(record);
+    });
 }
 
 function updateProgressPanelMaxHeight() {
@@ -805,7 +864,19 @@ function renderDesignInclinations(items) {
         trail.className = "inclination-evidence";
         (Array.isArray(item?.evidenceTrail) ? item.evidenceTrail : []).forEach(evidence => {
             const entry = document.createElement("li");
-            entry.textContent = `${t("stage")} ${evidence.stageNumber} \u00b7 ${evidence.text}`;
+            const summary = document.createElement("span");
+            summary.textContent = `${t("stage")} ${evidence.stageNumber} \u00b7 ${evidence.text}`;
+            entry.appendChild(summary);
+            if (evidence?.kind === "manual_edit" && evidence?.detailedText) {
+                const detail = document.createElement("details");
+                detail.className = "manual-observation-detail";
+                const heading = document.createElement("summary");
+                heading.textContent = t("viewDetailedObservation");
+                const body = document.createElement("p");
+                body.textContent = String(evidence.detailedText);
+                detail.append(heading, body);
+                entry.appendChild(detail);
+            }
             trail.appendChild(entry);
         });
         record.appendChild(trail);

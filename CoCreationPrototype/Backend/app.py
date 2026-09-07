@@ -52,6 +52,8 @@ from llm_client import (
     classify_challenge_reason,
     classify_revision_request,
     review_intent_feedback,
+    review_question_answers,
+    rewrite_intent_progress,
     _contains_user_design_direction,
     _guidance_advice_request,
     _guidance_confusion_request,
@@ -84,11 +86,13 @@ from repository import (
 from design_context import (
     add_confirmed_decision,
     add_open_question,
+    apply_question_answer_review,
     add_rejected_decision,
     clone_design_context,
     design_level_open_questions,
     evaluator_projection,
     empty_design_context,
+    extract_explicit_user_memory,
     infer_intent_topic,
     is_design_level_question,
     merge_intent_hypothesis,
@@ -330,7 +334,9 @@ def _safe_intent_evidence_details(kind, value):
 
     allowed_fields = {
         "conversation": {"requestProposal"},
-        "manual_edit": {"parentVersionId", "diff", "validation"},
+        "manual_edit": {
+            "parentVersionId", "diff", "changeSummary", "verifiedDiff", "validation"
+        },
         "proposal_accept": {"decision", "reason", "baseVersionId"},
         "proposal_reject": {"decision", "reason", "baseVersionId"},
         "stage_restore": {"sourceVersionId", "replacedVersionId"},
@@ -1070,6 +1076,12 @@ def create_manual_version(
                 details={
                     "parentVersionId": current["id"],
                     "diff": describe_diff(current_rows, validation.rows),
+                    "changeSummary": summarize_stage_changes(
+                        current_rows, validation.rows
+                    ),
+                    "verifiedDiff": summarize_verified_diff(
+                        current_rows, validation.rows, session["language"]
+                    ),
                     "validation": validation.as_dict(),
                 },
             )
@@ -1245,6 +1257,29 @@ def assess_version(
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
     design_context_guidance = _design_context_guidance(execution.guidance)
     execution = replace(execution, guidance=_public_guidance(execution.guidance))
+    manual_progress_rewrite = None
+    if context["stageContext"].get("source") == "human_edit":
+        change_summary = context["stageContext"].get("changeSummary") or {}
+        canonical_manual = clean_optional(
+            context["stageContext"].get("summary"), 1200
+        ) or "Designer saved a validated manual edit."
+        try:
+            manual_progress_rewrite = rewrite_intent_progress(
+                "manual_edit",
+                canonical_manual,
+                [
+                    dump_json(change_summary),
+                    str(execution.assistant_message or "")[:1200],
+                ],
+                session_language,
+                request.state.request_id,
+            )
+        except (LLMServiceError, TypeError, ValueError, KeyError):
+            manual_progress_rewrite = {
+                "detailedText": str(execution.assistant_message or "")[:1200],
+                "summaryText": canonical_manual,
+                "model": "deterministic-fallback",
+            }
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     opening_sync = None
@@ -1317,6 +1352,19 @@ def assess_version(
                     },
                     utc_now(),
                 )
+                record_event(
+                    database,
+                    session_id,
+                    "intent_progress_rewrite",
+                    {
+                        "artifactType": "manual_edit",
+                        "artifactId": version_id,
+                        "versionId": version_id,
+                        "language": session_language,
+                        **(manual_progress_rewrite or {}),
+                    },
+                    utc_now(),
+                )
             _record_disagreement_event(
                 database,
                 session_id,
@@ -1331,6 +1379,7 @@ def assess_version(
                 None,
                 turn_id,
                 design_context_guidance,
+                assistant_content=execution.assistant_message,
                 allow_progress=False,
             )
 
@@ -1514,9 +1563,7 @@ def submit_intent_feedback(
                 if item.get("status") == "confirmed" and item.get("id") != hypothesis_id
             ]
 
-            if payload.action == "reject" or (
-                payload.action == "confirm" and not active
-            ):
+            if payload.action == "reject":
                 evidence_id = record_intent_evidence(
                     database,
                     session_id,
@@ -1535,7 +1582,7 @@ def submit_intent_feedback(
                     turn_id=payload.sourceTurnId,
                 )
                 save_design_context(database, payload.baseVersionId, context)
-                outcome = "rejected" if payload.action == "reject" else "applied"
+                outcome = "rejected"
                 record_event(
                     database,
                     session_id,
@@ -1567,13 +1614,37 @@ def submit_intent_feedback(
                 )
             ]
 
-        review = review_intent_feedback(
-            statement,
-            active,
-            evidence_summary,
-            session["language"],
-            request.state.request_id,
-        )
+        if payload.action == "confirm" and not active:
+            review = {
+                "verdict": "compatible",
+                "explanation": None,
+                "supersedesHypothesisIds": [],
+            }
+        else:
+            review = review_intent_feedback(
+                statement,
+                active,
+                evidence_summary,
+                session["language"],
+                request.state.request_id,
+            )
+        display_rewrite = {
+            "detailedText": None,
+            "summaryText": statement,
+            "model": "deterministic-fallback",
+        }
+        if review["verdict"] == "compatible":
+            try:
+                display_rewrite = rewrite_intent_progress(
+                    "inclination",
+                    statement,
+                    evidence_summary,
+                    session["language"],
+                    request.state.request_id,
+                )
+            except (LLMServiceError, TypeError, ValueError, KeyError):
+                pass
+        display_statement = display_rewrite["summaryText"]
 
         with connect(immediate=True) as database:
             session = require_browser_session(database, session_id, access_cookie)
@@ -1625,6 +1696,8 @@ def submit_intent_feedback(
                     evidence_id=evidence_id,
                     stage_id=payload.baseVersionId,
                     turn_id=payload.sourceTurnId,
+                    display_statement=display_statement,
+                    display_language=session["language"],
                 )
                 save_design_context(database, payload.baseVersionId, context)
                 record_event(
@@ -1639,6 +1712,19 @@ def submit_intent_feedback(
                         "outcome": "applied",
                         "evidenceId": evidence_id,
                         "supersedesHypothesisIds": review["supersedesHypothesisIds"],
+                    },
+                    utc_now(),
+                )
+                record_event(
+                    database,
+                    session_id,
+                    "intent_progress_rewrite",
+                    {
+                        "artifactType": "inclination",
+                        "artifactId": hypothesis_id,
+                        "versionId": payload.baseVersionId,
+                        "language": session["language"],
+                        **display_rewrite,
                     },
                     utc_now(),
                 )
@@ -1860,15 +1946,20 @@ def _send_message_locked(
                 None,
             )
             if payload.action == "none":
-                record_intent_evidence(
-                    database,
-                    session_id,
-                    payload.baseVersionId,
-                    "conversation",
-                    sanitize_user_design_text(content),
-                    turn_id=user_turn_id,
-                    details={"requestProposal": bool(payload.requestProposal)},
-                )
+                explicit_goals, explicit_constraints = extract_explicit_user_memory(content)
+                for explicit_text in dict.fromkeys([
+                    *explicit_goals,
+                    *explicit_constraints,
+                ]):
+                    record_intent_evidence(
+                        database,
+                        session_id,
+                        payload.baseVersionId,
+                        "expressed_direction",
+                        explicit_text,
+                        turn_id=user_turn_id,
+                        details={"requestProposal": bool(payload.requestProposal)},
+                    )
             if payload.requestProposal:
                 record_event(
                     database,
@@ -1881,6 +1972,8 @@ def _send_message_locked(
                     },
                     utc_now(),
                 )
+        else:
+            user_turn_id = prior_user["id"]
 
         if payload.action != "none" and prior_action is None:
             _record_card_action(database, session_id, payload, source_offer)
@@ -2020,6 +2113,30 @@ def _send_message_locked(
                 stage_context["excludedProposalCandidateFingerprint"] = map_fingerprint(
                     excluded_rows
                 )
+
+    question_answer_review = {"answeredQuestionIds": [], "results": []}
+    if payload.action == "none" and allow_progress:
+        visible_open_questions = [
+            {
+                "questionId": item.get("id"),
+                "question": item.get("question"),
+            }
+            for item in stage_context.get("designContext", {}).get("openQuestions", [])
+            if item.get("status") == "open"
+            and item.get("sourceKind") in {"visible_output", "legacy"}
+        ]
+        if visible_open_questions:
+            try:
+                question_answer_review = review_question_answers(
+                    visible_open_questions,
+                    content,
+                    language,
+                    request.state.request_id,
+                )
+            except LLMServiceError:
+                # Answer classification is display memory enrichment. A model
+                # failure must never consume or block the designer's message.
+                question_answer_review = {"answeredQuestionIds": [], "results": []}
 
     challenge_reason_classification = None
     challenge_choice_resolution = None
@@ -2785,6 +2902,19 @@ def _send_message_locked(
                 assistant_turn_id,
                 execution.guidance,
             )
+            if question_answer_review.get("results"):
+                record_event(
+                    database,
+                    session_id,
+                    "question_answer_reviewed",
+                    {
+                        "versionId": payload.baseVersionId,
+                        "userTurnId": user_turn_id,
+                        "results": question_answer_review["results"],
+                        "model": "kimi-k2.6",
+                    },
+                    utc_now(),
+                )
             _update_design_context_from_turn(
                 database,
                 session_id,
@@ -2794,6 +2924,10 @@ def _send_message_locked(
                 design_context_guidance,
                 assistant_content=execution.assistant_message,
                 allow_progress=allow_progress,
+                answered_question_ids=question_answer_review.get(
+                    "answeredQuestionIds"
+                ),
+                answer_turn_id=user_turn_id,
             )
 
         session_payload = serialize_session(database, session_id)
@@ -3704,6 +3838,8 @@ def decide_proposal(
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    decision_rewrite = None
+    decision_rewrite_language = "zh-CN"
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         existing_decision = database.execute(
@@ -3757,6 +3893,7 @@ def decide_proposal(
             verified_summary = None
 
             if payload.decision == "accept":
+                decision_rewrite_language = session["language"]
                 proposed_rows = load_json(proposal["proposed_rows_json"])
                 current = get_current_version(database, session)
                 current_rows = load_json(current["rows_json"])
@@ -3815,6 +3952,15 @@ def decide_proposal(
                     },
                     now,
                 )
+                decision_rewrite = {
+                    "artifactId": proposal_id,
+                    "versionId": new_version_id,
+                    "canonical": proposal["summary"],
+                    "evidence": [
+                        clean_optional(payload.reason, 2000) or "",
+                        verified_summary or "",
+                    ],
+                }
 
             database.execute(
                 """
@@ -3894,6 +4040,36 @@ def decide_proposal(
                 )
             session_payload = serialize_session(database, session_id)
 
+    if decision_rewrite is not None:
+        try:
+            rewritten = rewrite_intent_progress(
+                "confirmed_decision",
+                decision_rewrite["canonical"],
+                decision_rewrite["evidence"],
+                decision_rewrite_language,
+                "decision-" + payload.idempotencyKey,
+            )
+        except (LLMServiceError, TypeError, ValueError, KeyError):
+            rewritten = {
+                "detailedText": None,
+                "summaryText": decision_rewrite["canonical"],
+                "model": "deterministic-fallback",
+            }
+        with connect(immediate=True) as database:
+            record_event(
+                database,
+                session_id,
+                "intent_progress_rewrite",
+                {
+                    "artifactType": "confirmed_decision",
+                    "artifactId": decision_rewrite["artifactId"],
+                    "versionId": decision_rewrite["versionId"],
+                    "language": decision_rewrite_language,
+                    **rewritten,
+                },
+                utc_now(),
+            )
+            session_payload = serialize_session(database, session_id)
     if new_version_id:
         synchronize_version_with_online_match(session_id, new_version_id, "stage")
     return session_payload
@@ -7707,6 +7883,49 @@ def _extract_conservative_map_question(content):
     return None
 
 
+def _extract_visible_questions(assistant_content, guidance=None):
+    """Return every question that survived into visible non-intent output.
+
+    Intent hypotheses are deliberately excluded: their correction language is
+    resolved by the orange-card controls and becomes the inclination statement.
+    """
+    guidance = guidance if isinstance(guidance, dict) else {}
+    visible_values = [assistant_content]
+    follow_up = guidance.get("followUpQuestion")
+    if follow_up:
+        visible_values.append(follow_up)
+    disagreement = guidance.get("disagreement")
+    if isinstance(disagreement, dict):
+        visible_values.extend([
+            disagreement.get("coreDisagreement"),
+            disagreement.get("nextQuestion"),
+        ])
+    offer = guidance.get("proposalOffer")
+    if isinstance(offer, dict):
+        visible_values.extend([offer.get("summary"), offer.get("rationale")])
+    for cue in guidance.get("uiCues") or []:
+        if isinstance(cue, dict) and cue.get("type") != "intent":
+            visible_values.append(cue.get("text"))
+
+    questions = []
+    seen = set()
+    for value in visible_values:
+        segments = re.split(
+            r"\s*(?:\n+|(?<=[.!?\u3002\uFF01\uFF1F]))\s*",
+            str(value or ""),
+        )
+        for segment in segments:
+            question = re.sub(r"\s+", " ", segment).strip()
+            if not question.endswith(("?", "\uFF1F")):
+                continue
+            key = re.sub(r"\s+", " ", question).strip("?\uFF1F").casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            questions.append(question[:1200])
+    return questions
+
+
 def _update_design_context_from_turn(
     database,
     session_id,
@@ -7716,6 +7935,8 @@ def _update_design_context_from_turn(
     guidance,
     assistant_content=None,
     allow_progress=True,
+    answered_question_ids=None,
+    answer_turn_id=None,
 ):
     """Merge server-owned memory after a normal chat or Stage review.
 
@@ -7760,6 +7981,14 @@ def _update_design_context_from_turn(
             utc_now(),
         )
         context = previous
+
+    if allow_progress and answered_question_ids:
+        context = apply_question_answer_review(
+            context,
+            answered_question_ids,
+            version_id,
+            answer_turn_id or turn_id,
+        )
 
     hypothesis_id = None
     hypothesis = str(guidance.get("intentHypothesis") or "").strip()
@@ -7873,7 +8102,7 @@ def _update_design_context_from_turn(
         )
 
     auto_open_questions = []
-    if allow_progress:
+    if allow_progress or assistant_content:
         candidates = [guidance.get("followUpQuestion")]
         if isinstance(disagreement, dict) and disagreement.get("status") == "active":
             candidates.append(disagreement.get("nextQuestion"))
@@ -7887,10 +8116,11 @@ def _update_design_context_from_turn(
                     item.get("evidenceText"),
                 )
             ]
-            if isinstance(patch, dict)
+            if allow_progress and isinstance(patch, dict)
             else []
         )
-        if not patch_questions:
+        candidates.extend(_extract_visible_questions(assistant_content, guidance))
+        if not patch_questions and not candidates:
             candidates.append(_extract_conservative_map_question(assistant_content))
         seen_questions = set()
         for question in candidates:
@@ -7899,7 +8129,13 @@ def _update_design_context_from_turn(
                 continue
             seen_questions.add(normalized_question)
             before = context
-            context = add_open_question(context, question, version_id, turn_id)
+            context = add_open_question(
+                context,
+                question,
+                version_id,
+                turn_id,
+                source_kind="visible_output",
+            )
             if context != before:
                 auto_open_questions.append(str(question).strip())
 

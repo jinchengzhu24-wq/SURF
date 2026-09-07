@@ -9,11 +9,11 @@ import hashlib
 import re
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 AUTHORITIES = {"explicit", "confirmed", "inferred"}
 GOAL_STATUSES = {"active", "superseded", "rejected"}
 DECISION_STATUSES = {"active", "superseded"}
-QUESTION_STATUSES = {"open", "resolved"}
+QUESTION_STATUSES = {"open", "answered", "resolved"}
 HYPOTHESIS_STATUSES = {"tentative", "confirmed", "rejected", "superseded", "legacy_unverified"}
 INTENT_TOPICS = {
     "difficulty", "route_readability", "push_dependency", "space_distribution",
@@ -317,6 +317,8 @@ def _normalize_question(item, index=0):
     if not question:
         return None
     status = item.get("status", "open")
+    if status == "resolved":
+        status = "answered"
     return {
         "id": _text(item.get("id"), 96) or _stable_id("question", question, index),
         "question": question,
@@ -327,6 +329,10 @@ def _normalize_question(item, index=0):
             item.get("updatedFromTurnId") or item.get("sourceTurnId")
         ),
         "resolvedByTurnId": _source(item.get("resolvedByTurnId")),
+        "answeredAtStageId": _source(
+            item.get("answeredAtStageId") or item.get("resolvedAtStageId")
+        ),
+        "sourceKind": _text(item.get("sourceKind"), 32) or "legacy",
     }
 
 
@@ -376,6 +382,10 @@ def _normalize_hypothesis(item, index=0):
             if item.get("feedbackAction") in {"confirm", "revise"}
             else None
         ),
+        "displayStatement": sanitize_user_design_text(
+            item.get("displayStatement")
+        ) or None,
+        "displayLanguage": _text(item.get("displayLanguage"), 16) or None,
     }
 
 
@@ -439,11 +449,13 @@ def normalize_design_context(value):
         for index, raw in enumerate(value.get("rejectedDecisions") or [])
         if (item := _normalize_decision(raw, rejected=True, index=index)) is not None
     ][-MAX_INACTIVE_ITEMS:]
-    result["openQuestions"] = _bounded_status_items([
+    # Question history is user-visible progress. Do not discard answered
+    # questions merely because the prompt projection is bounded elsewhere.
+    result["openQuestions"] = [
         item
         for index, raw in enumerate(value.get("openQuestions") or [])
         if (item := _normalize_question(raw, index=index)) is not None
-    ], "open")
+    ]
     result["intentHypotheses"] = _bounded_hypotheses([
         item
         for index, raw in enumerate(value.get("intentHypotheses") or [])
@@ -697,6 +709,8 @@ def resolve_intent_hypothesis(
     evidence_id=None,
     stage_id=None,
     turn_id=None,
+    display_statement=None,
+    display_language=None,
 ):
     """Apply explicit card feedback to one displayed tentative hypothesis."""
     result = normalize_design_context(context)
@@ -758,6 +772,10 @@ def resolve_intent_hypothesis(
         target["origin"] = "user_revision" if action == "revise" else target.get("origin")
         target["confirmedAtStageId"] = _source(stage_id)
         target["feedbackAction"] = action
+        target["displayStatement"] = (
+            sanitize_user_design_text(display_statement) or replacement
+        )
+        target["displayLanguage"] = _text(display_language, 16) or None
         if evidence_id:
             target["supportingEvidenceIds"] = list(dict.fromkeys(
                 target.get("supportingEvidenceIds", []) + [_source(evidence_id)]
@@ -838,9 +856,10 @@ def _question_key(value):
 
 def _merge_open_question(result, entry, stage_id, turn_id, user_text):
     question = sanitize_user_design_text(entry.get("question"))
-    if not question or not is_design_level_question(
-        question,
-        entry.get("evidenceText"),
+    is_visible_output = entry.get("sourceKind") == "visible_output"
+    if not question or (
+        not is_visible_output
+        and not is_design_level_question(question, entry.get("evidenceText"))
     ):
         return False
 
@@ -855,14 +874,15 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
     )
     status = entry.get("status", "open")
 
-    if status == "resolved":
+    if status in {"resolved", "answered"}:
         if not _verified_user_evidence(entry.get("evidenceText"), user_text):
             return False
         if existing is None:
             return False
-        existing["status"] = "resolved"
+        existing["status"] = "answered"
         existing["updatedFromTurnId"] = _source(turn_id)
         existing["resolvedByTurnId"] = _source(turn_id)
+        existing["answeredAtStageId"] = _source(stage_id)
         return True
 
     if existing is not None:
@@ -870,6 +890,8 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
             existing["status"] = "open"
         existing["question"] = question
         existing["updatedFromTurnId"] = _source(turn_id)
+        if entry.get("sourceKind") == "visible_output":
+            existing["sourceKind"] = "visible_output"
         return True
 
     result["openQuestions"].append({
@@ -880,24 +902,48 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
         "sourceTurnId": _source(turn_id),
         "updatedFromTurnId": _source(turn_id),
         "resolvedByTurnId": None,
+        "answeredAtStageId": None,
+        "sourceKind": _text(entry.get("sourceKind"), 32) or "model_patch",
     })
     return True
 
 
-def add_open_question(context, question, stage_id=None, turn_id=None):
+def add_open_question(context, question, stage_id=None, turn_id=None, *, source_kind="visible_output"):
     """Add an assistant-raised open question using the normal provenance rules."""
     result = normalize_design_context(context)
     clean = _text(question)
-    if not clean or not is_design_level_question(clean):
+    if not clean or (
+        source_kind != "visible_output" and not is_design_level_question(clean)
+    ):
         return result
 
     _merge_open_question(
         result,
-        {"question": clean, "status": "open"},
+        {"question": clean, "status": "open", "sourceKind": source_kind},
         stage_id,
         turn_id,
         None,
     )
+    result["updatedFromStageId"] = _source(stage_id)
+    result["updatedFromTurnId"] = _source(turn_id)
+    return normalize_design_context(result)
+
+
+def apply_question_answer_review(context, answered_question_ids, stage_id=None, turn_id=None):
+    """Mark only model-reviewed question IDs as answered in this Stage snapshot."""
+    result = normalize_design_context(context)
+    answered = {
+        _source(value) for value in (answered_question_ids or []) if _source(value)
+    }
+    if not answered:
+        return result
+    for item in result["openQuestions"]:
+        if item.get("id") not in answered or item.get("status") != "open":
+            continue
+        item["status"] = "answered"
+        item["updatedFromTurnId"] = _source(turn_id)
+        item["resolvedByTurnId"] = _source(turn_id)
+        item["answeredAtStageId"] = _source(stage_id)
     result["updatedFromStageId"] = _source(stage_id)
     result["updatedFromTurnId"] = _source(turn_id)
     return normalize_design_context(result)
@@ -929,6 +975,29 @@ def extract_explicit_user_memory(user_text):
         r"\u5982\u4f55|\u600e\u4e48|\u4ec0\u4e48|\u54ea|\u662f\u5426|\u80fd\u5426|\u53ef\u4ee5\u5417|\u6211\u8be5)",
         flags=re.IGNORECASE,
     )
+    evaluative_view_pattern = re.compile(
+        r"(?:\b(?:i\s+(?:think|feel|find)|in\s+my\s+view|to\s+me)\b|"
+        r"\u6211(?:\u89c9\u5f97|\u8ba4\u4e3a|\u611f\u89c9|\u53d1\u73b0)|\u5728\u6211\u770b\u6765|\u5bf9\u6211\u6765\u8bf4)",
+        flags=re.IGNORECASE,
+    )
+    design_subject_pattern = re.compile(
+        r"(?:\b(?:box|target|player|route|path|corridor|layout|wall|water|push|"
+        r"start|distance|space|difficulty|rhythm|choice)\b|"
+        r"\u7bb1\u5b50|\u76ee\u6807|\u73a9\u5bb6|\u8def\u7ebf|\u8def\u5f84|\u901a\u9053|\u5e03\u5c40|"
+        r"\u5899|\u6c34\u57df|\u63a8\u52a8|\u8d77\u70b9|\u8ddd\u79bb|\u7a7a\u95f4|\u96be\u5ea6|\u8282\u594f|\u9009\u62e9)",
+        flags=re.IGNORECASE,
+    )
+    evaluation_pattern = re.compile(
+        r"(?:\b(?:too\s+(?:close|far|long|short|easy|hard|tight|open)|"
+        r"crowded|cramped|unclear|clearer|harder|easier|awkward)\b|"
+        r"\u592a(?:\u8fd1|\u8fdc|\u957f|\u77ed|\u6324|\u7d27|\u7a7a|\u96be|\u5bb9\u6613)|"
+        r"\u6328\u5f97\u592a\u8fd1|\u62e5\u6324|\u5c40\u4fc3|\u4e0d\u6e05\u695a|\u66f4\u6e05\u695a|\u66f4\u96be|\u66f4\u5bb9\u6613|\u522b\u626d)",
+        flags=re.IGNORECASE,
+    )
+    uncertainty_pattern = re.compile(
+        r"(?:\b(?:maybe|perhaps|might|not\s+sure)\b|\u4e0d\u786e\u5b9a|\u4e5f\u8bb8|\u53ef\u80fd)",
+        flags=re.IGNORECASE,
+    )
     clauses = [
         part.strip()
         for part in re.split(r"(?<=[.!?\u3002\uFF01\uFF1F;\uFF1B])\s*|\n+", text)
@@ -941,7 +1010,13 @@ def extract_explicit_user_memory(user_text):
         is_question = clause.endswith(("?", "\uFF1F")) or bool(question_start.search(lowered))
         if is_question:
             continue
-        if goal_pattern.search(clause):
+        explicit_evaluation = bool(
+            evaluative_view_pattern.search(clause)
+            and design_subject_pattern.search(clause)
+            and evaluation_pattern.search(clause)
+            and not uncertainty_pattern.search(clause)
+        )
+        if goal_pattern.search(clause) or explicit_evaluation:
             goals.append(clause)
         if constraint_pattern.search(clause):
             constraints.append(clause)

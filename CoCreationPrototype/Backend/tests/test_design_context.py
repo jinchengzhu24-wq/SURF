@@ -13,12 +13,14 @@ if str(BACKEND_DIR) not in sys.path:
 
 import repository
 from design_context import (
+    apply_question_answer_review,
     apply_hypothesis_feedback,
     add_confirmed_decision,
     add_open_question,
     add_rejected_decision,
     empty_design_context,
     design_level_open_questions,
+    extract_explicit_user_memory,
     is_design_level_question,
     merge_chat_update,
     merge_intent_hypothesis,
@@ -30,6 +32,41 @@ from design_context import (
 
 
 class DesignContextUnitTests(unittest.TestCase):
+    def test_evaluative_first_person_view_is_explicit_memory(self):
+        goals, constraints = extract_explicit_user_memory(
+            "\u6211\u89c9\u5f97\u4e24\u4e2a\u7bb1\u5b50\u8d77\u70b9\u6328\u5f97\u592a\u8fd1\u4e86\u3002"
+        )
+        self.assertEqual(goals, ["\u6211\u89c9\u5f97\u4e24\u4e2a\u7bb1\u5b50\u8d77\u70b9\u6328\u5f97\u592a\u8fd1\u4e86\u3002"])
+        self.assertEqual(constraints, [])
+
+    def test_question_review_marks_only_selected_question(self):
+        context = add_open_question(
+            empty_design_context(), "Which route should stay open?", "stage-1", "turn-a"
+        )
+        context = add_open_question(
+            context, "Which box spacing should the design emphasize?", "stage-1", "turn-b"
+        )
+        first_id, second_id = [item["id"] for item in context["openQuestions"]]
+        reviewed = apply_question_answer_review(
+            context, [first_id], "stage-2", "user-turn"
+        )
+        self.assertEqual(reviewed["openQuestions"][0]["status"], "answered")
+        self.assertEqual(reviewed["openQuestions"][0]["resolvedByTurnId"], "user-turn")
+        self.assertEqual(reviewed["openQuestions"][0]["answeredAtStageId"], "stage-2")
+        self.assertEqual(reviewed["openQuestions"][1]["id"], second_id)
+        self.assertEqual(reviewed["openQuestions"][1]["status"], "open")
+
+    def test_visible_output_keeps_non_design_question(self):
+        context = add_open_question(
+            empty_design_context(),
+            "你刚才用了多少步？",
+            "stage-1",
+            "turn-1",
+            source_kind="visible_output",
+        )
+        self.assertEqual(len(context["openQuestions"]), 1)
+        self.assertEqual(context["openQuestions"][0]["question"], "你刚才用了多少步？")
+
     def test_resolved_revision_supersedes_old_inclination_and_confirmed_goal(self):
         context, old_id = merge_intent_hypothesis(
             empty_design_context(),
@@ -473,7 +510,7 @@ class DesignContextUnitTests(unittest.TestCase):
             stage_id="stage-1",
             turn_id="turn-3",
         )
-        self.assertEqual(resolved["openQuestions"][0]["status"], "resolved")
+        self.assertEqual(resolved["openQuestions"][0]["status"], "answered")
         self.assertEqual(resolved["openQuestions"][0]["resolvedByTurnId"], "turn-3")
 
     def test_model_cannot_create_confirmed_decision_in_chat_patch(self):
@@ -554,7 +591,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                         """,
                         (session_id,),
                     ).fetchone()[0]
-                self.assertEqual(migrated["schemaVersion"], 2)
+                    self.assertEqual(migrated["schemaVersion"], 3)
                 self.assertEqual(events, 1)
                 self.assertEqual(
                     migrated["intentHypotheses"][0]["status"],

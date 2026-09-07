@@ -109,8 +109,10 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v48-objective-policy-candidates"
+PROMPT_VERSION = "cocreation-v49-question-intent-progress"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
+QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
+INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
 
 
 def _structured_response_format(task=None):
@@ -156,6 +158,41 @@ def _structured_response_format(task=None):
             "required": ["verdict", "explanation", "supersedesHypothesisIds"],
         }
         name = "cocreation_intent_feedback_review"
+    elif task == "question_answer_review":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "results": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "questionId": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["answered", "unanswered"],
+                            },
+                        },
+                        "required": ["questionId", "status"],
+                    },
+                },
+            },
+            "required": ["results"],
+        }
+        name = "cocreation_question_answer_review"
+    elif task == "intent_progress_rewrite":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "detailedText": {"type": ["string", "null"]},
+                "summaryText": {"type": "string"},
+            },
+            "required": ["detailedText", "summaryText"],
+        }
+        name = "cocreation_intent_progress_rewrite"
     elif task == "proposal_clarification":
         schema = {
             "type": "object",
@@ -580,6 +617,13 @@ def build_chat_messages(
         "claim about how water should affect route reading or push decisions). It must also "
         "distill an interpretation already supported by assistantMessage: never introduce a "
         "different map element, design goal, or operation only inside the intent card.\n\n"
+        "When an intentHypothesis is warranted, make it detailed enough to stand as a correctable "
+        "memory candidate: normally use two to four sentences covering one core preference, the "
+        "specific words or actions that support your reading, the possible playable consequence, "
+        "and the boundary the designer may correct. Keep it to one coherent inclination; do not "
+        "combine incompatible goals or turn observed behavior into certainty. Questions inside "
+        "this orange-card text are resolved only by its card controls and are not conversation "
+        "questions.\n\n"
         "Treat the saved Stage as read-only until the designer accepts a validated "
         "proposal in the interface. Natural requests such as '你帮我改', '你来改吧', "
         "'按这个思路改', 'can you change it', and 'go ahead and revise it' first produce "
@@ -6094,6 +6138,185 @@ def review_intent_feedback(
         0,
         504,
     )
+
+
+def review_question_answers(questions, user_reply, language, request_id, *, _deadline=None):
+    """Semantically decide which visible assistant questions were actually answered."""
+    safe_questions = []
+    for item in questions or []:
+        if not isinstance(item, dict):
+            continue
+        question_id = str(item.get("questionId") or item.get("id") or "").strip()[:96]
+        question = re.sub(r"\s+", " ", str(item.get("question") or "")).strip()[:1200]
+        if question_id and question:
+            safe_questions.append({"questionId": question_id, "question": question})
+    safe_questions = safe_questions[:24]
+    reply = re.sub(r"\s+", " ", str(user_reply or "")).strip()[:2000]
+    if not safe_questions or not reply:
+        return {"answeredQuestionIds": [], "results": []}
+
+    api_key, base_url = _llm_credentials()
+    if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR", "The configured LLM API key is missing.",
+            request_id, False, 0, 503,
+        )
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    messages = [{
+        "role": "system",
+        "content": (
+            "Review whether the designer's latest reply genuinely answers each previously visible "
+            "assistant question. Return every supplied questionId exactly once. Use answered only "
+            "when the reply gives a position, choice, concrete information, or explicitly closes "
+            "that issue. A tangential reply, vague acknowledgement, or merely saying they do not "
+            "know remains unanswered. Do not infer intent, discuss the map, or add prose. "
+            f"The interface language is {response_language}.\nQuestions:\n"
+            + json.dumps(safe_questions, ensure_ascii=False, separators=(",", ":"))
+            + "\nLatest designer reply:\n" + reply
+        ),
+    }]
+    deadline = _deadline or (time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS)
+    last_error = None
+    for attempt in range(1, 3):
+        remaining = _remaining_until(deadline)
+        timeout_seconds = min(35.0, remaining)
+        if timeout_seconds <= 0:
+            break
+        try:
+            response = asyncio.run(asyncio.wait_for(
+                _request_completion(
+                    api_key, base_url, KIMI_MODEL, messages,
+                    QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS,
+                    timeout_seconds, task="question_answer_review",
+                ),
+                timeout=timeout_seconds,
+            ))
+            payload = json.loads(str(response.choices[0].message.content or ""))
+            if set(payload) != {"results"} or not isinstance(payload["results"], list):
+                raise ValueError("Question review has an invalid envelope.")
+            expected = {item["questionId"] for item in safe_questions}
+            results = payload["results"]
+            if len(results) != len(expected):
+                raise ValueError("Question review omitted a question.")
+            seen = set()
+            for item in results:
+                if not isinstance(item, dict) or set(item) != {"questionId", "status"}:
+                    raise ValueError("Question review contains an invalid result.")
+                if item["questionId"] not in expected or item["questionId"] in seen:
+                    raise ValueError("Question review contains an invalid question ID.")
+                if item["status"] not in {"answered", "unanswered"}:
+                    raise ValueError("Question review contains an invalid status.")
+                seen.add(item["questionId"])
+            return {
+                "results": results,
+                "answeredQuestionIds": [
+                    item["questionId"] for item in results
+                    if item["status"] == "answered"
+                ],
+            }
+        except asyncio.TimeoutError as exception:
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT", "Kimi did not review question answers in time.",
+                request_id, True, attempt, 504,
+            )
+        except LLMServiceError:
+            raise
+        except Exception as exception:
+            last_error = classify_exception(exception, request_id, attempt)
+            last_error.retryable = True
+    if last_error is not None:
+        raise last_error
+    raise LLMServiceError(
+        "UPSTREAM_TIMEOUT", "Kimi did not review question answers in time.",
+        request_id, True, 0, 504,
+    )
+
+
+def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, request_id, *, _deadline=None):
+    """Create display copy without changing the canonical memory or inventing evidence."""
+    kind = str(kind or "").strip()
+    if kind not in {"inclination", "confirmed_decision", "manual_edit"}:
+        raise ValueError("Unsupported intent progress rewrite kind.")
+    canonical = re.sub(r"\s+", " ", str(canonical_text or "")).strip()[:1200]
+    evidence = [
+        re.sub(r"\s+", " ", str(item or "")).strip()[:700]
+        for item in (safe_evidence or []) if str(item or "").strip()
+    ][:12]
+    if not canonical:
+        raise ValueError("Intent progress rewrite requires canonical text.")
+    api_key, base_url = _llm_credentials()
+    if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR", "The configured LLM API key is missing.",
+            request_id, False, 0, 503,
+        )
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    detail_rule = (
+        "For manual_edit, detailedText must be two to five factual sentences and summaryText "
+        "one or two information-dense sentences. For other kinds detailedText must be null. "
+    )
+    messages = [{
+        "role": "system",
+        "content": (
+            "Rewrite one co-creation progress record for display. Use only the supplied canonical "
+            "text and evidence. Preserve uncertainty and never add motives, map facts, coordinates, "
+            "metrics, or causal claims. Do not mention internal fields. " + detail_rule
+            + f"Write in {response_language}.\nKind: {kind}\nCanonical text: {canonical}"
+            + "\nSafe evidence:\n"
+            + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+        ),
+    }]
+    deadline = _deadline or (time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS)
+    remaining = _remaining_until(deadline)
+    if remaining <= 0:
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT", "Kimi did not rewrite progress before the deadline.",
+            request_id, True, 0, 504,
+        )
+    try:
+        response = asyncio.run(asyncio.wait_for(
+            _request_completion(
+                api_key, base_url, KIMI_MODEL, messages,
+                INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS,
+                min(40.0, remaining), task="intent_progress_rewrite",
+            ),
+            timeout=min(40.0, remaining),
+        ))
+        payload = json.loads(str(response.choices[0].message.content or ""))
+        if set(payload) != {"detailedText", "summaryText"}:
+            raise ValueError("Progress rewrite has unexpected fields.")
+        summary = _normalize_response_paragraphs(str(payload.get("summaryText") or ""))[:1200]
+        detail = payload.get("detailedText")
+        detail = _normalize_response_paragraphs(str(detail or ""))[:1200] or None
+        if len(summary) < 4:
+            raise ValueError("Progress rewrite summary is too short.")
+        if kind == "manual_edit" and (detail is None or len(detail) < 12):
+            raise ValueError("Manual-edit detail is too short.")
+        if kind != "manual_edit" and payload.get("detailedText") is not None:
+            raise ValueError("Only manual edits may include detailed text.")
+        source_facts = canonical + " " + " ".join(evidence)
+        source_tokens = {
+            token.casefold()
+            for token in re.findall(r"(?<![A-Za-z0-9_])(?:B\d+|T\d+|P|\d+(?:\.\d+)?)(?![A-Za-z0-9_])", source_facts)
+        }
+        output_tokens = {
+            token.casefold()
+            for token in re.findall(r"(?<![A-Za-z0-9_])(?:B\d+|T\d+|P|\d+(?:\.\d+)?)(?![A-Za-z0-9_])", (detail or "") + " " + summary)
+        }
+        if not output_tokens.issubset(source_tokens):
+            raise ValueError("Progress rewrite introduced an unsupported map fact or number.")
+        return {"detailedText": detail, "summaryText": summary, "model": KIMI_MODEL}
+    except asyncio.TimeoutError as exception:
+        raise LLMServiceError(
+            "UPSTREAM_TIMEOUT", "Kimi did not rewrite progress before the deadline.",
+            request_id, True, 1, 504,
+        ) from exception
+    except LLMServiceError:
+        raise
+    except Exception as exception:
+        error = classify_exception(exception, request_id, 1)
+        error.retryable = True
+        raise error from exception
 
 
 async def _translate_with_model_fallback(

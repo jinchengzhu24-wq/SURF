@@ -18,6 +18,22 @@ from llm_client import LLMExecutionResult, LLMServiceError, build_chat_messages
 
 
 class CoCreationPrototypeApiTests(unittest.TestCase):
+    def test_visible_question_extraction_excludes_orange_intent(self):
+        questions = backend._extract_visible_questions(
+            "Which route should stay open? Should the first push remain direct?",
+            {
+                "intentHypothesis": "Is your deeper preference a readable route?",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        self.assertEqual(questions, [
+            "Which route should stay open?",
+            "Should the first push remain direct?",
+        ])
+
     def test_automatic_candidate_is_frozen_into_actionable_purple_offer(self):
         proposed = list(backend.SAMPLE_ROWS)
         proposed[1] = "##.........#"
@@ -586,7 +602,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("cocreation-intent-memory-20260907-1", index_response.text)
+        self.assertIn("cocreation-question-memory-20260907-3", index_response.text)
         self.assertIn("proposal-mode-toggle", index_response.text)
         self.assertIn("proposal-toggle-track", index_response.text)
         self.assertIn("proposal-toggle-thumb", index_response.text)
