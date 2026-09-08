@@ -348,7 +348,7 @@ def _has_valid_design_context(raw):
         value = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
-    return isinstance(value, dict) and value.get("schemaVersion") == 3
+    return isinstance(value, dict) and value.get("schemaVersion") == 4
 
 
 def _legacy_visible_questions(content, guidance):
@@ -493,7 +493,7 @@ def backfill_design_contexts(database):
             if version["design_context_json"]:
                 try:
                     raw_context = load_json(version["design_context_json"])
-                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") in {1, 2}:
+                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") in {1, 2, 3}:
                         legacy_schema_version = raw_context.get("schemaVersion")
                         legacy_context = normalize_design_context(raw_context)
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -543,7 +543,7 @@ def backfill_design_contexts(database):
                         dump_json({
                             "versionId": version["id"],
                             "fromSchemaVersion": legacy_schema_version,
-                            "toSchemaVersion": 3,
+                            "toSchemaVersion": 4,
                         }),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
@@ -640,7 +640,7 @@ def backfill_design_contexts(database):
                     """,
                     (
                         session["id"],
-                        dump_json({"versionId": version["id"], "schemaVersion": 3}),
+                        dump_json({"versionId": version["id"], "schemaVersion": 4}),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
                 )
@@ -1394,6 +1394,7 @@ def serialize_session(database, session_id):
                     "question": item.get("question"),
                     "status": (
                         "answered" if item.get("status") in {"answered", "resolved"}
+                        else "ignored" if item.get("status") == "ignored"
                         else "unanswered"
                     ),
                     "askedAtStageNumber": source_stage_number(
@@ -1403,9 +1404,13 @@ def serialize_session(database, session_id):
                         source_stage_number(item.get("answeredAtStageId"), version)
                         if item.get("answeredAtStageId") else None
                     ),
+                    "ignoredAtStageNumber": (
+                        source_stage_number(item.get("ignoredAtStageId"), version)
+                        if item.get("ignoredAtStageId") else None
+                    ),
                     "sourceTurnId": item.get("sourceTurnId"),
                     "answeredByTurnId": item.get("resolvedByTurnId"),
-                    "updatedAt": turn_created_at.get(
+                    "updatedAt": item.get("ignoredAt") or turn_created_at.get(
                         item.get("resolvedByTurnId")
                         or item.get("updatedFromTurnId")
                         or item.get("sourceTurnId")

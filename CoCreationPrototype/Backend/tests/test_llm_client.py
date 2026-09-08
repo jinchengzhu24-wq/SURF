@@ -1985,7 +1985,7 @@ class LLMClientTests(unittest.TestCase):
             "<GUIDANCE>\n"
             "INTENT: The designer wants the water to affect the route.\n"
             "</GUIDANCE>"
-        ])
+        ] * 3)
 
         self.assertEqual(result.guidance["move"], "clarify_intent")
         self.assertEqual(result.guidance["intentConfidence"], "medium")
@@ -2638,7 +2638,7 @@ class LLMClientTests(unittest.TestCase):
             [
                 "我同意，水现在更像装饰而不是路线边界。\n"
                 "<GUIDANCE>INTENT: 我暂时把你的方向理解为：我倒是认为得改动水域的形状</GUIDANCE>"
-            ],
+            ] * 3,
             language="zh-CN",
             conversation=[
                 {"role": "assistant", "content": "我原本认为补一个缺口就够。"},
@@ -2653,6 +2653,73 @@ class LLMClientTests(unittest.TestCase):
         self.assertTrue(any(marker in intent for marker in ("路线", "推进", "绕行", "选择")))
         self.assertNotIn("设计者", intent)
 
+    def test_short_model_intent_retries_until_body_and_card_are_detailed(self):
+        short = (
+            "I understand the feedback.\n"
+            "<GUIDANCE>INTENT: I think you may prefer clearer box spacing.</GUIDANCE>"
+        )
+        detailed_body = (
+            "Your comment points to the opening relationship between the two boxes rather than "
+            "to a generic request for more difficulty. I would separate visual legibility from "
+            "the later push-order consequence, because moving the boxes apart could clarify the "
+            "first choice while also changing how quickly their routes become dependent. I still "
+            "cannot tell whether independent openings or a readable dependency is the stronger "
+            "priority, so I would keep that distinction open before proposing a map revision."
+        )
+        detailed_card = (
+            "For now, I understand that you may prefer the opening box relationship to be easier "
+            "to read without removing meaningful planning. This reading comes from your wording "
+            "about the boxes feeling too close, which I treat as evidence rather than a confirmed "
+            "intention. The possible player consequence is a clearer first route choice while later "
+            "push decisions can still carry weight. If that is not the balance you care about, correct me."
+        )
+        result, client = self.execute(
+            [short, detailed_body + "\n<GUIDANCE>INTENT: " + detailed_card + "</GUIDANCE>"],
+            conversation=[
+                {"role": "user", "content": "I think the two boxes start too close together."}
+            ],
+        )
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertIsNone(
+            llm_client._intent_hypothesis_detail_issue(
+                result.guidance["intentHypothesis"], "en"
+            )
+        )
+        self.assertIsNone(llm_client._intent_body_detail_issue(detailed_body, "en"))
+
+    def test_visual_only_feedback_gets_detailed_uncertainty_fallback(self):
+        card = llm_client._detailed_intent_fallback(
+            "I think you may care more about gameplay.",
+            "I think this part looks ugly.",
+            "en",
+        )
+        self.assertIsNone(llm_client._intent_hypothesis_detail_issue(card, "en"))
+        self.assertIn("cannot yet tell", card)
+        self.assertIn("outline", card)
+        self.assertIn("route turns", card)
+
+    def test_intent_detail_rejects_incompatible_or_overcertain_claims(self):
+        incompatible = (
+            "For now, I understand two mutually incompatible directions in one inclination. "
+            "This reading comes from your wording and could affect the player experience. "
+            "I would carry both into a later revision even though they cannot coexist. "
+            "If that is not your intent, correct me."
+        )
+        overcertain = (
+            "For now, I understand that route clarity is central to your preference. "
+            "Because you moved one box, you definitely want every later push to be simpler. "
+            "That could change the player's route experience and the design tradeoff. "
+            "If that is not your intent, correct me."
+        )
+        self.assertIn(
+            "incompatible",
+            llm_client._intent_hypothesis_detail_issue(incompatible, "en"),
+        )
+        self.assertIn(
+            "certainty",
+            llm_client._intent_hypothesis_detail_issue(overcertain, "en"),
+        )
     def test_direction_question_goes_deeper_instead_of_asking_for_approval(self):
         question = llm_client._deterministic_key_question(
             [{"role": "user", "content": "我想让箱子贴着水边推进时更有路线判断。"}],
@@ -3844,6 +3911,75 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertEqual(result.guidance["uiCues"], [])
         self.assertIn("I would be guessing on your behalf", result.assistant_message)
+        self.assertIsNone(
+            llm_client._intent_hypothesis_detail_issue(
+                result.guidance["intentHypothesis"], "en"
+            )
+        )
+        self.assertIsNone(
+            llm_client._intent_body_detail_issue(result.assistant_message, "en")
+        )
+
+    def test_unclear_chinese_visual_revision_keeps_visual_play_boundary(self):
+        result, _ = self.execute(
+            ["\u6211\u9700\u8981\u5148\u7406\u89e3\u4f60\u7684\u91cd\u70b9\u3002"],
+            language="zh-CN",
+            conversation=[{
+                "role": "user",
+                "content": "\u6211\u89c9\u5f97\u8fd9\u91cc\u4e0d\u597d\u770b\uff0c\u5e2e\u6211\u4fee\u6539\u4e00\u4e0b\u3002",
+            }],
+        )
+        card = result.guidance["intentHypothesis"]
+        self.assertIsNotNone(card)
+        self.assertIn("\u89c6\u89c9", card)
+        self.assertIn("\u8def\u7ebf", card)
+        self.assertIn("\u4e24\u8005\u517c\u987e", result.assistant_message)
+        self.assertIsNone(llm_client._intent_hypothesis_detail_issue(card, "zh-CN"))
+        self.assertIsNone(
+            llm_client._intent_body_detail_issue(result.assistant_message, "zh-CN")
+        )
+
+    def test_needs_clarification_routing_keeps_detailed_orange_card(self):
+        result, _ = self.execute(
+            ["I need to understand the requested change first."],
+            conversation=[{"role": "user", "content": "Can you change it?"}],
+            stage_context={
+                "revisionRouting": "needs_clarification",
+                "proposalState": "clarifying",
+                "deferRevisionExecution": True,
+                "revisionRequestState": "needs_direction",
+                "discussionCardMode": "disagreement_only",
+            },
+        )
+        self.assertEqual(result.guidance["move"], "clarify_intent")
+        self.assertEqual(result.guidance["intentConfidence"], "low")
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["proposalOffer"])
+        self.assertIsNone(
+            llm_client._intent_hypothesis_detail_issue(
+                result.guidance["intentHypothesis"], "en"
+            )
+        )
+
+    def test_needs_clarification_routing_ignores_prior_assistant_revision_wording(self):
+        state, brief = llm_client._classify_revision_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": "We can discuss a route revision and make a proposal after your reaction.",
+                },
+                {
+                    "role": "user",
+                    "content": "This does not look good; can you change it?",
+                },
+            ],
+            {
+                "revisionRouting": "needs_clarification",
+                "vagueAestheticRevision": True,
+            },
+        )
+        self.assertEqual(state, "needs_direction")
+        self.assertIsNone(brief)
 
     def test_explicit_map_proposal_rejects_text_only_result(self):
         text_only = json.dumps({

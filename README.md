@@ -24,7 +24,7 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 当前询问四个中立的地图设计问题（首步检查、推箱依赖、空间分布、路线结构），前两题用于推断难度，后两题用于推断布局。AI 输出温暖的 AI reflection 以及难度/布局建议；四道答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI 推荐和用户最终确认一起保存，不会传入 8010 共创服务或其 LLM 上下文。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。8000 的两个 Agent 保持 `deepseek-v4-flash`；8010 的聊天助手和关卡修改助手、Stage 开场、翻译、Revision 与 Intent feedback review 流程统一使用 Kimi K2.6，不读取 8000 的 DeepSeek 环境变量，也不静默回退到 DeepSeek。当前 8010 前端缓存键为 `cocreation-question-memory-20260907-3`。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。8000 的两个 Agent 保持 `deepseek-v4-flash`；8010 的聊天助手和关卡修改助手、Stage 开场、翻译、Revision 与 Intent feedback review 流程统一使用 Kimi K2.6，不读取 8000 的 DeepSeek 环境变量，也不静默回退到 DeepSeek。当前 8010 前端缓存键为 `cocreation-intent-question-actions-20260908-1`。
 
 正式 Unity 共创会话在浏览器首次访问授权后开始 10 分钟倒计时。直访问示例会话不创建 deadline、不倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
 
@@ -168,6 +168,8 @@ python CoCreationPrototype/Backend/app.py
 
 2026-09-07 已部署共创问题追踪与 Intent 内容改写：共创进度左栏改为“未解决问题 / 已作答”，橙卡文本明确排除，历史 Stage 保持当时的问题状态；设计倾向证据严格限制为已表达方向、已确认决策和手动修改观察，并由独立 Kimi 任务生成可回退、可审计的展示摘要。发布前通过 SQLite backup API 生成 `cocreation-question-memory-final-20260907T105548Z.sqlite3`，仅上传 8010 的四个后端和三个前端运行文件；417 个 Python 测试、前端语法、Python 编译及差异检查通过。公网真实流程验证了问题记录、详细橙卡确认、explicit 兼容投影，以及保存后手动修改观察的 Kimi 详细文案和摘要。未修改 8000，未构建或上传 WebGL。
 
+2026-09-08 已部署橙卡详细表达与问题忽略机制：附带橙卡的正文和卡内暂定意图均保留证据、体验影响与可纠正边界；共创进度将已作答和已忽略问题统一归入“已处理”，当前问题可用“忽略”移出上下文，并用“恢复”重新打开。发布前通过 SQLite backup API 生成 `cocreation-intent-question-actions-20260908T120100Z.sqlite3`，仅更新 8010 后端和前端运行文件；425 个 Python 测试、前端语法、Python 编译及差异检查通过。未修改 8000，未构建或上传 WebGL。
+
 ## 8010 API
 
 ```text
@@ -226,7 +228,9 @@ DesignContext schema v2 在不新增业务表的前提下增加可追踪的 Inte
 
 模型提供的 `evidenceText` 不再有权把目标或约束升级为 `explicit`；explicit 只从用户自己的陈述性设计子句中确定性提取，问题、假设、引用和路线求助不进入明确意图。v1 快照启动时确定性迁移到 v2，旧 inferred 仅作为 `legacy_unverified` 暂定假设保留，不调用模型、不从历史助手正文或地图 diff 补造意图。指令式记忆文本会被隔离，最终 `designer_intentions` 仍保持独立自报告。
 
-新版“共创进度”按 Stage 快照展示两栏：`未解决问题`确定性提取最终实际展示的 AI 正文与非橙卡卡片问句，并由独立 Kimi 语义审查标记作答状态，已作答项保留在折叠历史中；橙色 TENTATIVE INTENT 卡中的问题不进入这里。`设计倾向`只投影用户通过橙卡确认或修订后的 confirmed hypothesis，橙卡原文保留为 canonical 记录，展示主体可由 Kimi 概括改写。每条倾向的“为什么我会这样理解”最多显示最近 12 条逐 Stage 证据，并严格限于用户明确表达、已确认方案/分歧决策和确定性手动修改观察。查看历史 Stage 时不泄漏后续答案、记忆或证据；旧 API 字段继续保留兼容。
+新版“共创进度”按 Stage 快照展示两栏：`未解决问题`确定性提取最终实际展示的 AI 正文与非橙卡卡片问句，并由独立 Kimi 语义审查标记作答状态；用户可确定性“忽略”当前问题，并在折叠的“已处理”区通过“恢复”重新打开，忽略/恢复均不调用 LLM、不创建对话 Turn。橙色 TENTATIVE INTENT 卡中的问题不进入问题记录。`设计倾向`只投影用户通过橙卡确认或修订后的 confirmed hypothesis，橙卡原文保留为 canonical 记录，展示主体可由 Kimi 概括改写。每条倾向的“为什么我会这样理解”最多显示最近 12 条逐 Stage 证据，并严格限于用户明确表达、已确认方案/分歧决策和确定性手动修改观察。查看历史 Stage 时不泄漏后续回答、忽略、恢复、记忆或证据；旧 API 字段继续保留兼容。
+
+普通对话附带 TENTATIVE INTENT 时，AI 正文必须先说明具体反馈依据、可能关联的设计重点与玩法体验以及仍不确定的边界；橙卡内部以 2–4 句完整表达一个可纠正的主体倾向。中文通常为 100–240 字，英文通常为 55–130 词；过短、只给结论、混合不兼容目标或把行为证据直接写成确定意图的模型输出会在既有预算内重试，最终确定性回退也保留完整证据与纠正边界。仅有“不好看”等视觉反馈时，不会擅自确定用户更重视玩法，而会保留几何观感、路线节奏或两者兼顾之间的歧义。
 
 橙卡只出现在普通非方案对话中，并复用紫卡的按钮与 busy/失效状态。`符合我的想法`、`不是我的意思`、`我想调整一下`必须通过专用 feedback 接口操作；聊天框里的“对/不是”不再隐式改变状态。否定立即落为 rejected 且不调用 Kimi；无既有倾向时确认可直接生效；修订或存在其他有效倾向时由独立 `intent_feedback_review` 任务只审查语义清晰度与兼容性。冲突或不清楚只写 pending 审计，并返回同一 hypothesis ID 的 adjust-only 橙卡循环；通过审查后才写入长期倾向并替代真正冲突的旧倾向。pending、rejected 与 tentative 都不进入 Revision 硬约束。
 

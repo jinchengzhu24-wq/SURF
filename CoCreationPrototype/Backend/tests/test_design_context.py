@@ -14,6 +14,7 @@ if str(BACKEND_DIR) not in sys.path:
 import repository
 from design_context import (
     apply_question_answer_review,
+    apply_question_feedback,
     apply_hypothesis_feedback,
     add_confirmed_decision,
     add_open_question,
@@ -66,6 +67,32 @@ class DesignContextUnitTests(unittest.TestCase):
         )
         self.assertEqual(len(context["openQuestions"]), 1)
         self.assertEqual(context["openQuestions"][0]["question"], "你刚才用了多少步？")
+
+    def test_question_ignore_and_restore_preserve_identity(self):
+        context = add_open_question(
+            empty_design_context(), "Which route should stay open?", "stage-1", "turn-1"
+        )
+        question_id = context["openQuestions"][0]["id"]
+        ignored, changed = apply_question_feedback(
+            context, question_id, "ignore", "stage-2", "2026-09-08T01:02:03Z"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(ignored["openQuestions"][0]["status"], "ignored")
+        self.assertEqual(ignored["openQuestions"][0]["ignoredAtStageId"], "stage-2")
+        reviewed = apply_question_answer_review(
+            ignored, [question_id], "stage-2", "user-turn"
+        )
+        self.assertEqual(reviewed["openQuestions"][0]["status"], "ignored")
+        repeated = add_open_question(
+            ignored, "Which route should stay open?", "stage-2", "turn-2"
+        )
+        self.assertEqual(repeated["openQuestions"][0]["status"], "ignored")
+        restored, changed = apply_question_feedback(
+            repeated, question_id, "restore", "stage-2", "2026-09-08T01:03:03Z"
+        )
+        self.assertTrue(changed)
+        self.assertEqual(restored["openQuestions"][0]["status"], "open")
+        self.assertIsNone(restored["openQuestions"][0]["ignoredAtStageId"])
 
     def test_resolved_revision_supersedes_old_inclination_and_confirmed_goal(self):
         context, old_id = merge_intent_hypothesis(
@@ -591,7 +618,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                         """,
                         (session_id,),
                     ).fetchone()[0]
-                    self.assertEqual(migrated["schemaVersion"], 3)
+                    self.assertEqual(migrated["schemaVersion"], 4)
                 self.assertEqual(events, 1)
                 self.assertEqual(
                     migrated["intentHypotheses"][0]["status"],

@@ -1862,6 +1862,21 @@ textarea:focus-visible {
     opacity: 0.86;
 }
 
+.progress-item-question.ignored {
+    border-left-color: #8b6d51;
+    color: #6a5947;
+    background: #e8ddca;
+    box-shadow: inset 0 0 0 1px #f8eedc;
+    opacity: 0.9;
+}
+
+.question-feedback-button {
+    min-height: 24px;
+    margin-top: 7px;
+    padding: 3px 9px;
+    font-size: 9px;
+}
+
 .progress-item-inclination {
     border-color: #9c6b3a;
     border-left-color: #6d3f20;

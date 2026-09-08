@@ -154,6 +154,20 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         )
         self.assertEqual(
             backend._adaptive_revision_routing(
+                "\u6211\u89c9\u5f97\u8fd9\u91cc\u4e0d\u597d\u770b\uff0c\u5e2e\u6211\u4fee\u6539\u4e00\u4e0b",
+                empty_claims,
+                snapshot,
+                proposal_discovery={
+                    "status": "clarifying",
+                    "userEvidence": [
+                        "\u6211\u89c9\u5f97\u8fd9\u91cc\u4e0d\u597d\u770b\uff0c\u5e2e\u6211\u4fee\u6539\u4e00\u4e0b"
+                    ],
+                },
+            ),
+            "needs_clarification",
+        )
+        self.assertEqual(
+            backend._adaptive_revision_routing(
                 "\u6211\u6709\u70b9\u8ff7\u832b\uff0c\u7ed9\u6211\u4e00\u70b9\u601d\u8def",
                 empty_claims,
                 snapshot,
@@ -602,7 +616,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("cocreation-question-memory-20260907-3", index_response.text)
+        self.assertIn("cocreation-intent-question-actions-20260908-1", index_response.text)
         self.assertIn("proposal-mode-toggle", index_response.text)
         self.assertIn("proposal-toggle-track", index_response.text)
         self.assertIn("proposal-toggle-thumb", index_response.text)
@@ -723,6 +737,10 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('proposalCompanionManualText', js_response.text)
         self.assertIn('revision: "REVISION / 修改建议"', js_response.text)
         self.assertIn('intent: "TENTATIVE INTENT / 暂定意图"', js_response.text)
+        self.assertIn('restoreQuestion = "\\u6062\\u590d"', js_response.text)
+        self.assertIn('questionFeedbackBusy: new Set()', js_response.text)
+        self.assertIn('record.setAttribute("aria-busy", "true")', js_response.text)
+        self.assertIn('.question-feedback-button', css_response.text)
         self.assertIn('"execute_revision", "draftSuggestedRevision"', js_response.text)
         self.assertIn('isLatestRevisionOfferTurn', js_response.text)
         self.assertIn('guidance-cue-button-stale', css_response.text)

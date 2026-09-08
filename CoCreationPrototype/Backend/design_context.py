@@ -9,11 +9,11 @@ import hashlib
 import re
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 AUTHORITIES = {"explicit", "confirmed", "inferred"}
 GOAL_STATUSES = {"active", "superseded", "rejected"}
 DECISION_STATUSES = {"active", "superseded"}
-QUESTION_STATUSES = {"open", "answered", "resolved"}
+QUESTION_STATUSES = {"open", "answered", "ignored", "resolved"}
 HYPOTHESIS_STATUSES = {"tentative", "confirmed", "rejected", "superseded", "legacy_unverified"}
 INTENT_TOPICS = {
     "difficulty", "route_readability", "push_dependency", "space_distribution",
@@ -332,6 +332,8 @@ def _normalize_question(item, index=0):
         "answeredAtStageId": _source(
             item.get("answeredAtStageId") or item.get("resolvedAtStageId")
         ),
+        "ignoredAtStageId": _source(item.get("ignoredAtStageId")),
+        "ignoredAt": _text(item.get("ignoredAt"), 64) or None,
         "sourceKind": _text(item.get("sourceKind"), 32) or "legacy",
     }
 
@@ -903,6 +905,8 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
         "updatedFromTurnId": _source(turn_id),
         "resolvedByTurnId": None,
         "answeredAtStageId": None,
+        "ignoredAtStageId": None,
+        "ignoredAt": None,
         "sourceKind": _text(entry.get("sourceKind"), 32) or "model_patch",
     })
     return True
@@ -947,6 +951,29 @@ def apply_question_answer_review(context, answered_question_ids, stage_id=None, 
     result["updatedFromStageId"] = _source(stage_id)
     result["updatedFromTurnId"] = _source(turn_id)
     return normalize_design_context(result)
+
+
+def apply_question_feedback(context, question_id, action, stage_id=None, changed_at=None):
+    """Apply a deterministic ignore/restore action to one visible question."""
+    result = normalize_design_context(context)
+    target = next(
+        (item for item in result["openQuestions"] if item.get("id") == _source(question_id)),
+        None,
+    )
+    if target is None:
+        return result, False
+    if action == "ignore" and target.get("status") == "open":
+        target["status"] = "ignored"
+        target["ignoredAtStageId"] = _source(stage_id)
+        target["ignoredAt"] = _text(changed_at, 64) or None
+    elif action == "restore" and target.get("status") == "ignored":
+        target["status"] = "open"
+        target["ignoredAtStageId"] = None
+        target["ignoredAt"] = None
+    else:
+        return result, False
+    result["updatedFromStageId"] = _source(stage_id)
+    return normalize_design_context(result), True
 
 
 def extract_explicit_user_memory(user_text):

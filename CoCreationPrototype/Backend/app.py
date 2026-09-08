@@ -87,6 +87,7 @@ from design_context import (
     add_confirmed_decision,
     add_open_question,
     apply_question_answer_review,
+    apply_question_feedback,
     add_rejected_decision,
     clone_design_context,
     design_level_open_questions,
@@ -538,6 +539,12 @@ class IntentFeedbackRequest(StrictModel):
     action: Literal["confirm", "reject", "revise"]
     candidateText: str | None = None
     sourceTurnId: str
+    baseVersionId: str
+    idempotencyKey: str
+
+
+class QuestionFeedbackRequest(StrictModel):
+    action: Literal["ignore", "restore"]
     baseVersionId: str
     idempotencyKey: str
 
@@ -1441,6 +1448,112 @@ def _intent_feedback_signature(payload, hypothesis_id, candidate):
     }
 
 
+def _question_feedback_event(database, session_id, idempotency_key):
+    rows = database.execute(
+        """
+        SELECT payload_json FROM audit_events
+        WHERE session_id = ? AND event_type = 'question_feedback_applied'
+        ORDER BY id DESC
+        """,
+        (session_id,),
+    ).fetchall()
+    for row in rows:
+        event = load_json(row["payload_json"]) or {}
+        if event.get("idempotencyKey") == idempotency_key:
+            return event
+    return None
+
+
+@app.post("/api/sessions/{session_id}/questions/{question_id}/feedback")
+def submit_question_feedback(
+    session_id: str,
+    question_id: str,
+    payload: QuestionFeedbackRequest,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
+):
+    """Deterministically ignore or restore one visible current-Stage question."""
+    _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    _validate_identifier(question_id, "questionId")
+    signature = {
+        "questionId": question_id,
+        "action": payload.action,
+        "baseVersionId": payload.baseVersionId,
+    }
+    with message_request_lock(session_id, payload.idempotencyKey):
+        with connect(immediate=True) as database:
+            session = require_browser_session(database, session_id, access_cookie)
+            prior = _question_feedback_event(
+                database, session_id, payload.idempotencyKey
+            )
+            if prior is not None:
+                if prior.get("request") != signature:
+                    raise ApiError(
+                        409,
+                        "IDEMPOTENCY_CONFLICT",
+                        "The question feedback key was reused for a different request.",
+                    )
+                return {
+                    "outcome": prior["outcome"],
+                    "session": serialize_session(database, session_id),
+                }
+
+            session = require_active_session(database, session_id, access_cookie)
+            require_current_base(session, payload.baseVersionId)
+            context = load_design_context(database, session_id, payload.baseVersionId)
+            target = next(
+                (
+                    item for item in context.get("openQuestions", [])
+                    if item.get("id") == question_id
+                ),
+                None,
+            )
+            expected_status = "open" if payload.action == "ignore" else "ignored"
+            if (
+                target is None
+                or target.get("sourceKind") not in {"visible_output", "legacy"}
+                or target.get("status") != expected_status
+            ):
+                raise ApiError(
+                    409,
+                    "STALE_QUESTION",
+                    "This question is no longer available for that action.",
+                )
+
+            changed_at = utc_now()
+            context, changed = apply_question_feedback(
+                context,
+                question_id,
+                payload.action,
+                payload.baseVersionId,
+                changed_at,
+            )
+            if not changed:
+                raise ApiError(
+                    409,
+                    "STALE_QUESTION",
+                    "This question is no longer available for that action.",
+                )
+            save_design_context(database, payload.baseVersionId, context)
+            record_event(
+                database,
+                session_id,
+                "question_feedback_applied",
+                {
+                    "request": signature,
+                    "idempotencyKey": payload.idempotencyKey,
+                    "questionId": question_id,
+                    "versionId": payload.baseVersionId,
+                    "action": payload.action,
+                    "outcome": "applied",
+                },
+                changed_at,
+            )
+            return {
+                "outcome": "applied",
+                "session": serialize_session(database, session_id),
+            }
+
+
 def _require_actionable_intent_card(
     database,
     session_id,
@@ -2006,6 +2119,9 @@ def _send_message_locked(
         if stage_context["adaptiveProposalCompletion"]:
             revision_routing = "proposal"
         stage_context["revisionRouting"] = revision_routing
+        stage_context["vagueAestheticRevision"] = _is_vague_aesthetic_revision(
+            content
+        )
         proposal_state = {
             "proposal": "ready_with_explicit_binding",
             "proposal_conservative": "ready_with_conservative_binding",
@@ -5988,12 +6104,31 @@ def _proposal_discovery_is_sufficient(discovery, snapshot):
     )
 
 
+def _is_vague_aesthetic_revision(content):
+    text = str(content or "")
+    return bool(re.search(
+        r"(?:\u4e0d\u597d\u770b|\u4e0d\u7f8e\u89c2|\u770b\u8d77\u6765\u4e0d\u5bf9|\b(?:ugly|doesn'?t look (?:good|right)|not aesthetic)\b)",
+        text,
+        flags=re.IGNORECASE,
+    )) and not bool(re.search(
+        r"(?:\u8f6e\u5ed3|\u5730\u5f62|\u5206\u5272|\u5bf9\u79f0|\u901a\u9053|\u8def\u7ebf|\u8f6c\u6298|\u8282\u594f|"
+        r"\u6c34\u57df|\u5899|\u7bb1\u5b50|\u76ee\u6807|\b(?:outline|geometry|composition|symmetry|corridor|route|turn|rhythm|water|wall|box|target)\b)",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
 def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_discovery=None):
     """Choose proposal expansion versus one targeted clarification question."""
     text = str(content or "").strip()
     if not text:
         return "none"
     if (user_map_claims or {}).get("conflicts"):
+        return "needs_clarification"
+    if _is_vague_aesthetic_revision(text):
+        # Evaluate this before proposal-discovery sufficiency: vague aesthetic
+        # feedback must not become a concrete proposal merely because the same
+        # turn also asks the assistant to make a change.
         return "needs_clarification"
 
     discovery = proposal_discovery or {}

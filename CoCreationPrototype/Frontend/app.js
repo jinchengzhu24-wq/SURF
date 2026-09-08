@@ -347,11 +347,16 @@ translations.en.confirmedDecisions = "Confirmed decisions";
 translations.en.unresolvedQuestions = "Unresolved questions";
 translations.en.noConfirmedDecisions = "No confirmed decisions yet.";
 translations.en.noUnresolvedQuestions = "No unresolved questions yet.";
-translations.en.answeredQuestions = "Answered questions";
-translations.en.noAnsweredQuestions = "No answered questions yet.";
+translations.en.answeredQuestions = "Processed";
+translations.en.noAnsweredQuestions = "No processed questions yet.";
 translations.en.askedAtStage = "Asked at Stage {stage}";
 translations.en.answeredAtStage = "Answered at Stage {stage}";
+translations.en.ignoredAtStage = "Ignored at Stage {stage}";
 translations.en.answeredLabel = "Answered";
+translations.en.ignoredLabel = "Ignored";
+translations.en.ignoreQuestion = "Ignore";
+translations.en.restoreQuestion = "Restore";
+translations.en.error_STALE_QUESTION = "This question is no longer available for that action.";
 translations.en.viewDetailedObservation = "View detailed observation";
 translations.en.fromStage = "From Stage {stage}";
 translations.en.explicitLabel = "Explicit";
@@ -386,11 +391,16 @@ translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
 translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
 translations["zh-CN"].noConfirmedDecisions = "\u6682\u65e0\u5df2\u786e\u8ba4\u51b3\u7b56\u3002";
 translations["zh-CN"].noUnresolvedQuestions = "\u6682\u65e0\u672a\u89e3\u51b3\u95ee\u9898\u3002";
-translations["zh-CN"].answeredQuestions = "\u5df2\u4f5c\u7b54";
-translations["zh-CN"].noAnsweredQuestions = "\u6682\u65e0\u5df2\u4f5c\u7b54\u95ee\u9898\u3002";
+translations["zh-CN"].answeredQuestions = "\u5df2\u5904\u7406";
+translations["zh-CN"].noAnsweredQuestions = "\u6682\u65e0\u5df2\u5904\u7406\u95ee\u9898\u3002";
 translations["zh-CN"].askedAtStage = "\u63d0\u95ee\u4e8e Stage {stage}";
 translations["zh-CN"].answeredAtStage = "\u4f5c\u7b54\u4e8e Stage {stage}";
+translations["zh-CN"].ignoredAtStage = "\u5ffd\u7565\u4e8e Stage {stage}";
 translations["zh-CN"].answeredLabel = "\u5df2\u4f5c\u7b54";
+translations["zh-CN"].ignoredLabel = "\u5df2\u5ffd\u7565";
+translations["zh-CN"].ignoreQuestion = "\u5ffd\u7565";
+translations["zh-CN"].restoreQuestion = "\u6062\u590d";
+translations["zh-CN"].error_STALE_QUESTION = "\u8fd9\u4e2a\u95ee\u9898\u5df2\u65e0\u6cd5\u6267\u884c\u8be5\u64cd\u4f5c\u3002";
 translations["zh-CN"].viewDetailedObservation = "\u67e5\u770b\u8be6\u7ec6\u89c2\u5bdf";
 translations["zh-CN"].fromStage = "\u6765\u81ea Stage {stage}";
 translations["zh-CN"].explicitLabel = "\u5df2\u660e\u786e\u8868\u8fbe";
@@ -422,6 +432,7 @@ const state = {
     deadlineTimerId: null,
     pendingMessage: null,
     proposalMode: false,
+    questionFeedbackBusy: new Set(),
     assessing: new Set(),
     translating: new Set(),
     translationFailures: new Set(),
@@ -721,16 +732,18 @@ function renderProgressContext() {
     const questions = Array.isArray(context.questionRecords) ? context.questionRecords : [];
     renderQuestionRecords(
         elements.unresolvedQuestionsList,
-        questions.filter(item => item?.status !== "answered"),
+        questions.filter(item => item?.status === "unanswered"),
         false,
     );
     renderQuestionRecords(
         elements.answeredQuestionsList,
-        questions.filter(item => item?.status === "answered"),
+        questions.filter(item => item?.status === "answered" || item?.status === "ignored"),
         true,
     );
     if (elements.answeredQuestionsPanel) {
-        elements.answeredQuestionsPanel.hidden = !questions.some(item => item?.status === "answered");
+        elements.answeredQuestionsPanel.hidden = !questions.some(
+            item => item?.status === "answered" || item?.status === "ignored"
+        );
     }
     renderDesignInclinations(context.designInclinations);
     requestAnimationFrame(updateProgressPanelMaxHeight);
@@ -749,7 +762,9 @@ function renderQuestionRecords(container, items, answered) {
     }
     entries.forEach(item => {
         const record = document.createElement("article");
-        record.className = `progress-item progress-item-question ${answered ? "answered" : "unanswered"}`;
+        const ignored = item?.status === "ignored";
+        record.className = `progress-item progress-item-question ${ignored ? "ignored" : answered ? "answered" : "unanswered"}`;
+        record.setAttribute("aria-busy", "false");
         const text = document.createElement("p");
         text.className = "progress-item-text";
         text.textContent = String(item?.question || "").trim();
@@ -757,15 +772,72 @@ function renderQuestionRecords(container, items, answered) {
         const meta = document.createElement("small");
         const asked = Number(item?.askedAtStageNumber);
         const answeredAt = Number(item?.answeredAtStageNumber);
-        const values = [answered ? t("answeredLabel") : t("unresolvedLabel")];
+        const ignoredAt = Number(item?.ignoredAtStageNumber);
+        const values = [ignored ? t("ignoredLabel") : answered ? t("answeredLabel") : t("unresolvedLabel")];
         if (Number.isInteger(asked)) values.push(t("askedAtStage").replace("{stage}", String(asked)));
         if (answered && Number.isInteger(answeredAt)) {
             values.push(t("answeredAtStage").replace("{stage}", String(answeredAt)));
         }
         meta.textContent = values.join(" \u00b7 ");
         record.appendChild(meta);
+        if (ignored && Number.isInteger(ignoredAt)) {
+            meta.textContent += ` \u00b7 ${t("ignoredAtStage").replace("{stage}", String(ignoredAt))}`;
+        }
+        if (item?.questionId && (!answered || ignored)) {
+            const action = ignored ? "restore" : "ignore";
+            const feedbackKey = `${item.questionId}:${action}`;
+            const button = makeButton(
+                t(ignored ? "restoreQuestion" : "ignoreQuestion"),
+                "secondary-button guidance-cue-button question-feedback-button",
+                () => void submitQuestionFeedback(action, item, record),
+            );
+            button.dataset.feedbackKey = feedbackKey;
+            button.disabled = state.busy || !canEditSelected()
+                || state.questionFeedbackBusy.has(feedbackKey);
+            record.appendChild(button);
+        }
         container.appendChild(record);
     });
+}
+
+async function submitQuestionFeedback(action, item, record, idempotencyKey = null) {
+    if (state.busy || !canEditSelected() || !item?.questionId) return;
+    const feedbackKey = `${item.questionId}:${action}`;
+    if (state.questionFeedbackBusy.has(feedbackKey)) return;
+    const requestKey = idempotencyKey || uniqueId(`question-${action}`);
+    state.questionFeedbackBusy.add(feedbackKey);
+    record.setAttribute("aria-busy", "true");
+    record.querySelectorAll("button").forEach(button => { button.disabled = true; });
+    try {
+        const result = await api(
+            `/api/sessions/${state.sessionId}/questions/${item.questionId}/feedback`,
+            {
+                method: "POST",
+                body: {
+                    action,
+                    baseVersionId: state.session.currentVersionId,
+                    idempotencyKey: requestKey,
+                },
+            },
+        );
+        state.session = result.session;
+        selectVersion(state.session.currentVersionId, false);
+        render();
+    } catch (error) {
+        showError(
+            error,
+            () => submitQuestionFeedback(action, item, record, requestKey),
+        );
+    } finally {
+        state.questionFeedbackBusy.delete(feedbackKey);
+        if (record.isConnected) {
+            record.setAttribute("aria-busy", "false");
+            record.querySelectorAll("button").forEach(button => {
+                button.disabled = state.busy || !canEditSelected();
+            });
+        }
+        updateControls();
+    }
 }
 
 function updateProgressPanelMaxHeight() {
@@ -1871,6 +1943,10 @@ function updateControls() {
     elements.proposalRequestButton.classList.toggle("is-active", state.proposalMode);
     elements.proposalRequestButton.setAttribute("aria-pressed", state.proposalMode ? "true" : "false");
     elements.sendButton.disabled = state.busy || !editable || !elements.messageInput.value.trim();
+    document.querySelectorAll(".question-feedback-button").forEach(button => {
+        button.disabled = state.busy || !editable
+            || state.questionFeedbackBusy.has(button.dataset.feedbackKey || "");
+    });
     elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
     elements.typingRow.hidden = !state.chatBusy;
 }

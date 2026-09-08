@@ -4054,6 +4054,114 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(answered_progress["questionRecords"][0]["status"], "answered")
         self.assertEqual(answered_progress["questionRecords"][0]["answeredAtStageNumber"], 1)
 
+    def test_visible_question_can_be_ignored_and_restored_without_llm_or_turns(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I see one route question worth keeping open. Which route should remain readable?",
+            1,
+            "question-feedback-opening",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "question-feedback-opening"},
+            )
+        progress = next(
+            item for item in assessed.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        question_id = progress["questionRecords"][0]["questionId"]
+        turn_count = len(assessed.json()["turns"])
+
+        wrong_stage = self.client.post(
+            f"/api/sessions/{self.session_id}/questions/{question_id}/feedback",
+            json={
+                "action": "ignore",
+                "baseVersionId": "not-the-current-stage",
+                "idempotencyKey": "question-ignore-wrong-stage",
+            },
+        )
+        self.assertEqual(wrong_stage.status_code, 409, wrong_stage.text)
+        self.assertEqual(wrong_stage.json()["code"], "VERSION_CONFLICT")
+
+        with patch.object(backend, "review_question_answers") as review:
+            ignored = self.client.post(
+                f"/api/sessions/{self.session_id}/questions/{question_id}/feedback",
+                json={
+                    "action": "ignore",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "question-ignore-001",
+                },
+            )
+        self.assertEqual(ignored.status_code, 200, ignored.text)
+        review.assert_not_called()
+        ignored_progress = next(
+            item for item in ignored.json()["session"]["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(ignored_progress["questionRecords"][0]["status"], "ignored")
+        self.assertEqual(ignored_progress["questionRecords"][0]["ignoredAtStageNumber"], 1)
+        self.assertEqual(ignored_progress["unresolvedQuestions"], [])
+        self.assertEqual(len(ignored.json()["session"]["turns"]), turn_count)
+
+        repeated = self.client.post(
+            f"/api/sessions/{self.session_id}/questions/{question_id}/feedback",
+            json={
+                "action": "ignore",
+                "baseVersionId": version_id,
+                "idempotencyKey": "question-ignore-001",
+            },
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+
+        key_conflict = self.client.post(
+            f"/api/sessions/{self.session_id}/questions/{question_id}/feedback",
+            json={
+                "action": "restore",
+                "baseVersionId": version_id,
+                "idempotencyKey": "question-ignore-001",
+            },
+        )
+        self.assertEqual(key_conflict.status_code, 409, key_conflict.text)
+        self.assertEqual(key_conflict.json()["code"], "IDEMPOTENCY_CONFLICT")
+
+        restored = self.client.post(
+            f"/api/sessions/{self.session_id}/questions/{question_id}/feedback",
+            json={
+                "action": "restore",
+                "baseVersionId": version_id,
+                "idempotencyKey": "question-restore-001",
+            },
+        )
+        self.assertEqual(restored.status_code, 200, restored.text)
+        restored_progress = next(
+            item for item in restored.json()["session"]["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(restored_progress["questionRecords"][0]["status"], "unanswered")
+        self.assertIsNone(restored_progress["questionRecords"][0]["ignoredAtStageNumber"])
+
+        stale = self.client.post(
+            f"/api/sessions/{self.session_id}/questions/{question_id}/feedback",
+            json={
+                "action": "restore",
+                "baseVersionId": version_id,
+                "idempotencyKey": "question-restore-stale",
+            },
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+        self.assertEqual(stale.json()["code"], "STALE_QUESTION")
+
     def test_active_disagreement_next_question_enters_progress_after_opening(self):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(
