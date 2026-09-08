@@ -173,25 +173,6 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 .chat-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; }
 .history-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 13px; border-bottom: 1px solid #ecd48c; color: #684d00; background: var(--amber-soft); font-size: 11px; }
 .history-banner button { border: 0; color: var(--amber); background: transparent; cursor: pointer; font-weight: 800; }
-.progress-panel { border-bottom: 1px solid var(--border); background: var(--surface-soft); }
-.progress-panel > summary { padding: 9px 13px; color: var(--brand-dark); background: #d7e4e8; cursor: pointer; font-family: Consolas, "Courier New", monospace; font-size: 11px; font-weight: 900; list-style: none; }
-.progress-panel > summary::-webkit-details-marker { display: none; }
-.progress-panel > summary::before { content: "+"; display: inline-block; width: 16px; color: var(--brand); font-size: 14px; }
-.progress-panel[open] > summary::before { content: "-"; }
-.progress-panel-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px 13px 12px; border-top: 1px solid #bdcdd1; }
-.progress-section { min-width: 0; padding: 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
-.progress-section h3 { margin: 0 0 8px; color: var(--brand-dark); font-family: Consolas, "Courier New", monospace; font-size: 10px; }
-.progress-items { display: grid; gap: 7px; }
-.progress-item { padding: 8px; border-left: 3px solid var(--brand); background: #f8f7ef; }
-.progress-item-question { border-left-color: var(--amber); background: #fffaf0; }
-.answered-questions { margin-top: 9px; border-top: 1px dashed var(--border-strong); padding-top: 7px; }
-.answered-questions > summary { color: var(--muted); cursor: pointer; font-size: 10px; font-weight: 800; }
-.answered-questions .progress-items { margin-top: 7px; }
-.progress-item-question.answered { opacity: .78; border-left-color: #747b7c; background: #ecebe5; }
-.progress-item-text, .progress-item-reason, .progress-empty { margin: 0; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
-.progress-item-reason { margin-top: 5px; color: var(--muted); font-size: 9px; }
-.progress-item small { display: block; margin-top: 6px; color: var(--muted); font-family: Consolas, "Courier New", monospace; font-size: 8px; }
-.progress-empty { color: var(--muted); }
 .chat-scroll {
     flex: 1 1 0;
     min-height: 0;
@@ -1444,6 +1425,7 @@ main {
         var(--pixel-shadow);
 }
 
+/* Retired legacy progress styling. The neutral task log below is authoritative.
 .progress-panel {
     margin: 0 17px;
     border: 0;
@@ -1624,6 +1606,393 @@ main {
     font-size: 12px;
     font-weight: 800;
 }
+*/
+
+/* Co-creation progress: neutral pixel-adventure task log. */
+.progress-panel {
+    margin: 0;
+    overflow: hidden;
+    border: 3px solid var(--stone-dark);
+    border-radius: 2px;
+    background: #e8d7b9;
+    box-shadow:
+        inset 0 0 0 2px #c99458,
+        3px 3px 0 rgba(76, 45, 28, 0.38);
+}
+
+.progress-panel[open] {
+    display: flex;
+    max-height: var(--progress-panel-max-height, 44%);
+    min-height: 0;
+    flex-direction: column;
+}
+
+.progress-panel > summary {
+    display: flex;
+    min-height: 36px;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 3px solid var(--wood-dark);
+    color: #fff3b5;
+    background-color: var(--wood);
+    background-image:
+        linear-gradient(rgba(255, 214, 140, 0.22) 0 3px, transparent 3px),
+        repeating-linear-gradient(
+            90deg,
+            transparent 0 78px,
+            rgba(67, 36, 18, 0.18) 78px 80px,
+            rgba(220, 157, 84, 0.12) 80px 82px
+        );
+    box-shadow:
+        inset 0 0 0 2px var(--wood-light),
+        inset 0 -2px 0 rgba(56, 28, 13, 0.3);
+    cursor: pointer;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    list-style: none;
+}
+
+.progress-panel > summary::-webkit-details-marker,
+.answered-questions > summary::-webkit-details-marker {
+    display: none;
+}
+
+.progress-panel > summary::before {
+    width: 14px;
+    color: #f0cd70;
+    content: "\25B6";
+    font-size: 11px;
+}
+
+.progress-panel[open] > summary::before { content: "\25BC"; }
+.progress-panel > summary:hover { background-color: #a86a32; }
+
+.progress-panel > summary:focus-visible,
+.answered-questions > summary:focus-visible,
+.manual-observation-detail > summary:focus-visible {
+    outline: 3px solid #ffe188;
+    outline-offset: -3px;
+}
+
+.progress-panel-body {
+    display: grid;
+    min-height: 0;
+    flex: 1 1 auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    max-height: var(--progress-panel-body-max-height, calc(44vh - 36px));
+    padding: 11px 12px 13px;
+    background:
+        linear-gradient(rgba(255, 255, 255, 0.24), rgba(255, 255, 255, 0)),
+        #e8d7b9;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-color: #7d8581 #c8a478;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+}
+
+.progress-panel-body::-webkit-scrollbar { width: 9px; }
+.progress-panel-body::-webkit-scrollbar-track { background: #c8a478; }
+.progress-panel-body::-webkit-scrollbar-thumb {
+    border: 2px solid #c8a478;
+    border-radius: 1px;
+    background: #7d8581;
+}
+
+.progress-panel-body::-webkit-scrollbar-thumb:hover { background: #59625e; }
+
+.progress-section {
+    --progress-accent: #752719;
+    --progress-section-surface: #f8e3dc;
+    --progress-section-heading: #f1d1c8;
+    --progress-item-surface: #fff9f5;
+    min-width: 0;
+    border: 2px solid #4c5553;
+    border-radius: 1px;
+    border-left: 5px solid var(--progress-accent);
+    background: var(--progress-section-surface);
+    box-shadow:
+        inset 0 0 0 1px #fffaf0,
+        3px 3px 0 rgba(47, 51, 47, 0.42);
+}
+
+.progress-section-inclinations {
+    --progress-accent: #765017;
+    --progress-section-surface: #f4e7c3;
+    --progress-section-heading: #ecdfb4;
+    --progress-item-surface: #fffaf0;
+}
+
+.progress-section h3 {
+    display: flex;
+    min-height: 34px;
+    align-items: center;
+    gap: 7px;
+    margin: 0;
+    padding: 6px 9px;
+    border-bottom: 2px solid #7d8279;
+    color: #24302e;
+    background: var(--progress-section-heading);
+    box-shadow: inset 0 -1px 0 #fffaf0;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    font-weight: 950;
+    letter-spacing: 0.02em;
+}
+
+.progress-section h3::before {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    flex: 0 0 auto;
+    border: 2px solid color-mix(in srgb, var(--progress-accent) 74%, #252b2a);
+    background: var(--progress-accent);
+    box-shadow: 1px 1px 0 rgba(37, 43, 42, 0.45);
+    content: "";
+}
+
+.progress-items {
+    display: grid;
+    gap: 8px;
+    padding: 9px;
+}
+
+.progress-item {
+    --progress-item-accent: var(--progress-accent);
+    position: relative;
+    min-width: 0;
+    padding: 9px 10px 8px 21px;
+    border: 1px solid #a9aa9f;
+    border-radius: 0;
+    color: #26302e;
+    background: var(--progress-item-surface);
+    box-shadow:
+        inset 0 0 0 1px #fffdf7,
+        2px 2px 0 rgba(58, 63, 59, 0.22);
+}
+
+.progress-item::before {
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    left: 7px;
+    width: 7px;
+    box-sizing: border-box;
+    border: 1px solid #1c2523;
+    background: var(--progress-item-accent);
+    box-shadow: 1px 1px 0 rgba(28, 37, 35, 0.35);
+    content: "";
+}
+
+.progress-item-title,
+.progress-item-text {
+    margin: 0;
+    color: #26302e;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.progress-item-footer {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid #d4cdbc;
+}
+
+.progress-item-footer-confirmed {
+    justify-content: flex-start;
+}
+
+.progress-item-meta,
+.progress-item small {
+    display: block;
+    min-width: 0;
+    color: #68675f;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 9px;
+    font-weight: 800;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.progress-item-question.answered,
+.progress-item-question.ignored {
+    --progress-item-accent: #7d8581;
+    color: #60635d;
+    background: #eeece4;
+    box-shadow: inset 0 0 0 1px #f9f7ef;
+    opacity: 0.9;
+}
+
+.progress-item-question.answered .progress-item-title,
+.progress-item-question.ignored .progress-item-title {
+    color: #60635d;
+}
+
+.progress-item-inclination {
+    --progress-item-accent: #765017;
+}
+
+.question-feedback-button {
+    width: auto;
+    min-height: 24px;
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 3px 8px;
+    border: 2px solid #752719;
+    border-radius: 1px;
+    color: #67261b;
+    background: #f3ddd6;
+    box-shadow:
+        inset 0 0 0 1px #fff6ef,
+        1px 1px 0 #4b403b;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 9px;
+    font-weight: 900;
+    line-height: 1;
+}
+
+.question-feedback-button:hover:not(:disabled) {
+    color: #fff8ef;
+    background: #9b4432;
+    transform: translate(-1px, -1px);
+}
+
+.question-feedback-button:disabled {
+    border-color: #8a8c83;
+    color: #6e7069;
+    background: #dcddd5;
+    box-shadow: none;
+}
+
+.progress-empty {
+    margin: 0;
+    padding: 9px 10px;
+    border: 1px dashed #a9aa9f;
+    color: #68675f;
+    background: #fffaf0;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.5;
+}
+
+.answered-questions {
+    margin: 0 9px 9px;
+    border-top: 1px solid #bfc0b7;
+}
+
+.answered-questions > summary {
+    display: flex;
+    min-height: 29px;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 7px;
+    border: 1px solid #9a9d95;
+    border-radius: 1px;
+    color: #4e5654;
+    background: #e1e0d8;
+    box-shadow: inset 0 0 0 1px #f7f4ea;
+    cursor: pointer;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 9px;
+    font-weight: 900;
+    list-style: none;
+}
+
+.answered-questions > summary::before {
+    color: #752719;
+    content: "\25B6";
+    font-size: 9px;
+}
+
+.answered-questions[open] > summary::before { content: "\25BC"; }
+.answered-questions .progress-items { padding: 8px 0 0; }
+
+.progress-evidence {
+    margin-top: 9px;
+    padding: 7px 8px 8px;
+    border-top: 2px solid #cdbd98;
+    background: #f8f1df;
+}
+
+.inclination-why {
+    display: block;
+    color: #765017;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 9px;
+    font-weight: 900;
+    letter-spacing: 0.03em;
+}
+
+.inclination-evidence {
+    display: grid;
+    gap: 6px;
+    margin: 6px 0 0;
+    padding-left: 16px;
+    color: #424b47;
+    font-size: 10px;
+    line-height: 1.45;
+}
+
+.inclination-evidence li::marker { color: #765017; font-weight: 900; }
+
+.progress-evidence-stage {
+    display: inline-block;
+    margin: 0 5px 3px 0;
+    padding: 1px 4px;
+    border: 1px solid #9c7a37;
+    color: #614511;
+    background: #f1e2bd;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 8px;
+    font-weight: 900;
+    line-height: 1.25;
+}
+
+.progress-evidence-text { color: #424b47; }
+
+.manual-observation-detail { margin-top: 5px; }
+
+.manual-observation-detail > summary {
+    color: #614511;
+    cursor: pointer;
+    font-size: 9px;
+    font-weight: 850;
+}
+
+.manual-observation-detail > p {
+    margin: 5px 0 0;
+    color: #4b514e;
+    font-size: 10px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
+@media (max-width: 680px) {
+    .progress-panel-body {
+        grid-template-columns: 1fr;
+        gap: 10px;
+        padding: 10px;
+    }
+
+    .progress-item-footer {
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+
+    .question-feedback-button { margin-left: auto; }
+}
 
 button:focus-visible,
 textarea:focus-visible {
@@ -1703,7 +2072,7 @@ textarea:focus-visible {
     }
 }
 
-/* Co-creation progress: compact pixel-adventure quest log. */
+/* Retired wood-card progress styling. The neutral task log below is authoritative.
 .progress-panel {
     margin: 0;
     border: 3px solid var(--stone-dark);
@@ -1993,8 +2362,9 @@ textarea:focus-visible {
 
     .progress-section { padding: 6px; }
 }
+*/
 
-/* Progress columns reuse the conversation guidance-card language. */
+/* Retired guidance-card progress styling. The neutral task log below is authoritative.
 .progress-panel-body {
     gap: 12px;
     padding: 11px 12px 13px;
@@ -2142,3 +2512,4 @@ textarea:focus-visible {
         padding: 10px;
     }
 }
+*/

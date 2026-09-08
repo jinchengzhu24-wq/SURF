@@ -766,10 +766,13 @@ function renderQuestionRecords(container, items, answered) {
         record.className = `progress-item progress-item-question ${ignored ? "ignored" : answered ? "answered" : "unanswered"}`;
         record.setAttribute("aria-busy", "false");
         const text = document.createElement("p");
-        text.className = "progress-item-text";
+        text.className = "progress-item-title progress-item-text";
         text.textContent = String(item?.question || "").trim();
         record.appendChild(text);
+        const footer = document.createElement("footer");
+        footer.className = "progress-item-footer";
         const meta = document.createElement("small");
+        meta.className = "progress-item-meta";
         const asked = Number(item?.askedAtStageNumber);
         const answeredAt = Number(item?.answeredAtStageNumber);
         const ignoredAt = Number(item?.ignoredAtStageNumber);
@@ -779,7 +782,7 @@ function renderQuestionRecords(container, items, answered) {
             values.push(t("answeredAtStage").replace("{stage}", String(answeredAt)));
         }
         meta.textContent = values.join(" \u00b7 ");
-        record.appendChild(meta);
+        footer.appendChild(meta);
         if (ignored && Number.isInteger(ignoredAt)) {
             meta.textContent += ` \u00b7 ${t("ignoredAtStage").replace("{stage}", String(ignoredAt))}`;
         }
@@ -794,8 +797,9 @@ function renderQuestionRecords(container, items, answered) {
             button.dataset.feedbackKey = feedbackKey;
             button.disabled = state.busy || !canEditSelected()
                 || state.questionFeedbackBusy.has(feedbackKey);
-            record.appendChild(button);
+            footer.appendChild(button);
         }
+        record.appendChild(footer);
         container.appendChild(record);
     });
 }
@@ -928,20 +932,26 @@ function renderDesignInclinations(items) {
         const record = document.createElement("article");
         record.className = "progress-item progress-item-inclination";
         const statement = document.createElement("p");
-        statement.className = "progress-item-text";
+        statement.className = "progress-item-title progress-item-text";
         statement.textContent = String(item?.statement || "").trim();
         record.appendChild(statement);
+        const evidence = document.createElement("div");
+        evidence.className = "progress-evidence";
         const why = document.createElement("strong");
         why.className = "inclination-why";
         why.textContent = t("whyUnderstand");
-        record.appendChild(why);
+        evidence.appendChild(why);
         const trail = document.createElement("ol");
         trail.className = "inclination-evidence";
         (Array.isArray(item?.evidenceTrail) ? item.evidenceTrail : []).forEach(evidence => {
             const entry = document.createElement("li");
+            const stage = document.createElement("span");
+            stage.className = "progress-evidence-stage";
+            stage.textContent = `${t("stage")} ${evidence.stageNumber}`;
             const summary = document.createElement("span");
-            summary.textContent = `${t("stage")} ${evidence.stageNumber} \u00b7 ${evidence.text}`;
-            entry.appendChild(summary);
+            summary.className = "progress-evidence-text";
+            summary.textContent = String(evidence.text || "");
+            entry.append(stage, summary);
             if (evidence?.kind === "manual_edit" && evidence?.detailedText) {
                 const detail = document.createElement("details");
                 detail.className = "manual-observation-detail";
@@ -954,12 +964,17 @@ function renderDesignInclinations(items) {
             }
             trail.appendChild(entry);
         });
-        record.appendChild(trail);
+        evidence.appendChild(trail);
+        record.appendChild(evidence);
+        const footer = document.createElement("footer");
+        footer.className = "progress-item-footer progress-item-footer-confirmed";
         const meta = document.createElement("small");
+        meta.className = "progress-item-meta";
         meta.textContent = t("confirmedAtStage").replace(
             "{stage}", String(item?.confirmedAtStageNumber || "")
         );
-        record.appendChild(meta);
+        footer.appendChild(meta);
+        record.appendChild(footer);
         container.appendChild(record);
     });
 }
