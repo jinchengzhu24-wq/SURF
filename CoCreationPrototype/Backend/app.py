@@ -103,6 +103,10 @@ from design_context import (
     set_active_disagreement,
     sanitize_user_design_text,
 )
+from revision_workflow import (
+    SemanticConstraintError,
+    validate_semantic_constraints,
+)
 
 
 HOST = "127.0.0.1"
@@ -127,6 +131,10 @@ MESSAGE_ACTIONS = {
     "execute_revision",
     "challenge_revision",
     "alternative_revision",
+    "continue_challenge",
+}
+REVISION_CARD_ACTIONS = {
+    "execute_revision", "challenge_revision", "alternative_revision",
 }
 CARD_ACTION_EVENTS = {
     "execute_revision": "revision_execution_requested",
@@ -513,8 +521,11 @@ class MessageRequest(StrictModel):
         "execute_revision",
         "challenge_revision",
         "alternative_revision",
+        "continue_challenge",
     ] = "none"
     sourceTurnId: str | None = None
+    challengeId: str | None = None
+    exitChallenge: bool = False
 
 
 class ProposalDecisionRequest(StrictModel):
@@ -619,12 +630,32 @@ async def handle_api_error(request: Request, exception: ApiError):
 
 @app.exception_handler(LLMServiceError)
 async def handle_llm_service_error(request: Request, exception: LLMServiceError):
+    code = str(exception.code or "")
+    if code.startswith("REVISION_PLAN"):
+        task, failure_stage, maximum = "revision_plan", "schema", 2
+    elif code in {
+        "PROPOSAL_SEARCH_EXHAUSTED", "DETERMINISTIC_SEARCH_EXHAUSTED",
+        "CANDIDATE_UNSOLVABLE", "SEMANTIC_CONSTRAINT_NOT_MET",
+        "SOFT_OBJECTIVE_EVIDENCE_MISSING", "HARD_OBJECTIVE_NOT_MET",
+    }:
+        task, failure_stage, maximum = "deterministic_search", "semantic_contract", 2
+    else:
+        task, failure_stage, maximum = "chat", "upstream", 3
     response = error_response(
         exception.status_code,
         exception.code,
         exception.safe_message,
         exception.request_id,
         exception.retryable,
+        {
+            "task": task,
+            "failureStage": failure_stage,
+            "failureCode": code,
+            "attemptsUsed": exception.attempts_used,
+            "maximumAttempts": maximum,
+            "retryable": exception.retryable,
+            "safeReason": exception.safe_message,
+        },
     )
     response.headers["X-LLM-Attempts-Used"] = str(exception.attempts_used)
     return response
@@ -1977,7 +2008,7 @@ def _send_message_locked(
                 "IDEMPOTENCY_CONFLICT",
                 "The message key was already used for a different card action.",
             )
-        if prior_user is not None and payload.action != "none" and prior_action is None:
+        if prior_user is not None and payload.action in REVISION_CARD_ACTIONS and prior_action is None:
             raise ApiError(
                 409,
                 "IDEMPOTENCY_CONFLICT",
@@ -2006,7 +2037,7 @@ def _send_message_locked(
         if prior_assistant is not None:
             return serialize_session(database, session_id)
 
-        if payload.action == "none":
+        if payload.action in {"none", "continue_challenge"}:
             require_current_base(session, payload.baseVersionId)
         elif payload.baseVersionId != session["current_version_id"]:
             raise ApiError(
@@ -2018,7 +2049,7 @@ def _send_message_locked(
 
         source_turn = None
         source_offer = None
-        if payload.action != "none":
+        if payload.action in REVISION_CARD_ACTIONS:
             source_turn, source_offer = _source_revision_offer(
                 database,
                 session_id,
@@ -2027,7 +2058,7 @@ def _send_message_locked(
             )
 
         current = get_current_version(database, session)
-        if payload.action != "none":
+        if payload.action in REVISION_CARD_ACTIONS:
             source_binding = _preflight_proposal(
                 database,
                 session_id,
@@ -2088,8 +2119,21 @@ def _send_message_locked(
         else:
             user_turn_id = prior_user["id"]
 
-        if payload.action != "none" and prior_action is None:
+        if payload.action in REVISION_CARD_ACTIONS and prior_action is None:
             _record_card_action(database, session_id, payload, source_offer)
+        elif payload.action == "continue_challenge" and prior_action is None:
+            record_event(
+                database,
+                session_id,
+                "challenge_continued",
+                {
+                    "messageKey": payload.idempotencyKey,
+                    "action": payload.action,
+                    "challengeId": payload.challengeId,
+                    "baseVersionId": payload.baseVersionId,
+                },
+                utc_now(),
+            )
 
         retrying_failed_message = prior_user is not None
         context = build_llm_context(database, session_id, current)
@@ -2179,6 +2223,7 @@ def _send_message_locked(
                 utc_now(),
             )
         stage_context["discussionCardMode"] = "disagreement_only"
+        stage_context["revisionSourceTurnIds"] = [user_turn_id]
         stage_context["explicitProposalRequest"] = payload.requestProposal
         stage_context["explicitAction"] = payload.action
         stage_context["actionSourceTurnId"] = payload.sourceTurnId
@@ -2204,7 +2249,7 @@ def _send_message_locked(
             and not proposal_state.startswith("ready_")
         )
         if (
-            payload.action != "none" or payload.requestProposal
+            payload.action in REVISION_CARD_ACTIONS or payload.requestProposal
         ) and stage_context.get("activeDisagreement"):
             raise ApiError(
                 409,
@@ -2257,7 +2302,10 @@ def _send_message_locked(
     challenge_reason_classification = None
     challenge_choice_resolution = None
     challenge_deadline = None
-    if payload.action == "none":
+    active_disagreement = stage_context.get("activeDisagreement") or {}
+    if payload.action == "continue_challenge" or (
+        payload.action == "none" and not payload.exitChallenge
+    ):
         stage_context = context["stageContext"]
         active_disagreement = stage_context.get("activeDisagreement") or {}
         if (
@@ -2276,18 +2324,71 @@ def _send_message_locked(
                 hypotheses = {
                     "primary": active_disagreement.get("primaryHypothesis"),
                     "secondary": active_disagreement.get("secondaryHypothesis"),
+                    "challengeId": active_disagreement.get("challengeId"),
                 }
-            if hypotheses.get("primary") and hypotheses.get("secondary"):
-                challenge_deadline = time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS
-                challenge_reason_classification = classify_challenge_reason(
-                    content,
-                    hypotheses,
-                    active_disagreement.get("proposalSummary")
-                    or hypotheses.get("proposalSummary")
-                    or challenge_context.get("proposalSummary"),
-                    request.state.request_id,
-                    _deadline=challenge_deadline,
+            if (
+                hypotheses.get("primary") and hypotheses.get("secondary")
+                and (
+                    not payload.challengeId
+                    or payload.challengeId == hypotheses.get("challengeId")
                 )
+            ):
+                challenge_deadline = time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS
+                try:
+                    challenge_reason_classification = classify_challenge_reason(
+                        content,
+                        hypotheses,
+                        active_disagreement.get("proposalSummary")
+                        or hypotheses.get("proposalSummary")
+                        or challenge_context.get("proposalSummary"),
+                        request.state.request_id,
+                        _deadline=challenge_deadline,
+                    )
+                except LLMServiceError as exception:
+                    # A failed auxiliary judgment is not a failed chat turn.
+                    # Keep the already-persisted user reason exactly once and
+                    # expose an explicit pending state that can be retried with
+                    # the same message idempotency key.
+                    with connect(immediate=True) as database:
+                        active_session = require_active_session(
+                            database, session_id, access_cookie
+                        )
+                        require_current_base(active_session, payload.baseVersionId)
+                        duplicate = database.execute(
+                            """
+                            SELECT 1 FROM audit_events
+                            WHERE session_id = ?
+                              AND event_type = 'challenge_reason_review_pending'
+                              AND json_extract(payload_json, '$.messageKey') = ?
+                            LIMIT 1
+                            """,
+                            (session_id, payload.idempotencyKey),
+                        ).fetchone()
+                        if duplicate is None:
+                            record_event(
+                                database,
+                                session_id,
+                                "challenge_reason_review_pending",
+                                {
+                                    "messageKey": payload.idempotencyKey,
+                                    "baseVersionId": payload.baseVersionId,
+                                    "challengeId": (
+                                        hypotheses.get("challengeId")
+                                        or challenge_context.get("challengeId")
+                                    ),
+                                    "sourceUserTurnId": user_turn_id,
+                                    "state": "review_pending",
+                                    "task": "challenge_review",
+                                    "failureStage": "upstream",
+                                    "failureCode": exception.code,
+                                    "attemptsUsed": exception.attempts_used,
+                                    "maximumAttempts": 2,
+                                    "retryable": True,
+                                    "safeReason": exception.safe_message,
+                                },
+                                utc_now(),
+                            )
+                        return serialize_session(database, session_id)
                 comparison = challenge_reason_classification.get("comparison")
                 if comparison:
                     from llm_client import _validate_map_grounding_texts
@@ -2298,18 +2399,55 @@ def _send_message_locked(
                             entity_bindings=stage_context.get("entityBindings"),
                         )
                     except ValueError as exception:
-                        raise LLMServiceError(
-                            "MODEL_RESPONSE_INVALID",
-                            "Kimi's challenge comparison did not match the current Stage.",
-                            request.state.request_id,
-                            True,
-                            1,
-                            502,
-                        ) from exception
+                        with connect(immediate=True) as database:
+                            active_session = require_active_session(
+                                database, session_id, access_cookie
+                            )
+                            require_current_base(active_session, payload.baseVersionId)
+                            record_event(
+                                database,
+                                session_id,
+                                "challenge_reason_review_pending",
+                                {
+                                    "messageKey": payload.idempotencyKey,
+                                    "baseVersionId": payload.baseVersionId,
+                                    "challengeId": hypotheses.get("challengeId"),
+                                    "sourceUserTurnId": user_turn_id,
+                                    "state": "review_pending",
+                                    "task": "challenge_review",
+                                    "failureStage": "binding",
+                                    "failureCode": "MAP_GROUNDING_INVALID",
+                                    "attemptsUsed": challenge_reason_classification.get("attemptsUsed", 1),
+                                    "maximumAttempts": 2,
+                                    "retryable": True,
+                                    "safeReason": "The comparison did not match the current Stage facts.",
+                                },
+                                utc_now(),
+                            )
+                            return serialize_session(database, session_id)
                 stage_context["challengeReasonClassification"] = (
                     challenge_reason_classification
                 )
-
+                with connect(immediate=True) as database:
+                    record_event(
+                        database,
+                        session_id,
+                        "challenge_reason_review_resolved",
+                        {
+                            "messageKey": payload.idempotencyKey,
+                            "baseVersionId": payload.baseVersionId,
+                            "challengeId": (
+                                hypotheses.get("challengeId")
+                                or challenge_context.get("challengeId")
+                            ),
+                            "sourceUserTurnId": user_turn_id,
+                            "state": "reason_review",
+                            "attemptsUsed": challenge_reason_classification.get(
+                                "attemptsUsed", 1
+                            ),
+                        },
+                        utc_now(),
+                    )
     revision_state, revision_brief = classify_revision_request(
         context["conversation"],
         context["stageContext"],
@@ -2471,6 +2609,7 @@ def _send_message_locked(
     if (
         payload.action != "challenge_revision"
         and payload.action != "execute_revision"
+        and payload.action != "continue_challenge"
         and execution.proposed_rows is not None
     ):
         if revision_state == "proposal_requested":
@@ -2535,6 +2674,11 @@ def _send_message_locked(
             "followUpQuestion": None,
             "proposalOffer": None,
             "disagreement": None,
+            "challengeState": {
+                "challengeId": challenge_id,
+                "status": "awaiting_reason",
+                "interactionMode": "reason",
+            },
             "uiCues": [],
             "coordinateLinks": [],
         })
@@ -2719,10 +2863,20 @@ def _send_message_locked(
                             "sourceTurnId": payload.sourceTurnId,
                             "baseVersionId": payload.baseVersionId,
                             "proposalSummary": (source_offer or {}).get("summary"),
+                            "challengeId": hypotheses.get("challengeId"),
+                            "hypotheses": hypotheses.get("items") or [],
                             "primary": hypotheses.get("primary"),
                             "secondary": hypotheses.get("secondary"),
+                            "state": "awaiting_reason",
                         },
                         utc_now(),
+                    )
+                challenged_binding = dict(source_binding or {})
+                if source_turn is not None and challenged_binding:
+                    challenged_binding["status"] = "challenged"
+                    database.execute(
+                        "UPDATE conversation_turns SET proposal_binding_json = ? WHERE id = ?",
+                        (dump_json(challenged_binding), source_turn["id"]),
                     )
 
             discovery_marker = (execution.guidance or {}).get("proposalDiscovery")
@@ -2864,6 +3018,28 @@ def _send_message_locked(
 
             if execution.revision_plan:
                 revision_contract = execution.revision_contract or {}
+                revision_workflow = revision_contract.get("revisionWorkflow") or {}
+                if revision_workflow:
+                    semantic_results = (
+                        (execution.proposal_diagnostics or {}).get(
+                            "mechanismEvidence"
+                        ) or {}
+                    ).get("semanticConstraintResults") or []
+                    record_event(
+                        database,
+                        session_id,
+                        "revision_workflow_v2_evaluated",
+                        {
+                            "baseVersionId": payload.baseVersionId,
+                            "sourceTurnId": assistant_turn_id,
+                            "messageKey": payload.idempotencyKey,
+                            "workflow": revision_workflow,
+                            "constraintResults": semantic_results,
+                            "mode": revision_workflow.get("mode"),
+                            "candidateAccepted": execution.proposed_rows is not None,
+                        },
+                        utc_now(),
+                    )
                 record_agent_handoff(
                     database,
                     session_id,
@@ -3268,6 +3444,11 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
             "The purple card is bound to verified tile changes; the current map has not changed yet."
         )
     guidance = dict(execution.guidance or {})
+    revision_workflow = dict(
+        (execution.revision_contract or {}).get("revisionWorkflow") or {}
+    )
+    if revision_workflow:
+        revision_workflow["status"] = "proposed"
     guidance.update({
         "move": "offer_revision",
         "followUpQuestion": None,
@@ -3275,6 +3456,9 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
             "summary": summary,
             "rationale": rationale,
             "executionBrief": brief,
+            "revisionWorkflow": (
+                revision_workflow
+            ),
         },
         "uiCues": [],
     })
@@ -4032,6 +4216,76 @@ def decide_proposal(
                     if isinstance(proposal_offer, dict)
                     else None
                 )
+                revision_workflow = (
+                    proposal_offer.get("revisionWorkflow")
+                    if isinstance(proposal_offer, dict)
+                    and isinstance(proposal_offer.get("revisionWorkflow"), dict)
+                    else {}
+                )
+                actual_transitions = [
+                    {
+                        "row": row_index + 1,
+                        "column": column_index + 1,
+                        "from": before,
+                        "to": after,
+                    }
+                    for row_index, (before_row, after_row) in enumerate(
+                        zip(current_rows, validation.rows)
+                    )
+                    for column_index, (before, after) in enumerate(
+                        zip(before_row, after_row)
+                    )
+                    if before != after
+                ]
+                frozen_transitions = (
+                    proposal_brief.get("requiredTransitions") or []
+                    if isinstance(proposal_brief, dict)
+                    else []
+                )
+                if frozen_transitions:
+                    actual_signature = {
+                        (item["row"], item["column"], item["from"], item["to"])
+                        for item in actual_transitions
+                    }
+                    frozen_signature = {
+                        (item.get("row"), item.get("column"), item.get("from"), item.get("to"))
+                        for item in frozen_transitions
+                    }
+                    if actual_signature != frozen_signature:
+                        raise ApiError(
+                            409,
+                            "EXECUTION_REPLAY_MISMATCH",
+                            "The proposal no longer matches its frozen tile transitions.",
+                            False,
+                            {
+                                "task": "execution_replay",
+                                "failureStage": "postcondition",
+                                "failureCode": "FROZEN_DIFF_MISMATCH",
+                                "retryable": False,
+                                "safeReason": "The actual map diff differs from the reviewed purple card.",
+                            },
+                        )
+                try:
+                    constraint_results = validate_semantic_constraints(
+                        current_rows,
+                        validation.rows,
+                        revision_workflow,
+                    )
+                except SemanticConstraintError as exception:
+                    raise ApiError(
+                        422,
+                        "SEMANTIC_POSTCONDITION_FAILED",
+                        "The proposal no longer satisfies the authorized semantic contract.",
+                        False,
+                        {
+                            "task": "postcondition",
+                            "failureStage": "semantic_contract",
+                            "failureCode": "SEMANTIC_CONSTRAINT_FAILED",
+                            "retryable": False,
+                            "safeReason": "One or more explicit design requirements were not satisfied.",
+                            "constraintResults": exception.results,
+                        },
+                    ) from exception
                 new_version_id = _insert_version(
                     database,
                     session,
@@ -4056,6 +4310,24 @@ def decide_proposal(
                     proposal_id,
                 )
                 save_design_context(database, new_version_id, child_context)
+                execution_outcome = {
+                    "revisionWorkflowId": revision_workflow.get("revisionWorkflowId"),
+                    "sourceProposalTurnId": proposal["assistant_turn_id"],
+                    "actualTransitions": actual_transitions,
+                    "constraintResults": constraint_results,
+                    "softEvidence": [],
+                    "validation": validation.as_dict(),
+                    "beforeFingerprint": map_fingerprint(current_rows),
+                    "afterFingerprint": map_fingerprint(validation.rows),
+                    "status": "verified",
+                }
+                record_event(
+                    database,
+                    session_id,
+                    "revision_execution_outcome",
+                    {"versionId": new_version_id, **execution_outcome},
+                    now,
+                )
                 record_event(
                     database,
                     session_id,
@@ -6444,13 +6716,19 @@ def _validate_message_action_payload(payload):
             "INVALID_MESSAGE_ACTION",
             "A proposal request cannot also be a revision-card action.",
         )
-    if action == "none" and source_turn_id:
+    if payload.exitChallenge and action != "none":
+        raise ApiError(
+            400,
+            "INVALID_MESSAGE_ACTION",
+            "Exiting challenge mode must be an ordinary message.",
+        )
+    if action in {"none", "continue_challenge"} and source_turn_id:
         raise ApiError(
             400,
             "INVALID_MESSAGE_ACTION",
             "A source turn is only valid for a card action.",
         )
-    if action != "none":
+    if action in REVISION_CARD_ACTIONS:
         if not source_turn_id:
             raise ApiError(
                 400,
@@ -6458,6 +6736,20 @@ def _validate_message_action_payload(payload):
                 "A card action requires its source turn.",
             )
         _validate_identifier(source_turn_id, "sourceTurnId")
+    if action == "continue_challenge":
+        if not payload.challengeId:
+            raise ApiError(
+                400,
+                "INVALID_MESSAGE_ACTION",
+                "Continuing a challenge requires its challenge ID.",
+            )
+        _validate_identifier(payload.challengeId, "challengeId")
+    elif payload.challengeId:
+        raise ApiError(
+            400,
+            "INVALID_MESSAGE_ACTION",
+            "A challenge ID is only valid while continuing a challenge.",
+        )
 
 
 def _revision_offer_from_json(guidance_json):
@@ -6939,7 +7231,8 @@ def _action_for_message_key(database, session_id, message_key):
           AND event_type IN ('card_action_requested',
                              'revision_execution_requested',
                              'proposal_challenge_started',
-                             'alternative_revision_requested')
+                             'alternative_revision_requested',
+                             'challenge_continued')
         ORDER BY id DESC LIMIT 1
         """,
         (session_id, message_key),
@@ -7129,6 +7422,10 @@ def _enforce_challenge_reason_execution(
         "secondaryHypothesis": secondary,
         "proposalSummary": proposal_summary,
         "acceptedReason": str(user_reason or "").strip()[:1200] if reasonable else "",
+        "challengeId": (
+            (challenge_context.get("hypotheses") or {}).get("challengeId")
+            or challenge_context.get("challengeId")
+        ),
     }
     guidance = dict(execution.guidance or {})
     guidance.update({
@@ -7138,6 +7435,14 @@ def _enforce_challenge_reason_execution(
         "followUpQuestion": None,
         "proposalOffer": None,
         "disagreement": disagreement,
+        "challengeState": {
+            "challengeId": (
+                (challenge_context.get("hypotheses") or {}).get("challengeId")
+                or challenge_context.get("challengeId")
+            ),
+            "status": disagreement["phase"],
+            "interactionMode": "choice" if reasonable else "reason",
+        },
         "uiCues": [],
     })
     return replace(
@@ -7173,6 +7478,11 @@ def _enforce_challenge_choice_execution(
         guidance.update({
             "proposalOffer": None,
             "disagreement": pending,
+            "challengeState": {
+                "challengeId": active_disagreement.get("challengeId"),
+                "status": "choice_pending",
+                "interactionMode": "choice",
+            },
             "followUpQuestion": None,
             "uiCues": [],
         })
@@ -7195,6 +7505,11 @@ def _enforce_challenge_choice_execution(
         "nextQuestion": None,
     })
     guidance["disagreement"] = resolved
+    guidance["challengeState"] = {
+        "challengeId": active_disagreement.get("challengeId"),
+        "status": "resolved",
+        "interactionMode": "resolved",
+    }
     return replace(execution, guidance=guidance)
 
 
@@ -7249,13 +7564,53 @@ def _challenge_fallback_body(offer, source_binding, language):
 
 
 def _sanitize_challenge_execution(execution, offer, language, source_binding=None):
-    model_body = _paragraph_display_text(execution.assistant_message)
-    body = (
-        model_body
-        if _challenge_body_has_two_tentative_hypotheses(model_body, language)
-        else _challenge_fallback_body(offer, source_binding, language)
-    )
-    hypotheses = _challenge_hypotheses_from_body(body, language)
+    # Challenge state must never be reconstructed from visible punctuation.
+    # Tile symbols such as ``.`` and translated punctuation previously split a
+    # hypothesis in the middle.  Build canonical hypotheses from the frozen
+    # proposal binding and render the visible copy from the same source.
+    body = _challenge_fallback_body(offer, source_binding, language)
+    summary = _inline_display_text((offer or {}).get("summary"))
+    brief = (
+        (source_binding or {}).get("executionBrief")
+        if isinstance(source_binding, dict)
+        else {}
+    ) or {}
+    change = _verified_transition_description(brief, language, limit=3)
+    objective = _inline_display_text(brief.get("playObjective"))
+    preserved = _challenge_preserve_description(brief, language)
+    if language == "zh-CN":
+        primary = (
+            f"这项质疑可能是在判断：{change}是否足以实现"
+            f"{objective or '方案承诺的实际玩法效果'}，而不只是改变外观或移动距离。"
+        )
+        secondary = f"另一种可能是，这项改动会削弱方案承诺保留的{preserved}。"
+    else:
+        primary = (
+            f"The challenge may be asking whether {change} is sufficient to "
+            f"{objective or 'produce the promised play effect'}, rather than merely changing appearance or walking distance."
+        )
+        secondary = f"Another possibility is that the change weakens the promised preservation of {preserved}."
+    challenge_seed = "\n".join((summary, primary, secondary))
+    challenge_id = "ch-" + hashlib.sha256(challenge_seed.encode("utf-8")).hexdigest()[:24]
+    hypotheses = {
+        "primary": primary[:800],
+        "secondary": secondary[:800],
+        "challengeId": challenge_id,
+        "items": [
+            {
+                "hypothesisId": challenge_id + "-primary",
+                "kind": "mechanism_adequacy",
+                "statement": primary[:800],
+                "basis": summary[:600],
+            },
+            {
+                "hypothesisId": challenge_id + "-secondary",
+                "kind": "preservation_risk",
+                "statement": secondary[:800],
+                "basis": summary[:600],
+            },
+        ],
+    }
     return replace(
         execution,
         assistant_message=body,
@@ -7263,7 +7618,7 @@ def _sanitize_challenge_execution(execution, offer, language, source_binding=Non
         revision_plan={},
         revision_contract={},
         revision_operations=[],
-        proposal_diagnostics={"challengeHypotheses": hypotheses} if hypotheses else {},
+        proposal_diagnostics={"challengeHypotheses": hypotheses},
         guidance={
             "move": "offer_perspective",
             "intentHypothesis": None,
@@ -7766,6 +8121,33 @@ def _proposal_presentation_for_binding(
         ],
         "preserved": list(brief.get("preserve") or []),
     }
+    workflow = binding.get("revisionWorkflow") or {}
+    if workflow:
+        presentation["objective"] = str(workflow.get("objective") or "")[:1200]
+        presentation["mustSatisfy"] = list(dict.fromkeys(
+            str(item.get("sourceText") or item.get("kind") or "").strip()
+            for item in workflow.get("semanticConstraints") or []
+            if str(item.get("sourceText") or item.get("kind") or "").strip()
+        ))[:8]
+        soft_labels = {
+            "planning_depth": ("增强需要提前规划的路线判断", "strengthen route judgments that require advance planning"),
+            "box_dependency": ("增强箱子之间可验证的推动依赖", "strengthen verifiable push dependencies between boxes"),
+            "shared_blocking": ("增强共享通道中的局部阻挡关系", "strengthen local blocking relationships in shared passages"),
+            "longer_transport": ("增强较长推运过程中的选择", "strengthen choices during longer box transport"),
+            "space_route_choice": ("增强空间分布带来的路线选择", "strengthen route choices created by spatial distribution"),
+        }
+        language_index = 0 if language == "zh-CN" else 1
+        presentation["tryToAchieve"] = [
+            soft_labels.get(
+                str(item.get("statement") if isinstance(item, dict) else item),
+                (
+                    str(item.get("statement") if isinstance(item, dict) else item),
+                    str(item.get("statement") if isinstance(item, dict) else item),
+                ),
+            )[language_index]
+            for item in workflow.get("softObjectives") or []
+            if str(item.get("statement") if isinstance(item, dict) else item).strip()
+        ][:6]
     if isinstance(summary, str) and summary.strip():
         presentation["summary"] = summary.strip()[:600]
     if isinstance(rationale, str) and rationale.strip():
@@ -7811,6 +8193,11 @@ def _proposal_binding_for_offer(offer, version_id, rows, entity_bindings=None):
                 entity_bindings or {}
             ).get("bindingFingerprint"),
             "executionBrief": brief,
+            "revisionWorkflow": (
+                dict(offer.get("revisionWorkflow"))
+                if isinstance(offer.get("revisionWorkflow"), dict)
+                else {}
+            ),
             "status": "already_satisfied",
         }
     status = "active"
@@ -7829,6 +8216,11 @@ def _proposal_binding_for_offer(offer, version_id, rows, entity_bindings=None):
             entity_bindings or {}
         ).get("bindingFingerprint"),
         "executionBrief": brief,
+        "revisionWorkflow": (
+            dict(offer.get("revisionWorkflow"))
+            if isinstance(offer.get("revisionWorkflow"), dict)
+            else {}
+        ),
         "status": status,
     }
 

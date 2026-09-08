@@ -928,6 +928,38 @@ main {
     padding-left: 19px;
 }
 
+.proposal-plan-contract-item {
+    margin: 0.45rem 0;
+    line-height: 1.5;
+}
+
+.challenge-review-pending {
+    margin-top: 0.45rem;
+    padding: 0.55rem 0.7rem;
+    border: 2px solid #a75a42;
+    background: #f3c0a9;
+    color: #54251b;
+    font-size: 0.9rem;
+}
+
+.challenge-review-pending .guidance-cue-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-top: 0.45rem;
+}
+
+.challenge-composer-mode {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-top: 0.6rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed currentColor;
+    font-size: 0.85rem;
+}
+
 .proposal-plan-detail-item,
 .proposal-plan-preserved {
     font-weight: 800;

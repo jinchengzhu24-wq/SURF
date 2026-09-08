@@ -367,7 +367,20 @@ translations.en.proposalConcreteChanges = "Concrete tile changes";
 translations.en.proposalPreserved = "Preserved";
 translations.en.proposalBefore = "Before";
 translations.en.proposalAfter = "After";
+translations.en.proposalObjective = "What this should achieve";
+translations.en.proposalMustSatisfy = "Must satisfy";
+translations.en.proposalTryToAchieve = "Try to achieve";
+translations.en.proposalActualChanges = "Actual changes prepared";
 translations.en.executeBoundProposal = "Execute the bound proposal.";
+translations.en.error_SEMANTIC_CONSTRAINT_NOT_MET = "No candidate satisfied every explicit requirement; the current map was not changed.";
+translations.en.error_SEMANTIC_POSTCONDITION_FAILED = "The reviewed proposal failed its semantic postcondition and was not applied.";
+translations.en.error_EXECUTION_REPLAY_MISMATCH = "The actual diff no longer matches the reviewed purple card and was not applied.";
+translations.en.challengeReviewPending = "Your reason was saved, but Kimi could not judge it after two attempts.";
+translations.en.retryChallengeReview = "Retry judgment";
+translations.en.supplementChallengeReason = "Add detail";
+translations.en.challengeComposerMode = "Responding to proposal challenge";
+translations.en.exitChallengeMode = "Exit challenge";
+translations.en.proposalChallenged = "This proposal is paused while its challenge is being resolved.";
 translations["zh-CN"].progressTitle = "\u5171\u521b\u8fdb\u5ea6";
 translations["zh-CN"].expressedDirections = "\u5df2\u8868\u8fbe\u65b9\u5411";
 translations["zh-CN"].noExpressedDirections = "\u6682\u65e0\u660e\u786e\u8868\u8fbe\u7684\u65b9\u5411\u3002";
@@ -411,7 +424,17 @@ translations["zh-CN"].proposalConcreteChanges = "\u5177\u4f53\u683c\u5b50\u53d8\
 translations["zh-CN"].proposalPreserved = "\u4fdd\u6301\u4e0d\u53d8";
 translations["zh-CN"].proposalBefore = "\u4fee\u6539\u524d";
 translations["zh-CN"].proposalAfter = "\u4fee\u6539\u540e";
+translations["zh-CN"].proposalObjective = "\u60f3\u5b9e\u73b0\u4ec0\u4e48";
+translations["zh-CN"].proposalMustSatisfy = "\u5fc5\u987b\u6ee1\u8db3";
+translations["zh-CN"].proposalTryToAchieve = "\u5c3d\u91cf\u5b9e\u73b0";
+translations["zh-CN"].proposalActualChanges = "\u5b9e\u9645\u51c6\u5907\u4fee\u6539";
 translations["zh-CN"].executeBoundProposal = "\u6267\u884c\u5df2\u7ed1\u5b9a\u7684\u65b9\u6848\u3002";
+translations["zh-CN"].challengeReviewPending = "\u4f60\u7684\u7406\u7531\u5df2\u4fdd\u5b58\uff0c\u4f46 Kimi \u8fde\u7eed\u4e24\u6b21\u672a\u80fd\u5b8c\u6210\u5224\u65ad\u3002";
+translations["zh-CN"].retryChallengeReview = "\u91cd\u8bd5\u5224\u65ad";
+translations["zh-CN"].supplementChallengeReason = "\u8865\u5145\u8bf4\u660e";
+translations["zh-CN"].challengeComposerMode = "\u6b63\u5728\u56de\u5e94\u65b9\u6848\u8d28\u7591";
+translations["zh-CN"].exitChallengeMode = "\u9000\u51fa\u8d28\u7591";
+translations["zh-CN"].proposalChallenged = "\u8fd9\u4e2a\u65b9\u6848\u5df2\u6682\u505c\uff0c\u9700\u5148\u5904\u7406\u5bf9\u5b83\u7684\u8d28\u7591\u3002";
 translations["zh-CN"].alternativeRevision = "\u91cd\u65b0\u751f\u6210\u65b9\u6848";
 translations["zh-CN"].proposalDisagreementActive = "\u8bf7\u5148\u89e3\u51b3\u5f53\u524d\u5206\u6b67\uff0c\u518d\u4f7f\u7528\u8fd9\u4e2a\u65b9\u6848";
 
@@ -440,6 +463,7 @@ const state = {
     translationRemainingCount: 0,
     retryAction: null,
     activeCoordinateLink: null,
+    dismissedChallengeIds: new Set(),
     renderedMessageStageId: null,
     renderedMessageCount: 0,
     language: "zh-CN"
@@ -484,7 +508,10 @@ const chineseApiErrors = {
     PROPOSAL_SEARCH_EXHAUSTED: "没有找到通过验证的地图方案，当前地图未改变。",
     REVISION_EXECUTION_INVALID: "已冻结的修改没有通过内部执行合同检查，当前地图未改变。",
     REVISION_EXECUTION_MISMATCH: "重放结果与已冻结的格子变化不一致，当前地图未改变。",
-    DISAGREEMENT_ACTIVE: "当前仍有未解决的分歧，请先继续协商后再选择修改方案。"
+    DISAGREEMENT_ACTIVE: "当前仍有未解决的分歧，请先继续协商后再选择修改方案。",
+    SEMANTIC_CONSTRAINT_NOT_MET: "没有候选同时满足所有明确要求，当前地图未改变。",
+    SEMANTIC_POSTCONDITION_FAILED: "已审查方案未通过执行后语义校验，因此未应用。",
+    EXECUTION_REPLAY_MISMATCH: "实际差异与已审查紫卡不一致，因此未应用。"
 };
 
 const LEVEL_VALIDATION_ERROR_CODES = new Set([
@@ -1034,6 +1061,48 @@ function renderMessages() {
             bubble.textContent = turn.content;
         }
         content.appendChild(bubble);
+        if (turn.role === "user") {
+            const review = (state.session.challengeReviewRecords || []).find(item =>
+                item?.sourceUserTurnId === turn.turnId && item?.status === "review_pending"
+            );
+            if (review) {
+                const pending = document.createElement("div");
+                pending.className = "challenge-review-pending";
+                pending.setAttribute("role", "status");
+                pending.textContent = t("challengeReviewPending");
+                const actions = document.createElement("div");
+                actions.className = "guidance-cue-actions";
+                actions.appendChild(makeButton(
+                    t("retryChallengeReview"),
+                    "secondary-button guidance-cue-button",
+                    () => {
+                        state.pendingMessage = {
+                            content: turn.content,
+                            baseVersionId: turn.versionId,
+                            idempotencyKey: turn.requestId,
+                            requestProposal: false,
+                            action: "continue_challenge",
+                            challengeId: review.challengeId
+                        };
+                        persistPendingMessage();
+                        void submitPendingMessage();
+                    },
+                    { disabled: state.busy || !canEditSelected() }
+                ));
+                actions.appendChild(makeButton(
+                    t("supplementChallengeReason"),
+                    "secondary-button guidance-cue-button",
+                    () => {
+                        elements.messageInput.focus();
+                        elements.messageInput.value = `${turn.content}\n`;
+                        handleComposerInput();
+                    },
+                    { disabled: state.busy || !canEditSelected() }
+                ));
+                pending.appendChild(actions);
+                content.appendChild(pending);
+            }
+        }
         row.appendChild(content);
         elements.messageList.appendChild(row);
     });
@@ -1066,6 +1135,27 @@ function renderAssistantBubble(turn, bubble) {
     const body = assistantBodyWithoutCues(localized.content, uiCues, question);
     renderAssistantBody(bodyNode, body, guidance.coordinateLinks, turn);
     bubble.appendChild(bodyNode);
+    const challengeState = guidance.challengeState;
+    if (
+        challengeState?.challengeId
+        && challengeState.status !== "resolved"
+        && !state.dismissedChallengeIds.has(challengeState.challengeId)
+        && turn.versionId === state.session.currentVersionId
+    ) {
+        const mode = document.createElement("div");
+        mode.className = "challenge-composer-mode";
+        mode.textContent = t("challengeComposerMode");
+        mode.appendChild(makeButton(
+            t("exitChallengeMode"),
+            "secondary-button guidance-cue-button",
+            () => {
+                state.dismissedChallengeIds.add(challengeState.challengeId);
+                render();
+            },
+            { disabled: state.busy }
+        ));
+        bubble.appendChild(mode);
+    }
 
     if (localized !== turn) {
         const translatedLabel = document.createElement("small");
@@ -1180,6 +1270,7 @@ function proposalStateMessage(status) {
     if (status === "stale") return t("proposalStale");
     if (status === "precondition_failed") return t("proposalPreconditionFailed");
     if (status === "disagreement_active") return t("proposalDisagreementActive");
+    if (status === "challenged") return t("proposalChallenged");
     return t("staleRevisionCard");
 }
 
@@ -1658,8 +1749,39 @@ function createProposalPresentation(presentation) {
     const section = document.createElement("div");
     section.className = "proposal-plan-details";
 
+    const appendTextBlock = (labelKey, value) => {
+        const text = String(value || "").trim();
+        if (!text) return;
+        const block = document.createElement("p");
+        block.className = "proposal-plan-contract-item";
+        const label = document.createElement("strong");
+        label.textContent = `${t(labelKey)}: `;
+        block.append(label, document.createTextNode(text));
+        section.appendChild(block);
+    };
+    const appendListBlock = (labelKey, values) => {
+        const items = Array.isArray(values) ? values.map(value => String(value || "").trim()).filter(Boolean) : [];
+        if (!items.length) return;
+        const heading = document.createElement("h4");
+        heading.textContent = t(labelKey);
+        section.appendChild(heading);
+        const list = document.createElement("ul");
+        items.forEach(value => {
+            const item = document.createElement("li");
+            item.textContent = value;
+            list.appendChild(item);
+        });
+        section.appendChild(list);
+    };
+
+    appendTextBlock("proposalObjective", presentation?.objective);
+    appendListBlock("proposalMustSatisfy", presentation?.mustSatisfy);
+    appendListBlock("proposalTryToAchieve", presentation?.tryToAchieve);
+
     const title = document.createElement("h4");
-    title.textContent = t("proposalConcreteChanges");
+    title.textContent = presentation?.objective
+        ? t("proposalActualChanges")
+        : t("proposalConcreteChanges");
     section.appendChild(title);
 
     const changes = Array.isArray(presentation?.changes)
@@ -2045,16 +2167,46 @@ async function sendMessage(event) {
         || state.pendingMessage.baseVersionId !== state.session.currentVersionId
         || state.pendingMessage.requestProposal !== state.proposalMode
     ) {
+        const challenge = activeChallengeComposerState();
+        const exitedChallenge = dismissedChallengeComposerState();
         state.pendingMessage = {
             content,
             baseVersionId: state.session.currentVersionId,
             idempotencyKey: uniqueId(state.proposalMode ? "proposal-request" : "message"),
-            requestProposal: state.proposalMode
+            requestProposal: state.proposalMode,
+            ...(challenge ? {
+                action: "continue_challenge",
+                challengeId: challenge.challengeId
+            } : {}),
+            ...(exitedChallenge ? { exitChallenge: true } : {})
         };
     }
 
     persistPendingMessage();
     await submitPendingMessage();
+}
+
+function activeChallengeComposerState() {
+    const turns = selectedStageTurns();
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+        const challenge = turns[index]?.guidance?.challengeState;
+        if (!challenge?.challengeId) continue;
+        if (challenge.status === "resolved" || state.dismissedChallengeIds.has(challenge.challengeId)) return null;
+        return challenge;
+    }
+    return null;
+}
+
+function dismissedChallengeComposerState() {
+    const turns = selectedStageTurns();
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+        const challenge = turns[index]?.guidance?.challengeState;
+        if (!challenge?.challengeId) continue;
+        return challenge.status !== "resolved" && state.dismissedChallengeIds.has(challenge.challengeId)
+            ? challenge
+            : null;
+    }
+    return null;
 }
 
 function toggleProposalMode() {
@@ -2093,7 +2245,10 @@ async function submitPendingMessage() {
         setProposalMode(false);
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());
-        clearPendingMessage();
+        const reviewPending = (state.session.challengeReviewRecords || []).some(item =>
+            item?.messageKey === pending.idempotencyKey && item?.status === "review_pending"
+        );
+        if (!reviewPending) clearPendingMessage();
         state.chatStatus = "idle";
         state.chatError = null;
         updateCharacterCount();
@@ -2590,8 +2745,13 @@ function localizedErrorMessage(error) {
     const message = localized
         || (state.language === "zh-CN" ? t("errorGeneric") : error?.message)
         || t("errorGeneric");
+    const attemptsUsed = Number(error?.details?.attemptsUsed);
+    const maximumAttempts = Number(error?.details?.maximumAttempts);
+    const attemptSuffix = Number.isInteger(attemptsUsed) && Number.isInteger(maximumAttempts)
+        ? ` (${attemptsUsed}/${maximumAttempts})`
+        : "";
     const details = formatValidationDetails(error);
-    return details ? `${message} ${details}` : message;
+    return details ? `${message}${attemptSuffix} ${details}` : `${message}${attemptSuffix}`;
 }
 
 function isLevelValidationError(error) {
@@ -2793,12 +2953,16 @@ function readPendingMessage() {
             "none",
             "execute_revision",
             "challenge_revision",
-            "alternative_revision"
+            "alternative_revision",
+            "continue_challenge"
         ].includes(pending.action)) return null;
         if (
-            pending.action
-            && pending.action !== "none"
+            ["execute_revision", "challenge_revision", "alternative_revision"].includes(pending.action)
             && typeof pending.sourceTurnId !== "string"
+        ) return null;
+        if (
+            pending.action === "continue_challenge"
+            && typeof pending.challengeId !== "string"
         ) return null;
         if (pending.baseVersionId !== state.session.currentVersionId) return null;
         localStorage.setItem(currentKey, JSON.stringify(pending));

@@ -746,6 +746,46 @@ def serialize_session(database, session_id):
         ).fetchall()
         if row["message_key"]
     }
+    challenge_review_rows = database.execute(
+        """
+        SELECT id, event_type, payload_json, created_at
+        FROM audit_events
+        WHERE session_id = ? AND event_type IN (
+          'challenge_reason_review_pending',
+          'challenge_reason_review_resolved'
+        )
+        ORDER BY id
+        """,
+        (session_id,),
+    ).fetchall()
+    challenge_reviews = {}
+    for row in challenge_review_rows:
+        payload = load_json(row["payload_json"]) or {}
+        message_key = str(payload.get("messageKey") or "")
+        if not message_key:
+            continue
+        challenge_reviews[message_key] = {
+            **payload,
+            "auditId": row["id"],
+            "status": (
+                "review_pending"
+                if row["event_type"] == "challenge_reason_review_pending"
+                else "resolved"
+            ),
+            "updatedAt": row["created_at"],
+        }
+    execution_outcomes = {}
+    for row in database.execute(
+        """
+        SELECT payload_json FROM audit_events
+        WHERE session_id = ? AND event_type = 'revision_execution_outcome'
+        ORDER BY id
+        """,
+        (session_id,),
+    ).fetchall():
+        payload = load_json(row["payload_json"]) or {}
+        if payload.get("versionId"):
+            execution_outcomes[payload["versionId"]] = payload
     intent_audit_rows = database.execute(
         """
         SELECT id, event_type, payload_json, created_at FROM audit_events
@@ -1140,6 +1180,12 @@ def serialize_session(database, session_id):
                 "actionable": False,
                 "reason": "proposal_consumed_or_stale",
             }
+        if binding_status == "challenged":
+            return {
+                "status": "challenged",
+                "actionable": False,
+                "reason": "proposal_challenged",
+            }
         return {
             "status": "active",
             "actionable": (
@@ -1482,6 +1528,7 @@ def serialize_session(database, session_id):
                 "validation": load_json(version["validation_json"]),
                 "createdAt": version["created_at"],
                 "playAttempts": attempts_by_version.get(version["id"], []),
+                "executionOutcome": execution_outcomes.get(version["id"]),
                 "openingTurnId": (
                     opening_by_version[version["id"]]["assistant_turn_id"]
                     if version["id"] in opening_by_version
@@ -1496,6 +1543,7 @@ def serialize_session(database, session_id):
             for version in versions
         ],
         "progressContexts": progress_contexts,
+        "challengeReviewRecords": list(challenge_reviews.values()),
         "turns": [
             {
                 "turnId": turn["id"],

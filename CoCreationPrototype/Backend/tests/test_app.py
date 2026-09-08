@@ -616,7 +616,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("cocreation-intent-question-actions-20260908-1", index_response.text)
+        self.assertIn("revision-workflow-v2-20260908-1", index_response.text)
         self.assertIn("proposal-mode-toggle", index_response.text)
         self.assertIn("proposal-toggle-track", index_response.text)
         self.assertIn("proposal-toggle-thumb", index_response.text)
@@ -1021,6 +1021,15 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 "message": "DeepSeek did not respond before the timeout.",
                 "requestId": "timeout-test",
                 "retryable": True,
+                "details": {
+                    "task": "chat",
+                    "failureStage": "upstream",
+                    "failureCode": "UPSTREAM_TIMEOUT",
+                    "attemptsUsed": 2,
+                    "maximumAttempts": 3,
+                    "retryable": True,
+                    "safeReason": "DeepSeek did not respond before the timeout.",
+                },
             },
         )
         self.assertEqual(response.headers["X-LLM-Attempts-Used"], "2")

@@ -33,6 +33,11 @@ from level_validation import (
 )
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
+from revision_workflow import (
+    SemanticConstraintError,
+    build_revision_workflow,
+    validate_semantic_constraints,
+)
 
 
 KIMI_MODEL = "kimi-k2.6"
@@ -68,7 +73,7 @@ PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS = 180.0
 PROPOSAL_SEARCH_DEADLINE_SECONDS = 56.0
 # The authorized revision now has two bounded LLM phases: a semantic plan and
 # concrete operation candidates.  Both use the existing proposal model config.
-REVISION_CONTRACT_SCHEMA_VERSION = 1
+REVISION_CONTRACT_SCHEMA_VERSION = 2
 REVISION_MIN_CHANGED_CELLS = 1
 REVISION_MAX_CHANGED_CELLS = 12
 # Compatibility for older diagnostics and integrations that imported this
@@ -3267,6 +3272,7 @@ def _objective_validating_proposal_validator(
     policy,
     entity_bindings,
     evidence_by_fingerprint,
+    revision_workflow=None,
 ):
     baseline_features = _proposal_route_features(
         base_rows,
@@ -3289,6 +3295,12 @@ def _objective_validating_proposal_validator(
             policy,
         )
         evidence_by_fingerprint[map_fingerprint(candidate_rows)] = evidence
+        semantic_results = validate_semantic_constraints(
+            base_rows,
+            candidate_rows,
+            revision_workflow or {},
+        )
+        evidence["semanticConstraintResults"] = semantic_results
         if policy.get("requiresMechanismEvidence") and not evidence["passed"]:
             raise ObjectiveEvidenceError(evidence)
         return validation
@@ -3363,6 +3375,12 @@ def _attempt_semantic_revision_replan(
         stage_context,
     )
     contract["objectivePolicy"] = objective_policy
+    workflow = contract.get("revisionWorkflow") or {}
+    if workflow and objective_policy.get("softObjectiveClass") not in {None, "general"}:
+        workflow["softObjectives"] = [{
+            "kind": "route_mechanism",
+            "statement": str(objective_policy.get("softObjectiveClass"))[:600],
+        }]
     operation_messages = _build_map_operation_messages(
         contract,
         rows,
@@ -3548,6 +3566,12 @@ def _generate_revision_search_proposal_sync(
             stage_context,
         )
         revision_contract["objectivePolicy"] = objective_policy
+        workflow = revision_contract.get("revisionWorkflow") or {}
+        if workflow and objective_policy.get("softObjectiveClass") not in {None, "general"}:
+            workflow["softObjectives"] = [{
+                "kind": "route_mechanism",
+                "statement": str(objective_policy.get("softObjectiveClass"))[:600],
+            }]
     except ValueError as exception:
         error = LLMServiceError(
             "REVISION_CONTRACT_CONFLICT",
@@ -3594,6 +3618,7 @@ def _generate_revision_search_proposal_sync(
         objective_policy,
         stage_context.get("entityBindings"),
         evidence_by_fingerprint,
+        revision_contract.get("revisionWorkflow"),
     )
     exact_strategies = [
         item for item in revision_contract.get("strategies") or []
@@ -3818,6 +3843,11 @@ def _generate_revision_search_proposal_sync(
                 exception.code = "SOFT_OBJECTIVE_EVIDENCE_MISSING"
                 exception.safe_message = (
                     "Solvable local candidates were found, but none produced verified evidence for the requested play mechanism."
+                )
+            elif "semantic_contract" in rejection_categories or "SemanticConstraintError" in fallback_reasons:
+                exception.code = "SEMANTIC_CONSTRAINT_NOT_MET"
+                exception.safe_message = (
+                    "Candidates were found, but none satisfied every explicit semantic requirement in the authorized revision."
                 )
             elif (
                 "hard_objective_not_met" in rejection_categories
@@ -4570,6 +4600,7 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
             "strategyIndex": index,
             "effect": strategy_data["effect"],
             "focus": strategy_data["focus"],
+            "focusRegions": [strategy_data["focus"]] if strategy_data["focus"] else [],
             "allowedOperators": strategy_data["operators"],
             "preserve": strategy_data["preserve"],
             "minimumChangedCells": minimum_changed_cells,
@@ -4579,12 +4610,46 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
             "anchorEntities": strategy_data.get("anchorEntities") or [],
             "playObjective": strategy_data.get("playObjective"),
         })
+    source_offer = (stage_context or {}).get("sourceProposalOffer") or {}
+    source_workflow = (
+        source_offer.get("revisionWorkflow")
+        if isinstance(source_offer, dict)
+        and isinstance(source_offer.get("revisionWorkflow"), dict)
+        else None
+    )
+    if source_workflow:
+        revision_workflow = dict(source_workflow)
+        revision_workflow["status"] = "authorized"
+    elif (stage_context or {}).get("explicitAction") in {
+        "execute_revision", "challenge_revision", "alternative_revision",
+    }:
+        # Historical V1 cards keep their exact frozen-diff contract.  Their
+        # assistant-authored summary must never be recompiled into new hard
+        # designer requirements.
+        revision_workflow = build_revision_workflow("", stage_context)
+        revision_workflow.update({
+            "objective": str(authorized_brief or "").strip()[:1200],
+            "semanticConstraints": [],
+            "mode": "off",
+        })
+    else:
+        revision_workflow = build_revision_workflow(authorized_brief, stage_context)
+    workflow_minimum = int(
+        (revision_workflow.get("scope") or {}).get("minimumChangedCells") or 1
+    )
+    if revision_workflow.get("mode") == "enforce":
+        for strategy in strategies:
+            strategy["minimumChangedCells"] = max(
+                int(strategy.get("minimumChangedCells") or 1),
+                workflow_minimum,
+            )
     contract = {
         "schemaVersion": REVISION_CONTRACT_SCHEMA_VERSION,
         "authorizedBrief": str(authorized_brief or "").strip()[:1200],
         "revisionPlan": plan.as_dict(),
         "strategies": strategies,
         "explicitlyRelaxedByDesigner": bool((stage_context or {}).get("revisionRelaxed")),
+        "revisionWorkflow": revision_workflow,
     }
     for strategy in contract["strategies"]:
         if strategy["minimumChangedCells"] > strategy["maximumChangedCells"]:
@@ -4664,6 +4729,7 @@ def _modifier_contract_view(revision_contract):
             "strategyIndex": strategy.get("strategyIndex"),
             "effect": strategy.get("effect"),
             "focus": strategy.get("focus"),
+            "focusRegions": list(strategy.get("focusRegions") or []),
             "allowedOperators": list(strategy.get("allowedOperators") or []),
             "preserve": list(strategy.get("preserve") or []),
             "minimumChangedCells": strategy.get("minimumChangedCells"),
@@ -4684,6 +4750,9 @@ def _modifier_contract_view(revision_contract):
         "schemaVersion": revision_contract.get("schemaVersion", 1),
         "strategies": strategies,
         "objectivePolicy": revision_contract.get("objectivePolicy") or {},
+        "semanticConstraints": list(
+            (revision_contract.get("revisionWorkflow") or {}).get("semanticConstraints") or []
+        ),
     }
 
 
@@ -5189,6 +5258,8 @@ def _canonical_operation_signature(operations):
 
 
 def _candidate_rejection_category(exception):
+    if isinstance(exception, SemanticConstraintError):
+        return "semantic_contract"
     if isinstance(exception, ObjectiveEvidenceError):
         return "soft_objective_evidence_missing"
     if isinstance(exception, HardObjectiveError):
@@ -5934,49 +6005,64 @@ def classify_challenge_reason(
             f"Latest designer reason: {reason[:1200]}"
         ),
     }]
-    try:
-        response = asyncio.run(asyncio.wait_for(
-            _request_completion(
-                api_key,
-                base_url,
-                KIMI_MODEL,
-                messages,
-                180,
-                timeout_seconds,
-                task="challenge_reason_classification",
-            ),
-            timeout=timeout_seconds,
-        ))
-        payload = json.loads(str(response.choices[0].message.content or ""))
-        relation = payload.get("relation")
-        merit = payload.get("merit")
-        comparison = _normalize_response_paragraphs(str(payload.get("comparison") or ""))
-        if relation not in {"primary", "secondary", "different", "unclear"}:
-            raise ValueError("challenge reason relation is invalid")
-        if merit not in {"reasonable", "not_yet_reasonable", "unclear"}:
-            raise ValueError("challenge reason merit is invalid")
-        if relation != "unclear" and merit != "unclear" and len(comparison) < 40:
-            raise ValueError("challenge reason comparison is not detailed enough")
-        return {
-            "relation": relation,
-            "merit": merit,
-            "comparison": comparison[:1200] or None,
-        }
-    except asyncio.TimeoutError as exception:
+    last_exception = None
+    attempts_used = 0
+    for attempt in range(1, 3):
+        remaining = _remaining_until(deadline)
+        if remaining <= 0:
+            break
+        attempt_timeout = min(20.0, remaining)
+        attempts_used = attempt
+        try:
+            response = asyncio.run(asyncio.wait_for(
+                _request_completion(
+                    api_key,
+                    base_url,
+                    KIMI_MODEL,
+                    messages,
+                    180,
+                    attempt_timeout,
+                    task="challenge_reason_classification",
+                ),
+                timeout=attempt_timeout,
+            ))
+            payload = json.loads(str(response.choices[0].message.content or ""))
+            relation = payload.get("relation")
+            merit = payload.get("merit")
+            comparison = _normalize_response_paragraphs(str(payload.get("comparison") or ""))
+            if relation not in {"primary", "secondary", "different", "unclear"}:
+                raise ValueError("challenge reason relation is invalid")
+            if merit not in {"reasonable", "not_yet_reasonable", "unclear"}:
+                raise ValueError("challenge reason merit is invalid")
+            if relation != "unclear" and merit != "unclear" and len(comparison) < 40:
+                raise ValueError("challenge reason comparison is not detailed enough")
+            return {
+                "relation": relation,
+                "merit": merit,
+                "comparison": comparison[:1200] or None,
+                "attemptsUsed": attempt,
+            }
+        except (asyncio.TimeoutError, LLMServiceError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exception:
+            last_exception = exception
+            if attempt < 2 and _remaining_until(deadline) > 1.0:
+                continue
+            break
+    if isinstance(last_exception, LLMServiceError):
+        last_exception.attempts_used = attempts_used
+        last_exception.retryable = True
+        raise last_exception
+    if isinstance(last_exception, asyncio.TimeoutError) or _remaining_until(deadline) <= 0:
         raise LLMServiceError(
             "UPSTREAM_TIMEOUT",
             "Kimi did not classify the challenge reason before the request deadline.",
             request_id,
             True,
-            1,
+            attempts_used,
             504,
-        ) from exception
-    except LLMServiceError:
-        raise
-    except Exception as exception:
-        error = classify_exception(exception, request_id, 1)
-        error.retryable = True
-        raise error from exception
+        ) from last_exception
+    error = classify_exception(last_exception or ValueError("empty challenge review"), request_id, attempts_used)
+    error.retryable = True
+    raise error from last_exception
 
 
 def review_intent_feedback(
@@ -7992,6 +8078,14 @@ def _plain_messages_with_validation_feedback(
 def _safe_validation_reason(exception):
     if isinstance(exception, json.JSONDecodeError):
         return "The response was not a complete valid JSON object."
+
+    if isinstance(exception, SemanticConstraintError):
+        failed = [
+            f"{item.get('kind')}:{item.get('reason')}"
+            for item in exception.results
+            if item.get("passed") is False
+        ]
+        return "Semantic contract failed (" + ", ".join(failed[:4]) + ")."
 
     if isinstance(exception, (ValueError, TypeError, KeyError)):
         reason = " ".join(str(exception).split())[:300]

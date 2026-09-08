@@ -24,7 +24,7 @@ Menu
 
 旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 当前询问四个中立的地图设计问题（首步检查、推箱依赖、空间分布、路线结构），前两题用于推断难度，后两题用于推断布局。AI 输出温暖的 AI reflection 以及难度/布局建议；四道答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI 推荐和用户最终确认一起保存，不会传入 8010 共创服务或其 LLM 上下文。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。8000 的两个 Agent 保持 `deepseek-v4-flash`；8010 的聊天助手和关卡修改助手、Stage 开场、翻译、Revision 与 Intent feedback review 流程统一使用 Kimi K2.6，不读取 8000 的 DeepSeek 环境变量，也不静默回退到 DeepSeek。当前 8010 前端缓存键为 `cocreation-intent-question-actions-20260908-1`。
+8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。8000 的两个 Agent 保持 `deepseek-v4-flash`；8010 的聊天助手和关卡修改助手、Stage 开场、翻译、Revision 与 Intent feedback review 流程统一使用 Kimi K2.6，不读取 8000 的 DeepSeek 环境变量，也不静默回退到 DeepSeek。当前 8010 前端缓存键为 `revision-workflow-v2-20260908-1`。
 
 正式 Unity 共创会话在浏览器首次访问授权后开始 10 分钟倒计时。直访问示例会话不创建 deadline、不倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
 
@@ -124,6 +124,8 @@ LLM 每轮还会接收初稿方法与当前 Stage 来源，避免把生成器产
 后端使用独立 SQLite/WAL。默认数据库为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`，`.env` 和数据库文件均被本目录 `.gitignore` 排除。
 完整地图修改采用“LLM 意图编译器 → RevisionPlan/语义合同 → 关卡修改助手候选 → 机制证据与确定性求解 → 精确 executionBrief 冻结 → 待审查提案”。用户明确坐标、实体、保留项和明确量化要求是硬约束；主观难度与节奏诉求是软目标，但必须有路线相关的推动区段、箱子交替、最少推动数或绕行等机制证据。`searchedStates` 仅为诊断，明确推动次数要求使用独立的 `minimumPushes`。语义计划可以不预先冻结格子，候选通过后才把真实 diff 写入非空 `requiredTransitions`；历史 executionBrief v1 无需迁移。候选签名和地图指纹跨模型重试去重，失败后可换一次语义实现，再进入最多 128 张地图、24 宽 beam、三层深度且受 56 秒阶段截止约束的确定性搜索。只有真实变化、硬约束满足、机制证据达标、结构合法且可解的候选才能显示紫卡；失败按上游、计划、合同、重复、不可解、硬指标、软证据和搜索耗尽分别说明，不再把本地验证失败称为上游拒绝。
 
+Revision Workflow V2 为每个授权修改建立稳定 workflow、来源 Turn 和有限的通用语义约束。模型候选、纠正规划、确定性搜索及最终执行回放使用同一合同：“重新分布”必须具有真实的来源与目标变化，“改动太少”只有在用户明确提出后才提高最小相关改动数，满足目标的单格方案仍被允许。紫卡展示目标、硬要求、软目标、保留项和冻结 diff。质疑假设以结构化 ID 保存，不再从带坐标或 tile 符号的可见文本按标点反解析；辅助审查连续两次失败时保留唯一用户 Turn 并进入可重试的 `review_pending`。
+
 模型/传输错误（超时、连接失败、空响应、非法 JSON 等）第一次返回可重试错误，前端保留原消息幂等键并显示一次 Retry；Retry 再次失败后保存一条手动编辑/继续讨论的说明，不再继续提供 Retry。若模型已经生成有效 `RevisionPlan`，但确定性搜索找不到同时满足要求且可解的地图，系统将该结果作为已处理的业务结果返回：显示说明和风险提示，不自动放宽要求、不创建提案、不修改当前 Stage，也不显示 Retry。说明会明确邀请设计者亲自在右侧编辑器调整，或继续与 AI 商讨如何缩小、重新表述修改目标；只有新的明确授权和可行提案才会进入地图提案流程。合法计划在构造零候选时仍会执行一次内部结构修正；历史会话中已经存在的 `relaxationOffer` 仍按旧流程兼容读取和确认，但新失败请求不会创建新的放宽流程。
 
 生产 systemd 模板保存在 `CoCreationPrototype/Backend/sokoban-cocreation.service`，其中将写权限限制到独立数据目录，只读取 8010 自己的 `.env` 和安全配置，不加载 8000 的 DeepSeek 环境文件。
@@ -139,6 +141,7 @@ python CoCreationPrototype/Backend/app.py
 
 - 8000 `Backend/.env`：`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`DEEPSEEK_BASE_URL`
 - 8010 `CoCreationPrototype/Backend/.env`：`COCREATION_LLM_PROVIDER=kimi`、`COCREATION_LLM_MODEL=kimi-k2.6`、`COCREATION_LLM_BASE_URL=https://api.moonshot.cn/v1`、`KIMI_API_KEY`（或显式 `COCREATION_LLM_API_KEY`）
+- 修改闭环开关：`COCREATION_DEMO_MODIFICATION_V2_MODE=off|shadow|enforce`（默认 `enforce`）与 `COCREATION_FORMAL_MODIFICATION_V2_MODE=off|shadow|enforce`（默认 `shadow`）
 - 8010 不得把 8000 的 DeepSeek 变量作为回退；缺少 Kimi key 时服务应报告配置错误
 - `COCREATION_PUBLIC_BASE_URL`
 - `COCREATION_WEBGL_BASE_URL`

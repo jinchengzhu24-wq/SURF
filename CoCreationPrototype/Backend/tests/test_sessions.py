@@ -2925,6 +2925,26 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertIsNone(challenge_turn["guidance"]["proposalOffer"])
         self.assertIsNone(challenge_turn["guidance"]["disagreement"])
         self.assertEqual(challenged.json()["proposals"], [])
+        challenged_source = next(
+            turn for turn in challenged.json()["turns"]
+            if turn["turnId"] == source_turn["turnId"]
+        )
+        self.assertEqual(challenged_source["proposalState"]["status"], "challenged")
+
+        # The remainder of this compatibility test exercises the independent
+        # alternative and execute branches. Reactivate its fixture binding;
+        # production challenge flows intentionally keep the original card paused.
+        with repository.connect(immediate=True) as database:
+            row = database.execute(
+                "SELECT proposal_binding_json FROM conversation_turns WHERE id = ?",
+                (source_turn["turnId"],),
+            ).fetchone()
+            binding = json.loads(row["proposal_binding_json"])
+            binding["status"] = "active"
+            database.execute(
+                "UPDATE conversation_turns SET proposal_binding_json = ? WHERE id = ?",
+                (json.dumps(binding), source_turn["turnId"]),
+            )
 
         alternative_execution = LLMExecutionResult(
             "I would try a different local treatment.",
