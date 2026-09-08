@@ -528,6 +528,11 @@ class MessageRequest(StrictModel):
     exitChallenge: bool = False
 
 
+class ChallengeReviewRetryRequest(StrictModel):
+    baseVersionId: str
+    idempotencyKey: str
+
+
 class ProposalDecisionRequest(StrictModel):
     decision: Literal["accept", "reject"]
     baseVersionId: str
@@ -1944,6 +1949,59 @@ def submit_intent_feedback(
             }
 
 
+def _normalize_challenge_reason_text(value):
+    return re.sub(r"[\W_]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+
+def _route_message_to_active_challenge(session_id, payload, content, access_cookie):
+    """Resolve challenge routing before any ordinary-chat side effect."""
+    if payload.exitChallenge or payload.action not in {"none", "continue_challenge"}:
+        return payload
+    with connect(immediate=True) as database:
+        session = require_active_session(database, session_id, access_cookie)
+        require_current_base(session, payload.baseVersionId)
+        challenge = database.execute(
+            """
+            SELECT * FROM revision_challenges
+            WHERE session_id = ? AND base_version_id = ?
+              AND status NOT IN ('resolved', 'superseded')
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (session_id, payload.baseVersionId),
+        ).fetchone()
+        if challenge is None:
+            return payload
+        if payload.challengeId and payload.challengeId != challenge["challenge_id"]:
+            raise ApiError(409, "CHALLENGE_STALE", "The selected challenge is no longer active.")
+        routed = payload.model_copy(update={
+            "action": "continue_challenge",
+            "challengeId": challenge["challenge_id"],
+        })
+        review = database.execute(
+            """
+            SELECT review.message_key, review.status, turn.content
+            FROM challenge_reason_reviews AS review
+            JOIN conversation_turns AS turn ON turn.id = review.source_user_turn_id
+            WHERE review.session_id = ? AND review.challenge_id = ?
+              AND review.status IN ('review_pending', 'reviewing')
+            ORDER BY review.updated_at DESC LIMIT 1
+            """,
+            (session_id, challenge["challenge_id"]),
+        ).fetchone()
+        if (
+            review is not None
+            and _normalize_challenge_reason_text(review["content"])
+            == _normalize_challenge_reason_text(content)
+        ):
+            routed = routed.model_copy(update={
+                "idempotencyKey": review["message_key"],
+                "content": review["content"],
+            })
+        elif review is not None and review["status"] == "reviewing":
+            raise ApiError(409, "CHALLENGE_REVIEW_BUSY", "This judgment is already being reviewed.")
+        return routed
+
+
 @app.post("/api/sessions/{session_id}/messages")
 def send_message(
     session_id: str,
@@ -1953,11 +2011,17 @@ def send_message(
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
-    _validate_message_action_payload(payload)
     content = payload.content.strip()
 
     if not content or len(content) > MAX_MESSAGE_LENGTH:
         raise ApiError(400, "INVALID_MESSAGE", "The message must contain 1 to 2000 characters.")
+
+    payload = _route_message_to_active_challenge(
+        session_id, payload, content, access_cookie
+    )
+    content = payload.content.strip()
+    _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    _validate_message_action_payload(payload)
 
     with message_request_lock(session_id, payload.idempotencyKey):
         return _send_message_locked(
@@ -1968,6 +2032,169 @@ def send_message(
             response,
             access_cookie,
         )
+
+
+@app.post("/api/sessions/{session_id}/challenge-reviews/{review_id}/retry")
+def retry_challenge_review(
+    session_id: str,
+    review_id: str,
+    payload: ChallengeReviewRetryRequest,
+    request: Request,
+    response: Response,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
+):
+    _validate_identifier(review_id, "reviewId")
+    _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    with connect(immediate=True) as database:
+        session = require_active_session(database, session_id, access_cookie)
+        require_current_base(session, payload.baseVersionId)
+        prior_request = database.execute(
+            """
+            SELECT * FROM challenge_review_requests
+            WHERE session_id = ? AND idempotency_key = ?
+            """,
+            (session_id, payload.idempotencyKey),
+        ).fetchone()
+        if prior_request is not None:
+            if prior_request["review_id"] != review_id:
+                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The retry key belongs to another review.")
+            if prior_request["status"] == "completed":
+                result = load_json(prior_request["result_json"]) or {}
+                return {
+                    "outcome": result.get("outcome") or "pending",
+                    "session": serialize_session(database, session_id),
+                }
+            if prior_request["status"] == "reviewing":
+                raise ApiError(409, "CHALLENGE_REVIEW_BUSY", "This judgment is already being retried.")
+
+        review = database.execute(
+            """
+            SELECT review.*, challenge.base_version_id, challenge.status AS challenge_status,
+                   turn.content
+            FROM challenge_reason_reviews AS review
+            JOIN revision_challenges AS challenge
+              ON challenge.challenge_id = review.challenge_id
+            JOIN conversation_turns AS turn ON turn.id = review.source_user_turn_id
+            WHERE review.review_id = ? AND review.session_id = ?
+            """,
+            (review_id, session_id),
+        ).fetchone()
+        if review is None:
+            raise ApiError(404, "CHALLENGE_REVIEW_NOT_FOUND", "The challenge review was not found.")
+        if review["base_version_id"] != payload.baseVersionId:
+            raise ApiError(409, "CHALLENGE_REVIEW_STALE", "The challenge belongs to another Stage.")
+        if review["status"] != "review_pending":
+            code = "CHALLENGE_REVIEW_BUSY" if review["status"] == "reviewing" else "CHALLENGE_REVIEW_STALE"
+            raise ApiError(409, code, "The challenge review is no longer pending.")
+        if review["challenge_status"] in {"resolved", "superseded"}:
+            raise ApiError(409, "CHALLENGE_REVIEW_STALE", "The challenge is no longer active.")
+        now = utc_now()
+        database.execute(
+            """
+            INSERT INTO challenge_review_requests(
+                session_id, idempotency_key, review_id, status,
+                result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, 'reviewing', NULL, ?, ?)
+            ON CONFLICT(session_id, idempotency_key) DO UPDATE SET
+                status = 'reviewing', result_json = NULL, updated_at = excluded.updated_at
+            """,
+            (session_id, payload.idempotencyKey, review_id, now, now),
+        )
+        database.execute(
+            "UPDATE challenge_reason_reviews SET status = 'reviewing', updated_at = ? WHERE review_id = ?",
+            (now, review_id),
+        )
+        database.execute(
+            "UPDATE revision_challenges SET status = 'reviewing', updated_at = ? WHERE challenge_id = ?",
+            (now, review["challenge_id"]),
+        )
+        record_event(
+            database,
+            session_id,
+            "challenge_review_retry_requested",
+            {
+                "reviewId": review_id,
+                "challengeId": review["challenge_id"],
+                "sourceUserTurnId": review["source_user_turn_id"],
+                "idempotencyKey": payload.idempotencyKey,
+                "baseVersionId": payload.baseVersionId,
+            },
+            now,
+        )
+        reason_content = review["content"]
+        original_message_key = review["message_key"]
+        challenge_id = review["challenge_id"]
+
+    try:
+        session_payload = send_message(
+            session_id,
+            MessageRequest(
+                content=reason_content,
+                baseVersionId=payload.baseVersionId,
+                idempotencyKey=original_message_key,
+                action="continue_challenge",
+                challengeId=challenge_id,
+            ),
+            request,
+            response,
+            access_cookie,
+        )
+    except Exception:
+        with connect(immediate=True) as database:
+            now = utc_now()
+            database.execute(
+                "UPDATE challenge_reason_reviews SET status = 'review_pending', updated_at = ? WHERE review_id = ? AND status = 'reviewing'",
+                (now, review_id),
+            )
+            database.execute(
+                "UPDATE revision_challenges SET status = 'review_pending', updated_at = ? WHERE challenge_id = ? AND status = 'reviewing'",
+                (now, challenge_id),
+            )
+            database.execute(
+                "UPDATE challenge_review_requests SET status = 'failed', updated_at = ? WHERE session_id = ? AND idempotency_key = ?",
+                (now, session_id, payload.idempotencyKey),
+            )
+            record_event(
+                database,
+                session_id,
+                "challenge_review_retry_failed",
+                {
+                    "reviewId": review_id,
+                    "challengeId": challenge_id,
+                    "idempotencyKey": payload.idempotencyKey,
+                },
+                now,
+            )
+        raise
+
+    with connect(immediate=True) as database:
+        current_review = database.execute(
+            "SELECT status FROM challenge_reason_reviews WHERE review_id = ?",
+            (review_id,),
+        ).fetchone()
+        outcome = "resolved" if current_review and current_review["status"] == "resolved" else "pending"
+        now = utc_now()
+        database.execute(
+            """
+            UPDATE challenge_review_requests
+            SET status = 'completed', result_json = ?, updated_at = ?
+            WHERE session_id = ? AND idempotency_key = ?
+            """,
+            (dump_json({"outcome": outcome}), now, session_id, payload.idempotencyKey),
+        )
+        record_event(
+            database,
+            session_id,
+            "challenge_review_retry_completed",
+            {
+                "reviewId": review_id,
+                "challengeId": challenge_id,
+                "idempotencyKey": payload.idempotencyKey,
+                "outcome": outcome,
+            },
+            now,
+        )
+        return {"outcome": outcome, "session": serialize_session(database, session_id)}
 
 
 def _send_message_locked(
@@ -2300,6 +2527,7 @@ def _send_message_locked(
                 question_answer_review = {"answeredQuestionIds": [], "results": []}
 
     challenge_reason_classification = None
+    challenge_review_id = None
     challenge_choice_resolution = None
     challenge_deadline = None
     active_disagreement = stage_context.get("activeDisagreement") or {}
@@ -2333,6 +2561,52 @@ def _send_message_locked(
                     or payload.challengeId == hypotheses.get("challengeId")
                 )
             ):
+                challenge_id = hypotheses.get("challengeId")
+                challenge_review_id = "cr-" + hashlib.sha256(
+                    f"{challenge_id}:{user_turn_id}".encode("utf-8")
+                ).hexdigest()[:24]
+                with connect(immediate=True) as database:
+                    now = utc_now()
+                    database.execute(
+                        """
+                        UPDATE challenge_reason_reviews
+                        SET status = 'superseded', updated_at = ?
+                        WHERE session_id = ? AND challenge_id = ?
+                          AND status = 'review_pending'
+                          AND source_user_turn_id != ?
+                        """,
+                        (now, session_id, challenge_id, user_turn_id),
+                    )
+                    database.execute(
+                        """
+                        INSERT INTO challenge_reason_reviews(
+                            review_id, session_id, challenge_id,
+                            source_user_turn_id, message_key, status,
+                            attempts_used, failure_code, result_json,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, 'reviewing', 0, NULL, NULL, ?, ?)
+                        ON CONFLICT(session_id, source_user_turn_id) DO UPDATE SET
+                            status = 'reviewing', failure_code = NULL,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            challenge_review_id,
+                            session_id,
+                            challenge_id,
+                            user_turn_id,
+                            payload.idempotencyKey,
+                            now,
+                            now,
+                        ),
+                    )
+                    database.execute(
+                        """
+                        UPDATE revision_challenges
+                        SET status = 'reviewing', current_reason_turn_id = ?, updated_at = ?
+                        WHERE challenge_id = ? AND session_id = ?
+                        """,
+                        (user_turn_id, now, challenge_id, session_id),
+                    )
                 challenge_deadline = time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS
                 try:
                     challenge_reason_classification = classify_challenge_reason(
@@ -2388,6 +2662,30 @@ def _send_message_locked(
                                 },
                                 utc_now(),
                             )
+                        now = utc_now()
+                        database.execute(
+                            """
+                            UPDATE challenge_reason_reviews
+                            SET status = 'review_pending', attempts_used = ?,
+                                failure_code = ?, updated_at = ?
+                            WHERE review_id = ? AND session_id = ?
+                            """,
+                            (
+                                exception.attempts_used,
+                                exception.code,
+                                now,
+                                challenge_review_id,
+                                session_id,
+                            ),
+                        )
+                        database.execute(
+                            """
+                            UPDATE revision_challenges
+                            SET status = 'review_pending', updated_at = ?
+                            WHERE challenge_id = ? AND session_id = ?
+                            """,
+                            (now, challenge_id, session_id),
+                        )
                         return serialize_session(database, session_id)
                 comparison = challenge_reason_classification.get("comparison")
                 if comparison:
@@ -2424,6 +2722,29 @@ def _send_message_locked(
                                 },
                                 utc_now(),
                             )
+                            now = utc_now()
+                            database.execute(
+                                """
+                                UPDATE challenge_reason_reviews
+                                SET status = 'review_pending', attempts_used = ?,
+                                    failure_code = 'MAP_GROUNDING_INVALID', updated_at = ?
+                                WHERE review_id = ? AND session_id = ?
+                                """,
+                                (
+                                    challenge_reason_classification.get("attemptsUsed", 1),
+                                    now,
+                                    challenge_review_id,
+                                    session_id,
+                                ),
+                            )
+                            database.execute(
+                                """
+                                UPDATE revision_challenges
+                                SET status = 'review_pending', updated_at = ?
+                                WHERE challenge_id = ? AND session_id = ?
+                                """,
+                                (now, challenge_id, session_id),
+                            )
                             return serialize_session(database, session_id)
                 stage_context["challengeReasonClassification"] = (
                     challenge_reason_classification
@@ -2447,6 +2768,22 @@ def _send_message_locked(
                             ),
                         },
                         utc_now(),
+                    )
+                    now = utc_now()
+                    database.execute(
+                        """
+                        UPDATE challenge_reason_reviews
+                        SET status = 'resolved', attempts_used = ?, failure_code = NULL,
+                            result_json = ?, updated_at = ?
+                        WHERE review_id = ? AND session_id = ?
+                        """,
+                        (
+                            challenge_reason_classification.get("attemptsUsed", 1),
+                            dump_json(challenge_reason_classification),
+                            now,
+                            challenge_review_id,
+                            session_id,
+                        ),
                     )
     revision_state, revision_brief = classify_revision_request(
         context["conversation"],
@@ -2596,6 +2933,7 @@ def _send_message_locked(
             source_offer,
             language,
             source_binding,
+            payload.sourceTurnId,
         )
     elif challenge_reason_classification is not None:
         execution = _enforce_challenge_reason_execution(
@@ -2674,11 +3012,6 @@ def _send_message_locked(
             "followUpQuestion": None,
             "proposalOffer": None,
             "disagreement": None,
-            "challengeState": {
-                "challengeId": challenge_id,
-                "status": "awaiting_reason",
-                "interactionMode": "reason",
-            },
             "uiCues": [],
             "coordinateLinks": [],
         })
@@ -2746,7 +3079,7 @@ def _send_message_locked(
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, payload.baseVersionId)
         current = get_current_version(database, session)
-        if payload.action != "none":
+        if payload.action in REVISION_CARD_ACTIONS:
             # The first preflight protects the model call. Repeat it after
             # that call to close the race where a save/restore happens while
             # the LLM is working. This also keeps challenge/alternative cards
@@ -2853,6 +3186,30 @@ def _send_message_locked(
                     "challengeHypotheses"
                 )
                 if isinstance(hypotheses, dict):
+                    challenge_id = hypotheses.get("challengeId")
+                    now = utc_now()
+                    database.execute(
+                        """
+                        INSERT INTO revision_challenges(
+                            challenge_id, session_id, base_version_id,
+                            source_proposal_turn_id, challenge_turn_id, status,
+                            current_reason_turn_id, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, 'awaiting_reason', NULL, ?, ?)
+                        ON CONFLICT(challenge_id) DO UPDATE SET
+                            status = 'awaiting_reason',
+                            challenge_turn_id = excluded.challenge_turn_id,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            challenge_id,
+                            session_id,
+                            payload.baseVersionId,
+                            payload.sourceTurnId,
+                            assistant_turn_id,
+                            now,
+                            now,
+                        ),
+                    )
                     record_event(
                         database,
                         session_id,
@@ -2863,13 +3220,13 @@ def _send_message_locked(
                             "sourceTurnId": payload.sourceTurnId,
                             "baseVersionId": payload.baseVersionId,
                             "proposalSummary": (source_offer or {}).get("summary"),
-                            "challengeId": hypotheses.get("challengeId"),
+                            "challengeId": challenge_id,
                             "hypotheses": hypotheses.get("items") or [],
                             "primary": hypotheses.get("primary"),
                             "secondary": hypotheses.get("secondary"),
                             "state": "awaiting_reason",
                         },
-                        utc_now(),
+                        now,
                     )
                 challenged_binding = dict(source_binding or {})
                 if source_turn is not None and challenged_binding:
@@ -2877,6 +3234,20 @@ def _send_message_locked(
                     database.execute(
                         "UPDATE conversation_turns SET proposal_binding_json = ? WHERE id = ?",
                         (dump_json(challenged_binding), source_turn["id"]),
+                    )
+
+            if payload.action == "continue_challenge":
+                challenge_state = (execution.guidance or {}).get("challengeState") or {}
+                challenge_status = str(challenge_state.get("status") or "reason_review")
+                challenge_id = challenge_state.get("challengeId")
+                if challenge_id:
+                    database.execute(
+                        """
+                        UPDATE revision_challenges
+                        SET status = ?, updated_at = ?
+                        WHERE challenge_id = ? AND session_id = ?
+                        """,
+                        (challenge_status, utc_now(), challenge_id, session_id),
                     )
 
             discovery_marker = (execution.guidance or {}).get("proposalDiscovery")
@@ -7563,7 +7934,13 @@ def _challenge_fallback_body(offer, source_binding, language):
     )
 
 
-def _sanitize_challenge_execution(execution, offer, language, source_binding=None):
+def _sanitize_challenge_execution(
+    execution,
+    offer,
+    language,
+    source_binding=None,
+    source_turn_id=None,
+):
     # Challenge state must never be reconstructed from visible punctuation.
     # Tile symbols such as ``.`` and translated punctuation previously split a
     # hypothesis in the middle.  Build canonical hypotheses from the frozen
@@ -7590,7 +7967,12 @@ def _sanitize_challenge_execution(execution, offer, language, source_binding=Non
             f"{objective or 'produce the promised play effect'}, rather than merely changing appearance or walking distance."
         )
         secondary = f"Another possibility is that the change weakens the promised preservation of {preserved}."
-    challenge_seed = "\n".join((summary, primary, secondary))
+    workflow_id = str(
+        ((source_binding or {}).get("revisionWorkflow") or {}).get("revisionWorkflowId")
+        or source_turn_id
+        or "legacy-challenge"
+    )
+    challenge_seed = "\n".join((workflow_id, summary, primary, secondary))
     challenge_id = "ch-" + hashlib.sha256(challenge_seed.encode("utf-8")).hexdigest()[:24]
     hypotheses = {
         "primary": primary[:800],
@@ -7626,6 +8008,11 @@ def _sanitize_challenge_execution(execution, offer, language, source_binding=Non
             "followUpQuestion": None,
             "proposalOffer": None,
             "disagreement": None,
+            "challengeState": {
+                "challengeId": challenge_id,
+                "status": "awaiting_reason",
+                "interactionMode": "reason",
+            },
             "uiCues": [],
         },
     )

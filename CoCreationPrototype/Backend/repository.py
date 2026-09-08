@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -188,6 +189,46 @@ CREATE TABLE IF NOT EXISTS audit_events (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS revision_challenges (
+    challenge_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES design_sessions(id),
+    base_version_id TEXT NOT NULL,
+    source_proposal_turn_id TEXT NOT NULL,
+    challenge_turn_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    current_reason_turn_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(session_id, challenge_turn_id)
+);
+
+CREATE TABLE IF NOT EXISTS challenge_reason_reviews (
+    review_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES design_sessions(id),
+    challenge_id TEXT NOT NULL REFERENCES revision_challenges(challenge_id),
+    source_user_turn_id TEXT NOT NULL REFERENCES conversation_turns(id),
+    message_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts_used INTEGER NOT NULL DEFAULT 0,
+    failure_code TEXT,
+    result_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(session_id, source_user_turn_id),
+    UNIQUE(session_id, message_key)
+);
+
+CREATE TABLE IF NOT EXISTS challenge_review_requests (
+    session_id TEXT NOT NULL REFERENCES design_sessions(id),
+    idempotency_key TEXT NOT NULL,
+    review_id TEXT NOT NULL REFERENCES challenge_reason_reviews(review_id),
+    status TEXT NOT NULL,
+    result_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(session_id, idempotency_key)
+);
+
 CREATE INDEX IF NOT EXISTS idx_versions_session
     ON level_versions(session_id, stage_number);
 CREATE INDEX IF NOT EXISTS idx_turns_session
@@ -196,6 +237,10 @@ CREATE INDEX IF NOT EXISTS idx_turn_translations_session
     ON turn_translations(session_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_version
     ON play_attempts(session_id, version_id, issued_at);
+CREATE INDEX IF NOT EXISTS idx_revision_challenges_session
+    ON revision_challenges(session_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_challenge_reviews_challenge
+    ON challenge_reason_reviews(session_id, challenge_id, updated_at);
 """
 
 
@@ -219,6 +264,7 @@ def initialize_database():
         database.commit()
         backfill_design_contexts(database)
         backfill_entity_bindings(database)
+        backfill_revision_challenges(database)
         database.commit()
     finally:
         database.close()
@@ -263,6 +309,9 @@ def delete_demo_sessions(database, keep_session_id=None):
 
     placeholders = ", ".join("?" for _ in session_ids)
     delete_statements = (
+        "DELETE FROM challenge_review_requests WHERE session_id IN ({})",
+        "DELETE FROM challenge_reason_reviews WHERE session_id IN ({})",
+        "DELETE FROM revision_challenges WHERE session_id IN ({})",
         "DELETE FROM designer_decisions WHERE session_id IN ({})",
         "DELETE FROM designer_intentions WHERE session_id IN ({})",
         "DELETE FROM play_attempts WHERE session_id IN ({})",
@@ -648,6 +697,177 @@ def backfill_design_contexts(database):
     return changed
 
 
+def _stable_challenge_review_id(challenge_id, source_user_turn_id):
+    seed = f"{challenge_id}:{source_user_turn_id}".encode("utf-8")
+    return "cr-" + hashlib.sha256(seed).hexdigest()[:24]
+
+
+def backfill_revision_challenges(database):
+    """Restore canonical challenge state from structured audit records only."""
+    preexisting_challenge_ids = {
+        row["challenge_id"]
+        for row in database.execute("SELECT challenge_id FROM revision_challenges").fetchall()
+    }
+    migrated_challenge_ids = set()
+    rows = database.execute(
+        """
+        SELECT session_id, event_type, payload_json, created_at
+        FROM audit_events
+        WHERE event_type IN (
+          'proposal_challenge_hypotheses_recorded',
+          'challenge_reason_review_pending',
+          'challenge_reason_review_resolved'
+        )
+        ORDER BY id
+        """
+    ).fetchall()
+    for row in rows:
+        payload = load_json(row["payload_json"]) or {}
+        challenge_id = str(payload.get("challengeId") or "").strip()
+        if not challenge_id:
+            continue
+        if challenge_id in preexisting_challenge_ids:
+            continue
+        if row["event_type"] == "proposal_challenge_hypotheses_recorded":
+            challenge_turn_id = str(payload.get("challengeTurnId") or "").strip()
+            source_turn_id = str(payload.get("sourceTurnId") or "").strip()
+            base_version_id = str(payload.get("baseVersionId") or "").strip()
+            if not challenge_turn_id or not source_turn_id or not base_version_id:
+                continue
+            database.execute(
+                """
+                INSERT OR IGNORE INTO revision_challenges(
+                    challenge_id, session_id, base_version_id,
+                    source_proposal_turn_id, challenge_turn_id, status,
+                    current_reason_turn_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'awaiting_reason', NULL, ?, ?)
+                """,
+                (
+                    challenge_id,
+                    row["session_id"],
+                    base_version_id,
+                    source_turn_id,
+                    challenge_turn_id,
+                    row["created_at"],
+                    row["created_at"],
+                ),
+            )
+            migrated_challenge_ids.add(challenge_id)
+            continue
+
+        source_user_turn_id = str(payload.get("sourceUserTurnId") or "").strip()
+        message_key = str(payload.get("messageKey") or "").strip()
+        if not source_user_turn_id or not message_key:
+            continue
+        challenge = database.execute(
+            "SELECT challenge_id FROM revision_challenges WHERE challenge_id = ? AND session_id = ?",
+            (challenge_id, row["session_id"]),
+        ).fetchone()
+        if challenge is None:
+            continue
+        review_id = _stable_challenge_review_id(challenge_id, source_user_turn_id)
+        review_status = (
+            "review_pending"
+            if row["event_type"] == "challenge_reason_review_pending"
+            else "resolved"
+        )
+        challenge_status = (
+            "review_pending"
+            if review_status == "review_pending"
+            else str(payload.get("state") or "reason_review")
+        )
+        database.execute(
+            """
+            INSERT INTO challenge_reason_reviews(
+                review_id, session_id, challenge_id, source_user_turn_id,
+                message_key, status, attempts_used, failure_code, result_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, source_user_turn_id) DO UPDATE SET
+                status = excluded.status,
+                attempts_used = excluded.attempts_used,
+                failure_code = excluded.failure_code,
+                result_json = excluded.result_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                review_id,
+                row["session_id"],
+                challenge_id,
+                source_user_turn_id,
+                message_key,
+                review_status,
+                int(payload.get("attemptsUsed") or 0),
+                payload.get("failureCode"),
+                dump_json(payload) if review_status == "resolved" else None,
+                row["created_at"],
+                row["created_at"],
+            ),
+        )
+        database.execute(
+            """
+            UPDATE revision_challenges
+            SET current_reason_turn_id = ?, status = ?, updated_at = ?
+            WHERE challenge_id = ? AND session_id = ?
+            """,
+            (
+                source_user_turn_id,
+                challenge_status,
+                row["created_at"],
+                challenge_id,
+                row["session_id"],
+            ),
+        )
+
+    # Preserve all reasons while exposing only the latest unresolved one as
+    # actionable after migration.
+    challenges = database.execute(
+        "SELECT challenge_id, current_reason_turn_id FROM revision_challenges"
+    ).fetchall()
+    for challenge in challenges:
+        if (
+            challenge["challenge_id"] not in migrated_challenge_ids
+            or not challenge["current_reason_turn_id"]
+        ):
+            continue
+        database.execute(
+            """
+            UPDATE challenge_reason_reviews
+            SET status = 'superseded'
+            WHERE challenge_id = ? AND status = 'review_pending'
+              AND source_user_turn_id != ?
+            """,
+            (challenge["challenge_id"], challenge["current_reason_turn_id"]),
+        )
+    for challenge_id in migrated_challenge_ids:
+        challenge_session = database.execute(
+            "SELECT session_id FROM revision_challenges WHERE challenge_id = ?",
+            (challenge_id,),
+        ).fetchone()
+        if challenge_session is None:
+            continue
+        guidance_rows = database.execute(
+            """
+            SELECT guidance_json, created_at FROM conversation_turns
+            WHERE session_id = ? AND role = 'assistant' AND guidance_json IS NOT NULL
+            ORDER BY sequence_number DESC
+            """,
+            (challenge_session["session_id"],),
+        ).fetchall()
+        for guidance_row in guidance_rows:
+            guidance = load_json(guidance_row["guidance_json"]) or {}
+            challenge_state = guidance.get("challengeState") or {}
+            if challenge_state.get("challengeId") != challenge_id:
+                continue
+            status = str(challenge_state.get("status") or "").strip()
+            if status:
+                database.execute(
+                    "UPDATE revision_challenges SET status = ?, updated_at = ? WHERE challenge_id = ?",
+                    (status, guidance_row["created_at"], challenge_id),
+                )
+            break
+
+
 def record_event(database, session_id, event_type, payload, created_at):
     database.execute(
         """
@@ -748,32 +968,28 @@ def serialize_session(database, session_id):
     }
     challenge_review_rows = database.execute(
         """
-        SELECT id, event_type, payload_json, created_at
-        FROM audit_events
-        WHERE session_id = ? AND event_type IN (
-          'challenge_reason_review_pending',
-          'challenge_reason_review_resolved'
-        )
-        ORDER BY id
+        SELECT review_id, challenge_id, source_user_turn_id, message_key,
+               status, attempts_used, failure_code, result_json, updated_at
+        FROM challenge_reason_reviews
+        WHERE session_id = ? ORDER BY created_at, review_id
         """,
         (session_id,),
     ).fetchall()
-    challenge_reviews = {}
-    for row in challenge_review_rows:
-        payload = load_json(row["payload_json"]) or {}
-        message_key = str(payload.get("messageKey") or "")
-        if not message_key:
-            continue
-        challenge_reviews[message_key] = {
-            **payload,
-            "auditId": row["id"],
-            "status": (
-                "review_pending"
-                if row["event_type"] == "challenge_reason_review_pending"
-                else "resolved"
-            ),
-            "updatedAt": row["created_at"],
+    challenge_reviews = {
+        row["message_key"]: {
+            **(load_json(row["result_json"]) or {}),
+            "reviewId": row["review_id"],
+            "challengeId": row["challenge_id"],
+            "sourceUserTurnId": row["source_user_turn_id"],
+            "messageKey": row["message_key"],
+            "status": row["status"],
+            "attemptsUsed": row["attempts_used"],
+            "failureCode": row["failure_code"],
+            "retryable": row["status"] == "review_pending",
+            "updatedAt": row["updated_at"],
         }
+        for row in challenge_review_rows
+    }
     execution_outcomes = {}
     for row in database.execute(
         """

@@ -202,6 +202,30 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result["comparison"], comparison)
         prompt = client.chat.completions.calls[0]["messages"][0]["content"]
         self.assertIn("Core disagreement", prompt)
+        schema = client.chat.completions.calls[0]["response_format"]["json_schema"]["schema"]
+        self.assertIn("comparison", schema["properties"])
+        self.assertIn("comparison", schema["required"])
+
+    def test_challenge_reason_classifier_falls_back_only_for_short_comparison(self):
+        payload = json.dumps({
+            "relation": "different",
+            "merit": "reasonable",
+            "comparison": "Too short.",
+        })
+        client = FakeClient([payload, payload])
+
+        with patch.object(llm_client, "_create_async_client", return_value=client):
+            result = llm_client.classify_challenge_reason(
+                "Only changing one water tile is too little.",
+                {"primary": "The mechanism may be too weak.", "secondary": "Preservation may be at risk."},
+                "Change one water tile near the late B1 route.",
+                "challenge-short-comparison-test",
+            )
+
+        self.assertEqual(result["relation"], "different")
+        self.assertEqual(result["merit"], "reasonable")
+        self.assertGreaterEqual(len(result["comparison"]), 40)
+        self.assertEqual(result["attemptsUsed"], 2)
 
     def test_proposal_body_playable_support_executes_its_complete_validator(self):
         self.assertTrue(llm_client._proposal_body_has_playable_support(

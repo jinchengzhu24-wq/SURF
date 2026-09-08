@@ -378,6 +378,11 @@ translations.en.error_EXECUTION_REPLAY_MISMATCH = "The actual diff no longer mat
 translations.en.challengeReviewPending = "Your reason was saved, but Kimi could not judge it after two attempts.";
 translations.en.retryChallengeReview = "Retry judgment";
 translations.en.supplementChallengeReason = "Add detail";
+translations.en.challengeReviewSuperseded = "Replaced by a later explanation";
+translations.en.error_CHALLENGE_STALE = "This challenge is no longer active.";
+translations.en.error_CHALLENGE_REVIEW_NOT_FOUND = "This pending judgment no longer exists.";
+translations.en.error_CHALLENGE_REVIEW_STALE = "This pending judgment is no longer actionable.";
+translations.en.error_CHALLENGE_REVIEW_BUSY = "This judgment is already being processed.";
 translations.en.challengeComposerMode = "Responding to proposal challenge";
 translations.en.exitChallengeMode = "Exit challenge";
 translations.en.proposalChallenged = "This proposal is paused while its challenge is being resolved.";
@@ -432,6 +437,11 @@ translations["zh-CN"].executeBoundProposal = "\u6267\u884c\u5df2\u7ed1\u5b9a\u76
 translations["zh-CN"].challengeReviewPending = "\u4f60\u7684\u7406\u7531\u5df2\u4fdd\u5b58\uff0c\u4f46 Kimi \u8fde\u7eed\u4e24\u6b21\u672a\u80fd\u5b8c\u6210\u5224\u65ad\u3002";
 translations["zh-CN"].retryChallengeReview = "\u91cd\u8bd5\u5224\u65ad";
 translations["zh-CN"].supplementChallengeReason = "\u8865\u5145\u8bf4\u660e";
+translations["zh-CN"].challengeReviewSuperseded = "\u5df2\u88ab\u540e\u7eed\u8bf4\u660e\u66ff\u4ee3";
+translations["zh-CN"].error_CHALLENGE_STALE = "\u8fd9\u6b21\u8d28\u7591\u5df2\u4e0d\u518d\u5904\u4e8e\u53ef\u64cd\u4f5c\u72b6\u6001\u3002";
+translations["zh-CN"].error_CHALLENGE_REVIEW_NOT_FOUND = "\u627e\u4e0d\u5230\u8fd9\u6761\u5f85\u5224\u65ad\u8bb0\u5f55\u3002";
+translations["zh-CN"].error_CHALLENGE_REVIEW_STALE = "\u8fd9\u6761\u5f85\u5224\u65ad\u8bb0\u5f55\u5df2\u4e0d\u53ef\u64cd\u4f5c\u3002";
+translations["zh-CN"].error_CHALLENGE_REVIEW_BUSY = "\u8fd9\u6761\u7406\u7531\u6b63\u5728\u5224\u65ad\u4e2d\u3002";
 translations["zh-CN"].challengeComposerMode = "\u6b63\u5728\u56de\u5e94\u65b9\u6848\u8d28\u7591";
 translations["zh-CN"].exitChallengeMode = "\u9000\u51fa\u8d28\u7591";
 translations["zh-CN"].proposalChallenged = "\u8fd9\u4e2a\u65b9\u6848\u5df2\u6682\u505c\uff0c\u9700\u5148\u5904\u7406\u5bf9\u5b83\u7684\u8d28\u7591\u3002";
@@ -1076,16 +1086,7 @@ function renderMessages() {
                     t("retryChallengeReview"),
                     "secondary-button guidance-cue-button",
                     () => {
-                        state.pendingMessage = {
-                            content: turn.content,
-                            baseVersionId: turn.versionId,
-                            idempotencyKey: turn.requestId,
-                            requestProposal: false,
-                            action: "continue_challenge",
-                            challengeId: review.challengeId
-                        };
-                        persistPendingMessage();
-                        void submitPendingMessage();
+                        void retryChallengeReview(review);
                     },
                     { disabled: state.busy || !canEditSelected() }
                 ));
@@ -1099,8 +1100,26 @@ function renderMessages() {
                     },
                     { disabled: state.busy || !canEditSelected() }
                 ));
+                actions.appendChild(makeButton(
+                    t("exitChallengeMode"),
+                    "secondary-button guidance-cue-button",
+                    () => {
+                        state.dismissedChallengeIds.add(review.challengeId);
+                        render();
+                    },
+                    { disabled: state.busy || !canEditSelected() }
+                ));
                 pending.appendChild(actions);
                 content.appendChild(pending);
+            }
+            const supersededReview = (state.session.challengeReviewRecords || []).find(item =>
+                item?.sourceUserTurnId === turn.turnId && item?.status === "superseded"
+            );
+            if (supersededReview) {
+                const superseded = document.createElement("div");
+                superseded.className = "challenge-review-pending resolved";
+                superseded.textContent = t("challengeReviewSuperseded");
+                content.appendChild(superseded);
             }
         }
         row.appendChild(content);
@@ -2223,6 +2242,44 @@ async function retryPendingMessage() {
     await submitPendingMessage();
 }
 
+async function retryChallengeReview(review, retryKey = uniqueId("challenge-review-retry")) {
+    if (!review?.reviewId || state.busy) return;
+    state.busy = true;
+    state.chatBusy = true;
+    state.chatStatus = "waiting";
+    state.chatError = null;
+    startChatTimer();
+    renderChatRequestStatus();
+    updateControls();
+    try {
+        const result = await api(
+            `/api/sessions/${state.sessionId}/challenge-reviews/${review.reviewId}/retry`,
+            {
+                method: "POST",
+                body: {
+                    baseVersionId: state.session.currentVersionId,
+                    idempotencyKey: retryKey
+                },
+                timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS
+            }
+        );
+        state.session = result.session;
+        clearPendingMessage();
+        state.chatStatus = "idle";
+        render();
+    } catch (error) {
+        state.chatStatus = "failed";
+        state.chatError = error;
+        showError(error, () => retryChallengeReview(review, retryKey));
+    } finally {
+        state.busy = false;
+        state.chatBusy = false;
+        stopChatTimer();
+        renderChatRequestStatus();
+        updateControls();
+    }
+}
+
 async function submitPendingMessage() {
     const pending = state.pendingMessage;
     if (!pending || state.busy) return;
@@ -2851,12 +2908,6 @@ function applyTranslations() {
 
 function handleComposerInput() {
     if (state.sessionId) localStorage.setItem(composerKey(), elements.messageInput.value);
-    if (state.pendingMessage && elements.messageInput.value.trim() !== state.pendingMessage.content) {
-        clearPendingMessage();
-        state.chatStatus = "idle";
-        state.chatError = null;
-        renderChatRequestStatus();
-    }
     updateCharacterCount();
     updateControls();
 }

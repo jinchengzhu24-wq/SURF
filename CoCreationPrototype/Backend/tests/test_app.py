@@ -616,7 +616,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("revision-workflow-v2-20260908-1", index_response.text)
+        self.assertIn("challenge-canonical-20260908-2", index_response.text)
         self.assertIn("proposal-mode-toggle", index_response.text)
         self.assertIn("proposal-toggle-track", index_response.text)
         self.assertIn("proposal-toggle-thumb", index_response.text)

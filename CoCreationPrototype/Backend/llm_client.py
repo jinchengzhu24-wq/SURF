@@ -141,8 +141,9 @@ def _structured_response_format(task=None):
                     "type": "string",
                     "enum": ["reasonable", "not_yet_reasonable", "unclear"],
                 },
+                "comparison": {"type": "string"},
             },
-            "required": ["relation", "merit"],
+            "required": ["relation", "merit", "comparison"],
         }
         name = "cocreation_challenge_reason_classification"
     elif task == "intent_feedback_review":
@@ -6035,7 +6036,23 @@ def classify_challenge_reason(
             if merit not in {"reasonable", "not_yet_reasonable", "unclear"}:
                 raise ValueError("challenge reason merit is invalid")
             if relation != "unclear" and merit != "unclear" and len(comparison) < 40:
-                raise ValueError("challenge reason comparison is not detailed enough")
+                if attempt < 2 and _remaining_until(deadline) > 1.0:
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Your semantic labels were usable, but comparison was missing or too short. "
+                            "Return the same JSON contract and provide a concrete two-to-four-sentence comparison."
+                        ),
+                    })
+                    continue
+                comparison = _challenge_comparison_fallback(
+                    reason,
+                    primary,
+                    secondary,
+                    proposal_summary,
+                    relation,
+                    merit,
+                )
             return {
                 "relation": relation,
                 "merit": merit,
@@ -6063,6 +6080,32 @@ def classify_challenge_reason(
     error = classify_exception(last_exception or ValueError("empty challenge review"), request_id, attempts_used)
     error.retryable = True
     raise error from last_exception
+
+
+def _challenge_comparison_fallback(
+    reason,
+    primary,
+    secondary,
+    proposal_summary,
+    relation,
+    merit,
+):
+    """Render a conservative explanation from already classified semantics."""
+    chinese = bool(re.search(r"[\u3400-\u9fff]", str(reason or "")))
+    matched = primary if relation == "primary" else secondary if relation == "secondary" else reason
+    if chinese:
+        stance = "我目前认为这个理由成立" if merit == "reasonable" else "我目前还不能确认这个理由已经成立"
+        return _normalize_response_paragraphs(
+            f"{stance}。我把你关注的重点理解为“{str(matched or reason)[:260]}”，"
+            f"而原方案主要在处理“{str(proposal_summary or '')[:220]}”。"
+            "当前需要决定的是，下一版应优先回应你的这项顾虑，还是继续保留原方案的修改重点。"
+        )[:1200]
+    stance = "I currently find this reason reasonable" if merit == "reasonable" else "I cannot yet confirm that this reason is sufficient"
+    return _normalize_response_paragraphs(
+        f"{stance}. I understand your priority as “{str(matched or reason)[:320]}”, "
+        f"while the original proposal prioritizes “{str(proposal_summary or '')[:260]}”. "
+        "The decision is whether the next revision should address this concern first or retain the original proposal's priority."
+    )[:1200]
 
 
 def review_intent_feedback(

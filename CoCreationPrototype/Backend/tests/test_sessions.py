@@ -94,6 +94,9 @@ class CoCreationSessionTests(unittest.TestCase):
     def setUp(self):
         with repository.connect(immediate=True) as database:
             for table in (
+                "challenge_review_requests",
+                "challenge_reason_reviews",
+                "revision_challenges",
                 "audit_events",
                 "designer_intentions",
                 "play_attempts",
@@ -3316,6 +3319,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertIn("Please correct me", challenge_body)
         challenge_guidance = challenged.json()["turns"][-1]["guidance"]
         self.assertIsNone(challenge_guidance.get("disagreement"))
+        self.assertEqual(challenge_guidance["challengeState"]["status"], "awaiting_reason")
         self.assertFalse(
             any(card["type"] == "discussion" for card in backend._displayed_cards(challenge_guidance))
         )
@@ -3333,6 +3337,10 @@ class CoCreationSessionTests(unittest.TestCase):
         hypothesis_payload = json.loads(saved_hypotheses["payload_json"])
         self.assertTrue(hypothesis_payload["primary"])
         self.assertTrue(hypothesis_payload["secondary"])
+        self.assertEqual(
+            challenge_guidance["challengeState"]["challengeId"],
+            hypothesis_payload["challengeId"],
+        )
 
         active = {
             "status": "active",
@@ -3410,6 +3418,169 @@ class CoCreationSessionTests(unittest.TestCase):
         latest = resolved_response.json()["turns"][-1]["guidance"]
         self.assertEqual(latest["disagreement"]["resolution"], "user")
         self.assertIsNotNone(latest["proposalOffer"])
+
+    def test_pending_challenge_retry_reuses_the_original_user_turn(self):
+        version_id = self.read_session()["currentVersionId"]
+        source_turn = self.offer_bound_revision(
+            PLAYER_MOVE_BRIEF,
+            summary="Move the player start left to sharpen the first route choice",
+            message_key="pending-review-offer",
+        )
+        challenge_execution = LLMExecutionResult(
+            "Tell me what concerns you about this proposal.",
+            1,
+            "pending-review-start",
+            model="mock-model",
+            guidance={"move": "offer_perspective", "proposalOffer": None, "uiCues": []},
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
+            challenged = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Challenge this proposal.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "pending-review-start",
+                    "action": "challenge_revision",
+                    "sourceTurnId": source_turn["turnId"],
+                },
+            )
+        self.assertEqual(challenged.status_code, 200, challenged.text)
+        challenge_id = challenged.json()["turns"][-1]["guidance"]["challengeState"]["challengeId"]
+        failure = LLMServiceError(
+            "MODEL_RESPONSE_INVALID",
+            "The LLM returned an invalid response.",
+            "pending-review-reason",
+            True,
+            2,
+            502,
+        )
+        with patch.object(backend, "classify_challenge_reason", side_effect=failure):
+            pending = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Changing only one tile is too little.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "pending-review-reason",
+                },
+            )
+        self.assertEqual(pending.status_code, 200, pending.text)
+        pending_session = pending.json()
+        reviews = [item for item in pending_session["challengeReviewRecords"] if item["status"] == "review_pending"]
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0]["challengeId"], challenge_id)
+        reason_turn_id = reviews[0]["sourceUserTurnId"]
+        user_count = len([turn for turn in pending_session["turns"] if turn["role"] == "user"])
+        with repository.connect() as database:
+            leaked_evidence = database.execute(
+                """
+                SELECT COUNT(*) AS count FROM audit_events
+                WHERE session_id = ? AND event_type = 'intent_evidence_recorded'
+                  AND json_extract(payload_json, '$.turnId') = ?
+                """,
+                (self.session_id, reason_turn_id),
+            ).fetchone()["count"]
+        self.assertEqual(leaked_evidence, 0)
+        with repository.connect(immediate=True) as database:
+            repository.backfill_revision_challenges(database)
+            persisted_status = database.execute(
+                "SELECT status FROM revision_challenges WHERE challenge_id = ?",
+                (challenge_id,),
+            ).fetchone()["status"]
+        self.assertEqual(persisted_status, "review_pending")
+
+        with patch.object(backend, "classify_challenge_reason", side_effect=failure):
+            duplicate_submit = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Changing only one tile is too little!",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "pending-review-duplicate-browser-key",
+                },
+            )
+        self.assertEqual(duplicate_submit.status_code, 200, duplicate_submit.text)
+        self.assertEqual(
+            len([turn for turn in duplicate_submit.json()["turns"] if turn["role"] == "user"]),
+            user_count,
+        )
+
+        with patch.object(backend, "classify_challenge_reason", side_effect=failure):
+            supplemented = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Changing only one tile is too little; I want at least two related water changes.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "pending-review-supplement",
+                    "action": "continue_challenge",
+                    "challengeId": challenge_id,
+                },
+            )
+        self.assertEqual(supplemented.status_code, 200, supplemented.text)
+        supplemented_session = supplemented.json()
+        self.assertEqual(
+            len([turn for turn in supplemented_session["turns"] if turn["role"] == "user"]),
+            user_count + 1,
+        )
+        reviews_by_status = supplemented_session["challengeReviewRecords"]
+        self.assertEqual(len([item for item in reviews_by_status if item["status"] == "review_pending"]), 1)
+        self.assertEqual(len([item for item in reviews_by_status if item["status"] == "superseded"]), 1)
+        reviews = [item for item in reviews_by_status if item["status"] == "review_pending"]
+        reason_turn_id = reviews[0]["sourceUserTurnId"]
+        user_count += 1
+
+        active_execution = LLMExecutionResult(
+            "I agree that the scope is too small for the promised effect.",
+            1,
+            "pending-review-reason",
+            model="mock-model",
+            guidance={"move": "offer_perspective", "proposalOffer": None, "uiCues": []},
+        )
+        classification = {
+            "relation": "different",
+            "merit": "reasonable",
+            "comparison": (
+                "I agree that one changed tile is too limited for the promised scope. "
+                "Your concern prioritizes sufficient change coverage, while the proposal prioritized locality."
+            ),
+            "attemptsUsed": 1,
+        }
+        with patch.object(backend, "classify_challenge_reason", return_value=classification), patch.object(
+            backend, "generate_chat_reply", return_value=active_execution
+        ):
+            retried = self.client.post(
+                f"/api/sessions/{self.session_id}/challenge-reviews/{reviews[0]['reviewId']}/retry",
+                json={
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "pending-review-retry",
+                },
+            )
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(retried.json()["outcome"], "resolved")
+        retried_session = retried.json()["session"]
+        self.assertEqual(len([turn for turn in retried_session["turns"] if turn["role"] == "user"]), user_count)
+        self.assertEqual(
+            len([turn for turn in retried_session["turns"] if turn["turnId"] == reason_turn_id]),
+            1,
+        )
+        with repository.connect(immediate=True) as database:
+            challenge_status_before = database.execute(
+                "SELECT status FROM revision_challenges WHERE challenge_id = ?",
+                (challenge_id,),
+            ).fetchone()["status"]
+            repository.backfill_revision_challenges(database)
+            challenge_status_after = database.execute(
+                "SELECT status FROM revision_challenges WHERE challenge_id = ?",
+                (challenge_id,),
+            ).fetchone()["status"]
+        self.assertEqual(challenge_status_after, challenge_status_before)
+        repeated = self.client.post(
+            f"/api/sessions/{self.session_id}/challenge-reviews/{reviews[0]['reviewId']}/retry",
+            json={
+                "baseVersionId": version_id,
+                "idempotencyKey": "pending-review-retry",
+            },
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(repeated.json()["outcome"], "resolved")
 
     def test_proposal_button_mode_is_audited_restored_and_idempotent(self):
         version_id = self.read_session()["currentVersionId"]
