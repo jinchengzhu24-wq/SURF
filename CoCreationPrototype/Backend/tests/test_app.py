@@ -233,6 +233,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 "id": "request", "role": "user",
                 "content": "我希望用户花费更多时间来解决这个关卡，可以如何改善",
                 "sequence_number": 1, "guidance_json": None,
+                "request_id": "proposal-request",
             },
             {
                 "id": "ask-1", "role": "assistant",
@@ -254,7 +255,11 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             ],
         }
 
-        discovery = backend._proposal_discovery_from_turns(turns, "stage-1")
+        discovery = backend._proposal_discovery_from_turns(
+            turns,
+            "stage-1",
+            {"proposal-request"},
+        )
         specification = backend._proposal_clarification_spec(
             discovery, snapshot, "zh-CN"
         )
@@ -266,6 +271,54 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("B2", specification["allowedEntityLabels"])
         self.assertTrue(specification["fallbackQuestion"].endswith(("?", "？")))
         self.assertIn("增加实际推箱次数", specification["fallbackAcknowledgement"])
+
+    def test_sparse_region_proposal_asks_neutral_visual_or_play_question(self):
+        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        discovery = {
+            "status": "clarifying",
+            "userEvidence": ["我希望左下角别那么空"],
+            "clarificationQuestionCount": 0,
+            "askedQuestionKeys": [],
+        }
+
+        self.assertTrue(
+            backend._proposal_discovery_has_unique_anchor(discovery, snapshot)
+        )
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "我希望左下角别那么空",
+                {"conflicts": []},
+                snapshot,
+                proposal_discovery=discovery,
+            ),
+            "needs_clarification",
+        )
+        specification = backend._proposal_clarification_spec(
+            discovery,
+            snapshot,
+            "zh-CN",
+        )
+        self.assertEqual(specification["questionKey"], "experience_goal")
+        self.assertIn("左下角", specification["fallbackQuestion"])
+        self.assertIn("视觉上的空间分布", specification["fallbackQuestion"])
+        self.assertIn("路线或推箱节奏", specification["fallbackQuestion"])
+        self.assertNotIn("解题时间", specification["fallbackQuestion"])
+
+        continued = {
+            **discovery,
+            "userEvidence": discovery["userEvidence"] + ["我更在意视觉上的空间平衡"],
+            "clarificationQuestionCount": 1,
+            "askedQuestionKeys": ["experience_goal"],
+        }
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "我更在意视觉上的空间平衡",
+                {"conflicts": []},
+                snapshot,
+                proposal_discovery=continued,
+            ),
+            "proposal",
+        )
 
     def test_server_clarification_replaces_snapshot_fallback_and_advances_count(self):
         execution = LLMExecutionResult(
@@ -507,18 +560,33 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("corrective retry then timed out", execution.assistant_message)
         self.assertIsNone(execution.guidance["proposalOffer"])
 
-    def test_failed_proposal_topic_reopens_for_a_new_concrete_direction(self):
+    def test_failed_proposal_topic_unlocks_before_a_new_concrete_direction(self):
         turns = [
             {"id": "request", "role": "user", "content": "请给我一个方案", "sequence_number": 1, "guidance_json": None},
             {"id": "failed", "role": "assistant", "content": "候选未通过", "sequence_number": 2,
              "guidance_json": '{"proposalDiscovery":{"topicId":"request","status":"failed","clarificationQuestionCount":3}}'},
-            {"id": "retry", "role": "user", "content": "让 B1 阻挡 B2 的通道", "sequence_number": 3, "guidance_json": None},
+            {"id": "retry", "role": "user", "content": "请修改地图，让 B1 阻挡 B2 的通道", "sequence_number": 3, "guidance_json": None},
         ]
 
         discovery = backend._proposal_discovery_from_turns(turns, "stage")
 
         self.assertEqual(discovery["status"], "clarifying")
+        self.assertEqual(discovery["topicId"], "retry")
         self.assertIn("B1", discovery["brief"])
+
+    def test_textual_cancel_does_not_replace_an_active_proposal_topic(self):
+        turns = [
+            {"id": "request", "role": "user", "content": "帮我改", "sequence_number": 1, "guidance_json": None},
+            {"id": "ask", "role": "assistant", "content": "你希望改动哪个局部？", "sequence_number": 2,
+             "guidance_json": '{"proposalDiscovery":{"topicId":"request","status":"clarifying","clarificationQuestionCount":1}}'},
+            {"id": "cancel", "role": "user", "content": "放弃这个，换个方向", "sequence_number": 3, "guidance_json": None},
+        ]
+
+        discovery = backend._proposal_discovery_from_turns(turns, "stage")
+
+        self.assertEqual(discovery["topicId"], "request")
+        self.assertEqual(discovery["status"], "clarifying")
+        self.assertIn("放弃这个", discovery["brief"])
 
     def test_clarification_budget_allows_safe_completion_for_unique_water(self):
         snapshot = {
@@ -616,7 +684,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("language-entry-20260909-1", index_response.text)
+        self.assertIn("dual-branch-20260909-1", index_response.text)
         self.assertIn("languageSetupSwitch", index_response.text)
         self.assertIn("enterSessionButton", index_response.text)
         self.assertIn("proposal-mode-toggle", index_response.text)
@@ -653,6 +721,11 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertNotIn('["discussionAi", disagreement.aiPosition]', js_response.text)
         self.assertIn('["discussionCore", disagreement.coreDisagreement]', js_response.text)
         self.assertIn("function toggleProposalMode()", js_response.text)
+        self.assertIn("function proposalFlowActive()", js_response.text)
+        self.assertIn("state.session?.proposalFlowState?.active", js_response.text)
+        self.assertIn("elements.proposalRequestButton.disabled = (", js_response.text)
+        self.assertIn("disagreementActive || proposalLocked", js_response.text)
+        self.assertIn("state.session.proposalFlowState = latest.proposalFlowState", js_response.text)
         self.assertNotIn("async function requestProposal()", js_response.text)
         self.assertIn('requestProposal: state.proposalMode', js_response.text)
         self.assertIn('aria-pressed="false"', index_response.text)
@@ -689,6 +762,15 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn(".guidance-cue::before,\n.discussion-focus::before", css_response.text)
         self.assertIn(".guidance-cue-label,\n.discussion-focus-label", css_response.text)
         self.assertIn(".discussion-focus {\n    margin-top: 30px;", css_response.text)
+        self.assertIn(
+            ".disagreement-field strong {\n    font-size: 12px;",
+            css_response.text,
+        )
+        self.assertNotIn("challenge-review-pending", css_response.text)
+        self.assertNotIn("challenge-composer-mode", css_response.text)
+        self.assertNotIn("retryChallengeReview", js_response.text)
+        self.assertNotIn("supplementChallengeReason", js_response.text)
+        self.assertNotIn("exitChallengeMode", js_response.text)
         self.assertIn("translation-label", css_response.text)
         self.assertIn('hash.playReturn', js_response.text)
         self.assertIn('status === "sync_failed"', js_response.text)

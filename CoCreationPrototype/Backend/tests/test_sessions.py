@@ -884,11 +884,8 @@ class CoCreationSessionTests(unittest.TestCase):
             if item["versionId"] == version_id
         )
         self.assertEqual(progress["confirmedDecisions"], [])
-        self.assertEqual(
-            progress["unresolvedQuestions"][0]["question"],
-            "What would you like another player to notice first?",
-        )
-        self.assertEqual(progress["questionRecords"][0]["status"], "unanswered")
+        self.assertEqual(progress["unresolvedQuestions"], [])
+        self.assertEqual(progress["questionRecords"], [])
 
     def test_next_ordinary_chat_links_evidence_to_persistent_hypothesis(self):
         version_id = self.read_session()["currentVersionId"]
@@ -1563,6 +1560,155 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(len(retried.json()["versions"]), 1)
         self.assertEqual(retried.json()["proposals"], [])
 
+    def test_direct_modification_locks_one_proposal_topic_and_suppresses_orange(self):
+        version_id = self.read_session()["currentVersionId"]
+        first_execution = LLMExecutionResult(
+            "I can narrow this into one safe revision.",
+            1,
+            "proposal-flow-start",
+            model="mock-model",
+            guidance={
+                "move": "clarify_intent",
+                "intentHypothesis": "For now, I think you may prefer a longer route.",
+                "intentConfidence": "medium",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        second_execution = LLMExecutionResult(
+            "That gives the proposal a clearer play goal.",
+            1,
+            "proposal-flow-answer",
+            model="mock-model",
+            guidance={
+                "move": "clarify_intent",
+                "intentHypothesis": "For now, I understand that you prefer longer box transport.",
+                "intentConfidence": "medium",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+
+        with patch.object(
+            backend,
+            "generate_chat_reply",
+            side_effect=[first_execution, second_execution],
+        ) as mocked:
+            started = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please change the map.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "proposal-flow-start",
+                },
+            )
+            continued = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "I think the extra time should come from more planning.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "proposal-flow-answer",
+                },
+            )
+
+        self.assertEqual(started.status_code, 200, started.text)
+        self.assertTrue(started.json()["proposalFlowState"]["active"])
+        self.assertEqual(started.json()["proposalFlowState"]["status"], "clarifying")
+        self.assertEqual(
+            started.json()["proposalFlowState"]["clarificationQuestionCount"],
+            1,
+        )
+        self.assertEqual(continued.status_code, 200, continued.text)
+        self.assertTrue(continued.json()["proposalFlowState"]["active"])
+        self.assertEqual(
+            continued.json()["turns"][-1]["guidance"]["intentHypothesis"],
+            None,
+        )
+        first_topic = mocked.call_args_list[0].kwargs["stage_context"]["proposalDiscovery"]
+        second_topic = mocked.call_args_list[1].kwargs["stage_context"]["proposalDiscovery"]
+        self.assertEqual(first_topic["topicId"], second_topic["topicId"])
+        self.assertEqual(len(second_topic["userEvidence"]), 2)
+
+    def test_answering_a_historical_question_cannot_create_an_orange_card(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "I see a compact opening route.",
+            1,
+            "historical-question-opening",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "historical-question-opening"},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+        question_id = "legacy-question-001"
+        with repository.connect(immediate=True) as database:
+            version = repository.get_version(database, self.session_id, version_id)
+            design_context = repository.load_json(version["design_context_json"])
+            design_context["openQuestions"] = [{
+                "id": question_id,
+                "question": "Which route should remain readable?",
+                "status": "open",
+                "sourceKind": "legacy",
+                "sourceStageId": version_id,
+            }]
+            database.execute(
+                "UPDATE level_versions SET design_context_json = ? WHERE id = ?",
+                (repository.dump_json(design_context), version_id),
+            )
+        execution = LLMExecutionResult(
+            "Keeping that route readable preserves the opening comparison.",
+            1,
+            "historical-question-answer",
+            model="mock-model",
+            guidance={
+                "move": "clarify_intent",
+                "intentHypothesis": "For now, I understand that you prefer the upper route.",
+                "intentConfidence": "medium",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        with (
+            patch.object(backend, "generate_chat_reply", return_value=execution),
+            patch.object(
+                backend,
+                "review_question_answers",
+                return_value={
+                    "results": [{"questionId": question_id, "status": "answered"}],
+                    "answeredQuestionIds": [question_id],
+                },
+            ),
+        ):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "I think the upper route should remain readable.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "historical-question-answer",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIsNone(response.json()["turns"][-1]["guidance"]["intentHypothesis"])
+
     def test_exhausted_deterministic_search_returns_guidance_without_relaxation_offer(self):
         version_id = self.read_session()["currentVersionId"]
         request_payload = {
@@ -1604,15 +1750,13 @@ class CoCreationSessionTests(unittest.TestCase):
             ]
             self.assertEqual([turn["role"] for turn in matching], ["user", "assistant"])
             warning_turn = matching[-1]
-            self.assertEqual(
-                [cue["type"] for cue in warning_turn["guidance"]["uiCues"]],
-                ["warning"],
-            )
+            self.assertEqual(warning_turn["guidance"]["uiCues"], [])
             self.assertIsNone(warning_turn["guidance"]["proposalOffer"])
-            self.assertIsNone(warning_turn["guidance"]["relaxationOffer"])
-            self.assertIn("adjust the map yourself", warning_turn["content"].lower())
-            self.assertIn("discuss", warning_turn["content"].lower())
+            self.assertIsNone(warning_turn["guidance"].get("relaxationOffer"))
+            self.assertIn("no solvable change", warning_turn["content"].lower())
+            self.assertIn("no purple proposal card", warning_turn["content"].lower())
             self.assertEqual(failed_generation.json()["proposals"], [])
+            self.assertFalse(failed_generation.json()["proposalFlowState"]["active"])
 
             repeated = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -1631,7 +1775,8 @@ class CoCreationSessionTests(unittest.TestCase):
                     (self.session_id,),
                 ).fetchall()
             ]
-        self.assertEqual(event_types.count("proposal_search_failed"), 1)
+        self.assertEqual(event_types.count("proposal_search_failed"), 0)
+        self.assertEqual(event_types.count("proposal_discovery_progress"), 1)
         self.assertEqual(event_types.count("proposal_relaxation_offered"), 0)
 
     def test_transport_failures_never_trigger_relaxation_offer(self):
@@ -1660,6 +1805,7 @@ class CoCreationSessionTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 504)
+        self.assertTrue(self.read_session()["proposalFlowState"]["active"])
         matching = [
             turn for turn in self.read_session()["turns"]
             if turn["requestId"] == request_payload["idempotencyKey"]
@@ -1673,7 +1819,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 """,
                 (self.session_id,),
             ).fetchone()[0]
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 1)
 
     def test_retry_after_ordinary_chat_failure_never_saves_server_prose(self):
         version_id = self.read_session()["currentVersionId"]
@@ -3460,7 +3606,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(latest["disagreement"]["resolution"], "user")
         self.assertIsNotNone(latest["proposalOffer"])
 
-    def test_pending_challenge_retry_reuses_the_original_user_turn(self):
+    def test_failed_challenge_review_uses_chat_retry_without_duplicate_user_turn(self):
         version_id = self.read_session()["currentVersionId"]
         source_turn = self.offer_bound_revision(
             PLAYER_MOVE_BRIEF,
@@ -3504,11 +3650,15 @@ class CoCreationSessionTests(unittest.TestCase):
                     "idempotencyKey": "pending-review-reason",
                 },
             )
-        self.assertEqual(pending.status_code, 200, pending.text)
-        pending_session = pending.json()
+        self.assertEqual(pending.status_code, 502, pending.text)
+        self.assertEqual(pending.json()["code"], "CHALLENGE_REVIEW_FAILED")
+        self.assertTrue(pending.json()["retryable"])
+        self.assertEqual(pending.json()["details"]["task"], "challenge_review")
+        pending_session = self.read_session()
         reviews = [item for item in pending_session["challengeReviewRecords"] if item["status"] == "review_pending"]
         self.assertEqual(len(reviews), 1)
         self.assertEqual(reviews[0]["challengeId"], challenge_id)
+        self.assertFalse(reviews[0]["retryable"])
         reason_turn_id = reviews[0]["sourceUserTurnId"]
         user_count = len([turn for turn in pending_session["turns"] if turn["role"] == "user"])
         with repository.connect() as database:
@@ -3538,9 +3688,10 @@ class CoCreationSessionTests(unittest.TestCase):
                     "idempotencyKey": "pending-review-duplicate-browser-key",
                 },
             )
-        self.assertEqual(duplicate_submit.status_code, 200, duplicate_submit.text)
+        self.assertEqual(duplicate_submit.status_code, 502, duplicate_submit.text)
+        duplicate_session = self.read_session()
         self.assertEqual(
-            len([turn for turn in duplicate_submit.json()["turns"] if turn["role"] == "user"]),
+            len([turn for turn in duplicate_session["turns"] if turn["role"] == "user"]),
             user_count,
         )
 
@@ -3555,8 +3706,8 @@ class CoCreationSessionTests(unittest.TestCase):
                     "challengeId": challenge_id,
                 },
             )
-        self.assertEqual(supplemented.status_code, 200, supplemented.text)
-        supplemented_session = supplemented.json()
+        self.assertEqual(supplemented.status_code, 502, supplemented.text)
+        supplemented_session = self.read_session()
         self.assertEqual(
             len([turn for turn in supplemented_session["turns"] if turn["role"] == "user"]),
             user_count + 1,
@@ -3588,15 +3739,15 @@ class CoCreationSessionTests(unittest.TestCase):
             backend, "generate_chat_reply", return_value=active_execution
         ):
             retried = self.client.post(
-                f"/api/sessions/{self.session_id}/challenge-reviews/{reviews[0]['reviewId']}/retry",
+                f"/api/sessions/{self.session_id}/messages",
                 json={
+                    "content": "Changing only one tile is too little; I want at least two related water changes.",
                     "baseVersionId": version_id,
-                    "idempotencyKey": "pending-review-retry",
+                    "idempotencyKey": "pending-review-supplement",
                 },
             )
         self.assertEqual(retried.status_code, 200, retried.text)
-        self.assertEqual(retried.json()["outcome"], "resolved")
-        retried_session = retried.json()["session"]
+        retried_session = retried.json()
         self.assertEqual(len([turn for turn in retried_session["turns"] if turn["role"] == "user"]), user_count)
         self.assertEqual(
             len([turn for turn in retried_session["turns"] if turn["turnId"] == reason_turn_id]),
@@ -3613,15 +3764,32 @@ class CoCreationSessionTests(unittest.TestCase):
                 (challenge_id,),
             ).fetchone()["status"]
         self.assertEqual(challenge_status_after, challenge_status_before)
-        repeated = self.client.post(
+        retired = self.client.post(
             f"/api/sessions/{self.session_id}/challenge-reviews/{reviews[0]['reviewId']}/retry",
             json={
                 "baseVersionId": version_id,
                 "idempotencyKey": "pending-review-retry",
             },
         )
-        self.assertEqual(repeated.status_code, 200, repeated.text)
-        self.assertEqual(repeated.json()["outcome"], "resolved")
+        self.assertEqual(retired.status_code, 410, retired.text)
+        self.assertEqual(retired.json()["code"], "CHALLENGE_REVIEW_RETRY_RETIRED")
+
+    def test_exit_challenge_payload_is_rejected_without_state_change(self):
+        version_id = self.read_session()["currentVersionId"]
+        before = self.read_session()
+        response = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Talk about something else.",
+                "baseVersionId": version_id,
+                "idempotencyKey": "retired-exit-challenge",
+                "exitChallenge": True,
+            },
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["code"], "CHALLENGE_EXIT_UNSUPPORTED")
+        after = self.read_session()
+        self.assertEqual(after["turns"], before["turns"])
 
     def test_proposal_button_mode_is_audited_restored_and_idempotent(self):
         version_id = self.read_session()["currentVersionId"]
@@ -4020,7 +4188,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(assessed.json()["currentVersionId"], stage_id)
 
-    def test_chat_patch_updates_public_progress_without_exposing_internal_patch(self):
+    def test_chat_patch_stays_hidden_and_cannot_create_ordinary_questions(self):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(
             "I notice a compact central route.",
@@ -4077,7 +4245,7 @@ class CoCreationSessionTests(unittest.TestCase):
             item for item in payload["progressContexts"]
             if item["versionId"] == version_id
         )
-        self.assertEqual(progress["unresolvedQuestions"][0]["question"], question)
+        self.assertEqual(progress["unresolvedQuestions"], [])
 
         second_execution = LLMExecutionResult(
             "That question is settled by the latest play observation.",
@@ -4116,7 +4284,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(progress["unresolvedQuestions"], [])
 
-    def test_first_chat_reply_skips_progress_but_second_reply_updates_it(self):
+    def test_ordinary_chat_patch_cannot_create_open_questions(self):
         version_id = self.read_session()["currentVersionId"]
         question = "Should the first push expose the side corridor?"
         first_execution = LLMExecutionResult(
@@ -4183,9 +4351,9 @@ class CoCreationSessionTests(unittest.TestCase):
             item for item in second.json()["progressContexts"]
             if item["versionId"] == version_id
         )
-        self.assertEqual(progress["unresolvedQuestions"][0]["question"], question)
+        self.assertEqual(progress["unresolvedQuestions"], [])
 
-    def test_later_map_question_is_recovered_when_model_omits_patch(self):
+    def test_later_map_question_is_not_added_to_progress(self):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(
             "I notice a compact central route.",
@@ -4236,55 +4404,8 @@ class CoCreationSessionTests(unittest.TestCase):
             item for item in response.json()["progressContexts"]
             if item["versionId"] == version_id
         )
-        self.assertEqual(
-            progress["unresolvedQuestions"][0]["question"],
-            "Should we keep this corridor open?",
-        )
-        self.assertEqual(
-            progress["questionRecords"][0]["status"], "unanswered"
-        )
-
-        answer_execution = LLMExecutionResult(
-            "That gives us a clear direction.",
-            1,
-            "fallback-question-answer-001",
-            model="mock-model",
-            guidance={
-                "move": "offer_perspective",
-                "intentHypothesis": None,
-                "intentConfidence": None,
-                "followUpQuestion": None,
-                "proposalOffer": None,
-                "disagreement": None,
-                "uiCues": [],
-            },
-        )
-        question_id = progress["questionRecords"][0]["questionId"]
-        with (
-            patch.object(backend, "generate_chat_reply", return_value=answer_execution),
-            patch.object(
-                backend,
-                "review_question_answers",
-                return_value={
-                    "results": [{"questionId": question_id, "status": "answered"}],
-                    "answeredQuestionIds": [question_id],
-                },
-            ),
-        ):
-            answered = self.client.post(
-                f"/api/sessions/{self.session_id}/messages",
-                json={
-                    "content": "Keep the corridor open so the first route stays readable.",
-                    "baseVersionId": version_id,
-                    "idempotencyKey": "fallback-question-answer-001",
-                },
-            )
-        answered_progress = next(
-            item for item in answered.json()["progressContexts"]
-            if item["versionId"] == version_id
-        )
-        self.assertEqual(answered_progress["questionRecords"][0]["status"], "answered")
-        self.assertEqual(answered_progress["questionRecords"][0]["answeredAtStageNumber"], 1)
+        self.assertEqual(progress["unresolvedQuestions"], [])
+        self.assertEqual(progress["questionRecords"], [])
 
     def test_visible_question_can_be_ignored_and_restored_without_llm_or_turns(self):
         version_id = self.read_session()["currentVersionId"]
@@ -4308,12 +4429,28 @@ class CoCreationSessionTests(unittest.TestCase):
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "question-feedback-opening"},
             )
+        question_id = "historical-visible-question"
+        with repository.connect(immediate=True) as database:
+            version = repository.get_version(database, self.session_id, version_id)
+            design_context = repository.load_json(version["design_context_json"])
+            design_context["openQuestions"] = [{
+                "id": question_id,
+                "question": "Which route should remain readable?",
+                "status": "open",
+                "sourceKind": "legacy",
+                "sourceStageId": version_id,
+            }]
+            database.execute(
+                "UPDATE level_versions SET design_context_json = ? WHERE id = ?",
+                (repository.dump_json(design_context), version_id),
+            )
+        assessed_payload = self.read_session()
         progress = next(
-            item for item in assessed.json()["progressContexts"]
+            item for item in assessed_payload["progressContexts"]
             if item["versionId"] == version_id
         )
-        question_id = progress["questionRecords"][0]["questionId"]
-        turn_count = len(assessed.json()["turns"])
+        self.assertEqual(progress["questionRecords"][0]["questionId"], question_id)
+        turn_count = len(assessed_payload["turns"])
 
         wrong_stage = self.client.post(
             f"/api/sessions/{self.session_id}/questions/{question_id}/feedback",

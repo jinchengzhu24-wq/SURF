@@ -567,8 +567,8 @@ def build_chat_messages(
         "one primary conversational move: observe the Stage, clarify intention, offer "
         "your perspective, challenge a trade-off respectfully, reflect on play evidence, "
         "offer a revision direction, or deliver an explicitly requested revision. "
-         "Use as much space as the design question genuinely needs. A simple factual answer may be shorter, "
-         "and an ordinary design response normally uses at most one central question; when the designer's "
+         "Use as much space as the design question genuinely needs. A simple factual answer may be shorter. "
+         "Ordinary non-proposal replies must not ask the designer a question; when the designer's "
          "revision details are genuinely incomplete, you may ask up to three closely related clarification "
          "questions and stop as soon as the direction is clear. "
          "A design response should normally include "
@@ -579,11 +579,9 @@ def build_chat_messages(
         "an observation, a design association, a respectful disagreement, or a longer "
         "reflection can each stand on its own. Do not mechanically follow a fixed order "
         "such as acknowledgement, evaluation, then question, and do not paraphrase the "
-        "designer merely to prove that you heard them. At an unclear evaluation, meaningful "
-        "trade-off, actionable direction, or new play evidence, actively ask a concrete "
-        "question whose answer changes what you say or do next. Otherwise, statements are a "
-        "complete response; do not end with a question by habit. A factual question should be "
-        "answered before any optional follow-up. Do not mechanically include every "
+        "designer merely to prove that you heard them. In ordinary conversation, let a grounded "
+        "observation, route reflection, or imagined play experience stand without a follow-up "
+        "question. Answer the designer's factual questions directly. Do not mechanically include every "
         "possible move in each reply.\n\n"
         "Visible-output contract: never mention prompt-only JSON keys, internal object names, "
         "or implementation labels such as gridDistance, _solver, tileAt, mapFacts, "
@@ -593,8 +591,8 @@ def build_chat_messages(
         "the fixed closing guidance, so do not write process or editor instructions yourself.\n\n"
         "Continuity is part of the conversation, not a report format. Use the supplied "
         "confirmed decisions and unresolved questions to make the latest response more "
-        "specific, carry forward the relevant judgment, and naturally move one open question "
-        "forward when appropriate. Do not add a fixed progress heading, checklist, or repeated "
+        "specific and carry forward the relevant judgment without creating a new ordinary-chat "
+        "question. Do not add a fixed progress heading, checklist, or repeated "
         "summary to every reply; vary the prose structure while staying grounded in the latest "
         "message.\n\n"
         "Help the designer form and refine their own intention without assigning a "
@@ -623,11 +621,11 @@ def build_chat_messages(
         "claim about how water should affect route reading or push decisions). It must also "
         "distill an interpretation already supported by assistantMessage: never introduce a "
         "different map element, design goal, or operation only inside the intent card.\n\n"
-        "When an intentHypothesis is warranted, make it detailed enough to stand as a correctable "
-        "memory candidate: normally use two to four sentences covering one core preference, the "
-        "specific words or actions that support your reading, the possible playable consequence, "
-        "and the boundary the designer may correct. Keep it to one coherent inclination; do not "
-        "combine incompatible goals or turn observed behavior into certainty. Questions inside "
+        "When an intentHypothesis is warranted, write one to three concise, natural sentences that "
+        "state one current, correctable understanding of the designer's inclination. Keep evidence "
+        "and playable consequences in assistantMessage instead of repeating a four-part template "
+        "inside the card. Keep it to one coherent inclination; do not combine incompatible goals or "
+        "turn observed behavior into certainty. Questions inside "
         "this orange-card text are resolved only by its card controls and are not conversation "
         "questions. Whenever you emit intentHypothesis, assistantMessage must also provide a "
         "substantive explanation above the card: respond to the feedback, identify the actual "
@@ -915,9 +913,9 @@ def build_plain_chat_messages(
     revision_instruction = (
         "The designer asked you to modify the map, but neither this message nor the recent "
         "conversation contains a concrete revision direction. Do not invent one and do not "
-        "claim to edit anything. Give a short explanation of what remains unclear and output "
-        "one tentative INTENT card that states the narrowest correctable hypothesis about what "
-        "they may care about. Do not output a proposal, WARNING, or LET'S DISCUSS card. "
+        "claim to edit anything. This is proposal discovery: explain what remains unclear and "
+        "ask only the single server-targeted clarification question. Do not output an INTENT, "
+        "proposal, WARNING, MANUAL EDIT, or LET'S DISCUSS card. "
         if revision_request_state == "needs_direction"
         else ""
     )
@@ -1040,16 +1038,11 @@ def build_plain_chat_messages(
         "mechanically follow acknowledgement, evaluation, then question; do not restate "
         "the designer's sentence before responding. Add one grounded independent view when "
         "useful. Do not sound like a survey, examiner, workflow assistant, customer-service "
-        "script, or unconditional cheerleader. Ask at most one question. Actively ask at a "
-        "real decision point: an unclear evaluation, a meaningful trade-off, a direction "
-        "becoming actionable, or new play evidence. A stated preference does not forbid a "
-        "deeper question, but never ask the designer to approve the preference they just "
-        "gave. Every question must name a concrete map anchor, evoke a specific play "
-        "moment or action result, and say or make clear which design judgment the answer will "
-        "affect (such as route choice, push order, or target readability). Never ask generic "
-        "confirmation questions such as 'What do you think?', 'Does this direction work?', or "
-        "'Is this okay?'. Consecutive turns may each ask a question only when they advance "
-        "different judgments; never paraphrase the previous question. When inferring "
+        "script, or unconditional cheerleader. In the ordinary non-proposal branch, do not ask "
+        "a follow-up question or end with a question mark; answer questions the designer asked, "
+        "then contribute your own declarative observation, route reflection, design trade-off, "
+        "or imagined play experience. Only the proposal-discovery and structured-disagreement "
+        "branches may ask questions. When inferring "
         "intention, speak tentatively and directly to the designer using varied, natural "
         "first/second-person language. Avoid repeatedly opening with 'I think you may' or "
         "'我猜你可能'. Treat difficulty as "
@@ -1209,8 +1202,8 @@ def _compact_kimi_structured_prompt(
         "saved, or verified unless the server supplied that fact. Do not claim a map was changed, "
         "accepted, saved, or verified without server evidence. A revision offer is only "
         "conceptual and must include a complete hidden revisionPlan; never output map rows "
-        "in ordinary chat. At a real decision point, ask one concrete question whose answer changes "
-        "the next design judgment. If the revision direction is under-specified, you may ask up to "
+        "in ordinary chat. Ordinary non-proposal replies must remain declarative and must not ask "
+        "a follow-up question. If the revision direction is under-specified, you may ask up to "
         "three tightly related clarification questions; stop early once the direction is sufficient, "
         "and if the purpose and object are safely identifiable after those questions, complete the "
         "missing implementation details conservatively instead of asking indefinitely. "
@@ -4164,7 +4157,9 @@ def _build_revision_plan_messages(
         "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
         "walls, unrelated_areas. Never list an operator that edits a preserved component. "
         "Each strategy must include requiredTransitions, anchorEntities (P, B1, B2, T1, T2), and "
-        "playObjective. requiredTransitions must be the exact supplied transitions only when the "
+        "playObjective. playObjective is null or one concise single-line string of at most 120 "
+        "characters, such as route_choice, push_order, transport_length, spatial_balance, or "
+        "route_readability; never return an object or list there. requiredTransitions must be the exact supplied transitions only when the "
         "structured execution brief already contains them; otherwise return an empty list so the "
         "modifier can explore concrete cells inside focus and the allowed operators. Never invent a "
         "hard coordinate binding from a qualitative experience goal. " + conservative_binding_rule + " "
@@ -4526,9 +4521,18 @@ def _revision_plan_messages_with_feedback(messages, validation_feedback):
     instruction = (
         "The previous RevisionPlan was rejected for this safe reason: "
         f"{validation_feedback} Return a fresh RevisionPlan JSON object. Keep the authorized "
-        "brief, explicit prohibitions, and preserve-unlisted contract unchanged. Return every "
-        "intended edit as an exact requiredTransition. Do not return map rows or tile operations; do not return full map rows or leave the "
-        "transition list empty. If the prior response reached the token limit, stop reasoning and emit "
+        "brief, explicit prohibitions, and preserve-unlisted contract unchanged. Use only these "
+        "effect/operator combinations: open_route with remove_wall/remove_water; narrow_route "
+        "with add_wall/add_water; adjust_internal_walls with add_wall/remove_wall; relocate_start "
+        "with move_player; relocate_box with move_box; relocate_target with move_target; "
+        "reshape_water with add_water/remove_water; or change_box_order with move_box, "
+        "move_target, add_wall, or remove_wall. Use only a listed effect and ensure at least one "
+        "operator can realize it. Keep requiredTransitions empty for a qualitative request; include "
+        "exact transitions only when the supplied structured execution brief already froze them. "
+        "Set playObjective to null or one concise single-line string no longer than 120 characters; "
+        "never return an object or list for playObjective. "
+        "Do not invent coordinates. Do not return map rows or tile operations. If the prior response "
+        "reached the token limit, stop reasoning and emit "
         "the complete compact JSON immediately. Return exactly one strategy unless "
         "the authorized brief explicitly requires alternatives, and include no explanatory prose."
     )
@@ -6480,56 +6484,84 @@ def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, reque
         ),
     }]
     deadline = _deadline or (time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS)
-    remaining = _remaining_until(deadline)
-    if remaining <= 0:
-        raise LLMServiceError(
-            "UPSTREAM_TIMEOUT", "Kimi did not rewrite progress before the deadline.",
-            request_id, True, 0, 504,
-        )
-    try:
-        response = asyncio.run(asyncio.wait_for(
-            _request_completion(
-                api_key, base_url, KIMI_MODEL, messages,
-                INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS,
-                min(40.0, remaining), task="intent_progress_rewrite",
-            ),
-            timeout=min(40.0, remaining),
-        ))
-        payload = json.loads(str(response.choices[0].message.content or ""))
-        if set(payload) != {"detailedText", "summaryText"}:
-            raise ValueError("Progress rewrite has unexpected fields.")
-        summary = _normalize_response_paragraphs(str(payload.get("summaryText") or ""))[:1200]
-        detail = payload.get("detailedText")
-        detail = _normalize_response_paragraphs(str(detail or ""))[:1200] or None
-        if len(summary) < 4:
-            raise ValueError("Progress rewrite summary is too short.")
-        if kind == "manual_edit" and (detail is None or len(detail) < 12):
-            raise ValueError("Manual-edit detail is too short.")
-        if kind != "manual_edit" and payload.get("detailedText") is not None:
-            raise ValueError("Only manual edits may include detailed text.")
-        source_facts = canonical + " " + " ".join(evidence)
-        source_tokens = {
-            token.casefold()
-            for token in re.findall(r"(?<![A-Za-z0-9_])(?:B\d+|T\d+|P|\d+(?:\.\d+)?)(?![A-Za-z0-9_])", source_facts)
-        }
-        output_tokens = {
-            token.casefold()
-            for token in re.findall(r"(?<![A-Za-z0-9_])(?:B\d+|T\d+|P|\d+(?:\.\d+)?)(?![A-Za-z0-9_])", (detail or "") + " " + summary)
-        }
-        if not output_tokens.issubset(source_tokens):
-            raise ValueError("Progress rewrite introduced an unsupported map fact or number.")
-        return {"detailedText": detail, "summaryText": summary, "model": KIMI_MODEL}
-    except asyncio.TimeoutError as exception:
-        raise LLMServiceError(
-            "UPSTREAM_TIMEOUT", "Kimi did not rewrite progress before the deadline.",
-            request_id, True, 1, 504,
-        ) from exception
-    except LLMServiceError:
-        raise
-    except Exception as exception:
-        error = classify_exception(exception, request_id, 1)
-        error.retryable = True
-        raise error from exception
+    last_error = None
+    for attempt in range(1, 3):
+        remaining = _remaining_until(deadline)
+        if remaining <= 0:
+            break
+        timeout_seconds = min(40.0 if attempt == 1 else remaining, remaining)
+        validation_feedback = None
+        try:
+            response = asyncio.run(asyncio.wait_for(
+                _request_completion(
+                    api_key, base_url, KIMI_MODEL, messages,
+                    INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS,
+                    timeout_seconds, task="intent_progress_rewrite",
+                ),
+                timeout=timeout_seconds,
+            ))
+            payload = json.loads(str(response.choices[0].message.content or ""))
+            if set(payload) != {"detailedText", "summaryText"}:
+                raise ValueError("Progress rewrite has unexpected fields.")
+            summary = _normalize_response_paragraphs(
+                str(payload.get("summaryText") or "")
+            )[:1200]
+            detail = payload.get("detailedText")
+            detail = _normalize_response_paragraphs(str(detail or ""))[:1200] or None
+            if len(summary) < 4:
+                raise ValueError("Progress rewrite summary is too short.")
+            canonical_key = re.sub(r"\W+", "", canonical).casefold()
+            summary_key = re.sub(r"\W+", "", summary).casefold()
+            if summary_key == canonical_key:
+                raise ValueError("Progress rewrite copied the canonical text unchanged.")
+            if kind == "manual_edit" and (detail is None or len(detail) < 12):
+                raise ValueError("Manual-edit detail is too short.")
+            if kind != "manual_edit":
+                # This auxiliary field is never displayed for compact progress records.
+                # Ignore provider over-generation instead of rejecting a valid summary.
+                detail = None
+            source_facts = canonical + " " + " ".join(evidence)
+            source_tokens = {
+                token.casefold()
+                for token in re.findall(r"(?<![A-Za-z0-9_])(?:B\d+|T\d+|P|\d+(?:\.\d+)?)(?![A-Za-z0-9_])", source_facts)
+            }
+            output_tokens = {
+                token.casefold()
+                for token in re.findall(r"(?<![A-Za-z0-9_])(?:B\d+|T\d+|P|\d+(?:\.\d+)?)(?![A-Za-z0-9_])", (detail or "") + " " + summary)
+            }
+            if not output_tokens.issubset(source_tokens):
+                raise ValueError("Progress rewrite introduced an unsupported map fact or number.")
+            return {"detailedText": detail, "summaryText": summary, "model": KIMI_MODEL}
+        except asyncio.TimeoutError:
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT", "Kimi did not rewrite progress before the deadline.",
+                request_id, True, attempt, 504,
+            )
+        except LLMServiceError as exception:
+            last_error = exception
+        except Exception as exception:
+            validation_feedback = str(exception)[:500]
+            last_error = classify_exception(exception, request_id, attempt)
+            last_error.retryable = True
+        if attempt == 1 and last_error.retryable:
+            feedback = validation_feedback or str(last_error)
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The prior rewrite was rejected: " + feedback
+                    + " Return fresh JSON with a genuinely concise summaryText that does not "
+                    "copy the canonical text. For inclination and confirmed_decision, set "
+                    "detailedText to null. Do not mention this correction."
+                ),
+            })
+            continue
+        raise last_error
+    if last_error is not None:
+        raise last_error
+    raise LLMServiceError(
+        "UPSTREAM_TIMEOUT", "Kimi did not rewrite progress before the deadline.",
+        request_id, True, 0, 504,
+    )
 
 
 async def _translate_with_model_fallback(
@@ -7135,17 +7167,13 @@ async def _generate_plain_with_model_fallback(
                         "The Stage 1 opening contained only questions."
                     )
                 body = _ensure_stage_one_orientation(body, rows, language)
-            elif stage_opening and question is None:
-                # A later saved Stage may expose a concrete uncertainty or
-                # first-person judgment in ordinary prose.  Distill that
-                # actual point; never substitute a stock water/box question.
-                question = _perspective_discussion_focus(body, language)
-            elif stage_opening and question is not None:
-                try:
-                    question = _normalize_opening_question(question)
-                except ValueError:
-                    body = visible_content
-                    question = None
+            elif stage_opening:
+                body = _questionless_body(visible_content)
+                question = None
+                if not body:
+                    raise LowQualityModelResponse(
+                        "A Stage opening cannot contain only questions."
+                    )
 
             if not stage_opening and question is not None:
                 question = _refine_discussion_focus(
@@ -7206,9 +7234,7 @@ async def _generate_plain_with_model_fallback(
                 latest_user = _latest_role_content(semantic_messages, "user")
                 body = _unclear_revision_reply(language, latest_user)
                 question = None
-                intent_hypothesis = _unclear_revision_intent(language, latest_user)
-                # This card is generated by the deterministic ambiguity fallback,
-                # not copied from the model output inspected above.
+                intent_hypothesis = None
                 model_intent_hypothesis_supplied = False
                 proposal_offer = None
                 ui_cues = []
@@ -7264,6 +7290,19 @@ async def _generate_plain_with_model_fallback(
                 guidance_mode=guidance_mode,
             )
             body = _deduplicate_assistant_body(body)
+            ordinary_branch = bool(
+                not stage_opening
+                and not _is_proposal_conversation_branch(stage_context)
+                and not isinstance(guidance.get("disagreement"), dict)
+                and guidance.get("proposalOffer") is None
+            )
+            if ordinary_branch:
+                body = _questionless_body(body)
+                guidance["followUpQuestion"] = None
+                if not body:
+                    raise LowQualityModelResponse(
+                        "An ordinary non-proposal reply cannot contain only questions."
+                    )
             if guidance.get("intentHypothesis"):
                 intent_issue = _intent_hypothesis_detail_issue(
                     guidance["intentHypothesis"], language
@@ -7281,10 +7320,14 @@ async def _generate_plain_with_model_fallback(
                         )
                     )
                 if intent_issue:
-                    guidance["intentHypothesis"] = _detailed_intent_fallback(
-                        guidance["intentHypothesis"],
-                        _latest_role_content(semantic_messages, "user"),
+                    latest_user = _latest_role_content(semantic_messages, "user")
+                    guidance["intentHypothesis"] = _natural_intent_candidate(
+                        latest_user,
                         language,
+                        _latest_user_explicitly_agrees(latest_user),
+                        difficulty_reframe=_user_reframes_difficulty_judgment(
+                            semantic_messages
+                        ),
                     )
                     guidance_fallback_used = True
                 if body_issue:
@@ -12027,8 +12070,9 @@ def _proposal_clarification_dimension_matches(question, question_key):
     text = str(question or "").casefold()
     patterns = {
         "experience_goal": (
-            r"(?:时间|难度|体验|节奏|压力|思考|判断|操作|"
-            r"time|difficulty|experience|pacing|pressure|judg|action|thinking)"
+            r"(?:时间|难度|体验|节奏|压力|思考|判断|操作|视觉|空间|平衡|外观|"
+            r"time|difficulty|experience|pacing|pressure|judg|action|thinking|"
+            r"visual|spatial|balance|appearance)"
         ),
         "mechanism": (
             r"(?:机制|推箱|推动|运输|顺序|陷阱|绕行|试错|误导|死角|"
@@ -12676,11 +12720,7 @@ def _ensure_required_guidance_card(
         return normalized
 
     if _is_human_edit_stage_opening(stage_opening, stage_context):
-        normalized["followUpQuestion"] = _human_edit_intent_discussion_focus(
-            normalized.get("followUpQuestion"),
-            stage_context,
-            language,
-        )
+        normalized["followUpQuestion"] = None
         return normalized
 
     if _user_explicitly_off_topic(latest_user):
@@ -12694,11 +12734,8 @@ def _ensure_required_guidance_card(
     if guidance_mode == "needs_clarification":
         normalized["move"] = "clarify_intent"
         normalized["proposalOffer"] = None
-        normalized["intentHypothesis"] = (
-            normalized.get("intentHypothesis")
-            or _unclear_revision_intent(language, latest_user)
-        )
-        normalized["intentConfidence"] = "low"
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
         normalized["followUpQuestion"] = None
         normalized["uiCues"] = []
         return normalized
@@ -12768,7 +12805,15 @@ def _ensure_required_guidance_card(
         ][:1]
         return normalized
 
-    if _user_states_first_person_view(latest_user):
+    ordinary_intent_allowed = bool(
+        not _is_proposal_conversation_branch(stage_context)
+        and not (stage_context or {}).get("answeredVisibleQuestion")
+        and _user_explicitly_states_design_stance(latest_user)
+    )
+    if not ordinary_intent_allowed:
+        normalized["intentHypothesis"] = None
+        normalized["intentConfidence"] = None
+    elif _user_explicitly_states_design_stance(latest_user):
         hypothesis = normalized.get("intentHypothesis") or _natural_intent_candidate(
             latest_user,
             language,
@@ -12868,11 +12913,7 @@ def classify_guidance_request(conversation, stage_context=None, stage_opening=Fa
         for message in user_messages
     )
 
-    if advice_request and has_direction:
-        return "revision_advice"
-    if advice_request and (
-        _guidance_confusion_request(latest_user) or not has_direction
-    ):
+    if advice_request:
         return "discussion"
     return "none"
 
@@ -13028,6 +13069,7 @@ def _contains_user_design_direction(message):
         "绕过障碍", "绕行", "路线", "通道", "推箱", "推动顺序", "推进顺序",
         "难度", "节奏", "选择", "空间", "水域", "墙", "箱子", "目标", "压力",
         "犹豫", "停顿", "挑战", "更难", "更简单", "可读", "时间", "游玩", "停留", "延长",
+        "空旷", "空荡", "太空", "别那么空", "不要那么空",
     )
     if any(marker in text for marker in chinese_direction_leads) and any(
         marker in text for marker in chinese_effects
@@ -13141,6 +13183,89 @@ def _legacy_unclear_revision_intent(language):
     )
 
 
+def _is_proposal_conversation_branch(stage_context):
+    context = stage_context or {}
+    if context.get("conversationBranch") == "proposal":
+        return True
+    return bool(
+        context.get("proposalDiscovery")
+        or context.get("activeDisagreement")
+        or context.get("revisionRouting") in {
+            "needs_clarification",
+            "proposal",
+            "proposal_conservative",
+            "proposal_blocked",
+        }
+        or context.get("explicitAction") in {
+            "execute_revision",
+            "challenge_revision",
+            "alternative_revision",
+            "continue_challenge",
+        }
+    )
+
+
+def _user_explicitly_states_design_stance(message):
+    """Gate orange cards on an explicit current-turn design stance.
+
+    The broader first-person detector is retained for compatibility in other
+    language heuristics.  This stricter predicate is the server-owned card
+    boundary: observations, requests for ideas, operations, and inferred
+    behavioral evidence do not qualify on their own.
+    """
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    lowered = text.casefold()
+    if not text or _user_explicitly_off_topic(text):
+        return False
+
+    design_markers = (
+        "关卡", "地图", "布局", "空间", "水", "墙", "箱", "目标", "路线",
+        "通道", "推动", "推箱", "顺序", "难度", "节奏", "选择", "体验",
+        "判断", "压力", "可读", "绕行", "障碍", "外观", "视觉", "好看", "简单", "复杂",
+        "level", "map", "layout", "space", "water", "wall", "box", "crate",
+        "target", "route", "corridor", "push", "order", "difficulty", "pacing",
+        "choice", "experience", "readable", "detour", "obstacle", "visual",
+        "easy", "hard", "complex",
+    )
+    explicit_stance = any(marker in text for marker in (
+        "我认为", "我倒是认为", "我觉得", "我感觉", "在我看来", "我更在意", "我更希望",
+        "我希望", "我想要", "我倾向于", "我更倾向于", "我喜欢", "我不喜欢",
+        "我宁愿", "对我来说", "我不认同", "我不同意", "我反而觉得",
+    )) or bool(re.search(
+        r"\b(?:i think|i feel|i believe|in my view|from my perspective|"
+        r"i prefer|i want|i would like|i care|to me|i like|i dislike|"
+        r"i disagree|i do not agree|i don't agree)\b",
+        lowered,
+    ))
+    direct_evaluation = bool(re.search(
+        r"(?:太|过于|比较|有点|还是)(?:简单|难|复杂|绕|空|挤|直白|单调)|"
+        r"(?:不好看|不合理|不够清楚|不够自然|缺少选择)|"
+        r"\b(?:too|not enough|still)\s+(?:easy|hard|difficult|complex|empty|"
+        r"crowded|direct|plain|clear|readable)\b",
+        lowered,
+        re.IGNORECASE,
+    ))
+    bare_rebuttal = any(marker in lowered for marker in (
+        "我不认同", "我不同意", "不是这样", "并不是", "恰恰相反",
+        "i disagree", "i do not agree", "i don't agree", "that is not right",
+        "that's not right", "on the contrary",
+    ))
+    contextual_preference = bool(re.search(
+        r"(?:我(?:更)?(?:喜欢|不喜欢|倾向于|更希望|宁愿)|我觉得(?:这样|这个|它)|"
+        r"\b(?:i prefer|i like|i dislike|i would rather|i think (?:this|that|it))\b)",
+        lowered,
+        re.IGNORECASE,
+    ))
+    return bool(
+        bare_rebuttal
+        or contextual_preference
+        or (
+            (explicit_stance or direct_evaluation)
+            and any(marker in lowered for marker in design_markers)
+        )
+    )
+
+
 def _legacy_unclear_revision_reply(language):
     if language == "zh-CN":
         return (
@@ -13181,26 +13306,26 @@ def _unclear_revision_reply(language, latest_user=None):
                 "\u6536\u5230\uff0c\u4f60\u5bf9\u5f53\u524d\u5c40\u90e8\u89c2\u611f\u7684\u53cd\u9988\u5f88\u660e\u786e\uff0c\u4f46\u201c\u4e0d\u597d\u770b\u201d\u8fd8\u4e0d\u8db3\u4ee5\u786e\u5b9a\u5e94\u8be5\u6539\u52a8\u54ea\u79cd\u8bbe\u8ba1\u5173\u7cfb\u3002"
                 "\u6211\u89c2\u5bdf\u5230\u8fd9\u53ef\u80fd\u6d89\u53ca\u5730\u56fe\u8f6e\u5ed3\u548c\u5730\u5f62\u5206\u5272\u7684\u51e0\u4f55\u89c2\u611f\uff0c\u4e5f\u53ef\u80fd\u6d89\u53ca\u73a9\u5bb6\u63a8\u7bb1\u65f6\u8def\u7ebf\u8f6c\u6298\u4e0e\u8282\u594f\u7684\u611f\u53d7\u3002"
                 "\u8fd9\u4e24\u79cd\u91cd\u70b9\u4f1a\u5bfc\u5411\u4e0d\u540c\u7684\u4fee\u6539\uff0c\u800c\u4f60\u4e5f\u53ef\u80fd\u5e0c\u671b\u4e24\u8005\u517c\u987e\uff0c\u6240\u4ee5\u6211\u73b0\u5728\u4e0d\u4f1a\u64c5\u81ea\u628a\u89c6\u89c9\u53cd\u9988\u89e3\u91ca\u6210\u786e\u5b9a\u7684\u73a9\u6cd5\u76ee\u6807\u3002"
-                "\u4e0b\u65b9\u6a59\u5361\u4f1a\u5b8c\u6574\u4fdd\u7559\u8fd9\u4e2a\u8fb9\u754c\uff0c\u4f9b\u4f60\u786e\u8ba4\u3001\u5426\u5b9a\u6216\u8c03\u6574\u3002"
+                "\u6211\u4f1a\u628a\u8fd9\u4e2a\u8fb9\u754c\u7559\u5728\u65b9\u6848\u6f84\u6e05\u4e2d\uff0c\u518d\u6839\u636e\u4f60\u63a5\u4e0b\u6765\u7684\u56de\u7b54\u6536\u655b\u4fee\u6539\u3002"
             )
         return (
             "\u53ef\u4ee5\uff0c\u6211\u613f\u610f\u548c\u4f60\u4e00\u8d77\u8c03\u6574\uff0c\u4f46\u4f60\u8fd9\u6b21\u53ea\u660e\u786e\u8868\u8fbe\u4e86\u5e0c\u671b\u6539\u52a8\uff0c\u8fd8\u6ca1\u6709\u6307\u51fa\u5177\u4f53\u7684\u8bbe\u8ba1\u5bf9\u8c61\u548c\u671f\u671b\u6548\u679c\u3002"
             "\u8fd9\u610f\u5473\u7740\u6211\u76ee\u524d\u65e0\u6cd5\u5224\u65ad\u4f60\u66f4\u5728\u610f\u8def\u7ebf\u9605\u8bfb\u3001\u63a8\u52a8\u5173\u7cfb\u3001\u7a7a\u95f4\u611f\u53d7\u8fd8\u662f\u5176\u4ed6\u73a9\u5bb6\u4f53\u9a8c\uff0c\u8fd9\u4e9b\u65b9\u5411\u4f1a\u5bfc\u5411\u4e0d\u540c\u7684\u4fee\u6539\u3002"
             "\u5982\u679c\u73b0\u5728\u76f4\u63a5\u66ff\u4f60\u6539\u56fe\uff0c\u6211\u5176\u5b9e\u662f\u5728\u66ff\u4f60\u731c\u6d4b\u8bbe\u8ba1\u76ee\u6807\uff0c\u800c\u4e0d\u662f\u54cd\u5e94\u5df2\u7ecf\u660e\u786e\u7684\u610f\u56fe\u3002"
-            "\u56e0\u6b64\uff0c\u4e0b\u65b9\u6a59\u5361\u53ea\u8bb0\u5f55\u6211\u5f53\u524d\u53ef\u7ea0\u6b63\u7684\u6682\u65f6\u7406\u89e3\uff0c\u7531\u4f60\u51b3\u5b9a\u662f\u5426\u9700\u8981\u8c03\u6574\u5b83\u3002"
+            "\u56e0\u6b64\uff0c\u6211\u4f1a\u5148\u901a\u8fc7\u65b9\u6848\u6f84\u6e05\u6536\u96c6\u5fc5\u8981\u4fe1\u606f\uff0c\u800c\u4e0d\u662f\u7528\u6682\u5b9a\u610f\u56fe\u4ee3\u66ff\u65b9\u6848\u3002"
         )
     if visual_only:
         return (
             "Your feedback clearly says that this part does not look right, but that phrase alone does not identify which design relationship should change. "
             "I can read it as concern about the map outline and geometric composition, or as concern about how route turns feel while the player is pushing boxes. "
             "Those priorities lead to different revisions, and you may also want a balance of both, so I am not converting visual feedback into a confirmed gameplay goal. "
-            "The orange card below keeps that boundary explicit for you to confirm, reject, or revise."
+            "I will keep that boundary inside proposal clarification and use your next answer to narrow the revision."
         )
     return (
         "Yes, I am happy to work on it with you, but this request identifies a desire for change without naming the design object or the intended effect. "
         "I still cannot tell whether the priority is route reading, push relationships, spatial feeling, or another part of the player experience, and each would lead to a different revision. "
         "If I edited the map now, I would be guessing on your behalf rather than responding to a direction you actually established. "
-        "The orange card below therefore records only a correctable temporary reading for you to confirm, reject, or revise."
+        "I will therefore collect the missing proposal detail before attempting a validated revision."
     )
 
 
@@ -13301,6 +13426,23 @@ def _intent_comparison_text(text, language):
 def _semantic_intent_options(source, language):
     value = str(source or "").casefold()
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", str(source or "")):
+        if re.search(
+            r"(?:太空了?|空旷|空荡|显得空|过于空|比较空|别那么空|不要那么空|不那么空)",
+            source,
+        ):
+            region = next(
+                (
+                    name for name in
+                    ("左下角", "右下角", "左上角", "右上角", "中间")
+                    if name in source
+                ),
+                "这片局部区域",
+            )
+            return (
+                f"我暂时理解的是，你希望{region}不再显得空旷；我还不确定你主要在意视觉平衡，还是希望它影响实际路线与推箱节奏，请纠正我。",
+                f"听起来你希望{region}的空间分布更有内容；这可能是视觉上的不平衡，也可能关系到实际玩法，我暂时不替你确定是哪一种。",
+                f"我读到的倾向是，你想改善{region}的空旷感；我还需要确认重点是布局观感，还是玩家经过这里时的路线与推动体验。",
+            )
         if "水" in source and any(marker in source for marker in ("形", "改", "变", "水域")):
             return (
                 "我暂时理解的是，你想让水域真正重写玩家读路线和推进时机的方式，而不是只补一个局部缺口；如果我抓错重点，请纠正我。",
@@ -13319,6 +13461,12 @@ def _semantic_intent_options(source, language):
             "我读到的倾向是，你希望这项调整影响实际的推进选择；若重点不是这里，请改正我。",
         )
 
+    if re.search(r"(?:too\s+empty|feels?\s+empty|sparse|vacant)", value):
+        return (
+            "For now, I understand that you want this area to feel less empty; I am not yet sure whether you mainly mean visual balance or an effect on routes and push rhythm.",
+            "It sounds like you want more purpose in this open area, while the distinction between appearance and play remains open for correction.",
+            "I read your preference as improving this area's emptiness, but I still need to confirm whether the priority is composition or the player's route and pushing experience.",
+        )
     if "water" in value:
         return (
             "For now, I understand your direction as wanting water to reshape route reading and push timing, rather than merely change a local patch; please correct me if I have that wrong.",
@@ -15751,14 +15899,12 @@ def _intent_sentence_count(value):
 
 
 def _intent_hypothesis_detail_issue(value, language):
-    """Require a standalone, evidence-aware and explicitly correctable orange card."""
+    """Require one concise, tentative, coherent orange-card understanding."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     chinese = language == "zh-CN" or bool(re.search(r"[\u3400-\u9fff]", text))
     if not text:
         return "intentHypothesis is empty"
     sentence_count = _intent_sentence_count(text)
-    if sentence_count < 2 or sentence_count > 4:
-        return "intentHypothesis must contain two to four sentences"
     if re.search(
         r"(?:\u4e92\u4e0d\u517c\u5bb9|\u65e2\u8981.{0,80}\u53c8\u4e0d\u8981|\bmutually incompatible\b|\bboth\b.{0,100}\b(?:and the opposite|but not that)\b)",
         text,
@@ -15771,24 +15917,21 @@ def _intent_hypothesis_detail_issue(value, language):
         re.IGNORECASE,
     ):
         return "intentHypothesis turns behavioral evidence into certainty"
+    if sentence_count < 1 or sentence_count > 3:
+        return "intentHypothesis must contain one to three sentences"
     if chinese:
-        if len(text) < 100:
-            return "Chinese intentHypothesis is not detailed enough"
-        evidence = re.search(r"\u6765\u81ea|\u56e0\u4e3a|\u4f60\u521a\u624d|\u8fd9\u4e2a\u5224\u65ad", text)
-        consequence = re.search(r"\u73a9\u5bb6|\u4f53\u9a8c|\u8def\u7ebf|\u63a8\u52a8|\u7a7a\u95f4|\u540e\u7eed\u8c03\u6574", text)
-        correction = re.search(r"\u7ea0\u6b63|\u4fee\u6b63|\u8fd8\u4e0d\u80fd\u786e\u5b9a|\u5982\u679c.*\u4e0d\u662f|\u82e5.*\u4e0d\u662f", text)
+        tentative = re.search(
+            r"(?:\u6682\u65f6|\u542c\u8d77\u6765|\u6211\u8bfb\u5230|\u6211\u7406\u89e3|\u76ee\u524d|\u53ef\u80fd|\u50cf\u662f)",
+            text,
+        )
     else:
-        if len(re.findall(r"\b[\w'-]+\b", text)) < 55:
-            return "English intentHypothesis is not detailed enough"
-        evidence = re.search(r"\b(?:because|comes from|based on|you just|your wording|this reading)\b", text, re.IGNORECASE)
-        consequence = re.search(r"\b(?:player|experience|route|push|space|later revision|next adjustment)\b", text, re.IGNORECASE)
-        correction = re.search(r"\b(?:correct me|if that is not|if this is not|not yet tell|still uncertain)\b", text, re.IGNORECASE)
-    if not evidence:
-        return "intentHypothesis must identify its evidence"
-    if not consequence:
-        return "intentHypothesis must describe a possible design or play consequence"
-    if not correction:
-        return "intentHypothesis must state a correction boundary"
+        tentative = re.search(
+            r"\b(?:for now|it sounds|i read|i understand|my current reading|may|might|seem)\b",
+            text,
+            re.IGNORECASE,
+        )
+    if not tentative:
+        return "intentHypothesis must remain explicitly tentative"
     return None
 
 
@@ -15801,7 +15944,7 @@ def _intent_body_detail_issue(value, language):
 
 
 def _detailed_intent_fallback(hypothesis, latest_user, language):
-    """Expand a safe core inference without inventing current-map facts."""
+    """Create a concise, correctable inclination without map invention."""
     source = re.sub(r"\s+", " ", str(latest_user or "")).strip()
     visual_only = bool(re.search(
         r"(?:\u4e0d\u597d\u770b|\u597d\u770b|\u7f8e\u89c2|\u89c6\u89c9|\u8f6e\u5ed3|\b(?:ugly|looks?|visual|shape|outline|aesthetic)\b)",
@@ -15811,10 +15954,8 @@ def _detailed_intent_fallback(hypothesis, latest_user, language):
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", source):
         if visual_only:
             return (
-                "\u6211\u6682\u65f6\u7406\u89e3\u5230\uff0c\u4f60\u8ba4\u4e3a\u5f53\u524d\u7684\u5c40\u90e8\u89c2\u611f\u8fd8\u6ca1\u6709\u8fbe\u5230\u9884\u671f\uff0c\u5e76\u5e0c\u671b\u4e0b\u4e00\u6b65\u8c03\u6574\u4e0d\u8981\u53ea\u505c\u7559\u5728\u6cdb\u5316\u7684\u201c\u66f4\u597d\u770b\u201d\u4e0a\u3002"
-                "\u8fd9\u4e2a\u5224\u65ad\u6765\u81ea\u4f60\u521a\u624d\u5bf9\u89c6\u89c9\u6548\u679c\u7684\u76f4\u63a5\u8bc4\u4ef7\uff0c\u4f46\u6211\u8fd8\u4e0d\u80fd\u786e\u5b9a\u4f60\u66f4\u5728\u610f\u5730\u56fe\u8f6e\u5ed3\u4e0e\u5730\u5f62\u5206\u5272\uff0c\u8fd8\u662f\u63a8\u7bb1\u8fc7\u7a0b\u4e2d\u7684\u8def\u7ebf\u8f6c\u6298\u548c\u8282\u594f\u3002"
-                "\u4e0d\u540c\u91cd\u70b9\u4f1a\u8ba9\u540e\u7eed\u8c03\u6574\u5206\u522b\u504f\u5411\u51e0\u4f55\u89c2\u611f\u6216\u73a9\u5bb6\u7684\u63a8\u52a8\u4e0e\u8def\u7ebf\u9009\u62e9\uff0c\u56e0\u6b64\u6211\u73b0\u5728\u4e0d\u4f1a\u628a\u5176\u4e2d\u4efb\u4f55\u4e00\u4e2a\u5f53\u6210\u5df2\u786e\u8ba4\u503e\u5411\u3002"
-                "\u5982\u679c\u4f60\u5173\u6ce8\u7684\u662f\u5176\u4ed6\u66f4\u5177\u4f53\u7684\u89c6\u89c9\u6216\u73a9\u6cd5\u6807\u51c6\uff0c\u8bf7\u7ea0\u6b63\u6211\u7684\u8fd9\u4e2a\u7406\u89e3\u3002"
+                "\u6211\u6682\u65f6\u7406\u89e3\u4e3a\uff0c\u4f60\u5bf9\u5f53\u524d\u5c40\u90e8\u89c2\u611f\u4e0d\u6ee1\u610f\u3002"
+                "\u6211\u8fd8\u4e0d\u786e\u5b9a\u4f60\u66f4\u5728\u610f\u5730\u56fe\u8f6e\u5ed3\uff0c\u8fd8\u662f\u6e38\u73a9\u65f6\u8def\u7ebf\u8f6c\u6298\u7684\u89c2\u611f\u3002"
             )
         core = next(
             (
@@ -15829,10 +15970,8 @@ def _detailed_intent_fallback(hypothesis, latest_user, language):
         )
         return (
             f"{core}\u3002"
-            "\u8fd9\u4e2a\u5224\u65ad\u6765\u81ea\u4f60\u521a\u624d\u5bf9\u8bbe\u8ba1\u6548\u679c\u7684\u76f4\u63a5\u8868\u8fbe\uff0c\u6211\u6682\u65f6\u53ea\u628a\u5b83\u89c6\u4e3a\u4e00\u4e2a\u53ef\u4fee\u6b63\u7684\u504f\u597d\u7ebf\u7d22\u3002"
-            "\u5982\u679c\u8fd9\u4e2a\u7406\u89e3\u6210\u7acb\uff0c\u540e\u7eed\u8c03\u6574\u5e94\u4f18\u5148\u9a8c\u8bc1\u5b83\u662f\u5426\u771f\u6b63\u6539\u53d8\u73a9\u5bb6\u7684\u5b9e\u9645\u4f53\u9a8c\u4e0e\u8bbe\u8ba1\u53d6\u820d\uff0c\u800c\u4e0d\u662f\u51ed\u7a7a\u52a0\u5165\u4f60\u6ca1\u6709\u63d0\u5230\u7684\u65b0\u76ee\u6807\u3002"
-            "\u5982\u679c\u6211\u6982\u62ec\u7684\u91cd\u70b9\u4e0d\u662f\u4f60\u771f\u6b63\u5728\u610f\u7684\u65b9\u5411\uff0c\u8bf7\u7ea0\u6b63\u6211\u3002"
-        )[:1200]
+            "\u6211\u76ee\u524d\u53ea\u628a\u5b83\u5f53\u4f5c\u4e00\u4e2a\u53ef\u4fee\u6b63\u7684\u8bbe\u8ba1\u503e\u5411\u3002"
+        )
     core = next(
         (
             part.strip().rstrip(".!?")
@@ -15843,19 +15982,12 @@ def _detailed_intent_fallback(hypothesis, latest_user, language):
     )
     if visual_only:
         return (
-            "For now, I understand that the local appearance does not yet match what you want, "
-            "and that a generic instruction to make it look better would be too vague. This reading "
-            "comes from your direct visual evaluation, but I cannot yet tell whether you care more "
-            "about the map outline and geometric separation or about the rhythm of route turns during play. "
-            "Those priorities would lead to different later revisions and different player experiences, so "
-            "I am not treating either one as confirmed. If another visual or play criterion is the real issue, correct me."
+            "For now, I understand that the local appearance does not yet match what you want. "
+            "I cannot yet tell whether you care more about the map outline or how route turns look during play."
         )
     return (
-        f"{core}. This reading comes from the design effect you just described, and I am treating it "
-        "only as a correctable preference rather than a confirmed intention. If the reading is right, "
-        "a later revision should test whether it changes the player's actual experience and the relevant "
-        "design tradeoff, without inventing a new goal that you did not mention. If that is not the direction you actually care about, correct me."
-    )[:1200]
+        f"{core}. I am treating this only as a correctable design inclination for now."
+    )
 
 
 def _detailed_intent_body_fallback(body, latest_user, language):
@@ -16274,6 +16406,10 @@ def _classify_revision_request(conversation, stage_context=None):
 
     english_markers = (
         "map proposal",
+        "give me a plan",
+        "provide a plan",
+        "suggest a plan",
+        "concrete revision",
         "concrete map",
         "draft this",
         "draft that",
@@ -16285,6 +16421,11 @@ def _classify_revision_request(conversation, stage_context=None):
     )
     chinese_markers = (
         "地图提案",
+        "给我方案",
+        "给我个方案",
+        "给我一个方案",
+        "提供方案",
+        "生成方案",
         "具体生成",
         "生成地图",
         "生成一份",

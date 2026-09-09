@@ -2075,16 +2075,28 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(focus)
 
     def test_plain_reply_extracts_intent_card(self):
-        result, _ = self.execute([
-            "The water now reads as part of the route.\n\n"
-            "<GUIDANCE>\n"
-            "INTENT: The designer wants the water to affect the route.\n"
-            "</GUIDANCE>"
-        ] * 3)
+        result, _ = self.execute(
+            [
+                "The water now reads as part of the route rather than as background decoration. "
+                "That changes how I imagine reading the opening: the player can compare the direct "
+                "approach with the water-side line before committing to a push. The spatial boundary "
+                "also gives the first box a clearer relationship to the later target approach, while "
+                "the remaining floor keeps enough room for recovery. In play, I would expect a brief "
+                "pause at that first commitment, followed by a more legible push rhythm instead of "
+                "extra walking that has no design consequence.\n\n"
+                "<GUIDANCE>\n"
+                "INTENT: For now, I understand that you prefer the water to affect the route.\n"
+                "</GUIDANCE>"
+            ],
+            conversation=[{
+                "role": "user",
+                "content": "I think the water should affect the route.",
+            }],
+        )
 
         self.assertEqual(result.guidance["move"], "clarify_intent")
         self.assertEqual(result.guidance["intentConfidence"], "medium")
-        self.assertTrue(result.guidance["intentHypothesis"].startswith("I read your preference"))
+        self.assertIn("water", result.guidance["intentHypothesis"].casefold())
         self.assertNotIn("GUIDANCE", result.assistant_message)
 
     def test_plain_reply_extracts_proposal_card(self):
@@ -2221,7 +2233,7 @@ class LLMClientTests(unittest.TestCase):
             self.assertTrue(llm_client._proposal_card_is_meta_language(transition))
             self.assertEqual(llm_client._revision_direction_sentence(transition), "")
 
-    def test_invalid_proposal_card_is_retried_and_repaired_in_the_same_reply(self):
+    def test_ordinary_advice_strips_invalid_proposal_metadata(self):
         meta = "\u8fd9\u4e2a\u5224\u65ad\u4f1a\u76f4\u63a5\u5f71\u54cd\u6211\u63a5\u4e0b\u6765\u5efa\u8bae\u600e\u4e48\u8c03\u6574\u8def\u7ebf"
         body = (
             "\u5982\u679c\u60f3\u8ba9\u6574\u4f53\u65f6\u95f4\u62c9\u957f\uff0c\u6211\u5efa\u8bae\u628a\u5173\u952e\u7bb1\u5b50\u7684\u8def\u7ebf\u7a0d\u5fae\u7ed5\u4e00\u70b9\uff0c"
@@ -2238,7 +2250,7 @@ class LLMClientTests(unittest.TestCase):
         )
         conversation = [{
             "role": "user",
-            "content": "\u6211\u5e0c\u671b\u8ba9\u7528\u6237\u53ef\u4ee5\u82b1\u66f4\u591a\u65f6\u95f4\u6765\u6e38\u73a9\uff0c\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848",
+            "content": "\u4f60\u89c9\u5f97\u53ef\u4ee5\u600e\u6837\u8ba9\u73a9\u5bb6\u82b1\u66f4\u591a\u65f6\u95f4\u7ed5\u8fc7\u969c\u788d\u7269\uff1f",
         }]
 
         result, client = self.execute(
@@ -2458,11 +2470,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "MODEL_LOW_QUALITY_RESPONSE")
         self.assertEqual(raised.exception.attempts_used, 3)
 
-    def test_multiple_questions_stay_in_body_without_failing(self):
-        reply = "What should stay? What should change?"
+    def test_multiple_questions_are_removed_when_declarative_body_exists(self):
+        reply = "The route currently has a direct opening. What should stay? What should change?"
         result, _ = self.execute([reply])
 
-        self.assertTrue(result.assistant_message.startswith(reply))
+        self.assertEqual(result.assistant_message, "The route currently has a direct opening.")
         self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_redundant_question_is_removed_after_an_explicit_direction(self):
@@ -2484,7 +2496,7 @@ class LLMClientTests(unittest.TestCase):
             "That would make the opening commitment more legible."
         ))
         self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertEqual(result.guidance["uiCues"], [])
 
     def test_explicit_direction_does_not_keep_a_routine_question_when_the_reply_is_clear(self):
@@ -2686,7 +2698,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIsNone(result.guidance["disagreement"])
         self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertIn("Which first push should carry the route judgment?", result.assistant_message)
+        self.assertNotIn("Which first push should carry the route judgment?", result.assistant_message)
 
     def test_clear_first_person_evaluation_gets_an_intent_card_when_model_omits_one(self):
         client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
@@ -2704,6 +2716,23 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIsNotNone(result.guidance["intentHypothesis"])
         self.assertIsNone(result.guidance["followUpQuestion"])
+
+    def test_orange_gate_accepts_current_turn_judgment_preference_and_rebuttal(self):
+        for message in (
+            "我觉得这个太直接了。",
+            "我不喜欢这样。",
+            "我不同意，你对路线节奏的判断不对。",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(
+                    llm_client._user_explicitly_states_design_stance(message)
+                )
+
+        for message in ("我移动了一个箱子。", "这里有两条路线。", "给我一些思路。"):
+            with self.subTest(message=message):
+                self.assertFalse(
+                    llm_client._user_explicitly_states_design_stance(message)
+                )
 
     def test_user_difficulty_reframe_gets_a_tentative_intent_card(self):
         result, _ = self.execute(
@@ -2763,10 +2792,8 @@ class LLMClientTests(unittest.TestCase):
         )
         detailed_card = (
             "For now, I understand that you may prefer the opening box relationship to be easier "
-            "to read without removing meaningful planning. This reading comes from your wording "
-            "about the boxes feeling too close, which I treat as evidence rather than a confirmed "
-            "intention. The possible player consequence is a clearer first route choice while later "
-            "push decisions can still carry weight. If that is not the balance you care about, correct me."
+            "to read without removing meaningful planning. I am treating that as a correctable "
+            "design inclination for now."
         )
         result, client = self.execute(
             [short, detailed_body + "\n<GUIDANCE>INTENT: " + detailed_card + "</GUIDANCE>"],
@@ -2832,7 +2859,7 @@ class LLMClientTests(unittest.TestCase):
             {"role": "user", "content": "做点联动吧"},
         ]))
 
-    def test_guidance_request_classifier_prefers_revision_advice_for_a_concrete_goal(self):
+    def test_explicit_plan_language_is_reserved_for_revision_routing(self):
         messages = (
             "给我一个方案，我想让玩家花更多时间绕过障碍物。",
             "I want the player to spend more time detouring around obstacles; can you suggest a plan?",
@@ -2841,12 +2868,12 @@ class LLMClientTests(unittest.TestCase):
 
         for message in messages:
             with self.subTest(message=message):
-                self.assertEqual(
-                    llm_client.classify_guidance_request([
-                        {"role": "user", "content": message},
-                    ]),
-                    "revision_advice",
+                conversation = [{"role": "user", "content": message}]
+                self.assertNotEqual(
+                    llm_client._classify_revision_request(conversation)[0],
+                    "not_request",
                 )
+                self.assertEqual(llm_client.classify_guidance_request(conversation), "none")
 
     def test_guidance_request_classifier_routes_open_ended_help_to_discussion(self):
         messages = (
@@ -2873,82 +2900,47 @@ class LLMClientTests(unittest.TestCase):
             "none",
         )
 
-    def test_concrete_advice_request_gets_a_proposal_card_when_model_omits_metadata(self):
-        result, client = self.execute(
-            [
-                "我会先看这张图的路线节奏，再说明可以怎样调整。",
-                "我会先看这张图的路线节奏，再说明可以怎样调整。",
-            ],
-            rows=MAP_GROUNDING_ROWS,
-            language="zh-CN",
-            conversation=[{
-                "role": "user",
-                "content": "给我一个方案，我想让玩家花更多时间绕过障碍物。",
-            }],
-        )
+    def test_explicit_plan_request_enters_revision_flow(self):
+        state, brief = llm_client._classify_revision_request([{
+            "role": "user",
+            "content": "给我一个方案，我想让玩家花更多时间绕过障碍物。",
+        }])
 
-        self.assertEqual(len(client.chat.completions.calls), 2)
-        self.assertNotEqual(result.guidance["move"], "offer_revision")
-        self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertEqual(result.guidance["uiCues"], [])
-        self.assertNotIn("could not form a proposal", result.assistant_message.casefold())
-        self.assertNotIn("fully consistent with the saved map", result.assistant_message.casefold())
-        self.assertTrue(result.assistant_message.strip())
-        self.assertIn(
-            "REVISION_ADVICE",
-            client.chat.completions.calls[0]["messages"][0]["content"],
-        )
-        self.assertIn(
-            "required guidance card",
-            client.chat.completions.calls[1]["messages"][0]["content"],
-        )
+        self.assertIn(state, {"needs_direction", "authorized", "authorized_relaxed"})
+        if state != "needs_direction":
+            self.assertTrue(brief)
 
-    def test_concrete_english_coordinate_request_keeps_execution_brief_when_model_omits_metadata(self):
-        result, client = self.execute(
-            [
-                "I would focus on the local opening.",
-                "I would focus on the local opening.",
-            ],
-            rows=OPERATION_BASE_ROWS,
-            language="en",
-            conversation=[{
-                "role": "user",
-                "content": (
-                    "Please suggest a concrete revision: change (2,2) from floor to wall, "
-                    "while keeping the boxes and targets unchanged."
-                ),
-            }],
-        )
+    def test_concrete_english_coordinate_request_keeps_execution_brief(self):
+        state, brief = llm_client._classify_revision_request([{
+            "role": "user",
+            "content": (
+                "Please suggest a concrete revision: change (2,2) from floor to wall, "
+                "while keeping the boxes and targets unchanged."
+            ),
+        }])
 
-        self.assertNotEqual(result.guidance["move"], "offer_revision")
-        self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(state, "authorized")
+        self.assertIn("(2,2)", brief)
+        self.assertIn("unchanged", brief)
 
-    def test_revision_advice_rejects_multiple_options_and_shows_clarification(self):
-        multi_option_reply = (
-            "Option A: close the upper opening. Option B: move the target instead."
-        )
-        result, client = self.execute(
-            [multi_option_reply, multi_option_reply],
-            rows=OPERATION_BASE_ROWS,
-            language="en",
-            conversation=[{
-                "role": "user",
-                "content": (
-                    "Please suggest a concrete revision: change (2,2) from floor to wall, "
-                    "while keeping the boxes and targets unchanged."
-                ),
-            }],
-        )
+    def test_revision_plan_language_does_not_fall_back_to_ordinary_guidance(self):
+        conversation = [{
+            "role": "user",
+            "content": "Please suggest a concrete revision: change (2,2) from floor to wall.",
+        }]
 
-        self.assertEqual(len(client.chat.completions.calls), 2)
-        self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertEqual(result.guidance["move"], "clarify_intent")
-        self.assertEqual(result.guidance["uiCues"], [])
-        self.assertNotIn("could not form a proposal", result.assistant_message.casefold())
-        self.assertNotIn("fully consistent with the saved map", result.assistant_message.casefold())
-        self.assertNotIn("Option A", result.assistant_message)
+        self.assertEqual(llm_client.classify_guidance_request(conversation), "none")
+        self.assertEqual(llm_client._classify_revision_request(conversation)[0], "authorized")
+
+    def test_revision_plan_correction_preserves_qualitative_transition_boundary(self):
+        corrected = llm_client._revision_plan_messages_with_feedback(
+            [{"role": "system", "content": "base"}],
+            "strategy 1 has an unsupported effect.",
+        )[0]["content"]
+
+        self.assertIn("Use only these effect/operator combinations", corrected)
+        self.assertIn("Keep requiredTransitions empty for a qualitative request", corrected)
+        self.assertNotIn("do not return full map rows or leave the transition list empty", corrected)
 
     def test_response_paragraphs_are_balanced_without_dropping_route_detail(self):
         body = (
@@ -2985,17 +2977,14 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertEqual(len(client.chat.completions.calls), 1)
-        self.assertEqual(result.guidance["move"], "clarify_intent")
+        self.assertNotEqual(result.guidance["move"], "offer_revision")
         self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertTrue(result.guidance["followUpQuestion"])
+        self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertFalse(any(
             cue["type"] == "manual_edit"
             for cue in result.guidance["uiCues"]
         ))
-        self.assertIn(
-            "DISCUSSION",
-            client.chat.completions.calls[0]["messages"][0]["content"],
-        )
+        self.assertIn("DISCUSSION", client.chat.completions.calls[0]["messages"][0]["content"])
 
     def test_any_first_person_stance_gets_a_correctable_intent_without_a_forced_discussion_card(self):
         guidance = llm_client._ensure_required_guidance_card(
@@ -3200,7 +3189,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("具体做法是", offer["rationale"])
         self.assertIn("转向选择", offer["rationale"])
 
-    def test_explicit_agreement_gets_deterministic_cards_and_no_questions(self):
+    def test_explicit_modification_agreement_does_not_create_an_orange_card(self):
         client = FakeClient([
             "我会把右下目标与水塘做局部联动。这样能让水域影响第一次推动。"
             "你还想改别的区域吗？要不要扩大水域？"
@@ -3223,7 +3212,7 @@ class LLMClientTests(unittest.TestCase):
             )
 
         self.assertNotEqual(result.guidance["move"], "offer_revision")
-        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertNotIn("？", result.assistant_message)
         self.assertNotIn("吗", result.assistant_message)
@@ -3540,10 +3529,8 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result.model, "kimi-k2.6")
         focus = result.guidance["followUpQuestion"]
-        self.assertIsNotNone(focus)
-        self.assertIn("水域、内部墙体", focus)
-        self.assertTrue(any(marker in focus for marker in ("想让", "希望", "想加强")))
-        self.assertNotIn("试玩时", focus)
+        self.assertIsNone(focus)
+        self.assertNotIn("？", result.assistant_message)
 
     def test_structured_stage_one_opening_receives_rows_for_scope_normalization(self):
         payload = json.dumps({
@@ -3988,7 +3975,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(state, "not_request")
         self.assertIsNone(brief)
 
-    def test_unclear_revision_request_is_tentative_intent_only(self):
+    def test_unclear_revision_request_is_proposal_clarification_without_orange(self):
         result, _ = self.execute(
             [
                 "I can help, but I still need to understand the area you mean.\n"
@@ -4000,22 +3987,17 @@ class LLMClientTests(unittest.TestCase):
             conversation=[{"role": "user", "content": "Can you change it?"}],
         )
 
-        self.assertIsNotNone(result.guidance["intentHypothesis"])
-        self.assertEqual(result.guidance["intentConfidence"], "low")
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentConfidence"])
         self.assertIsNone(result.guidance["followUpQuestion"])
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertEqual(result.guidance["uiCues"], [])
         self.assertIn("I would be guessing on your behalf", result.assistant_message)
         self.assertIsNone(
-            llm_client._intent_hypothesis_detail_issue(
-                result.guidance["intentHypothesis"], "en"
-            )
-        )
-        self.assertIsNone(
             llm_client._intent_body_detail_issue(result.assistant_message, "en")
         )
 
-    def test_unclear_chinese_visual_revision_keeps_visual_play_boundary(self):
+    def test_unclear_chinese_visual_revision_keeps_boundary_in_body_only(self):
         result, _ = self.execute(
             ["\u6211\u9700\u8981\u5148\u7406\u89e3\u4f60\u7684\u91cd\u70b9\u3002"],
             language="zh-CN",
@@ -4023,18 +4005,20 @@ class LLMClientTests(unittest.TestCase):
                 "role": "user",
                 "content": "\u6211\u89c9\u5f97\u8fd9\u91cc\u4e0d\u597d\u770b\uff0c\u5e2e\u6211\u4fee\u6539\u4e00\u4e0b\u3002",
             }],
+            stage_context={
+                "conversationBranch": "proposal",
+                "revisionRouting": "needs_clarification",
+                "proposalState": "clarifying",
+            },
         )
         card = result.guidance["intentHypothesis"]
-        self.assertIsNotNone(card)
-        self.assertIn("\u89c6\u89c9", card)
-        self.assertIn("\u8def\u7ebf", card)
+        self.assertIsNone(card)
         self.assertIn("\u4e24\u8005\u517c\u987e", result.assistant_message)
-        self.assertIsNone(llm_client._intent_hypothesis_detail_issue(card, "zh-CN"))
         self.assertIsNone(
             llm_client._intent_body_detail_issue(result.assistant_message, "zh-CN")
         )
 
-    def test_needs_clarification_routing_keeps_detailed_orange_card(self):
+    def test_needs_clarification_routing_suppresses_orange_card(self):
         result, _ = self.execute(
             ["I need to understand the requested change first."],
             conversation=[{"role": "user", "content": "Can you change it?"}],
@@ -4047,14 +4031,9 @@ class LLMClientTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.guidance["move"], "clarify_intent")
-        self.assertEqual(result.guidance["intentConfidence"], "low")
-        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentConfidence"])
+        self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertIsNone(
-            llm_client._intent_hypothesis_detail_issue(
-                result.guidance["intentHypothesis"], "en"
-            )
-        )
 
     def test_needs_clarification_routing_ignores_prior_assistant_revision_wording(self):
         state, brief = llm_client._classify_revision_request(
@@ -4784,7 +4763,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_progress_rewrite_uses_structured_kimi_task(self):
         client = FakeClient([json.dumps({
-            "detailedText": None,
+            "detailedText": "This extra explanation is not part of an inclination record.",
             "summaryText": "Prefer planning order over route length.",
         })])
         with (
@@ -4799,7 +4778,49 @@ class LLMClientTests(unittest.TestCase):
                 "progress-rewrite-test",
             )
         self.assertEqual(result["summaryText"], "Prefer planning order over route length.")
+        self.assertIsNone(result["detailedText"])
         self.assertEqual(result["model"], "kimi-k2.6")
+
+    def test_progress_rewrite_retries_an_unchanged_summary(self):
+        canonical = "I read your inclination as preferring planning order over route length."
+        client = FakeClient([
+            json.dumps({"detailedText": None, "summaryText": canonical}),
+            json.dumps({
+                "detailedText": None,
+                "summaryText": "Prefer planning order over route length.",
+            }),
+        ])
+        with (
+            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.rewrite_intent_progress(
+                "inclination",
+                canonical,
+                [],
+                "en",
+                "progress-rewrite-retry-test",
+            )
+
+        self.assertEqual(result["summaryText"], "Prefer planning order over route length.")
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertIn(
+            "copied the canonical text unchanged",
+            client.chat.completions.calls[1]["messages"][-1]["content"],
+        )
+
+    def test_empty_region_intent_preserves_visual_and_play_ambiguity(self):
+        options = llm_client._semantic_intent_options(
+            "我觉得左下角太空了",
+            "zh-CN",
+        )
+
+        self.assertEqual(len(options), 3)
+        for option in options:
+            self.assertIn("左下角", option)
+            self.assertRegex(option, r"(?:视觉|观感)")
+            self.assertRegex(option, r"(?:玩法|路线|推箱|推动)")
+            self.assertNotIn("解题时间", option)
 
     def test_discussion_card_is_not_repeated_in_the_saved_assistant_body(self):
         focus = "我会留意水边第一次推进是否真的改变了路线判断。"
@@ -5659,7 +5680,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("what did you hope", focus.casefold())
         self.assertEqual(result[1]["satisfactionQuestion"], focus)
 
-    def test_plain_fallback_human_edit_opening_still_has_an_intent_question(self):
+    def test_plain_fallback_human_edit_opening_has_no_intent_question(self):
         guidance = llm_client._ensure_required_guidance_card(
             {
                 "move": "observe_stage",
@@ -5680,8 +5701,7 @@ class LLMClientTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("water area", guidance["followUpQuestion"])
-        self.assertRegex(guidance["followUpQuestion"], r"\?$" )
+        self.assertIsNone(guidance["followUpQuestion"])
 
     def test_open_ended_map_question_gets_a_discussion_card(self):
         guidance = llm_client._ensure_required_guidance_card(

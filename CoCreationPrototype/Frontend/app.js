@@ -389,16 +389,9 @@ translations.en.executeBoundProposal = "Execute the bound proposal.";
 translations.en.error_SEMANTIC_CONSTRAINT_NOT_MET = "No candidate satisfied every explicit requirement; the current map was not changed.";
 translations.en.error_SEMANTIC_POSTCONDITION_FAILED = "The reviewed proposal failed its semantic postcondition and was not applied.";
 translations.en.error_EXECUTION_REPLAY_MISMATCH = "The actual diff no longer matches the reviewed purple card and was not applied.";
-translations.en.challengeReviewPending = "Your reason was saved, but Kimi could not judge it after two attempts.";
-translations.en.retryChallengeReview = "Retry judgment";
-translations.en.supplementChallengeReason = "Add detail";
-translations.en.challengeReviewSuperseded = "Replaced by a later explanation";
-translations.en.error_CHALLENGE_STALE = "This challenge is no longer active.";
-translations.en.error_CHALLENGE_REVIEW_NOT_FOUND = "This pending judgment no longer exists.";
-translations.en.error_CHALLENGE_REVIEW_STALE = "This pending judgment is no longer actionable.";
-translations.en.error_CHALLENGE_REVIEW_BUSY = "This judgment is already being processed.";
-translations.en.challengeComposerMode = "Responding to proposal challenge";
-translations.en.exitChallengeMode = "Exit challenge";
+translations.en.error_CHALLENGE_REVIEW_FAILED = "Kimi could not judge this reason reliably. Retry the message.";
+translations.en.error_CHALLENGE_REVIEW_RETRY_RETIRED = "Use the chat request retry for this judgment.";
+translations.en.error_CHALLENGE_EXIT_UNSUPPORTED = "Continue the conversation to resolve this proposal challenge.";
 translations.en.proposalChallenged = "This proposal is paused while its challenge is being resolved.";
 translations["zh-CN"].progressTitle = "\u5171\u521b\u8fdb\u5ea6";
 translations["zh-CN"].expressedDirections = "\u5df2\u8868\u8fbe\u65b9\u5411";
@@ -448,16 +441,9 @@ translations["zh-CN"].proposalMustSatisfy = "\u5fc5\u987b\u6ee1\u8db3";
 translations["zh-CN"].proposalTryToAchieve = "\u5c3d\u91cf\u5b9e\u73b0";
 translations["zh-CN"].proposalActualChanges = "\u5b9e\u9645\u51c6\u5907\u4fee\u6539";
 translations["zh-CN"].executeBoundProposal = "\u6267\u884c\u5df2\u7ed1\u5b9a\u7684\u65b9\u6848\u3002";
-translations["zh-CN"].challengeReviewPending = "\u4f60\u7684\u7406\u7531\u5df2\u4fdd\u5b58\uff0c\u4f46 Kimi \u8fde\u7eed\u4e24\u6b21\u672a\u80fd\u5b8c\u6210\u5224\u65ad\u3002";
-translations["zh-CN"].retryChallengeReview = "\u91cd\u8bd5\u5224\u65ad";
-translations["zh-CN"].supplementChallengeReason = "\u8865\u5145\u8bf4\u660e";
-translations["zh-CN"].challengeReviewSuperseded = "\u5df2\u88ab\u540e\u7eed\u8bf4\u660e\u66ff\u4ee3";
-translations["zh-CN"].error_CHALLENGE_STALE = "\u8fd9\u6b21\u8d28\u7591\u5df2\u4e0d\u518d\u5904\u4e8e\u53ef\u64cd\u4f5c\u72b6\u6001\u3002";
-translations["zh-CN"].error_CHALLENGE_REVIEW_NOT_FOUND = "\u627e\u4e0d\u5230\u8fd9\u6761\u5f85\u5224\u65ad\u8bb0\u5f55\u3002";
-translations["zh-CN"].error_CHALLENGE_REVIEW_STALE = "\u8fd9\u6761\u5f85\u5224\u65ad\u8bb0\u5f55\u5df2\u4e0d\u53ef\u64cd\u4f5c\u3002";
-translations["zh-CN"].error_CHALLENGE_REVIEW_BUSY = "\u8fd9\u6761\u7406\u7531\u6b63\u5728\u5224\u65ad\u4e2d\u3002";
-translations["zh-CN"].challengeComposerMode = "\u6b63\u5728\u56de\u5e94\u65b9\u6848\u8d28\u7591";
-translations["zh-CN"].exitChallengeMode = "\u9000\u51fa\u8d28\u7591";
+translations["zh-CN"].error_CHALLENGE_REVIEW_FAILED = "Kimi \u672a\u80fd\u53ef\u9760\u5730\u5224\u65ad\u8fd9\u6761\u7406\u7531\uff0c\u8bf7\u91cd\u8bd5\u8be5\u6d88\u606f\u3002";
+translations["zh-CN"].error_CHALLENGE_REVIEW_RETRY_RETIRED = "\u8bf7\u4f7f\u7528\u804a\u5929\u8bf7\u6c42\u7684\u901a\u7528\u91cd\u8bd5\u3002";
+translations["zh-CN"].error_CHALLENGE_EXIT_UNSUPPORTED = "\u8bf7\u901a\u8fc7\u7ee7\u7eed\u5bf9\u8bdd\u89e3\u51b3\u5f53\u524d\u65b9\u6848\u8d28\u7591\u3002";
 translations["zh-CN"].proposalChallenged = "\u8fd9\u4e2a\u65b9\u6848\u5df2\u6682\u505c\uff0c\u9700\u5148\u5904\u7406\u5bf9\u5b83\u7684\u8d28\u7591\u3002";
 translations["zh-CN"].alternativeRevision = "\u91cd\u65b0\u751f\u6210\u65b9\u6848";
 translations["zh-CN"].proposalDisagreementActive = "\u8bf7\u5148\u89e3\u51b3\u5f53\u524d\u5206\u6b67\uff0c\u518d\u4f7f\u7528\u8fd9\u4e2a\u65b9\u6848";
@@ -487,7 +473,6 @@ const state = {
     translationRemainingCount: 0,
     retryAction: null,
     activeCoordinateLink: null,
-    dismissedChallengeIds: new Set(),
     renderedMessageStageId: null,
     renderedMessageCount: 0,
     language: "zh-CN",
@@ -1094,57 +1079,6 @@ function renderMessages() {
             bubble.textContent = turn.content;
         }
         content.appendChild(bubble);
-        if (turn.role === "user") {
-            const review = (state.session.challengeReviewRecords || []).find(item =>
-                item?.sourceUserTurnId === turn.turnId && item?.status === "review_pending"
-            );
-            if (review) {
-                const pending = document.createElement("div");
-                pending.className = "challenge-review-pending";
-                pending.setAttribute("role", "status");
-                pending.textContent = t("challengeReviewPending");
-                const actions = document.createElement("div");
-                actions.className = "guidance-cue-actions";
-                actions.appendChild(makeButton(
-                    t("retryChallengeReview"),
-                    "secondary-button guidance-cue-button",
-                    () => {
-                        void retryChallengeReview(review);
-                    },
-                    { disabled: state.busy || !canEditSelected() }
-                ));
-                actions.appendChild(makeButton(
-                    t("supplementChallengeReason"),
-                    "secondary-button guidance-cue-button",
-                    () => {
-                        elements.messageInput.focus();
-                        elements.messageInput.value = `${turn.content}\n`;
-                        handleComposerInput();
-                    },
-                    { disabled: state.busy || !canEditSelected() }
-                ));
-                actions.appendChild(makeButton(
-                    t("exitChallengeMode"),
-                    "secondary-button guidance-cue-button",
-                    () => {
-                        state.dismissedChallengeIds.add(review.challengeId);
-                        render();
-                    },
-                    { disabled: state.busy || !canEditSelected() }
-                ));
-                pending.appendChild(actions);
-                content.appendChild(pending);
-            }
-            const supersededReview = (state.session.challengeReviewRecords || []).find(item =>
-                item?.sourceUserTurnId === turn.turnId && item?.status === "superseded"
-            );
-            if (supersededReview) {
-                const superseded = document.createElement("div");
-                superseded.className = "challenge-review-pending resolved";
-                superseded.textContent = t("challengeReviewSuperseded");
-                content.appendChild(superseded);
-            }
-        }
         row.appendChild(content);
         elements.messageList.appendChild(row);
     });
@@ -1177,28 +1111,6 @@ function renderAssistantBubble(turn, bubble) {
     const body = assistantBodyWithoutCues(localized.content, uiCues, question);
     renderAssistantBody(bodyNode, body, guidance.coordinateLinks, turn);
     bubble.appendChild(bodyNode);
-    const challengeState = guidance.challengeState;
-    if (
-        challengeState?.challengeId
-        && challengeState.status !== "resolved"
-        && !state.dismissedChallengeIds.has(challengeState.challengeId)
-        && turn.versionId === state.session.currentVersionId
-    ) {
-        const mode = document.createElement("div");
-        mode.className = "challenge-composer-mode";
-        mode.textContent = t("challengeComposerMode");
-        mode.appendChild(makeButton(
-            t("exitChallengeMode"),
-            "secondary-button guidance-cue-button",
-            () => {
-                state.dismissedChallengeIds.add(challengeState.challengeId);
-                render();
-            },
-            { disabled: state.busy }
-        ));
-        bubble.appendChild(mode);
-    }
-
     if (localized !== turn) {
         const translatedLabel = document.createElement("small");
         translatedLabel.className = "translation-label";
@@ -2121,12 +2033,16 @@ function updateControls() {
     elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
     elements.messageInput.disabled = state.busy || !editable;
     const disagreementActive = selectedStageHasActiveDisagreement();
+    const proposalLocked = proposalFlowActive();
     if ((!editable || disagreementActive) && state.proposalMode) {
         setProposalMode(false);
     }
-    elements.proposalRequestButton.disabled = state.busy || !editable || disagreementActive;
-    elements.proposalRequestButton.classList.toggle("is-active", state.proposalMode);
-    elements.proposalRequestButton.setAttribute("aria-pressed", state.proposalMode ? "true" : "false");
+    const proposalActive = state.proposalMode || proposalLocked;
+    elements.proposalRequestButton.disabled = (
+        state.busy || !editable || disagreementActive || proposalLocked
+    );
+    elements.proposalRequestButton.classList.toggle("is-active", proposalActive);
+    elements.proposalRequestButton.setAttribute("aria-pressed", proposalActive ? "true" : "false");
     elements.sendButton.disabled = state.busy || !editable || !elements.messageInput.value.trim();
     document.querySelectorAll(".question-feedback-button").forEach(button => {
         button.disabled = state.busy || !editable
@@ -2216,7 +2132,6 @@ async function sendMessage(event) {
         || state.pendingMessage.requestProposal !== state.proposalMode
     ) {
         const challenge = activeChallengeComposerState();
-        const exitedChallenge = dismissedChallengeComposerState();
         state.pendingMessage = {
             content,
             baseVersionId: state.session.currentVersionId,
@@ -2225,8 +2140,7 @@ async function sendMessage(event) {
             ...(challenge ? {
                 action: "continue_challenge",
                 challengeId: challenge.challengeId
-            } : {}),
-            ...(exitedChallenge ? { exitChallenge: true } : {})
+            } : {})
         };
     }
 
@@ -2239,28 +2153,25 @@ function activeChallengeComposerState() {
     for (let index = turns.length - 1; index >= 0; index -= 1) {
         const challenge = turns[index]?.guidance?.challengeState;
         if (!challenge?.challengeId) continue;
-        if (challenge.status === "resolved" || state.dismissedChallengeIds.has(challenge.challengeId)) return null;
+        if (challenge.status === "resolved") return null;
         return challenge;
     }
     return null;
 }
 
-function dismissedChallengeComposerState() {
-    const turns = selectedStageTurns();
-    for (let index = turns.length - 1; index >= 0; index -= 1) {
-        const challenge = turns[index]?.guidance?.challengeState;
-        if (!challenge?.challengeId) continue;
-        return challenge.status !== "resolved" && state.dismissedChallengeIds.has(challenge.challengeId)
-            ? challenge
-            : null;
-    }
-    return null;
-}
-
 function toggleProposalMode() {
-    if (state.busy || !canEditSelected() || selectedStageHasActiveDisagreement()) return;
+    if (
+        state.busy
+        || !canEditSelected()
+        || selectedStageHasActiveDisagreement()
+        || proposalFlowActive()
+    ) return;
     setProposalMode(!state.proposalMode);
     updateControls();
+}
+
+function proposalFlowActive() {
+    return Boolean(state.session?.proposalFlowState?.active);
 }
 
 async function retryPendingMessage() {
@@ -2269,44 +2180,6 @@ async function retryPendingMessage() {
     localStorage.setItem(composerKey(), state.pendingMessage.content);
     updateCharacterCount();
     await submitPendingMessage();
-}
-
-async function retryChallengeReview(review, retryKey = uniqueId("challenge-review-retry")) {
-    if (!review?.reviewId || state.busy) return;
-    state.busy = true;
-    state.chatBusy = true;
-    state.chatStatus = "waiting";
-    state.chatError = null;
-    startChatTimer();
-    renderChatRequestStatus();
-    updateControls();
-    try {
-        const result = await api(
-            `/api/sessions/${state.sessionId}/challenge-reviews/${review.reviewId}/retry`,
-            {
-                method: "POST",
-                body: {
-                    baseVersionId: state.session.currentVersionId,
-                    idempotencyKey: retryKey
-                },
-                timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS
-            }
-        );
-        state.session = result.session;
-        clearPendingMessage();
-        state.chatStatus = "idle";
-        render();
-    } catch (error) {
-        state.chatStatus = "failed";
-        state.chatError = error;
-        showError(error, () => retryChallengeReview(review, retryKey));
-    } finally {
-        state.busy = false;
-        state.chatBusy = false;
-        stopChatTimer();
-        renderChatRequestStatus();
-        updateControls();
-    }
 }
 
 async function submitPendingMessage() {
@@ -2331,10 +2204,7 @@ async function submitPendingMessage() {
         setProposalMode(false);
         elements.messageInput.value = "";
         localStorage.removeItem(composerKey());
-        const reviewPending = (state.session.challengeReviewRecords || []).some(item =>
-            item?.messageKey === pending.idempotencyKey && item?.status === "review_pending"
-        );
-        if (!reviewPending) clearPendingMessage();
+        clearPendingMessage();
         state.chatStatus = "idle";
         state.chatError = null;
         updateCharacterCount();
@@ -2358,6 +2228,19 @@ async function submitPendingMessage() {
             } catch (_refreshError) {
                 // Keep the original proposal-state error visible if the refresh
                 // itself cannot complete.
+            }
+        } else if (error?.retryable && (pending.action || "none") === "none") {
+            // A direct-language modification can start a server-owned proposal
+            // flow before Kimi returns. Refresh only that authority state so a
+            // retryable failure still shows the Proposal toggle as locked,
+            // while preserving the composer text and idempotency key.
+            try {
+                const latest = await api(
+                    `/api/sessions/${encodeURIComponent(state.sessionId)}`
+                );
+                state.session.proposalFlowState = latest.proposalFlowState;
+            } catch (_proposalStateRefreshError) {
+                // The original retryable error remains the useful action.
             }
         }
         state.chatStatus = "error";

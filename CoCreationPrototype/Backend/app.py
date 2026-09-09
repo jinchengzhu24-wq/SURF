@@ -55,6 +55,7 @@ from llm_client import (
     review_question_answers,
     rewrite_intent_progress,
     _contains_user_design_direction,
+    _user_explicitly_states_design_stance,
     _guidance_advice_request,
     _guidance_confusion_request,
     execute_revision_operations,
@@ -1803,8 +1804,11 @@ def submit_intent_feedback(
                     session["language"],
                     request.state.request_id,
                 )
-            except (LLMServiceError, TypeError, ValueError, KeyError):
-                pass
+            except (LLMServiceError, TypeError, ValueError, KeyError) as exception:
+                display_rewrite["failureCode"] = (
+                    getattr(exception, "code", None) or type(exception).__name__
+                )
+                display_rewrite["failureReason"] = str(exception)[:500]
         display_statement = display_rewrite["summaryText"]
 
         with connect(immediate=True) as database:
@@ -2060,153 +2064,11 @@ def retry_challenge_review(
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, payload.baseVersionId)
-        prior_request = database.execute(
-            """
-            SELECT * FROM challenge_review_requests
-            WHERE session_id = ? AND idempotency_key = ?
-            """,
-            (session_id, payload.idempotencyKey),
-        ).fetchone()
-        if prior_request is not None:
-            if prior_request["review_id"] != review_id:
-                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The retry key belongs to another review.")
-            if prior_request["status"] == "completed":
-                result = load_json(prior_request["result_json"]) or {}
-                return {
-                    "outcome": result.get("outcome") or "pending",
-                    "session": serialize_session(database, session_id),
-                }
-            if prior_request["status"] == "reviewing":
-                raise ApiError(409, "CHALLENGE_REVIEW_BUSY", "This judgment is already being retried.")
-
-        review = database.execute(
-            """
-            SELECT review.*, challenge.base_version_id, challenge.status AS challenge_status,
-                   turn.content
-            FROM challenge_reason_reviews AS review
-            JOIN revision_challenges AS challenge
-              ON challenge.challenge_id = review.challenge_id
-            JOIN conversation_turns AS turn ON turn.id = review.source_user_turn_id
-            WHERE review.review_id = ? AND review.session_id = ?
-            """,
-            (review_id, session_id),
-        ).fetchone()
-        if review is None:
-            raise ApiError(404, "CHALLENGE_REVIEW_NOT_FOUND", "The challenge review was not found.")
-        if review["base_version_id"] != payload.baseVersionId:
-            raise ApiError(409, "CHALLENGE_REVIEW_STALE", "The challenge belongs to another Stage.")
-        if review["status"] != "review_pending":
-            code = "CHALLENGE_REVIEW_BUSY" if review["status"] == "reviewing" else "CHALLENGE_REVIEW_STALE"
-            raise ApiError(409, code, "The challenge review is no longer pending.")
-        if review["challenge_status"] in {"resolved", "superseded"}:
-            raise ApiError(409, "CHALLENGE_REVIEW_STALE", "The challenge is no longer active.")
-        now = utc_now()
-        database.execute(
-            """
-            INSERT INTO challenge_review_requests(
-                session_id, idempotency_key, review_id, status,
-                result_json, created_at, updated_at
-            ) VALUES (?, ?, ?, 'reviewing', NULL, ?, ?)
-            ON CONFLICT(session_id, idempotency_key) DO UPDATE SET
-                status = 'reviewing', result_json = NULL, updated_at = excluded.updated_at
-            """,
-            (session_id, payload.idempotencyKey, review_id, now, now),
-        )
-        database.execute(
-            "UPDATE challenge_reason_reviews SET status = 'reviewing', updated_at = ? WHERE review_id = ?",
-            (now, review_id),
-        )
-        database.execute(
-            "UPDATE revision_challenges SET status = 'reviewing', updated_at = ? WHERE challenge_id = ?",
-            (now, review["challenge_id"]),
-        )
-        record_event(
-            database,
-            session_id,
-            "challenge_review_retry_requested",
-            {
-                "reviewId": review_id,
-                "challengeId": review["challenge_id"],
-                "sourceUserTurnId": review["source_user_turn_id"],
-                "idempotencyKey": payload.idempotencyKey,
-                "baseVersionId": payload.baseVersionId,
-            },
-            now,
-        )
-        reason_content = review["content"]
-        original_message_key = review["message_key"]
-        challenge_id = review["challenge_id"]
-
-    try:
-        session_payload = send_message(
-            session_id,
-            MessageRequest(
-                content=reason_content,
-                baseVersionId=payload.baseVersionId,
-                idempotencyKey=original_message_key,
-                action="continue_challenge",
-                challengeId=challenge_id,
-            ),
-            request,
-            response,
-            access_cookie,
-        )
-    except Exception:
-        with connect(immediate=True) as database:
-            now = utc_now()
-            database.execute(
-                "UPDATE challenge_reason_reviews SET status = 'review_pending', updated_at = ? WHERE review_id = ? AND status = 'reviewing'",
-                (now, review_id),
-            )
-            database.execute(
-                "UPDATE revision_challenges SET status = 'review_pending', updated_at = ? WHERE challenge_id = ? AND status = 'reviewing'",
-                (now, challenge_id),
-            )
-            database.execute(
-                "UPDATE challenge_review_requests SET status = 'failed', updated_at = ? WHERE session_id = ? AND idempotency_key = ?",
-                (now, session_id, payload.idempotencyKey),
-            )
-            record_event(
-                database,
-                session_id,
-                "challenge_review_retry_failed",
-                {
-                    "reviewId": review_id,
-                    "challengeId": challenge_id,
-                    "idempotencyKey": payload.idempotencyKey,
-                },
-                now,
-            )
-        raise
-
-    with connect(immediate=True) as database:
-        current_review = database.execute(
-            "SELECT status FROM challenge_reason_reviews WHERE review_id = ?",
-            (review_id,),
-        ).fetchone()
-        outcome = "resolved" if current_review and current_review["status"] == "resolved" else "pending"
-        now = utc_now()
-        database.execute(
-            """
-            UPDATE challenge_review_requests
-            SET status = 'completed', result_json = ?, updated_at = ?
-            WHERE session_id = ? AND idempotency_key = ?
-            """,
-            (dump_json({"outcome": outcome}), now, session_id, payload.idempotencyKey),
-        )
-        record_event(
-            database,
-            session_id,
-            "challenge_review_retry_completed",
-            {
-                "reviewId": review_id,
-                "challengeId": challenge_id,
-                "idempotencyKey": payload.idempotencyKey,
-                "outcome": outcome,
-            },
-            now,
-        )
-        return {"outcome": outcome, "session": serialize_session(database, session_id)}
+    raise ApiError(
+        410,
+        "CHALLENGE_REVIEW_RETRY_RETIRED",
+        "This dedicated retry endpoint has been retired. Retry the original chat message instead.",
+    )
 
 
 def _send_message_locked(
@@ -2416,6 +2278,34 @@ def _send_message_locked(
             "ready_with_conservative_binding": "conservative",
         }.get(proposal_state)
         stage_context["responseLanguage"] = language
+        if proposal_discovery and proposal_discovery.get("sourceTurnId"):
+            started = database.execute(
+                """
+                SELECT 1 FROM audit_events
+                WHERE session_id = ? AND event_type = 'proposal_discovery_started'
+                  AND json_extract(payload_json, '$.topicId') = ?
+                LIMIT 1
+                """,
+                (session_id, proposal_discovery["topicId"]),
+            ).fetchone()
+            if started is None:
+                record_event(
+                    database,
+                    session_id,
+                    "proposal_discovery_started",
+                    {
+                        "stageId": payload.baseVersionId,
+                        "topicId": proposal_discovery["topicId"],
+                        "sourceTurnId": proposal_discovery["sourceTurnId"],
+                        "messageKey": payload.idempotencyKey,
+                        "trigger": (
+                            "proposal_button"
+                            if payload.requestProposal
+                            else "direct_modification"
+                        ),
+                    },
+                    utc_now(),
+                )
         if (
             payload.action == "none"
             and
@@ -2538,6 +2428,13 @@ def _send_message_locked(
                 # failure must never consume or block the designer's message.
                 question_answer_review = {"answeredQuestionIds": [], "results": []}
 
+    stage_context["answeredQuestionIds"] = list(
+        question_answer_review.get("answeredQuestionIds") or []
+    )
+    stage_context["answeredVisibleQuestion"] = bool(
+        stage_context["answeredQuestionIds"]
+    )
+
     challenge_reason_classification = None
     challenge_review_id = None
     challenge_choice_resolution = None
@@ -2631,10 +2528,9 @@ def _send_message_locked(
                         _deadline=challenge_deadline,
                     )
                 except LLMServiceError as exception:
-                    # A failed auxiliary judgment is not a failed chat turn.
-                    # Keep the already-persisted user reason exactly once and
-                    # expose an explicit pending state that can be retried with
-                    # the same message idempotency key.
+                    # Keep the already-persisted user reason exactly once. The
+                    # ordinary chat retry replays this same message key, so a
+                    # dedicated challenge-review retry API is unnecessary.
                     with connect(immediate=True) as database:
                         active_session = require_active_session(
                             database, session_id, access_cookie
@@ -2698,7 +2594,19 @@ def _send_message_locked(
                             """,
                             (now, challenge_id, session_id),
                         )
-                        return serialize_session(database, session_id)
+                    raise ApiError(
+                        exception.status_code,
+                        "CHALLENGE_REVIEW_FAILED",
+                        exception.safe_message,
+                        retryable=True,
+                        details={
+                            "task": "challenge_review",
+                            "failureStage": "upstream",
+                            "failureCode": exception.code,
+                            "attemptsUsed": exception.attempts_used,
+                            "maximumAttempts": 2,
+                        },
+                    ) from exception
                 comparison = challenge_reason_classification.get("comparison")
                 if comparison:
                     from llm_client import _validate_map_grounding_texts
@@ -2757,7 +2665,19 @@ def _send_message_locked(
                                 """,
                                 (now, challenge_id, session_id),
                             )
-                            return serialize_session(database, session_id)
+                        raise ApiError(
+                            502,
+                            "CHALLENGE_REVIEW_FAILED",
+                            "Kimi's judgment did not match the current Stage facts. Retry the message.",
+                            retryable=True,
+                            details={
+                                "task": "challenge_review",
+                                "failureStage": "binding",
+                                "failureCode": "MAP_GROUNDING_INVALID",
+                                "attemptsUsed": challenge_reason_classification.get("attemptsUsed", 1),
+                                "maximumAttempts": 2,
+                            },
+                        ) from exception
                 stage_context["challengeReasonClassification"] = (
                     challenge_reason_classification
                 )
@@ -2841,6 +2761,21 @@ def _send_message_locked(
             context["stageContext"].get("authorizedRevisionBrief") or revision_brief or ""
         ).strip()
     context["stageContext"]["revisionRequestState"] = revision_state
+    proposal_branch = bool(
+        payload.action in REVISION_CARD_ACTIONS
+        or payload.requestProposal
+        or context["stageContext"].get("activeDisagreement")
+        or context["stageContext"].get("proposalDiscovery")
+        or context["stageContext"].get("revisionRouting") in {
+            "needs_clarification",
+            "proposal",
+            "proposal_conservative",
+            "proposal_blocked",
+        }
+    )
+    context["stageContext"]["conversationBranch"] = (
+        "proposal" if proposal_branch else "ordinary"
+    )
     revision_failure = None
     if revision_state == "relaxation_confirmed":
         execution = _relaxed_revision_suggestion_execution(
@@ -2866,7 +2801,12 @@ def _send_message_locked(
             )
         except LLMServiceError as exception:
             revision_failure = exception
-            if revision_state == "proposal_requested":
+            proposal_retryable_failure = bool(
+                proposal_branch and exception.retryable
+            )
+            if proposal_retryable_failure:
+                execution = None
+            elif revision_state == "proposal_requested":
                 execution = _automatic_proposal_failure_execution(
                     language=language,
                     request_id=exception.request_id,
@@ -2897,7 +2837,11 @@ def _send_message_locked(
                     payload.action == "none"
                     and revision_state == "not_request"
                 )
-                if not retrying_failed_message or ordinary_message_failure:
+                if (
+                    proposal_retryable_failure
+                    or not retrying_failed_message
+                    or ordinary_message_failure
+                ):
                     with connect(immediate=True) as database:
                         active_session = require_active_session(
                             database,
@@ -3060,8 +3004,14 @@ def _send_message_locked(
         )
         if item.get("status") == "confirmed"
     }
+    intent_allowed = bool(
+        context["stageContext"].get("conversationBranch") == "ordinary"
+        and not context["stageContext"].get("answeredVisibleQuestion")
+        and _user_explicitly_states_design_stance(content)
+    )
     if candidate_intent and (
-        payload.requestProposal
+        not intent_allowed
+        or payload.requestProposal
         or payload.action != "none"
         or execution_guidance.get("proposalOffer")
         or active_disagreement_card
@@ -3603,6 +3553,11 @@ def _send_message_locked(
                     "answeredQuestionIds"
                 ),
                 answer_turn_id=user_turn_id,
+                allow_new_questions=(
+                    isinstance((execution.guidance or {}).get("disagreement"), dict)
+                    and (execution.guidance or {}).get("disagreement", {}).get("status")
+                    == "active"
+                ),
             )
 
         session_payload = serialize_session(database, session_id)
@@ -6467,16 +6422,21 @@ def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None
     forced_keys = set(proposal_request_keys or ())
     ordered = sorted(turns or [], key=lambda turn: turn["sequence_number"])
     active = None
+    conversation_prefix = []
     for turn in ordered:
         content = str(turn["content"] or "").strip()
         if turn["role"] == "user":
-            starts_new_topic = (
-                active is None
-                or active.get("status") in {"proposal_ready", "blocked"}
-                or _proposal_topic_reset_requested(content)
-            )
+            conversation_prefix.append({"role": "user", "content": content})
+            # An active discovery owns every subsequent user reply. Textual
+            # cancel/topic-switch wording does not unlock or replace it; only
+            # a terminal assistant marker clears the topic below.
+            starts_new_topic = active is None
+            revision_state, _ = classify_revision_request(conversation_prefix)
+            direct_revision_request = revision_state in {
+                "needs_direction", "authorized", "authorized_relaxed",
+            }
             if (
-                _guidance_advice_request(content)
+                direct_revision_request
                 or (
                     turn["request_id"]
                     if "request_id" in turn.keys()
@@ -6504,6 +6464,7 @@ def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None
                     # designer direction re-opens the same Stage topic.
                     active["status"] = "clarifying"
             continue
+        conversation_prefix.append({"role": turn["role"], "content": content})
         if active is None or turn["role"] != "assistant":
             continue
         try:
@@ -6538,6 +6499,9 @@ def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None
         # suppress a later, correctly routed proposal attempt.
         if marker_status == "proposal_ready" and not marker.get("hasValidatedCandidate"):
             marker_status = "failed"
+        if marker_status in {"proposal_ready", "failed", "blocked"}:
+            active = None
+            continue
         active["status"] = marker_status
     if active is None:
         return None
@@ -6583,6 +6547,20 @@ def _proposal_clarification_spec(discovery, snapshot, language):
 
     evidence = "\n".join(discovery.get("userEvidence") or []).strip()
     lowered = evidence.casefold()
+    spatial_emptiness = bool(re.search(
+        r"(?:太空了?|空旷|空荡|显得空|过于空|比较空|别那么空|不要那么空|不那么空|"
+        r"too\s+empty|feels?\s+empty|sparse|vacant)",
+        lowered,
+        re.IGNORECASE,
+    ))
+    spatial_region = next(
+        (
+            name for name in
+            ("左下角", "右下角", "左上角", "右上角", "中间区域", "中央区域")
+            if name in evidence
+        ),
+        "这片区域",
+    )
     asked = [
         str(key).strip()
         for key in discovery.get("askedQuestionKeys") or []
@@ -6590,8 +6568,9 @@ def _proposal_clarification_spec(discovery, snapshot, language):
     ]
     count_before = max(0, min(3, int(discovery.get("clarificationQuestionCount") or 0)))
     has_goal = bool(re.search(
-        r"(?:时间|难度|思考|挑战|体验|节奏|压力|选择|"
-        r"time|difficulty|challenge|experience|pacing|pressure|choice)",
+        r"(?:时间|难度|思考|挑战|体验|节奏|压力|选择|视觉|空间分布|平衡|外观|"
+        r"time|difficulty|challenge|experience|pacing|pressure|choice|"
+        r"visual|spatial|balance|appearance)",
         lowered,
         re.IGNORECASE,
     ))
@@ -6626,11 +6605,18 @@ def _proposal_clarification_spec(discovery, snapshot, language):
 
     chinese = language == "zh-CN"
     if question_key == "experience_goal":
-        question = (
-            "你希望玩家增加的时间主要花在规划推箱顺序上，还是花在执行更长的运输路线上？"
-            if chinese else
-            "Should the added solving time come mainly from planning the push order or from executing a longer transport route?"
-        )
+        if spatial_emptiness:
+            question = (
+                f"你希望{spatial_region}主要改善视觉上的空间分布，还是加入会影响路线或推箱节奏的结构？"
+                if chinese else
+                "Should this area mainly improve visual balance, or gain structure that affects routes or push rhythm?"
+            )
+        else:
+            question = (
+                "你希望玩家增加的时间主要花在规划推箱顺序上，还是花在执行更长的运输路线上？"
+                if chinese else
+                "Should the added solving time come mainly from planning the push order or from executing a longer transport route?"
+            )
     elif question_key == "mechanism":
         question = (
             "你希望额外时间主要来自更长的推箱运输，还是来自需要反复判断顺序的局部陷阱？"
@@ -6672,9 +6658,11 @@ def _proposal_clarification_spec(discovery, snapshot, language):
     # used only when its independently authored question cannot be retained.
     fallback_questions = {
         "experience_goal": (
-            "你希望额外的解题时间主要消耗在哪种判断或操作上？"
-            if chinese else
-            "What kind of judgment or action should account for the extra solving time?"
+            question if spatial_emptiness else (
+                "你希望额外的解题时间主要消耗在哪种判断或操作上？"
+                if chinese else
+                "What kind of judgment or action should account for the extra solving time?"
+            )
         ),
         "mechanism": (
             "你希望通过哪种局部机制增加实际推箱次数？"
@@ -6701,7 +6689,11 @@ def _proposal_clarification_spec(discovery, snapshot, language):
         "fallbackQuestion": question,
         "fallbackAcknowledgement": acknowledgement,
         "questionIntent": {
-            "experience_goal": "clarify where the added player time or difficulty should come from",
+            "experience_goal": (
+                "clarify whether the sparse area should improve visual balance or affect routes and push rhythm"
+                if spatial_emptiness else
+                "clarify where the added player time or difficulty should come from"
+            ),
             "mechanism": "clarify the local play mechanism that should create the requested effect",
             "binding": "clarify which existing entity or local area should carry the change",
             "preserve": "clarify which current play quality must remain unchanged",
@@ -6727,6 +6719,13 @@ def _proposal_discovery_has_unique_anchor(discovery, snapshot):
     if labels:
         return (snapshot or {}).get("identityStatus") == "exact"
     lowered = evidence.casefold()
+    if re.search(
+        r"(?:左下角|右下角|左上角|右上角|中间区域|中央区域|"
+        r"lower[-\s]?left|lower[-\s]?right|upper[-\s]?left|upper[-\s]?right|central area)",
+        lowered,
+        re.IGNORECASE,
+    ):
+        return bool(snapshot)
     entities = (snapshot or {}).get("entities") or []
     if re.search(r"(?:箱子|box|crate)", lowered):
         return sum(item.get("kind") == "box" for item in entities) == 1
@@ -6762,7 +6761,10 @@ def _proposal_discovery_is_sufficient(discovery, snapshot):
 def _is_vague_aesthetic_revision(content):
     text = str(content or "")
     return bool(re.search(
-        r"(?:\u4e0d\u597d\u770b|\u4e0d\u7f8e\u89c2|\u770b\u8d77\u6765\u4e0d\u5bf9|\b(?:ugly|doesn'?t look (?:good|right)|not aesthetic)\b)",
+        r"(?:\u4e0d\u597d\u770b|\u4e0d\u7f8e\u89c2|\u770b\u8d77\u6765\u4e0d\u5bf9|"
+        r"太空了?|空旷|空荡|显得空|过于空|比较空|别那么空|不要那么空|不那么空|"
+        r"\b(?:ugly|doesn'?t look (?:good|right)|not aesthetic|"
+        r"too\s+empty|feels?\s+empty|sparse|vacant)\b)",
         text,
         flags=re.IGNORECASE,
     )) and not bool(re.search(
@@ -6803,22 +6805,13 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_d
     if _guidance_confusion_request(text):
         return "confused"
 
-    direct_edit = bool(re.search(
-        r"(?:把|将|請將|扩展|扩大|移动|移到|挪到|调整|修改|改成|放到|"
-        r"\b(?:move|shift|extend|expand|change|adjust|relocate)\b)",
-        text,
-        flags=re.IGNORECASE,
-    ))
-    direct_edit = direct_edit or bool(re.search(
-        r"(?:\u5e2e\u6211|\u8bf7(?:\u4f60)?|\u628a|\u5c06).{0,48}"
-        r"(?:\u6539|\u4fee\u6539|\u8c03\u6574|\u79fb\u52a8|\u6269\u5c55|\u6269\u5927|\u6539\u6210|"
-        r"\u632a\u5230|\u7f29\u5c0f|\u589e\u52a0|\u51cf\u5c11|\b(?:move|shift|extend|expand|change|adjust|relocate)\b)|"
-        r"\b(?:move|shift|extend|expand|change|adjust|relocate)\b",
-        text,
-        flags=re.IGNORECASE,
-    ))
-    advice_request = _guidance_advice_request(text)
-    if not direct_edit and not advice_request:
+    revision_state, _ = classify_revision_request([
+        {"role": "user", "content": text},
+    ])
+    direct_edit = revision_state in {
+        "needs_direction", "authorized", "authorized_relaxed",
+    }
+    if not direct_edit:
         return "none"
     concrete_change = bool(re.search(
         r"(?:\u628a|\u5c06|\u8ba9|\u5e0c\u671b|\u60f3(?:\u8981|\u8ba9|\u628a)?|"
@@ -7106,11 +7099,11 @@ def _validate_message_action_payload(payload):
             "INVALID_MESSAGE_ACTION",
             "A proposal request cannot also be a revision-card action.",
         )
-    if payload.exitChallenge and action != "none":
+    if payload.exitChallenge:
         raise ApiError(
-            400,
-            "INVALID_MESSAGE_ACTION",
-            "Exiting challenge mode must be an ordinary message.",
+            409,
+            "CHALLENGE_EXIT_UNSUPPORTED",
+            "An active proposal challenge must be resolved through the conversation.",
         )
     if action in {"none", "continue_challenge"} and source_turn_id:
         raise ApiError(
@@ -8870,6 +8863,7 @@ def _update_design_context_from_turn(
     allow_progress=True,
     answered_question_ids=None,
     answer_turn_id=None,
+    allow_new_questions=False,
 ):
     """Merge server-owned memory after a normal chat or Stage review.
 
@@ -8890,13 +8884,20 @@ def _update_design_context_from_turn(
         patch = None
 
     previous = load_design_context(database, session_id, version_id)
+    effective_patch = patch
+    if isinstance(patch, dict) and not allow_new_questions:
+        # Ordinary non-proposal turns may still contribute explicit design
+        # evidence, but neither model metadata nor visible prose may create a
+        # new open-question record.
+        effective_patch = dict(patch)
+        effective_patch.pop("openQuestions", None)
     try:
         context = merge_chat_update(
             previous,
             # The user's own explicit memory remains attributable even when
             # this assistant reply is the Stage opening.  Only the model patch
             # is gated by the opening rule.
-            patch=patch if allow_progress else None,
+            patch=effective_patch if allow_progress else None,
             user_text=user_content,
             stage_id=version_id,
             turn_id=turn_id,
@@ -9035,7 +9036,7 @@ def _update_design_context_from_turn(
         )
 
     auto_open_questions = []
-    if allow_progress or assistant_content:
+    if allow_new_questions and (allow_progress or assistant_content):
         candidates = [guidance.get("followUpQuestion")]
         if isinstance(disagreement, dict) and disagreement.get("status") == "active":
             candidates.append(disagreement.get("nextQuestion"))

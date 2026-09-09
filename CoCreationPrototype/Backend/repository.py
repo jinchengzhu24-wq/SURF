@@ -1007,7 +1007,7 @@ def serialize_session(database, session_id):
             "status": row["status"],
             "attemptsUsed": row["attempts_used"],
             "failureCode": row["failure_code"],
-            "retryable": row["status"] == "review_pending",
+            "retryable": False,
             "updatedAt": row["updated_at"],
         }
         for row in challenge_review_rows
@@ -1738,6 +1738,48 @@ def serialize_session(database, session_id):
             "createdAt": translation["created_at"],
         }
 
+    proposal_flow_status = "inactive"
+    proposal_flow_question_count = 0
+    latest_flow_event = database.execute(
+        """
+        SELECT event_type, payload_json FROM audit_events
+        WHERE session_id = ?
+          AND event_type IN ('proposal_discovery_started', 'proposal_discovery_progress')
+          AND json_extract(payload_json, '$.stageId') = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (session_id, session["current_version_id"]),
+    ).fetchone()
+    if latest_flow_event is not None:
+        flow_payload = load_json(latest_flow_event["payload_json"]) or {}
+        marker_status = (
+            "clarifying"
+            if latest_flow_event["event_type"] == "proposal_discovery_started"
+            else str(flow_payload.get("status") or "inactive")
+        )
+        if marker_status == "clarifying":
+            proposal_flow_status = "clarifying"
+            proposal_flow_question_count = max(
+                0,
+                min(3, int(flow_payload.get("clarificationQuestionCount") or 0)),
+            )
+    if proposal_flow_status == "inactive":
+        # Compatibility for sessions created before proposal-flow audit events.
+        latest_marker = None
+        for turn in turns:
+            if turn["version_id"] != session["current_version_id"] or turn["role"] != "assistant":
+                continue
+            guidance = load_json(turn["guidance_json"]) or {}
+            marker = guidance.get("proposalDiscovery")
+            if isinstance(marker, dict):
+                latest_marker = marker
+        if isinstance(latest_marker, dict) and latest_marker.get("status") == "clarifying":
+            proposal_flow_status = "clarifying"
+            proposal_flow_question_count = max(
+                0,
+                min(3, int(latest_marker.get("clarificationQuestionCount") or 0)),
+            )
+
     return {
         "sessionId": session["id"],
         "status": session["status"],
@@ -1755,6 +1797,11 @@ def serialize_session(database, session_id):
         "deadlineAt": session["deadline_at"],
         "deadlineExpired": _deadline_expired(session["deadline_at"]),
         "remainingSeconds": _remaining_deadline_seconds(session["deadline_at"]),
+        "proposalFlowState": {
+            "active": proposal_flow_status == "clarifying",
+            "status": proposal_flow_status,
+            "clarificationQuestionCount": proposal_flow_question_count,
+        },
         "versions": [
             {
                 "versionId": version["id"],
