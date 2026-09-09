@@ -4114,6 +4114,83 @@ class CoCreationSessionTests(unittest.TestCase):
             "active",
         )
 
+    def test_choice_pending_continue_challenge_persists_resolution(self):
+        version_id = self.read_session()["currentVersionId"]
+        challenge_id = "challenge-continue-choice"
+        with repository.connect(immediate=True) as database:
+            context = repository.load_design_context(
+                database, self.session_id, version_id
+            )
+            context["activeDisagreement"] = {
+                "status": "active",
+                "subject": "ai_revision_challenge",
+                "userPosition": "The single-cell change is too small.",
+                "aiPosition": "Keep the original local adjustment.",
+                "coreDisagreement": "Whether the revision scope is sufficient.",
+                "nextQuestion": "Should we keep the original approach?",
+                "resolution": None,
+                "phase": "choice_pending",
+                "displayCard": True,
+                "proposalSummary": "Move the player start left.",
+                "acceptedReason": "The single-cell change is too small.",
+                "primaryHypothesis": "The mechanism may be too weak.",
+                "secondaryHypothesis": "The original structure may be over-preserved.",
+            }
+            repository.save_design_context(database, version_id, context)
+
+        execution = LLMExecutionResult(
+            "I prepared a broader validated proposal.",
+            1,
+            "continue-choice-proposal",
+            proposed_rows=EDITED_ROWS,
+            modification_summary="Moved the player start left.",
+            model="mock-model",
+            guidance={
+                "move": "deliver_revision",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            revision_plan=PLAYER_MOVE_CONTRACT["revisionPlan"],
+            proposal_diagnostics={
+                "selectedStrategyIndex": 1,
+                "changedCellCount": 2,
+            },
+            revision_contract=PLAYER_MOVE_CONTRACT,
+            revision_operations=PLAYER_MOVE_OPERATIONS,
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "No.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "continue-choice-proposal",
+                    "action": "continue_challenge",
+                    "challengeId": challenge_id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        latest = response.json()["turns"][-1]["guidance"]
+        self.assertEqual(latest["disagreement"]["status"], "resolved")
+        self.assertEqual(latest["disagreement"]["resolution"], "user")
+        with repository.connect() as database:
+            context = repository.load_design_context(
+                database, self.session_id, version_id
+            )
+            resolved_events = database.execute(
+                """
+                SELECT COUNT(*) FROM audit_events
+                WHERE session_id = ? AND event_type = 'disagreement_resolved'
+                """,
+                (self.session_id,),
+            ).fetchone()[0]
+        self.assertIsNone(context["activeDisagreement"])
+        self.assertEqual(resolved_events, 1)
+
     def test_active_disagreement_cards_keep_warning_and_four_summaries(self):
         disagreement = {
             "status": "active",

@@ -267,6 +267,7 @@ def initialize_database():
         backfill_design_contexts(database)
         backfill_entity_bindings(database)
         backfill_revision_challenges(database)
+        repair_resolved_challenge_disagreements(database)
         backfill_language_locks(database)
         database.commit()
     finally:
@@ -888,6 +889,153 @@ def backfill_revision_challenges(database):
                     (status, guidance_row["created_at"], challenge_id),
                 )
             break
+
+
+def repair_resolved_challenge_disagreements(database):
+    """Clear choice-pending snapshots already resolved by a validated proposal.
+
+    A short-lived routing mismatch allowed the frontend's ``continue_challenge``
+    action to start a replacement proposal without persisting the corresponding
+    resolved disagreement.  Repair only when the immutable audit trail contains
+    both that continuation and a later accepted Revision Workflow V2 candidate
+    for the same message key.  Descendants are repaired only while they carry
+    the exact inherited disagreement, so a later independent disagreement is
+    never cleared.
+    """
+    continuations = database.execute(
+        """
+        SELECT id, session_id, payload_json
+        FROM audit_events
+        WHERE event_type = 'challenge_continued'
+        ORDER BY id
+        """
+    ).fetchall()
+    repaired = 0
+    for continuation in continuations:
+        payload = load_json(continuation["payload_json"]) or {}
+        if payload.get("action") != "continue_challenge":
+            continue
+        message_key = str(payload.get("messageKey") or "").strip()
+        base_version_id = str(payload.get("baseVersionId") or "").strip()
+        if not message_key or not base_version_id:
+            continue
+
+        workflow_event = None
+        workflow_rows = database.execute(
+            """
+            SELECT id, payload_json
+            FROM audit_events
+            WHERE session_id = ? AND id > ?
+              AND event_type = 'revision_workflow_v2_evaluated'
+            ORDER BY id
+            """,
+            (continuation["session_id"], continuation["id"]),
+        ).fetchall()
+        for workflow_row in workflow_rows:
+            workflow = load_json(workflow_row["payload_json"]) or {}
+            if workflow.get("messageKey") != message_key:
+                continue
+            if workflow.get("candidateAccepted") is not True:
+                continue
+            if (workflow.get("workflow") or {}).get("status") != "authorized":
+                continue
+            workflow_event = workflow_row
+            break
+        if workflow_event is None:
+            continue
+
+        base_context = load_design_context(
+            database, continuation["session_id"], base_version_id
+        )
+        stale_disagreement = base_context.get("activeDisagreement")
+        if not stale_disagreement:
+            disagreement_event = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND id < ?
+                  AND event_type IN ('disagreement_started', 'disagreement_updated')
+                  AND json_extract(payload_json, '$.versionId') = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (
+                    continuation["session_id"],
+                    continuation["id"],
+                    base_version_id,
+                ),
+            ).fetchone()
+            if disagreement_event is not None:
+                disagreement_payload = load_json(
+                    disagreement_event["payload_json"]
+                ) or {}
+                stale_disagreement = normalize_design_context({
+                    "activeDisagreement": disagreement_payload.get("disagreement")
+                }).get("activeDisagreement")
+        if not (
+            isinstance(stale_disagreement, dict)
+            and stale_disagreement.get("status") == "active"
+            and stale_disagreement.get("subject") == "ai_revision_challenge"
+            and stale_disagreement.get("phase") == "choice_pending"
+        ):
+            continue
+
+        identity_fields = (
+            "subject",
+            "userPosition",
+            "proposalSummary",
+            "acceptedReason",
+            "primaryHypothesis",
+            "secondaryHypothesis",
+        )
+        stale_identity = tuple(
+            stale_disagreement.get(field) for field in identity_fields
+        )
+
+        versions = database.execute(
+            """
+            SELECT id, parent_version_id
+            FROM level_versions
+            WHERE session_id = ?
+            ORDER BY stage_number, created_at, id
+            """,
+            (continuation["session_id"],),
+        ).fetchall()
+        descendants = {base_version_id}
+        for version in versions:
+            if version["parent_version_id"] in descendants:
+                descendants.add(version["id"])
+
+        for version in versions:
+            if version["id"] not in descendants:
+                continue
+            context = load_design_context(
+                database, continuation["session_id"], version["id"]
+            )
+            candidate = context.get("activeDisagreement")
+            if not isinstance(candidate, dict):
+                continue
+            candidate_identity = tuple(
+                candidate.get(field) for field in identity_fields
+            )
+            if candidate_identity != stale_identity:
+                continue
+            context = set_active_disagreement(
+                context, None, version["id"], None
+            )
+            save_design_context(database, version["id"], context)
+            record_event(
+                database,
+                continuation["session_id"],
+                "stale_disagreement_repaired",
+                {
+                    "versionId": version["id"],
+                    "baseVersionId": base_version_id,
+                    "messageKey": message_key,
+                    "reason": "validated_replacement_proposal",
+                },
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+            repaired += 1
+    return repaired
 
 
 def record_event(database, session_id, event_type, payload, created_at):

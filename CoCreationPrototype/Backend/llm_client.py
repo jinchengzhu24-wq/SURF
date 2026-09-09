@@ -13221,7 +13221,8 @@ def _user_explicitly_states_design_stance(message):
     design_markers = (
         "关卡", "地图", "布局", "空间", "水", "墙", "箱", "目标", "路线",
         "通道", "推动", "推箱", "顺序", "难度", "节奏", "选择", "体验",
-        "判断", "压力", "可读", "绕行", "障碍", "外观", "视觉", "好看", "简单", "复杂",
+        "玩家", "游玩", "玩法", "思考", "试错", "探索", "判断", "压力", "可读",
+        "绕行", "障碍", "外观", "视觉", "好看", "简单", "复杂",
         "level", "map", "layout", "space", "water", "wall", "box", "crate",
         "target", "route", "corridor", "push", "order", "difficulty", "pacing",
         "choice", "experience", "readable", "detour", "obstacle", "visual",
@@ -13229,7 +13230,8 @@ def _user_explicitly_states_design_stance(message):
     )
     explicit_stance = any(marker in text for marker in (
         "我认为", "我倒是认为", "我觉得", "我感觉", "在我看来", "我更在意", "我更希望",
-        "我希望", "我想要", "我倾向于", "我更倾向于", "我喜欢", "我不喜欢",
+        "我希望", "我想要", "我想让", "我更想让", "我希望让", "我更希望让",
+        "我倾向于", "我更倾向于", "我喜欢", "我不喜欢",
         "我宁愿", "对我来说", "我不认同", "我不同意", "我反而觉得",
     )) or bool(re.search(
         r"\b(?:i think|i feel|i believe|in my view|from my perspective|"

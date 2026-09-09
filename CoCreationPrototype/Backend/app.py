@@ -2931,7 +2931,7 @@ def _send_message_locked(
             source_binding,
         )
     if (
-        payload.action == "none"
+        payload.action in {"none", "continue_challenge"}
         and active_disagreement.get("subject") == "ai_revision_challenge"
         and active_disagreement.get("phase") == "choice_pending"
     ):

@@ -2722,17 +2722,67 @@ class LLMClientTests(unittest.TestCase):
             "我觉得这个太直接了。",
             "我不喜欢这样。",
             "我不同意，你对路线节奏的判断不对。",
+            "我想让用户花费更多时间来游玩我的关卡。",
+            "我希望玩家需要更多思考。",
+            "我更想让路线复杂一些。",
         ):
             with self.subTest(message=message):
                 self.assertTrue(
                     llm_client._user_explicitly_states_design_stance(message)
                 )
 
-        for message in ("我移动了一个箱子。", "这里有两条路线。", "给我一些思路。"):
+        for message in (
+            "我移动了一个箱子。",
+            "这里有两条路线。",
+            "给我一些思路。",
+            "帮我想想如何让玩家花更多时间。",
+        ):
             with self.subTest(message=message):
                 self.assertFalse(
                     llm_client._user_explicitly_states_design_stance(message)
                 )
+
+    def test_want_player_experience_statement_gets_an_intent_card(self):
+        result, _ = self.execute(
+            ["这个方向会让当前较短的路线更需要规划。"],
+            language="zh-CN",
+            conversation=[{
+                "role": "user",
+                "content": "我想让用户花费更多时间来游玩我的关卡。",
+            }],
+        )
+
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertEqual(result.guidance["intentConfidence"], "medium")
+        self.assertIsNone(result.guidance["followUpQuestion"])
+
+    def test_want_player_experience_statement_has_no_orange_card_in_proposal_branch(self):
+        result, _ = self.execute(
+            ["这个方向可以先从增加路线依赖来收敛。"],
+            language="zh-CN",
+            conversation=[{
+                "role": "user",
+                "content": "我想让用户花费更多时间来游玩我的关卡。",
+            }],
+            stage_context={"conversationBranch": "proposal"},
+        )
+
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentConfidence"])
+
+    def test_answered_question_statement_has_no_orange_card(self):
+        result, _ = self.execute(
+            ["这会把体验重点放在路线规划上。"],
+            language="zh-CN",
+            conversation=[{
+                "role": "user",
+                "content": "我想让用户花费更多时间来游玩我的关卡。",
+            }],
+            stage_context={"answeredVisibleQuestion": True},
+        )
+
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertIsNone(result.guidance["intentConfidence"])
 
     def test_user_difficulty_reframe_gets_a_tentative_intent_card(self):
         result, _ = self.execute(

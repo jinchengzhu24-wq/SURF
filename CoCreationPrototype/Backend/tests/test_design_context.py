@@ -557,6 +557,145 @@ class DesignContextUnitTests(unittest.TestCase):
 
 
 class DesignContextRepositoryTests(unittest.TestCase):
+    def test_repair_clears_audited_stale_disagreement_from_descendants(self):
+        original_path = repository.DATABASE_PATH
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            repository.DATABASE_PATH = Path(directory) / "stale-disagreement.sqlite3"
+            try:
+                repository.initialize_database()
+                session_id = uuid.uuid4().hex
+                parent_id = uuid.uuid4().hex
+                child_id = uuid.uuid4().hex
+                message_key = "continued-choice-message"
+                now = "2026-09-09T00:00:00Z"
+                disagreement = {
+                    "status": "active",
+                    "subject": "ai_revision_challenge",
+                    "userPosition": "The proposed scope is too small.",
+                    "aiPosition": "Keep the local change.",
+                    "coreDisagreement": "Whether one changed cell is enough.",
+                    "nextQuestion": "Should the original approach remain?",
+                    "resolution": None,
+                    "phase": "choice_pending",
+                    "displayCard": True,
+                    "proposalSummary": "Change one water tile.",
+                    "acceptedReason": "One changed cell is not enough.",
+                }
+                context = empty_design_context()
+                context["activeDisagreement"] = disagreement
+                child_context = json.loads(json.dumps(context))
+                child_context["activeDisagreement"].update({
+                    "nextQuestion": "Please answer only yes or no.",
+                    "displayCard": False,
+                })
+                with repository.connect(immediate=True) as database:
+                    database.execute(
+                        """
+                        INSERT INTO design_sessions(
+                            id, creation_key, access_hash, integration_hash, bootstrap_hash,
+                            initial_draft_method, language, status, current_version_id,
+                            created_at, updated_at
+                        ) VALUES (?, ?, 'a', 'b', 'c', 'partial_completion', 'en',
+                                  'active', ?, ?, ?)
+                        """,
+                        (session_id, uuid.uuid4().hex, child_id, now, now),
+                    )
+                    rows = json.dumps(["############"] * 10)
+                    for version_id, stage_number, parent_version_id in (
+                        (parent_id, 1, None),
+                        (child_id, 2, parent_id),
+                    ):
+                        database.execute(
+                            """
+                            INSERT INTO level_versions(
+                                id, session_id, stage_number, parent_version_id, source,
+                                rows_json, summary, diff_json, validation_json,
+                                design_context_json, idempotency_key, created_at
+                            ) VALUES (?, ?, ?, ?, 'llm_accepted', ?, '', '[]', '{}', ?, ?, ?)
+                            """,
+                            (
+                                version_id,
+                                session_id,
+                                stage_number,
+                                parent_version_id,
+                                rows,
+                                json.dumps(
+                                    context if version_id == parent_id else child_context
+                                ),
+                                version_id,
+                                now,
+                            ),
+                        )
+                    repository.record_event(
+                        database,
+                        session_id,
+                        "disagreement_started",
+                        {
+                            "versionId": parent_id,
+                            "disagreement": disagreement,
+                        },
+                        now,
+                    )
+                    repository.record_event(
+                        database,
+                        session_id,
+                        "challenge_continued",
+                        {
+                            "messageKey": message_key,
+                            "action": "continue_challenge",
+                            "baseVersionId": parent_id,
+                        },
+                        now,
+                    )
+                    repository.record_event(
+                        database,
+                        session_id,
+                        "disagreement_updated",
+                        {
+                            "versionId": child_id,
+                            "disagreement": child_context["activeDisagreement"],
+                        },
+                        now,
+                    )
+                    repository.record_event(
+                        database,
+                        session_id,
+                        "revision_workflow_v2_evaluated",
+                        {
+                            "messageKey": message_key,
+                            "candidateAccepted": True,
+                            "workflow": {"status": "authorized"},
+                        },
+                        now,
+                    )
+                    self.assertEqual(
+                        repository.repair_resolved_challenge_disagreements(database),
+                        2,
+                    )
+                    self.assertEqual(
+                        repository.repair_resolved_challenge_disagreements(database),
+                        0,
+                    )
+                    repaired_parent = repository.load_design_context(
+                        database, session_id, parent_id
+                    )
+                    repaired_child = repository.load_design_context(
+                        database, session_id, child_id
+                    )
+                    event_count = database.execute(
+                        """
+                        SELECT COUNT(*) FROM audit_events
+                        WHERE session_id = ?
+                          AND event_type = 'stale_disagreement_repaired'
+                        """,
+                        (session_id,),
+                    ).fetchone()[0]
+                self.assertIsNone(repaired_parent["activeDisagreement"])
+                self.assertIsNone(repaired_child["activeDisagreement"])
+                self.assertEqual(event_count, 2)
+            finally:
+                repository.DATABASE_PATH = original_path
+
     def test_schema_one_snapshot_migrates_without_model_inference(self):
         original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
