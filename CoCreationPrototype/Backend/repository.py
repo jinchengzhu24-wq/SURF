@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS design_sessions (
     player_number INTEGER,
     initial_draft_method TEXT NOT NULL,
     language TEXT NOT NULL,
+    language_locked_at TEXT,
     status TEXT NOT NULL,
     current_version_id TEXT,
     final_version_id TEXT,
@@ -259,12 +260,14 @@ def initialize_database():
         _ensure_column(database, "design_sessions", "demo_mode", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(database, "design_sessions", "deadline_started_at", "TEXT")
         _ensure_column(database, "design_sessions", "deadline_at", "TEXT")
+        _ensure_column(database, "design_sessions", "language_locked_at", "TEXT")
         database.execute("PRAGMA journal_mode=WAL")
         database.execute("PRAGMA foreign_keys=ON")
         database.commit()
         backfill_design_contexts(database)
         backfill_entity_bindings(database)
         backfill_revision_challenges(database)
+        backfill_language_locks(database)
         database.commit()
     finally:
         database.close()
@@ -295,6 +298,25 @@ def get_session(database, session_id):
         "SELECT * FROM design_sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
+
+
+def backfill_language_locks(database):
+    """Preserve the language of sessions that already entered the workbench."""
+    database.execute(
+        """
+        UPDATE design_sessions
+        SET language_locked_at = COALESCE(deadline_started_at, created_at)
+        WHERE language_locked_at IS NULL
+          AND (
+              demo_mode = 1
+              OR deadline_started_at IS NOT NULL
+              OR EXISTS (
+                  SELECT 1 FROM conversation_turns
+                  WHERE conversation_turns.session_id = design_sessions.id
+              )
+          )
+        """
+    )
 
 
 def delete_demo_sessions(database, keep_session_id=None):
@@ -1107,9 +1129,9 @@ def serialize_session(database, session_id):
         guidance = _public_guidance(turn_guidance)
         try:
             # Import lazily to avoid the repository <-> LLM client import cycle.
-            from llm_client import _sanitize_visible_guidance
+            from llm_client import repair_legacy_visible_guidance
 
-            guidance = _sanitize_visible_guidance(guidance, language)
+            guidance = repair_legacy_visible_guidance(guidance, language)
         except (ImportError, TypeError, ValueError, KeyError):
             pass
         try:
@@ -1135,9 +1157,9 @@ def serialize_session(database, session_id):
         """Hide prompt-only implementation labels in legacy stored text."""
         try:
             # Import lazily to avoid the repository <-> LLM client import cycle.
-            from llm_client import _sanitize_visible_model_text
+            from llm_client import repair_legacy_visible_text
 
-            return _sanitize_visible_model_text(value, language)
+            return repair_legacy_visible_text(value, language)
         except (ImportError, TypeError, ValueError, KeyError):
             return value
 
@@ -1174,7 +1196,7 @@ def serialize_session(database, session_id):
             return payload
         try:
             # Import lazily to avoid the repository <-> LLM client import cycle.
-            from llm_client import _sanitize_visible_model_text
+            from llm_client import repair_legacy_visible_text
         except ImportError:
             return payload
 
@@ -1185,13 +1207,13 @@ def serialize_session(database, session_id):
             "satisfactionQuestion",
         ):
             if result.get(field_name) is not None:
-                result[field_name] = _sanitize_visible_model_text(
+                result[field_name] = repair_legacy_visible_text(
                     result[field_name], language
                 )
         for field_name in ("features", "suggestions"):
             if isinstance(result.get(field_name), list):
                 result[field_name] = [
-                    _sanitize_visible_model_text(item, language)
+                    repair_legacy_visible_text(item, language)
                     for item in result[field_name]
                 ]
         return result
@@ -1720,6 +1742,7 @@ def serialize_session(database, session_id):
         "sessionId": session["id"],
         "status": session["status"],
         "language": session["language"],
+        "languageLocked": session["language_locked_at"] is not None,
         "demoMode": bool(session["demo_mode"]),
         "initialDraftMethod": session["initial_draft_method"],
         "matchId": session["match_id"],

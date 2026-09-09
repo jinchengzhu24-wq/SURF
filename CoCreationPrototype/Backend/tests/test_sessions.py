@@ -136,6 +136,11 @@ class CoCreationSessionTests(unittest.TestCase):
             json={"bootstrapToken": fragment["bootstrap"][0]},
         )
         self.assertEqual(exchange.status_code, 200, exchange.text)
+        confirmed = self.client.patch(
+            f"/api/sessions/{payload['sessionId']}/language",
+            json={"language": "en"},
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
         return payload["sessionId"], payload["integrationToken"]
 
     def create_and_open_demo_session(self, creation_key):
@@ -2537,25 +2542,25 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(events[1]["versionId"], version_id)
         self.assertIsInstance(events[1]["coCreationDurationSeconds"], int)
         self.assertGreaterEqual(events[1]["coCreationDurationSeconds"], 0)
-        self.assertLessEqual(events[1]["coCreationDurationSeconds"], 600)
+        self.assertLessEqual(events[1]["coCreationDurationSeconds"], 1200)
 
     def test_cocreation_duration_uses_remaining_deadline_and_caps_at_timeout(self):
         session = {
-            "deadline_at": "2026-08-26T10:10:00Z",
-            "finalized_at": "2026-08-26T10:06:37Z",
+            "deadline_at": "2026-08-26T10:20:00Z",
+            "finalized_at": "2026-08-26T10:13:23Z",
         }
         self.assertEqual(
             backend.calculate_cocreation_duration_seconds(session),
-            397,
+            803,
         )
 
         timed_out = {
-            "deadline_at": "2026-08-26T10:10:00Z",
-            "finalized_at": "2026-08-26T10:18:00Z",
+            "deadline_at": "2026-08-26T10:20:00Z",
+            "finalized_at": "2026-08-26T10:28:00Z",
         }
         self.assertEqual(
             backend.calculate_cocreation_duration_seconds(timed_out),
-            600,
+            1200,
         )
 
     def test_message_sync_uses_a_stable_message_event_id(self):
@@ -2592,7 +2597,7 @@ class CoCreationSessionTests(unittest.TestCase):
             json={"language": "zh-CN"},
         )
         self.assertEqual(locked.status_code, 409)
-        self.assertEqual(locked.json()["code"], "SESSION_DEADLINE_EXPIRED")
+        self.assertEqual(locked.json()["code"], "LANGUAGE_LOCKED")
 
         finalized = self.client.post(
             f"/api/sessions/{self.session_id}/finalize",
@@ -2607,14 +2612,50 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(finalized.json()["finalVersionId"], finalized.json()["currentVersionId"])
         self.assertEqual(finalized.json()["versions"][-1]["source"], "human_edit")
 
-    def test_language_switch_is_persisted(self):
+    def test_language_cannot_change_after_session_entry(self):
         response = self.client.patch(
             f"/api/sessions/{self.session_id}/language",
             json={"language": "zh-CN"},
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["language"], "zh-CN")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["code"], "LANGUAGE_LOCKED")
+
+    def test_language_confirmation_starts_the_formal_twenty_minute_deadline(self):
+        created = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "partial_completion",
+                "language": "en",
+                "idempotencyKey": "language_confirm_001",
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        payload = created.json()
+        fragment = parse_qs(urlparse(payload["launchUrl"]).fragment)
+        exchanged = self.client.post(
+            f"/api/sessions/{payload['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        self.assertEqual(exchanged.status_code, 200, exchanged.text)
+
+        before = self.client.get(f"/api/sessions/{payload['sessionId']}").json()
+        self.assertFalse(before["languageLocked"])
+        self.assertIsNone(before["deadlineAt"])
+
+        confirmed = self.client.patch(
+            f"/api/sessions/{payload['sessionId']}/language",
+            json={"language": "zh-CN"},
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        session = confirmed.json()
+        self.assertTrue(session["languageLocked"])
+        self.assertEqual(session["language"], "zh-CN")
+        self.assertIsNotNone(session["deadlineStartedAt"])
+        self.assertIsNotNone(session["deadlineAt"])
+        self.assertLessEqual(session["remainingSeconds"], 1200)
+        self.assertGreater(session["remainingSeconds"], 1190)
 
     def test_assistant_translation_is_cached_without_changing_original_turn(self):
         version_id = self.read_session()["currentVersionId"]

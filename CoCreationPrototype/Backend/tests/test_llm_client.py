@@ -644,8 +644,8 @@ class LLMClientTests(unittest.TestCase):
     def test_chinese_visible_output_localizes_design_jargon(self):
         payload = {
             "assistantMessage": (
-                "The Peninsula creates a choke point and a playable moment, so route choice "
-                "and push order shape the trade-off through the corridor."
+                "Peninsula、choke point、playable moment、route choice、push order、trade-off "
+                "和 corridor 会共同塑造路线体验。"
             ),
             "guidance": {
                 "move": "offer_perspective",
@@ -670,6 +670,77 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("Peninsula", result[0])
         self.assertNotIn("choke point", result[0])
         self.assertNotIn("playable moment", result[0])
+
+    def test_chinese_visible_output_localizes_box_alternations(self):
+        payload = {
+            "assistantMessage": "boxAlternations 从 1 次上升，说明两个箱子的推动更需要交替安排。",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload, language="zh-CN")
+
+        self.assertIn("箱子交替次数", result[0])
+        self.assertNotIn("boxAlternations", result[0])
+
+    def test_chinese_visible_output_rejects_unknown_english_identifier(self):
+        payload = {
+            "assistantMessage": "routeComplexityScore 增加后，路线会更难直接判断。",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        with self.assertRaisesRegex(ValueError, "Chinese visible text contains"):
+            llm_client.validate_chat_response(payload, language="zh-CN")
+
+    def test_chinese_visible_output_keeps_entity_ids_and_stage(self):
+        payload = {
+            "assistantMessage": "B1 经过第 4 行第 6 列后会压缩 B2 的站位空间，Stage 2 可以重点观察这个顺序。",
+            "guidance": {
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+            },
+            "assessment": None,
+            "proposedRows": None,
+            "modificationSummary": "",
+        }
+
+        result = llm_client.validate_chat_response(payload, language="zh-CN")
+
+        self.assertIn("B1", result[0])
+        self.assertIn("B2", result[0])
+        self.assertIn("Stage 2", result[0])
+
+    def test_legacy_chinese_display_replaces_unknown_identifier(self):
+        result = llm_client.repair_legacy_visible_text(
+            "routeComplexityScore 让路线更难直接判断。",
+            "zh-CN",
+        )
+
+        self.assertNotIn("routeComplexityScore", result)
+        self.assertIn("相关设计指标", result)
 
     def test_stage_assessment_schema_owns_opening_move(self):
         schema = llm_client._structured_response_format("stage_assessment")
@@ -2955,7 +3026,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("小范围更改、提供可审查的改动内容", body)
         self.assertIn("较大的改动我建议由你亲手试一试", body)
 
-    def test_legacy_stage_one_display_uses_balanced_two_paragraph_opening(self):
+    def test_legacy_stage_one_display_keeps_fixed_guidance_in_its_own_paragraph(self):
         body = llm_client._repair_stage_one_opening_display(
             "地图中央偏下有一片由8格水域组成的矩形区域（第7-8行、第3-6列），将下方通道与上半部分隔开。"
             "这种布局让两个箱子各自偏向不同目标，但可通行的纵路空间被水域压缩。\n\n"
@@ -2965,7 +3036,7 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertIn("当前快照中的实体位置", body)
         self.assertEqual(body.count("当前快照中的实体位置"), 1)
-        self.assertEqual(body.count("\n\n"), 1)
+        self.assertEqual(body.count("\n\n"), 2)
         self.assertIn("我会先把这种分隔", body)
         self.assertIn("小范围更改、提供可审查的改动内容", body)
 
@@ -3182,7 +3253,7 @@ class LLMClientTests(unittest.TestCase):
                 },
             )
 
-        self.assertIn("first readable corridor", result.assistant_message)
+        self.assertIn("The first push is not only about approaching a target", result.assistant_message)
         self.assertNotIn("did not finish cleanly", result.assistant_message)
         self.assertNotIn("?", result.assistant_message)
         self.assertIn("play the Stage", result.assistant_message)
@@ -3412,7 +3483,7 @@ class LLMClientTests(unittest.TestCase):
                 {"stageNumber": 2, "source": "accepted_proposal"},
             )
 
-        self.assertIn("first readable corridor", result.assistant_message)
+        self.assertIn("The first push is not only about approaching a target", result.assistant_message)
         self.assertNotIn("did not finish cleanly", result.assistant_message)
         self.assertEqual(result.model, "kimi-k2.6-safe-opening")
         self.assertEqual(len(client.chat.completions.calls), 3)
@@ -3436,7 +3507,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(result.model, "kimi-k2.6-safe-opening")
         self.assertEqual(len(client.chat.completions.calls), 1)
-        self.assertIn("first readable corridor", result.assistant_message)
+        self.assertIn("The first push is not only about approaching a target", result.assistant_message)
 
     def test_later_human_edit_invalid_opening_uses_grounded_plain_recovery(self):
         client = FakeClient([
@@ -5689,8 +5760,8 @@ class LLMClientTests(unittest.TestCase):
         )
         prompt = messages[0]["content"]
 
-        self.assertIn("two short paragraphs with four or five declarative sentences", prompt)
-        self.assertIn("your own design reaction", prompt)
+        self.assertIn("three concise paragraphs with seven to ten declarative sentences", prompt)
+        self.assertIn("your own first-person difficulty and design reaction", prompt)
         self.assertIn("do not put questions, choices", prompt)
         self.assertIn("The server owns optional discussion metadata", prompt)
         self.assertIn("satisfactionQuestion must be null", prompt)
@@ -5712,10 +5783,10 @@ class LLMClientTests(unittest.TestCase):
 
         for prompt in (structured, plain):
             self.assertIn("opening after a verified human edit", prompt)
-            self.assertIn("two short paragraphs with four or five declarative sentences", prompt)
+            self.assertIn("three concise paragraphs with seven to ten declarative sentences", prompt)
             self.assertIn("saved, solvable edit once", prompt)
             self.assertIn("Do not inventory the layout", prompt)
-            self.assertIn("list entity locations or coordinates", prompt)
+            self.assertIn("one or two verified anchors", prompt)
             self.assertIn("designer placed a particular object", prompt)
 
     def test_human_edit_opening_prefers_effects_over_coordinate_inventory(self):

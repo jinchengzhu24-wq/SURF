@@ -26,7 +26,7 @@ Menu
 
 8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。8000 的两个 Agent 保持 `deepseek-v4-flash`；8010 的聊天助手和关卡修改助手、Stage 开场、翻译、Revision 与 Intent feedback review 流程统一使用 Kimi K2.6，不读取 8000 的 DeepSeek 环境变量，也不静默回退到 DeepSeek。当前 8010 前端缓存键为 `revision-workflow-v2-20260908-1`。
 
-正式 Unity 共创会话在浏览器首次访问授权后开始 10 分钟倒计时。直访问示例会话不创建 deadline、不倒计时。截止后服务端锁定聊天、编辑、保存、恢复、试玩、提案与语言切换；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
+正式 Unity 共创会话先显示语言选择页；用户点击“进入共创会话”后，所选中英文将锁定至本次会话，且从该时刻开始 20 分钟倒计时。直访问示例会话不创建 deadline、不倒计时，创建后同样锁定语言。截止后服务端锁定聊天、编辑、保存、恢复、试玩和提案；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
 
 8010 当前采用“聊天助手理解与协商 → 关卡修改助手执行局部候选 → 后端确定性校验与求解”的双角色交接。模型只负责生成内容，后端统一清洗可见文本、校验当前 Stage 坐标和路线、累计 DesignContext，并在 Stage 1 开场最后幂等追加固定操作指引。Stage assessment 仍在后端归档，但不再渲染为可见评价卡；普通聊天不追加该固定收尾。普通聊天只产生正文或概念引导，紫卡动作才可能授权地图提案；所有提案仍需用户明确接受后才创建新 Stage。风险质疑必须有具体地图、求解器、试玩或用户目标证据，不能因为意见不同就自动质疑。
 
@@ -173,6 +173,10 @@ python CoCreationPrototype/Backend/app.py
 
 2026-09-08 已部署橙卡详细表达与问题忽略机制：附带橙卡的正文和卡内暂定意图均保留证据、体验影响与可纠正边界；共创进度将已作答和已忽略问题统一归入“已处理”，当前问题可用“忽略”移出上下文，并用“恢复”重新打开。发布前通过 SQLite backup API 生成 `cocreation-intent-question-actions-20260908T120100Z.sqlite3`，仅更新 8010 后端和前端运行文件；425 个 Python 测试、前端语法、Python 编译及差异检查通过。未修改 8000，未构建或上传 WebGL。
 
+2026-09-09 已部署 Stage 开场与会话语言入口调整：开场通常以三个段落观察空间结构、首推依赖/路线节奏和主观难度，Stage 1 的固定操作说明独立保留为结尾段；语言改为会话创建页的默认中文锁定选择，确认后才开启 20 分钟正式会话计时。发布前通过 SQLite backup API 生成 `cocreation-language-entry-20260909T003000Z.sqlite3`，仅更新 8010 的三个后端与三个前端运行文件；会话、LLM、前端和其余 8010 回归均通过，公网 `/cocreation/health` 及新版前端资源已验证。未修改 8000，未构建或上传 WebGL。
+
+2026-09-09 已部署中文可见文本语言门禁：求解器与路线证据在中文任务中改为中文语义标签；新回复、卡片、评估和翻译在入库前会拒绝非许可英文，历史助手内容则在读取时兼容替换，不改写研究记录。发布前通过 SQLite backup API 生成独立备份，仅更新 8010 后端运行文件；8010 Python 回归、Python 编译及差异检查通过，未修改 8000，未构建或上传 WebGL。
+
 ## 8010 API
 
 ```text
@@ -215,7 +219,7 @@ WebGL 页面底部的 `DATA DASHBOARD` 按钮会先在游戏页面内显示 Dash
 
 在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。只有从 `Menu` 在线入口启动的玩家在 8010 成功产生 `first_stage` 后才正式落盘：DG 确认初稿设置时，Draft 只暂存在当前房间内存中，不写流程 JSONL；收到 `first_stage` 后才按 Draft → First Stage 顺序追加。未从 Menu 启动的玩家不会写入匹配生命周期、Draft、Stage、Message 或 Final 记录；其 8010 同步会成功返回但被 8000 直接丢弃，以免中断共创网页。Dashboard 默认只显示至少一位玩家同时具有 Menu 起点标记与 `first_stage` 的比赛；旧记录缺少该标记时不会显示。达到门槛但尚未完整结束的比赛仍显示实际的 `In progress`、`Expired` 或 `Cancelled` 状态，只有两位玩家都提交结果才标记为 `Completed`。Draft 节点保存四道中立题的内部答案、AI reflection、难度/布局理由、AI 推荐值、推荐来源及用户最终 `finalDifficulty` 与 `finalLayout`。后续可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
 
-8010 的 `final` 事件会记录 `coCreationDurationSeconds`，定义为首次打开共创网页到确认最终 Stage 的耗时，按服务器十分钟期限计算并限制在 0–600 秒；设计意图填写不计入。对手游玩 Final Stage 时按 `R` 重开的次数通过 8000 结果字段 `restartCount` 记录，在 Challenge maps、Compare player challenges 和 Final map 的 `Opponent restarts` 中展示；网络重试、重新进入场景和问卷重填不计入，旧结果缺少字段时显示 `-`。对手游玩时长仍来自 8000 `result_submitted.durationSeconds`，只在 Result submitted 和挑战地图详情中展示。Dashboard 的 Match ID 和两位玩家 `studySessionId` 默认显示前 8 位，旁边的复制按钮复制完整值，搜索支持完整值与短值。
+8010 的 `final` 事件会记录 `coCreationDurationSeconds`，定义为确认会话语言并进入工作台到确认最终 Stage 的耗时，按服务器二十分钟期限计算并限制在 0–1200 秒；设计意图填写不计入。对手游玩 Final Stage 时按 `R` 重开的次数通过 8000 结果字段 `restartCount` 记录，在 Challenge maps、Compare player challenges 和 Final map 的 `Opponent restarts` 中展示；网络重试、重新进入场景和问卷重填不计入，旧结果缺少字段时显示 `-`。对手游玩时长仍来自 8000 `result_submitted.durationSeconds`，只在 Result submitted 和挑战地图详情中展示。Dashboard 的 Match ID 和两位玩家 `studySessionId` 默认显示前 8 位，旁边的复制按钮复制完整值，搜索支持完整值与短值。
 
 ### 8010 跨 Stage DesignContext
 
@@ -284,7 +288,7 @@ Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Soko
 完整手动回归应使用 Unity `2022.3.62f2c1`，按当前 DG 在线路线执行：
 
 1. 生成首版后进入 `CoCreation_Entry`，确认 8010 Stage 1 rows 完全一致。
-2. 连续创建至少三个 Stage，检查聊天、差异、历史恢复及中英文切换。
+2. 连续创建至少三个 Stage，检查聊天、差异、历史恢复及会话创建前的中英文选择。
 3. 试玩最新与历史 Stage，确认进入 `DG_Level` 且没有重新调用生成接口。
 4. 覆盖通关自动返回、`R` 重开、完成提交重试和浏览器异常中断，确认指标累计且 Stage 数量不变。
 5. 最终确认后填写意图；确认完成卡仅在在线匹配会话显示“返回 Unity 继续”，点击后聚焦原 Unity 标签页并关闭 8010 标签页，Unity 只在意图提交之后获得最终 rows 并进入 `Challenge_Waiting`。
@@ -301,7 +305,7 @@ Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Soko
 “正在使用算法创建示例地图……”，再由 8010 后端参考 Unity `Algorithm_Level` 的结构模板、
 墙体/水域布局和反向拉箱流程生成 10×12、两箱、两目标的可解地图，然后自动开始首段开场；assessment 仍会在后端归档，但不显示评价卡。
 刷新当前演示会话 URL 可以继续当前测试；演示完成后不显示“返回 Unity 继续”。
-演示数据只写入 8010，不调用 8000 同步接口，不启动十分钟 deadline，也不记录正式匹配的
+演示数据只写入 8010，不调用 8000 同步接口，不启动二十分钟 deadline，也不记录正式匹配的
 `coCreationDurationSeconds`。每次新演示会话在新地图验证和新会话创建成功后，清理上一轮
 演示会话及其关联的对话、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。若地图
 生成或会话创建失败，上一轮演示记录保持不变。前端静态资源缓存键为

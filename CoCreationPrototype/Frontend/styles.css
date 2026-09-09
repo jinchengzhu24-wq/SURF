@@ -151,6 +151,65 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
 .landing > p:not(.eyebrow) { max-width: 560px; margin: 0 auto 24px; color: var(--muted); line-height: 1.65; }
 .demo-generation-status { margin: 14px auto 0 !important; color: var(--brand-dark) !important; font-size: 12px; }
 .demo-generation-status[hidden] { display: none; }
+.language-setup {
+    display: grid;
+    justify-items: center;
+    gap: 10px;
+    margin: 0 auto 22px;
+}
+.language-setup-label {
+    margin: 0;
+    color: #5e482d;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: .04em;
+}
+.language-choice {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #49341f;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    font-weight: 900;
+}
+.language-switch {
+    position: relative;
+    width: 76px;
+    height: 39px;
+    padding: 0;
+    border: 3px solid #292929;
+    border-radius: 999px;
+    background: #f5f2e8;
+    box-shadow: inset 0 0 0 2px #fff, 3px 3px 0 #4b2e18;
+    cursor: pointer;
+    transition: background .15s ease;
+}
+.language-switch.is-english { background: #303030; }
+.language-switch-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 27px;
+    height: 27px;
+    border-radius: 50%;
+    background: #303030;
+    box-shadow: 1px 1px 0 rgba(0, 0, 0, .24);
+    transition: transform .15s ease, background .15s ease;
+}
+.language-switch.is-english .language-switch-thumb {
+    transform: translateX(35px);
+    background: #f7f5ef;
+}
+.language-switch:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: inset 0 0 0 2px #fff, 4px 4px 0 #4b2e18; }
+.language-switch:disabled { cursor: wait; opacity: .65; }
+.language-lock-notice {
+    max-width: 520px;
+    margin: 0 !important;
+    color: #6b5132 !important;
+    font-size: 11px !important;
+    line-height: 1.55;
+}
 
 .workspace { display: grid; grid-template-columns: 240px minmax(430px, 1.15fr) minmax(390px, 0.9fr); gap: 12px; align-items: stretch; }
 .stage-panel, .chat-panel, .map-panel { min-height: calc(100vh - 126px); }

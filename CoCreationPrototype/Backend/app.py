@@ -118,7 +118,7 @@ MAX_INTENTION_LENGTH = 4000
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SESSION_COOKIE_NAME = "sokoban_cocreation_access"
 PLAY_TICKET_LIFETIME = timedelta(minutes=5)
-COCREATION_DEADLINE = timedelta(minutes=10)
+COCREATION_DEADLINE = timedelta(minutes=20)
 COCREATION_DEADLINE_SECONDS = int(COCREATION_DEADLINE.total_seconds())
 INTERRUPTED_AFTER = timedelta(minutes=30)
 _message_locks = {}
@@ -791,9 +791,9 @@ def _create_session_record(
                 INSERT INTO design_sessions(
                     id, creation_key, access_hash, integration_hash,
                     bootstrap_hash, demo_mode, match_id, player_number,
-                    initial_draft_method, language, status,
+                    initial_draft_method, language, language_locked_at, status,
                     current_version_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -806,6 +806,7 @@ def _create_session_record(
                     player_number if player_number in (1, 2) else None,
                     initial_draft_method,
                     language,
+                    created_at if demo_mode else None,
                     version_id,
                     created_at,
                     created_at,
@@ -931,19 +932,18 @@ def exchange_browser_access(
         if session["bootstrap_used_at"] is not None:
             raise ApiError(409, "BOOTSTRAP_TOKEN_USED", "The session link was already used.")
 
-        deadline_started_at, deadline_at = start_deadline_if_missing(database, session)
-        accessed_at = deadline_started_at or utc_now()
+        accessed_at = utc_now()
         database.execute(
             """UPDATE design_sessions
-               SET bootstrap_used_at = ?, deadline_started_at = ?, deadline_at = ?
+               SET bootstrap_used_at = ?
                WHERE id = ?""",
-            (accessed_at, deadline_started_at, deadline_at, session_id),
+            (accessed_at, session_id),
         )
         record_event(
             database,
             session_id,
             "browser_access_granted",
-            {"deadlineAt": deadline_at},
+            {"deadlineAt": session["deadline_at"]},
             accessed_at,
         )
 
@@ -971,7 +971,6 @@ def read_session(
             session_id,
             access_cookie or session_token,
         )
-        start_deadline_if_missing(database, session)
         expire_interrupted_attempts(database, session_id)
         return serialize_session(database, session["id"])
 
@@ -983,17 +982,30 @@ def change_language(
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     with connect(immediate=True) as database:
-        session = require_active_session(database, session_id, access_cookie)
+        session = require_browser_session(database, session_id, access_cookie)
+        if session["status"] != "active":
+            raise ApiError(409, "SESSION_LOCKED", "This co-creation session is no longer editable.")
+        if session["language_locked_at"] is not None:
+            if session["language"] == payload.language:
+                return serialize_session(database, session["id"])
+            raise ApiError(
+                409,
+                "LANGUAGE_LOCKED",
+                "The session language was already selected and cannot be changed.",
+            )
         now = utc_now()
         database.execute(
-            "UPDATE design_sessions SET language = ?, updated_at = ? WHERE id = ?",
-            (payload.language, now, session_id),
+            """UPDATE design_sessions
+               SET language = ?, language_locked_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (payload.language, now, now, session_id),
         )
+        deadline_started_at, deadline_at = start_deadline_if_missing(database, session)
         record_event(
             database,
             session_id,
-            "language_changed",
-            {"language": payload.language},
+            "language_selected",
+            {"language": payload.language, "deadlineAt": deadline_at},
             now,
         )
         return serialize_session(database, session["id"])
@@ -5278,7 +5290,7 @@ def synchronize_version_with_online_match(session_id, version_id, event_type):
 
 
 def calculate_cocreation_duration_seconds(session):
-    """Return the consumed portion of the ten-minute browser deadline."""
+    """Return the consumed portion of the confirmed-language workbench deadline."""
     deadline_at = session["deadline_at"]
     finalized_at = session["finalized_at"]
     if not deadline_at or not finalized_at:
@@ -7035,6 +7047,13 @@ def require_active_session(database, session_id, token):
 
     if session["status"] != "active":
         raise ApiError(409, "SESSION_LOCKED", "This co-creation session is no longer editable.")
+
+    if session["language_locked_at"] is None:
+        raise ApiError(
+            409,
+            "LANGUAGE_NOT_SELECTED",
+            "Select the session language before entering the co-creation workspace.",
+        )
 
     if session_deadline_expired(session):
         raise ApiError(409, "SESSION_DEADLINE_EXPIRED", "Time is up. Submit the current map as the final Stage now.")

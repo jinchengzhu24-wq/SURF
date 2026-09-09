@@ -114,7 +114,7 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v50-detailed-intent-question-actions"
+PROMPT_VERSION = "cocreation-v52-chinese-visible-language-gate"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
 INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
@@ -505,7 +505,7 @@ def build_chat_messages(
     serialized_map = ""
     numbered_map = ""
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
-    solver_metrics = _llm_solver_evidence(solver_metrics or {})
+    solver_metrics = _solver_evidence_for_prompt(solver_metrics or {}, language)
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     # Send one current Stage representation.  Multiple independently rendered
@@ -859,17 +859,20 @@ def build_plain_chat_messages(
     numbered_map = ""
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     raw_solver_metrics = solver_metrics or {}
-    solver_metrics = _llm_solver_evidence(raw_solver_metrics)
+    solver_metrics = _solver_evidence_for_prompt(raw_solver_metrics, language)
     play_summary = play_summary or {}
     stage_context = stage_context or {}
     map_facts = _stage_snapshot_for_prompt(rows, stage_context)
     prompt_stage_context = _prompt_stage_context(rows, stage_context)
     if isinstance(prompt_stage_context.get("proposalClarification"), dict):
         clarification = dict(prompt_stage_context["proposalClarification"])
-        clarification["routeEvidence"] = _proposal_clarification_route_evidence(
-            rows,
-            raw_solver_metrics,
-            stage_context,
+        clarification["routeEvidence"] = _route_evidence_for_prompt(
+            _proposal_clarification_route_evidence(
+                rows,
+                raw_solver_metrics,
+                stage_context,
+            ),
+            language,
         )
         prompt_stage_context["proposalClarification"] = clarification
     design_context_prompt = _design_context_prompt(
@@ -919,9 +922,12 @@ def build_plain_chat_messages(
         else ""
     )
     opening_instruction = (
-        "This is the opening for a verified saved Stage. Notice one or two concrete "
-        "authored choices and offer a clearly subjective perspective. Do not inventory "
-        "the map, use a workflow greeting, or ask for an overall experience category. "
+        "This is the opening for a verified saved Stage. Usually write three concise paragraphs "
+        "with seven to ten declarative sentences: observe layout structure and spatial distribution; "
+        "connect concrete choices to the first push, dependencies, bottlenecks, detours, or route rhythm; "
+        "then offer a clearly subjective difficulty and design perspective. Use one or two verified anchors "
+        "only when they clarify a judgment. Do not inventory the map, use a workflow greeting, or ask for "
+        "an overall experience category. "
         + (
             "This is Stage 1: do not ask any question. Keep the map observation and your "
             "own design feeling intact. Do not add any process, trial, editor, or scope guidance: "
@@ -1139,16 +1145,19 @@ def _compact_kimi_structured_prompt(
     )
     opening = (
         (
-            "This is the opening after a verified human edit. Write two short paragraphs with four "
-            "or five declarative sentences: acknowledge the saved, solvable edit once, discuss two "
-            "or three likely play effects of the changed components, and include one first-person "
-            "design reflection. Do not "
-            "inventory the layout, list entity locations or coordinates, narrate every changed tile, "
-            "or say that the designer placed a particular object."
+            "This is the opening after a verified human edit. Usually write three concise "
+            "paragraphs with seven to ten declarative sentences: acknowledge the saved, solvable "
+            "edit once; explain the changed layout structure and two or three likely play effects; "
+            "then give one first-person design reflection about difficulty, push order, or route rhythm. "
+            "Use one or two verified anchors only when they make a specific layout judgment clearer. "
+            "Do not inventory the layout, narrate every changed tile, or say that the designer placed "
+            "a particular object."
             if human_edit_opening
-            else "This is a Stage opening. Write two short paragraphs with four or five declarative "
-            "sentences: one or two concrete map observations, their likely play effects, and your "
-            "own design reaction."
+            else "This is a Stage opening. Usually write three concise paragraphs with seven to ten "
+            "declarative sentences: first observe the layout structure and spatial distribution; then "
+            "connect concrete map choices to the first push, dependencies, bottlenecks, detours, or "
+            "route rhythm; finally give your own first-person difficulty and design reaction. Use one "
+            "or two verified anchors only when they make the observation clearer, never as an inventory."
         )
         + " Keep followUpQuestion and assessment.satisfactionQuestion null; do not put questions, "
         "choices, workflow, or editor instructions in the opening. The server owns optional "
@@ -1368,14 +1377,16 @@ def _compact_kimi_plain_prompt(
         ])
     opening = (
         (
-            "This is the opening after a verified human edit. Write two short paragraphs with four "
-            "or five declarative sentences: acknowledge the saved, solvable edit once, give two or "
-            "three likely play effects, and include your first-person design reflection. Do not inventory the "
-            "layout, list entity locations or coordinates, narrate every changed tile, or say the "
-            "designer placed a particular object."
+            "This is the opening after a verified human edit. Usually write three concise paragraphs "
+            "with seven to ten declarative sentences: acknowledge the saved, solvable edit once; explain "
+            "the changed layout structure and likely play effects; then give a first-person design reflection. "
+            "Use one or two verified anchors only when they clarify a specific judgment. Do not inventory "
+            "the layout, narrate every changed tile, or say the designer placed a particular object."
             if human_edit_opening
-            else "This is a Stage opening. Write two short paragraphs with four or five declarative "
-            "sentences: concrete map observations, their likely play effects, and your own design reaction."
+            else "This is a Stage opening. Usually write three concise paragraphs with seven to ten "
+            "declarative sentences: observe layout structure and spatial distribution; explain its effect "
+            "on the first push, dependencies, bottlenecks, detours, or route rhythm; then give your own "
+            "first-person difficulty and design reaction. Use verified anchors sparingly, never as an inventory."
         )
         + " Do not include questions, choices, or process/editor instructions; the server owns "
         "optional discussion metadata and appends the Stage 1 closing."
@@ -1495,6 +1506,64 @@ def _llm_solver_evidence(solver_metrics):
         for field in allowed_fields
         if field in solver_metrics
     }
+
+
+def _solver_evidence_for_prompt(solver_metrics, language):
+    """Project verified metrics into the response language before prose generation."""
+    evidence = _llm_solver_evidence(solver_metrics)
+    if language != "zh-CN":
+        return evidence
+    labels = {
+        "valid": "地图格式有效",
+        "solvable": "存在可解路线",
+        "searchedStates": "搜索状态数",
+        "solutionSteps": "求解步数",
+        "solutionPushes": "推动次数",
+    }
+    return {
+        labels[key]: value
+        for key, value in evidence.items()
+        if key in labels
+    }
+
+
+def _route_evidence_for_prompt(evidence, language):
+    """Keep route evidence useful without exposing implementation-shaped keys."""
+    if language != "zh-CN":
+        return evidence
+    evidence = evidence or {}
+    mode_labels = {
+        "verified_route_summary": "已核对的路线概况",
+        "totals_only": "仅有总量信息",
+        "unavailable": "路线信息暂不可用",
+    }
+    result = {"路线证据状态": mode_labels.get(evidence.get("mode"), "路线信息暂不可用")}
+    scalar_labels = {
+        "solutionSteps": "求解步数",
+        "solutionPushes": "推动次数",
+        "boxAlternations": "箱子交替次数",
+    }
+    for key, label in scalar_labels.items():
+        if isinstance(evidence.get(key), int):
+            result[label] = evidence[key]
+    if isinstance(evidence.get("pushesByBox"), dict):
+        result["各箱子的推动次数"] = [
+            {"箱子": label, "推动次数": count}
+            for label, count in evidence["pushesByBox"].items()
+            if isinstance(count, int)
+        ]
+    if isinstance(evidence.get("pushOrder"), list):
+        result["推动分段"] = [
+            {"箱子": item.get("box"), "连续推动次数": item.get("pushes")}
+            for item in evidence["pushOrder"]
+            if isinstance(item, dict)
+        ]
+    if isinstance(evidence.get("targetAssignments"), dict):
+        result["箱子与目标的对应"] = [
+            {"箱子": box, "目标": target}
+            for box, target in evidence["targetAssignments"].items()
+        ]
+    return result
 
 
 def _proposal_clarification_route_evidence(rows, solver_metrics, stage_context=None):
@@ -5731,10 +5800,13 @@ def _generate_plain_chat_sync(
     effective_stage_context = dict(stage_context or {})
     if isinstance(effective_stage_context.get("proposalClarification"), dict):
         clarification = dict(effective_stage_context["proposalClarification"])
-        clarification["routeEvidence"] = _proposal_clarification_route_evidence(
-            rows,
-            solver_metrics or {},
-            effective_stage_context,
+        clarification["routeEvidence"] = _route_evidence_for_prompt(
+            _proposal_clarification_route_evidence(
+                rows,
+                solver_metrics or {},
+                effective_stage_context,
+            ),
+            language,
         )
         effective_stage_context["proposalClarification"] = clarification
 
@@ -5884,6 +5956,12 @@ def translate_turns(items, target_language, request_id):
                 "coreDisagreement, and nextQuestion fields. When a source item includes "
                 "coordinateLinks, return coordinateLinkTexts in the same order and translate "
                 "only their text values; omit coordinateLinkTexts for items without coordinateLinks."
+                + (
+                    " In Simplified Chinese, use Chinese natural language throughout; keep only "
+                    "P, B1/B2, T1/T2, coordinates, and Stage in Latin characters. Never expose "
+                    "English implementation labels or design jargon."
+                    if target_language == "zh-CN" else ""
+                )
             ),
         },
         {
@@ -7345,6 +7423,12 @@ async def _generate_plain_with_model_fallback(
                 stage_opening,
                 stage_context,
             )
+            _assert_visible_output_language(
+                language,
+                assistant_message,
+                guidance=guidance,
+                assessment=assessment,
+            )
             if ordinary_discussion:
                 _validate_map_grounding_texts(
                     [assistant_message],
@@ -8286,6 +8370,27 @@ def validate_translation_response(payload, source_items, target_language="en"):
                         normalized["disagreement"][field_name],
                         target_language,
                     )
+        translation_texts = [
+            normalized.get("body"),
+            normalized.get("followUpQuestion"),
+            normalized.get("intentHypothesis"),
+            normalized.get("proposalOfferSummary"),
+            normalized.get("proposalOfferRationale"),
+            normalized.get("proposalSummary"),
+            *(normalized.get("uiCueTexts") or []),
+            *(normalized.get("coordinateLinkTexts") or []),
+        ]
+        if isinstance(normalized.get("disagreement"), dict):
+            translation_texts.extend(
+                normalized["disagreement"].get(field_name)
+                for field_name in (
+                    "userPosition",
+                    "aiPosition",
+                    "coreDisagreement",
+                    "nextQuestion",
+                )
+            )
+        _assert_visible_output_language(target_language, *translation_texts)
         translated_by_id[turn_id] = normalized
 
     if set(translated_by_id) != set(source_by_id):
@@ -9303,14 +9408,22 @@ def validate_chat_response(
                 entity_bindings=(stage_context or {}).get("entityBindings"),
             )
 
+    modification_summary = _sanitize_visible_model_text(
+        _normalize_single_level_language(modification_summary.strip()),
+        language,
+    )[:1000]
+    _assert_visible_output_language(
+        language,
+        assistant_message,
+        modification_summary,
+        guidance=guidance,
+        assessment=assessment,
+    )
     return (
         assistant_message,
         assessment,
         proposed_rows,
-        _sanitize_visible_model_text(
-            _normalize_single_level_language(modification_summary.strip()),
-            language,
-        )[:1000],
+        modification_summary,
         guidance,
     )
 
@@ -9516,6 +9629,14 @@ _VISIBLE_INTERNAL_TERM_REPLACEMENTS = {
     "_solver": ("确定性求解器", "deterministic solver"),
     "solutionSteps": ("求解步数", "solution steps"),
     "solutionPushes": ("推动次数", "pushes"),
+    "minimumPushes": ("最少推动数", "minimum pushes"),
+    "pushBlocks": ("推动分段数", "push blocks"),
+    "boxAlternations": ("箱子交替次数", "box alternations"),
+    "pushesByBox": ("各箱子的推动次数", "pushes by box"),
+    "pushOrder": ("推动顺序", "push order"),
+    "targetAssignments": ("目标对应关系", "target assignments"),
+    "routeMode": ("路线概况", "route mode"),
+    "analysisContext": ("路线分析信息", "route analysis"),
     "searchedStates": ("搜索状态数", "searched states"),
     "tileAt": ("当前格子", "current tile"),
     "mapFacts": ("当前地图事实", "current map facts"),
@@ -9526,6 +9647,12 @@ _VISIBLE_INTERNAL_TERM_REPLACEMENTS = {
     "designContextPatch": ("设计进度", "design progress"),
     "coordinateLinks": ("路线端点", "route endpoints"),
 }
+
+# Chinese co-creation prose may use map entity labels and the product's version
+# label, but implementation identifiers and English design prose must never
+# escape to a participant-facing surface.
+_VISIBLE_CHINESE_LATIN_ALLOWLIST = {"P", "B1", "B2", "T1", "T2", "Stage"}
+_VISIBLE_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 
 
 _VISIBLE_CHINESE_DESIGN_TERM_REPLACEMENTS = (
@@ -9565,6 +9692,88 @@ def _sanitize_visible_model_text(value, language="en"):
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n[ \t]+", "\n", text)
     return text.strip()
+
+
+def repair_legacy_visible_text(value, language="en"):
+    """Read-time compatibility repair for immutable historical assistant prose."""
+    text = _sanitize_visible_model_text(value, language)
+    if language != "zh-CN":
+        return text
+    return _VISIBLE_LATIN_TOKEN_RE.sub(
+        lambda match: (
+            match.group(0)
+            if match.group(0) in _VISIBLE_CHINESE_LATIN_ALLOWLIST
+            else "相关设计指标"
+        ),
+        text,
+    )
+
+
+def _visible_chinese_language_issue(value):
+    """Return a safe diagnostic when Chinese visible prose still code-switches."""
+    text = str(value or "")
+    if not text:
+        return None
+    tokens = [
+        token for token in _VISIBLE_LATIN_TOKEN_RE.findall(text)
+        if token not in _VISIBLE_CHINESE_LATIN_ALLOWLIST
+    ]
+    if not tokens:
+        return None
+    token = tokens[0]
+    kind = "implementation identifier" if (
+        "_" in token or re.search(r"[a-z][A-Z]|[A-Z][a-z]+[A-Z]", token)
+    ) else "English term"
+    return f"Chinese visible text contains {kind}: {token}"
+
+
+def _visible_guidance_texts(guidance):
+    """Yield only user-facing strings; never inspect backend metadata values."""
+    guidance = guidance or {}
+    for field_name in ("intentHypothesis", "followUpQuestion"):
+        yield guidance.get(field_name)
+    offer = guidance.get("proposalOffer") or {}
+    if isinstance(offer, dict):
+        yield offer.get("summary")
+        yield offer.get("rationale")
+        presentation = offer.get("proposalPresentation") or {}
+        if isinstance(presentation, dict):
+            yield presentation.get("summary")
+            yield presentation.get("rationale")
+    disagreement = guidance.get("disagreement") or {}
+    if isinstance(disagreement, dict):
+        for field_name in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion"):
+            yield disagreement.get(field_name)
+    for cue in guidance.get("uiCues") or []:
+        if isinstance(cue, dict):
+            yield cue.get("text")
+    for link in guidance.get("coordinateLinks") or []:
+        if isinstance(link, dict):
+            yield link.get("text")
+
+
+def _assert_visible_output_language(language, *values, guidance=None, assessment=None):
+    """Reject a model response before persistence when Chinese prose is mixed."""
+    if language != "zh-CN":
+        return
+    candidates = list(values)
+    candidates.extend(_visible_guidance_texts(guidance))
+    if isinstance(assessment, dict):
+        for value in assessment.values():
+            candidates.extend(value if isinstance(value, list) else [value])
+    for value in candidates:
+        issue = _visible_chinese_language_issue(value)
+        if issue:
+            _log_llm_event(
+                "visible_language_violation",
+                language=language,
+                violationKind=(
+                    "implementation_identifier"
+                    if "implementation identifier" in issue
+                    else "english_term"
+                ),
+            )
+            raise ValueError(issue)
 
 
 def _sanitize_visible_guidance(guidance, language="en"):
@@ -9658,6 +9867,54 @@ def _sanitize_visible_guidance(guidance, language="en"):
 
     # designContextPatch and its error are intentionally untouched: they are
     # consumed by the server and removed by app._public_guidance before storage.
+    return result
+
+
+def repair_legacy_visible_guidance(guidance, language="en"):
+    """Apply the historical read-time language repair to every display field."""
+    result = _sanitize_visible_guidance(guidance, language)
+    if language != "zh-CN":
+        return result
+
+    for field_name in ("intentHypothesis", "followUpQuestion"):
+        if result.get(field_name) is not None:
+            result[field_name] = repair_legacy_visible_text(result[field_name], language)
+    offer = result.get("proposalOffer")
+    if isinstance(offer, dict):
+        offer = dict(offer)
+        for field_name in ("summary", "rationale"):
+            if offer.get(field_name) is not None:
+                offer[field_name] = repair_legacy_visible_text(offer[field_name], language)
+        presentation = offer.get("proposalPresentation")
+        if isinstance(presentation, dict):
+            presentation = dict(presentation)
+            for field_name in ("summary", "rationale"):
+                if presentation.get(field_name) is not None:
+                    presentation[field_name] = repair_legacy_visible_text(
+                        presentation[field_name], language
+                    )
+            offer["proposalPresentation"] = presentation
+        result["proposalOffer"] = offer
+    disagreement = result.get("disagreement")
+    if isinstance(disagreement, dict):
+        disagreement = dict(disagreement)
+        for field_name in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion"):
+            if disagreement.get(field_name) is not None:
+                disagreement[field_name] = repair_legacy_visible_text(
+                    disagreement[field_name], language
+                )
+        result["disagreement"] = disagreement
+    for collection_name in ("uiCues", "coordinateLinks"):
+        if isinstance(result.get(collection_name), list):
+            result[collection_name] = [
+                {
+                    **item,
+                    "text": repair_legacy_visible_text(item.get("text"), language),
+                }
+                if isinstance(item, dict) and item.get("text") is not None
+                else item
+                for item in result[collection_name]
+            ]
     return result
 
 
@@ -11546,16 +11803,44 @@ def _safe_incomplete_chat_reply(language, stage_opening=False, rows=None):
 def _server_snapshot_fallback_message(rows, language, *, stage_context=None, stage_opening=False):
     """Produce a useful body from server facts when model prose is unusable."""
     if stage_opening:
+        try:
+            snapshot = build_stage_snapshot(rows)
+            box_count = len(snapshot.get("boxes") or [])
+            target_count = len(snapshot.get("targets") or [])
+            water_count = len(snapshot.get("waterCells") or [])
+        except (TypeError, ValueError, KeyError):
+            box_count = target_count = water_count = 0
         if language == "zh-CN":
-            message = (
-                "我先从这个版本的第一次推动来观察：最先被读到的通道，"
-                "会不会让推动顺序显得清楚而自然。"
+            layout = (
+                f"这个版本保留了 {box_count} 个箱子和 {target_count} 个目标，"
+                + (f"水域用 {water_count} 个格子收紧了可走空间。" if water_count else "可走空间主要由墙体轮廓和内部转折塑形。")
+                + "我会先把这些区域之间的开口看作布局阅读的重点。"
+            )
+            play = (
+                "对玩家来说，第一次推动不只是靠近某个目标，而是在确认哪条通道值得先投入。"
+                "一旦箱子经过较窄的转折，后续可站位空间和推动顺序就会互相牵制；"
+                "这让路线节奏有机会从直接搬运变成先观察、再承诺的过程。"
+            )
+            reflection = (
+                "我个人会把这种布局读成中等偏需要留心的开场：它的难点更可能来自顺序判断，"
+                "而不是单纯拉长步数。只要首个可读的方向足够清楚，这种张力会显得有意图而不生硬。"
             )
         else:
-            message = (
-                "I would begin with this version's first push: whether the first readable "
-                "corridor makes the push order feel clear and natural."
+            layout = (
+                f"This version keeps {box_count} box{'es' if box_count != 1 else ''} and {target_count} target{'s' if target_count != 1 else ''}. "
+                + (f"Its {water_count} water tiles tighten the walkable space. " if water_count else "Its wall outline and internal turns shape the walkable space. ")
+                + "I would first read the openings between those areas as the layout's main visual structure."
             )
+            play = (
+                "The first push is not only about approaching a target; it asks which corridor is worth committing to first. "
+                "When a box passes through a tighter turn, standing room and push order begin to constrain one another. "
+                "That can make the route feel like observe-then-commit rather than simple transport."
+            )
+            reflection = (
+                "Personally, I read this as a moderately attentive opening: its pressure is more likely to come from ordering judgments than from simply extending the move count. "
+                "If the first readable direction remains clear, that tension should feel deliberate rather than abrupt."
+            )
+        message = f"{layout}\n\n{play}\n\n{reflection}"
         return (
             _ensure_stage_one_orientation(message, rows, language)
             if _is_stage_one(stage_context)
@@ -13466,7 +13751,7 @@ def _stage_one_coordinate_summary(rows, language):
 
 
 def _repair_stage_one_opening_display(message, rows, language):
-    """Give legacy Stage 1 openings the current two-paragraph presentation.
+    """Give legacy Stage 1 openings the current analysis-plus-guidance presentation.
 
     This is deliberately a read-time repair: it never rewrites the archived
     turn.  The operation guidance still appears exactly once, while old
@@ -13585,10 +13870,9 @@ def _repair_stage_one_opening_display(message, rows, language):
         return body
     if not body:
         return guidance
-    body_paragraphs = [part.strip() for part in body.split("\n\n") if part.strip()]
-    if len(body_paragraphs) == 1:
-        return f"{body_paragraphs[0]}\n\n{guidance}"
-    return f"{body_paragraphs[0]}\n\n{' '.join(body_paragraphs[1:])} {guidance}"
+    # The fixed operation guidance is intentionally its own final paragraph.
+    # It must never merge into the map analysis, including for old records.
+    return f"{body}\n\n{guidance}"
 
 
 def _latest_user_states_direction(messages):

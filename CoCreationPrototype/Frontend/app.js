@@ -49,6 +49,13 @@ const translations = {
         openFromUnity: "Create a first level in Unity, then continue here.",
         landingBody: "The lab keeps every accepted Stage, conversation and play attempt together. No predefined design goal is assigned.",
         startDemo: "Start a sample session",
+        sessionSetup: "Session setup",
+        formalLandingTitle: "Stage 1 is synced. Choose a language to begin co-creation.",
+        formalLandingBody: "The lab keeps every accepted Stage, complete conversation, and play attempt together. No predefined design goal is assigned.",
+        sessionLanguage: "Session language",
+        formalLanguageLock: "This session will use the selected language and cannot be changed after entry. The 20-minute co-creation timer starts when you enter.",
+        demoLanguageLock: "Your selection cannot be changed after the session is created.",
+        enterSession: "Enter co-creation session",
         demoGenerationStatus: "Creating a sample map with the algorithm…",
         versionHistory: "Version history",
         stages: "Stages",
@@ -196,6 +203,13 @@ const translations = {
         openFromUnity: "请先在 Unity 创建第一版关卡，再进入这里继续共创。",
         landingBody: "实验室会把每个已接受 Stage、完整对话和试玩记录关联保存，不会为你分配预设设计目标。",
         startDemo: "创建示例会话",
+        sessionSetup: "会话设置",
+        formalLandingTitle: "Stage 1 已同步，选择语言后开始共创。",
+        formalLandingBody: "实验室会把每个已接受的 Stage、完整对话和试玩记录关联保存，不会为你分配预设设计目标。",
+        sessionLanguage: "会话语言",
+        formalLanguageLock: "本次会话将使用所选语言；进入共创后无法再次切换。点击进入后将开始 20 分钟共创计时。",
+        demoLanguageLock: "创建会话后无法再次切换语言。",
+        enterSession: "进入共创会话",
         demoGenerationStatus: "正在使用算法创建示例地图……",
         versionHistory: "版本历史",
         stages: "Stages",
@@ -476,7 +490,8 @@ const state = {
     dismissedChallengeIds: new Set(),
     renderedMessageStageId: null,
     renderedMessageCount: 0,
-    language: "zh-CN"
+    language: "zh-CN",
+    landingMode: "demo"
 };
 
 const chineseApiErrors = {
@@ -549,7 +564,7 @@ const validationTileNames = {
 
 const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
-    "languageButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
+    "landingEyebrow", "landingTitle", "landingBody", "languageSetupSwitch", "languageLockNotice", "enterSessionButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "progressPanel", "progressSummary", "unresolvedQuestionsList", "answeredQuestionsPanel", "answeredQuestionsSummary", "answeredQuestionsList", "designInclinationsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
     "proposalRequestButton", "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
@@ -559,7 +574,8 @@ const elements = Object.fromEntries([
     "cancelFinalizeButton", "confirmFinalizeButton"
 ].map(id => [id, document.getElementById(id)]));
 
-elements.languageButton.addEventListener("click", toggleLanguage);
+elements.languageSetupSwitch.addEventListener("click", toggleSetupLanguage);
+elements.enterSessionButton.addEventListener("click", confirmSessionLanguage);
 elements.demoButton.addEventListener("click", createDemoSession);
 elements.retryButton.addEventListener("click", () => state.retryAction && state.retryAction());
 elements.chatRetryButton.addEventListener("click", retryPendingMessage);
@@ -612,7 +628,9 @@ async function initialize() {
     state.sessionId = hash.session || "";
 
     if (!state.sessionId) {
-        showLanding();
+        state.session = null;
+        state.language = "zh-CN";
+        showLanding("demo");
         return;
     }
 
@@ -622,15 +640,12 @@ async function initialize() {
                 method: "POST",
                 body: { bootstrapToken: hash.bootstrap }
             });
-            await api(`/api/sessions/${encodeURIComponent(state.sessionId)}/language`, {
-                method: "PATCH",
-                body: { language: "zh-CN" }
-            });
         }
 
         localStorage.setItem(SESSION_STORAGE_KEY, state.sessionId);
         state.selectedVersionId = hash.stage || localStorage.getItem(selectedStageKey()) || "";
-        await refreshSession();
+        const enteredWorkspace = await refreshSession();
+        if (!enteredWorkspace) return;
         restoreComposerDraft();
         recoverPendingMessage();
         showPlayReturnNotice(hash.playReturn);
@@ -682,6 +697,13 @@ async function openCreatedSession(launchUrl) {
 
 async function refreshSession() {
     state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
+
+    if (!state.session.languageLocked) {
+        state.language = "zh-CN";
+        showLanding("formal");
+        return false;
+    }
+
     state.language = state.session.language;
 
     if (!findVersion(state.selectedVersionId)) {
@@ -695,6 +717,7 @@ async function refreshSession() {
     render();
     void ensureVisibleTranslations();
     await ensureAssessment(state.session.currentVersionId);
+    return true;
 }
 
 function render() {
@@ -2077,6 +2100,13 @@ function renderDeadline() {
 function updateControls() {
     if (!state.session) {
         elements.demoButton.disabled = state.busy;
+        elements.languageSetupSwitch.disabled = state.busy;
+        return;
+    }
+
+    if (!state.session.languageLocked) {
+        elements.enterSessionButton.disabled = state.busy;
+        elements.languageSetupSwitch.disabled = state.busy;
         return;
     }
 
@@ -2089,7 +2119,6 @@ function updateControls() {
     elements.restoreStageButton.disabled = state.busy || expired;
     elements.playButton.disabled = state.busy || expired || state.dirty || pending || !selectedVersion();
     elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
-    elements.languageButton.disabled = state.busy || expired || state.translationInProgress;
     elements.messageInput.disabled = state.busy || !editable;
     const disagreementActive = selectedStageHasActiveDisagreement();
     if ((!editable || disagreementActive) && state.proposalMode) {
@@ -2456,19 +2485,25 @@ function returnToUnity() {
     }
 }
 
-async function toggleLanguage() {
+function toggleSetupLanguage() {
     const next = state.language === "en" ? "zh-CN" : "en";
-    if (!state.session) {
-        state.language = next;
-        applyTranslations();
-        return;
-    }
+    state.language = next;
+    applyTranslations();
+}
+
+async function confirmSessionLanguage() {
+    if (!state.session || state.session.languageLocked) return;
     await withBusy(async () => {
-        state.session = await api(`/api/sessions/${state.sessionId}/language`, { method: "PATCH", body: { language: next } });
-        state.language = next;
-        render();
+        await api(`/api/sessions/${state.sessionId}/language`, {
+            method: "PATCH",
+            body: { language: state.language }
+        });
+        const enteredWorkspace = await refreshSession();
+        if (enteredWorkspace) {
+            restoreComposerDraft();
+            recoverPendingMessage();
+        }
     });
-    void ensureVisibleTranslations();
 }
 
 function selectVersion(versionId, shouldRender = true) {
@@ -2720,11 +2755,20 @@ function formatAttempt(attempt) {
     return `${t(statusKey)} · ${attempt.moveCount} ${t("moves")} · ${attempt.pushCount} ${t("pushes")} · ${attempt.restartCount} ${t("restarts")} · ${Number(attempt.durationSeconds || 0).toFixed(1)} ${t("seconds")}`;
 }
 
-function showLanding() {
+function showLanding(mode = "demo") {
+    state.landingMode = mode;
     elements.workspace.hidden = true;
     elements.landing.hidden = false;
-    setStatus(t("errorNoSession"), "pending");
+    const formal = mode === "formal";
+    elements.landingEyebrow.dataset.i18n = formal ? "sessionSetup" : "neutralBrief";
+    elements.landingTitle.dataset.i18n = formal ? "formalLandingTitle" : "openFromUnity";
+    elements.landingBody.dataset.i18n = formal ? "formalLandingBody" : "landingBody";
+    elements.languageLockNotice.dataset.i18n = formal ? "formalLanguageLock" : "demoLanguageLock";
+    elements.enterSessionButton.hidden = !formal;
+    elements.demoButton.hidden = formal;
+    setStatus(formal ? t("loading") : t("errorNoSession"), "pending");
     applyTranslations();
+    updateControls();
 }
 
 async function withBusy(action, onError = null) {
@@ -2900,7 +2944,8 @@ function applyTranslations() {
     document.querySelectorAll("[data-i18n-placeholder]").forEach(element => element.placeholder = t(element.dataset.i18nPlaceholder));
     document.querySelectorAll("[data-i18n-title]").forEach(element => element.title = t(element.dataset.i18nTitle));
     document.querySelectorAll("[data-i18n-aria-label]").forEach(element => element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel)));
-    elements.languageButton.textContent = state.language === "en" ? "中文" : "English";
+    elements.languageSetupSwitch.classList.toggle("is-english", state.language === "en");
+    elements.languageSetupSwitch.setAttribute("aria-checked", state.language === "en" ? "true" : "false");
     updateCharacterCount();
     renderChatRequestStatus();
     renderTranslationStatus();
