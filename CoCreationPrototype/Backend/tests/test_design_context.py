@@ -19,12 +19,14 @@ from design_context import (
     add_confirmed_decision,
     add_open_question,
     add_rejected_decision,
+    deduplicate_open_questions,
     empty_design_context,
     design_level_open_questions,
     extract_explicit_user_memory,
     is_design_level_question,
     merge_chat_update,
     merge_intent_hypothesis,
+    question_dedup_key,
     revision_projection,
     resolve_intent_hypothesis,
     sanitize_user_design_text,
@@ -33,6 +35,51 @@ from design_context import (
 
 
 class DesignContextUnitTests(unittest.TestCase):
+    def test_question_dedup_ignores_yes_no_instruction_but_not_distinct_question(self):
+        concise = "\u4f60\u662f\u5426\u4ecd\u5e0c\u671b\u6cbf\u7528\u6211\u539f\u6765\u63d0\u51fa\u7684\u529e\u6cd5\uff1f"
+        instructed = concise + "\u8bf7\u56de\u7b54\u662f\u6216\u5426\u3002"
+        wrapped = "\u8bf7\u53ea\u786e\u8ba4\uff1a" + concise + "\u56de\u7b54\u201c\u662f\u201d\u6216\u201c\u5426\u201d\u5373\u53ef\u3002"
+        distinct = "\u4f60\u66f4\u503e\u5411\u7f29\u51cf\u6c34\u57df\uff0c\u8fd8\u662f\u6539\u53d8\u5b83\u7684\u5f62\u72b6\uff1f"
+        self.assertEqual(question_dedup_key(concise), question_dedup_key(instructed))
+        self.assertEqual(question_dedup_key(concise), question_dedup_key(wrapped))
+        self.assertNotEqual(question_dedup_key(concise), question_dedup_key(distinct))
+
+        context = add_open_question(
+            empty_design_context(), instructed, "stage-1", "turn-1"
+        )
+        original_id = context["openQuestions"][0]["id"]
+        context = add_open_question(
+            context,
+            concise,
+            "stage-1",
+            "turn-2",
+            source_key="disagreement:challenge-1:next",
+            prefer_question=True,
+        )
+        self.assertEqual(len(context["openQuestions"]), 1)
+        self.assertEqual(context["openQuestions"][0]["id"], original_id)
+        self.assertEqual(context["openQuestions"][0]["question"], concise)
+
+    def test_question_dedup_preserves_processed_state_and_oldest_id(self):
+        first = add_open_question(
+            empty_design_context(), "Use the original approach?", "stage-1", "turn-1"
+        )
+        oldest_id = first["openQuestions"][0]["id"]
+        duplicate = dict(first["openQuestions"][0])
+        duplicate.update({
+            "id": "later-question",
+            "question": "Use the original approach? Please answer yes or no.",
+            "status": "answered",
+            "resolvedByTurnId": "user-turn",
+            "answeredAtStageId": "stage-1",
+        })
+        first["openQuestions"].append(duplicate)
+        repaired = deduplicate_open_questions(first)
+        self.assertEqual(len(repaired["openQuestions"]), 1)
+        self.assertEqual(repaired["openQuestions"][0]["id"], oldest_id)
+        self.assertEqual(repaired["openQuestions"][0]["status"], "answered")
+        self.assertEqual(repaired["openQuestions"][0]["resolvedByTurnId"], "user-turn")
+
     def test_evaluative_first_person_view_is_explicit_memory(self):
         goals, constraints = extract_explicit_user_memory(
             "\u6211\u89c9\u5f97\u4e24\u4e2a\u7bb1\u5b50\u8d77\u70b9\u6328\u5f97\u592a\u8fd1\u4e86\u3002"
@@ -557,6 +604,135 @@ class DesignContextUnitTests(unittest.TestCase):
 
 
 class DesignContextRepositoryTests(unittest.TestCase):
+    def test_startup_repair_merges_duplicate_progress_questions_idempotently(self):
+        original_path = repository.DATABASE_PATH
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            repository.DATABASE_PATH = Path(directory) / "duplicate-questions.sqlite3"
+            try:
+                repository.initialize_database()
+                session_id = uuid.uuid4().hex
+                version_id = uuid.uuid4().hex
+                now = "2026-09-10T00:00:00Z"
+                canonical = "\u4f60\u662f\u5426\u4ecd\u5e0c\u671b\u6cbf\u7528\u6211\u539f\u6765\u63d0\u51fa\u7684\u529e\u6cd5\uff1f"
+                context = empty_design_context()
+                context["openQuestions"] = [
+                    {
+                        "id": "oldest-question",
+                        "question": canonical + "\u8bf7\u56de\u7b54\u662f\u6216\u5426\u3002",
+                        "status": "open",
+                        "sourceKind": "visible_output",
+                        "sourceStageId": version_id,
+                        "sourceTurnId": "assistant-turn",
+                    },
+                    {
+                        "id": "answered-duplicate",
+                        "question": canonical,
+                        "status": "open",
+                        "sourceKind": "visible_output",
+                        "sourceStageId": version_id,
+                        "sourceTurnId": "assistant-turn",
+                    },
+                ]
+                with repository.connect(immediate=True) as database:
+                    database.execute(
+                        """
+                        INSERT INTO design_sessions(
+                            id, creation_key, access_hash, integration_hash, bootstrap_hash,
+                            initial_draft_method, language, status, current_version_id,
+                            created_at, updated_at
+                        ) VALUES (?, ?, 'a', 'b', 'c', 'partial_completion', 'zh-CN',
+                                  'active', ?, ?, ?)
+                        """,
+                        (session_id, uuid.uuid4().hex, version_id, now, now),
+                    )
+                    database.execute(
+                        """
+                        INSERT INTO level_versions(
+                            id, session_id, stage_number, source, rows_json, summary,
+                            diff_json, validation_json, design_context_json,
+                            idempotency_key, created_at
+                        ) VALUES (?, ?, 1, 'initial', ?, '', '[]', '{}', ?, ?, ?)
+                        """,
+                        (
+                            version_id,
+                            session_id,
+                            json.dumps(["############"] * 10),
+                            json.dumps(context),
+                            version_id,
+                            now,
+                        ),
+                    )
+                    database.execute(
+                        """
+                        INSERT INTO conversation_turns(
+                            id, session_id, sequence_number, role, content, language,
+                            version_id, guidance_json, created_at
+                        ) VALUES ('assistant-turn', ?, 1, 'assistant', ?, 'zh-CN', ?, ?, ?)
+                        """,
+                        (
+                            session_id,
+                            canonical,
+                            version_id,
+                            json.dumps({"disagreement": {"nextQuestion": canonical}}),
+                            now,
+                        ),
+                    )
+                    database.execute(
+                        """
+                        INSERT INTO conversation_turns(
+                            id, session_id, sequence_number, role, content, language,
+                            version_id, request_id, created_at
+                        ) VALUES ('user-turn', ?, 2, 'user', ?, 'zh-CN', ?,
+                                  'challenge-choice-message', ?)
+                        """,
+                        (session_id, "\u5426", version_id, now),
+                    )
+                    repository.record_event(
+                        database,
+                        session_id,
+                        "disagreement_started",
+                        {
+                            "versionId": version_id,
+                            "disagreement": {
+                                "status": "active",
+                                "subject": "ai_revision_challenge",
+                                "phase": "choice_pending",
+                                "nextQuestion": canonical,
+                            },
+                        },
+                        now,
+                    )
+                    repository.record_event(
+                        database,
+                        session_id,
+                        "challenge_continued",
+                        {
+                            "messageKey": "challenge-choice-message",
+                            "action": "continue_challenge",
+                            "baseVersionId": version_id,
+                        },
+                        now,
+                    )
+                    self.assertEqual(repository.repair_duplicate_progress_questions(database), 1)
+                    self.assertEqual(repository.repair_duplicate_progress_questions(database), 0)
+                    self.assertEqual(
+                        repository.repair_answered_challenge_choice_questions(database),
+                        1,
+                    )
+                    self.assertEqual(
+                        repository.repair_answered_challenge_choice_questions(database),
+                        0,
+                    )
+                    repaired = repository.load_design_context(
+                        database, session_id, version_id
+                    )
+                self.assertEqual(len(repaired["openQuestions"]), 1)
+                self.assertEqual(repaired["openQuestions"][0]["id"], "oldest-question")
+                self.assertEqual(repaired["openQuestions"][0]["question"], canonical)
+                self.assertEqual(repaired["openQuestions"][0]["status"], "answered")
+            finally:
+                repository.DATABASE_PATH = original_path
+
     def test_repair_clears_audited_stale_disagreement_from_descendants(self):
         original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

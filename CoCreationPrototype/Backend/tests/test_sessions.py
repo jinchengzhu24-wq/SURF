@@ -1633,6 +1633,66 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(first_topic["topicId"], second_topic["topicId"])
         self.assertEqual(len(second_topic["userEvidence"]), 2)
 
+    def test_proposal_clarifications_enter_progress_and_answers_are_processed(self):
+        version_id = self.read_session()["currentVersionId"]
+        execution = LLMExecutionResult(
+            "I can narrow this into one safe revision.",
+            1,
+            "proposal-progress",
+            model="mock-model",
+            guidance={
+                "move": "clarify_intent",
+                "intentHypothesis": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            started = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Please change the map.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "proposal-progress-start",
+                },
+            )
+        self.assertEqual(started.status_code, 200, started.text)
+        first_progress = next(
+            item for item in started.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(len(first_progress["questionRecords"]), 1)
+        first_question_id = first_progress["questionRecords"][0]["questionId"]
+        self.assertEqual(first_progress["questionRecords"][0]["status"], "unanswered")
+
+        answer_review = {
+            "answeredQuestionIds": [first_question_id],
+            "results": [{"questionId": first_question_id, "answered": True}],
+        }
+        with patch.object(backend, "review_question_answers", return_value=answer_review), patch.object(
+            backend, "generate_chat_reply", return_value=execution
+        ):
+            continued = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "The extra time should come from planning the push order.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "proposal-progress-answer",
+                },
+            )
+        self.assertEqual(continued.status_code, 200, continued.text)
+        second_progress = next(
+            item for item in continued.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        records = second_progress["questionRecords"]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["questionId"], first_question_id)
+        self.assertEqual(records[0]["status"], "answered")
+        self.assertEqual(records[1]["status"], "unanswered")
+
     def test_answering_a_historical_question_cannot_create_an_orange_card(self):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(
@@ -4136,6 +4196,14 @@ class CoCreationSessionTests(unittest.TestCase):
                 "primaryHypothesis": "The mechanism may be too weak.",
                 "secondaryHypothesis": "The original structure may be over-preserved.",
             }
+            context = backend.add_open_question(
+                context,
+                "Should we keep the original approach? Please answer yes or no.",
+                version_id,
+                "choice-question-turn",
+                source_key=f"disagreement:{challenge_id}:next",
+            )
+            choice_question_id = context["openQuestions"][0]["id"]
             repository.save_design_context(database, version_id, context)
 
         execution = LLMExecutionResult(
@@ -4161,7 +4229,9 @@ class CoCreationSessionTests(unittest.TestCase):
             revision_contract=PLAYER_MOVE_CONTRACT,
             revision_operations=PLAYER_MOVE_OPERATIONS,
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with patch.object(backend, "review_question_answers") as answer_review, patch.object(
+            backend, "generate_chat_reply", return_value=execution
+        ):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -4172,6 +4242,7 @@ class CoCreationSessionTests(unittest.TestCase):
                     "challengeId": challenge_id,
                 },
             )
+        answer_review.assert_not_called()
 
         self.assertEqual(response.status_code, 200, response.text)
         latest = response.json()["turns"][-1]["guidance"]
@@ -4189,6 +4260,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 (self.session_id,),
             ).fetchone()[0]
         self.assertIsNone(context["activeDisagreement"])
+        choice_question = next(
+            item for item in context["openQuestions"]
+            if item["id"] == choice_question_id
+        )
+        self.assertEqual(choice_question["status"], "answered")
         self.assertEqual(resolved_events, 1)
 
     def test_active_disagreement_cards_keep_warning_and_four_summaries(self):
@@ -4633,7 +4709,8 @@ class CoCreationSessionTests(unittest.TestCase):
 
         next_question = "Which first-push judgment should the player make?"
         execution = LLMExecutionResult(
-            "I still see a disagreement about the first push.",
+            "I still see a disagreement about the first push. "
+            f"{next_question} Please answer yes or no.",
             1,
             "disagreement-followup-001",
             model="mock-model",
@@ -4641,12 +4718,13 @@ class CoCreationSessionTests(unittest.TestCase):
                 "move": "offer_perspective",
                 "intentHypothesis": None,
                 "intentConfidence": None,
-                "followUpQuestion": None,
+                "followUpQuestion": f"{next_question} Please answer yes or no.",
                 "proposalOffer": None,
                 "uiCues": [],
                 "disagreement": {
                     "status": "active",
                     "subject": "user_request",
+                    "challengeId": "progress-challenge-001",
                     "userPosition": "Keep the opening direct.",
                     "aiPosition": "The first push may need a side choice.",
                     "coreDisagreement": "Whether the first push should expose a side choice.",
@@ -4673,6 +4751,33 @@ class CoCreationSessionTests(unittest.TestCase):
             progress["unresolvedQuestions"][0]["question"],
             next_question,
         )
+        self.assertEqual(len(progress["questionRecords"]), 1)
+
+        question_id = progress["questionRecords"][0]["questionId"]
+        answer_review = {
+            "answeredQuestionIds": [question_id],
+            "results": [{"questionId": question_id, "answered": True}],
+        }
+        with patch.object(backend, "review_question_answers", return_value=answer_review), patch.object(
+            backend, "generate_chat_reply", return_value=execution
+        ):
+            answered = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Keep the direct first push.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "disagreement-followup-answer",
+                    "action": "continue_challenge",
+                    "challengeId": "progress-challenge-001",
+                },
+            )
+        self.assertEqual(answered.status_code, 200, answered.text)
+        answered_progress = next(
+            item for item in answered.json()["progressContexts"]
+            if item["versionId"] == version_id
+        )
+        self.assertEqual(len(answered_progress["questionRecords"]), 1)
+        self.assertEqual(answered_progress["questionRecords"][0]["status"], "answered")
 
 
 if __name__ == "__main__":

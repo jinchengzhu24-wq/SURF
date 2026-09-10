@@ -11,11 +11,14 @@ from design_context import (
     add_confirmed_decision,
     add_open_question,
     add_rejected_decision,
+    apply_question_answer_review,
+    deduplicate_open_questions,
     design_level_open_questions,
     empty_design_context,
     infer_intent_topic,
     merge_chat_update,
     normalize_design_context,
+    question_dedup_key,
     set_active_disagreement,
 )
 from level_validation import (
@@ -268,6 +271,8 @@ def initialize_database():
         backfill_entity_bindings(database)
         backfill_revision_challenges(database)
         repair_resolved_challenge_disagreements(database)
+        repair_duplicate_progress_questions(database)
+        repair_answered_challenge_choice_questions(database)
         backfill_language_locks(database)
         database.commit()
     finally:
@@ -1035,6 +1040,162 @@ def repair_resolved_challenge_disagreements(database):
                 datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             )
             repaired += 1
+    return repaired
+
+
+def repair_duplicate_progress_questions(database):
+    """Idempotently merge duplicate visible questions in Stage snapshots."""
+    versions = database.execute(
+        """
+        SELECT id, session_id, design_context_json
+        FROM level_versions
+        WHERE design_context_json IS NOT NULL
+        ORDER BY session_id, stage_number, created_at, id
+        """
+    ).fetchall()
+    repaired = 0
+    for version in versions:
+        context = normalize_design_context(load_json(version["design_context_json"]))
+        before_count = len(context.get("openQuestions", []))
+        if before_count < 2:
+            continue
+        preferred_questions = []
+        guidance_rows = database.execute(
+            """
+            SELECT guidance_json FROM conversation_turns
+            WHERE session_id = ? AND version_id = ?
+              AND role = 'assistant' AND guidance_json IS NOT NULL
+            ORDER BY sequence_number
+            """,
+            (version["session_id"], version["id"]),
+        ).fetchall()
+        for row in guidance_rows:
+            guidance = load_json(row["guidance_json"]) or {}
+            disagreement = guidance.get("disagreement") or {}
+            if (
+                isinstance(disagreement, dict)
+                and disagreement.get("nextQuestion")
+            ):
+                preferred_questions.append(disagreement["nextQuestion"])
+
+        repaired_context = deduplicate_open_questions(
+            context, preferred_questions=preferred_questions
+        )
+        removed = before_count - len(repaired_context.get("openQuestions", []))
+        if removed <= 0:
+            continue
+        save_design_context(database, version["id"], repaired_context)
+        record_event(
+            database,
+            version["session_id"],
+            "duplicate_progress_questions_repaired",
+            {"versionId": version["id"], "removedCount": removed},
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+        repaired += removed
+    return repaired
+
+
+def repair_answered_challenge_choice_questions(database):
+    """Backfill explicit yes/no answers skipped by the legacy challenge route."""
+    continuations = database.execute(
+        """
+        SELECT id, session_id, payload_json FROM audit_events
+        WHERE event_type = 'challenge_continued'
+        ORDER BY id
+        """
+    ).fetchall()
+    repaired = 0
+    for continuation in continuations:
+        payload = load_json(continuation["payload_json"]) or {}
+        message_key = str(payload.get("messageKey") or "").strip()
+        base_version_id = str(payload.get("baseVersionId") or "").strip()
+        if not message_key or not base_version_id:
+            continue
+        user_turn = database.execute(
+            """
+            SELECT id, content FROM conversation_turns
+            WHERE session_id = ? AND request_id = ? AND role = 'user'
+            LIMIT 1
+            """,
+            (continuation["session_id"], message_key),
+        ).fetchone()
+        if user_turn is None:
+            continue
+        answer = re.sub(
+            r"[\s,.!?;:\u3002\uFF0C\uFF01\uFF1F\uFF1B\uFF1A]+",
+            "",
+            str(user_turn["content"] or "").casefold(),
+        )
+        if answer not in {"yes", "no", "\u662f", "\u5426"}:
+            continue
+        disagreement_row = database.execute(
+            """
+            SELECT payload_json FROM audit_events
+            WHERE session_id = ? AND id < ?
+              AND event_type IN ('disagreement_started', 'disagreement_updated')
+              AND json_extract(payload_json, '$.versionId') = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (continuation["session_id"], continuation["id"], base_version_id),
+        ).fetchone()
+        if disagreement_row is None:
+            continue
+        disagreement = (
+            load_json(disagreement_row["payload_json"]) or {}
+        ).get("disagreement") or {}
+        if not (
+            disagreement.get("subject") == "ai_revision_challenge"
+            and disagreement.get("phase") == "choice_pending"
+            and disagreement.get("nextQuestion")
+        ):
+            continue
+        question_key = question_dedup_key(disagreement["nextQuestion"])
+        versions = database.execute(
+            """
+            SELECT id, parent_version_id FROM level_versions
+            WHERE session_id = ? ORDER BY stage_number, created_at, id
+            """,
+            (continuation["session_id"],),
+        ).fetchall()
+        descendants = {base_version_id}
+        for version in versions:
+            if version["parent_version_id"] in descendants:
+                descendants.add(version["id"])
+        for version in versions:
+            if version["id"] not in descendants:
+                continue
+            context = load_design_context(
+                database, continuation["session_id"], version["id"]
+            )
+            matching_ids = [
+                item.get("id") for item in context.get("openQuestions", [])
+                if item.get("status") == "open"
+                and question_dedup_key(item.get("question")) == question_key
+                and item.get("id")
+            ]
+            if not matching_ids:
+                continue
+            context = apply_question_answer_review(
+                context,
+                matching_ids,
+                base_version_id,
+                user_turn["id"],
+            )
+            save_design_context(database, version["id"], context)
+            record_event(
+                database,
+                continuation["session_id"],
+                "challenge_choice_question_repaired",
+                {
+                    "versionId": version["id"],
+                    "baseVersionId": base_version_id,
+                    "userTurnId": user_turn["id"],
+                    "questionIds": matching_ids,
+                },
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+            repaired += len(matching_ids)
     return repaired
 
 

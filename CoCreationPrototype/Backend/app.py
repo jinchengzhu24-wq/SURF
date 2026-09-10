@@ -100,6 +100,7 @@ from design_context import (
     merge_intent_hypothesis,
     merge_chat_update,
     resolve_intent_hypothesis,
+    question_dedup_key,
     revision_projection,
     set_active_disagreement,
     sanitize_user_design_text,
@@ -2404,8 +2405,25 @@ def _send_message_locked(
                     excluded_rows
                 )
 
+    pending_disagreement = stage_context.get("activeDisagreement") or {}
+    deterministic_challenge_choice = (
+        _challenge_choice(content, language)
+        if (
+            pending_disagreement.get("subject") == "ai_revision_challenge"
+            and pending_disagreement.get("phase") == "choice_pending"
+        )
+        else None
+    )
     question_answer_review = {"answeredQuestionIds": [], "results": []}
-    if payload.action == "none" and allow_progress:
+    if (
+        payload.action in {"none", "continue_challenge"}
+        and deterministic_challenge_choice is None
+        and (
+            allow_progress
+            or bool(proposal_discovery)
+            or bool(stage_context.get("activeDisagreement"))
+        )
+    ):
         visible_open_questions = [
             {
                 "questionId": item.get("id"),
@@ -2449,8 +2467,31 @@ def _send_message_locked(
             active_disagreement.get("subject") == "ai_revision_challenge"
             and active_disagreement.get("phase") == "choice_pending"
         ):
-            challenge_choice_resolution = _challenge_choice(content, language)
+            challenge_choice_resolution = deterministic_challenge_choice
             stage_context["challengeChoiceResolution"] = challenge_choice_resolution
+            if challenge_choice_resolution:
+                choice_key = question_dedup_key(
+                    active_disagreement.get("nextQuestion")
+                )
+                for item in stage_context.get("designContext", {}).get(
+                    "openQuestions", []
+                ):
+                    if (
+                        item.get("status") == "open"
+                        and question_dedup_key(item.get("question")) == choice_key
+                        and item.get("id")
+                    ):
+                        answered_ids = question_answer_review.setdefault(
+                            "answeredQuestionIds", []
+                        )
+                        if item["id"] not in answered_ids:
+                            answered_ids.append(item["id"])
+                            question_answer_review.setdefault("results", []).append({
+                                "questionId": item["id"],
+                                "answered": True,
+                                "source": "deterministic_challenge_choice",
+                            })
+                        break
         else:
             challenge_context = stage_context.get("challengeContext") or {}
             hypotheses = challenge_context.get("hypotheses") or {}
@@ -2760,6 +2801,12 @@ def _send_message_locked(
         revision_brief = str(
             context["stageContext"].get("authorizedRevisionBrief") or revision_brief or ""
         ).strip()
+    context["stageContext"]["answeredQuestionIds"] = list(
+        question_answer_review.get("answeredQuestionIds") or []
+    )
+    context["stageContext"]["answeredVisibleQuestion"] = bool(
+        context["stageContext"]["answeredQuestionIds"]
+    )
     context["stageContext"]["revisionRequestState"] = revision_state
     proposal_branch = bool(
         payload.action in REVISION_CARD_ACTIONS
@@ -3553,10 +3600,8 @@ def _send_message_locked(
                     "answeredQuestionIds"
                 ),
                 answer_turn_id=user_turn_id,
-                allow_new_questions=(
-                    isinstance((execution.guidance or {}).get("disagreement"), dict)
-                    and (execution.guidance or {}).get("disagreement", {}).get("status")
-                    == "active"
+                proposal_discovery=(execution.guidance or {}).get(
+                    "proposalDiscovery"
                 ),
             )
 
@@ -8863,7 +8908,7 @@ def _update_design_context_from_turn(
     allow_progress=True,
     answered_question_ids=None,
     answer_turn_id=None,
-    allow_new_questions=False,
+    proposal_discovery=None,
 ):
     """Merge server-owned memory after a normal chat or Stage review.
 
@@ -8885,10 +8930,9 @@ def _update_design_context_from_turn(
 
     previous = load_design_context(database, session_id, version_id)
     effective_patch = patch
-    if isinstance(patch, dict) and not allow_new_questions:
-        # Ordinary non-proposal turns may still contribute explicit design
-        # evidence, but neither model metadata nor visible prose may create a
-        # new open-question record.
+    if isinstance(patch, dict):
+        # Question progress is server-owned and limited to proposal discovery
+        # and active disagreement flows. Model patches never create records.
         effective_patch = dict(patch)
         effective_patch.pop("openQuestions", None)
     try:
@@ -8916,7 +8960,7 @@ def _update_design_context_from_turn(
         )
         context = previous
 
-    if allow_progress and answered_question_ids:
+    if answered_question_ids:
         context = apply_question_answer_review(
             context,
             answered_question_ids,
@@ -9036,42 +9080,51 @@ def _update_design_context_from_turn(
         )
 
     auto_open_questions = []
-    if allow_new_questions and (allow_progress or assistant_content):
-        candidates = [guidance.get("followUpQuestion")]
-        if isinstance(disagreement, dict) and disagreement.get("status") == "active":
-            candidates.append(disagreement.get("nextQuestion"))
-        patch_questions = (
-            [
-                item for item in patch.get("openQuestions", [])
-                if isinstance(item, dict)
-                and item.get("status", "open") == "open"
-                and is_design_level_question(
-                    item.get("question"),
-                    item.get("evidenceText"),
-                )
-            ]
-            if allow_progress and isinstance(patch, dict)
-            else []
-        )
-        candidates.extend(_extract_visible_questions(assistant_content, guidance))
-        if not patch_questions and not candidates:
-            candidates.append(_extract_conservative_map_question(assistant_content))
-        seen_questions = set()
-        for question in candidates:
-            normalized_question = str(question or "").strip().casefold()
-            if not normalized_question or normalized_question in seen_questions:
-                continue
-            seen_questions.add(normalized_question)
-            before = context
-            context = add_open_question(
-                context,
-                question,
-                version_id,
-                turn_id,
-                source_kind="visible_output",
+    question_candidates = []
+    proposal_marker = proposal_discovery if isinstance(proposal_discovery, dict) else {}
+    if proposal_marker.get("status") == "clarifying":
+        visible_questions = _extract_visible_questions(assistant_content, guidance)
+        question_key = str(
+            proposal_marker.get("clarificationQuestionKey") or ""
+        ).strip()
+        topic_id = str(proposal_marker.get("topicId") or "").strip()
+        for index, question in enumerate(visible_questions):
+            source_key = (
+                f"proposal:{topic_id}:{question_key}"
+                if topic_id and question_key and index == 0
+                else None
             )
-            if context != before:
-                auto_open_questions.append(str(question).strip())
+            question_candidates.append((question, source_key, False))
+
+    if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+        next_question = disagreement.get("nextQuestion")
+        challenge_id = str(disagreement.get("challengeId") or "").strip()
+        source_key = f"disagreement:{challenge_id}:next" if challenge_id else None
+        question_candidates.append((next_question, source_key, True))
+        question_candidates.append((guidance.get("followUpQuestion"), None, False))
+        question_candidates.extend(
+            (question, None, False)
+            for question in _extract_visible_questions(assistant_content, guidance)
+        )
+
+    seen_questions = set()
+    for question, source_key, prefer_question in question_candidates:
+        normalized_question = question_dedup_key(question)
+        if not normalized_question or normalized_question in seen_questions:
+            continue
+        seen_questions.add(normalized_question)
+        before_count = len(context.get("openQuestions", []))
+        context = add_open_question(
+            context,
+            question,
+            version_id,
+            turn_id,
+            source_kind="visible_output",
+            source_key=source_key,
+            prefer_question=prefer_question,
+        )
+        if len(context.get("openQuestions", [])) > before_count:
+            auto_open_questions.append(str(question).strip())
 
     save_design_context(database, version_id, context)
     record_event(

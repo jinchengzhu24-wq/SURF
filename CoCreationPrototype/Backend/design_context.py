@@ -335,6 +335,7 @@ def _normalize_question(item, index=0):
         "ignoredAtStageId": _source(item.get("ignoredAtStageId")),
         "ignoredAt": _text(item.get("ignoredAt"), 64) or None,
         "sourceKind": _text(item.get("sourceKind"), 32) or "legacy",
+        "sourceKey": _text(item.get("sourceKey"), 192) or None,
     }
 
 
@@ -851,9 +852,76 @@ def _verified_user_evidence(evidence_text, user_text):
     return bool(evidence and evidence in str(user_text or ""))
 
 
-def _question_key(value):
-    """Compare equivalent questions without duplicating punctuation or spacing variants."""
-    return re.sub(r"\s+", " ", _text(value)).strip("?\uFF1F").casefold()
+def question_dedup_key(value):
+    """Return a conservative identity for visibly equivalent questions.
+
+    Answer-format suffixes are presentation details, not separate design
+    questions.  Keep the comparison deliberately narrower than semantic
+    similarity so two genuinely different trade-off questions are preserved.
+    """
+    clean = _text(value).casefold()
+    clean = re.sub(r"[\u201c\u201d\u2018\u2019\"'\u300c\u300d\u300e\u300f]", "", clean)
+    clean = re.sub(
+        r"^(?:\u8bf7)?(?:\u53ea|\u4ec5)?\u786e\u8ba4\s*[:\uFF1A]\s*",
+        "",
+        clean,
+    )
+    clean = re.sub(
+        r"(?:"
+        r"(?:[?\uFF1F,\uFF0C;\uFF1B:\uFF1A.\u3002!\uFF01]\s*)?"
+        r"(?:(?:please\s+)?(?:answer|reply)\s+(?:with\s+)?)?"
+        r"yes\s*(?:or|/)\s*no\s*(?:only)?"
+        r"|(?:[?\uFF1F,\uFF0C;\uFF1B:\uFF1A.\u3002!\uFF01]\s*)?"
+        r"(?:\u8bf7)?(?:\u76f4\u63a5)?(?:\u56de\u7b54|\u56de\u590d)?\s*"
+        r"\u662f\s*(?:\u6216|\u8fd8\u662f|/)\s*\u5426\s*"
+        r"(?:\u5373\u53ef|\u5c31\u53ef\u4ee5)?"
+        r")[.\u3002!\uFF01?\uFF1F]*$",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    )
+    clean = re.sub(r"\s+", " ", clean)
+    return clean.strip(" ?\uFF1F,\uFF0C;\uFF1B:\uFF1A.\u3002!\uFF01").casefold()
+
+
+def deduplicate_open_questions(context, preferred_questions=None):
+    """Collapse legacy duplicate questions while preserving the oldest ID."""
+    result = normalize_design_context(context)
+    preferred = {
+        question_dedup_key(value): _text(value)
+        for value in (preferred_questions or [])
+        if question_dedup_key(value)
+    }
+    merged = []
+    by_key = {}
+    status_rank = {"open": 0, "ignored": 1, "answered": 2, "resolved": 2}
+    for item in result["openQuestions"]:
+        key = question_dedup_key(item.get("question"))
+        source_key = _text(item.get("sourceKey"), 192)
+        identity = ("source", source_key) if source_key else ("text", key)
+        existing = by_key.get(identity)
+        if existing is None and key:
+            existing = next(
+                (candidate for candidate in merged
+                 if question_dedup_key(candidate.get("question")) == key),
+                None,
+            )
+        if existing is None:
+            merged.append(item)
+            by_key[identity] = item
+            continue
+        if status_rank.get(item.get("status"), 0) > status_rank.get(existing.get("status"), 0):
+            for field in (
+                "status", "resolvedByTurnId", "answeredAtStageId",
+                "ignoredAtStageId", "ignoredAt", "updatedFromTurnId",
+            ):
+                existing[field] = item.get(field)
+        if not existing.get("sourceKey") and source_key:
+            existing["sourceKey"] = source_key
+        if key in preferred:
+            existing["question"] = preferred[key]
+    result["openQuestions"] = merged
+    return normalize_design_context(result)
 
 
 def _merge_open_question(result, entry, stage_id, turn_id, user_text):
@@ -870,7 +938,11 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
         (
             item for item in result["openQuestions"]
             if (target_id and item.get("id") == target_id)
-            or _question_key(item.get("question")) == _question_key(question)
+            or (
+                entry.get("sourceKey")
+                and item.get("sourceKey") == entry.get("sourceKey")
+            )
+            or question_dedup_key(item.get("question")) == question_dedup_key(question)
         ),
         None,
     )
@@ -883,6 +955,10 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
             return False
         existing["status"] = "answered"
         existing["updatedFromTurnId"] = _source(turn_id)
+        if entry.get("sourceKey"):
+            existing["sourceKey"] = _text(entry.get("sourceKey"), 192)
+        if entry.get("preferQuestion"):
+            existing["question"] = question
         existing["resolvedByTurnId"] = _source(turn_id)
         existing["answeredAtStageId"] = _source(stage_id)
         return True
@@ -890,10 +966,11 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
     if existing is not None:
         if existing.get("status") == "resolved":
             existing["status"] = "open"
-        existing["question"] = question
         existing["updatedFromTurnId"] = _source(turn_id)
         if entry.get("sourceKind") == "visible_output":
             existing["sourceKind"] = "visible_output"
+        if entry.get("preferQuestion"):
+            existing["question"] = question
         return True
 
     result["openQuestions"].append({
@@ -908,11 +985,21 @@ def _merge_open_question(result, entry, stage_id, turn_id, user_text):
         "ignoredAtStageId": None,
         "ignoredAt": None,
         "sourceKind": _text(entry.get("sourceKind"), 32) or "model_patch",
+        "sourceKey": _text(entry.get("sourceKey"), 192) or None,
     })
     return True
 
 
-def add_open_question(context, question, stage_id=None, turn_id=None, *, source_kind="visible_output"):
+def add_open_question(
+    context,
+    question,
+    stage_id=None,
+    turn_id=None,
+    *,
+    source_kind="visible_output",
+    source_key=None,
+    prefer_question=False,
+):
     """Add an assistant-raised open question using the normal provenance rules."""
     result = normalize_design_context(context)
     clean = _text(question)
@@ -923,7 +1010,13 @@ def add_open_question(context, question, stage_id=None, turn_id=None, *, source_
 
     _merge_open_question(
         result,
-        {"question": clean, "status": "open", "sourceKind": source_kind},
+        {
+            "question": clean,
+            "status": "open",
+            "sourceKind": source_kind,
+            "sourceKey": source_key,
+            "preferQuestion": prefer_question,
+        },
         stage_id,
         turn_id,
         None,
