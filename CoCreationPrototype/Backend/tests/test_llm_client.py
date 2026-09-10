@@ -2085,7 +2085,8 @@ class LLMClientTests(unittest.TestCase):
                 "pause at that first commitment, followed by a more legible push rhythm instead of "
                 "extra walking that has no design consequence.\n\n"
                 "<GUIDANCE>\n"
-                "INTENT: For now, I understand that you prefer the water to affect the route.\n"
+                "INTENT: For now, I understand that you prefer the water to affect the route. "
+                "Whether route reading or push timing matters more remains open for correction.\n"
                 "</GUIDANCE>"
             ],
             conversation=[{
@@ -2741,6 +2742,103 @@ class LLMClientTests(unittest.TestCase):
                 self.assertFalse(
                     llm_client._user_explicitly_states_design_stance(message)
                 )
+
+    def test_orange_gate_accepts_common_chinese_design_terms_and_stance_forms(self):
+        messages = (
+            "我认为两个终点不能靠在一起。",
+            "我认为起点位置需要调整。",
+            "我认为这条路径太短了。",
+            "我认为走廊太窄了。",
+            "我认为这个区域太空旷。",
+            "我认为这里容易死锁。",
+            "我认为解法太直接。",
+            "我认为整体不够平衡。",
+            "我个人觉得路线太短。",
+            "我不希望两个目标靠在一起。",
+            "我不想要这个布局。",
+            "我更想要复杂一些的路线。",
+            "我比较喜欢现在的布局。",
+            "我会更喜欢对称的布局。",
+            "我更倾向于让水域参与路线。",
+            "我偏向这个布局。",
+            "我在意目标之间的距离。",
+        )
+
+        for message in messages:
+            with self.subTest(message=message):
+                self.assertTrue(
+                    llm_client._user_explicitly_states_design_stance(message)
+                )
+
+    def test_orange_gate_accepts_common_english_design_terms_and_stance_forms(self):
+        messages = (
+            "I think the goals are too close together.",
+            "I think the player start is misplaced.",
+            "I think the floor is too open.",
+            "I think the entrance is unclear.",
+            "I think the solution is too direct.",
+            "I think the balance is off.",
+            "I personally think the route is too short.",
+            "I don't want the targets together.",
+            "I'd prefer a longer route.",
+            "I'd like the map to feel less crowded.",
+            "My preference is a more open layout.",
+            "I am inclined toward a harder level.",
+        )
+
+        for message in messages:
+            with self.subTest(message=message):
+                self.assertTrue(
+                    llm_client._user_explicitly_states_design_stance(message)
+                )
+
+    def test_orange_gate_requires_first_person_and_rejects_substring_false_positives(self):
+        messages = (
+            "这里太空了。",
+            "两个终点不该靠在一起。",
+            "我喜欢音乐。",
+            "我认为水平需要提高。",
+            "我检查了邮箱。",
+        )
+
+        for message in messages:
+            with self.subTest(message=message):
+                self.assertFalse(
+                    llm_client._user_explicitly_states_design_stance(message)
+                )
+
+    def test_ambiguous_first_person_reference_gets_generic_correctable_intent(self):
+        source = "我更喜欢现在这样。"
+        classification = llm_client._classify_explicit_design_stance(source)
+        card = llm_client._natural_intent_candidate(source, "zh-CN", False)
+
+        self.assertTrue(classification.eligible)
+        self.assertTrue(classification.ambiguous_reference)
+        self.assertEqual(classification.topics, ())
+        self.assertIn("整体", card)
+        self.assertNotIn("目标", card)
+        self.assertNotIn("坐标", card)
+        self.assertIsNone(
+            llm_client._intent_hypothesis_detail_issue(card, "zh-CN")
+        )
+
+    def test_screenshot_wording_gets_target_relationship_intent_when_model_omits_one(self):
+        result, _ = self.execute(
+            ["我会把你的判断与当前目标分布分开来看，再保留尚未确认的玩法解释。"],
+            language="zh-CN",
+            conversation=[{
+                "role": "user",
+                "content": "我认为两个终点不能靠在一起。",
+            }],
+        )
+
+        intent = result.guidance["intentHypothesis"]
+        self.assertIsNotNone(intent)
+        self.assertIn("目标", intent)
+        self.assertIn("关系", intent)
+        self.assertIsNone(
+            llm_client._intent_hypothesis_detail_issue(intent, "zh-CN")
+        )
 
     def test_want_player_experience_statement_gets_an_intent_card(self):
         result, _ = self.execute(

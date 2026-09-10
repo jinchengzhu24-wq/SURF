@@ -955,6 +955,65 @@ class CoCreationSessionTests(unittest.TestCase):
             for row in evidence
         ))
 
+    def test_chinese_target_synonym_survives_api_intent_gate(self):
+        version_id = self.read_session()["currentVersionId"]
+        opening = LLMExecutionResult(
+            "我注意到当前关卡有两只箱子和两个目标。",
+            1,
+            "target-synonym-opening",
+            assessment={},
+            model="mock-model",
+            guidance={
+                "move": "observe_stage",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+            assessed = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "target-synonym-opening"},
+            )
+        self.assertEqual(assessed.status_code, 200, assessed.text)
+        reply = LLMExecutionResult(
+            "你的判断明确指向两个目标之间的空间关系，我会把视觉分布与玩法效果分开保留。",
+            1,
+            "target-synonym-intent",
+            model="mock-model",
+            guidance={
+                "move": "clarify_intent",
+                "intentHypothesis": (
+                    "我暂时理解为，你更在意目标点之间保持清楚、可区分的空间关系。"
+                    "它主要影响布局观感还是实际推箱路线，目前仍需要由你确认。"
+                ),
+                "intentConfidence": "medium",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "disagreement": None,
+                "uiCues": [],
+            },
+        )
+
+        with patch.object(backend, "generate_chat_reply", return_value=reply):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "我认为两个终点不能靠在一起。",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "target-synonym-intent",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        turn = response.json()["turns"][-1]
+        self.assertIsNotNone(turn["guidance"]["intentHypothesis"])
+        self.assertEqual(turn["guidance"]["intentState"]["status"], "tentative")
+        self.assertTrue(turn["guidance"]["intentState"]["actionable"])
+
     def test_saved_manual_edit_records_evidence_without_confirming_intent(self):
         version_id = self.read_session()["currentVersionId"]
         response = self.client.post(

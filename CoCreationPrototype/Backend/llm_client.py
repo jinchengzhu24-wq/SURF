@@ -114,7 +114,7 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v52-chinese-visible-language-gate"
+PROMPT_VERSION = "cocreation-v53-bilingual-intent-stance-gate"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
 INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
@@ -621,7 +621,7 @@ def build_chat_messages(
         "claim about how water should affect route reading or push decisions). It must also "
         "distill an interpretation already supported by assistantMessage: never introduce a "
         "different map element, design goal, or operation only inside the intent card.\n\n"
-        "When an intentHypothesis is warranted, write one to three concise, natural sentences that "
+        "When an intentHypothesis is warranted, write two to four concise, natural sentences that "
         "state one current, correctable understanding of the designer's inclination. Keep evidence "
         "and playable consequences in assistantMessage instead of repeating a four-part template "
         "inside the card. Keep it to one coherent inclination; do not combine incompatible goals or "
@@ -13205,6 +13205,180 @@ def _is_proposal_conversation_branch(stage_context):
     )
 
 
+@dataclass(frozen=True)
+class DesignStanceClassification:
+    eligible: bool
+    language: str
+    stance_kind: str = ""
+    topics: tuple = ()
+    ambiguous_reference: bool = False
+
+
+_DESIGN_TOPIC_TERMS_ZH = {
+    "entities": (
+        "关卡", "地图", "布局", "水域", "水面", "水边", "水塘", "水格", "墙",
+        "墙体", "箱子", "木箱", "箱体", "目标", "目标点", "终点", "落点", "玩家",
+        "玩家位置", "起点", "出生点", "地面", "地板", "空地", "格子", "方格", "地块",
+        "障碍", "障碍物",
+    ),
+    "topology": (
+        "空间", "路线", "路径", "道路", "通道", "走廊", "入口", "出口", "岔路",
+        "分叉", "转角", "转折", "死路", "死角", "角落", "区域", "局部", "中央",
+        "中间", "边界", "边缘", "外壳", "轮廓", "左侧", "右侧", "上方", "下方",
+    ),
+    "relations": (
+        "位置", "距离", "间距", "相邻", "靠近", "贴近", "紧邻", "紧挨", "分开",
+        "远离", "远近", "集中", "分散", "分布", "对称", "平衡", "密度",
+    ),
+    "mechanics": (
+        "推动", "推箱", "推法", "推数", "推动次数", "顺序", "步数", "解法", "最短解",
+        "最短路线", "可解", "死锁", "软锁", "卡死", "卡住", "退路", "回头路",
+        "回旋", "绕行", "移动", "运输", "重开", "试错",
+    ),
+    "experience": (
+        "难度", "节奏", "选择", "体验", "游玩", "玩法", "思考", "探索", "判断",
+        "压力", "压迫", "可读", "清晰", "直观", "自然", "公平", "流畅", "顺畅",
+        "挑战", "犹豫", "停顿", "紧张", "趣味", "有趣", "无聊", "单调", "成就",
+        "自由", "多样", "观感", "美观", "外观", "视觉", "好看", "形状", "造型",
+        "色彩", "简单", "容易", "复杂", "空旷", "空荡", "拥挤", "时间",
+    ),
+}
+
+_DESIGN_TOPIC_TERMS_EN = {
+    "entities": (
+        "level", "map", "layout", "water", "wall", "box", "boxes", "crate", "crates",
+        "target", "targets", "goal", "goals", "player", "start", "spawn", "floor", "ground",
+        "tile", "tiles", "cell", "cells", "grid", "obstacle", "obstacles",
+    ),
+    "topology": (
+        "space", "route", "routes", "path", "paths", "road", "roads", "corridor", "corridors",
+        "passage", "passages", "entrance", "exit", "fork", "branch", "turn", "corner",
+        "dead end", "area", "region", "boundary", "edge", "outline",
+    ),
+    "relations": (
+        "position", "distance", "spacing", "adjacent", "adjacency", "near", "nearby", "close",
+        "apart", "separate", "separation", "far", "cluster", "concentrated", "distribution",
+        "symmetry", "symmetric", "balance", "balanced", "density", "dense", "sparse",
+    ),
+    "mechanics": (
+        "push", "pushes", "push order", "move", "moves", "step", "steps", "solution",
+        "solvable", "solvability", "deadlock", "soft lock", "stuck", "escape", "return route",
+        "detour", "transport", "restart", "trial and error",
+    ),
+    "experience": (
+        "difficulty", "pacing", "rhythm", "choice", "experience", "gameplay", "play", "thinking",
+        "exploration", "judgment", "pressure", "readable", "readability", "clear", "clarity",
+        "intuitive", "natural", "fair", "smooth", "challenge", "hesitation", "pause", "tension",
+        "fun", "boring", "monotonous", "achievement", "freedom", "variety", "appearance",
+        "aesthetic", "visual", "shape", "color", "easy", "hard", "complex", "empty", "crowded",
+    ),
+}
+
+
+def _english_term_present(text, term):
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
+        text,
+        re.IGNORECASE,
+    ) is not None
+
+
+def _classify_explicit_design_stance(message):
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    lowered = text.casefold().replace("’", "'")
+    language = "zh-CN" if re.search(r"[\u3400-\u9fff]", text) else "en"
+    if not text or _user_explicitly_off_topic(text):
+        return DesignStanceClassification(False, language)
+
+    if language == "zh-CN":
+        rebuttal = re.search(
+            r"(?:我(?:不认同|不同意|反对)|在我看来并不是|对我来说并不是)",
+            text,
+        )
+        constraint = re.search(
+            r"(?:我(?:个人)?(?:希望|更希望|不希望|更不希望|想要|不想要|想让|不想让|"
+            r"更想要|更想让|不愿意)|我(?:宁愿|宁可))",
+            text,
+        )
+        preference = re.search(
+            r"(?:我(?:个人)?(?:喜欢|不喜欢|比较喜欢|更喜欢|会更喜欢|倾向(?:于)?|"
+            r"更倾向(?:于)?|偏向|在意|更在意|介意)|对我(?:来说|而言))",
+            text,
+        )
+        evaluation = re.search(
+            r"(?:我(?:个人|倒是|反而)?(?:认为|觉得|感觉)|我的看法是|在我看来|"
+            r"在我眼里|依我看)",
+            text,
+        )
+        topic_terms = _DESIGN_TOPIC_TERMS_ZH
+        reference = re.search(
+            r"(?:这样|这个|这种|这里|那里|当前|现在(?:这样)?|它们?|两者|这两个|那两个|"
+            r"刚才|原来|原先)",
+            text,
+        )
+    else:
+        rebuttal = re.search(
+            r"\b(?:i(?: personally)? (?:disagree|object)|i do not agree|i don't agree|"
+            r"in my view that is not|to me that is not)\b",
+            lowered,
+        )
+        constraint = re.search(
+            r"\b(?:i(?: personally)? (?:want|do not want|don't want|hope|do not hope|don't hope)|"
+            r"i would like|i would not like|i'd like|i'd not like|i would rather|i'd rather)\b",
+            lowered,
+        )
+        preference = re.search(
+            r"\b(?:i(?: personally)? (?:prefer|like|dislike|care about|favor)|"
+            r"i'd prefer|my preference is|i am inclined|i'm inclined|for me|to me)\b",
+            lowered,
+        )
+        evaluation = re.search(
+            r"\b(?:i(?: personally)? (?:think|feel|believe)|in my view|from my perspective|"
+            r"as i see it)\b",
+            lowered,
+        )
+        topic_terms = _DESIGN_TOPIC_TERMS_EN
+        reference = re.search(
+            r"\b(?:this|that|these|those|it|they|them|both|here|there|currently|right now|"
+            r"the current one|the previous one)\b",
+            lowered,
+        )
+
+    stance_kind = next(
+        (name for name, match in (
+            ("rebuttal", rebuttal),
+            ("constraint", constraint),
+            ("preference", preference),
+            ("evaluation", evaluation),
+        ) if match is not None),
+        "",
+    )
+    if not stance_kind:
+        return DesignStanceClassification(False, language)
+
+    topics = tuple(
+        topic
+        for topic, terms in topic_terms.items()
+        if any(
+            term in text if language == "zh-CN" else _english_term_present(lowered, term)
+            for term in terms
+        )
+    )
+    if re.search(r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+)(?![A-Za-z0-9])", text, re.IGNORECASE):
+        topics = tuple(dict.fromkeys((*topics, "entities")))
+
+    ambiguous_reference = not topics and (
+        reference is not None or stance_kind == "rebuttal"
+    )
+    return DesignStanceClassification(
+        bool(topics or ambiguous_reference),
+        language,
+        stance_kind,
+        topics,
+        ambiguous_reference,
+    )
+
+
 def _user_explicitly_states_design_stance(message):
     """Gate orange cards on an explicit current-turn design stance.
 
@@ -13213,59 +13387,7 @@ def _user_explicitly_states_design_stance(message):
     boundary: observations, requests for ideas, operations, and inferred
     behavioral evidence do not qualify on their own.
     """
-    text = re.sub(r"\s+", " ", str(message or "")).strip()
-    lowered = text.casefold()
-    if not text or _user_explicitly_off_topic(text):
-        return False
-
-    design_markers = (
-        "关卡", "地图", "布局", "空间", "水", "墙", "箱", "目标", "路线",
-        "通道", "推动", "推箱", "顺序", "难度", "节奏", "选择", "体验",
-        "玩家", "游玩", "玩法", "思考", "试错", "探索", "判断", "压力", "可读",
-        "绕行", "障碍", "外观", "视觉", "好看", "简单", "复杂",
-        "level", "map", "layout", "space", "water", "wall", "box", "crate",
-        "target", "route", "corridor", "push", "order", "difficulty", "pacing",
-        "choice", "experience", "readable", "detour", "obstacle", "visual",
-        "easy", "hard", "complex",
-    )
-    explicit_stance = any(marker in text for marker in (
-        "我认为", "我倒是认为", "我觉得", "我感觉", "在我看来", "我更在意", "我更希望",
-        "我希望", "我想要", "我想让", "我更想让", "我希望让", "我更希望让",
-        "我倾向于", "我更倾向于", "我喜欢", "我不喜欢",
-        "我宁愿", "对我来说", "我不认同", "我不同意", "我反而觉得",
-    )) or bool(re.search(
-        r"\b(?:i think|i feel|i believe|in my view|from my perspective|"
-        r"i prefer|i want|i would like|i care|to me|i like|i dislike|"
-        r"i disagree|i do not agree|i don't agree)\b",
-        lowered,
-    ))
-    direct_evaluation = bool(re.search(
-        r"(?:太|过于|比较|有点|还是)(?:简单|难|复杂|绕|空|挤|直白|单调)|"
-        r"(?:不好看|不合理|不够清楚|不够自然|缺少选择)|"
-        r"\b(?:too|not enough|still)\s+(?:easy|hard|difficult|complex|empty|"
-        r"crowded|direct|plain|clear|readable)\b",
-        lowered,
-        re.IGNORECASE,
-    ))
-    bare_rebuttal = any(marker in lowered for marker in (
-        "我不认同", "我不同意", "不是这样", "并不是", "恰恰相反",
-        "i disagree", "i do not agree", "i don't agree", "that is not right",
-        "that's not right", "on the contrary",
-    ))
-    contextual_preference = bool(re.search(
-        r"(?:我(?:更)?(?:喜欢|不喜欢|倾向于|更希望|宁愿)|我觉得(?:这样|这个|它)|"
-        r"\b(?:i prefer|i like|i dislike|i would rather|i think (?:this|that|it))\b)",
-        lowered,
-        re.IGNORECASE,
-    ))
-    return bool(
-        bare_rebuttal
-        or contextual_preference
-        or (
-            (explicit_stance or direct_evaluation)
-            and any(marker in lowered for marker in design_markers)
-        )
-    )
+    return _classify_explicit_design_stance(message).eligible
 
 
 def _legacy_unclear_revision_reply(language):
@@ -13368,7 +13490,7 @@ def _natural_intent_candidate(
                 "It sounds to me like you want to preserve meaningful judgment without making the route harder to read; that is only my current reading.",
                 "I read your preference as wanting difficulty to come from clear trade-offs rather than confusing resistance; please correct me if that misses the point.",
             )
-        return options[variant]
+        return _ensure_intent_card_sentence_shape(options[variant], language)
 
     if language == "zh-CN":
         if explicit_agreement:
@@ -13387,7 +13509,20 @@ def _natural_intent_candidate(
         )
     else:
         options = _semantic_intent_options(source, "en")
-    return options[variant]
+    return _ensure_intent_card_sentence_shape(options[variant], language)
+
+
+def _ensure_intent_card_sentence_shape(value, language):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    sentence_count = len([
+        part for part in re.split(r"(?<=[.!?。！？])\s*", text)
+        if part.strip()
+    ])
+    if sentence_count >= 2:
+        return text
+    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        return f"{text} 这只是我目前的理解，你可以直接纠正它。"
+    return f"{text} This is only my current reading, and you can correct it directly."
 
 
 def _replace_echoed_intent_hypothesis(hypothesis, latest_user, language):
@@ -13427,7 +13562,14 @@ def _intent_comparison_text(text, language):
 
 def _semantic_intent_options(source, language):
     value = str(source or "").casefold()
+    classification = _classify_explicit_design_stance(source)
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", str(source or "")):
+        if classification.ambiguous_reference:
+            return (
+                "我暂时理解为，你对当前呈现出的整体设计关系有一个明确偏好。具体在意的是布局观感还是实际玩法效果，目前仍然开放，你可以纠正我。",
+                "听起来你更偏向保留或调整现在这种整体感觉。因为指代还不具体，我不会替你绑定某个地图对象或修改方式。",
+                "我读到的是你对当前设计方向有所取舍。至于这个取舍落在空间、路线还是游玩体验上，我先保持为可修正的开放理解。",
+            )
         if re.search(
             r"(?:太空了?|空旷|空荡|显得空|过于空|比较空|别那么空|不要那么空|不那么空)",
             source,
@@ -13445,6 +13587,12 @@ def _semantic_intent_options(source, language):
                 f"听起来你希望{region}的空间分布更有内容；这可能是视觉上的不平衡，也可能关系到实际玩法，我暂时不替你确定是哪一种。",
                 f"我读到的倾向是，你想改善{region}的空旷感；我还需要确认重点是布局观感，还是玩家经过这里时的路线与推动体验。",
             )
+        if any(marker in source for marker in ("目标", "终点", "落点", "T1", "T2")):
+            return (
+                "我暂时理解为，你更在意目标点之间保持清楚、可区分的空间关系。它主要影响布局观感还是实际推箱路线，目前仍需要由你确认。",
+                "听起来你不希望目标区域的关系显得过于集中或含混。至于重点是视觉分布还是推进选择，我先不替你确定。",
+                "我读到的倾向是，你希望目标位置之间呈现更合适的关系。具体应该怎样影响路线和节奏，仍是可以纠正的部分。",
+            )
         if "水" in source and any(marker in source for marker in ("形", "改", "变", "水域")):
             return (
                 "我暂时理解的是，你想让水域真正重写玩家读路线和推进时机的方式，而不是只补一个局部缺口；如果我抓错重点，请纠正我。",
@@ -13457,23 +13605,71 @@ def _semantic_intent_options(source, language):
                 "听起来你更在意的是，墙应当让玩家在推进前读出不同路径的后果；这只是我当前的理解。",
                 "我读到的倾向是，你希望障碍承担选择压力，而不是单纯拉长路线；若重点不是这里，请改正我。",
             )
+        if "relations" in classification.topics or "topology" in classification.topics:
+            return (
+                "我暂时理解为，你对当前空间或路径关系有一个明确偏好。它更偏向视觉组织还是实际推进体验，我现在不替你下结论。",
+                "听起来你更在意各部分之间怎样形成清楚的空间关系。至于这种关系应当怎样改变游玩，仍然可以由你修正。",
+                "我读到的是你希望当前局部关系更符合自己的设计判断。它具体指向布局、路线还是两者兼顾，我先保持开放。",
+            )
+        if "mechanics" in classification.topics:
+            return (
+                "我暂时理解为，你更在意当前解法与推动机制呈现出的实际体验。具体需要保留或改变哪一种机制，仍然由你确认。",
+                "听起来你的判断重点落在玩家实际解题和推进的过程上。我不会把它直接解释成某一种地图修改。",
+                "我读到的是你对当前解法机制有一个可修正的倾向。它应当怎样影响难度或路线，我先不替你确定。",
+            )
+        if "experience" in classification.topics:
+            return (
+                "我暂时理解为，你更在意玩家实际感受到的设计体验。具体由哪一种布局或路线机制来实现，目前仍然开放。",
+                "听起来你对当前体验效果有一个明确偏好。我不会把这份偏好直接等同于某个具体改图方案。",
+                "我读到的是你希望当前关卡呈现不同的体验重点。这个重点怎样落到地图结构上，仍需要由你确认。",
+            )
         return (
             "我暂时理解的是，你希望这次局部改动真的改变玩家读路线和作决定的方式，而不只是调整某个格子；如果我抓错重点，请纠正我。",
             "听起来你更在意的是，下一步要能在游玩中感到明确差异，而不是停留在表面的布局变化；这只是我当前的理解。",
             "我读到的倾向是，你希望这项调整影响实际的推进选择；若重点不是这里，请改正我。",
         )
 
+    if classification.ambiguous_reference:
+        return (
+            "For now, I understand that you have a clear preference about the current overall design relationship. Whether it concerns appearance or actual play remains open for correction.",
+            "It sounds to me like you prefer keeping or changing the current overall feel. Because the reference is still broad, I will not bind it to a specific map object or edit.",
+            "I read a definite choice about the current design direction. Whether that choice concerns space, routes, or play experience is still deliberately unresolved.",
+        )
     if re.search(r"(?:too\s+empty|feels?\s+empty|sparse|vacant)", value):
         return (
             "For now, I understand that you want this area to feel less empty; I am not yet sure whether you mainly mean visual balance or an effect on routes and push rhythm.",
             "It sounds like you want more purpose in this open area, while the distinction between appearance and play remains open for correction.",
             "I read your preference as improving this area's emptiness, but I still need to confirm whether the priority is composition or the player's route and pushing experience.",
         )
+    if any(_english_term_present(value, term) for term in ("target", "targets", "goal", "goals")):
+        return (
+            "For now, I understand that you care about keeping the targets' spatial relationship clear and distinguishable. Whether the priority is visual distribution or the pushing route remains open for correction.",
+            "It sounds to me like you do not want the target area to feel overly concentrated or ambiguous. I am not yet deciding whether that preference is mainly visual or mechanical.",
+            "I read your preference as wanting a more suitable relationship between target positions. How that should affect route rhythm remains for you to confirm.",
+        )
     if "water" in value:
         return (
             "For now, I understand your direction as wanting water to reshape route reading and push timing, rather than merely change a local patch; please correct me if I have that wrong.",
             "It sounds to me like you want water to become a boundary that makes rerouting and pushing worth judging, not background decoration; that is only my current reading.",
             "I read your preference as wanting the water layout to change the choices around a box's passage, rather than only its visual shape; please correct me if that misses the point.",
+        )
+    if "relations" in classification.topics or "topology" in classification.topics:
+        return (
+            "For now, I understand that you have a clear preference about the current spatial or path relationship. I am not yet deciding whether its main purpose is visual organization or play.",
+            "It sounds to me like you care about how the parts form a readable spatial relationship. The intended gameplay consequence remains open for correction.",
+            "I read a preference for changing how this local relationship feels. Whether that means composition, route structure, or both is still unresolved.",
+        )
+    if "mechanics" in classification.topics:
+        return (
+            "For now, I understand that you care about the experience created by the current solution and pushing mechanism. The particular mechanism to preserve or change remains for you to confirm.",
+            "It sounds to me like your judgment concerns the actual solving and pushing process. I will not turn that directly into a specific map edit.",
+            "I read a correctable preference about the current solution mechanism. How it should affect difficulty or routes remains open.",
+        )
+    if "experience" in classification.topics:
+        return (
+            "For now, I understand that you care about the player's experienced design effect. The layout or route mechanism that should create it remains open for correction.",
+            "It sounds to me like you have a clear preference about the current experience. I will not equate that preference with a specific map revision.",
+            "I read a preference for a different experiential emphasis in the current level. How that should map onto structure remains for you to confirm.",
         )
     return (
         "For now, I understand your direction as wanting this local change to alter how the player reads the route and makes a decision, rather than merely changing a tile; please correct me if I have that wrong.",
@@ -15919,8 +16115,8 @@ def _intent_hypothesis_detail_issue(value, language):
         re.IGNORECASE,
     ):
         return "intentHypothesis turns behavioral evidence into certainty"
-    if sentence_count < 1 or sentence_count > 3:
-        return "intentHypothesis must contain one to three sentences"
+    if sentence_count < 2 or sentence_count > 4:
+        return "intentHypothesis must contain two to four sentences"
     if chinese:
         tentative = re.search(
             r"(?:\u6682\u65f6|\u542c\u8d77\u6765|\u6211\u8bfb\u5230|\u6211\u7406\u89e3|\u76ee\u524d|\u53ef\u80fd|\u50cf\u662f)",
