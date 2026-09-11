@@ -1,268 +1,122 @@
 # Sokoban 人机共创与在线挑战
 
-本仓库包含 Unity 2D Sokoban 客户端、8000 端口的匹配服务与研究 dashboard，以及 8010 端口的独立 LLM 共创工作台。当前原型把“与 LLM 共创地图”和“在 Unity 中游玩地图”分开：Unity 先生成并验证第一版地图，网页负责持续聊天、版本管理和可选试玩。
+本仓库包含 Unity 2D Sokoban 客户端、8000 端口的在线匹配与研究 Dashboard，以及独立的 8010 LLM 共创工作台。
 
-## 当前目标路由
+当前产品把“地图共创”和“Unity 游玩”分开：Unity 负责生成并验证首版地图，8010 网页负责聊天、版本管理、手工编辑、AI 提案和 Stage 试玩；最终确认后，Unity 再取得最终地图进入在线挑战。
+
+## 当前在线路线
 
 ```text
 Menu
-  → Questionnaire(Online1，可选择打开外部问卷或直接 Continue) → Online_Lobby → Match_Briefing → DG → DG_Level（生成并验证首版）
-  → CoCreation_Entry（上传首版并创建 8010 会话）
+  → Questionnaire(Online1)
+  → Online_Lobby
+  → Match_Briefing
+  → DG
+  → DG_Level（生成并验证首版）
+  → CoCreation_Entry
   → 8010 Co-Creation Lab
       → Stage 1 = Unity 首版 rows
-      → Stage 1 开场、连续聊天、手工编辑或 LLM 修改提案
-      → 每次明确保存/接受才创建不可覆盖的新 Stage
-      → 可选择任意已保存 Stage 并点击 Play
-          → 8000 WebGL → DG_Level 只读试玩（PC_Level 为保留路径，当前未启用）
-          → 通关动画与结果同步 → 自动返回同一 8010 会话
+      → 聊天、手工编辑、AI 提案和 Stage 试玩
       → 明确确认最终 Stage
       → 填写设计意图
-  → Unity 获得最终 rows
-  → Challenge_Waiting → Online_Level → Match_Result
-  → Questionnaire(Online2) → Menu
+  → Challenge_Waiting
+  → Online_Level
+  → Match_Result
+  → Questionnaire(Online2)
+  → Menu
 ```
 
-旧 `Competition_Mode`、`AI_Asistant_Mode` 以及 Competitive / Supportive 生成语义已经移除。匹配双方 Ready 后直接进入 DG 首版流程；PC 保留为暂未接入的实现资产。DG 当前询问四个中立的地图设计问题（首步检查、推箱依赖、空间分布、路线结构），前两题用于推断难度，后两题用于推断布局。AI 输出温暖的 AI reflection 以及难度/布局建议；四道答案只指导 8000 的首版生成，并在 Draft 研究节点中与 AI 推荐和用户最终确认一起保存，不会传入 8010 共创服务或其 LLM 上下文。
+Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都是每轮在线匹配的一部分。Tutorial 按钮打开浏览器 PDF：
+`http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。
 
-8010 共创服务、8000 中立匹配后端和包含 Stage Play 的 WebGL 部署通过 Nginx 暴露为 `http://111.231.136.4/cocreation/` 与 `http://111.231.136.4/game/`。8010 继续使用三栏 Pixel-adventure 工作台、五色引导卡、Stage 版本历史、试玩同步和最终意图流程；在线匹配会话提交最终意图后显示“返回 Unity 继续”按钮，由保留房间身份的原 Unity 标签页进入 `Challenge_Waiting`。8000 的两个 Agent 保持 `deepseek-v4-flash`；8010 的聊天助手和关卡修改助手、Stage 开场、翻译、Revision 与 Intent feedback review 流程统一使用 Kimi K2.6，不读取 8000 的 DeepSeek 环境变量，也不静默回退到 DeepSeek。当前 8010 前端缓存键为 `intent-conflict-20260911-1`。
+## 系统边界与当前实现
 
-正式 Unity 共创会话先显示语言选择页；用户点击“进入共创会话”后，所选中英文将锁定至本次会话，且从该时刻开始 20 分钟倒计时。直访问示例会话不创建 deadline、不倒计时，创建后同样锁定语言。截止后服务端锁定聊天、编辑、保存、恢复、试玩和提案；网页只保留最终 Stage 提交。该提交可携带当前可解的本地草稿，并原子保存为最终人工 Stage 后进入意图填写。
+- 公网入口为 `http://111.231.136.4/game/`、`http://111.231.136.4/frontend/` 和 `http://111.231.136.4/cocreation/`。用户访问时使用 Nginx 的 80 端口，不在公开链接中使用 `:8000` 或 `:8010`。
+- DG 使用四道中立地图设计问题：首步检查、推箱依赖、空间分布和路线结构。Q1–Q2 只用于 8000 的难度建议，Q3–Q4 只用于 8000 的布局建议；DG context 不会传入 8010 或其 LLM 上下文。
+- 8000 的两个 Agent 使用 `deepseek-v4-flash`；8010 的聊天助手、关卡修改助手、Stage 开场、翻译、Revision 和意图反馈审查使用 Kimi `kimi-k2.6`。8010 不读取或回退到 8000 的 DeepSeek 环境变量。
+- `Draft` 场景已退役。`PC`、`PC_Design` 和 `PC_Level` 仅作为历史实现资产保留，不在当前 Build Settings 或在线导航中。
+- 8010 正式 Unity 会话在首次浏览器访问后启动服务端 deadline，当前为 20 分钟。到期后聊天、编辑、保存、恢复、试玩和提案锁定，只保留最终 Stage 提交；提交时可将当前可解的本地草稿原子保存为最终 `human_edit` Stage。
+- 直接访问 `/cocreation/` 创建的是独立演示会话，不启动 deadline、不同步 8000，也不写入正式匹配记录。
 
-8010 当前采用“聊天助手理解与协商 → 关卡修改助手执行局部候选 → 后端确定性校验与求解”的双角色交接。模型只负责生成内容，后端统一清洗可见文本、校验当前 Stage 坐标和路线、累计 DesignContext，并在 Stage 1 开场最后幂等追加固定操作指引。Stage assessment 仍在后端归档，但不再渲染为可见评价卡；普通聊天不追加该固定收尾。普通聊天只产生正文或概念引导，紫卡动作才可能授权地图提案；所有提案仍需用户明确接受后才创建新 Stage。风险质疑必须有具体地图、求解器、试玩或用户目标证据，不能因为意见不同就自动质疑。
+## 8010 工作台规则
 
-## 共创规则
+- 一个会话始终只包含同一个关卡；`Stage 1`、`Stage 2` 及后续 Stage 都是该关卡的不可变版本，不是不同关卡或关卡 progression。
+- Stage 1 必须与 Unity DG 验证后的 rows 一致。手工编辑和 AI 提案都必须通过尺寸、符号、实体数量、外墙和 Sokoban 可解性校验。
+- 手工草稿只有保存为新 Stage 后才持久化。AI 提案先保存为待审查 proposal，只有用户明确接受并再次通过后端验证，才创建新 Stage。
+- Play 只针对已保存 Stage，不会修改地图、创建 Stage、确认最终版本或提交在线挑战。试玩会保存到对应 Stage 的 `play_attempts`。
+- 地图事实以当前 StageSnapshot 为唯一来源。服务器会重新校验当前坐标、实体、路线和可点击链接；历史 Stage、旧助手文本和用户错误坐标不能作为当前地图事实。
+- 普通聊天只返回经过校验的分析文本；proposal、disagreement、intent hypothesis 等内部字段经过服务端投影后才可供前端显示。研究者目标、实验条件和 8000 DG context 不进入 8010。
 
-- `Stage 1` 必须与 DG 在 Unity 中通过格式检查及 `LevelSolver` 验证后的 rows 完全一致。
-- 会话围绕同一个持续演化的关卡进行。聊天历史、版本、差异、评价、提案决定、试玩证据、最终版本和设计意图均持久化。
-- 手工修改只存在于浏览器草稿中，点击“保存为新 Stage”后才成为版本；历史 Stage 永不覆盖。
-- LLM 修改先以提案和差异预览呈现。提案必须相对基础 Stage 至少真实改变一个瓦片，且只有设计者接受并再次通过服务器求解与非空差异校验后才创建 Stage；零改动提案不能保存或接受。
-- LLM 的难度和体验判断是主观意见；服务器与 Unity 求解器结果才是确定性证据。
-- Play 只允许当前选中的已保存 Stage。未保存草稿、请求处理中或存在待决定提案时禁用。
-- Play 不会修改地图、创建 Stage、确认最终版本或提交在线挑战。
-- 最终确认后先收集设计者自然形成的意图；在此之前，集成接口不会向 Unity暴露最终 rows。
-- 英文/中文切换影响新 UI、错误信息和后续 LLM 回复；历史消息保留原始语言。
+## 8010 后端数据保留
 
-## 当前 DG 与保留的 PC 资产
+8010 使用独立 SQLite/WAL 数据库，默认路径为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`。数据库和 `.env` 不提交到 Git。正式 Unity 会话的历史记录不会因新会话创建而清理；独立演示会话只保留最新一轮。
 
-### 当前首版生成模式
+| 表 | 当前保留的数据 |
+| --- | --- |
+| `design_sessions` | 会话身份、demo 标记、匹配 ID/玩家编号、初稿方法、语言与锁定时间、deadline、当前/最终版本、状态和时间戳。访问、集成和 bootstrap token 只保存哈希，不保存明文 token。 |
+| `level_versions` | 每个不可变 Stage 的编号、`parent_version_id`、来源、完整地图 rows、摘要、diff、验证结果、实体绑定和该 Stage 的 `design_context_json` 快照。 |
+| `conversation_turns` | 用户与助手的完整消息、角色、序号、所属 Stage、语言、请求 ID，以及必要的模型尝试次数、延迟、引导信息和 proposal binding。 |
+| `turn_translations` | 已翻译的助手正文、翻译后的引导/提案摘要、语言、模型元数据和时间戳。 |
+| `llm_assessments` | 每个 Stage 的开场/评估归档及其关联助手 turn。Stage assessment 只作为后端记录，不渲染为独立评价卡。 |
+| `change_proposals` | AI 提案的基础 Stage、候选地图、摘要、真实 diff、确定性验证结果、状态、来源助手 turn 和决定时间。 |
+| `designer_decisions` | 用户对提案的接受/拒绝等决定、理由、关联 proposal/version、幂等键和时间。 |
+| `play_attempts` | 某个已保存 Stage 的试玩票据和状态，以及加载、首次移动、结束时间、耗时、移动数、推动数、重开数和求解基准。 |
+| `designer_intentions` | 最终 Stage 确认后的用户自报告意图、语言和提交时间；它不与 AI 的后台意图记忆混用。 |
+| `audit_events` | 会话生命周期、版本、问题、提案、决定、分歧、手工编辑、试玩证据、意图反馈、deadline 和集成同步等追加式审计事件。 |
+| `revision_challenges` | 针对 proposal 的结构化质疑状态、基础 Stage、来源 turn、当前理由 turn 和更新时间。 |
+| `challenge_reason_reviews` / `challenge_review_requests` | 质疑理由审查结果、状态、失败原因、尝试次数、幂等请求和可重试记录。 |
 
-- `DG_Level` 根据玩家描述获取 LLM 方案，通过模板生成和回退策略形成完整地图，并在 Unity 端验证。
-- DG 四道问题见 [Draft_question.md](Draft_question.md)，reflection 与 Draft 记录规范见 [Draft首版理解助手（8000）.md](Multi-Agent/Draft首版理解助手（8000）.md)。
-- 当前在线流程只启用 DG；PC/PC_Design/PC_Level 作为保留资产，不在 Build Settings 或导航中开放。
-- 首版验证成功后不要求玩家先通关；DG rows 与 `description_generation` 写入 `CoCreationDraftContext`，随后加载 `CoCreation_Entry`。
+`GET /api/sessions/{sessionId}` 返回的是服务端投影，包括 `versions`（含每个 Stage 的 `playAttempts`）、`progressContexts`、`turns`（含公开 `guidance` 和 `translations`）、`assessments`、`proposals`、`challengeReviewRecords` 和 `intention`。原始 DesignContext、内部审计字段、隐藏 token 和 prompt-only 字段不会直接公开。
 
-### Stage 试玩模式
+## 跨 Stage 数据与 DesignContext
 
-- 网页创建五分钟、一次性 Play Ticket，URL 只携带 attempt ID 与票据，不携带 rows。
-- 8000 WebGL 的 Menu 启动组件换取完整 rows、来源、语言、提交 token 和返回 URL，并立即从地址栏清除票据。
-- 当前 `description_generation` 加载 `DG_Level`；保留的 `partial_completion` 不在当前构建流程中调用。
-- 试玩上下文存在时，生成控制器停用；指定 rows 再经 Unity `LevelSolver(maxSearchStates=300000)` 后加载。
-- WASD 移动；`R` 重开地图，但累计移动、推动、重开和首次有效移动后的耗时不清零。
-- 通关后保留完成动画和淡出，提交 `completed` 指标后自动返回原 8010 会话；Unity 内不再提供主动提前返回按钮，浏览器返回、关闭或刷新按 `interrupted` 处理。
-- 试玩不会进入 `Challenge_Waiting`、`Match_Result` 或问卷。
+每个 Stage 是同一关卡的版本快照。新 Stage 通过 `parentVersionId` 连接父 Stage，保存父 Stage 的最新地图和 DesignContext 副本，再追加本次事件；父快照保持不变。历史 Stage 只读取自己的 lineage，不会看到后续 Stage 的回答、记忆、忽略/恢复状态或证据。
 
-## 8010 工作台
+每个 `level_versions.design_context_json` 快照可包含：
 
-8010 每轮先由后端确定唯一分支。普通非方案交流围绕当前 Stage 的布局、空间分布、路线关系、推箱节奏、设计取舍和可想象的游玩体验展开，不主动向用户追加问题；“你觉得怎么改”“给我一些思路”等仅请求观点的表达仍在这一分支。`TENTATIVE INTENT / 暂定意图` 只可能出现在普通分支，而且当前用户消息本身必须明确陈述个人判断、偏好或对 AI 判断的反驳；普通事实、操作行为、模型推测和对历史开放问题的回答都不会触发橙卡。
+- 用户目标 `userGoals` 和设计约束 `designConstraints`；
+- 已确认决定 `confirmedDecisions` 和被拒绝决定 `rejectedDecisions`；
+- 开放问题 `openQuestions`，包括 open、answered、ignored 等状态；
+- `activeDisagreement`、已处理证据 ID 和来源 Stage/turn；
+- 跨 Stage 继承的 `intentHypotheses`。
 
-输入框右侧的“方案 / Proposal”在发送前仍是可切换的 armed 状态；提交后若需要澄清，则由服务端切换为 active/locked，刷新页面也会恢复。明确的“帮我改”“你来改”“按这个思路改”等修改授权同样启动方案发现，无须先点按钮。活跃期间的后续回答全部追加到同一个 proposal topic，按钮保持开启样式且不可取消，聊天输入仍可回答最多三轮高价值澄清；信息充分时立即进入 `RevisionPlan → executionContract → candidate/search → validation` 并生成紫卡。紫卡成功或三问后的明确终止失败才会关闭并解锁 Proposal；可重试上游错误保留锁定与同一消息重试能力。方案流程、提案动作和结构化分歧期间都禁止生成橙卡。
+不同调用场景使用同一快照的不同投影：Chat 可读取完整语义快照；Revision 只读取 active 的 explicit/confirmed 目标、约束、决定、相关问题和执行 brief；手工编辑复核可读取带来源的完整投影。它们不会重新从跨 Stage 原始聊天猜测当前意图。
 
-### 8010 双向质疑状态机
+## 用户意图推测与证据
 
-完整流程为：用户表达需求 → 后端确定普通/方案分支 → 方案证据收敛 → `RevisionPlan` 与确定性验证 → `REVISION`，或由用户选择 `MANUAL EDIT`。方案信息不足时只在正文澄清，不显示橙卡；方向与对象一旦充分就停止提问并生成经验证的紫卡。紫卡仍只是待审查方案，不能直接执行地图变更。
+8010 会保留模型对用户设计方向的可纠正理解，但不会把推测当成事实：
 
-紫卡现在提供三个结构化动作：
+- `explicit` 只表示用户自己明确表达的目标或约束。
+- `confirmed` 只由用户确认、接受提案、接受折中或正式保留现状形成。
+- `inferred` / `tentative` 是 AI 的暂定假设，必须保持可纠正，不能直接成为地图执行的硬约束。
+- `intentHypotheses` 保存主题、陈述、状态、置信度、支持/反驳证据 ID、来源 Stage/turn、展示文本和反馈动作。历史假设会保留为 `rejected`、`superseded` 或 `legacy_unverified`，而不是被静默删除。
+- 意图证据会以 `intent_evidence_recorded` 追加到 `audit_events`。证据可来自用户表达、提案接受/拒绝、分歧解决、确定性手工 diff、Stage 恢复和试玩结果；单个行为证据本身不会自动等同于用户意图。
+- 橙色 TENTATIVE INTENT 卡只能通过专用反馈确认、修订或否定。冲突时保留新旧假设及其审计来源，待用户选择，不自动替换已确认倾向。
+- “设计倾向”只投影 confirmed hypothesis，并显示最多 12 条逐 Stage 的证据轨迹；pending、rejected、tentative 和未经确认的 inferred 内容不会进入 Revision 硬约束。
 
-- 自动收敛的紫卡在展示前已经完成 `RevisionPlan → 语义合同 → 候选/搜索 → 精确 executionBrief 冻结 → 结构与可解验证`。`execute_revision`（请助手生成这个方案）校验当前 Stage 和来源 turn 后只重放并再次求解这份冻结修改；通过后仍是待审查 proposal，只有用户接受才创建 `llm_accepted` Stage。
-- `challenge_revision`（质疑这个方案）：先保存可见用户 turn，首轮只返回普通正文，并以可纠正措辞给出一个机制层面的主猜测和一个保留体验层面的副猜测；首轮不产生新卡或地图提案。用户理由若不同于两个猜测，必须进入结构化分歧：立即认可时全程只显示一次蓝卡；暂不认可时进入时显示一次，后续普通气泡不重复，直到认可并转入 `choice_pending` 时再显示一次。`choice_pending` 的明确“是/否”分别以 AI 原方法或用户新理由为主，并进入全新的正式方案验证管线。
-- `alternative_revision`（换一个方案）：不执行、不返回 `proposedRows`，要求模型提出与原紫卡核心处理不同的概念 `proposalOffer`；有限重试仍不能区分时只返回说明。
+## 8010 与 8000 的数据边界
 
-蓝色 `LET'S DISCUSS` 只表示尚未解决的真实分歧，不再作为普通提问或普通解释的容器。新 turn 使用可选的 `guidance.disagreement`：
+8010 是完整共创记录的权威来源。正式会话只向 8000 同步必要的研究投影：首版 `first_stage`、已保存的人工/AI Stage、Stage opening/turn 以及最终 `final` 事件。最终事件中的 `coCreationDurationSeconds` 由 8010 服务端计算，当前范围为 0–1200 秒；对手游玩时长仍使用 8000 的 `result_submitted.durationSeconds`。
 
-```json
-{
-  "status": "active | resolved",
-  "subject": "ai_revision | human_edit | user_request",
-  "userPosition": "...",
-  "aiPosition": "...",
-  "coreDisagreement": "...",
-  "nextQuestion": "...",
-  "resolution": "user | ai | compromise | retain_current | null"
-}
-```
+Unity 的集成接口只有在会话完成后返回最终 rows 和用户最终自报告意图。8010 不把 DesignContext、intentHypotheses、完整聊天、研究者目标或实验条件发送给 8000 的 LLM 或 Unity 执行流程。
 
-可见蓝卡不再单独展示 `aiPosition`，只展示用户方向、详细分歧核心和下一问题；`coreDisagreement` 必须明确 AI 是否认同用户、具体原因、双方关注重点的差异和需要共同决定的取舍。`aiPosition` 继续保留用于历史与协议兼容。
+## 8010 API 分类
 
-active 分歧不能生成紫卡；普通问题留在正文。AI 接受用户、用户接受 AI 或双方折中后才重新形成紫卡；`retain_current` 只结束分歧且不创建版本；没有共识则持续更新蓝卡并保留当前地图。红色 `WARNING` 只说明有具体地图、求解器、试玩或目标冲突证据支持的风险，蓝卡说明双方到底在哪个决策上有分歧，因此两者可以连续出现。
+8010 API 按功能分为以下几类，具体请求模型和校验以 `CoCreationPrototype/Backend/app.py` 为准：
 
-AI 的主动质疑适用于直接请求和已保存的 `human_edit`，但只能基于具体箱子、目标、墙体、水域、路径、推箱顺序、可达区域、求解器指标、试玩证据或此前明确目标。方案不同、用户拒绝 AI 或用户采用手动编辑本身都不是质疑依据。手动编辑仍先确定性验证并创建 `human_edit` Stage；失败保留草稿且不调用质疑流程。成功后一次专用 Kimi 评审生成两条独立 assistant turn：第一条只观察当前 Stage 的布局、路线和设想游玩体验，第二条始终比较完整 verified diff、changed components、父子 Stage 求解指标、试玩证据、DesignContext 中明确/已确认的设计倾向与有界 Stage lineage。只有这些服务端证据支持具体冲突时，第二条才附带 `LET'S DISCUSS`；人工编辑评审不再生成 `WARNING`，也不得撤销或覆盖用户编辑。
+- 会话创建、浏览器访问、语言锁定和状态读取；
+- Stage 创建、恢复、评估和进度读取；
+- 普通聊天、翻译、问题反馈和意图假设反馈；
+- 提案决定、Revision challenge、理由审查和幂等重试；
+- Stage Play ticket、试玩启动、进度、完成和中断；
+- 最终 Stage 提交、最终意图和 Unity 集成读取；
+- `/health`、`/ready` 和独立演示会话入口。
 
-动作、分歧和手动编辑复核沿用 `audit_events`，记录 `card_action_requested`、三种卡片动作、`disagreement_started/updated/resolved` 和 `human_edit_reviewed`。`sourceTurnId` 必须引用当前 Stage 内带 `proposalOffer` 的 assistant turn，旧 turn 缺少 `disagreement` 时仍按旧 `followUpQuestion` 显示蓝卡。
-
-目录：
-
-```text
-CoCreationPrototype/
-├── Frontend/              # 独立 HTML/CSS/JS 三栏工作台
-└── Backend/               # FastAPI、Kimi K2.6 客户端、SQLite 与测试
-```
-
-前端视觉复用 8000 MatchMaking/Train dashboard 当前生效的 Pixel-adventure 设计语言：草绿色网格背景、木质 sticky topbar、米白石质面板、蓝紫标题板、硬边像素阴影、Consolas 标题与像素地图框。8010 所有可见文字以 700 粗体为基础，按钮和状态标签使用 800，页面标题保留 900。桌面仍为 Stage / 聊天 / 地图编辑器三栏；低于 1200px 收为两栏，低于 900px 为单栏，680px 下进一步缩小阴影、间距与瓦片。8010 保留独立 CSS，不在运行时引用 8000 文件。
-
-LLM 使用理性、亲切、以第一人称为主的朋友式共创策略，并明确避免机械复述、固定开头、客服话术及“回应—评价—提问”模板。普通设计回复不再主动提问，也不新增普通开放问题记录；回复长度不套固定模板，重点展开具体布局观察、路线推理、设计判断和设想游玩体验。Stage 1 的首条开场同样不提问，并会明确说明：LLM 只能协助小范围、可审查的改动、建议与思路梳理；大幅重做应先由设计者在右侧编辑器完成。历史开放问题仍可回答、忽略和恢复；蓝色 `LET'S DISCUSS / 一起聊聊` 只表示具体且尚未解决的结构化分歧。手动保存的 `human_edit` Stage 连续显示无卡片开场观察和始终可见的专项评审；只有已验证地图变化与明确/已确认倾向、求解指标或试玩证据构成具体冲突时，专项评审才生成单独的 `LET'S DISCUSS`，不会附带 `WARNING`，也不能为了制造互动强行质疑。普通聊天不得声称“改好了”或邀请试玩尚未生成的地图，已验证提案也必须等玩家明确接受才会成为新 Stage。整个共创会话始终只有一关，所有 Stage 都只是这同一关的保存版本；提示词与保存前规范化会拦截错误进度表述。
-
-本次 8010 Kimi 适配还规定：Stage 1 固定操作收尾由后端幂等追加，旧 Stage 1 在读取或同步时保守补齐且不改写数据库；Stage assessment 只在后端归档，不再显示评价卡。普通聊天只有在 Stage 1 开场之后才可消费合法 `designContextPatch`，未解决问题按来源 Stage、来源 turn 和更新时间累计；模型 patch 不能直接制造已确认决策。地图相关回复只在存在明确移动关系时生成路线文字和可点击 `coordinateLinks`，方位、邻接和实体并列描述不标箭头。
-
-蓝色与紫色卡片不会再把正文原句直接搬进去。紫卡使用短标题总结实际修改方向，并在下方独立展开预期的游玩影响和验证重点；蓝卡固定总结用户方向、包含完整比较思考的分歧核心和下一问题，不再单列 AI 观点。普通问题不生成新蓝卡。完整地图提案的模型阶段先编译 `RevisionPlan`，再由关卡修改助手返回局部操作候选；计划结构不合法或候选非法时使用安全的结构反馈重试，候选仍失败则调用生产中的确定性 `search_revision_plan()` 兜底。地图构造、结构校验和求解全部由后端完成，不再把失败地图交给模型重画。
-
-LLM 每轮还会接收初稿方法与当前 Stage 来源，避免把生成器产物误说成玩家亲手设计。DG 首版只把上游描述和参数选择归因给玩家，具体墙体、水域、箱子、目标和玩家位置均作为生成结果讨论；由于 8010 当前不保存具体参数值，LLM 不得猜测参数。保留的 PC 首版路径只把箱子起点、目标和整体草图约束视为玩家输入，不能询问玩家为何放置生成水域、某个内部墙或玩家出生点。玩家在工作台保存的手工修改可以依据确定性 diff 归因；接受 LLM 提案和恢复历史版本则分别表述为共同接受的方向和重新查看旧版本。这些规则同时作用于首轮和后续对话。完整地图提案还会逐格对照当前 Stage：后端拒绝空 diff，prompt 要求修改摘要只能陈述 rows 中实际发生的更改，保存提案和接受提案时各有一次独立校验。
-
-当玩家适合直接实践自己的想法时，LLM 可以简短提示使用右侧地图编辑器并保存为新 Stage，但不把手工编辑说成必选步骤。手工 Stage 保存前必须通过统一的尺寸、符号、玩家/箱子/目标数量、封闭外墙与 Sokoban 可解性校验：地图可以是不规则轮廓并在外围保留空白 void，但外部只能被连续的 `#` 墙阻断，水域 `@` 不能替代外墙。通过后，后端会相对父版本确定性识别外壳、水域、内部墙体、箱子位置、目标点、玩家位置及可用地面的变化；新 Stage 的回复先准确确认这些改动和可解状态，再由 LLM评价其设计影响并继续对话。
-
-对话以保存的 Stage 为边界：每条 turn 仍完整持久化并带有 `versionId`，但页面选择某个 Stage 时只显示该版本相关的对话，LLM 也只接收当前 Stage 的最近对话。唯一的关系型承接是已接受提案的 assistant turn：它不复制、不改写原记录，而通过 proposal/decision/version 关联同时显示为新 Stage 的第一条上下文。历史 Stage 的对话只读；返回当前 Stage 后才可继续发送，并恢复当前 Stage 自己的草稿或未完成请求。
-
-8010 的普通聊天、Stage 开场和翻译保持 120 秒后端预算；可能自动进入正式提案的消息使用 320 秒浏览器等待上限，正式提案后端总预算为 300 秒。所有 8010 LLM 任务统一使用 Moonshot `kimi-k2.6`、`temperature=0.6`、`max_completion_tokens` 与 `thinking.disabled`；RevisionPlan 和修改候选直接输出结构化 JSON，不允许隐藏思考耗尽输出预算。结构化请求优先使用严格 JSON schema，接口不支持时仅在同一 Kimi 请求内有限降级到 `json_object`，结构化失败再进行一次带校验原因的同模型修正。8010 不读取 8000 的 DeepSeek 环境变量。方案主题信息不足时，系统在当前 Stage 内最多提出三项高价值澄清；信息充分时立即进入受约束的 RevisionPlan、执行合同、候选操作和求解验证链路，任何失败都不会修改地图或退回通用 Stage 开场正文。
-
-后端使用独立 SQLite/WAL。默认数据库为 `CoCreationPrototype/Backend/data/cocreation.sqlite3`，`.env` 和数据库文件均被本目录 `.gitignore` 排除。
-完整地图修改采用“LLM 意图编译器 → RevisionPlan/语义合同 → 关卡修改助手候选 → 机制证据与确定性求解 → 精确 executionBrief 冻结 → 待审查提案”。用户明确坐标、实体、保留项和明确量化要求是硬约束；主观难度与节奏诉求是软目标，但必须有路线相关的推动区段、箱子交替、最少推动数或绕行等机制证据。`searchedStates` 仅为诊断，明确推动次数要求使用独立的 `minimumPushes`。语义计划可以不预先冻结格子，候选通过后才把真实 diff 写入非空 `requiredTransitions`；历史 executionBrief v1 无需迁移。候选签名和地图指纹跨模型重试去重，失败后可换一次语义实现，再进入最多 128 张地图、24 宽 beam、三层深度且受 56 秒阶段截止约束的确定性搜索。只有真实变化、硬约束满足、机制证据达标、结构合法且可解的候选才能显示紫卡；失败按上游、计划、合同、重复、不可解、硬指标、软证据和搜索耗尽分别说明，不再把本地验证失败称为上游拒绝。
-
-Revision Workflow V2 为每个授权修改建立稳定 workflow、来源 Turn 和有限的通用语义约束。模型候选、纠正规划、确定性搜索及最终执行回放使用同一合同：“重新分布”必须具有真实的来源与目标变化，“改动太少”只有在用户明确提出后才提高最小相关改动数，满足目标的单格方案仍被允许。紫卡展示目标、硬要求、软目标、保留项和冻结 diff。质疑假设、challenge 和理由审查均使用稳定 ID 与 canonical 状态保存，不再从可见文本或前端临时状态反推；辅助审查连续两次失败时保留唯一用户 Turn 和内部 `review_pending` 审计记录，并进入现有聊天错误重试，相同理由沿用消息幂等键且不会新增 Turn，只有实质不同的说明才生成新 Turn并替代旧审查。前端不再提供专用的“重试判断 / 补充说明 / 退出质疑”，质疑开始后通过普通输入继续解决；蓝色分歧卡正文与其他卡片统一为 12px。
-
-模型/传输错误（超时、连接失败、空响应、非法 JSON 等）第一次返回可重试错误，前端保留原消息幂等键并显示一次 Retry；Retry 再次失败后保存一条手动编辑/继续讨论的说明，不再继续提供 Retry。若模型已经生成有效 `RevisionPlan`，但确定性搜索找不到同时满足要求且可解的地图，系统将该结果作为已处理的业务结果返回：显示说明和风险提示，不自动放宽要求、不创建提案、不修改当前 Stage，也不显示 Retry。说明会明确邀请设计者亲自在右侧编辑器调整，或继续与 AI 商讨如何缩小、重新表述修改目标；只有新的明确授权和可行提案才会进入地图提案流程。合法计划在构造零候选时仍会执行一次内部结构修正；历史会话中已经存在的 `relaxationOffer` 仍按旧流程兼容读取和确认，但新失败请求不会创建新的放宽流程。
-
-生产 systemd 模板保存在 `CoCreationPrototype/Backend/sokoban-cocreation.service`，其中将写权限限制到独立数据目录，只读取 8010 自己的 `.env` 和安全配置，不加载 8000 的 DeepSeek 环境文件。
-
-本地启动：
-
-```powershell
-python -m pip install -r CoCreationPrototype/Backend/requirements.txt
-python CoCreationPrototype/Backend/app.py
-```
-
-访问 `http://127.0.0.1:8010/`。关键环境变量见 `CoCreationPrototype/Backend/.env.example`：
-
-- 8000 `Backend/.env`：`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`、`DEEPSEEK_BASE_URL`
-- 8010 `CoCreationPrototype/Backend/.env`：`COCREATION_LLM_PROVIDER=kimi`、`COCREATION_LLM_MODEL=kimi-k2.6`、`COCREATION_LLM_BASE_URL=https://api.moonshot.cn/v1`、`KIMI_API_KEY`（或显式 `COCREATION_LLM_API_KEY`）
-- 修改闭环开关：`COCREATION_DEMO_MODIFICATION_V2_MODE=off|shadow|enforce`（默认 `enforce`）与 `COCREATION_FORMAL_MODIFICATION_V2_MODE=off|shadow|enforce`（默认 `shadow`）
-- 8010 不得把 8000 的 DeepSeek 变量作为回退；缺少 Kimi key 时服务应报告配置错误
-- `COCREATION_PUBLIC_BASE_URL`
-- `COCREATION_WEBGL_BASE_URL`
-- `COCREATION_TOKEN_SECRET`
-- `COCREATION_DATABASE_PATH`
-- `COCREATION_ALLOWED_ORIGINS`
-
-### REVISION 卡片的最新方案限制
-
-同一个当前 Stage 中可以保留多条紫色 `REVISION` 建议，但只有按 `conversation_turns.sequence_number` 判定的最近一条有效 `proposalOffer` 可以执行、质疑或换方案。较早紫卡仍显示在对话历史中，但三个按钮禁用并提示仅最新方案可操作。普通 assistant 正文不会使紫卡失效；后端会再次校验 `sourceTurnId`，因此旧标签页或直接请求也不能绕过该限制。历史 Stage 仍只读，地图提案的接受/拒绝动作不受此规则影响。
-
-### 8010 固定地图事实、可信路线与回复展示（2026-09-04）
-
-每个 Stage 是不可变地图快照。服务器由该 Stage 的 rows、版本 ID 和实体绑定构造唯一 `StageSnapshot`；聊天、开场、方案、质疑、重新生成、路线恢复、翻译、修改助手和执行前检查只能依据这份快照。历史 Stage、旧助手回复、旧路线结论和用户的错误坐标都不能成为当前地图事实。实体身份不可信时，系统使用中性坐标描述，不将 B1/B2/T1/T2 用作路线或执行硬锚点。
-
-模型可以提供设计判断、路线体验解释和第一人称布局感受；位置、格子状态、实体坐标、路线端点和可点击链接则由服务器根据 `factRef` 与当前快照渲染并复核。没有服务器引用的当前地图断言会从可见正文移除。路线只在存在移动关系、端点可信且 BFS 可达时显示，位置、邻接或“靠近”关系不会被标注为路线。翻译不会收到地图快照；翻译完成后服务器仍会用原 Turn 的 StageSnapshot 重新验证正文和链接。
-
-地图相关聊天通常保持 2–4 段、约 6–10 句；只有用户明确讨论路线、推动关系或通道时才保留 1–2 段路线推演，普通空间与体验讨论不为了显得具体而强行加入坐标。普通聊天和路线讨论的可见正文只能来自通过当前 StageSnapshot 校验的 Kimi 回复；后端在既有 120 秒预算内最多自动尝试三次，仍无可靠正文时返回可重试错误并只保留用户 Turn，不生成或落库服务器兜底助手正文。服务器快照正文只保留给 Stage 开场等明确定义的专用流程。
-
-2026-09-04 已仅部署 8010 后端的 `app.py` 与 `llm_client.py`；部署前备份 SQLite、WAL 与 SHM，重启 `sokoban-cocreation` 后内网和公网 `/cocreation/health` 均返回 `{"status":"ok"}`。本轮回归为 341 个 8010 Python 测试，并通过 `node --check CoCreationPrototype/Frontend/app.js` 和 `git diff --check`。
-
-2026-09-06 已部署普通聊天 Kimi-only 修复：普通聊天与路线讨论最多进行三次模型尝试，跨分句实体坐标不再错误绑定，三次均无可靠正文时返回可重试错误且不保存助手 Turn。部署前通过 SQLite backup API 生成独立备份，仅更新 8010 的两个后端与两个前端运行文件；390 个 8010 Python 测试、前端语法检查和差异检查均通过，未构建 WebGL。
-
-2026-09-06 已部署“方案 / Proposal”按钮及方案质疑讨论状态机：`requestProposal` 模式随审计、刷新恢复和幂等重试保存；不同于两个暂定猜测的新理由按 `reason_review → choice_pending` 转换，并由 `displayCard` 将合理分支限制为一次蓝卡、不合理后转合理分支限制为两次。部署前使用 SQLite backup API 备份生产库，仅更新 8010 的四个后端和三个前端运行文件；396 个 8010 Python 测试、`node --check` 与 `git diff --check` 均通过，公网真实 API 验证普通发送仍为无卡 Kimi 正文、同文案的方案请求进入 Kimi 澄清流程，未构建 WebGL。
-
-2026-09-07 已部署可交互 Intent-memory：共创进度改为“已表达方向 / 设计倾向”两栏，confirmed 倾向带逐 Stage 的“为什么我会这样理解”审计证据；橙卡支持确认、否定和卡内修订，冲突/不清楚时保持同一 hypothesis ID 并进入 adjust-only 循环。发布前通过 SQLite backup API 生成 `cocreation-intent-memory-20260907T0920Z.sqlite3`，仅上传 8010 的四个后端和三个前端运行文件；411 个 Python 测试、前端语法与差异检查通过，公网真实 Kimi 对话成功生成 actionable 橙卡并通过专用接口否定为 rejected。未修改 8000，未构建或上传 WebGL。
-
-2026-09-07 已部署共创问题追踪与 Intent 内容改写：共创进度左栏改为“未解决问题 / 已作答”，橙卡文本明确排除，历史 Stage 保持当时的问题状态；设计倾向证据严格限制为已表达方向、已确认决策和手动修改观察，并由独立 Kimi 任务生成可回退、可审计的展示摘要。发布前通过 SQLite backup API 生成 `cocreation-question-memory-final-20260907T105548Z.sqlite3`，仅上传 8010 的四个后端和三个前端运行文件；417 个 Python 测试、前端语法、Python 编译及差异检查通过。公网真实流程验证了问题记录、详细橙卡确认、explicit 兼容投影，以及保存后手动修改观察的 Kimi 详细文案和摘要。未修改 8000，未构建或上传 WebGL。
-
-2026-09-08 已部署橙卡详细表达与问题忽略机制：附带橙卡的正文和卡内暂定意图均保留证据、体验影响与可纠正边界；共创进度将已作答和已忽略问题统一归入“已处理”，当前问题可用“忽略”移出上下文，并用“恢复”重新打开。发布前通过 SQLite backup API 生成 `cocreation-intent-question-actions-20260908T120100Z.sqlite3`，仅更新 8010 后端和前端运行文件；425 个 Python 测试、前端语法、Python 编译及差异检查通过。未修改 8000，未构建或上传 WebGL。
-
-2026-09-11 已部署暂定意图冲突双卡选择流程：新橙卡生成时立即复核已确认倾向，冲突回复先说明具体矛盾，再同时展示当前新意图与最近确认的冲突旧意图，两张卡均只提供“保留这个”；选择结果以 confirmed/superseded 或 confirmed/rejected 原子落库并保留审计证据，待选择期间只锁定聊天输入、发送和方案入口。发布前生成 `cocreation.sqlite3.backup-intent-conflict-20260911T073716Z`，仅上传 8010 的三个后端与三个前端运行文件；477 个 Python 测试、前端语法、Python 编译及差异检查通过，公网健康接口与缓存键 `intent-conflict-20260911-1` 验证正常。未修改 8000，未构建或上传 WebGL。
-
-2026-09-09 已部署 Stage 开场与会话语言入口调整：开场通常以三个段落观察空间结构、首推依赖/路线节奏和主观难度，Stage 1 的固定操作说明独立保留为结尾段；语言改为会话创建页的默认中文锁定选择，确认后才开启 20 分钟正式会话计时。发布前通过 SQLite backup API 生成 `cocreation-language-entry-20260909T003000Z.sqlite3`，仅更新 8010 的三个后端与三个前端运行文件；会话、LLM、前端和其余 8010 回归均通过，公网 `/cocreation/health` 及新版前端资源已验证。未修改 8000，未构建或上传 WebGL。
-
-2026-09-09 已部署中文可见文本语言门禁：求解器与路线证据在中文任务中改为中文语义标签；新回复、卡片、评估和翻译在入库前会拒绝非许可英文，历史助手内容则在读取时兼容替换，不改写研究记录。发布前通过 SQLite backup API 生成独立备份，仅更新 8010 后端运行文件；8010 Python 回归、Python 编译及差异检查通过，未修改 8000，未构建或上传 WebGL。
-
-2026-09-09 已部署质疑交互精简与蓝卡字号统一：前端移除专用“重试判断 / 补充说明 / 退出质疑”及恢复状态条，判断失败改用现有聊天错误重试并沿用原消息幂等键；专用重试接口无副作用退役，旧退出参数明确拒绝，canonical challenge、review 和审计记录继续保留。蓝色分歧卡正文由 14px 统一为 12px。发布前通过 SQLite backup API 生成 `cocreation-pre-challenge-streamline-20260909T071842Z.sqlite3`，442 个 8010 Python 测试、Python 编译、前端语法及差异检查通过；仅更新 8010 运行文件，内外网 health 和缓存键均已验证。未修改 8000，未构建或上传 WebGL。
-
-2026-09-09 已部署普通/方案双分支与橙卡隔离：普通回复不主动提问或新增普通开放问题，橙卡只接受当前用户明确判断、偏好或反驳；明确修改与 Proposal 按钮进入服务端持久化的方案发现状态，澄清期间按钮锁定，紫卡或明确终止后解锁，可重试错误保持同一 topic 与消息幂等键。发布前生成 SQLite 备份 `cocreation_before_dual_branch_20260909_1610.sqlite3`，447 个 8010 Python 测试、Python 编译、前端语法及差异检查通过；仅上传有差异的三个后端和两个前端运行文件并重启 `sokoban-cocreation`。公网真实 Kimi 流程验证了普通回复无追问、连续方案回答无橙卡、可重试错误保持 locked，以及充分方向直接返回紫卡并解锁。未修改 8000，未构建或上传 WebGL。
-
-## 8010 API
-
-```text
-POST  /api/sessions
-POST  /api/demo-sessions
-POST  /api/sessions/{sessionId}/browser-access
-GET   /api/sessions/{sessionId}
-PATCH /api/sessions/{sessionId}/language
-
-POST  /api/sessions/{sessionId}/versions
-POST  /api/sessions/{sessionId}/versions/{versionId}/restore
-POST  /api/sessions/{sessionId}/versions/{versionId}/assessments
-POST  /api/sessions/{sessionId}/messages
-POST  /api/sessions/{sessionId}/intent-hypotheses/{hypothesisId}/feedback
-POST  /api/sessions/{sessionId}/proposals/{proposalId}/decision
-
-POST  /api/sessions/{sessionId}/versions/{versionId}/play-attempts
-POST  /api/play-attempts/{attemptId}/bootstrap
-POST  /api/play-attempts/{attemptId}/start
-POST  /api/play-attempts/{attemptId}/progress
-POST  /api/play-attempts/{attemptId}/complete
-POST  /api/play-attempts/{attemptId}/abandon
-
-POST  /api/sessions/{sessionId}/finalize
-POST  /api/sessions/{sessionId}/intention
-GET   /api/integrations/sessions/{sessionId}
-```
-
-浏览器会话使用 HttpOnly cookie；Unity 创建会话后持有只读集成 token。Play Ticket 只能换取一次地图，随后使用仅限该 attempt 的 token 提交指标。Stage 保存、恢复、消息、提案决定和 Play 创建均使用幂等键；同一消息键若改换内容或 Stage 返回 `409 IDEMPOTENCY_CONFLICT`，基于过期 Stage 的新写入返回 `409 VERSION_CONFLICT`。会话中的 assistant turn 可额外返回 `guidance`，记录本轮引导动作、暂定意图、`proposalOffer`、可选 `disagreement` 和至多两个 `manual_edit` / `warning` UI cues；新 turn 只有 active `disagreement` 显示蓝卡，历史 `tradeoff` cue 继续兼容读取并按红色警告展示。
-
-## 8000 在线匹配
-
-8000 后端继续提供匿名两人房间、Ready、挑战交换、结果提交、问卷和 dashboard。房间位于单进程内存中，使用六位房间码、一秒轮询和 30 分钟惰性清理。
-
-Online1 是问卷星中的双语匹配前筛选问卷：收集性别、年龄区间、既往推箱子经验及是否与另一组两位参与者均为陌生关系；隐藏的第 5 题 `studySessionId` 由 Unity 以 `q5` 参数写入。Online2 是独立的 21 题双语赛后问卷，隐藏的第 22 题 `studySessionId` 由 Unity 以 `q22` 参数写入。
-
-Online Lobby 的生成房间码显示在静态浏览器只读输入框中，可以选中后手动复制；加入房间输入框支持粘贴并规范化为六位字母数字码。两个输入框通过 WebGL 模板与 `BrowserNavigation.jslib` 同步到 Unity，不再提供 `COPY CODE` 按钮。
-
-WebGL 页面底部的 `DATA DASHBOARD` 按钮会先在游戏页面内显示 Dashboard 访问密码框，密码通过 8000 的校验接口后才打开 Dashboard；取消或校验失败不会跳转。Dashboard 内的删除操作仍单独使用同一密码校验。
-
-在线共创研究记录按 `matchId` 分为 Player 1 和 Player 2 两条追加式 JSONL 流程。只有从 `Menu` 在线入口启动的玩家在 8010 成功产生 `first_stage` 后才正式落盘：DG 确认初稿设置时，Draft 只暂存在当前房间内存中，不写流程 JSONL；收到 `first_stage` 后才按 Draft → First Stage 顺序追加。未从 Menu 启动的玩家不会写入匹配生命周期、Draft、Stage、Message 或 Final 记录；其 8010 同步会成功返回但被 8000 直接丢弃，以免中断共创网页。Dashboard 默认只显示至少一位玩家同时具有 Menu 起点标记与 `first_stage` 的比赛；旧记录缺少该标记时不会显示。达到门槛但尚未完整结束的比赛仍显示实际的 `In progress`、`Expired` 或 `Cancelled` 状态，只有两位玩家都提交结果才标记为 `Completed`。Draft 节点保存四道中立题的内部答案、AI reflection、难度/布局理由、AI 推荐值、推荐来源及用户最终 `finalDifficulty` 与 `finalLayout`。后续可见节点为 `first_stage`、`stage`、`turn`、`final` 与 `message`；每个 Stage 的自动 AI 首评以内部 `opening` 记录追加保存，不另占时间线节点。Dashboard 会把未被后续首轮问答使用的首评附在对应 Stage；若紧接着出现该 Stage 的首轮主动问答，则合并展示为“AI 首评 → 玩家消息 → AI 回复”，避免重复呈现同一首评。
-
-8010 的 `final` 事件会记录 `coCreationDurationSeconds`，定义为确认会话语言并进入工作台到确认最终 Stage 的耗时，按服务器二十分钟期限计算并限制在 0–1200 秒；设计意图填写不计入。对手游玩 Final Stage 时按 `R` 重开的次数通过 8000 结果字段 `restartCount` 记录，在 Challenge maps、Compare player challenges 和 Final map 的 `Opponent restarts` 中展示；网络重试、重新进入场景和问卷重填不计入，旧结果缺少字段时显示 `-`。对手游玩时长仍来自 8000 `result_submitted.durationSeconds`，只在 Result submitted 和挑战地图详情中展示。Dashboard 的 Match ID 和两位玩家 `studySessionId` 默认显示前 8 位，旁边的复制按钮复制完整值，搜索支持完整值与短值。
-
-### 8010 跨 Stage DesignContext
-
-地图版本通过 `parentVersionId` 和 `diff` 继承同一个关卡的结构演化；现在每个 `level_versions` 还保存可空的 `design_context_json` 快照。快照记录用户目标、设计约束、确认过的决策、拒绝过的方案、开放问题和 active disagreement，包含来源 Stage/turn，不新增数据库表。旧数据库启动时自动迁移并按 Stage 顺序保守回填，回填不调用模型，也不把 AI 普通正文当成用户意图。
-
-DesignContext 的 authority 分为三层：`explicit` 是用户自己说出的目标或约束，`confirmed` 只能由用户确认/接受提案/接受折中/正式保留现状形成，`inferred` 只是 AI 可纠正的暂时理解。旧内容不会删除，用户修正时标记 `superseded` 或 `rejected` 并保留来源；inferred 不能覆盖更高权限内容，也不能单独驱动地图执行。最终 `designer_intentions` 仍是最终提交时的自报告，不与该后台记忆混用。
-
-新 Stage（接受提案、手动保存、restore）复制父 Stage 的最新快照后再记录本次事件。接受提案追加 `confirmedDecision`，拒绝提案追加 `rejectedDecision`；手动编辑只继承语义记忆，地图 diff 本身不被自动解释为用户目标。Chat 读取完整语义快照，Revision 只接收 active explicit/confirmed 目标、约束、确认/拒绝决策、相关开放问题和执行 brief，Evaluator/手动编辑复核读取带来源的完整投影；三者不重新从跨 Stage 原始聊天猜测意图，且 8010 永不接收 8000 DG context、研究者目标或实验条件。
-
-普通聊天可返回内部 `designContextPatch`，服务端负责校验和合并；非法 patch 只写失败审计，不阻塞可见对话。该字段被前端隐藏，不增加卡片或颜色。既有 REVISION、MANUAL EDIT、WARNING、LET'S DISCUSS、TENTATIVE INTENT 和最新紫卡唯一可操作限制保持不变。
-
-DesignContext schema v2 在不新增业务表的前提下增加可追踪的 Intent-memory：对话、提案接受/拒绝、分歧状态、已保存手动编辑和试玩结果先以 `intent_evidence_recorded` 写入 `audit_events`，它们只是行为观察，绝不自动等同于用户意图。当前 lineage 中尚未处理的证据只在下一次普通聊天中提供给 Kimi；若回复形成可纠正的 `intentHypothesis`，服务端为它分配稳定 ID、关联相关证据并保存进当前 Stage 的 `intentHypotheses` 快照。单一行为证据只能产生低置信暂定假设，不同类型证据可把它提高到中等置信，未经用户明确确认永远不能成为 confirmed 或 Revision 硬约束。
-
-模型提供的 `evidenceText` 不再有权把目标或约束升级为 `explicit`；explicit 只从用户自己的陈述性设计子句中确定性提取，问题、假设、引用和路线求助不进入明确意图。v1 快照启动时确定性迁移到 v2，旧 inferred 仅作为 `legacy_unverified` 暂定假设保留，不调用模型、不从历史助手正文或地图 diff 补造意图。指令式记忆文本会被隔离，最终 `designer_intentions` 仍保持独立自报告。
-
-新版“共创进度”按 Stage 快照展示两栏：`未解决问题`只新增 Proposal 方案发现中最多三轮的澄清问题，以及质疑流程中实际展示并等待用户回应的问题；普通非方案回复不再新增开放问题。方案回答和 `continue_challenge` 回答均会把对应问题移入“已处理”，明确的质疑“是/否”使用确定性结果完成问题。正文、`followUpQuestion` 与 `disagreement.nextQuestion` 中仅标点、引号或“请回答是或否”等提示语不同的同一问题会保留最早 ID 并合并为一条，启动时也会幂等修复历史重复记录。独立 Kimi 语义审查仍可把其他自由文本回答标记为已回答，用户也可确定性“忽略”并在“已处理”区恢复，忽略/恢复均不调用 LLM、不创建对话 Turn。橙色 TENTATIVE INTENT 卡中的问题不进入问题记录。`设计倾向`只投影用户通过橙卡确认或修订后的 confirmed hypothesis，橙卡原文保留为 canonical 记录，展示主体可由 Kimi 概括改写。每条倾向的“为什么我会这样理解”最多显示最近 12 条逐 Stage 证据，并严格限于用户明确表达、已确认方案/分歧决策和确定性手动修改观察。查看历史 Stage 时不泄漏后续回答、忽略、恢复、记忆或证据；旧 API 字段继续保留兼容。
-
-普通对话附带 TENTATIVE INTENT 时，具体依据和玩法分析留在正文；橙卡本身只用 1–3 句自然、简洁的第一人称理解表达一个当前倾向和必要的不确定边界，不再要求最低字数或机械重复证据、玩法后果与纠正邀请。服务端仍校验单一倾向、暂定语气、不得把行为写成确定意图以及不得包含错误地图事实。仅有“不好看”等视觉反馈时，不会擅自确定用户更重视玩法，而会保留外观与游玩效果之间的歧义。
-
-橙卡只出现在普通非方案对话中，并复用紫卡的 busy/失效状态。普通橙卡的 `符合我的想法`、`不是我的意思`、`我想调整一下`必须通过专用 feedback 接口操作；聊天框里的“对/不是”不再隐式改变状态。否定立即落为 rejected 且不调用 Kimi；无既有倾向时确认可直接生效。新橙卡生成时若已有 confirmed 倾向，独立 `intent_feedback_review` 会在同一普通消息预算内预检兼容性，而且永远不能自动替代旧倾向。若冲突，助手正文先具体比较新旧方向，再同时显示当前新意图与最近确认的冲突旧意图；两张卡都只有 `保留这个`，选择新意图会确认新意图并 supersede 展示的旧意图，选择旧意图会保持旧意图 confirmed 并 reject 新意图，其他历史倾向不变。待选择期间聊天输入、发送与方案入口锁定；若 Stage 因其他操作切换，旧 Stage 的冲突卡转为历史只读。语义不清楚仍保留同一 hypothesis ID 的 adjust-only 澄清流程。pending、rejected 与 tentative 都不进入 Revision 硬约束。
-
-挑战提交当前只包含地图 rows 和兼容用的初稿模式字段：
-
-```json
-{
-  "rows": ["..."],
-  "aiAssistantMode": "description_generation"
-}
-```
-
-`aiAssistantMode` 仅为旧接口兼容字段，不在 dashboard 作为用户可见模式展示；当前在线路线固定为 `description_generation`。旧客户端多传的 `competitionMode` 或关系/体验字段被兼容忽略，不验证、不存储、不返回。历史 JSONL 原件保留，但新事件和派生 dashboard 不暴露这些字段。
+浏览器使用 HttpOnly cookie；Unity 创建正式会话后持有只读 integration token。Stage 保存、恢复、消息、提案决定和 Play 创建均使用幂等键；过期 Stage 写入返回版本冲突，改换同一消息键内容返回幂等冲突。
 
 ## Build Settings
 
-当前启用的共创与在线匹配场景：
+当前在线路线启用的 Unity 场景：
 
 ```text
 Assets/Scenes/Menu.unity
@@ -278,7 +132,11 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online1).unity
 Assets/Scenes/Matchmaking/Online/Questionnaire(Online2).unity
 ```
 
-`PC.unity`、`PC_Design.unity` 和 `PC_Level.unity` 仍作为禁用的历史实现资产保留，不属于当前 Build Settings 或在线导航。
+## 演示模式
+
+直接访问 `/cocreation/` 时，页面显示“创建示例会话”。8010 后端生成 `algorithm_demo` 的 10×12、两箱、两目标可解地图并开始 Stage 1 开场。演示数据只写入 8010，不创建正式 deadline、不同步 8000，也不记录正式匹配的 `coCreationDurationSeconds`。
+
+创建新的演示会话成功后，只清理上一轮演示会话及其关联的聊天、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。如果新地图或新会话创建失败，上一轮演示记录保持不变。
 
 ## 验证
 
@@ -289,32 +147,6 @@ node --check CoCreationPrototype/Frontend/app.js
 dotnet build Assembly-CSharp.csproj -v:minimal
 ```
 
-## Tutorial PDF
+完整手动回归应使用 Unity `2022.3.62f2c1`，覆盖：Stage 1 rows 一致性、连续创建和恢复多个 Stage、最新/历史 Stage 试玩、完成/中断指标、意图确认、最终 rows 返回 Unity，以及在线挑战和两次问卷。
 
-Menu 的 `Tutorial` 按钮会打开 `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。双语 PDF 由现有 8000 `/frontend/` 静态路由提供，并在浏览器的 PDF 查看器中打开，不会离开当前 Unity Menu 页面。
-
-完整手动回归应使用 Unity `2022.3.62f2c1`，按当前 DG 在线路线执行：
-
-1. 生成首版后进入 `CoCreation_Entry`，确认 8010 Stage 1 rows 完全一致。
-2. 连续创建至少三个 Stage，检查聊天、差异、历史恢复及会话创建前的中英文选择。
-3. 试玩最新与历史 Stage，确认进入 `DG_Level` 且没有重新调用生成接口。
-4. 覆盖通关自动返回、`R` 重开、完成提交重试和浏览器异常中断，确认指标累计且 Stage 数量不变。
-5. 最终确认后填写意图；确认完成卡仅在在线匹配会话显示“返回 Unity 继续”，点击后聚焦原 Unity 标签页并关闭 8010 标签页，Unity 只在意图提交之后获得最终 rows 并进入 `Challenge_Waiting`。
-6. 双端继续完成挑战交换、`Online_Level`、`Match_Result` 和在线问卷。
-
-如需单独回归保留的 PC 路径，必须先在 Unity Build Settings 中重新启用相应场景；这不属于当前在线研究路线。
-
-部署 8010-only 变更时先备份 SQLite，再只上传变更的 `CoCreationPrototype` 文件并重启独立服务；不构建或上传 WebGL。只有用户提供或明确要求 WebGL 更新时，才按指定 Unity 版本构建、更新缓存键并上传。不要把 `.env`、API Key、SQLite、研究日志或 `WebGLBuild/` 提交到 Git。
-
-## 8010 直访问单次测试模式
-
-直接访问 `/cocreation/` 时，页面只显示“创建示例会话” landing，不读取旧的
-`localStorage` 会话，也不会请求上一轮会话、对话、Stage 或地图记录。点击按钮后立即显示
-“正在使用算法创建示例地图……”，再由 8010 后端参考 Unity `Algorithm_Level` 的结构模板、
-墙体/水域布局和反向拉箱流程生成 10×12、两箱、两目标的可解地图，然后自动开始首段开场；assessment 仍会在后端归档，但不显示评价卡。
-刷新当前演示会话 URL 可以继续当前测试；演示完成后不显示“返回 Unity 继续”。
-演示数据只写入 8010，不调用 8000 同步接口，不启动二十分钟 deadline，也不记录正式匹配的
-`coCreationDurationSeconds`。每次新演示会话在新地图验证和新会话创建成功后，清理上一轮
-演示会话及其关联的对话、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。若地图
-生成或会话创建失败，上一轮演示记录保持不变。前端静态资源缓存键为
-`cocreation-kimi-20260904-1`。
+8010-only 部署应先备份 SQLite，再只上传变更的 `CoCreationPrototype` 文件并重启独立服务；不要构建或上传 WebGL。WebGL 只有在用户提供或明确要求构建时才更新。不要把 `.env`、API Key、SQLite、研究日志、Unity 缓存或 `WebGLBuild/` 提交到 Git。部署细节见 [SERVER.md](SERVER.md)。
