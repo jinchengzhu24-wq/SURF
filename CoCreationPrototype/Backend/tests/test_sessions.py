@@ -4349,7 +4349,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual([card["type"] for card in cards], ["warning", "discussion"])
         self.assertEqual(cards[-1]["disagreement"], disagreement)
 
-    def test_manual_edit_warning_gets_discussion_without_replacing_stage(self):
+    def test_manual_edit_gets_separate_review_and_discussion_without_warning(self):
         version_id = self.read_session()["currentVersionId"]
         saved = self.client.post(
             f"/api/sessions/{self.session_id}/versions",
@@ -4362,8 +4362,32 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(saved.status_code, 200, saved.text)
         stage_id = saved.json()["currentVersionId"]
+        review = LLMExecutionResult(
+            "Compared with the earlier Stage, this edit increases commitment around the box route.",
+            1,
+            "manual-risk-review-001:manual-review",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "disagreement": {
+                    "status": "active",
+                    "subject": "human_edit",
+                    "userPosition": "Keep the tighter route to increase deliberation.",
+                    "aiPosition": "The verified edit reduces the box's recovery space.",
+                    "coreDisagreement": "Whether the extra deliberation is worth the reduced recovery space.",
+                    "nextQuestion": "Which effect should this Stage preserve?",
+                    "resolution": None,
+                },
+                "discussionCardMode": "disagreement_only",
+            },
+        )
         execution = LLMExecutionResult(
-            "I notice the change may close the box's escape route.",
+            "I notice the saved Stage has a tighter opening route and a more deliberate push rhythm.",
             1,
             "manual-risk-review-001",
             model="mock-model",
@@ -4371,7 +4395,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "solutionSummary": "The map remains solvable.",
                 "difficultyOpinion": "In my view, the opening is tighter.",
                 "features": ["Changed player start"],
-                "suggestions": ["Discuss the first route"],
+                "suggestions": ["Review the first route"],
                 "satisfactionQuestion": None,
             },
             guidance={
@@ -4380,11 +4404,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": None,
                 "proposalOffer": None,
-                "uiCues": [{
-                    "type": "warning",
-                    "text": "The moved player can close the box's only escape route beside the wall.",
-                }],
+                "uiCues": [],
             },
+            secondary_execution=review,
         )
         with patch.object(backend, "generate_stage_assessment", return_value=execution):
             assessed = self.client.post(
@@ -4392,12 +4414,17 @@ class CoCreationSessionTests(unittest.TestCase):
                 json={"idempotencyKey": "manual-risk-assessment-001"},
             )
         self.assertEqual(assessed.status_code, 200, assessed.text)
-        opening = assessed.json()["turns"][-1]
-        self.assertEqual(opening["guidance"]["disagreement"]["status"], "active")
+        opening, review_turn = assessed.json()["turns"][-2:]
+        self.assertIsNone(opening["guidance"].get("disagreement"))
+        self.assertEqual(review_turn["guidance"]["disagreement"]["status"], "active")
         self.assertEqual(
-            [card["type"] for card in backend._displayed_cards(opening["guidance"])],
-            ["warning", "discussion"],
+            [card["type"] for card in backend._displayed_cards(review_turn["guidance"])],
+            ["discussion"],
         )
+        self.assertFalse(any(
+            cue.get("type") in {"warning", "tradeoff"}
+            for cue in review_turn["guidance"].get("uiCues", [])
+        ))
         self.assertEqual(assessed.json()["currentVersionId"], stage_id)
 
     def test_chat_patch_stays_hidden_and_cannot_create_ordinary_questions(self):

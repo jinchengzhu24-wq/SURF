@@ -114,10 +114,11 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v53-bilingual-intent-stance-gate"
+PROMPT_VERSION = "cocreation-v54-manual-edit-review-pair"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
 INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
+MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS = 3200
 
 
 def _structured_response_format(task=None):
@@ -128,7 +129,56 @@ def _structured_response_format(task=None):
     the model to infer the wire shape from the much larger design rules.
     """
     task = str(task or "chat")
-    if task == "challenge_reason_classification":
+    if task == "manual_edit_assessment_pair":
+        assessment_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "solutionSummary": {"type": "string"},
+                "difficultyOpinion": {"type": "string"},
+                "features": {"type": "array", "items": {"type": "string"}},
+                "suggestions": {"type": "array", "items": {"type": "string"}},
+                "satisfactionQuestion": {"type": ["string", "null"]},
+            },
+            "required": [
+                "solutionSummary",
+                "difficultyOpinion",
+                "features",
+                "suggestions",
+                "satisfactionQuestion",
+            ],
+        }
+        conflict_schema = {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "properties": {
+                "evidenceIds": {"type": "array", "items": {"type": "string"}},
+                "userPosition": {"type": "string"},
+                "aiPosition": {"type": "string"},
+                "coreDisagreement": {"type": "string"},
+                "nextQuestion": {"type": "string"},
+            },
+            "required": [
+                "evidenceIds",
+                "userPosition",
+                "aiPosition",
+                "coreDisagreement",
+                "nextQuestion",
+            ],
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "openingMessage": {"type": "string"},
+                "assessment": assessment_schema,
+                "reviewMessage": {"type": "string"},
+                "conflict": conflict_schema,
+            },
+            "required": ["openingMessage", "assessment", "reviewMessage", "conflict"],
+        }
+        name = "cocreation_manual_edit_assessment_pair"
+    elif task == "challenge_reason_classification":
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -441,6 +491,7 @@ class LLMExecutionResult:
     revision_operations: list[dict] = field(default_factory=list)
     proposal_diagnostics: dict = field(default_factory=dict)
     proposal_binding: dict = field(default_factory=dict)
+    secondary_execution: object | None = None
 
 
 @dataclass(frozen=True)
@@ -2685,6 +2736,391 @@ def _validate_entity_coordinate_claims(text, rows, *, entity_bindings=None):
             )
 
 
+def _manual_edit_review_evidence(stage_context, solver_metrics, play_summary):
+    """Build bounded, server-owned evidence that a manual-edit review may cite."""
+    context = stage_context or {}
+    evidence = []
+    for index, change in enumerate((context.get("diff") or [])[:24], start=1):
+        if not isinstance(change, dict):
+            continue
+        try:
+            row = int(change.get("y")) + 1
+            column = int(change.get("x")) + 1
+        except (TypeError, ValueError):
+            continue
+        before = str(change.get("before") or " ")[:1]
+        after = str(change.get("after") or " ")[:1]
+        evidence.append({
+            "id": f"diff-{index}",
+            "kind": "verified_map_diff",
+            "fact": f"row {row}, column {column}: {before!r} -> {after!r}",
+        })
+
+    current_solver = solver_metrics or {}
+    if current_solver.get("solvable"):
+        evidence.append({
+            "id": "solver-current",
+            "kind": "solver",
+            "fact": {
+                "solvable": True,
+                "solutionSteps": current_solver.get("solutionSteps"),
+                "solutionPushes": current_solver.get("solutionPushes"),
+            },
+        })
+    parent_solver = context.get("parentValidation") or {}
+    if parent_solver.get("solvable") and current_solver.get("solvable"):
+        evidence.append({
+            "id": "solver-delta",
+            "kind": "solver_comparison",
+            "fact": {
+                "parentSolutionSteps": parent_solver.get("solutionSteps"),
+                "currentSolutionSteps": current_solver.get("solutionSteps"),
+                "parentSolutionPushes": parent_solver.get("solutionPushes"),
+                "currentSolutionPushes": current_solver.get("solutionPushes"),
+            },
+        })
+    if isinstance(play_summary, dict) and play_summary:
+        evidence.append({
+            "id": "play-current",
+            "kind": "play_evidence",
+            "fact": {
+                key: play_summary.get(key)
+                for key in (
+                    "status", "moveCount", "pushCount", "restartCount",
+                    "minimumMoves", "minimumPushes",
+                )
+            },
+        })
+
+    design = context.get("evaluatorDesignContext") or {}
+    design_sources = (
+        ("userGoals", "goal", "design_goal"),
+        ("designConstraints", "constraint", "design_constraint"),
+        ("confirmedDecisions", "decision", "confirmed_decision"),
+    )
+    for collection, text_key, kind in design_sources:
+        for index, item in enumerate((design.get(collection) or [])[-12:], start=1):
+            if not isinstance(item, dict) or item.get("status") != "active":
+                continue
+            if collection != "confirmedDecisions" and item.get("authority") not in {
+                "explicit", "confirmed"
+            }:
+                continue
+            statement = str(item.get(text_key) or "").strip()
+            if not statement:
+                continue
+            evidence.append({
+                "id": f"{kind}-{index}",
+                "kind": kind,
+                "fact": statement[:800],
+                "sourceStageId": item.get("sourceStageId"),
+            })
+    return evidence[:64]
+
+
+def _manual_edit_has_design_evidence(evidence):
+    return any(
+        item.get("kind") in {
+            "design_goal", "design_constraint", "confirmed_decision"
+        }
+        for item in (evidence or [])
+        if isinstance(item, dict)
+    )
+
+
+def _assert_no_unsupported_manual_edit_intent(texts, evidence):
+    """Reject designer-intent attribution when no explicit/confirmed evidence exists."""
+    if _manual_edit_has_design_evidence(evidence):
+        return
+    text = "\n".join(str(item or "") for item in texts)
+    chinese_patterns = (
+        r"(?:隐性|潜在|内在|背后(?:的)?)[^。！？\n]{0,16}(?:追求|意图|倾向|偏好|目标|希望)",
+        r"(?:你|用户|玩家|设计者|设计师)(?:所)?(?:想要|希望|意图|倾向|偏好|追求|目标)",
+        r"(?:符合|呼应|延续|支持|实现|背离|违背)[^。！？\n]{0,28}"
+        r"(?:你的|用户的|玩家的|设计者的|设计师的)?(?:意图|倾向|偏好|追求|目标|希望)",
+    )
+    english_patterns = (
+        r"\b(?:your|the (?:user|designer|player)'s)\s+"
+        r"(?:implicit\s+)?(?:intent(?:ion)?|preference|pursuit|goal|aim|hope|motivation)\b",
+        r"\b(?:you|the (?:user|designer|player))\s+"
+        r"(?:want(?:ed)?|hope(?:d)?|intend(?:ed)?|prefer(?:red)?|aim(?:ed)?|seek|sought)\b",
+        r"\b(?:implicit|hidden|underlying)\s+"
+        r"(?:intent(?:ion)?|preference|pursuit|goal|aim|hope|motivation)\b",
+    )
+    if any(re.search(pattern, text, re.IGNORECASE) for pattern in (*chinese_patterns, *english_patterns)):
+        raise ValueError(
+            "The manual-edit review attributes an unsupported designer intention."
+        )
+
+
+def _validate_manual_edit_pair_payload(
+    payload,
+    rows,
+    language,
+    solver_metrics,
+    stage_context,
+    evidence,
+    request_id,
+    attempts_used,
+    model,
+    latency_ms,
+):
+    if not isinstance(payload, dict) or set(payload) != {
+        "openingMessage", "assessment", "reviewMessage", "conflict"
+    }:
+        raise ValueError("The manual-edit assessment pair has an invalid envelope.")
+
+    opening_payload = {
+        "assistantMessage": payload.get("openingMessage"),
+        "guidance": {
+            "move": "observe_stage",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+            "coordinateLinks": [],
+        },
+        "assessment": payload.get("assessment"),
+        "proposedRows": None,
+        "modificationSummary": "",
+    }
+    opening_message, assessment, _, _, opening_guidance = validate_chat_response(
+        opening_payload,
+        assessment_only=True,
+        language=language,
+        stage_context=stage_context,
+        rows=rows,
+    )
+    opening_guidance.update({
+        "intentHypothesis": None,
+        "intentConfidence": None,
+        "followUpQuestion": None,
+        "proposalOffer": None,
+        "disagreement": None,
+        "uiCues": [],
+        "coordinateLinks": [],
+    })
+
+    review_message = _sanitize_visible_model_text(
+        _normalize_single_level_language(
+            _clean_text(payload.get("reviewMessage"), "reviewMessage")
+        ),
+        language,
+    )
+    review_message = _normalize_response_paragraphs(review_message)
+    if len(review_message) < 20:
+        raise ValueError("The manual-edit review is too short.")
+    if review_message.count("?") + review_message.count("\uFF1F"):
+        raise ValueError("The manual-edit review body must remain declarative.")
+
+    conflict = payload.get("conflict")
+    disagreement = None
+    cited_evidence_ids = []
+    if conflict is not None:
+        expected_fields = {
+            "evidenceIds", "userPosition", "aiPosition",
+            "coreDisagreement", "nextQuestion",
+        }
+        if not isinstance(conflict, dict) or set(conflict) != expected_fields:
+            raise ValueError("The manual-edit conflict has an invalid envelope.")
+        cited_evidence_ids = conflict.get("evidenceIds")
+        if not isinstance(cited_evidence_ids, list) or not cited_evidence_ids:
+            raise ValueError("A manual-edit conflict must cite server evidence.")
+        allowed_ids = {item["id"] for item in evidence}
+        if any(
+            not isinstance(item, str) or item not in allowed_ids
+            for item in cited_evidence_ids
+        ):
+            raise ValueError("A manual-edit conflict cites unknown evidence.")
+        cited_evidence_ids = list(dict.fromkeys(cited_evidence_ids))[:12]
+        concrete_ids = {
+            item["id"] for item in evidence
+            if item.get("kind") in {
+                "verified_map_diff", "solver_comparison", "play_evidence"
+            }
+        }
+        if not concrete_ids.intersection(cited_evidence_ids):
+            raise ValueError("A manual-edit conflict requires concrete map, solver, or play evidence.")
+        disagreement = _validate_disagreement({
+            "status": "active",
+            "subject": "human_edit",
+            "userPosition": conflict.get("userPosition"),
+            "aiPosition": conflict.get("aiPosition"),
+            "coreDisagreement": conflict.get("coreDisagreement"),
+            "nextQuestion": conflict.get("nextQuestion"),
+            "resolution": None,
+        }, language)
+        next_question = disagreement.get("nextQuestion") or ""
+        if next_question.count("?") + next_question.count("\uFF1F") != 1:
+            raise ValueError("A manual-edit discussion must ask exactly one next question.")
+
+    intent_scope_texts = [review_message]
+    if disagreement:
+        intent_scope_texts.extend(
+            disagreement.get(field)
+            for field in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion")
+        )
+    _assert_no_unsupported_manual_edit_intent(intent_scope_texts, evidence)
+
+    review_guidance = {
+        "move": "offer_perspective",
+        "intentHypothesis": None,
+        "intentConfidence": None,
+        "followUpQuestion": None,
+        "proposalOffer": None,
+        "disagreement": disagreement,
+        "uiCues": [],
+        "coordinateLinks": [],
+        "discussionCardMode": "disagreement_only",
+        "manualEditReview": {
+            "evidenceIds": cited_evidence_ids,
+            "outcome": "conflict" if disagreement else "no_conflict",
+        },
+    }
+    grounding_texts = [review_message]
+    if disagreement:
+        grounding_texts.extend(
+            disagreement.get(field)
+            for field in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion")
+        )
+    _validate_map_grounding_texts(
+        grounding_texts,
+        rows,
+        entity_bindings=(stage_context or {}).get("entityBindings"),
+    )
+    _assert_visible_output_language(
+        language,
+        review_message,
+        guidance=review_guidance,
+    )
+
+    secondary = LLMExecutionResult(
+        assistant_message=review_message,
+        attempts_used=attempts_used,
+        request_id=f"{request_id}:manual-review",
+        model=model,
+        latency_ms=latency_ms,
+        guidance=review_guidance,
+    )
+    return LLMExecutionResult(
+        assistant_message=opening_message,
+        attempts_used=attempts_used,
+        request_id=request_id,
+        assessment=assessment,
+        model=model,
+        latency_ms=latency_ms,
+        guidance=opening_guidance,
+        secondary_execution=secondary,
+    )
+
+
+def _generate_manual_edit_assessment_pair(
+    conversation,
+    rows,
+    language,
+    solver_metrics,
+    play_summary,
+    request_id,
+    stage_context,
+):
+    api_key, base_url = _llm_credentials()
+    if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR", "The configured LLM API key is missing.",
+            request_id, False, 0, 503,
+        )
+    evidence = _manual_edit_review_evidence(
+        stage_context, solver_metrics, play_summary
+    )
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    current_snapshot = _stage_snapshot_for_prompt(rows, stage_context)
+    progress = (stage_context or {}).get("progressContext") or {}
+    review_context = {
+        "changeSummary": (stage_context or {}).get("changeSummary"),
+        "evidence": evidence,
+        "confirmedDesignDirectionAvailable": _manual_edit_has_design_evidence(evidence),
+        "stageLineage": progress.get("stageLineage", [])[-12:],
+        "rejectedDecisions": progress.get("rejectedDecisions", [])[-12:],
+    }
+    messages = [{
+        "role": "system",
+        "content": (
+            "You are the Kimi K2.6 Sokoban co-creation evaluator. A designer has saved a "
+            "deterministically validated manual edit. Return one JSON object containing two distinct "
+            "messages. Write every natural-language field in " + response_language + ".\n\n"
+            "openingMessage is the first Stage-opening bubble. It must be declarative and card-free: "
+            "acknowledge the saved solvable Stage once, discuss layout, route relationships, push rhythm, "
+            "and a concrete first-person imagined play experience. Do not ask a question or infer intent.\n\n"
+            "reviewMessage is a second, always-visible declarative evaluator bubble. Compare the verified manual diff "
+            "with active explicit/confirmed design directions and the bounded Stage lineage. Explain where "
+            "the edit aligns, shifts, or creates a trade-off. Do not invent a motive, proposal, map change, "
+            "question, or warning card. Do not print evidence IDs or raw tile transitions in visible prose.\n\n"
+            "If confirmedDesignDirectionAvailable is false, explicitly say that there is no confirmed design "
+            "direction available for comparison and discuss only verified map, solver, or play effects. In that "
+            "case, never describe the edit as expressing, supporting, or conflicting with an implicit intention, "
+            "preference, pursuit, hope, or goal. The saved edit itself is not proof of motive.\n\n"
+            "Set conflict to null unless server evidence supports a concrete mechanical conflict or a "
+            "specific conflict with an active explicit/confirmed direction. Mere aesthetic difference, an "
+            "unconfirmed hypothesis, or simply using a different edit is not a conflict. When conflict is "
+            "non-null, cite at least one supplied concrete map/solver/play evidence ID and fill one warm "
+            "human_edit discussion: userPosition, aiPosition, a substantive coreDisagreement, and exactly "
+            "one nextQuestion. This produces LET'S DISCUSS only; never produce WARNING. Historical Stage "
+            "facts are comparison-only. Current-map claims must use only the Current Stage Snapshot. Avoid "
+            "coordinates in reviewMessage and conflict fields. assessment.satisfactionQuestion must be null.\n\n"
+            f"Current Stage Snapshot (authoritative):\n{current_snapshot}\n\n"
+            "Manual-edit review context (server-owned):\n"
+            + json.dumps(review_context, ensure_ascii=False, separators=(",", ":"))
+        ),
+    }]
+    started_at = time.monotonic()
+    deadline = _request_deadline(started_at)
+    last_error = None
+    for attempt in range(1, 3):
+        remaining = _remaining_until(deadline)
+        if remaining <= 0:
+            break
+        timeout_seconds = min(70.0 if attempt == 1 else remaining, remaining)
+        try:
+            response = asyncio.run(asyncio.wait_for(
+                _request_completion(
+                    api_key, base_url, KIMI_MODEL, messages,
+                    MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS,
+                    timeout_seconds,
+                    task="manual_edit_assessment_pair",
+                ),
+                timeout=timeout_seconds,
+            ))
+            choice = response.choices[0]
+            if str(getattr(choice, "finish_reason", "") or "") == "length":
+                raise ValueError("The manual-edit assessment pair reached its output limit.")
+            payload = json.loads(str(choice.message.content or ""))
+            latency_ms = int((time.monotonic() - started_at) * 1000)
+            return _validate_manual_edit_pair_payload(
+                payload, rows, language, solver_metrics, stage_context, evidence,
+                request_id, attempt, KIMI_MODEL, latency_ms,
+            )
+        except asyncio.TimeoutError as exception:
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT",
+                "Kimi did not complete the manual-edit review before the request deadline.",
+                request_id, True, attempt, 504,
+            )
+        except LLMServiceError:
+            raise
+        except Exception as exception:
+            last_error = classify_exception(exception, request_id, attempt)
+            last_error.retryable = True
+    if last_error is not None:
+        raise last_error
+    raise LLMServiceError(
+        "UPSTREAM_TIMEOUT",
+        "Kimi did not complete the manual-edit review before the request deadline.",
+        request_id, True, 0, 504,
+    )
+
+
 def generate_stage_assessment(
     conversation,
     rows,
@@ -2694,6 +3130,16 @@ def generate_stage_assessment(
     request_id,
     stage_context=None,
 ):
+    if _is_human_edit_stage_opening(True, stage_context):
+        return _generate_manual_edit_assessment_pair(
+            conversation,
+            rows,
+            language,
+            solver_metrics,
+            play_summary,
+            request_id,
+            stage_context or {},
+        )
     deadline = _request_deadline()
     try:
         return generate_chat_reply(

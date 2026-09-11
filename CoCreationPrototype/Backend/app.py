@@ -1302,18 +1302,25 @@ def assess_version(
         request.state.request_id,
         stage_context=context["stageContext"],
     )
-    execution = _ensure_human_edit_disagreement_execution(
-        execution,
-        context["stageContext"],
-        session_language,
-    )
-    execution = _normalize_manual_edit_review_execution(
-        execution,
-        context["stageContext"],
-    )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
-    design_context_guidance = _design_context_guidance(execution.guidance)
+    review_execution = getattr(execution, "secondary_execution", None)
+    if review_execution is not None:
+        review_execution = _mark_new_discussion_guidance(
+            review_execution, context["stageContext"]
+        )
+    review_metadata = (
+        dict(review_execution.guidance.get("manualEditReview") or {})
+        if review_execution is not None else {}
+    )
+    design_context_guidance = _design_context_guidance(
+        review_execution.guidance if review_execution is not None else execution.guidance
+    )
     execution = replace(execution, guidance=_public_guidance(execution.guidance))
+    if review_execution is not None:
+        review_execution = replace(
+            review_execution,
+            guidance=_public_guidance(review_execution.guidance),
+        )
     manual_progress_rewrite = None
     if context["stageContext"].get("source") == "human_edit":
         change_summary = context["stageContext"].get("changeSummary") or {}
@@ -1327,6 +1334,10 @@ def assess_version(
                 [
                     dump_json(change_summary),
                     str(execution.assistant_message or "")[:1200],
+                    str(
+                        review_execution.assistant_message
+                        if review_execution is not None else ""
+                    )[:1200],
                 ],
                 session_language,
                 request.state.request_id,
@@ -1365,6 +1376,17 @@ def assess_version(
                 execution.request_id,
                 execution,
             )
+            review_turn_id = None
+            if review_execution is not None:
+                review_turn_id = insert_turn(
+                    database,
+                    session,
+                    "assistant",
+                    review_execution.assistant_message,
+                    version_id,
+                    review_execution.request_id,
+                    review_execution,
+                )
             assessment_id = uuid.uuid4().hex
             database.execute(
                 """
@@ -1398,14 +1420,18 @@ def assess_version(
                     "human_edit_reviewed",
                     {
                         "versionId": version_id,
-                        "turnId": turn_id,
+                        "turnId": review_turn_id or turn_id,
+                        "openingTurnId": turn_id,
+                        "reviewTurnId": review_turn_id,
                         "diff": load_json(version["diff_json"]),
                         "changeSummary": context["stageContext"].get("changeSummary"),
-                        "hasWarning": any(
-                            cue.get("type") in {"warning", "tradeoff"}
-                            for cue in execution.guidance.get("uiCues", [])
+                        "hasWarning": False,
+                        "reviewOutcome": review_metadata.get("outcome"),
+                        "evidenceIds": review_metadata.get("evidenceIds", []),
+                        "disagreement": (
+                            review_execution.guidance.get("disagreement")
+                            if review_execution is not None else None
                         ),
-                        "disagreement": execution.guidance.get("disagreement"),
                     },
                     utc_now(),
                 )
@@ -1422,21 +1448,25 @@ def assess_version(
                     },
                     utc_now(),
                 )
-            _record_disagreement_event(
-                database,
-                session_id,
-                version_id,
-                turn_id,
-                execution.guidance,
-            )
+            if review_execution is not None:
+                _record_disagreement_event(
+                    database,
+                    session_id,
+                    version_id,
+                    review_turn_id,
+                    review_execution.guidance,
+                )
             _update_design_context_from_turn(
                 database,
                 session_id,
                 version_id,
                 None,
-                turn_id,
+                review_turn_id or turn_id,
                 design_context_guidance,
-                assistant_content=execution.assistant_message,
+                assistant_content=(
+                    review_execution.assistant_message
+                    if review_execution is not None else execution.assistant_message
+                ),
                 allow_progress=False,
             )
 
@@ -6354,6 +6384,11 @@ def build_llm_context(database, session_id, version):
             "parentVersionId": version["parent_version_id"],
             "beforeRows": parent_rows if version["source"] == "human_edit" else None,
             "afterRows": current_rows if version["source"] == "human_edit" else None,
+            "parentValidation": (
+                load_json(parent["validation_json"])
+                if version["source"] == "human_edit" and parent is not None
+                else None
+            ),
             "diff": load_json(version["diff_json"]),
             "changeSummary": change_summary,
             "mapFacts": build_map_facts(
@@ -8484,6 +8519,7 @@ def _public_guidance(guidance):
     result.pop("openingPresentation", None)
     result.pop("_intentHypothesisId", None)
     result.pop("_intentReviewState", None)
+    result.pop("manualEditReview", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and (
         "executionBrief" in offer or "revisionPlan" in offer

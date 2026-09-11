@@ -3646,39 +3646,248 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIn("The first push is not only about approaching a target", result.assistant_message)
 
-    def test_later_human_edit_invalid_opening_uses_grounded_plain_recovery(self):
-        client = FakeClient([
-            "   ",
-            "not a complete JSON object",
-            (
-                "我唯一有点拿不准的是T1在(2,10)那个角落。"
-                "右上角现在被墙收窄了，入口只有(2,9)那一条。"
-                "这个判断会影响我理解整张图的推箱顺序。"
+    def test_later_human_edit_uses_one_request_and_returns_two_messages(self):
+        payload = json.dumps({
+            "openingMessage": (
+                "The saved Stage remains solvable. The central space is now tighter. "
+                "The first approach asks for more deliberate route reading. "
+                "The box order is less immediate. The lower passage still provides recovery space. "
+                "I would pause before committing to the first push. "
+                "That pause gives the opening a more considered rhythm."
             ),
-        ])
+            "assessment": {
+                "solutionSummary": "The saved Stage remains solvable.",
+                "difficultyOpinion": "The opening now asks for more deliberate route reading.",
+                "features": ["A tighter central space"],
+                "suggestions": ["Watch the first-push commitment"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": (
+                "Compared with the parent Stage, the verified wall change supports the confirmed "
+                "preference for a more deliberate opening while preserving a solvable route."
+            ),
+            "conflict": None,
+        })
+        client = FakeClient([payload])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with patch.object(llm_client, "_create_async_client", return_value=client):
             result = llm_client.generate_stage_assessment(
                 [],
-                ["############"] * 10,
-                "zh-CN",
+                OPERATION_BASE_ROWS,
+                "en",
                 {"solvable": True, "solutionSteps": 24, "solutionPushes": 6},
                 {},
-                "later-human-edit-plain-opening-test",
+                "later-human-edit-pair-test",
                 {
                     "stageNumber": 2,
                     "source": "human_edit",
-                    "changeSummary": {"components": ["water", "internalWalls"]},
+                    "diff": [{"x": 1, "y": 1, "before": ".", "after": "#"}],
+                    "changeSummary": {"components": ["internalWalls"]},
+                    "evaluatorDesignContext": {
+                        "userGoals": [{
+                            "id": "goal-1",
+                            "goal": "Make the opening more deliberate.",
+                            "status": "active",
+                            "authority": "confirmed",
+                        }],
+                    },
                 },
-        )
+            )
 
         self.assertEqual(result.model, "kimi-k2.6")
-        focus = result.guidance["followUpQuestion"]
-        self.assertIsNone(focus)
-        self.assertNotIn("？", result.assistant_message)
+        self.assertIsNone(result.guidance["followUpQuestion"])
+        self.assertIsNotNone(result.secondary_execution)
+        self.assertIn("Compared with the parent Stage", result.secondary_execution.assistant_message)
+        self.assertEqual(result.secondary_execution.guidance["uiCues"], [])
+        self.assertIsNone(result.secondary_execution.guidance["disagreement"])
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(
+            client.chat.completions.calls[0]["response_format"]["json_schema"]["name"],
+            "cocreation_manual_edit_assessment_pair",
+        )
+
+    def test_manual_edit_pair_conflict_creates_discussion_without_warning(self):
+        stage_context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "diff": [{"x": 1, "y": 1, "before": ".", "after": "#"}],
+            "changeSummary": {"components": ["internalWalls"]},
+            "evaluatorDesignContext": {
+                "userGoals": [{
+                    "id": "goal-1",
+                    "goal": "Keep recovery space after a mistaken push.",
+                    "status": "active",
+                    "authority": "confirmed",
+                }],
+            },
+        }
+        solver = {"solvable": True, "solutionSteps": 24, "solutionPushes": 6}
+        evidence = llm_client._manual_edit_review_evidence(stage_context, solver, {})
+        payload = {
+            "openingMessage": (
+                "The saved Stage remains solvable. The central space is tighter. "
+                "The first approach now asks for more care. The push order is less immediate. "
+                "The lower passage remains available. I would pause before the first commitment. "
+                "That gives the opening a more deliberate rhythm."
+            ),
+            "assessment": {
+                "solutionSummary": "The saved Stage remains solvable.",
+                "difficultyOpinion": "The opening is more deliberate.",
+                "features": ["A tighter central space"],
+                "suggestions": ["Review recovery after the first push"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": (
+                "The verified wall change makes the first commitment stronger, but it also works "
+                "against the confirmed goal of preserving recovery space after a mistaken push."
+            ),
+            "conflict": {
+                "evidenceIds": ["diff-1", "design_goal-1"],
+                "userPosition": "Preserve recovery space after a mistaken push.",
+                "aiPosition": "The verified wall change reduces that recovery space.",
+                "coreDisagreement": (
+                    "I understand the intention to make the opening deliberate, but the verified "
+                    "change also narrows recovery, so the decision is whether commitment should "
+                    "outweigh the confirmed recovery goal."
+                ),
+                "nextQuestion": "Which effect should this Stage preserve?",
+            },
+        }
+
+        result = llm_client._validate_manual_edit_pair_payload(
+            payload,
+            OPERATION_BASE_ROWS,
+            "en",
+            solver,
+            stage_context,
+            evidence,
+            "manual-conflict-test",
+            1,
+            "mock-model",
+            10,
+        )
+
+        review = result.secondary_execution
+        self.assertEqual(review.guidance["disagreement"]["subject"], "human_edit")
+        self.assertEqual(review.guidance["uiCues"], [])
+        self.assertEqual(review.guidance["manualEditReview"]["outcome"], "conflict")
+
+    def test_manual_edit_pair_rejects_conflict_without_concrete_evidence(self):
+        stage_context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "evaluatorDesignContext": {
+                "userGoals": [{
+                    "id": "goal-1",
+                    "goal": "Keep recovery space.",
+                    "status": "active",
+                    "authority": "confirmed",
+                }],
+            },
+        }
+        solver = {}
+        evidence = llm_client._manual_edit_review_evidence(stage_context, solver, {})
+        payload = {
+            "openingMessage": "The saved Stage is compact and gives the opening a deliberate rhythm.",
+            "assessment": {
+                "solutionSummary": "The saved Stage was validated.",
+                "difficultyOpinion": "The opening is deliberate.",
+                "features": ["Compact space"],
+                "suggestions": ["Review the rhythm"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": "The edit looks different, but there is no concrete map evidence of a conflict.",
+            "conflict": {
+                "evidenceIds": ["design_goal-1"],
+                "userPosition": "Keep recovery space.",
+                "aiPosition": "The layout looks different.",
+                "coreDisagreement": "Whether this visual difference should change the design direction.",
+                "nextQuestion": "Should the appearance remain unchanged?",
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "concrete map, solver, or play evidence"):
+            llm_client._validate_manual_edit_pair_payload(
+                payload, OPERATION_BASE_ROWS, "en", solver, stage_context, evidence,
+                "manual-no-evidence-test", 1, "mock-model", 10,
+            )
+
+    def test_manual_edit_pair_rejects_implicit_intent_without_design_evidence(self):
+        stage_context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "diff": [{"x": 1, "y": 1, "before": ".", "after": "#"}],
+            "changeSummary": {"components": ["internalWalls"]},
+            "evaluatorDesignContext": {},
+        }
+        solver = {"solvable": True, "solutionSteps": 24, "solutionPushes": 6}
+        evidence = llm_client._manual_edit_review_evidence(stage_context, solver, {})
+        payload = {
+            "openingMessage": (
+                "The saved Stage remains solvable. The central space is tighter. "
+                "The opening route now asks for more care. The push order is less immediate. "
+                "I would pause before the first commitment. That pause changes the rhythm."
+            ),
+            "assessment": {
+                "solutionSummary": "The saved Stage remains solvable.",
+                "difficultyOpinion": "The opening asks for more care.",
+                "features": ["A tighter central space"],
+                "suggestions": ["Review the opening rhythm"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": (
+                "The verified wall change supports the designer's implicit pursuit of a more "
+                "deliberate opening while preserving a solvable route."
+            ),
+            "conflict": None,
+        }
+
+        with self.assertRaisesRegex(ValueError, "unsupported designer intention"):
+            llm_client._validate_manual_edit_pair_payload(
+                payload, OPERATION_BASE_ROWS, "en", solver, stage_context, evidence,
+                "manual-implicit-intent-test", 1, "mock-model", 10,
+            )
+
+    def test_manual_edit_pair_accepts_neutral_review_without_design_evidence(self):
+        stage_context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "diff": [{"x": 1, "y": 1, "before": ".", "after": "#"}],
+            "changeSummary": {"components": ["internalWalls"]},
+            "evaluatorDesignContext": {},
+        }
+        solver = {"solvable": True, "solutionSteps": 24, "solutionPushes": 6}
+        evidence = llm_client._manual_edit_review_evidence(stage_context, solver, {})
+        payload = {
+            "openingMessage": (
+                "The saved Stage remains solvable. The central space is tighter. "
+                "The opening route now asks for more care. The push order is less immediate. "
+                "I would pause before the first commitment. That pause changes the rhythm."
+            ),
+            "assessment": {
+                "solutionSummary": "The saved Stage remains solvable.",
+                "difficultyOpinion": "The opening asks for more care.",
+                "features": ["A tighter central space"],
+                "suggestions": ["Review the opening rhythm"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": (
+                "There is no confirmed design direction available for comparison. The verified "
+                "wall change tightens the opening while the current Stage remains solvable."
+            ),
+            "conflict": None,
+        }
+
+        result = llm_client._validate_manual_edit_pair_payload(
+            payload, OPERATION_BASE_ROWS, "en", solver, stage_context, evidence,
+            "manual-neutral-review-test", 1, "mock-model", 10,
+        )
+
+        self.assertIn(
+            "no confirmed design direction",
+            result.secondary_execution.assistant_message,
+        )
+        self.assertEqual(result.secondary_execution.guidance["uiCues"], [])
 
     def test_structured_stage_one_opening_receives_rows_for_scope_normalization(self):
         payload = json.dumps({
