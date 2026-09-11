@@ -359,6 +359,7 @@ translations.en.intentKeepThis = "Keep this";
 translations.en.intentKept = "Kept";
 translations.en.intentNewOption = "Current new inclination";
 translations.en.intentExistingOption = "Previously confirmed inclination";
+translations.en.intentEvidence = "Your original wording";
 translations.en.intentConflictPlaceholder = "Choose which inclination to keep above before continuing the conversation.";
 translations.en.error_STALE_INTENT_CARD = "This intent card was already handled or is no longer current.";
 translations.en.error_INVALID_INTENT_FEEDBACK = "Enter a clear design inclination between 4 and 1200 characters.";
@@ -423,6 +424,7 @@ translations["zh-CN"].intentKeepThis = "\u4fdd\u7559\u8fd9\u4e2a";
 translations["zh-CN"].intentKept = "\u5df2\u4fdd\u7559";
 translations["zh-CN"].intentNewOption = "\u5f53\u524d\u65b0\u610f\u56fe";
 translations["zh-CN"].intentExistingOption = "\u4e4b\u524d\u5df2\u786e\u8ba4\u7684\u610f\u56fe";
+translations["zh-CN"].intentEvidence = "\u4f60\u5f53\u65f6\u7684\u539f\u8bdd";
 translations["zh-CN"].intentConflictPlaceholder = "\u8bf7\u5148\u5728\u4e0a\u65b9\u9009\u62e9\u8981\u4fdd\u7559\u7684\u610f\u56fe\uff0c\u4e4b\u540e\u624d\u80fd\u7ee7\u7eed\u804a\u5929\u3002";
 translations["zh-CN"].error_INTENT_CONFLICT_PENDING = "\u8bf7\u5148\u9009\u62e9\u8981\u4fdd\u7559\u7684\u51b2\u7a81\u610f\u56fe\u3002";
 translations["zh-CN"].error_INTENT_CONTEXT_CHANGED = "\u51b2\u7a81\u590d\u6838\u671f\u95f4\u5df2\u786e\u8ba4\u610f\u56fe\u53d1\u751f\u4e86\u53d8\u5316\uff0c\u8bf7\u91cd\u8bd5\u8fd9\u6761\u6d88\u606f\u3002";
@@ -1704,6 +1706,19 @@ function createIntentConflictChoiceCue(text, intentState, turn) {
             ? t("intentNewOption")
             : t("intentExistingOption");
         card.insertBefore(role, card.querySelector("strong"));
+
+        const evidenceText = String(option.evidenceText || "").trim();
+        if (evidenceText) {
+            const evidence = document.createElement("small");
+            evidence.className = "intent-conflict-evidence";
+            evidence.textContent = `${t("intentEvidence")}：“${evidenceText}”`;
+            const actionsAnchor = card.querySelector(".guidance-cue-text");
+            if (actionsAnchor) {
+                actionsAnchor.insertAdjacentElement("afterend", evidence);
+            } else {
+                card.appendChild(evidence);
+            }
+        }
 
         if (intentState.actionable && canEditSelected()) {
             const actions = document.createElement("div");

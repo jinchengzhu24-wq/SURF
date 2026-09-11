@@ -268,6 +268,7 @@ def initialize_database():
         database.execute("PRAGMA foreign_keys=ON")
         database.commit()
         backfill_design_contexts(database)
+        backfill_intent_semantics(database)
         backfill_entity_bindings(database)
         backfill_revision_challenges(database)
         repair_resolved_challenge_disagreements(database)
@@ -425,7 +426,7 @@ def _has_valid_design_context(raw):
         value = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
-    return isinstance(value, dict) and value.get("schemaVersion") == 4
+    return isinstance(value, dict) and value.get("schemaVersion") == 5
 
 
 def _legacy_visible_questions(content, guidance):
@@ -570,7 +571,7 @@ def backfill_design_contexts(database):
             if version["design_context_json"]:
                 try:
                     raw_context = load_json(version["design_context_json"])
-                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") in {1, 2, 3}:
+                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") in {1, 2, 3, 4}:
                         legacy_schema_version = raw_context.get("schemaVersion")
                         legacy_context = normalize_design_context(raw_context)
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -620,7 +621,7 @@ def backfill_design_contexts(database):
                         dump_json({
                             "versionId": version["id"],
                             "fromSchemaVersion": legacy_schema_version,
-                            "toSchemaVersion": 4,
+                            "toSchemaVersion": 5,
                         }),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
@@ -717,11 +718,141 @@ def backfill_design_contexts(database):
                     """,
                     (
                         session["id"],
-                        dump_json({"versionId": version["id"], "schemaVersion": 4}),
+                        dump_json({"versionId": version["id"], "schemaVersion": 5}),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
                 )
             changed += 1
+    return changed
+
+
+def backfill_intent_semantics(database):
+    """Attach high-confidence user-authored semantic claims without rewriting history."""
+    topic_subjects = {
+        "water_function": {"water"},
+        "route_readability": {"route"},
+        "route_rhythm": {"route", "rhythm"},
+        "space_distribution": {"layout", "space"},
+        "difficulty": {"difficulty"},
+        "entity_placement": {"box", "target", "wall"},
+    }
+    changed = 0
+
+    def legacy_claims(text):
+        value = str(text or "").strip()
+        lowered = value.casefold()
+        if re.search(r"我(?:觉得|认为|担心|感觉).{0,18}(?:玩家|别人).{0,24}(?:会|可能|觉得|认为)", value):
+            return []
+        if re.search(r"\bi (?:think|feel|worry|believe).{0,36}\bplayers?\b.{0,48}\b(?:will|may|might|feel|think)\b", lowered):
+            return []
+        if (value.startswith("如果") or lowered.startswith("if ")) and not re.search(
+            r"(?:我(?:希望|想要|不想要|喜欢|不喜欢)|\bi (?:want|prefer|like|dislike|hope)\b)",
+            lowered,
+        ):
+            return []
+        subject = (
+            "water" if ("水" in value or "water" in lowered)
+            else "wall" if ("墙" in value or "wall" in lowered)
+            else "box" if ("箱" in value or "box" in lowered or "crate" in lowered)
+            else "target" if ("目标" in value or "target" in lowered)
+            else None
+        )
+        if subject is None:
+            return []
+        decrease = bool(re.search(
+            r"(?:太多|过多|占地(?:太大|过大)|覆盖(?:太大|过大)|减少|更少|少一点|"
+            r"\btoo (?:much|many|large)\b|\breduce\b|\bdecrease\b|\bless\b|\bfewer\b)",
+            lowered,
+            re.IGNORECASE,
+        ))
+        increase = bool(re.search(
+            r"(?:太少|过少|不够(?:多|大)?|覆盖(?:太小|过小|不足)|增加|增多|更多|多一点|"
+            r"\btoo (?:few|little|small)\b|\bnot enough\b|\bincrease\b|\bmore\b)",
+            lowered,
+            re.IGNORECASE,
+        ))
+        if decrease == increase:
+            return []
+        aspect = "visual" if re.search(r"(?:视觉|观感|外观|构图|\bvisual\b|\bappearance\b)", lowered) else "gameplay" if re.search(r"(?:路线|路径|推箱|玩法|游玩|节奏|限制|\broute\b|\bpush\b|\bgameplay\b)", lowered) else "unspecified"
+        scope_match = re.search(r"(?:左侧|右侧|上方|下方|中央|中间|左上|右上|左下|右下|\b(?:left|right|upper|lower|center|middle)\b)", lowered)
+        return [{
+            "subject": subject,
+            "attribute": "coverage" if subject == "water" else "amount",
+            "direction": "decrease" if decrease else "increase",
+            "degree": "excessive" if decrease else "insufficient",
+            "aspect": aspect,
+            "scope": scope_match.group(0) if scope_match else "stage",
+            "confidence": 1.0,
+        }]
+
+    def statement_mentions_subject(statement, subject):
+        value = str(statement or "").casefold()
+        terms = {
+            "water": ("水", "water"),
+            "wall": ("墙", "障碍", "wall", "obstacle"),
+            "box": ("箱", "box", "crate"),
+            "target": ("目标", "终点", "target", "goal"),
+        }.get(subject, ())
+        return any(term in value for term in terms)
+
+    versions = database.execute(
+        "SELECT id, session_id, design_context_json FROM level_versions ORDER BY created_at, id"
+    ).fetchall()
+    for version in versions:
+        context = normalize_design_context(load_json(version["design_context_json"]) or {})
+        version_changed = False
+        for hypothesis in context.get("intentHypotheses", []):
+            if hypothesis.get("semanticClaims") or not hypothesis.get("sourceTurnId"):
+                continue
+            assistant = database.execute(
+                "SELECT sequence_number, version_id FROM conversation_turns WHERE id = ? AND session_id = ? AND role = 'assistant'",
+                (hypothesis["sourceTurnId"], version["session_id"]),
+            ).fetchone()
+            if assistant is None:
+                continue
+            source = database.execute(
+                """
+                SELECT id, content FROM conversation_turns
+                WHERE session_id = ? AND version_id = ? AND role = 'user' AND sequence_number < ?
+                ORDER BY sequence_number DESC LIMIT 1
+                """,
+                (version["session_id"], assistant["version_id"], assistant["sequence_number"]),
+            ).fetchone()
+            if source is None:
+                continue
+            claims = legacy_claims(source["content"])
+            if len(claims) != 1:
+                continue
+            allowed_subjects = topic_subjects.get(hypothesis.get("topicKey"))
+            if allowed_subjects and claims[0].get("subject") not in allowed_subjects:
+                continue
+            if not allowed_subjects and not statement_mentions_subject(
+                hypothesis.get("statement"), claims[0].get("subject")
+            ):
+                continue
+            claim = dict(claims[0])
+            claim["sourceUserTurnId"] = source["id"]
+            hypothesis["semanticClaims"] = [claim]
+            version_changed = True
+            database.execute(
+                """
+                INSERT INTO audit_events(session_id, event_type, payload_json, created_at)
+                VALUES (?, 'intent_semantics_backfilled', ?, ?)
+                """,
+                (
+                    version["session_id"],
+                    dump_json({
+                        "versionId": version["id"],
+                        "hypothesisId": hypothesis["id"],
+                        "sourceUserTurnId": source["id"],
+                        "semanticClaims": [claim],
+                    }),
+                    datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                ),
+            )
+            changed += 1
+        if version_changed:
+            save_design_context(database, version["id"], context)
     return changed
 
 
@@ -1499,6 +1630,22 @@ def serialize_session(database, session_id):
         turn["id"]: public_turn_content(turn)
         for turn in turns
     }
+    raw_content_by_turn = {turn["id"]: turn["content"] for turn in turns}
+    translated_content_by_turn = {
+        (translation["turn_id"], translation["language"]): translation["body"]
+        for translation in translations
+        if translation["body"]
+    }
+
+    def hypothesis_evidence_text(hypothesis, language):
+        for claim in hypothesis.get("semanticClaims") or []:
+            source_turn_id = claim.get("sourceUserTurnId")
+            translated = translated_content_by_turn.get((source_turn_id, language))
+            if translated:
+                return translated
+            if source_turn_id and raw_content_by_turn.get(source_turn_id):
+                return raw_content_by_turn[source_turn_id]
+        return None
 
     def public_assessment_payload(payload, language):
         if not isinstance(payload, dict):
@@ -1572,6 +1719,21 @@ def serialize_session(database, session_id):
             return hypothesis.get("displayStatement") or hypothesis.get("statement")
         return hypothesis.get("statement")
 
+    def conflict_choice_statement(hypothesis, language):
+        claims = hypothesis.get("semanticClaims") or []
+        if len(claims) == 1:
+            claim = claims[0]
+            if claim.get("subject") == "water" and claim.get("attribute") == "coverage":
+                if language == "zh-CN" and claim.get("direction") == "decrease":
+                    return "你认为当前水域覆盖过多，倾向于降低它占据的空间。"
+                if language == "zh-CN" and claim.get("direction") == "increase":
+                    return "你认为当前水域覆盖不足，倾向于增加它占据的空间。"
+                if language != "zh-CN" and claim.get("direction") == "decrease":
+                    return "You see the current water coverage as excessive and prefer reducing its footprint."
+                if language != "zh-CN" and claim.get("direction") == "increase":
+                    return "You see the current water coverage as insufficient and prefer increasing its footprint."
+        return localized_hypothesis_statement(hypothesis, language)
+
     def intent_state(turn):
         guidance = stored_guidance_by_turn.get(turn["id"], {})
         hypothesis_id = guidance.get("_intentHypothesisId")
@@ -1635,18 +1797,20 @@ def serialize_session(database, session_id):
                         {
                             "role": "new",
                             "hypothesisId": hypothesis_id,
-                            "statement": localized_hypothesis_statement(
+                            "statement": conflict_choice_statement(
                                 hypothesis, turn["language"]
                             ),
                             "status": status,
+                            "evidenceText": hypothesis_evidence_text(hypothesis, turn["language"]),
                         },
                         {
                             "role": "existing",
                             "hypothesisId": existing_id,
-                            "statement": localized_hypothesis_statement(
+                            "statement": conflict_choice_statement(
                                 existing, turn["language"]
                             ),
                             "status": existing.get("status", "confirmed"),
+                            "evidenceText": hypothesis_evidence_text(existing, turn["language"]),
                         },
                     ],
                 }

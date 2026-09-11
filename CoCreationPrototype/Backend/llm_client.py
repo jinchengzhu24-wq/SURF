@@ -692,9 +692,12 @@ def build_chat_messages(
         "turn observed behavior into certainty. Questions inside "
         "this orange-card text are resolved only by its card controls and are not conversation "
         "questions. Whenever you emit intentHypothesis, assistantMessage must also provide a "
-        "substantive explanation above the card: respond to the feedback, identify the actual "
-        "evidence, distinguish plausible design meanings and their play consequences, and state "
-        "what remains uncertain. Do not jump from a one-sentence acknowledgement directly to "
+        "substantive explanation above the card, normally two or three paragraphs and four to seven "
+        "complete sentences: respond to the feedback, identify at least one verified current-map "
+        "observation, distinguish at least two plausible visual, spatial, route, push, or rhythm "
+        "consequences, and state what remains uncertain. Do not repeat the intent card, announce the "
+        "intent workflow, or pad the reply with generic statements about confirmation and correction. "
+        "Do not jump from a one-sentence acknowledgement directly to "
         "the orange card. A vague aesthetic reaction such as 'it does not look good' never proves "
         "that the designer prioritizes gameplay; keep visual composition and play rhythm distinct "
         "until the designer clarifies the boundary.\n\n"
@@ -6656,6 +6659,7 @@ def review_intent_feedback(
     language,
     request_id,
     *,
+    candidate_claims=None,
     _deadline=None,
 ):
     """Check one user-confirmed inclination without map or chat-history context."""
@@ -6672,6 +6676,7 @@ def review_intent_feedback(
             active.append({
                 "hypothesisId": hypothesis_id,
                 "statement": statement,
+                "semanticClaims": item.get("semanticClaims") or [],
             })
     active = active[:12]
     evidence = [
@@ -6724,6 +6729,9 @@ def review_intent_feedback(
             "belongs exclusively to the designer. Evidence entries "
             "are observations only and cannot establish intention by themselves.\n\n"
             f"Candidate inclination: {candidate}\n"
+            "Candidate server-extracted semantic claims:\n"
+            + json.dumps(candidate_claims or [], ensure_ascii=False, separators=(",", ":"))
+            + "\n"
             "Active confirmed inclinations:\n"
             + json.dumps(active, ensure_ascii=False, separators=(",", ":"))
             + "\nRelevant audit evidence:\n"
@@ -7416,7 +7424,6 @@ async def _generate_plain_with_model_fallback(
                 rows=rows,
                 strict_metadata=validation_mode not in {"ordinary_chat", "route_discussion"},
             )
-            model_intent_hypothesis_supplied = bool(intent_hypothesis)
             if clarification_active:
                 # The proposal topic and its one next question are server-owned.
                 # Model questions and metadata cannot advance or redirect it.
@@ -7735,7 +7742,6 @@ async def _generate_plain_with_model_fallback(
                 body = _unclear_revision_reply(language, latest_user)
                 question = None
                 intent_hypothesis = None
-                model_intent_hypothesis_supplied = False
                 proposal_offer = None
                 ui_cues = []
                 guidance_fallback_used = True
@@ -7811,10 +7817,11 @@ async def _generate_plain_with_model_fallback(
                 semantic_issue = _intent_semantic_binding_issue(
                     guidance["intentHypothesis"], latest_user, language
                 )
-                body_issue = _intent_body_detail_issue(body, language)
+                body_issue = _intent_body_detail_issue(
+                    body, language, guidance["intentHypothesis"]
+                )
                 if (
                     (intent_issue or semantic_issue or body_issue)
-                    and model_intent_hypothesis_supplied
                     and attempt < max_attempts
                 ):
                     raise ValueError(
@@ -7834,12 +7841,10 @@ async def _generate_plain_with_model_fallback(
                     )
                     guidance_fallback_used = True
                 if body_issue:
-                    body = _detailed_intent_body_fallback(
-                        body,
-                        _latest_role_content(semantic_messages, "user"),
-                        language,
+                    raise LowQualityModelResponse(
+                        "The intent response lacks distinct, complete design analysis: "
+                        + body_issue
                     )
-                    guidance_fallback_used = True
             if (
                 guidance_mode in {"revision_advice", "needs_clarification"}
                 and not guidance.get("proposalOffer")
@@ -13725,6 +13730,8 @@ class IntentSemanticFrame:
     direction: str
     degree: str = ""
     specificity: int = 0
+    aspect: str = "unspecified"
+    scope: str = "stage"
 
 
 _DESIGN_TOPIC_TERMS_ZH = {
@@ -13821,6 +13828,7 @@ _INTENT_SUBJECT_TERMS_EN = (
 )
 
 _INTENT_PROPERTY_TERMS_ZH = (
+    ("coverage", ("占地过大", "占地太大", "覆盖过大", "覆盖太大", "覆盖过小", "覆盖太小", "覆盖不足", "覆盖面积")),
     ("crowded", ("太拥挤", "过于拥挤", "拥挤", "太挤", "过密", "密集", "拥堵", "狭促")),
     ("empty", ("太空", "空旷", "空荡", "显得空")),
     ("complex", ("太复杂", "复杂")),
@@ -13829,9 +13837,11 @@ _INTENT_PROPERTY_TERMS_ZH = (
     ("clear", ("不清晰", "不够清晰", "清晰", "可读")),
     ("concentrated", ("太集中", "集中", "靠在一起", "太近")),
     ("separated", ("分开", "间距", "太远")),
+    ("amount", ("太多", "过多", "太少", "过少", "不够多", "数量", "更多", "更少", "多一点", "少一点", "增加", "增多", "减少")),
 )
 
 _INTENT_PROPERTY_TERMS_EN = (
+    ("coverage", ("too large", "too small", "coverage", "footprint", "takes up too much", "takes up too little")),
     ("crowded", ("too crowded", "crowded", "cramped", "too dense", "packed")),
     ("empty", ("too empty", "empty", "sparse", "vacant")),
     ("complex", ("too complex", "complex")),
@@ -13843,6 +13853,7 @@ _INTENT_PROPERTY_TERMS_EN = (
     )),
     ("concentrated", ("too concentrated", "concentrated", "too close")),
     ("separated", ("separate", "separated", "far apart")),
+    ("amount", ("too much", "too many", "too few", "too little", "not enough water", "more", "less", "fewer", "increase", "reduce", "decrease", "amount", "quantity")),
 )
 
 _INTENT_LABELS_ZH = {
@@ -13850,7 +13861,7 @@ _INTENT_LABELS_ZH = {
     "water": "水域", "wall": "墙体与障碍", "box": "箱子关系", "difficulty": "难度",
     "rhythm": "路线节奏", "crowded": "拥挤感", "empty": "空旷感", "complex": "复杂度",
     "short": "偏短", "long": "偏长", "clear": "清晰度", "concentrated": "集中关系",
-    "separated": "分离关系",
+    "separated": "分离关系", "amount": "数量", "coverage": "覆盖范围",
 }
 
 _INTENT_LABELS_EN = {
@@ -13858,7 +13869,7 @@ _INTENT_LABELS_EN = {
     "water": "water", "wall": "walls and obstacles", "box": "box relationship", "difficulty": "difficulty",
     "rhythm": "route rhythm", "crowded": "crowded feeling", "empty": "emptiness", "complex": "complexity",
     "short": "shortness", "long": "length", "clear": "clarity", "concentrated": "concentration",
-    "separated": "separation",
+    "separated": "separation", "amount": "amount", "coverage": "coverage",
 }
 
 
@@ -13885,8 +13896,8 @@ def _intent_semantic_frames(message):
         denied = bool(re.search(r"(?:不觉得|并不觉得|不认为).{0,24}(?:拥挤|密集|复杂|太难|太长|太短)", text))
         avoid = bool(re.search(r"(?:不喜欢|不希望|不想(?:要|让)?|不愿意|宁可不)", text))
         prefer = bool(re.search(r"(?:喜欢|希望|想要|更想要|宁愿|偏向|倾向)", text))
-        insufficient = bool(re.search(r"(?:不够|还不够)", text))
-        excessive = bool(re.search(r"(?:太|过于|过分)", text))
+        insufficient = bool(re.search(r"(?:太少|过少|不够(?:多|大)?|还不够|覆盖(?:太小|过小|不足))", text))
+        excessive = bool(re.search(r"(?:太|过多|占地(?:太大|过大)|覆盖(?:太大|过大)|过于|过分)", text))
         subject_terms = _INTENT_SUBJECT_TERMS_ZH
         property_terms = _INTENT_PROPERTY_TERMS_ZH
     else:
@@ -13899,7 +13910,7 @@ def _intent_semantic_frames(message):
         denied = bool(re.search(r"\b(?:do not|don't) (?:think|feel) .{0,24}(?:crowded|dense|complex|hard|long|short)\b", searchable))
         avoid = bool(re.search(r"\b(?:do not|don't) (?:like|want|hope|prefer)|\bdislike\b", searchable))
         prefer = bool(re.search(r"\b(?:like|want|hope|prefer|favor|would rather)\b", searchable))
-        insufficient = bool(re.search(r"\bnot enough\b", searchable))
+        insufficient = bool(re.search(r"\b(?:not enough|too (?:few|little|small))\b", searchable))
         excessive = bool(re.search(r"\btoo\b|\boverly\b", searchable))
         subject_terms = _INTENT_SUBJECT_TERMS_EN
         property_terms = _INTENT_PROPERTY_TERMS_EN
@@ -13919,24 +13930,43 @@ def _intent_semantic_frames(message):
         )]
         if not subjects or not properties:
             continue
+        if subjects[0] == "water" and properties[0] == "amount":
+            properties[0] = "coverage"
         if language == "zh-CN":
             clause_denied = bool(re.search(r"(?:不觉得|并不觉得|不认为).{0,24}(?:拥挤|密集|复杂|太难|太长|太短)", clause))
             clause_avoid = bool(re.search(r"(?:不喜欢|不希望|不想(?:要|让)?|不愿意|宁可不)", clause))
             clause_prefer = bool(re.search(r"(?:喜欢|希望|想要|更想要|宁愿|偏向|倾向)", clause))
-            clause_insufficient = bool(re.search(r"(?:不够|还不够)", clause))
-            clause_excessive = bool(re.search(r"(?:太|过于|过分)", clause))
+            clause_insufficient = bool(re.search(r"(?:太少|过少|不够(?:多|大)?|还不够|覆盖(?:太小|过小|不足))", clause))
+            clause_excessive = bool(re.search(r"(?:太|过多|占地(?:太大|过大)|覆盖(?:太大|过大)|过于|过分)", clause))
+            clause_increase = bool(re.search(r"(?:增加|增多|更多|多一点)", clause))
+            clause_decrease = bool(re.search(r"(?:减少|更少|少一点|缩小)", clause))
+            aspect = "visual" if re.search(r"(?:视觉|观感|外观|构图)", clause) else "gameplay" if re.search(r"(?:路线|路径|推箱|玩法|游玩|节奏|限制)", clause) else "unspecified"
+            scope_match = re.search(r"(?:左侧|右侧|上方|下方|中央|中间|左上|右上|左下|右下|第\s*\d+\s*行|第\s*\d+\s*列)", clause)
         else:
             clause_denied = bool(re.search(r"\b(?:do not|don't) (?:think|feel) .{0,24}(?:crowded|dense|complex|hard|long|short)\b", clause))
             clause_avoid = bool(re.search(r"\b(?:do not|don't) (?:like|want|hope|prefer)|\bdislike\b", clause))
             clause_prefer = bool(re.search(r"\b(?:like|want|hope|prefer|favor|would rather)\b", clause))
-            clause_insufficient = bool(re.search(r"\bnot enough\b", clause))
+            clause_insufficient = bool(re.search(r"\b(?:not enough|too (?:few|little|small))\b", clause))
             clause_excessive = bool(re.search(r"\btoo\b|\boverly\b", clause))
-        direction = "denied" if clause_denied else "avoid" if clause_avoid or clause_excessive else "increase" if clause_insufficient else "prefer" if clause_prefer else "evaluate"
+            clause_increase = bool(re.search(r"\b(?:increase|add|more)\b", clause))
+            clause_decrease = bool(re.search(r"\b(?:reduce|decrease|less|fewer|shrink)\b", clause))
+            aspect = "visual" if re.search(r"\b(?:visual|appearance|composition|aesthetic)\b", clause) else "gameplay" if re.search(r"\b(?:route|path|push|gameplay|play|rhythm|constraint)\b", clause) else "unspecified"
+            scope_match = re.search(r"\b(?:left|right|upper|lower|center|middle)\b", clause)
+        quantitative = properties[0] in {"amount", "coverage"}
+        direction = (
+            "decrease" if clause_decrease or (quantitative and clause_excessive and not clause_insufficient)
+            else "increase" if clause_increase or (quantitative and clause_insufficient)
+            else "avoid" if clause_denied or clause_avoid or clause_excessive
+            else "prefer" if clause_prefer
+            else "evaluate"
+        )
         degree = "insufficient" if clause_insufficient else "excessive" if clause_excessive else ""
         explicit_commitment = clause_denied or clause_avoid or clause_prefer
         frames.append(IntentSemanticFrame(
             subjects[0], properties[0], direction, degree,
             4 + (2 if explicit_commitment else int(direction != "evaluate")),
+            aspect,
+            scope_match.group(0).casefold() if scope_match else "stage",
         ))
     return tuple(dict.fromkeys(frames))
 
@@ -13944,6 +13974,29 @@ def _intent_semantic_frames(message):
 def _primary_intent_semantic_frame(message):
     frames = _intent_semantic_frames(message)
     return max(frames, key=lambda item: item.specificity) if frames else None
+
+
+def _intent_semantic_claims(message):
+    direction_map = {"prefer": "maintain", "denied": "avoid"}
+    attribute_map = {
+        "crowded": "density",
+        "empty": "density",
+        "complex": "complexity",
+        "short": "length",
+        "long": "length",
+        "clear": "clarity",
+        "concentrated": "concentration",
+        "separated": "separation",
+    }
+    return [{
+        "subject": frame.subject,
+        "attribute": attribute_map.get(frame.property, frame.property),
+        "direction": direction_map.get(frame.direction, frame.direction),
+        "degree": frame.degree or "neutral",
+        "aspect": frame.aspect,
+        "scope": frame.scope,
+        "confidence": 1.0,
+    } for frame in _intent_semantic_frames(message)[:4]]
 
 
 def _intent_frame_options(source, language):
@@ -13954,6 +14007,21 @@ def _intent_frame_options(source, language):
     subject = labels[frame.subject]
     property_label = labels[frame.property]
     if language == "zh-CN":
+        if frame.subject == "water" and frame.property == "coverage":
+            if frame.direction == "decrease":
+                if frame.degree == "excessive":
+                    core = "你认为当前水域覆盖过多，倾向于降低它占据的空间"
+                else:
+                    core = "你倾向于减少当前水域覆盖范围"
+                text = f"我暂时理解为，{core}。你主要在意视觉比例还是路线限制，目前仍未确定，可以纠正我。"
+                return (text, text, text)
+            if frame.direction == "increase":
+                if frame.degree == "insufficient":
+                    core = "你认为当前水域覆盖不足，倾向于增加它占据的空间"
+                else:
+                    core = "你倾向于增加当前水域覆盖范围"
+                text = f"我暂时理解为，{core}。你主要在意视觉比例还是路线限制，目前仍未确定，可以纠正我。"
+                return (text, text, text)
         if frame.degree == "excessive":
             property_label = f"过于{property_label}"
         elif frame.degree == "insufficient":
@@ -14274,12 +14342,14 @@ def _natural_intent_candidate(
 def _ensure_intent_card_sentence_shape(value, language):
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     sentence_count = len([
-        part for part in re.split(r"(?<=[.!?。！？])\s*", text)
+        part for part in re.split(r"(?<=[.!?;。！？；])\s*", text)
         if part.strip()
     ])
     if sentence_count >= 2:
         return text
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
+        if re.search(r"(?:只是我(?:当前|目前)的理解|可以(?:直接)?纠正|请纠正|仍可纠正)", text):
+            return text
         return f"{text} 这只是我目前的理解，你可以直接纠正它。"
     return f"{text} This is only my current reading, and you can correct it directly."
 
@@ -16853,7 +16923,7 @@ def _normalize_intent_hypothesis(hypothesis, language):
 
 def _intent_sentence_count(value):
     return len([
-        part for part in re.split(r"(?<=[.!?\u3002\uFF01\uFF1F])\s*", str(value or ""))
+        part for part in re.split(r"(?<=[.!?;\u3002\uFF01\uFF1F\uFF1B])\s*", str(value or ""))
         if part.strip()
     ])
 
@@ -16895,9 +16965,46 @@ def _intent_hypothesis_detail_issue(value, language):
     return None
 
 
-def _intent_body_detail_issue(value, language):
+def _intent_body_detail_issue(value, language, hypothesis=None):
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     chinese = language == "zh-CN" or bool(re.search(r"[\u3400-\u9fff]", text))
+    if re.search(
+        r"(?:下面的倾向|当作对当前设计效果的直接反馈|尚未被你确认的设计边界|"
+        r"inclination below|treating what you just said as direct feedback)",
+        text,
+        re.IGNORECASE,
+    ):
+        return "intent body contains workflow boilerplate"
+    if text.endswith((";", "；", ":", "：", ",", "，")) or re.search(
+        r"(?:^|[。！？.!?]\s*)(?:是让|而是让|还是让|because|while)\s*[^。！？.!?]*[;；]?\s*$",
+        text,
+        re.IGNORECASE,
+    ):
+        return "intent body ends with an incomplete clause"
+    if hypothesis and _guidance_reuses_visible_sentence(hypothesis, text):
+        return "intent body repeats the intent card"
+    map_related = bool(re.search(
+        r"(?:水|墙|箱|目标|地图|布局|路线|路径|空间|water|wall|box|crate|target|map|layout|route|path|space)",
+        str(hypothesis or ""),
+        re.IGNORECASE,
+    ))
+    if map_related:
+        effect_families = (
+            r"(?:视觉|观感|外观|构图|visual|appearance|composition|aesthetic)",
+            r"(?:空间|区域|通道|走廊|活动|spatial|space|area|corridor|passage)",
+            r"(?:路线|路径|绕行|可达|route|path|detour|reach)",
+            r"(?:推箱|推动|箱子|顺序|push|box|crate|order)",
+            r"(?:节奏|难度|压力|选择|rhythm|difficulty|pressure|choice)",
+        )
+        if sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in effect_families) < 2:
+            return "intent body does not distinguish two design consequences"
+        if not re.search(
+            r"(?:可能|也可能|尚未|还不|仍未|不确定|区分|或者|还是|"
+            r"may|might|uncertain|not yet|distinguish|whether|or)",
+            text,
+            re.IGNORECASE,
+        ):
+            return "intent body does not preserve the unresolved design boundary"
     if chinese:
         return None if len(text) >= 120 and _intent_sentence_count(text) >= 3 else "Chinese intent body is too brief"
     return None if len(re.findall(r"\b[\w'-]+\b", text)) >= 70 and _intent_sentence_count(text) >= 3 else "English intent body is too brief"
@@ -16948,25 +17055,6 @@ def _detailed_intent_fallback(hypothesis, latest_user, language):
     return (
         f"{core}. I am treating this only as a correctable design inclination for now."
     )
-
-
-def _detailed_intent_body_fallback(body, latest_user, language):
-    text = str(body or "").strip()
-    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", str(latest_user or "")):
-        addition = (
-            "\u6211\u4f1a\u5148\u628a\u4f60\u8fd9\u6b21\u7684\u8868\u8fbe\u5f53\u4f5c\u5bf9\u5f53\u524d\u8bbe\u8ba1\u6548\u679c\u7684\u76f4\u63a5\u53cd\u9988\uff0c\u800c\u4e0d\u4f1a\u7acb\u5373\u628a\u67d0\u79cd\u73a9\u6cd5\u76ee\u6807\u5f52\u56e0\u7ed9\u4f60\u3002"
-            "\u6211\u8fd8\u9700\u8981\u533a\u5206\u4f60\u76f4\u63a5\u8bf4\u660e\u7684\u6838\u5fc3\u91cd\u70b9\u3001\u5b83\u53ef\u80fd\u5e26\u6765\u7684\u73a9\u5bb6\u4f53\u9a8c\uff0c\u4ee5\u53ca\u5c1a\u672a\u88ab\u4f60\u786e\u8ba4\u7684\u8bbe\u8ba1\u8fb9\u754c\uff0c\u56e0\u4e3a\u8fd9\u4e9b\u4f1a\u5bfc\u5411\u4e0d\u540c\u7684\u4fee\u6539\u3002"
-            "\u5728\u8fd9\u4e2a\u8fb9\u754c\u88ab\u8bf4\u6e05\u4e4b\u524d\uff0c\u4e0b\u9762\u7684\u503e\u5411\u53ea\u662f\u6211\u4f9b\u4f60\u786e\u8ba4\u6216\u4fee\u6b63\u7684\u6682\u65f6\u7406\u89e3\u3002"
-        )
-    else:
-        addition = (
-            "I am treating what you just said as direct feedback about the current design effect, not as "
-            "permission to assign a particular play goal to you. I still need to separate the core point "
-            "you stated from its possible player experience and any design boundary you have "
-            "not confirmed, because those distinctions can lead to different revisions. Until that boundary is clear, the inclination below remains a tentative "
-            "reading for you to confirm or correct."
-        )
-    return "\n\n".join(part for part in (text, addition) if part)[:CHAT_RESPONSE_HARD_LENGTH]
 
 
 def _normalize_opening_question(question):

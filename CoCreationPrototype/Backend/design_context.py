@@ -9,7 +9,7 @@ import hashlib
 import re
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 AUTHORITIES = {"explicit", "confirmed", "inferred"}
 GOAL_STATUSES = {"active", "superseded", "rejected"}
 DECISION_STATUSES = {"active", "superseded"}
@@ -19,6 +19,17 @@ INTENT_TOPICS = {
     "difficulty", "route_readability", "push_dependency", "space_distribution",
     "route_rhythm", "water_function", "entity_placement", "preservation", "other",
 }
+INTENT_CLAIM_SUBJECTS = {
+    "layout", "space", "route", "target", "water", "wall", "box",
+    "difficulty", "rhythm",
+}
+INTENT_CLAIM_ATTRIBUTES = {
+    "amount", "coverage", "density", "complexity", "length", "clarity",
+    "concentration", "separation",
+}
+INTENT_CLAIM_DIRECTIONS = {"increase", "decrease", "maintain", "avoid", "evaluate"}
+INTENT_CLAIM_DEGREES = {"excessive", "insufficient", "neutral"}
+INTENT_CLAIM_ASPECTS = {"visual", "gameplay", "unspecified"}
 MAX_ACTIVE_INFERRED = 16
 MAX_INACTIVE_ITEMS = 16
 MAX_PATCH_ITEMS = 8
@@ -359,6 +370,41 @@ def _normalize_hypothesis(item, index=0):
         _source(value) for value in item.get("contradictingEvidenceIds", [])
         if _source(value)
     ][:32]
+    semantic_claims = []
+    for raw_claim in item.get("semanticClaims") or []:
+        if not isinstance(raw_claim, dict):
+            continue
+        subject = _text(raw_claim.get("subject"), 32)
+        attribute = _text(raw_claim.get("attribute"), 32)
+        direction = _text(raw_claim.get("direction"), 32)
+        degree = _text(raw_claim.get("degree"), 32) or "neutral"
+        aspect = _text(raw_claim.get("aspect"), 32) or "unspecified"
+        scope = _text(raw_claim.get("scope"), 96) or "stage"
+        if (
+            subject not in INTENT_CLAIM_SUBJECTS
+            or attribute not in INTENT_CLAIM_ATTRIBUTES
+            or direction not in INTENT_CLAIM_DIRECTIONS
+            or degree not in INTENT_CLAIM_DEGREES
+            or aspect not in INTENT_CLAIM_ASPECTS
+        ):
+            continue
+        semantic_claims.append({
+            "subject": subject,
+            "attribute": attribute,
+            "direction": direction,
+            "degree": degree,
+            "aspect": aspect,
+            "scope": scope,
+            "sourceUserTurnId": _source(raw_claim.get("sourceUserTurnId")),
+            "confidence": min(1.0, max(0.0, _confidence(raw_claim.get("confidence"), 1.0))),
+        })
+    semantic_claims = list({
+        (
+            claim["subject"], claim["attribute"], claim["direction"],
+            claim["degree"], claim["aspect"], claim["scope"],
+        ): claim
+        for claim in semantic_claims
+    }.values())[:4]
     return {
         "id": _text(item.get("id"), 96) or _stable_id("hypothesis", topic, statement, index),
         "topicKey": topic,
@@ -389,6 +435,7 @@ def _normalize_hypothesis(item, index=0):
             item.get("displayStatement")
         ) or None,
         "displayLanguage": _text(item.get("displayLanguage"), 16) or None,
+        "semanticClaims": semantic_claims,
     }
 
 
@@ -601,6 +648,8 @@ def merge_intent_hypothesis(
     turn_id=None,
     confidence=0.35,
     displayed=False,
+    semantic_claims=None,
+    source_user_turn_id=None,
 ):
     """Upsert one model hypothesis; it always remains tentative until user confirmation."""
     result = normalize_design_context(context)
@@ -611,6 +660,22 @@ def merge_intent_hypothesis(
     evidence_ids = list(dict.fromkeys(
         _source(value) for value in (evidence_ids or []) if _source(value)
     ))[:32]
+    normalized_claims = []
+    for claim in semantic_claims or []:
+        if not isinstance(claim, dict):
+            continue
+        normalized_claims.append({
+            **claim,
+            "sourceUserTurnId": _source(source_user_turn_id)
+            or _source(claim.get("sourceUserTurnId")),
+        })
+    normalized_claims = (
+        _normalize_hypothesis({
+            "statement": clean,
+            "topicKey": topic,
+            "semanticClaims": normalized_claims,
+        }).get("semanticClaims", [])
+    )
     exact = next((
         item for item in result["intentHypotheses"]
         if item.get("status") == "tentative"
@@ -625,6 +690,8 @@ def merge_intent_hypothesis(
         ))
         exact["lastUpdatedStageId"] = _source(stage_id)
         exact["displayed"] = bool(exact.get("displayed") or displayed)
+        if normalized_claims:
+            exact["semanticClaims"] = normalized_claims
         hypothesis_id = exact["id"]
     else:
         for item in result["intentHypotheses"]:
@@ -644,6 +711,7 @@ def merge_intent_hypothesis(
             "lastUpdatedStageId": _source(stage_id),
             "origin": "model",
             "displayed": bool(displayed),
+            "semanticClaims": normalized_claims,
         })
     result["processedEvidenceIds"] = list(dict.fromkeys(
         result.get("processedEvidenceIds", []) + evidence_ids

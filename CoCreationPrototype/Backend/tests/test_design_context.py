@@ -940,7 +940,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                         """,
                         (session_id,),
                     ).fetchone()[0]
-                    self.assertEqual(migrated["schemaVersion"], 4)
+                    self.assertEqual(migrated["schemaVersion"], 5)
                 self.assertEqual(events, 1)
                 self.assertEqual(
                     migrated["intentHypotheses"][0]["status"],
@@ -1161,6 +1161,68 @@ class DesignContextRepositoryTests(unittest.TestCase):
                     payload = repository.serialize_session(database, session_id)
                     self.assertNotIn("entityBindings", payload)
                     self.assertNotIn("entity_bindings_json", json.dumps(payload))
+            finally:
+                repository.DATABASE_PATH = original_path
+
+    def test_intent_semantic_backfill_is_idempotent_and_preserves_confirmed_text(self):
+        original_path = repository.DATABASE_PATH
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            repository.DATABASE_PATH = Path(directory) / "intent-semantics.sqlite3"
+            try:
+                repository.initialize_database()
+                session_id = uuid.uuid4().hex
+                version_id = uuid.uuid4().hex
+                user_turn_id = uuid.uuid4().hex
+                assistant_turn_id = uuid.uuid4().hex
+                original_statement = "听起来你想让水成为路线边界。"
+                context = empty_design_context()
+                context["intentHypotheses"] = [{
+                    "id": "legacy-water-intent",
+                    "topicKey": "water_function",
+                    "statement": original_statement,
+                    "status": "confirmed",
+                    "confidence": 1.0,
+                    "sourceStageId": version_id,
+                    "sourceTurnId": assistant_turn_id,
+                    "displayed": True,
+                }]
+                now = "2026-09-11T00:00:00Z"
+                with repository.connect(immediate=True) as database:
+                    database.execute(
+                        """INSERT INTO design_sessions(
+                            id, creation_key, access_hash, integration_hash, bootstrap_hash,
+                            initial_draft_method, language, status, current_version_id,
+                            created_at, updated_at
+                        ) VALUES (?, ?, 'a', 'b', 'c', 'partial_completion', 'zh-CN', 'active', ?, ?, ?)""",
+                        (session_id, uuid.uuid4().hex, version_id, now, now),
+                    )
+                    database.execute(
+                        """INSERT INTO level_versions(
+                            id, session_id, stage_number, parent_version_id, source, rows_json,
+                            summary, diff_json, validation_json, design_context_json,
+                            idempotency_key, created_at
+                        ) VALUES (?, ?, 1, NULL, 'initial', ?, '', '[]', '{}', ?, ?, ?)""",
+                        (version_id, session_id, json.dumps(["############"] * 10), json.dumps(context, ensure_ascii=False), version_id, now),
+                    )
+                    for turn_id, sequence, role, content in (
+                        (user_turn_id, 1, "user", "我觉得水域太多了"),
+                        (assistant_turn_id, 2, "assistant", "地图分析正文"),
+                    ):
+                        database.execute(
+                            """INSERT INTO conversation_turns(
+                                id, session_id, sequence_number, role, content, language,
+                                version_id, created_at, guidance_json
+                            ) VALUES (?, ?, ?, ?, ?, 'zh-CN', ?, ?, '{}')""",
+                            (turn_id, session_id, sequence, role, content, version_id, now),
+                        )
+                    self.assertEqual(repository.backfill_intent_semantics(database), 1)
+                    self.assertEqual(repository.backfill_intent_semantics(database), 0)
+                    repaired = repository.load_design_context(database, session_id, version_id)
+                    hypothesis = repaired["intentHypotheses"][0]
+                    self.assertEqual(hypothesis["statement"], original_statement)
+                    self.assertEqual(hypothesis["status"], "confirmed")
+                    self.assertEqual(hypothesis["semanticClaims"][0]["direction"], "decrease")
+                    self.assertEqual(hypothesis["semanticClaims"][0]["sourceUserTurnId"], user_turn_id)
             finally:
                 repository.DATABASE_PATH = original_path
 

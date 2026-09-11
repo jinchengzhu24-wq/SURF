@@ -63,6 +63,12 @@ MAP_GROUNDING_ROWS = [
     " #########  ",
 ]
 
+DETAILED_INTENT_BODY_ZH = (
+    "你指出的是当前地图中一个具体设计对象呈现出的比例或作用，而不只是抽象地表示不满意。"
+    "这个判断可能首先影响画面的空间重量，也可能改变玩家可用通道、绕行余量和推箱节奏，两种影响需要分开观察。"
+    "在没有更多直接说明前，我会保留视觉效果与实际玩法这两种解释，不把其中任何一种提前当成你的最终目的。"
+)
+
 
 def operation_payload(*operation_sets):
     return json.dumps({
@@ -2702,7 +2708,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("Which first push should carry the route judgment?", result.assistant_message)
 
     def test_clear_first_person_evaluation_gets_an_intent_card_when_model_omits_one(self):
-        client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
+        client = FakeClient([DETAILED_INTENT_BODY_ZH])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -2824,7 +2830,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_screenshot_wording_gets_target_relationship_intent_when_model_omits_one(self):
         result, _ = self.execute(
-            ["我会把你的判断与当前目标分布分开来看，再保留尚未确认的玩法解释。"],
+            [DETAILED_INTENT_BODY_ZH],
             language="zh-CN",
             conversation=[{
                 "role": "user",
@@ -2842,7 +2848,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_want_player_experience_statement_gets_an_intent_card(self):
         result, _ = self.execute(
-            ["这个方向会让当前较短的路线更需要规划。"],
+            [DETAILED_INTENT_BODY_ZH],
             language="zh-CN",
             conversation=[{
                 "role": "user",
@@ -2885,7 +2891,7 @@ class LLMClientTests(unittest.TestCase):
     def test_user_difficulty_reframe_gets_a_tentative_intent_card(self):
         result, _ = self.execute(
             [
-                "我会继续看第一次推箱时的路线判断，避免把难度只理解成增加障碍。"
+                DETAILED_INTENT_BODY_ZH
             ],
             language="zh-CN",
             conversation=[
@@ -2908,7 +2914,7 @@ class LLMClientTests(unittest.TestCase):
         user_message = "我倒是认为得改动水域的形状"
         result, _ = self.execute(
             [
-                "我同意，水现在更像装饰而不是路线边界。\n"
+                DETAILED_INTENT_BODY_ZH + "\n"
                 "<GUIDANCE>INTENT: 我暂时把你的方向理解为：我倒是认为得改动水域的形状</GUIDANCE>"
             ] * 3,
             language="zh-CN",
@@ -2957,6 +2963,35 @@ class LLMClientTests(unittest.TestCase):
             )
         )
         self.assertIsNone(llm_client._intent_body_detail_issue(detailed_body, "en"))
+
+    def test_three_inadequate_intent_bodies_return_retryable_error(self):
+        short = (
+            "I understand the feedback.\n"
+            "<GUIDANCE>INTENT: For now, I understand that you may prefer less water coverage. "
+            "This remains a correctable reading.</GUIDANCE>"
+        )
+        with self.assertRaises(llm_client.LLMServiceError) as raised:
+            self.execute(
+                [short, short, short],
+                conversation=[{"role": "user", "content": "I think there is too much water."}],
+            )
+        self.assertTrue(raised.exception.retryable)
+        self.assertEqual(raised.exception.code, "MODEL_LOW_QUALITY_RESPONSE")
+
+    def test_intent_body_quality_rejects_workflow_padding(self):
+        padded = (
+            "I am treating what you just said as direct feedback about the current design effect. "
+            "The visual balance and route pressure may differ across the map, and I cannot yet tell "
+            "which boundary matters more. The inclination below remains tentative until confirmation."
+        )
+        self.assertEqual(
+            llm_client._intent_body_detail_issue(
+                padded,
+                "en",
+                "For now, I understand that you may prefer less water coverage.",
+            ),
+            "intent body contains workflow boilerplate",
+        )
 
     def test_visual_only_feedback_gets_detailed_uncertainty_fallback(self):
         card = llm_client._detailed_intent_fallback(
@@ -3115,7 +3150,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_open_ended_help_gets_a_grounded_discussion_card_when_model_omits_metadata(self):
         result, client = self.execute(
-            ["我可以先陪你看看这张图。"],
+            [DETAILED_INTENT_BODY_ZH],
             rows=MAP_GROUNDING_ROWS,
             language="zh-CN",
             conversation=[{
@@ -6148,7 +6183,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(guidance["proposalOffer"])
 
     def test_later_turn_in_stage_one_may_still_ask_a_concrete_question(self):
-        client = FakeClient(["我更倾向于让水域真正参与路线，而不是只做背景。"])
+        client = FakeClient([DETAILED_INTENT_BODY_ZH])
 
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
@@ -6781,6 +6816,43 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(frame.subject, "route")
         self.assertEqual(frame.property, "clear")
         self.assertEqual(frame.direction, "prefer")
+
+    def test_water_amount_claims_preserve_opposite_coverage_directions(self):
+        too_much = llm_client._intent_semantic_claims("我觉得水域太多了")
+        too_little = llm_client._intent_semantic_claims("我觉得水域太少了")
+
+        self.assertEqual(too_much[0]["subject"], "water")
+        self.assertEqual(too_much[0]["attribute"], "coverage")
+        self.assertEqual(too_much[0]["direction"], "decrease")
+        self.assertEqual(too_little[0]["direction"], "increase")
+
+    def test_specific_property_wins_over_generic_more_wording(self):
+        claims = llm_client._intent_semantic_claims(
+            "I want the route to be more complex."
+        )
+
+        self.assertEqual(claims[0]["subject"], "route")
+        self.assertEqual(claims[0]["attribute"], "complexity")
+        self.assertEqual(claims[0]["direction"], "increase")
+
+    def test_explicit_water_reduction_does_not_invent_excessive_degree(self):
+        card = llm_client._intent_frame_options("我想减少水域", "zh-CN")[0]
+
+        self.assertIn("减少当前水域覆盖范围", card)
+        self.assertNotIn("覆盖过多", card)
+
+        decrease_card = llm_client._natural_intent_candidate(
+            "我觉得水域太多了", "zh-CN", False
+        )
+        increase_card = llm_client._natural_intent_candidate(
+            "我觉得水域太少了", "zh-CN", False
+        )
+        self.assertIn("覆盖过多", decrease_card)
+        self.assertIn("降低", decrease_card)
+        self.assertIn("覆盖不足", increase_card)
+        self.assertIn("增加", increase_card)
+        self.assertNotEqual(decrease_card, increase_card)
+        self.assertEqual(decrease_card.count("可以纠正我"), 1)
 
 
 if __name__ == "__main__":

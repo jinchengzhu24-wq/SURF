@@ -81,6 +81,22 @@ PLAYER_MOVE_CONTRACT = {
 
 
 class CoCreationSessionTests(unittest.TestCase):
+    def test_deterministic_intent_conflict_requires_same_scope_and_aspect(self):
+        decrease = [{
+            "subject": "water", "attribute": "coverage", "direction": "decrease",
+            "degree": "excessive", "aspect": "unspecified", "scope": "stage",
+        }]
+        increase = [{
+            "subject": "water", "attribute": "coverage", "direction": "increase",
+            "degree": "insufficient", "aspect": "unspecified", "scope": "stage",
+        }]
+        self.assertIsNotNone(backend._deterministic_intent_conflict(increase, decrease))
+        visual = [dict(increase[0], aspect="visual")]
+        gameplay = [dict(decrease[0], aspect="gameplay")]
+        self.assertIsNone(backend._deterministic_intent_conflict(visual, gameplay))
+        right = [dict(increase[0], scope="右侧")]
+        self.assertIsNone(backend._deterministic_intent_conflict(right, decrease))
+
     @classmethod
     def setUpClass(cls):
         cls.temp_directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -162,7 +178,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(exchange.status_code, 200, exchange.text)
         return payload["sessionId"]
 
-    def create_intent_card(self, statement, key, intent_review=None):
+    def create_intent_card(self, statement, key, intent_review=None, content=None):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(
             "I notice a compact, solvable opening.",
@@ -218,7 +234,7 @@ class CoCreationSessionTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "I care about how the level's decisions feel.",
+                    "content": content or "I care about how the level's decisions feel.",
                     "baseVersionId": version_id,
                     "idempotencyKey": key,
                 },
@@ -370,6 +386,40 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(key_conflict.status_code, 409, key_conflict.text)
         self.assertEqual(key_conflict.json()["code"], "IDEMPOTENCY_CONFLICT")
+
+    def test_opposite_water_coverage_uses_deterministic_conflict_flow(self):
+        version_id, first_turn, _ = self.create_intent_card(
+            "我暂时理解为，你认为当前水域覆盖过多，倾向于降低它占据的空间。你主要在意视觉比例还是路线限制，目前仍未确定，可以纠正我。",
+            "water-too-much-card",
+            content="我觉得水域太多了",
+        )
+        first_state = first_turn["guidance"]["intentState"]
+        confirmed = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{first_state['hypothesisId']}/feedback",
+            json={
+                "action": "confirm", "candidateText": None,
+                "sourceTurnId": first_turn["turnId"], "baseVersionId": version_id,
+                "idempotencyKey": "water-too-much-confirm",
+            },
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        _, second_turn, _ = self.create_intent_card(
+            "我暂时理解为，你认为当前水域覆盖不足，倾向于增加它占据的空间。你主要在意视觉比例还是路线限制，目前仍未确定，可以纠正我。",
+            "water-too-little-card",
+            content="我觉得水域太少了",
+        )
+        second_state = second_turn["guidance"]["intentState"]
+        self.assertEqual(second_state["interactionMode"], "conflict_choice")
+        self.assertEqual(
+            [item["evidenceText"] for item in second_state["conflictChoice"]["options"]],
+            ["我觉得水域太少了", "我觉得水域太多了"],
+        )
+        with repository.connect() as database:
+            event = database.execute(
+                "SELECT payload_json FROM audit_events WHERE session_id = ? AND event_type = 'intent_conflict_presented' ORDER BY id DESC LIMIT 1",
+                (self.session_id,),
+            ).fetchone()
+        self.assertEqual(json.loads(event["payload_json"])["reviewSource"], "deterministic")
 
     def test_intent_conflict_keep_existing_rejects_only_new_intent(self):
         version_id, first_turn, _ = self.create_intent_card(
