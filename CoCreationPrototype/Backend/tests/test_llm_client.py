@@ -6624,6 +6624,98 @@ class LLMClientTests(unittest.TestCase):
             translated["primaryHypothesis"], source["primaryHypothesis"]
         )
 
+    def test_intent_semantic_frame_preserves_explicit_layout_density_preference(self):
+        source = "我不喜欢这个地图的排版，太拥挤了。"
+        frame = llm_client._primary_intent_semantic_frame(source)
+        card = llm_client._natural_intent_candidate(source, "zh-CN", False)
+
+        self.assertEqual(frame.subject, "layout")
+        self.assertEqual(frame.property, "crowded")
+        self.assertEqual(frame.direction, "avoid")
+        self.assertIn("地图布局", card)
+        self.assertIn("拥挤", card)
+        self.assertTrue(any(marker in card for marker in ("不喜欢", "不希望")))
+        self.assertIsNone(
+            llm_client._intent_semantic_binding_issue(card, source, "zh-CN")
+        )
+
+    def test_generic_experience_card_fails_explicit_semantic_binding(self):
+        source = "我不喜欢这个地图的排版，太拥挤了。"
+        generic = (
+            "听起来你对当前体验效果有一个明确偏好。"
+            "我不会把这份偏好直接等同于某个具体改图方案。"
+        )
+
+        self.assertIn(
+            "lost",
+            llm_client._intent_semantic_binding_issue(generic, source, "zh-CN"),
+        )
+
+    def test_chat_retries_when_model_card_loses_explicit_layout_density_meaning(self):
+        generic_body = (
+            "你对当前地图的感受值得认真保留，因为它直接指出了你认为设计呈现不合适的部分。"
+            "我会把视觉印象、空间组织和实际游玩体验分开看，避免过早把其中一种解释成你的最终目标。"
+            "在没有更多说明前，这份判断仍然可以由你纠正，也不会被当作已经授权的修改方向。"
+        )
+        generic_card = (
+            "听起来你对当前体验效果有一个明确偏好。"
+            "我不会把这份偏好直接等同于某个具体改图方案。"
+        )
+        specific_body = (
+            "你指出的是地图排版带来的拥挤感，而不只是一个抽象的体验评价；这个对象和评价都应当保留。"
+            "这种感受可能来自视觉上的排布过密，也可能与玩家实际可活动的空间和推箱余量有关，两种解释并不相同。"
+            "在你说明重点前，我会把视觉和游玩的边界都保持开放，不会把它直接变成具体地图修改或执行授权。"
+        )
+        specific_card = (
+            "我暂时理解为，你不喜欢当前地图布局呈现出的过于拥挤感。"
+            "这先是你对当前设计的可纠正判断；它具体应怎样影响玩法或调整方式，仍由你确认。"
+        )
+        result, client = self.execute(
+            [
+                generic_body + "\n<GUIDANCE>INTENT: " + generic_card + "</GUIDANCE>",
+                specific_body + "\n<GUIDANCE>INTENT: " + specific_card + "</GUIDANCE>",
+            ],
+            language="zh-CN",
+            conversation=[{
+                "role": "user",
+                "content": "我不喜欢这个地图的排版，太拥挤了。",
+            }],
+        )
+
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertIn("地图布局", result.guidance["intentHypothesis"])
+        self.assertIn("拥挤", result.guidance["intentHypothesis"])
+
+    def test_echo_rewrite_keeps_subject_property_and_direction(self):
+        source = "我不想让路线更复杂。"
+        echoed = "我暂时理解为，你不想让路线更复杂。你可以纠正我。"
+        rewritten = llm_client._replace_echoed_intent_hypothesis(
+            echoed, source, "zh-CN"
+        )
+
+        self.assertIn("路线", rewritten)
+        self.assertIn("复杂", rewritten)
+        self.assertTrue(any(marker in rewritten for marker in ("不想", "不希望", "不喜欢")))
+        self.assertIsNone(
+            llm_client._intent_semantic_binding_issue(rewritten, source, "zh-CN")
+        )
+
+    def test_player_prediction_and_quoted_correction_do_not_create_intent_cards(self):
+        for source in (
+            "我觉得玩家可能会觉得这条路线太难。",
+            "你说我喜欢复杂路线，但我没有这个意思。",
+        ):
+            with self.subTest(source=source):
+                self.assertFalse(llm_client._user_explicitly_states_design_stance(source))
+
+    def test_multiple_intent_clauses_select_the_most_explicit_preference(self):
+        source = "我觉得布局太拥挤，但我更希望路线清晰。"
+        frame = llm_client._primary_intent_semantic_frame(source)
+
+        self.assertEqual(frame.subject, "route")
+        self.assertEqual(frame.property, "clear")
+        self.assertEqual(frame.direction, "prefer")
+
 
 if __name__ == "__main__":
     unittest.main()

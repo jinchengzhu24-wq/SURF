@@ -669,7 +669,11 @@ def build_chat_messages(
         "that disagreement only in the prose or discussion card. An intentHypothesis must "
         "infer the playable purpose behind the designer's stated operation; never merely copy "
         "or prefix their wording (for example, turn a request to reshape water into a tentative "
-        "claim about how water should affect route reading or push decisions). It must also "
+        "claim about how water should affect route reading or push decisions). When the designer "
+        "explicitly names an object, evaluation, comparison, or degree, preserve that meaning in "
+        "the hypothesis even while rephrasing it; never reduce it to a generic preference about "
+        "the current experience. A prediction about players, a quoted prior claim, or a conditional "
+        "reaction is not itself a confirmed designer inclination. It must also "
         "distill an interpretation already supported by assistantMessage: never introduce a "
         "different map element, design goal, or operation only inside the intent card.\n\n"
         "When an intentHypothesis is warranted, write two to four concise, natural sentences that "
@@ -7753,20 +7757,23 @@ async def _generate_plain_with_model_fallback(
                 intent_issue = _intent_hypothesis_detail_issue(
                     guidance["intentHypothesis"], language
                 )
+                latest_user = _latest_role_content(semantic_messages, "user")
+                semantic_issue = _intent_semantic_binding_issue(
+                    guidance["intentHypothesis"], latest_user, language
+                )
                 body_issue = _intent_body_detail_issue(body, language)
                 if (
-                    (intent_issue or body_issue)
+                    (intent_issue or semantic_issue or body_issue)
                     and model_intent_hypothesis_supplied
                     and attempt < max_attempts
                 ):
                     raise ValueError(
                         "Detailed TENTATIVE INTENT presentation required: "
                         + "; ".join(
-                            issue for issue in (intent_issue, body_issue) if issue
+                            issue for issue in (intent_issue, semantic_issue, body_issue) if issue
                         )
                     )
-                if intent_issue:
-                    latest_user = _latest_role_content(semantic_messages, "user")
+                if intent_issue or semantic_issue:
                     guidance["intentHypothesis"] = _natural_intent_candidate(
                         latest_user,
                         language,
@@ -13660,9 +13667,19 @@ class DesignStanceClassification:
     ambiguous_reference: bool = False
 
 
+@dataclass(frozen=True)
+class IntentSemanticFrame:
+    """A bounded, user-authored inclination that an orange card may carry."""
+    subject: str
+    property: str
+    direction: str
+    degree: str = ""
+    specificity: int = 0
+
+
 _DESIGN_TOPIC_TERMS_ZH = {
     "entities": (
-        "关卡", "地图", "布局", "水域", "水面", "水边", "水塘", "水格", "墙",
+        "关卡", "地图", "布局", "排版", "排布", "构图", "水域", "水面", "水边", "水塘", "水格", "墙",
         "墙体", "箱子", "木箱", "箱体", "目标", "目标点", "终点", "落点", "玩家",
         "玩家位置", "起点", "出生点", "地面", "地板", "空地", "格子", "方格", "地块",
         "障碍", "障碍物",
@@ -13674,7 +13691,7 @@ _DESIGN_TOPIC_TERMS_ZH = {
     ),
     "relations": (
         "位置", "距离", "间距", "相邻", "靠近", "贴近", "紧邻", "紧挨", "分开",
-        "远离", "远近", "集中", "分散", "分布", "对称", "平衡", "密度",
+        "远离", "远近", "集中", "分散", "分布", "对称", "平衡", "密度", "拥挤", "密集", "紧凑",
     ),
     "mechanics": (
         "推动", "推箱", "推法", "推数", "推动次数", "顺序", "步数", "解法", "最短解",
@@ -13704,7 +13721,7 @@ _DESIGN_TOPIC_TERMS_EN = {
     "relations": (
         "position", "distance", "spacing", "adjacent", "adjacency", "near", "nearby", "close",
         "apart", "separate", "separation", "far", "cluster", "concentrated", "distribution",
-        "symmetry", "symmetric", "balance", "balanced", "density", "dense", "sparse",
+        "symmetry", "symmetric", "balance", "balanced", "density", "dense", "sparse", "cramped", "compact",
     ),
     "mechanics": (
         "push", "pushes", "push order", "move", "moves", "step", "steps", "solution",
@@ -13729,12 +13746,258 @@ def _english_term_present(text, term):
     ) is not None
 
 
+_INTENT_SUBJECT_TERMS_ZH = (
+    ("layout", ("排版", "排布", "构图", "布局")),
+    ("space", ("空间", "区域", "走廊", "通道", "空地")),
+    ("route", ("路线", "路径", "路程", "走法")),
+    ("target", ("目标", "终点", "落点")),
+    ("water", ("水域", "水面", "水格", "水")),
+    ("wall", ("墙体", "墙", "障碍")),
+    ("box", ("箱子", "木箱", "箱体")),
+    ("difficulty", ("难度", "难", "容易", "简单")),
+    ("rhythm", ("节奏", "绕行", "回旋")),
+)
+
+_INTENT_SUBJECT_TERMS_EN = (
+    ("layout", ("layout", "composition", "arrangement")),
+    ("space", ("space", "area", "corridor", "passage", "floor")),
+    ("route", ("route", "path", "journey")),
+    ("target", ("target", "targets", "goal", "goals")),
+    ("water", ("water",)),
+    ("wall", ("wall", "walls", "obstacle", "obstacles")),
+    ("box", ("box", "boxes", "crate", "crates")),
+    ("difficulty", ("difficulty", "hard", "easy")),
+    ("rhythm", ("rhythm", "pacing", "detour")),
+)
+
+_INTENT_PROPERTY_TERMS_ZH = (
+    ("crowded", ("太拥挤", "过于拥挤", "拥挤", "太挤", "过密", "密集", "拥堵", "狭促")),
+    ("empty", ("太空", "空旷", "空荡", "显得空")),
+    ("complex", ("太复杂", "复杂")),
+    ("short", ("太短", "过短", "短")),
+    ("long", ("太长", "过长", "长")),
+    ("clear", ("不清晰", "不够清晰", "清晰", "可读")),
+    ("concentrated", ("太集中", "集中", "靠在一起", "太近")),
+    ("separated", ("分开", "间距", "太远")),
+)
+
+_INTENT_PROPERTY_TERMS_EN = (
+    ("crowded", ("too crowded", "crowded", "cramped", "too dense", "packed")),
+    ("empty", ("too empty", "empty", "sparse", "vacant")),
+    ("complex", ("too complex", "complex")),
+    ("short", ("too short", "short")),
+    ("long", ("too long", "long")),
+    ("clear", (
+        "unclear", "not clear", "clear", "clearer", "readable", "readability",
+        "easier to read", "legible", "legibility",
+    )),
+    ("concentrated", ("too concentrated", "concentrated", "too close")),
+    ("separated", ("separate", "separated", "far apart")),
+)
+
+_INTENT_LABELS_ZH = {
+    "layout": "地图布局", "space": "空间安排", "route": "路线", "target": "目标关系",
+    "water": "水域", "wall": "墙体与障碍", "box": "箱子关系", "difficulty": "难度",
+    "rhythm": "路线节奏", "crowded": "拥挤感", "empty": "空旷感", "complex": "复杂度",
+    "short": "偏短", "long": "偏长", "clear": "清晰度", "concentrated": "集中关系",
+    "separated": "分离关系",
+}
+
+_INTENT_LABELS_EN = {
+    "layout": "layout", "space": "spatial arrangement", "route": "route", "target": "target relationship",
+    "water": "water", "wall": "walls and obstacles", "box": "box relationship", "difficulty": "difficulty",
+    "rhythm": "route rhythm", "crowded": "crowded feeling", "empty": "emptiness", "complex": "complexity",
+    "short": "shortness", "long": "length", "clear": "clarity", "concentrated": "concentration",
+    "separated": "separation",
+}
+
+
+def _intent_term_present(text, term, language):
+    return term in text if language == "zh-CN" else _english_term_present(text, term)
+
+
+def _intent_semantic_frames(message):
+    """Extract only explicit, current-user preferences safe for an orange card."""
+    text = re.sub(r"\s+", " ", str(message or "")).strip()
+    language = "zh-CN" if re.search(r"[\u3400-\u9fff]", text) else "en"
+    lowered = text.casefold().replace("’", "'")
+    searchable = text if language == "zh-CN" else lowered
+    if not text:
+        return ()
+    if language == "zh-CN":
+        # Predictions, quoted claims, and purely conditional reactions are not a designer inclination.
+        if re.search(r"我(?:觉得|认为|担心|感觉).{0,18}(?:玩家|别人).{0,24}(?:会|可能|觉得|认为)", text):
+            return ()
+        if re.search(r"(?:你说|你认为|你觉得).{0,48}我.{0,24}(?:没(?:有)?这个意思|不是这个意思|没说)", text):
+            return ()
+        if text.startswith("如果") and not re.search(r"我(?:希望|想要|不想要|喜欢|不喜欢)", text):
+            return ()
+        denied = bool(re.search(r"(?:不觉得|并不觉得|不认为).{0,24}(?:拥挤|密集|复杂|太难|太长|太短)", text))
+        avoid = bool(re.search(r"(?:不喜欢|不希望|不想(?:要|让)?|不愿意|宁可不)", text))
+        prefer = bool(re.search(r"(?:喜欢|希望|想要|更想要|宁愿|偏向|倾向)", text))
+        insufficient = bool(re.search(r"(?:不够|还不够)", text))
+        excessive = bool(re.search(r"(?:太|过于|过分)", text))
+        subject_terms = _INTENT_SUBJECT_TERMS_ZH
+        property_terms = _INTENT_PROPERTY_TERMS_ZH
+    else:
+        if re.search(r"\bi (?:think|feel|worry|believe).{0,36}\bplayers?\b.{0,48}\b(?:will|may|might|feel|think)\b", searchable):
+            return ()
+        if re.search(r"\byou (?:said|think|thought|claim).{0,72}\bi (?:did not|didn't) (?:say|mean)\b", searchable):
+            return ()
+        if searchable.startswith("if ") and not re.search(r"\bi (?:want|prefer|like|dislike|hope)\b", searchable):
+            return ()
+        denied = bool(re.search(r"\b(?:do not|don't) (?:think|feel) .{0,24}(?:crowded|dense|complex|hard|long|short)\b", searchable))
+        avoid = bool(re.search(r"\b(?:do not|don't) (?:like|want|hope|prefer)|\bdislike\b", searchable))
+        prefer = bool(re.search(r"\b(?:like|want|hope|prefer|favor|would rather)\b", searchable))
+        insufficient = bool(re.search(r"\bnot enough\b", searchable))
+        excessive = bool(re.search(r"\btoo\b|\boverly\b", searchable))
+        subject_terms = _INTENT_SUBJECT_TERMS_EN
+        property_terms = _INTENT_PROPERTY_TERMS_EN
+
+    if language == "zh-CN":
+        clauses = [part.strip() for part in re.split(r"[。！？；;]|(?<=，)(?:但|不过|而不是|同时)", text) if part.strip()]
+    else:
+        clauses = [part.strip() for part in re.split(r"[.!?;]|\b(?:but|rather than|instead)\b", searchable) if part.strip()]
+
+    frames = []
+    for clause in clauses or [searchable]:
+        subjects = [key for key, terms in subject_terms if any(
+            _intent_term_present(clause, term, language) for term in terms
+        )]
+        properties = [key for key, terms in property_terms if any(
+            _intent_term_present(clause, term, language) for term in terms
+        )]
+        if not subjects or not properties:
+            continue
+        if language == "zh-CN":
+            clause_denied = bool(re.search(r"(?:不觉得|并不觉得|不认为).{0,24}(?:拥挤|密集|复杂|太难|太长|太短)", clause))
+            clause_avoid = bool(re.search(r"(?:不喜欢|不希望|不想(?:要|让)?|不愿意|宁可不)", clause))
+            clause_prefer = bool(re.search(r"(?:喜欢|希望|想要|更想要|宁愿|偏向|倾向)", clause))
+            clause_insufficient = bool(re.search(r"(?:不够|还不够)", clause))
+            clause_excessive = bool(re.search(r"(?:太|过于|过分)", clause))
+        else:
+            clause_denied = bool(re.search(r"\b(?:do not|don't) (?:think|feel) .{0,24}(?:crowded|dense|complex|hard|long|short)\b", clause))
+            clause_avoid = bool(re.search(r"\b(?:do not|don't) (?:like|want|hope|prefer)|\bdislike\b", clause))
+            clause_prefer = bool(re.search(r"\b(?:like|want|hope|prefer|favor|would rather)\b", clause))
+            clause_insufficient = bool(re.search(r"\bnot enough\b", clause))
+            clause_excessive = bool(re.search(r"\btoo\b|\boverly\b", clause))
+        direction = "denied" if clause_denied else "avoid" if clause_avoid or clause_excessive else "increase" if clause_insufficient else "prefer" if clause_prefer else "evaluate"
+        degree = "insufficient" if clause_insufficient else "excessive" if clause_excessive else ""
+        explicit_commitment = clause_denied or clause_avoid or clause_prefer
+        frames.append(IntentSemanticFrame(
+            subjects[0], properties[0], direction, degree,
+            4 + (2 if explicit_commitment else int(direction != "evaluate")),
+        ))
+    return tuple(dict.fromkeys(frames))
+
+
+def _primary_intent_semantic_frame(message):
+    frames = _intent_semantic_frames(message)
+    return max(frames, key=lambda item: item.specificity) if frames else None
+
+
+def _intent_frame_options(source, language):
+    frame = _primary_intent_semantic_frame(source)
+    if frame is None:
+        return None
+    labels = _INTENT_LABELS_ZH if language == "zh-CN" else _INTENT_LABELS_EN
+    subject = labels[frame.subject]
+    property_label = labels[frame.property]
+    if language == "zh-CN":
+        if frame.degree == "excessive":
+            property_label = f"过于{property_label}"
+        elif frame.degree == "insufficient":
+            property_label = f"不足的{property_label}"
+        if frame.direction == "denied":
+            core = f"你目前不认为当前{subject}呈现出{property_label}"
+            alternate = f"你目前不把当前{subject}看作具有{property_label}"
+        elif frame.direction == "avoid":
+            core = f"你不喜欢当前{subject}呈现出的{property_label}"
+            alternate = f"你不希望当前{subject}继续维持这种{property_label}"
+        elif frame.direction == "increase":
+            core = f"你希望当前{subject}在{property_label}上得到加强"
+            alternate = f"你希望当前{subject}不再缺少这种{property_label}"
+        elif frame.direction == "prefer":
+            core = f"你更偏好当前{subject}呈现出合适的{property_label}"
+            alternate = f"你希望当前{subject}保留或形成合适的{property_label}"
+        else:
+            core = f"你正在评价当前{subject}的{property_label}"
+            alternate = core
+        return (
+            f"我暂时理解为，{core}。这先是你对当前设计的可纠正判断；它具体应怎样影响玩法或调整方式，仍由你确认。",
+            f"听起来{alternate}。我会保留这一判断本身，而不会把它直接等同于某个具体改图方案。",
+            f"我读到的是，{core}。至于它主要关乎视觉、游玩感受还是两者兼顾，我先保持开放。",
+        )
+    if frame.degree == "excessive":
+        property_label = f"overly {property_label}"
+    elif frame.degree == "insufficient":
+        property_label = f"insufficient {property_label}"
+    if frame.direction == "denied":
+        core = f"you do not currently see the {subject} as {property_label}"
+        alternate = f"you do not currently treat the {subject} as {property_label}"
+    elif frame.direction == "avoid":
+        core = f"you dislike the {property_label} of the current {subject}"
+        alternate = f"you do not want the current {subject} to retain this {property_label}"
+    elif frame.direction == "increase":
+        core = f"you want more {property_label} in the current {subject}"
+        alternate = f"you do not want the current {subject} to lack this {property_label}"
+    elif frame.direction == "prefer":
+        core = f"you prefer an intentional {property_label} in the current {subject}"
+        alternate = f"you want the current {subject} to keep or form an intentional {property_label}"
+    else:
+        core = f"you are evaluating the {property_label} of the current {subject}"
+        alternate = core
+    return (
+        f"For now, I understand that {core}. This is a correctable judgment about the current design, not yet a specific map revision.",
+        f"It sounds to me like {alternate}. I will keep that evaluation distinct from an unconfirmed gameplay goal or edit.",
+        f"I read that {core}. Whether it mainly concerns appearance, play, or both remains open for correction.",
+    )
+
+
+def _intent_semantic_binding_issue(hypothesis, latest_user, language):
+    """Reject a card that loses an explicit current-turn object, property, or direction."""
+    expected = _primary_intent_semantic_frame(latest_user)
+    if expected is None:
+        return None
+    actual = _primary_intent_semantic_frame(hypothesis)
+    if actual is None:
+        return "intentHypothesis lost the user's explicit design subject and evaluation"
+    if actual.subject != expected.subject:
+        return "intentHypothesis changed the user's explicit design subject"
+    relation_readability_reframe = (
+        expected.subject in {"box", "target"}
+        and expected.property in {"concentrated", "separated"}
+        and actual.property == "clear"
+    )
+    if actual.property != expected.property and not relation_readability_reframe:
+        return "intentHypothesis lost the user's explicit design evaluation"
+    if actual.direction != expected.direction and not relation_readability_reframe:
+        return "intentHypothesis reversed or weakened the user's explicit direction"
+    if actual.degree != expected.degree and not relation_readability_reframe:
+        return "intentHypothesis lost the user's explicit degree or comparison"
+    return None
+
+
 def _classify_explicit_design_stance(message):
     text = re.sub(r"\s+", " ", str(message or "")).strip()
     lowered = text.casefold().replace("’", "'")
     language = "zh-CN" if re.search(r"[\u3400-\u9fff]", text) else "en"
     if not text or _user_explicitly_off_topic(text):
         return DesignStanceClassification(False, language)
+
+    # Do not turn a prediction about players, a quoted prior claim, or an
+    # uncommitted conditional into the designer's persistent inclination.
+    if not _intent_semantic_frames(text):
+        if language == "zh-CN" and re.search(
+            r"我(?:觉得|认为|担心|感觉).{0,18}(?:玩家|别人).{0,24}(?:会|可能|觉得|认为)|"
+            r"(?:你说|你认为|你觉得).{0,48}我.{0,24}(?:没(?:有)?这个意思|不是这个意思|没说)", text
+        ):
+            return DesignStanceClassification(False, language)
+        if language == "en" and re.search(
+            r"\bi (?:think|feel|worry|believe).{0,36}\bplayers?\b.{0,48}\b(?:will|may|might|feel|think)\b|"
+            r"\byou (?:said|think|thought|claim).{0,72}\bi (?:did not|didn't) (?:say|mean)\b", lowered
+        ):
+            return DesignStanceClassification(False, language)
 
     if language == "zh-CN":
         rebuttal = re.search(
@@ -14009,6 +14272,9 @@ def _intent_comparison_text(text, language):
 def _semantic_intent_options(source, language):
     value = str(source or "").casefold()
     classification = _classify_explicit_design_stance(source)
+    framed_options = _intent_frame_options(source, language)
+    if framed_options is not None:
+        return framed_options
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", str(source or "")):
         if classification.ambiguous_reference:
             return (

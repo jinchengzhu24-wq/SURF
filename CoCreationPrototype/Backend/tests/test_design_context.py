@@ -23,6 +23,7 @@ from design_context import (
     empty_design_context,
     design_level_open_questions,
     extract_explicit_user_memory,
+    infer_intent_topic,
     is_design_level_question,
     merge_chat_update,
     merge_intent_hypothesis,
@@ -35,6 +36,12 @@ from design_context import (
 
 
 class DesignContextUnitTests(unittest.TestCase):
+    def test_layout_density_inclination_uses_space_distribution_topic(self):
+        self.assertEqual(
+            infer_intent_topic("你不喜欢当前地图布局呈现出的拥挤感。"),
+            "space_distribution",
+        )
+
     def test_question_dedup_ignores_yes_no_instruction_but_not_distinct_question(self):
         concise = "\u4f60\u662f\u5426\u4ecd\u5e0c\u671b\u6cbf\u7528\u6211\u539f\u6765\u63d0\u51fa\u7684\u529e\u6cd5\uff1f"
         instructed = concise + "\u8bf7\u56de\u7b54\u662f\u6216\u5426\u3002"

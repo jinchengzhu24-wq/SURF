@@ -578,7 +578,11 @@ def infer_intent_topic(value):
         ("push_dependency", ("push order", "dependency", "first push", "\u63a8\u52a8\u987a\u5e8f", "\u5148\u540e", "\u7b2c\u4e00\u63a8")),
         ("route_readability", ("readable", "readability", "clear route", "\u53ef\u8bfb", "\u8bfb\u61c2", "\u6e05\u6670")),
         ("route_rhythm", ("rhythm", "pacing", "detour", "winding", "\u8282\u594f", "\u7ed5\u8def", "\u8fc2\u56de")),
-        ("space_distribution", ("space", "open area", "corridor", "\u7a7a\u95f4", "\u901a\u9053", "\u5f00\u653e")),
+        ("space_distribution", (
+            "space", "open area", "corridor", "layout", "composition", "arrangement",
+            "crowded", "cramped", "dense", "compact", "\u7a7a\u95f4", "\u901a\u9053", "\u5f00\u653e",
+            "\u5e03\u5c40", "\u6392\u7248", "\u6392\u5e03", "\u6784\u56fe", "\u62e5\u6324", "\u5bc6\u96c6", "\u7d27\u51d1",
+        )),
         ("difficulty", ("difficulty", "harder", "easier", "\u96be\u5ea6", "\u66f4\u96be", "\u66f4\u5bb9\u6613")),
         ("preservation", ("preserve", "keep", "unchanged", "\u4fdd\u7559", "\u4fdd\u6301", "\u4e0d\u53d8")),
         ("entity_placement", ("position", "placement", "move the box", "move the target", "\u4f4d\u7f6e", "\u79fb\u52a8\u7bb1\u5b50", "\u79fb\u52a8\u76ee\u6807")),
