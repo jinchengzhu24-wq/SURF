@@ -554,8 +554,9 @@ class IntentionRequest(StrictModel):
 
 
 class IntentFeedbackRequest(StrictModel):
-    action: Literal["confirm", "reject", "revise"]
+    action: Literal["confirm", "reject", "revise", "keep"]
     candidateText: str | None = None
+    selectedHypothesisId: str | None = None
     sourceTurnId: str
     baseVersionId: str
     idempotencyKey: str
@@ -1523,9 +1524,64 @@ def _intent_feedback_signature(payload, hypothesis_id, candidate):
         "hypothesisId": hypothesis_id,
         "action": payload.action,
         "candidateText": candidate or None,
+        "selectedHypothesisId": payload.selectedHypothesisId or None,
         "sourceTurnId": payload.sourceTurnId,
         "baseVersionId": payload.baseVersionId,
     }
+
+
+def _intent_feedback_signature_matches(stored, current):
+    """Keep pre-conflict-choice idempotency records replayable."""
+    stored = dict(stored or {})
+    stored.setdefault("selectedHypothesisId", None)
+    return stored == current
+
+
+def _active_intent_conflict_choice(database, session_id, version_id):
+    """Return the latest unresolved conflict choice for the current Stage."""
+    rows = database.execute(
+        """
+        SELECT id, guidance_json FROM conversation_turns
+        WHERE session_id = ? AND version_id = ? AND role = 'assistant'
+        ORDER BY sequence_number DESC
+        """,
+        (session_id, version_id),
+    ).fetchall()
+    context = None
+    for row in rows:
+        guidance = load_json(row["guidance_json"]) or {}
+        if not guidance.get("_intentHypothesisId"):
+            continue
+        review = guidance.get("_intentReviewState") or {}
+        if review.get("interactionMode") != "conflict_choice":
+            return None
+        new_id = str(guidance.get("_intentHypothesisId") or "").strip()
+        existing_id = str(review.get("existingHypothesisId") or "").strip()
+        if not new_id or not existing_id:
+            continue
+        if context is None:
+            context = load_design_context(database, session_id, version_id)
+        hypotheses = {
+            item.get("id"): item
+            for item in context.get("intentHypotheses", [])
+            if item.get("id")
+        }
+        new_item = hypotheses.get(new_id)
+        existing_item = hypotheses.get(existing_id)
+        if (
+            new_item is not None
+            and existing_item is not None
+            and new_item.get("status") == "tentative"
+            and existing_item.get("status") == "confirmed"
+        ):
+            return {
+                "sourceTurnId": row["id"],
+                "newHypothesisId": new_id,
+                "existingHypothesisId": existing_id,
+                "explanation": str(review.get("reviewExplanation") or "").strip(),
+            }
+        return None
+    return None
 
 
 def _question_feedback_event(database, session_id, idempotency_key):
@@ -1678,6 +1734,9 @@ def submit_intent_feedback(
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
     _validate_identifier(hypothesis_id, "hypothesisId")
     candidate = sanitize_user_design_text(payload.candidateText)
+    selected_hypothesis_id = str(payload.selectedHypothesisId or "").strip()
+    if selected_hypothesis_id:
+        _validate_identifier(selected_hypothesis_id, "selectedHypothesisId")
     if payload.action == "revise":
         if not candidate or len(candidate) < 4 or len(candidate) > 1200:
             raise ApiError(
@@ -1691,6 +1750,18 @@ def submit_intent_feedback(
             "INVALID_INTENT_FEEDBACK",
             "candidateText is accepted only when revising an inclination.",
         )
+    if payload.action == "keep" and not selected_hypothesis_id:
+        raise ApiError(
+            400,
+            "INVALID_INTENT_FEEDBACK",
+            "selectedHypothesisId is required when retaining a conflicting inclination.",
+        )
+    if payload.action != "keep" and selected_hypothesis_id:
+        raise ApiError(
+            400,
+            "INVALID_INTENT_FEEDBACK",
+            "selectedHypothesisId is accepted only for a conflict choice.",
+        )
 
     signature = _intent_feedback_signature(payload, hypothesis_id, candidate)
     with message_request_lock(session_id, payload.idempotencyKey):
@@ -1700,7 +1771,9 @@ def submit_intent_feedback(
                 database, session_id, payload.idempotencyKey
             )
             if prior is not None:
-                if prior.get("request") != signature:
+                if not _intent_feedback_signature_matches(
+                    prior.get("request"), signature
+                ):
                     raise ApiError(
                         409,
                         "IDEMPOTENCY_CONFLICT",
@@ -1737,6 +1810,123 @@ def submit_intent_feedback(
                     "This intent card has already been handled or has expired.",
                 )
             review_state = source_guidance.get("_intentReviewState") or {}
+            if review_state.get("interactionMode") == "conflict_choice":
+                new_id = hypothesis_id
+                existing_id = str(
+                    review_state.get("existingHypothesisId") or ""
+                ).strip()
+                if (
+                    payload.action != "keep"
+                    or selected_hypothesis_id not in {new_id, existing_id}
+                ):
+                    raise ApiError(
+                        409,
+                        "STALE_INTENT_CARD",
+                        "This conflict must be resolved by retaining one displayed inclination.",
+                    )
+                existing = next((
+                    item for item in context.get("intentHypotheses", [])
+                    if item.get("id") == existing_id
+                ), None)
+                if existing is None or existing.get("status") != "confirmed":
+                    raise ApiError(
+                        409,
+                        "STALE_INTENT_CARD",
+                        "The confirmed inclination in this conflict is no longer current.",
+                    )
+                choice = "new" if selected_hypothesis_id == new_id else "existing"
+                evidence_id = record_intent_evidence(
+                    database,
+                    session_id,
+                    payload.baseVersionId,
+                    "intent_conflict_choice",
+                    (
+                        target.get("statement")
+                        if choice == "new"
+                        else existing.get("statement")
+                    ),
+                    turn_id=payload.sourceTurnId,
+                    details={
+                        "action": "keep",
+                        "choice": choice,
+                        "newHypothesisId": new_id,
+                        "existingHypothesisId": existing_id,
+                        "explanation": str(
+                            review_state.get("reviewExplanation") or ""
+                        )[:1200],
+                    },
+                )
+                if choice == "new":
+                    context, _ = resolve_intent_hypothesis(
+                        context,
+                        new_id,
+                        "confirm",
+                        supersedes_ids=[existing_id],
+                        evidence_id=evidence_id,
+                        stage_id=payload.baseVersionId,
+                        turn_id=payload.sourceTurnId,
+                        display_statement=target.get("statement"),
+                        display_language=session["language"],
+                    )
+                    outcome = "kept_new"
+                else:
+                    context, _ = resolve_intent_hypothesis(
+                        context,
+                        new_id,
+                        "reject",
+                        evidence_id=evidence_id,
+                        stage_id=payload.baseVersionId,
+                        turn_id=payload.sourceTurnId,
+                    )
+                    outcome = "kept_existing"
+                retained_old = next((
+                    item for item in context.get("intentHypotheses", [])
+                    if item.get("id") == existing_id
+                ), None)
+                if retained_old is not None:
+                    evidence_field = (
+                        "contradictingEvidenceIds"
+                        if choice == "new"
+                        else "supportingEvidenceIds"
+                    )
+                    retained_old[evidence_field] = list(dict.fromkeys(
+                        retained_old.get(evidence_field, []) + [evidence_id]
+                    ))[:32]
+                    retained_old["lastUpdatedStageId"] = payload.baseVersionId
+                save_design_context(database, payload.baseVersionId, context)
+                record_event(
+                    database,
+                    session_id,
+                    "intent_hypothesis_feedback_applied",
+                    {
+                        "request": signature,
+                        "idempotencyKey": payload.idempotencyKey,
+                        "hypothesisId": new_id,
+                        "versionId": payload.baseVersionId,
+                        "outcome": outcome,
+                        "evidenceId": evidence_id,
+                        "selectedHypothesisId": selected_hypothesis_id,
+                        "newHypothesisId": new_id,
+                        "existingHypothesisId": existing_id,
+                        "supersedesHypothesisIds": (
+                            [existing_id] if choice == "new" else []
+                        ),
+                        "explanation": str(
+                            review_state.get("reviewExplanation") or ""
+                        )[:1200],
+                    },
+                    utc_now(),
+                )
+                return {
+                    "outcome": outcome,
+                    "session": serialize_session(database, session_id),
+                }
+            if payload.action == "keep":
+                raise ApiError(
+                    409,
+                    "STALE_INTENT_CARD",
+                    "This intent card is not an active conflict choice.",
+                )
             if (
                 review_state.get("interactionMode") == "adjust_only"
                 and payload.action != "revise"
@@ -1848,7 +2038,9 @@ def submit_intent_feedback(
                 database, session_id, payload.idempotencyKey
             )
             if prior is not None:
-                if prior.get("request") != signature:
+                if not _intent_feedback_signature_matches(
+                    prior.get("request"), signature
+                ):
                     raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The feedback key was reused.")
                 return {
                     "outcome": prior["outcome"],
@@ -1888,7 +2080,7 @@ def submit_intent_feedback(
                     hypothesis_id,
                     payload.action,
                     candidate_text=candidate,
-                    supersedes_ids=review["supersedesHypothesisIds"],
+                    supersedes_ids=[],
                     evidence_id=evidence_id,
                     stage_id=payload.baseVersionId,
                     turn_id=payload.sourceTurnId,
@@ -1907,7 +2099,7 @@ def submit_intent_feedback(
                         "versionId": payload.baseVersionId,
                         "outcome": "applied",
                         "evidenceId": evidence_id,
-                        "supersedesHypothesisIds": review["supersedesHypothesisIds"],
+                        "supersedesHypothesisIds": [],
                     },
                     utc_now(),
                 )
@@ -1929,6 +2121,25 @@ def submit_intent_feedback(
                     "session": serialize_session(database, session_id),
                 }
 
+            conflict_existing_id = None
+            if review["verdict"] == "conflict":
+                conflicting_ids = set(
+                    review.get("conflictingHypothesisIds") or []
+                )
+                conflict_existing_id = next(
+                    (
+                        item["hypothesisId"] for item in reversed(active)
+                        if item["hypothesisId"] in conflicting_ids
+                    ),
+                    None,
+                )
+                if conflict_existing_id is None:
+                    raise ApiError(
+                        502,
+                        "MODEL_RESPONSE_INVALID",
+                        "Kimi did not bind the conflict to confirmed memory.",
+                        retryable=True,
+                    )
             user_text = (
                 candidate
                 if payload.action == "revise"
@@ -1959,9 +2170,15 @@ def submit_intent_feedback(
                     "uiCues": [],
                     "_intentHypothesisId": hypothesis_id,
                     "_intentReviewState": {
-                        "interactionMode": "adjust_only",
+                        "interactionMode": (
+                            "conflict_choice"
+                            if review["verdict"] == "conflict"
+                            else "adjust_only"
+                        ),
                         "reviewOutcome": review["verdict"],
                         "reviewExplanation": explanation,
+                        "existingHypothesisId": conflict_existing_id,
+                        "newHypothesisId": hypothesis_id,
                     },
                 },
             )
@@ -1987,6 +2204,7 @@ def submit_intent_feedback(
                     "candidateText": statement,
                     "assistantTurnId": assistant_turn_id,
                     "explanation": explanation,
+                    "existingHypothesisId": conflict_existing_id,
                 },
                 utc_now(),
             )
@@ -2177,6 +2395,21 @@ def _send_message_locked(
                 "PROPOSAL_STALE",
                 "The selected proposal belongs to an older Stage.",
                 details={"reason": "version_changed"},
+            )
+
+        if (
+            payload.action == "none"
+            and _active_intent_conflict_choice(
+                database,
+                session_id,
+                payload.baseVersionId,
+            )
+            is not None
+        ):
+            raise ApiError(
+                409,
+                "INTENT_CONFLICT_PENDING",
+                "Retain one of the conflicting inclinations before sending another message.",
             )
 
         source_turn = None
@@ -2853,6 +3086,10 @@ def _send_message_locked(
     context["stageContext"]["conversationBranch"] = (
         "proposal" if proposal_branch else "ordinary"
     )
+    message_deadline = (
+        challenge_deadline
+        or time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS
+    )
     revision_failure = None
     if revision_state == "relaxation_confirmed":
         execution = _relaxed_revision_suggestion_execution(
@@ -2874,7 +3111,7 @@ def _send_message_locked(
                     proposed_rows,
                 ),
                 stage_context=context["stageContext"],
-                _deadline=challenge_deadline,
+                _deadline=message_deadline,
             )
         except LLMServiceError as exception:
             revision_failure = exception
@@ -3097,6 +3334,74 @@ def _send_message_locked(
         execution_guidance["intentHypothesis"] = None
         execution_guidance["intentConfidence"] = None
         execution = replace(execution, guidance=execution_guidance)
+        candidate_intent = ""
+    if candidate_intent:
+        confirmed_intents = [
+            {
+                "hypothesisId": str(item.get("id") or "").strip(),
+                "statement": str(item.get("statement") or "").strip(),
+            }
+            for item in (
+                context["stageContext"].get("designContext", {}).get(
+                    "intentHypotheses", []
+                )
+            )
+            if item.get("status") == "confirmed"
+            and str(item.get("id") or "").strip()
+            and str(item.get("statement") or "").strip()
+        ]
+        if confirmed_intents:
+            intent_review = review_intent_feedback(
+                candidate_intent,
+                confirmed_intents,
+                [],
+                language,
+                request.state.request_id,
+                _deadline=message_deadline,
+            )
+            if intent_review.get("verdict") == "conflict":
+                conflicting_ids = set(
+                    intent_review.get("conflictingHypothesisIds") or []
+                )
+                latest_conflict = next(
+                    (
+                        item for item in reversed(confirmed_intents)
+                        if item["hypothesisId"] in conflicting_ids
+                    ),
+                    None,
+                )
+                if latest_conflict is None:
+                    raise LLMServiceError(
+                        "MODEL_RESPONSE_INVALID",
+                        "Kimi did not bind the intent conflict to confirmed memory.",
+                        request.state.request_id,
+                        True,
+                        1,
+                        502,
+                    )
+                explanation = str(
+                    intent_review.get("explanation") or ""
+                ).strip()
+                if explanation and explanation not in str(
+                    execution.assistant_message or ""
+                ):
+                    execution = replace(
+                        execution,
+                        assistant_message="\n\n".join(
+                            part for part in (
+                                str(execution.assistant_message or "").strip(),
+                                explanation,
+                            )
+                            if part
+                        ),
+                    )
+                execution_guidance["_intentReviewState"] = {
+                    "interactionMode": "conflict_choice",
+                    "reviewOutcome": "conflict",
+                    "reviewExplanation": explanation,
+                    "existingHypothesisId": latest_conflict["hypothesisId"],
+                }
+                execution = replace(execution, guidance=execution_guidance)
     execution = _bind_execution_to_stage(
         execution,
         payload.baseVersionId,
@@ -3118,6 +3423,37 @@ def _send_message_locked(
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, payload.baseVersionId)
         current = get_current_version(database, session)
+        if design_context_guidance.get("intentHypothesis"):
+            pending_conflict = _active_intent_conflict_choice(
+                database,
+                session_id,
+                payload.baseVersionId,
+            )
+            if pending_conflict is not None:
+                raise ApiError(
+                    409,
+                    "INTENT_CONFLICT_PENDING",
+                    "Retain one of the conflicting inclinations before adding another intent card.",
+                )
+            review_state = design_context_guidance.get("_intentReviewState") or {}
+            if review_state.get("interactionMode") == "conflict_choice":
+                current_context = load_design_context(
+                    database,
+                    session_id,
+                    payload.baseVersionId,
+                )
+                existing_id = review_state.get("existingHypothesisId")
+                existing = next((
+                    item for item in current_context.get("intentHypotheses", [])
+                    if item.get("id") == existing_id
+                ), None)
+                if existing is None or existing.get("status") != "confirmed":
+                    raise ApiError(
+                        409,
+                        "INTENT_CONTEXT_CHANGED",
+                        "Confirmed intent memory changed while the conflict was being reviewed. Retry the message.",
+                        retryable=True,
+                    )
         if payload.action in REVISION_CARD_ACTIONS:
             # The first preflight protects the model call. Repeat it after
             # that call to close the race where a save/restore happens while
@@ -9037,6 +9373,11 @@ def _update_design_context_from_turn(
         if stored_turn is not None:
             stored_guidance = load_json(stored_turn["guidance_json"]) or {}
             stored_guidance["_intentHypothesisId"] = hypothesis_id
+            review_state = guidance.get("_intentReviewState")
+            if isinstance(review_state, dict):
+                stored_review_state = dict(review_state)
+                stored_review_state["newHypothesisId"] = hypothesis_id
+                stored_guidance["_intentReviewState"] = stored_review_state
             database.execute(
                 "UPDATE conversation_turns SET guidance_json = ? WHERE id = ?",
                 (dump_json(stored_guidance), turn_id),
@@ -9054,6 +9395,25 @@ def _update_design_context_from_turn(
             },
             utc_now(),
         )
+        review_state = guidance.get("_intentReviewState") or {}
+        if review_state.get("interactionMode") == "conflict_choice":
+            record_event(
+                database,
+                session_id,
+                "intent_conflict_presented",
+                {
+                    "versionId": version_id,
+                    "turnId": turn_id,
+                    "newHypothesisId": hypothesis_id,
+                    "existingHypothesisId": review_state.get(
+                        "existingHypothesisId"
+                    ),
+                    "explanation": str(
+                        review_state.get("reviewExplanation") or ""
+                    )[:1200],
+                },
+                utc_now(),
+            )
     elif allow_progress and isinstance(patch, dict):
         patch_hypotheses = [
             entry.get("goal")

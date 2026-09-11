@@ -162,7 +162,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(exchange.status_code, 200, exchange.text)
         return payload["sessionId"]
 
-    def create_intent_card(self, statement, key):
+    def create_intent_card(self, statement, key, intent_review=None):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(
             "I notice a compact, solvable opening.",
@@ -201,7 +201,20 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        intent_review = intent_review or {
+            "verdict": "compatible",
+            "explanation": None,
+            "supersedesHypothesisIds": [],
+            "conflictingHypothesisIds": [],
+        }
+        with (
+            patch.object(backend, "generate_chat_reply", return_value=execution),
+            patch.object(
+                backend,
+                "review_intent_feedback",
+                return_value=intent_review,
+            ),
+        ):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -240,7 +253,7 @@ class CoCreationSessionTests(unittest.TestCase):
         progress = response.json()["session"]["progressContexts"][0]
         self.assertEqual(progress["designInclinations"], [])
 
-    def test_intent_confirm_conflict_then_revision_keeps_stable_id(self):
+    def test_intent_conflict_is_presented_immediately_and_keep_new_supersedes_old(self):
         version_id, first_turn, _ = self.create_intent_card(
             "You prefer planning order over simply extending the route.",
             "intent-first-card",
@@ -258,89 +271,236 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(first_response.status_code, 200, first_response.text)
 
-        _, second_turn, _ = self.create_intent_card(
-            "You prefer difficulty to come only from a much longer route.",
-            "intent-second-card",
-        )
-        second_state = second_turn["guidance"]["intentState"]
         conflict = {
             "verdict": "conflict",
-            "explanation": "I see a conflict with your confirmed preference for planning order; please revise this inclination.",
+            "explanation": (
+                "I understand the new inclination as making route length the sole source of difficulty. "
+                "The confirmed inclination instead prioritizes push-order planning over extending the route, "
+                "so these directions cannot both determine the same difficulty decision."
+            ),
             "supersedesHypothesisIds": [],
+            "conflictingHypothesisIds": [first_state["hypothesisId"]],
         }
-        with patch.object(backend, "review_intent_feedback", return_value=conflict):
-            response = self.client.post(
-                f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
-                json={
-                    "action": "confirm",
-                    "candidateText": None,
-                    "sourceTurnId": second_turn["turnId"],
-                    "baseVersionId": version_id,
-                    "idempotencyKey": "intent-second-conflict",
-                },
-            )
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["outcome"], "conflict")
-        pending_turn = response.json()["session"]["turns"][-1]
-        pending_state = pending_turn["guidance"]["intentState"]
-        self.assertEqual(pending_state["hypothesisId"], second_state["hypothesisId"])
-        self.assertEqual(pending_state["interactionMode"], "adjust_only")
-        self.assertTrue(pending_state["actionable"])
-        with patch.object(backend, "review_intent_feedback") as mocked_retry:
-            duplicate = self.client.post(
-                f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
-                json={
-                    "action": "confirm",
-                    "candidateText": None,
-                    "sourceTurnId": second_turn["turnId"],
-                    "baseVersionId": version_id,
-                    "idempotencyKey": "intent-second-conflict",
-                },
-            )
-        self.assertEqual(duplicate.status_code, 200, duplicate.text)
-        self.assertEqual(duplicate.json()["outcome"], "conflict")
-        mocked_retry.assert_not_called()
-        stale = self.client.post(
-            f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+        _, second_turn, response_payload = self.create_intent_card(
+            "You prefer difficulty to come only from a much longer route.",
+            "intent-second-card",
+            intent_review=conflict,
+        )
+        second_state = second_turn["guidance"]["intentState"]
+        self.assertEqual(second_state["interactionMode"], "conflict_choice")
+        self.assertTrue(second_state["actionable"])
+        self.assertIn("cannot both", second_turn["content"])
+        options = second_state["conflictChoice"]["options"]
+        self.assertEqual([item["role"] for item in options], ["new", "existing"])
+        self.assertEqual(options[1]["hypothesisId"], first_state["hypothesisId"])
+
+        blocked = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
             json={
-                "action": "reject",
-                "candidateText": None,
-                "sourceTurnId": second_turn["turnId"],
+                "content": "Let us keep chatting before I choose.",
                 "baseVersionId": version_id,
-                "idempotencyKey": "intent-second-stale",
+                "idempotencyKey": "intent-conflict-blocked-message",
             },
         )
-        self.assertEqual(stale.status_code, 409, stale.text)
-        self.assertEqual(stale.json()["code"], "INVALID_CARD_SOURCE")
-        self.assertEqual(
-            len(response.json()["session"]["progressContexts"][0]["designInclinations"]),
-            1,
-        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(blocked.json()["code"], "INTENT_CONFLICT_PENDING")
 
-        compatible = {
-            "verdict": "compatible",
-            "explanation": None,
-            "supersedesHypothesisIds": [first_state["hypothesisId"]],
-        }
-        with patch.object(backend, "review_intent_feedback", return_value=compatible):
-            resolved = self.client.post(
-                f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
-                json={
-                    "action": "revise",
-                    "candidateText": "I prefer route length only when it reinforces meaningful push-order planning.",
-                    "sourceTurnId": pending_turn["turnId"],
-                    "baseVersionId": version_id,
-                    "idempotencyKey": "intent-second-revise",
-                },
-            )
+        invalid_choice = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+            json={
+                "action": "keep",
+                "candidateText": None,
+                "selectedHypothesisId": "intent-not-displayed",
+                "sourceTurnId": second_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-conflict-invalid-choice",
+            },
+        )
+        self.assertEqual(invalid_choice.status_code, 409, invalid_choice.text)
+        self.assertEqual(invalid_choice.json()["code"], "STALE_INTENT_CARD")
+
+        resolved = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+            json={
+                "action": "keep",
+                "candidateText": None,
+                "selectedHypothesisId": second_state["hypothesisId"],
+                "sourceTurnId": second_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-conflict-keep-new",
+            },
+        )
         self.assertEqual(resolved.status_code, 200, resolved.text)
+        self.assertEqual(resolved.json()["outcome"], "kept_new")
+        resolved_state = resolved.json()["session"]["turns"][-1]["guidance"]["intentState"]
+        self.assertEqual(
+            resolved_state["conflictChoice"]["selectedHypothesisId"],
+            second_state["hypothesisId"],
+        )
         progress = resolved.json()["session"]["progressContexts"][0]
         self.assertEqual(len(progress["designInclinations"]), 1)
         self.assertEqual(
             progress["designInclinations"][0]["hypothesisId"],
             second_state["hypothesisId"],
         )
-        self.assertEqual(progress["designInclinations"][0]["evidenceTrail"], [])
+
+        duplicate = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+            json={
+                "action": "keep",
+                "candidateText": None,
+                "selectedHypothesisId": second_state["hypothesisId"],
+                "sourceTurnId": second_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-conflict-keep-new",
+            },
+        )
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertEqual(duplicate.json()["outcome"], "kept_new")
+        key_conflict = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+            json={
+                "action": "keep",
+                "candidateText": None,
+                "selectedHypothesisId": first_state["hypothesisId"],
+                "sourceTurnId": second_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-conflict-keep-new",
+            },
+        )
+        self.assertEqual(key_conflict.status_code, 409, key_conflict.text)
+        self.assertEqual(key_conflict.json()["code"], "IDEMPOTENCY_CONFLICT")
+
+    def test_intent_conflict_keep_existing_rejects_only_new_intent(self):
+        version_id, first_turn, _ = self.create_intent_card(
+            "You prefer a readable first push.",
+            "intent-existing-first-card",
+        )
+        first_state = first_turn["guidance"]["intentState"]
+        confirmed = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{first_state['hypothesisId']}/feedback",
+            json={
+                "action": "confirm",
+                "candidateText": None,
+                "sourceTurnId": first_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-existing-first-confirm",
+            },
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        conflict = {
+            "verdict": "conflict",
+            "explanation": "The new direction obscures the first push, while the confirmed direction keeps it readable; both cannot govern that opening choice.",
+            "supersedesHypothesisIds": [],
+            "conflictingHypothesisIds": [first_state["hypothesisId"]],
+        }
+        _, second_turn, _ = self.create_intent_card(
+            "You prefer the first push to remain deliberately obscure.",
+            "intent-existing-second-card",
+            intent_review=conflict,
+        )
+        second_state = second_turn["guidance"]["intentState"]
+        resolved = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+            json={
+                "action": "keep",
+                "candidateText": None,
+                "selectedHypothesisId": first_state["hypothesisId"],
+                "sourceTurnId": second_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-conflict-keep-existing",
+            },
+        )
+        self.assertEqual(resolved.status_code, 200, resolved.text)
+        self.assertEqual(resolved.json()["outcome"], "kept_existing")
+        progress = resolved.json()["session"]["progressContexts"][0]
+        self.assertEqual(len(progress["designInclinations"]), 1)
+        self.assertEqual(
+            progress["designInclinations"][0]["hypothesisId"],
+            first_state["hypothesisId"],
+        )
+
+    def test_intent_conflict_displays_only_latest_conflicting_history(self):
+        version_id, first_turn, _ = self.create_intent_card(
+            "You prefer readable route structure.",
+            "intent-latest-first-card",
+        )
+        first_state = first_turn["guidance"]["intentState"]
+        first_confirm = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{first_state['hypothesisId']}/feedback",
+            json={
+                "action": "confirm",
+                "candidateText": None,
+                "sourceTurnId": first_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-latest-first-confirm",
+            },
+        )
+        self.assertEqual(first_confirm.status_code, 200, first_confirm.text)
+
+        _, second_turn, _ = self.create_intent_card(
+            "You prefer the opening decision to stay explicit.",
+            "intent-latest-second-card",
+        )
+        second_state = second_turn["guidance"]["intentState"]
+        compatible = {
+            "verdict": "compatible",
+            "explanation": None,
+            "supersedesHypothesisIds": [],
+            "conflictingHypothesisIds": [],
+        }
+        with patch.object(backend, "review_intent_feedback", return_value=compatible):
+            second_confirm = self.client.post(
+                f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
+                json={
+                    "action": "confirm",
+                    "candidateText": None,
+                    "sourceTurnId": second_turn["turnId"],
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "intent-latest-second-confirm",
+                },
+            )
+        self.assertEqual(second_confirm.status_code, 200, second_confirm.text)
+
+        conflict = {
+            "verdict": "conflict",
+            "explanation": "The new hidden structure opposes both confirmed directions, and the explicit opening is the most recently confirmed conflict.",
+            "supersedesHypothesisIds": [],
+            "conflictingHypothesisIds": [
+                first_state["hypothesisId"],
+                second_state["hypothesisId"],
+            ],
+        }
+        _, third_turn, _ = self.create_intent_card(
+            "You prefer both the route and opening decision to remain hidden.",
+            "intent-latest-third-card",
+            intent_review=conflict,
+        )
+        third_state = third_turn["guidance"]["intentState"]
+        self.assertEqual(
+            third_state["conflictChoice"]["options"][1]["hypothesisId"],
+            second_state["hypothesisId"],
+        )
+        resolved = self.client.post(
+            f"/api/sessions/{self.session_id}/intent-hypotheses/{third_state['hypothesisId']}/feedback",
+            json={
+                "action": "keep",
+                "candidateText": None,
+                "selectedHypothesisId": third_state["hypothesisId"],
+                "sourceTurnId": third_turn["turnId"],
+                "baseVersionId": version_id,
+                "idempotencyKey": "intent-latest-keep-new",
+            },
+        )
+        self.assertEqual(resolved.status_code, 200, resolved.text)
+        inclination_ids = {
+            item["hypothesisId"]
+            for item in resolved.json()["session"]["progressContexts"][0]["designInclinations"]
+        }
+        self.assertEqual(
+            inclination_ids,
+            {first_state["hypothesisId"], third_state["hypothesisId"]},
+        )
 
     def test_historical_stage_progress_does_not_leak_later_inclination(self):
         parent_id, parent_turn, _ = self.create_intent_card(

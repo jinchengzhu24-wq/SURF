@@ -210,8 +210,17 @@ def _structured_response_format(task=None):
                     "type": "array",
                     "items": {"type": "string"},
                 },
+                "conflictingHypothesisIds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
             },
-            "required": ["verdict", "explanation", "supersedesHypothesisIds"],
+            "required": [
+                "verdict",
+                "explanation",
+                "supersedesHypothesisIds",
+                "conflictingHypothesisIds",
+            ],
         }
         name = "cocreation_intent_feedback_review"
     elif task == "question_answer_review":
@@ -6698,17 +6707,21 @@ def review_intent_feedback(
         "content": (
             "You review one designer-authored candidate for long-term semantic memory. "
             "Return JSON only. verdict is compatible when the candidate is a clear, meaningful "
-            "design inclination and can coexist with every active inclination, or when it explicitly "
-            "and coherently replaces named prior inclinations. verdict is conflict "
+            "design inclination and can coexist with every active inclination. Never infer or "
+            "authorize replacement of an active inclination. verdict is conflict "
             "when it contradicts an active inclination or combines mutually incompatible priorities. "
             "verdict is unclear when it is vague, meaningless, merely an action acknowledgement, or "
             "not a design inclination. explanation must be null for compatible. For conflict or "
             "unclear, explanation must be a concise, warm first-person explanation in "
-            f"{response_language} that identifies the exact conflict or missing meaning and asks the "
-            "designer to revise the same inclination. Do not propose a map edit, invent map facts, "
+            f"{response_language}. For conflict, write two to four detailed sentences that name the "
+            "candidate direction, name the conflicting prior direction, and explain exactly why they "
+            "cannot both guide the same design decision. Do not ask the designer to revise, compromise, "
+            "or accept a recommendation. For unclear, explain the missing meaning and ask for "
+            "clarification. Do not propose a map edit, invent map facts, "
             "mention prompts or internal fields, or claim the candidate was saved. Return the exact "
-            "IDs of prior inclinations intentionally replaced in supersedesHypothesisIds; otherwise "
-            "return an empty array. Evidence entries "
+            "IDs of directly contradictory prior inclinations in conflictingHypothesisIds only when "
+            "verdict is conflict. supersedesHypothesisIds must always be empty; choosing what to retain "
+            "belongs exclusively to the designer. Evidence entries "
             "are observations only and cannot establish intention by themselves.\n\n"
             f"Candidate inclination: {candidate}\n"
             "Active confirmed inclinations:\n"
@@ -6741,19 +6754,27 @@ def review_intent_feedback(
                 raise ValueError("The intent review reached its output limit.")
             payload = json.loads(str(choice.message.content or ""))
             if set(payload) != {
-                "verdict", "explanation", "supersedesHypothesisIds"
+                "verdict",
+                "explanation",
+                "supersedesHypothesisIds",
+                "conflictingHypothesisIds",
             }:
                 raise ValueError("Intent review contains unexpected or missing fields.")
             verdict = payload.get("verdict")
             supersedes_ids = payload.get("supersedesHypothesisIds")
+            conflicting_ids = payload.get("conflictingHypothesisIds")
             active_ids = {item["hypothesisId"] for item in active}
             if (
                 not isinstance(supersedes_ids, list)
                 or any(not isinstance(item, str) for item in supersedes_ids)
                 or not set(supersedes_ids).issubset(active_ids)
+                or not isinstance(conflicting_ids, list)
+                or any(not isinstance(item, str) for item in conflicting_ids)
+                or not set(conflicting_ids).issubset(active_ids)
             ):
                 raise ValueError("Intent review replacement IDs are invalid.")
             supersedes_ids = list(dict.fromkeys(supersedes_ids))
+            conflicting_ids = list(dict.fromkeys(conflicting_ids))
             explanation = _normalize_response_paragraphs(
                 str(payload.get("explanation") or "")
             )[:1200]
@@ -6762,15 +6783,44 @@ def review_intent_feedback(
             if verdict == "compatible":
                 if payload.get("explanation") is not None:
                     raise ValueError("A compatible review must not include an explanation.")
+                if conflicting_ids:
+                    raise ValueError("A compatible review cannot cite conflicts.")
                 explanation = None
             elif len(explanation) < 12:
                 raise ValueError("Intent review explanation is too short.")
             elif supersedes_ids:
                 raise ValueError("A rejected intent review cannot replace active memory.")
+            elif verdict == "conflict" and not conflicting_ids:
+                raise ValueError("A conflict review must identify prior inclination IDs.")
+            elif verdict == "unclear" and conflicting_ids:
+                raise ValueError("An unclear review cannot cite confirmed conflicts.")
+            if verdict == "conflict":
+                conflict_sentences = [
+                    item for item in re.split(r"[.!?\u3002\uFF01\uFF1F]+", explanation)
+                    if item.strip()
+                ]
+                forbidden_direction = re.search(
+                    r"(?:please\s+(?:revise|rewrite|adjust|change)|"
+                    r"you\s+(?:need|have)\s+to\s+(?:revise|rewrite|adjust|change)|"
+                    r"compromise|\u8bf7(?:\u4fee\u6539|\u8c03\u6574|\u91cd\u65b0\u8868\u8ff0)|"
+                    r"\u9700\u8981(?:\u4fee\u6539|\u8c03\u6574|\u91cd\u65b0\u8868\u8ff0)|"
+                    r"\u6298\u4e2d|\u59a5\u534f)",
+                    explanation,
+                    flags=re.IGNORECASE,
+                )
+                if len(conflict_sentences) < 2 or forbidden_direction or re.search(
+                    r"[?\uFF1F]", explanation
+                ):
+                    raise ValueError(
+                        "A conflict explanation must compare both directions without directing the designer."
+                    )
+            if supersedes_ids:
+                raise ValueError("Intent review cannot authorize automatic replacement.")
             return {
                 "verdict": verdict,
                 "explanation": explanation,
-                "supersedesHypothesisIds": supersedes_ids,
+                "supersedesHypothesisIds": [],
+                "conflictingHypothesisIds": conflicting_ids,
             }
         except asyncio.TimeoutError as exception:
             last_error = LLMServiceError(
@@ -6790,8 +6840,8 @@ def review_intent_feedback(
             messages.append({
                 "role": "system",
                 "content": (
-                    "The prior response was invalid. Return exactly verdict, explanation, and "
-                    "supersedesHypothesisIds using "
+                    "The prior response was invalid. Return exactly verdict, explanation, "
+                    "supersedesHypothesisIds, and conflictingHypothesisIds using "
                     "the required JSON schema; do not add markdown or other fields."
                 ),
             })

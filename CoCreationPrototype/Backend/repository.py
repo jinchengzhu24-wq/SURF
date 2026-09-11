@@ -1547,6 +1547,31 @@ def serialize_session(database, session_id):
         if turn["role"] == "assistant" and hypothesis_id:
             latest_intent_turn[turn["version_id"]] = turn["id"]
 
+    translated_intent_statements = {}
+    for translation in translations:
+        source_guidance = stored_guidance_by_turn.get(
+            translation["turn_id"], {}
+        )
+        translated_guidance = load_json(translation["guidance_json"]) or {}
+        translated_statement = str(
+            translated_guidance.get("intentHypothesis") or ""
+        ).strip()
+        source_hypothesis_id = source_guidance.get("_intentHypothesisId")
+        if source_hypothesis_id and translated_statement:
+            translated_intent_statements[
+                (source_hypothesis_id, translation["language"])
+            ] = translated_statement
+
+    def localized_hypothesis_statement(hypothesis, language):
+        translated = translated_intent_statements.get((
+            hypothesis.get("id"), language,
+        ))
+        if translated:
+            return translated
+        if hypothesis.get("displayLanguage") == language:
+            return hypothesis.get("displayStatement") or hypothesis.get("statement")
+        return hypothesis.get("statement")
+
     def intent_state(turn):
         guidance = stored_guidance_by_turn.get(turn["id"], {})
         hypothesis_id = guidance.get("_intentHypothesisId")
@@ -1569,12 +1594,13 @@ def serialize_session(database, session_id):
             and session["status"] == "active"
             and not _deadline_expired(session["deadline_at"])
         )
+        review_mode = review.get("interactionMode", "full")
         mode = (
-            review.get("interactionMode", "full")
-            if actionable
-            else "resolved"
+            "conflict_choice"
+            if review_mode == "conflict_choice"
+            else review_mode if actionable else "resolved"
         )
-        return {
+        result = {
             "hypothesisId": hypothesis_id,
             "status": status,
             "interactionMode": mode,
@@ -1588,6 +1614,43 @@ def serialize_session(database, session_id):
                 review.get("reviewExplanation") if actionable else None
             ),
         }
+        if review_mode == "conflict_choice":
+            existing_id = str(review.get("existingHypothesisId") or "").strip()
+            existing = next((
+                item for item in context.get("intentHypotheses", [])
+                if item.get("id") == existing_id
+            ), None)
+            if existing is not None:
+                selected_id = None
+                if status == "confirmed" and existing.get("status") == "superseded":
+                    selected_id = hypothesis_id
+                elif status == "rejected" and existing.get("status") == "confirmed":
+                    selected_id = existing_id
+                result["conflictChoice"] = {
+                    "explanation": str(
+                        review.get("reviewExplanation") or ""
+                    ).strip(),
+                    "selectedHypothesisId": selected_id,
+                    "options": [
+                        {
+                            "role": "new",
+                            "hypothesisId": hypothesis_id,
+                            "statement": localized_hypothesis_statement(
+                                hypothesis, turn["language"]
+                            ),
+                            "status": status,
+                        },
+                        {
+                            "role": "existing",
+                            "hypothesisId": existing_id,
+                            "statement": localized_hypothesis_statement(
+                                existing, turn["language"]
+                            ),
+                            "status": existing.get("status", "confirmed"),
+                        },
+                    ],
+                }
+        return result
 
     for turn in turns:
         state = intent_state(turn)
@@ -2037,6 +2100,16 @@ def serialize_session(database, session_id):
                 translation["turn_id"], {}
             ).get("intentState")
             if source_intent_state is not None:
+                source_intent_state = json.loads(json.dumps(source_intent_state))
+                conflict_choice = source_intent_state.get("conflictChoice")
+                if isinstance(conflict_choice, dict):
+                    for option in conflict_choice.get("options", []):
+                        translated_statement = translated_intent_statements.get((
+                            option.get("hypothesisId"),
+                            translation["language"],
+                        ))
+                        if translated_statement:
+                            option["statement"] = translated_statement
                 translation_guidance["intentState"] = source_intent_state
         translations_by_turn.setdefault(translation["turn_id"], {})[
             translation["language"]

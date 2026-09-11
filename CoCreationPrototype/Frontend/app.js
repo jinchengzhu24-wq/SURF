@@ -355,8 +355,15 @@ translations.en.intentRejected = "Rejected";
 translations.en.intentRevised = "Revised and confirmed";
 translations.en.intentSuperseded = "Replaced by a later inclination";
 translations.en.intentStale = "This intent card is read-only.";
+translations.en.intentKeepThis = "Keep this";
+translations.en.intentKept = "Kept";
+translations.en.intentNewOption = "Current new inclination";
+translations.en.intentExistingOption = "Previously confirmed inclination";
+translations.en.intentConflictPlaceholder = "Choose which inclination to keep above before continuing the conversation.";
 translations.en.error_STALE_INTENT_CARD = "This intent card was already handled or is no longer current.";
 translations.en.error_INVALID_INTENT_FEEDBACK = "Enter a clear design inclination between 4 and 1200 characters.";
+translations.en.error_INTENT_CONFLICT_PENDING = "Choose which conflicting inclination to keep before sending another message.";
+translations.en.error_INTENT_CONTEXT_CHANGED = "Confirmed inclination memory changed during review. Retry this message.";
 translations.en.confirmedDecisions = "Confirmed decisions";
 translations.en.unresolvedQuestions = "Unresolved questions";
 translations.en.noConfirmedDecisions = "No confirmed decisions yet.";
@@ -412,6 +419,13 @@ translations["zh-CN"].intentRejected = "\u5df2\u5426\u5b9a";
 translations["zh-CN"].intentRevised = "\u5df2\u4fee\u8ba2\u5e76\u786e\u8ba4";
 translations["zh-CN"].intentSuperseded = "\u5df2\u88ab\u540e\u7eed\u503e\u5411\u66ff\u4ee3";
 translations["zh-CN"].intentStale = "\u8fd9\u5f20\u503e\u5411\u5361\u73b0\u5728\u53ea\u8bfb\u3002";
+translations["zh-CN"].intentKeepThis = "\u4fdd\u7559\u8fd9\u4e2a";
+translations["zh-CN"].intentKept = "\u5df2\u4fdd\u7559";
+translations["zh-CN"].intentNewOption = "\u5f53\u524d\u65b0\u610f\u56fe";
+translations["zh-CN"].intentExistingOption = "\u4e4b\u524d\u5df2\u786e\u8ba4\u7684\u610f\u56fe";
+translations["zh-CN"].intentConflictPlaceholder = "\u8bf7\u5148\u5728\u4e0a\u65b9\u9009\u62e9\u8981\u4fdd\u7559\u7684\u610f\u56fe\uff0c\u4e4b\u540e\u624d\u80fd\u7ee7\u7eed\u804a\u5929\u3002";
+translations["zh-CN"].error_INTENT_CONFLICT_PENDING = "\u8bf7\u5148\u9009\u62e9\u8981\u4fdd\u7559\u7684\u51b2\u7a81\u610f\u56fe\u3002";
+translations["zh-CN"].error_INTENT_CONTEXT_CHANGED = "\u51b2\u7a81\u590d\u6838\u671f\u95f4\u5df2\u786e\u8ba4\u610f\u56fe\u53d1\u751f\u4e86\u53d8\u5316\uff0c\u8bf7\u91cd\u8bd5\u8fd9\u6761\u6d88\u606f\u3002";
 translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
 translations["zh-CN"].unresolvedQuestions = "\u672a\u89e3\u51b3\u95ee\u9898";
 translations["zh-CN"].noConfirmedDecisions = "\u6682\u65e0\u5df2\u786e\u8ba4\u51b3\u7b56\u3002";
@@ -1193,11 +1207,19 @@ function renderAssistantBubble(turn, bubble) {
             localizedProposalSummary(proposal)
         ));
     } else if (guidance.intentHypothesis) {
-        cueList.appendChild(createIntentGuidanceCue(
-            guidance.intentHypothesis,
-            guidance.intentState,
-            turn,
-        ));
+        if (guidance.intentState?.interactionMode === "conflict_choice") {
+            cueList.appendChild(createIntentConflictChoiceCue(
+                guidance.intentHypothesis,
+                guidance.intentState,
+                turn,
+            ));
+        } else {
+            cueList.appendChild(createIntentGuidanceCue(
+                guidance.intentHypothesis,
+                guidance.intentState,
+                turn,
+            ));
+        }
     }
 
     uiCues.forEach(cue => {
@@ -1238,6 +1260,14 @@ function selectedStageHasActiveDisagreement() {
         }
     });
     return latestStatus === "active";
+}
+
+function selectedStageHasPendingIntentConflict() {
+    return selectedStageTurns().some(turn => (
+        turn.role === "assistant"
+        && turn.guidance?.intentState?.interactionMode === "conflict_choice"
+        && turn.guidance.intentState.actionable === true
+    ));
 }
 
 function isRevisionOfferTurn(turn) {
@@ -1649,7 +1679,75 @@ function createIntentGuidanceCue(text, intentState, turn) {
     return cue;
 }
 
-async function submitIntentFeedback(action, turn, intentState, candidateText, cue) {
+function createIntentConflictChoiceCue(text, intentState, turn) {
+    const choice = intentState?.conflictChoice;
+    const wrapper = document.createElement("section");
+    wrapper.className = "intent-conflict-choice";
+    if (!choice || !Array.isArray(choice.options) || choice.options.length !== 2) {
+        wrapper.appendChild(createIntentGuidanceCue(text, intentState, turn));
+        return wrapper;
+    }
+
+    choice.options.forEach(option => {
+        const statement = String(
+            option.role === "new"
+                ? (text || option.statement || "")
+                : (option.statement || "")
+        ).trim();
+        const card = createGuidanceCue("intent", statement);
+        card.classList.add("intent-feedback-card", "intent-conflict-option");
+        card.setAttribute("aria-busy", "false");
+
+        const role = document.createElement("small");
+        role.className = "intent-conflict-option-role";
+        role.textContent = option.role === "new"
+            ? t("intentNewOption")
+            : t("intentExistingOption");
+        card.insertBefore(role, card.querySelector("strong"));
+
+        if (intentState.actionable && canEditSelected()) {
+            const actions = document.createElement("div");
+            actions.className = "intent-card-actions";
+            actions.appendChild(makeButton(
+                t("intentKeepThis"),
+                "secondary-button guidance-cue-button",
+                () => void submitIntentFeedback(
+                    "keep",
+                    turn,
+                    intentState,
+                    null,
+                    card,
+                    option.hypothesisId,
+                ),
+            ));
+            card.appendChild(actions);
+        } else {
+            const status = document.createElement("small");
+            status.className = "guidance-cue-stale-note intent-resolution";
+            if (choice.selectedHypothesisId === option.hypothesisId) {
+                status.textContent = t("intentKept");
+            } else if (option.status === "superseded") {
+                status.textContent = t("intentSuperseded");
+            } else if (option.status === "rejected") {
+                status.textContent = t("intentRejected");
+            } else {
+                status.textContent = t("intentStale");
+            }
+            card.appendChild(status);
+        }
+        wrapper.appendChild(card);
+    });
+    return wrapper;
+}
+
+async function submitIntentFeedback(
+    action,
+    turn,
+    intentState,
+    candidateText,
+    cue,
+    selectedHypothesisId = null,
+) {
     if (state.busy || !canEditSelected() || !intentState?.actionable) return;
     cue.setAttribute("aria-busy", "true");
     cue.querySelectorAll("button, textarea").forEach(control => {
@@ -1663,6 +1761,7 @@ async function submitIntentFeedback(action, turn, intentState, candidateText, cu
                 body: {
                     action,
                     candidateText: action === "revise" ? candidateText : null,
+                    selectedHypothesisId: action === "keep" ? selectedHypothesisId : null,
                     sourceTurnId: turn.turnId,
                     baseVersionId: state.session.currentVersionId,
                     idempotencyKey: uniqueId(`intent-${action}`),
@@ -2025,25 +2124,31 @@ function updateControls() {
     const expired = deadlineExpired();
     const editable = canEditSelected();
     const pending = Boolean(currentPendingProposal());
+    const intentConflictPending = selectedStageHasPendingIntentConflict();
     elements.saveStageButton.disabled = !editable || !state.dirty || state.busy;
     elements.discardDraftButton.disabled = !editable || !state.dirty || state.busy;
     elements.restoreStageButton.hidden = state.selectedVersionId === state.session.currentVersionId || state.session.status !== "active";
     elements.restoreStageButton.disabled = state.busy || expired;
     elements.playButton.disabled = state.busy || expired || state.dirty || pending || !selectedVersion();
     elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
-    elements.messageInput.disabled = state.busy || !editable;
+    elements.messageInput.disabled = state.busy || !editable || intentConflictPending;
+    elements.messageInput.placeholder = intentConflictPending
+        ? t("intentConflictPlaceholder")
+        : t("messagePlaceholder");
     const disagreementActive = selectedStageHasActiveDisagreement();
     const proposalLocked = proposalFlowActive();
-    if ((!editable || disagreementActive) && state.proposalMode) {
+    if ((!editable || disagreementActive || intentConflictPending) && state.proposalMode) {
         setProposalMode(false);
     }
     const proposalActive = state.proposalMode || proposalLocked;
     elements.proposalRequestButton.disabled = (
         state.busy || !editable || disagreementActive || proposalLocked
+        || intentConflictPending
     );
     elements.proposalRequestButton.classList.toggle("is-active", proposalActive);
     elements.proposalRequestButton.setAttribute("aria-pressed", proposalActive ? "true" : "false");
-    elements.sendButton.disabled = state.busy || !editable || !elements.messageInput.value.trim();
+    elements.sendButton.disabled = state.busy || !editable || intentConflictPending
+        || !elements.messageInput.value.trim();
     document.querySelectorAll(".question-feedback-button").forEach(button => {
         button.disabled = state.busy || !editable
             || state.questionFeedbackBusy.has(button.dataset.feedbackKey || "");

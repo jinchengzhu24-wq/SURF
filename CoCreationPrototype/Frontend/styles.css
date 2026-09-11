@@ -1052,6 +1052,46 @@ main {
     gap: 2px;
 }
 
+.intent-conflict-choice {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 10px;
+}
+
+.intent-conflict-choice .guidance-cue {
+    margin-top: 0;
+}
+
+.intent-conflict-option {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+}
+
+.intent-conflict-option > strong {
+    flex: 1;
+}
+
+.intent-conflict-option-role {
+    display: block;
+    margin: 4px 0 7px;
+    color: #765017;
+    font-size: 10px;
+    font-weight: 800;
+}
+
+.composer textarea:disabled::placeholder {
+    color: #8a8f8b;
+    opacity: 1;
+}
+
+@media (max-width: 720px) {
+    .intent-conflict-choice {
+        grid-template-columns: 1fr;
+    }
+}
+
 .intent-edit-form {
     display: grid;
     gap: 6px;

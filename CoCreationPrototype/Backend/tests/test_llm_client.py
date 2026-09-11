@@ -5118,6 +5118,72 @@ class LLMClientTests(unittest.TestCase):
             "cocreation_question_answer_review",
         )
 
+    def test_intent_feedback_review_binds_conflict_without_auto_replacement(self):
+        explanation = (
+            "I understand the new direction as hiding the opening choice. "
+            "The confirmed direction keeps that same choice readable, so both cannot guide the opening at once."
+        )
+        client = FakeClient([json.dumps({
+            "verdict": "conflict",
+            "explanation": explanation,
+            "supersedesHypothesisIds": [],
+            "conflictingHypothesisIds": ["intent-old"],
+        })])
+        with (
+            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.review_intent_feedback(
+                "I prefer the opening choice to remain hidden.",
+                [{
+                    "hypothesisId": "intent-old",
+                    "statement": "I prefer the opening choice to remain readable.",
+                }],
+                [],
+                "en",
+                "intent-conflict-review-test",
+            )
+        self.assertEqual(result["verdict"], "conflict")
+        self.assertEqual(result["conflictingHypothesisIds"], ["intent-old"])
+        self.assertEqual(result["supersedesHypothesisIds"], [])
+        prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+        self.assertIn("Never infer or authorize replacement", prompt)
+
+    def test_intent_feedback_review_retries_directive_conflict_explanation(self):
+        client = FakeClient([
+            json.dumps({
+                "verdict": "conflict",
+                "explanation": "These conflict. Please revise the new inclination.",
+                "supersedesHypothesisIds": [],
+                "conflictingHypothesisIds": ["intent-old"],
+            }),
+            json.dumps({
+                "verdict": "conflict",
+                "explanation": (
+                    "I understand the new direction as extending the route for difficulty. "
+                    "The confirmed direction prioritizes push order instead, so both cannot govern the same difficulty choice."
+                ),
+                "supersedesHypothesisIds": [],
+                "conflictingHypothesisIds": ["intent-old"],
+            }),
+        ])
+        with (
+            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+        ):
+            result = llm_client.review_intent_feedback(
+                "I prefer difficulty to come from a longer route.",
+                [{
+                    "hypothesisId": "intent-old",
+                    "statement": "I prefer difficulty to come from push-order planning.",
+                }],
+                [],
+                "en",
+                "intent-conflict-directive-test",
+            )
+        self.assertEqual(result["verdict"], "conflict")
+        self.assertEqual(len(client.chat.completions.calls), 2)
+
     def test_progress_rewrite_uses_structured_kimi_task(self):
         client = FakeClient([json.dumps({
             "detailedText": "This extra explanation is not part of an inclination record.",
