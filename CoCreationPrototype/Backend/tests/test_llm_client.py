@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
 from openai import APIStatusError, APITimeoutError
@@ -150,6 +150,49 @@ class FakeCompletions:
         schema_name = (((kwargs.get("response_format") or {}).get("json_schema") or {}).get("name"))
         if schema_name != "cocreation_intent_candidate_review":
             self.calls.append(kwargs)
+        if schema_name == "cocreation_intent_component_repair":
+            prompt = str((kwargs.get("messages") or [{}])[-1].get("content") or "")
+            body_match = re.search(r"CURRENT BODY:\n(.*?)\n\nCURRENT CARD:", prompt, re.DOTALL)
+            card_match = re.search(r"CURRENT CARD:\n(.*?)\n\nREVIEW ISSUES:", prompt, re.DOTALL)
+            claims_match = re.search(r"LOCKED CLAIMS:\n(.*?)\n\nAUTHORITATIVE", prompt, re.DOTALL)
+            claims = json.loads(claims_match.group(1)) if claims_match else []
+            meaning = str((claims[0] if claims else {}).get("normalizedMeaning") or "the stated direction")
+            chinese = "Simplified Chinese" in prompt
+            repaired_body = (
+                "当前地图的围合边界、中央障碍和两侧通道为这个方向提供了明确的空间依据。"
+                "它可能改变画面中的视觉重心，让相关区域在整体构图里更突出或更收敛。"
+                "它也可能改变玩家规划箱子移动时的可用空间和路线节奏，使局部选择出现不同压力。"
+                "目前仍不能确定设计者更重视视觉比例还是操作限制，这个边界需要结合后续试玩判断。"
+                if chinese else
+                "The current enclosure, central obstacle, and side passages provide concrete spatial evidence for this direction. "
+                "It may shift the visual balance by making the affected region more prominent or more restrained within the composition. "
+                "It may also change the usable planning space and route rhythm when the player positions a box for the next push. "
+                "Whether visual proportion or playable restriction matters more remains genuinely open until the designer evaluates the result in play."
+            )
+            repaired_card = (
+                f"我暂时理解为，你表达的方向是：{meaning}。具体影响边界仍未确定，你可以直接纠正我。"
+                if chinese else
+                f"For now, I understand your direction as: {meaning}. The exact experience boundary remains open, and you can correct me."
+            )
+            body = repaired_body if "REPAIR BODY: yes" in prompt else (body_match.group(1).strip() if body_match else "")
+            body_paragraphs = [
+                item.strip() for item in re.split(r"\n\s*\n", body) if item.strip()
+            ] or ["The current Stage evidence remains relevant."]
+            card = repaired_card if "REPAIR CARD: yes" in prompt else (card_match.group(1).strip() if card_match else "")
+            card_sentences = [
+                item.strip()
+                for item in re.split(r"(?<=[.!?。！？；;])\s*", card)
+                if item.strip()
+            ]
+            if len(card_sentences) < 2:
+                card_sentences = [card, "This remains correctable."]
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=json.dumps({
+                    "bodyParagraphs": body_paragraphs[:3],
+                    "cardSentences": card_sentences[:4],
+                }, ensure_ascii=False)),
+            )])
         if schema_name == "cocreation_intent_candidate_review":
             prompt = str((kwargs.get("messages") or [{}])[-1].get("content") or "")
             match = re.search(
@@ -162,18 +205,28 @@ class FakeCompletions:
             }
             active_match = re.search(r"ACTIVE CONFIRMED INTENTIONS:\n(.*)$", prompt, re.DOTALL)
             active = json.loads(active_match.group(1)) if active_match else []
+            body_match = re.search(r"DRAFT BODY:\n(.*?)\n\nDRAFT INTENT", prompt, re.DOTALL)
+            draft_body = body_match.group(1).strip() if body_match else ""
+            body_valid = draft_body not in {"I understand the feedback.", "我理解你的反馈。"}
+            card_valid = (
+                decision["classification"] != "candidate"
+                or llm_client._intent_hypothesis_detail_issue(
+                    decision["cardText"],
+                    "zh-CN" if re.search(r"[\u3400-\u9fff]", decision["cardText"]) else "en",
+                ) is None
+            )
             return SimpleNamespace(choices=[SimpleNamespace(
                 finish_reason="stop",
                 message=SimpleNamespace(content=json.dumps({
                     "classification": decision["classification"],
                     "claims": decision["claims"],
                     "cardText": decision["cardText"],
-                    "cardTextValid": True,
-                    "bodyValid": True,
+                    "cardTextValid": card_valid,
+                    "bodyValid": body_valid,
                     "relation": "compatible" if decision["classification"] == "candidate" and active else "none",
                     "conflictingHypothesisIds": [],
                     "explanation": None,
-                    "issues": [],
+                    "issues": [] if body_valid and card_valid else ["Repair only the incomplete component."],
                     "reviewedActiveClaims": [],
                 }, ensure_ascii=False)),
             )])
@@ -267,6 +320,99 @@ class SlowClient:
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_review_false_positive_candidate_is_removed_without_regeneration(self):
+        claim = {
+            "normalizedMeaning": "评价地图", "subjectType": "layout", "subjectText": "地图",
+            "attributeType": "other", "attributeText": "评价", "direction": "evaluate",
+            "degree": "neutral", "aspect": "visual", "scopeType": "stage",
+            "scopeText": "stage", "evidenceSpan": "不存在的原文",
+        }
+        card = "我暂时理解为，你希望调整地图观感。具体方向仍未确定，你可以纠正我。"
+        decision = json.dumps({
+            "classification": "candidate", "claims": [claim], "cardText": card,
+        }, ensure_ascii=False, separators=(",", ":"))
+        body = "这张地图的围合轮廓比较清楚，中央水域也形成了明显的视觉焦点。完成时间还会受推箱顺序和试错次数影响，仅看静态地图无法准确估计。"
+        review = {
+            "classification": "none", "claims": [], "cardText": "",
+            # Intent-specific body scoring must not block an ordinary answer.
+            "cardTextValid": False, "bodyValid": False, "relation": "none",
+            "conflictingHypothesisIds": [], "explanation": None, "issues": [],
+            "reviewedActiveClaims": [], "reviewVersion": "test-v1",
+        }
+        with patch.object(
+            llm_client, "_review_intent_candidate_async", new=AsyncMock(return_value=review),
+        ):
+            result, client = self.execute(
+                [f"{body}\n<GUIDANCE>INTENT_DECISION: {decision} || INTENT: {card}</GUIDANCE>"],
+                language="zh-CN",
+                conversation=[{"role": "user", "content": "你觉得这张地图好看吗，耗费时间吗"}],
+            )
+
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertEqual(result.guidance["_intentDecision"]["classification"], "none")
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_non_conflict_review_discards_harmless_explanation(self):
+        payload = {
+            "classification": "none", "claims": [], "cardText": "",
+            "cardTextValid": False, "bodyValid": True, "relation": "none",
+            "conflictingHypothesisIds": [], "explanation": "这不是冲突。",
+            "issues": [], "reviewedActiveClaims": [],
+        }
+        response = SimpleNamespace(choices=[SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False)),
+        )])
+        with patch.object(
+            llm_client, "_request_completion", new=AsyncMock(return_value=response),
+        ):
+            result = asyncio.run(llm_client._review_intent_candidate_async(
+                api_key="test", base_url="https://example.invalid",
+                user_text="你觉得这张地图好看吗", body="地图轮廓清楚。",
+                decision={"classification": "none", "claims": [], "cardText": ""},
+                active_inclinations=[], language="zh-CN", request_id="review-test",
+                deadline=time.monotonic() + 10,
+            ))
+
+        self.assertIsNone(result["explanation"])
+
+    def test_conflict_review_accepts_complete_comparison_without_sentence_quota(self):
+        claim = {
+            "normalizedMeaning": "增加水域覆盖", "subjectType": "water", "subjectText": "水域",
+            "attributeType": "coverage", "attributeText": "覆盖", "direction": "increase",
+            "degree": "insufficient", "aspect": "unspecified", "scopeType": "stage",
+            "scopeText": "stage", "evidenceSpan": "水域太少了",
+        }
+        explanation = "我读到的新方向是增加当前水域覆盖，而先前确认的方向是减少同一范围的水域覆盖，这两个相反方向不能同时指导当前区域的设计。"
+        payload = {
+            "classification": "candidate", "claims": [claim],
+            "cardText": "我暂时理解为，你认为当前水域覆盖不足，希望增加一些。具体作用面仍未确定，你可以纠正我。",
+            "cardTextValid": True, "bodyValid": True, "relation": "conflict",
+            "conflictingHypothesisIds": ["old-water"], "explanation": explanation,
+            "issues": [], "reviewedActiveClaims": [],
+        }
+        response = SimpleNamespace(choices=[SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False)),
+        )])
+        with patch.object(
+            llm_client, "_request_completion", new=AsyncMock(return_value=response),
+        ):
+            result = asyncio.run(llm_client._review_intent_candidate_async(
+                api_key="test", base_url="https://example.invalid",
+                user_text="我觉得水域太少了", body="当前水域集中在中央。",
+                decision={"classification": "candidate", "claims": [claim], "cardText": payload["cardText"]},
+                active_inclinations=[{
+                    "hypothesisId": "old-water", "statement": "减少水域覆盖",
+                    "evidenceText": "水域太多了", "semanticClaims": [],
+                }],
+                language="zh-CN", request_id="conflict-review-test",
+                deadline=time.monotonic() + 10,
+            ))
+
+        self.assertEqual(result["relation"], "conflict")
+        self.assertEqual(result["explanation"], explanation)
+
     def test_kimi_reviewed_intent_preserves_water_increase_semantics(self):
         claim = {
             "normalizedMeaning": "增加当前水域覆盖范围",
@@ -3070,7 +3216,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("水", intent)
         self.assertNotIn("设计者", intent)
 
-    def test_short_model_intent_retries_until_body_and_card_are_detailed(self):
+    def test_short_model_intent_repairs_body_and_card_without_full_regeneration(self):
         short = (
             "I understand the feedback.\n"
             "<GUIDANCE>INTENT: I think you may prefer clearer box spacing.</GUIDANCE>"
@@ -3094,28 +3240,46 @@ class LLMClientTests(unittest.TestCase):
                 {"role": "user", "content": "I think the two boxes start too close together."}
             ],
         )
-        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(result.attempts_used, 1)
         self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertIsNone(
             llm_client._intent_hypothesis_detail_issue(
                 result.guidance["intentHypothesis"], "en"
             )
         )
-        self.assertIsNone(llm_client._intent_body_detail_issue(detailed_body, "en"))
+        self.assertIsNone(
+            llm_client._intent_body_detail_issue(
+                result.assistant_message, "en", result.guidance["intentHypothesis"]
+            )
+        )
 
-    def test_three_inadequate_intent_bodies_return_retryable_error(self):
+    def test_inadequate_intent_body_is_repaired_instead_of_losing_the_turn(self):
         short = (
             "I understand the feedback.\n"
             "<GUIDANCE>INTENT: For now, I understand that you may prefer less water coverage. "
             "This remains a correctable reading.</GUIDANCE>"
         )
-        with self.assertRaises(llm_client.LLMServiceError) as raised:
-            self.execute(
-                [short, short, short],
-                conversation=[{"role": "user", "content": "I think there is too much water."}],
-            )
-        self.assertTrue(raised.exception.retryable)
-        self.assertEqual(raised.exception.code, "MODEL_LOW_QUALITY_RESPONSE")
+        result, client = self.execute(
+            [short],
+            conversation=[{"role": "user", "content": "I think there is too much water."}],
+        )
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+
+    def test_intent_body_quality_detects_incomplete_enumerated_consequence(self):
+        body = (
+            "减少水域后，一种可能的效果是通道连通性增强，玩家可选择的路径变多；"
+            "另一种可能的效果是原本由水域强制形成的。"
+        )
+        self.assertEqual(
+            llm_client._intent_body_detail_issue(
+                body,
+                "zh-CN",
+                "我目前理解为水域覆盖偏多，可能需要减少。这个理解仍可纠正。",
+            ),
+            "intent body leaves an enumerated consequence incomplete",
+        )
 
     def test_intent_body_quality_rejects_workflow_padding(self):
         padded = (
@@ -6910,17 +7074,32 @@ class LLMClientTests(unittest.TestCase):
             "我暂时理解为，你不喜欢当前地图布局呈现出的过于拥挤感。"
             "这先是你对当前设计的可纠正判断；它具体应怎样影响玩法或调整方式，仍由你确认。"
         )
-        result, client = self.execute(
-            [
-                generic_body + "\n<GUIDANCE>INTENT: " + generic_card + "</GUIDANCE>",
-                specific_body + "\n<GUIDANCE>INTENT: " + specific_card + "</GUIDANCE>",
-            ],
-            language="zh-CN",
-            conversation=[{
-                "role": "user",
-                "content": "我不喜欢这个地图的排版，太拥挤了。",
-            }],
-        )
+        reviewed_claim = {
+            "normalizedMeaning": "不喜欢地图布局过于拥挤",
+            "subjectType": "layout", "subjectText": "地图布局",
+            "attributeType": "density", "attributeText": "拥挤程度",
+            "direction": "avoid", "degree": "excessive", "aspect": "unspecified",
+            "scopeType": "stage", "scopeText": "stage",
+            "evidenceSpan": "我不喜欢这个地图的排版，太拥挤了。",
+        }
+        review = {
+            "classification": "candidate", "claims": [reviewed_claim],
+            "cardText": specific_card, "cardTextValid": False, "bodyValid": True,
+            "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
+            "issues": ["卡片丢失了布局拥挤语义。"], "reviewedActiveClaims": [],
+            "reviewVersion": "test-v1",
+        }
+        with patch.object(
+            llm_client, "_review_intent_candidate_async", new=AsyncMock(return_value=review),
+        ):
+            result, client = self.execute(
+                [generic_body + "\n<GUIDANCE>INTENT: " + generic_card + "</GUIDANCE>"],
+                language="zh-CN",
+                conversation=[{
+                    "role": "user",
+                    "content": "我不喜欢这个地图的排版，太拥挤了。",
+                }],
+            )
 
         self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertIn("地图布局", result.guidance["intentHypothesis"])

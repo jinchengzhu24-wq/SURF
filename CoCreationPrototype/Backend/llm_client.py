@@ -117,6 +117,7 @@ CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
 PROMPT_VERSION = "cocreation-v55-kimi-intent-candidate-review"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
+INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
 INTENT_REVIEW_VERSION = "intent-candidate-review-v1"
 QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
 INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
@@ -254,6 +255,23 @@ def _structured_response_format(task=None):
             ],
         }
         name = "cocreation_intent_candidate_review"
+    elif task == "intent_component_repair":
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "bodyParagraphs": {
+                    "type": "array", "minItems": 1, "maxItems": 3,
+                    "items": {"type": "string"},
+                },
+                "cardSentences": {
+                    "type": "array", "minItems": 2, "maxItems": 4,
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["bodyParagraphs", "cardSentences"],
+        }
+        name = "cocreation_intent_component_repair"
     elif task == "intent_feedback_review":
         schema = {
             "type": "object",
@@ -7379,10 +7397,12 @@ async def _review_intent_candidate_async(
         "Do not invent a gameplay purpose. For candidate return cardText: two to four complete, "
         "tentative, correctable sentences that preserve every claim without restating the draft body. "
         "For non-candidate return empty cardText and no claims. cardTextValid means the "
-        "draft card covers every claim, stays tentative/correctable, and adds no purpose. bodyValid "
-        "means the prose directly responds, does not repeat the card, has verified Stage evidence, two "
-        "distinct possible effects, and one genuine uncertainty boundary when a candidate exists; it "
-        "must reject dangling introductions, option lists, workflow talk, or unfinished paragraphs. "
+        "draft card covers every claim, stays tentative/correctable, and adds no purpose. For none or "
+        "reference_only, bodyValid checks only that the prose directly answers the user and has no "
+        "dangling introduction, option-list fragment, workflow talk, or unfinished paragraph; do not "
+        "require Stage evidence, two effects, or an uncertainty boundary. Only for candidate, bodyValid "
+        "also requires verified Stage evidence, two distinct possible effects, one genuine uncertainty "
+        "boundary, and no repetition of the card. "
         "relation is none without a candidate or active inclination, otherwise compatible, conflict, "
         "or unclear. conflict must cite exact active IDs and explain in 2-4 first-person sentences in "
         f"{response_language} why the new and old directions cannot both guide the same decision; never "
@@ -7457,20 +7477,24 @@ async def _review_intent_candidate_async(
         raise ValueError("A reviewed candidate without confirmed memory must use relation none.")
     explanation = _normalize_response_paragraphs(str(payload.get("explanation") or ""))[:1200] or None
     if relation == "conflict":
-        conflict_sentences = [
-            item for item in re.split(r"[.!?\u3002\uFF01\uFF1F]+", explanation or "")
-            if item.strip()
-        ]
         forbidden_direction = re.search(
             r"(?:please\s+(?:revise|rewrite|adjust|change)|compromise|"
             r"请(?:修改|调整|重新表述)|需要(?:修改|调整|重新表述)|折中|妥协)",
             explanation or "",
             flags=re.IGNORECASE,
         )
-        if len(conflict_sentences) < 2 or len(conflict_sentences) > 4 or forbidden_direction or re.search(r"[?？]", explanation or ""):
-            raise ValueError("A conflict explanation must compare both directions in two to four non-directive sentences.")
-    elif relation in {"none", "compatible"} and explanation is not None:
-        raise ValueError("A non-conflict resolved review must not include an explanation.")
+        minimum_length = 36 if language == "zh-CN" else 80
+        if (
+            len(explanation or "") < minimum_length
+            or forbidden_direction
+            or re.search(r"[?？]", explanation or "")
+        ):
+            raise ValueError("A conflict explanation must substantively compare both directions without directing the designer.")
+    elif relation != "conflict":
+        # Explanation is user-visible only for a conflict. Kimi occasionally
+        # supplies harmless rationale for none/compatible/unclear despite the
+        # schema instruction; discard it instead of failing the whole turn.
+        explanation = None
     legacy_updates = []
     for update in payload.get("reviewedActiveClaims") or []:
         if not isinstance(update, dict) or set(update) != {"hypothesisId", "claims"}:
@@ -7509,6 +7533,109 @@ async def _review_intent_candidate_async(
         "reviewedActiveClaims": legacy_updates,
         "reviewVersion": INTENT_REVIEW_VERSION,
     }
+
+
+async def _repair_intent_components_async(
+    *, api_key, base_url, user_text, body, card_text, claims, issues,
+    repair_body, repair_card, map_facts, language, request_id, deadline,
+):
+    """Repair only rejected intent presentation components under locked semantics."""
+    if not repair_body and not repair_card:
+        return body, card_text
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    messages = [{"role": "system", "content": (
+        "You repair presentation components for a Sokoban tentative-intent reply. Return JSON only. "
+        "The LOCKED CLAIMS and exact user evidence are authoritative and must not be changed, expanded, "
+        "or assigned a new gameplay purpose. Preserve every component not marked REPAIR. If BODY is marked, "
+        "write substantive medium-depth analysis grounded only in the Stage facts, with two distinct possible "
+        "effects and one honest uncertainty boundary; return it as one to three complete bodyParagraphs and do "
+        "not repeat the card. If CARD is marked, write two to "
+        "four complete, tentative, explicitly correctable sentences that preserve all locked claims. Return "
+        "those sentences as separate cardSentences array items, including their closing punctuation. Do not "
+        "mention this workflow, offer options, or leave a dangling clause. Write in " + response_language + ".\n\n"
+        "CURRENT USER TEXT:\n" + str(user_text or "")[:2000] + "\n\n"
+        "LOCKED CLAIMS:\n" + json.dumps(claims, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+        "AUTHORITATIVE STAGE FACTS:\n" + str(map_facts or "")[:8000] + "\n\n"
+        "REPAIR BODY: " + ("yes" if repair_body else "no") + "\n"
+        "REPAIR CARD: " + ("yes" if repair_card else "no") + "\n"
+        "CURRENT BODY:\n" + str(body or "")[:5000] + "\n\n"
+        "CURRENT CARD:\n" + str(card_text or "")[:1200] + "\n\n"
+        "REVIEW ISSUES:\n" + json.dumps(list(issues or [])[:8], ensure_ascii=False)
+    )}]
+    remaining = _remaining_until(deadline)
+    if remaining <= 0:
+        raise asyncio.TimeoutError()
+    response = await asyncio.wait_for(
+        _request_completion(
+            api_key, base_url, KIMI_MODEL, messages,
+            INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS,
+            min(30.0, remaining), task="intent_component_repair",
+        ),
+        timeout=min(30.0, remaining),
+    )
+    choice = response.choices[0]
+    if str(getattr(choice, "finish_reason", "") or "") == "length":
+        raise ValueError("The intent component repair reached its output limit.")
+    payload = json.loads(str(choice.message.content or ""))
+    if not isinstance(payload, dict) or set(payload) != {"bodyParagraphs", "cardSentences"}:
+        raise ValueError("Intent component repair contains unexpected or missing fields.")
+    body_paragraphs = payload.get("bodyParagraphs")
+    if not isinstance(body_paragraphs, list) or not 1 <= len(body_paragraphs) <= 3:
+        raise ValueError("Intent body repair must return one to three paragraph items.")
+    body_paragraphs = [
+        re.sub(r"\s+", " ", str(item or "")).strip()
+        for item in body_paragraphs
+    ]
+    if any(not item for item in body_paragraphs):
+        raise ValueError("Intent body repair returned an empty paragraph item.")
+    body_sentence_end = "。" if language == "zh-CN" else "."
+    normalized_body_paragraphs = []
+    for paragraph in body_paragraphs:
+        if paragraph.endswith((",", "，", ";", "；")):
+            paragraph = paragraph[:-1].rstrip() + body_sentence_end
+        elif not re.search(r"[.!?。！？:]$", paragraph):
+            paragraph += body_sentence_end
+        normalized_body_paragraphs.append(paragraph)
+    repaired_body = "\n\n".join(normalized_body_paragraphs)
+    card_sentences = payload.get("cardSentences")
+    if not isinstance(card_sentences, list) or not 2 <= len(card_sentences) <= 4:
+        raise ValueError("Intent card repair must return two to four sentence items.")
+    card_sentences = [
+        re.sub(r"\s+", " ", str(item or "")).strip()
+        for item in card_sentences
+    ]
+    if any(not item for item in card_sentences):
+        raise ValueError("Intent card repair returned an empty sentence item.")
+    sentence_end = "。" if language == "zh-CN" else "."
+    internal_separator = "，" if language == "zh-CN" else "; "
+    card_sentences = [
+        re.sub(r"[.!?;。！？；]+(?=\s*\S)", internal_separator, item)
+        for item in card_sentences
+    ]
+    card_sentences = [
+        item if re.search(r"[.!?;。！？；]$", item) else item + sentence_end
+        for item in card_sentences
+    ]
+    repaired_card = (("" if language == "zh-CN" else " ").join(card_sentences))[:1000]
+    repaired_card_issue = _intent_hypothesis_detail_issue(repaired_card, language)
+    if repaired_card_issue == "intentHypothesis must remain explicitly tentative":
+        tentative_prefix = (
+            "我目前的暂定理解是，"
+            if language == "zh-CN"
+            else "My current tentative reading is that "
+        )
+        repaired_card = tentative_prefix + repaired_card
+        repaired_card_issue = _intent_hypothesis_detail_issue(repaired_card, language)
+    result_body = repaired_body if repair_body else body
+    result_card = repaired_card if repair_card else card_text
+    if repair_body and not result_body:
+        raise ValueError("Intent body repair returned no prose.")
+    if repair_card and repaired_card_issue:
+        raise ValueError(
+            "Intent card repair did not produce a complete tentative card: "
+            + repaired_card_issue
+        )
+    return result_body, result_card
 
 
 async def _generate_plain_with_model_fallback(
@@ -7552,7 +7679,11 @@ async def _generate_plain_with_model_fallback(
     )
     clarification_body_candidate = ""
     total_grounding_dropped_count = 0
-    intent_review_corrections = 0
+    intent_repair_map_facts = json.dumps(
+        _stage_snapshot_for_prompt(rows, stage_context),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
     max_attempts = len(models)
     ordinary_discussion = validation_mode in {"ordinary_chat", "route_discussion"}
@@ -7694,10 +7825,34 @@ async def _generate_plain_with_model_fallback(
                 rows=rows,
                 strict_metadata=validation_mode not in {"ordinary_chat", "route_discussion"},
             )
-            intent_decision = _extract_plain_intent_decision(content)
             latest_user_text = _latest_role_content(semantic_messages, "user")
+            try:
+                intent_decision = _extract_plain_intent_decision(content)
+            except ValueError:
+                if (
+                    not stage_opening
+                    and validation_mode in {"ordinary_chat", "route_discussion"}
+                ):
+                    intent_decision = None
+                else:
+                    raise
             if intent_decision is not None:
-                intent_decision = _validate_intent_decision(intent_decision, latest_user_text)
+                try:
+                    intent_decision = _validate_intent_decision(
+                        intent_decision, latest_user_text,
+                    )
+                except ValueError:
+                    if (
+                        not stage_opening
+                        and validation_mode in {"ordinary_chat", "route_discussion"}
+                    ):
+                        # Do not accept malformed draft semantics, but let the
+                        # independent Kimi reviewer decide from the user's exact
+                        # words. This avoids spending all retries on a false
+                        # candidate whose evidence span is already invalid.
+                        intent_decision = None
+                    else:
+                        raise
             if clarification_active:
                 # The proposal topic and its one next question are server-owned.
                 # Model questions and metadata cannot advance or redirect it.
@@ -8141,53 +8296,133 @@ async def _generate_plain_with_model_fallback(
                     tuple(claim.get(key) for key in core_fields)
                     for claim in intent_review.get("claims") or []
                 ]
-                review_issue = None
-                if (
+                classification_mismatch = bool(
                     not draft_decision_missing
                     and intent_review["classification"] != draft_classification
-                ):
-                    review_issue = "The independent review changed the intent classification."
-                elif not draft_decision_missing and draft_claim_keys != reviewed_claim_keys:
-                    review_issue = "The independent review found incomplete or inaccurate intent claims."
-                elif (
-                    not draft_decision_missing
-                    and draft_classification == "candidate"
-                    and not intent_review["cardTextValid"]
-                ):
-                    review_issue = "The independent review rejected the tentative-intent card text."
-                elif not intent_review["bodyValid"]:
-                    review_issue = "The independent review rejected the visible response quality."
-                elif intent_review["relation"] == "unclear":
-                    review_issue = "The relation to confirmed intent remains unclear."
-                if review_issue:
-                    details = "; ".join(intent_review.get("issues") or [])
-                    intent_review_corrections += 1
-                    correction_message = (
-                        review_issue
-                        + (" Reviewer correction: " + details if details else "")
-                        + " Locked reviewed decision: "
-                        + json.dumps({
-                            "classification": intent_review["classification"],
-                            "claims": intent_review["claims"],
-                        }, ensure_ascii=False, separators=(",", ":"))
+                )
+                if intent_review["relation"] == "unclear":
+                    raise ValueError("The relation to confirmed intent remains unclear.")
+
+                if intent_review["classification"] != "candidate":
+                    # Reviewer classification is authoritative for card
+                    # presence. A false-positive draft card is disposable
+                    # metadata; preserve the already-valid visible answer.
+                    intent_decision = {
+                        "classification": intent_review["classification"],
+                        "claims": [],
+                        "cardText": "",
+                    }
+                    draft_classification = intent_decision["classification"]
+                    guidance["intentHypothesis"] = None
+                    guidance["intentConfidence"] = None
+                else:
+                    claims_changed = bool(
+                        not draft_decision_missing
+                        and draft_classification == "candidate"
+                        and draft_claim_keys != reviewed_claim_keys
                     )
-                    if intent_review_corrections >= 2:
-                        raise LLMServiceError(
-                            "INTENT_CANDIDATE_REVIEW_FAILED",
-                            "Kimi could not align the response and tentative intent after correction.",
-                            request_id,
-                            True,
-                            attempt,
-                            502,
+                    selected_card = (
+                        intent_review["cardText"]
+                        if (
+                            draft_decision_missing
+                            or classification_mismatch
+                            or claims_changed
+                            or not intent_review["cardTextValid"]
                         )
-                    raise ValueError(correction_message)
-                if draft_decision_missing and intent_review["classification"] == "candidate":
+                        else intent_decision["cardText"]
+                    )
+                    pre_repair_body_issue = _intent_body_detail_issue(
+                        body, language, selected_card
+                    )
+                    if pre_repair_body_issue in {
+                        "intent body does not distinguish two design consequences",
+                        "intent body does not preserve the unresolved design boundary",
+                        "Chinese intent body is too brief",
+                        "English intent body is too brief",
+                    }:
+                        pre_repair_body_issue = None
+                    repair_body = bool(
+                        not intent_review["bodyValid"]
+                        or claims_changed
+                        or pre_repair_body_issue
+                    )
+                    repair_card = bool(
+                        _intent_hypothesis_detail_issue(selected_card, language)
+                    )
+                    if repair_body or repair_card:
+                        body, selected_card = await _repair_intent_components_async(
+                            api_key=api_key,
+                            base_url=base_url,
+                            user_text=latest_user_text,
+                            body=body,
+                            card_text=selected_card,
+                            claims=intent_review["claims"],
+                            issues=(intent_review.get("issues") or []) + (
+                                [pre_repair_body_issue]
+                                if pre_repair_body_issue
+                                else []
+                            ),
+                            repair_body=repair_body,
+                            repair_card=repair_card,
+                            map_facts=intent_repair_map_facts,
+                            language=language,
+                            request_id=request_id,
+                            deadline=deadline,
+                        )
+                        if repair_body and rows:
+                            body, removed_repair_grounding = _strip_invalid_grounding_sentences(
+                                body,
+                                rows,
+                                historical_reference=historical_reference,
+                                entity_bindings=(stage_context or {}).get("entityBindings"),
+                            )
+                            if not body:
+                                raise LowQualityModelResponse(
+                                    "No reliable repaired intent prose remained after map-grounding cleanup."
+                                )
+                        post_repair_body_issue = _intent_body_detail_issue(
+                            body, language, selected_card
+                        )
+                        if post_repair_body_issue not in {
+                            None,
+                            "intent body does not distinguish two design consequences",
+                            "intent body does not preserve the unresolved design boundary",
+                            "Chinese intent body is too brief",
+                            "English intent body is too brief",
+                        }:
+                            body, selected_card = await _repair_intent_components_async(
+                                api_key=api_key,
+                                base_url=base_url,
+                                user_text=latest_user_text,
+                                body=body,
+                                card_text=selected_card,
+                                claims=intent_review["claims"],
+                                issues=[post_repair_body_issue],
+                                repair_body=True,
+                                repair_card=False,
+                                map_facts=intent_repair_map_facts,
+                                language=language,
+                                request_id=request_id,
+                                deadline=deadline,
+                            )
+                            if rows:
+                                body, removed_repair_grounding = _strip_invalid_grounding_sentences(
+                                    body,
+                                    rows,
+                                    historical_reference=historical_reference,
+                                    entity_bindings=(stage_context or {}).get("entityBindings"),
+                                )
+                            if not body:
+                                raise LowQualityModelResponse(
+                                    "No reliable second-pass intent prose remained after map-grounding cleanup."
+                                )
                     intent_decision = {
                         "classification": "candidate",
                         "claims": intent_review["claims"],
-                        "cardText": intent_review["cardText"],
+                        "cardText": selected_card,
                     }
-                    guidance["intentHypothesis"] = intent_decision["cardText"]
+                    draft_classification = "candidate"
+                    guidance["intentHypothesis"] = selected_card
                     guidance["intentConfidence"] = "medium"
                 reviewed_claims = []
                 for claim in intent_review.get("claims") or []:
@@ -8223,6 +8458,16 @@ async def _generate_plain_with_model_fallback(
                 body_issue = _intent_body_detail_issue(
                     body, language, guidance["intentHypothesis"]
                 )
+                if ordinary_branch and body_issue in {
+                    "intent body does not distinguish two design consequences",
+                    "intent body does not preserve the unresolved design boundary",
+                    "Chinese intent body is too brief",
+                    "English intent body is too brief",
+                }:
+                    # The independent semantic review (or focused repair) owns
+                    # these qualitative judgments. Keyword/length heuristics
+                    # are advisory and must not discard an otherwise safe turn.
+                    body_issue = None
                 if (
                     (intent_issue or semantic_issue or body_issue)
                     and attempt < max_attempts
@@ -17464,6 +17709,12 @@ def _intent_body_detail_issue(value, language, hypothesis=None):
     ):
         return "intent body contains workflow boilerplate"
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(value or "")) if part.strip()]
+    if re.search(
+        r"(?:一种|另一种|第二种|其二)[^。！？]{0,40}(?:效果|影响)"
+        r"[^。！？]{0,20}是[^。！？]{1,160}的[。！？]\s*$",
+        text,
+    ):
+        return "intent body leaves an enumerated consequence incomplete"
     if any(part.endswith((";", "；", ":", "：", ",", "，")) for part in paragraphs) or re.search(
         r"(?:^|[。！？.!?]\s*)(?:是让|而是让|还是让|because|while)\s*[^。！？.!?]*[;；]?\s*$",
         text,
