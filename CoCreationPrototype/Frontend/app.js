@@ -361,6 +361,9 @@ translations.en.intentNewOption = "Current new inclination";
 translations.en.intentExistingOption = "Previously confirmed inclination";
 translations.en.intentEvidence = "Your original wording";
 translations.en.intentConflictPlaceholder = "Choose which inclination to keep above before continuing the conversation.";
+translations.en.proposalPlanningPlaceholder = "Planning, searching, and validating a proposal for this topic…";
+translations.en.proposalRetryPlaceholder = "Retry the unfinished proposal request to continue this topic.";
+translations.en.proposalSupplementPlaceholder = "Add a direction for this topic or reply with a suggested number…";
 translations.en.error_STALE_INTENT_CARD = "This intent card was already handled or is no longer current.";
 translations.en.error_INVALID_INTENT_FEEDBACK = "Enter a clear design inclination between 4 and 1200 characters.";
 translations.en.error_INTENT_CONFLICT_PENDING = "Choose which conflicting inclination to keep before sending another message.";
@@ -426,6 +429,9 @@ translations["zh-CN"].intentNewOption = "\u5f53\u524d\u65b0\u610f\u56fe";
 translations["zh-CN"].intentExistingOption = "\u4e4b\u524d\u5df2\u786e\u8ba4\u7684\u610f\u56fe";
 translations["zh-CN"].intentEvidence = "\u4f60\u5f53\u65f6\u7684\u539f\u8bdd";
 translations["zh-CN"].intentConflictPlaceholder = "\u8bf7\u5148\u5728\u4e0a\u65b9\u9009\u62e9\u8981\u4fdd\u7559\u7684\u610f\u56fe\uff0c\u4e4b\u540e\u624d\u80fd\u7ee7\u7eed\u804a\u5929\u3002";
+translations["zh-CN"].proposalPlanningPlaceholder = "\u6b63\u5728\u4e3a\u5f53\u524d\u4e3b\u9898\u89c4\u5212\u3001\u641c\u7d22\u5e76\u9a8c\u8bc1\u65b9\u6848\u2026\u2026";
+translations["zh-CN"].proposalRetryPlaceholder = "\u8bf7\u91cd\u8bd5\u672a\u5b8c\u6210\u7684\u65b9\u6848\u8bf7\u6c42\uff0c\u4ee5\u7ee7\u7eed\u5f53\u524d\u4e3b\u9898\u3002";
+translations["zh-CN"].proposalSupplementPlaceholder = "\u8bf7\u8865\u5145\u5f53\u524d\u4e3b\u9898\u7684\u65b9\u5411\uff0c\u6216\u56de\u590d\u5efa\u8bae\u7f16\u53f7\u2026\u2026";
 translations["zh-CN"].error_INTENT_CONFLICT_PENDING = "\u8bf7\u5148\u9009\u62e9\u8981\u4fdd\u7559\u7684\u51b2\u7a81\u610f\u56fe\u3002";
 translations["zh-CN"].error_INTENT_CONTEXT_CHANGED = "\u51b2\u7a81\u590d\u6838\u671f\u95f4\u5df2\u786e\u8ba4\u610f\u56fe\u53d1\u751f\u4e86\u53d8\u5316\uff0c\u8bf7\u91cd\u8bd5\u8fd9\u6761\u6d88\u606f\u3002";
 translations["zh-CN"].confirmedDecisions = "\u5df2\u786e\u8ba4\u51b3\u7b56";
@@ -2140,16 +2146,26 @@ function updateControls() {
     const editable = canEditSelected();
     const pending = Boolean(currentPendingProposal());
     const intentConflictPending = selectedStageHasPendingIntentConflict();
+    const proposalFlowStatus = state.session?.proposalFlowState?.status || "inactive";
+    const proposalPlanning = proposalFlowStatus === "planning";
+    const proposalRetryPending = proposalFlowStatus === "retry_pending";
     elements.saveStageButton.disabled = !editable || !state.dirty || state.busy;
     elements.discardDraftButton.disabled = !editable || !state.dirty || state.busy;
     elements.restoreStageButton.hidden = state.selectedVersionId === state.session.currentVersionId || state.session.status !== "active";
     elements.restoreStageButton.disabled = state.busy || expired;
     elements.playButton.disabled = state.busy || expired || state.dirty || pending || !selectedVersion();
     elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
-    elements.messageInput.disabled = state.busy || !editable || intentConflictPending;
+    elements.messageInput.disabled = state.busy || !editable || intentConflictPending
+        || proposalPlanning || proposalRetryPending;
     elements.messageInput.placeholder = intentConflictPending
         ? t("intentConflictPlaceholder")
-        : t("messagePlaceholder");
+        : proposalPlanning
+            ? t("proposalPlanningPlaceholder")
+            : proposalRetryPending
+                ? t("proposalRetryPlaceholder")
+                : proposalFlowStatus === "revision_needed"
+                    ? t("proposalSupplementPlaceholder")
+                    : t("messagePlaceholder");
     const disagreementActive = selectedStageHasActiveDisagreement();
     const proposalLocked = proposalFlowActive();
     if ((!editable || disagreementActive || intentConflictPending) && state.proposalMode) {
@@ -2163,6 +2179,7 @@ function updateControls() {
     elements.proposalRequestButton.classList.toggle("is-active", proposalActive);
     elements.proposalRequestButton.setAttribute("aria-pressed", proposalActive ? "true" : "false");
     elements.sendButton.disabled = state.busy || !editable || intentConflictPending
+        || proposalPlanning || proposalRetryPending
         || !elements.messageInput.value.trim();
     document.querySelectorAll(".question-feedback-button").forEach(button => {
         button.disabled = state.busy || !editable

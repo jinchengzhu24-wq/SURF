@@ -2148,13 +2148,18 @@ class CoCreationSessionTests(unittest.TestCase):
             ]
             self.assertEqual([turn["role"] for turn in matching], ["user", "assistant"])
             warning_turn = matching[-1]
-            self.assertEqual(warning_turn["guidance"]["uiCues"], [])
+            self.assertEqual(warning_turn["guidance"]["uiCues"][0]["type"], "warning")
+            self.assertIn("three answers are retained", warning_turn["guidance"]["uiCues"][0]["text"])
             self.assertIsNone(warning_turn["guidance"]["proposalOffer"])
             self.assertIsNone(warning_turn["guidance"].get("relaxationOffer"))
             self.assertIn("no solvable change", warning_turn["content"].lower())
             self.assertIn("no purple proposal card", warning_turn["content"].lower())
             self.assertEqual(failed_generation.json()["proposals"], [])
-            self.assertFalse(failed_generation.json()["proposalFlowState"]["active"])
+            self.assertTrue(failed_generation.json()["proposalFlowState"]["active"])
+            self.assertEqual(
+                failed_generation.json()["proposalFlowState"]["status"],
+                "revision_needed",
+            )
 
             repeated = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -2174,7 +2179,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 ).fetchall()
             ]
         self.assertEqual(event_types.count("proposal_search_failed"), 0)
-        self.assertEqual(event_types.count("proposal_discovery_progress"), 1)
+        self.assertEqual(event_types.count("proposal_discovery_progress"), 2)
         self.assertEqual(event_types.count("proposal_relaxation_offered"), 0)
 
     def test_transport_failures_never_trigger_relaxation_offer(self):
@@ -2204,6 +2209,10 @@ class CoCreationSessionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 504)
         self.assertTrue(self.read_session()["proposalFlowState"]["active"])
+        self.assertEqual(
+            self.read_session()["proposalFlowState"]["status"],
+            "retry_pending",
+        )
         matching = [
             turn for turn in self.read_session()["turns"]
             if turn["requestId"] == request_payload["idempotencyKey"]
@@ -2217,7 +2226,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 """,
                 (self.session_id,),
             ).fetchone()[0]
-        self.assertEqual(count, 1)
+        self.assertEqual(count, 3)
 
     def test_retry_after_ordinary_chat_failure_never_saves_server_prose(self):
         version_id = self.read_session()["currentVersionId"]

@@ -115,7 +115,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         )
 
         self.assertIn("可量化硬指标", execution.assistant_message)
-        self.assertIn("不是 Moonshot 接口拒绝", execution.assistant_message)
+        self.assertIn("当前 Stage", execution.assistant_message)
         self.assertIsNone(execution.guidance["proposalOffer"])
 
     def setUp(self):
@@ -482,7 +482,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(marked.guidance["proposalDiscovery"]["status"], "failed")
+        self.assertEqual(marked.guidance["proposalDiscovery"]["status"], "revision_needed")
         self.assertNotIn("当前保存的 Stage 为准", marked.assistant_message)
         self.assertIsNone(marked.guidance["proposalOffer"])
 
@@ -560,7 +560,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("corrective retry then timed out", execution.assistant_message)
         self.assertIsNone(execution.guidance["proposalOffer"])
 
-    def test_failed_proposal_topic_unlocks_before_a_new_concrete_direction(self):
+    def test_failed_proposal_topic_keeps_new_direction_as_same_topic_supplement(self):
         turns = [
             {"id": "request", "role": "user", "content": "请给我一个方案", "sequence_number": 1, "guidance_json": None},
             {"id": "failed", "role": "assistant", "content": "候选未通过", "sequence_number": 2,
@@ -570,11 +570,113 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         discovery = backend._proposal_discovery_from_turns(turns, "stage")
 
-        self.assertEqual(discovery["status"], "clarifying")
-        self.assertEqual(discovery["topicId"], "retry")
+        self.assertEqual(discovery["status"], "revision_needed")
+        self.assertEqual(discovery["topicId"], "request")
         self.assertIn("B1", discovery["brief"])
 
-    def test_textual_cancel_does_not_replace_an_active_proposal_topic(self):
+    def test_third_conversational_answer_enters_plan_without_keyword_gate(self):
+        turns = [
+            {"id": "request", "role": "user", "content": "我还是希望水域可以多一些", "sequence_number": 1, "guidance_json": None, "request_id": "proposal-request"},
+            {"id": "ask-1", "role": "assistant", "content": "想影响哪种体验？", "sequence_number": 2,
+             "guidance_json": '{"proposalDiscovery":{"topicId":"request","status":"clarifying","clarificationQuestionCount":1,"clarificationQuestionKey":"experience_goal","clarificationQuestionText":"想影响哪种体验？"}}'},
+            {"id": "answer-1", "role": "user", "content": "中断推进的节奏", "sequence_number": 3, "guidance_json": None},
+            {"id": "ask-2", "role": "assistant", "content": "采用什么机制？", "sequence_number": 4,
+             "guidance_json": '{"proposalDiscovery":{"topicId":"request","status":"clarifying","clarificationQuestionCount":2,"clarificationQuestionKey":"mechanism","clarificationQuestionText":"采用什么机制？"}}'},
+            {"id": "answer-2", "role": "user", "content": "作为一个需要绕开的触发节点", "sequence_number": 5, "guidance_json": None},
+            {"id": "ask-3", "role": "assistant", "content": "绑定哪个箱子？", "sequence_number": 6,
+             "guidance_json": '{"proposalDiscovery":{"topicId":"request","status":"clarifying","clarificationQuestionCount":3,"clarificationQuestionKey":"binding","clarificationQuestionText":"绑定哪个箱子？"}}'},
+            {"id": "answer-3", "role": "user", "content": "绑定在B1的长推进链路上作为中断节点", "sequence_number": 7, "guidance_json": None},
+        ]
+        snapshot = {
+            "identityStatus": "exact",
+            "entities": [{"id": "B1", "kind": "box"}, {"id": "B2", "kind": "box"}],
+        }
+
+        discovery = backend._proposal_discovery_from_turns(
+            turns, "stage", {"proposal-request"}
+        )
+
+        self.assertEqual(len(discovery["answers"]), 3)
+        self.assertEqual(discovery["answers"][-1]["questionKey"], "binding")
+        self.assertEqual(discovery["answers"][-1]["answerText"], turns[-1]["content"])
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                turns[-1]["content"], {"conflicts": []}, snapshot,
+                proposal_discovery=discovery,
+            ),
+            "proposal",
+        )
+
+    def test_third_answer_never_returns_a_fourth_clarification(self):
+        discovery = {
+            "topicId": "request",
+            "status": "clarifying",
+            "clarificationQuestionCount": 3,
+            "userEvidence": ["请给方案", "作为", "绑定在一个局部节点"],
+        }
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                "作为", {"conflicts": [{"kind": "stale_coordinate"}]},
+                {"identityStatus": "exact", "entities": []},
+                proposal_discovery=discovery,
+            ),
+            "proposal_conservative",
+        )
+
+    def test_verified_recovery_suggestion_is_replayed_and_revalidated(self):
+        contract = {
+            "schemaVersion": 2,
+            "authorizedBrief": "Increase the route length by at least five steps.",
+            "revisionPlan": {"strategies": []},
+            "strategies": [{
+                "strategyIndex": 1,
+                "effect": "adjust_internal_walls",
+                "focus": {"row": 2, "column": 2, "radius": 1},
+                "focusRegions": [{"row": 2, "column": 2, "radius": 1}],
+                "allowedOperators": ["add_wall"],
+                "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                "minimumChangedCells": 1,
+                "maximumChangedCells": 1,
+                "metricGoals": [{"metric": "solutionSteps", "direction": "increase", "minimumDelta": 5}],
+                "requiredTransitions": [],
+                "anchorEntities": [],
+                "playObjective": "route_choice",
+            }],
+            "objectivePolicy": {"hardMetricGoals": [{"metric": "solutionSteps", "direction": "increase", "minimumDelta": 5}]},
+        }
+        operations = [{"row": 2, "column": 2, "to": "#"}]
+        candidate_rows = backend.execute_revision_operations(
+            backend.SAMPLE_ROWS, operations, contract, 1
+        )
+        discovery = {
+            "failureEnvelope": {
+                "recoverySuggestions": [{"suggestionId": "suggestion-1", "verified": True}],
+                "rejections": [{
+                    "recoverySuggestionId": "suggestion-1",
+                    "hiddenCandidate": {
+                        "baseMapFingerprint": backend.map_fingerprint(backend.SAMPLE_ROWS),
+                        "candidateMapFingerprint": backend.map_fingerprint(candidate_rows),
+                        "operations": operations,
+                        "strategyIndex": 1,
+                        "revisionContract": contract,
+                        "mechanismEvidence": {"passed": True},
+                    },
+                }],
+            },
+        }
+
+        execution = backend._verified_recovery_suggestion_execution(
+            discovery, "建议1", backend.SAMPLE_ROWS, "zh-CN", "recovery-test"
+        )
+
+        self.assertIsNotNone(execution)
+        self.assertEqual(execution.proposed_rows, candidate_rows)
+        self.assertEqual(execution.revision_contract["strategies"][0]["metricGoals"], [])
+        self.assertEqual(
+            execution.proposal_diagnostics["recoverySuggestionId"], "suggestion-1"
+        )
+
+    def test_textual_cancel_ends_the_active_proposal_topic_via_routing(self):
         turns = [
             {"id": "request", "role": "user", "content": "帮我改", "sequence_number": 1, "guidance_json": None},
             {"id": "ask", "role": "assistant", "content": "你希望改动哪个局部？", "sequence_number": 2,
@@ -587,6 +689,14 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(discovery["topicId"], "request")
         self.assertEqual(discovery["status"], "clarifying")
         self.assertIn("放弃这个", discovery["brief"])
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                turns[-1]["content"], {"conflicts": []},
+                {"identityStatus": "exact", "entities": []},
+                proposal_discovery=discovery,
+            ),
+            "proposal_cancelled",
+        )
 
     def test_clarification_budget_allows_safe_completion_for_unique_water(self):
         snapshot = {

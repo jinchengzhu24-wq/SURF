@@ -1810,6 +1810,42 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertEqual(changed[1], "##.........#")
 
+    def test_contract_preflight_drops_only_the_invalid_strategy(self):
+        plan = llm_client.parse_revision_plan({
+            "strategies": [
+                {
+                    "effect": "adjust_internal_walls",
+                    "focus": {"row": 2, "column": 2, "radius": 1},
+                    "operators": ["add_wall"],
+                    "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                    "editBudget": 1,
+                    "metricGoals": [],
+                    "requiredTransitions": [{"row": 2, "column": 2, "from": "@", "to": "#"}],
+                    "anchorEntities": [],
+                    "playObjective": "route_choice",
+                },
+                {
+                    "effect": "adjust_internal_walls",
+                    "focus": {"row": 2, "column": 3, "radius": 1},
+                    "operators": ["add_wall"],
+                    "preserve": ["outer_shell", "player", "boxes", "targets", "water", "unrelated_areas"],
+                    "editBudget": 1,
+                    "metricGoals": [],
+                    "requiredTransitions": [{"row": 2, "column": 3, "from": ".", "to": "#"}],
+                    "anchorEntities": [],
+                    "playObjective": "route_choice",
+                },
+            ],
+        })
+
+        accepted, failures = llm_client._preflight_revision_strategies(
+            plan, OPERATION_BASE_ROWS, {}, "Add one local wall."
+        )
+
+        self.assertEqual(len(accepted.strategies), 1)
+        self.assertEqual(accepted.strategies[0].focus.column, 3)
+        self.assertEqual(failures[0]["strategyIndex"], 1)
+
     def test_plain_execution_brief_is_checked_against_saved_tiles(self):
         content = (
             "I would open the cited local route.\n"

@@ -2614,13 +2614,24 @@ def _send_message_locked(
         if stage_context["adaptiveProposalCompletion"]:
             revision_routing = "proposal"
         stage_context["revisionRouting"] = revision_routing
+        stage_context["clarificationBudgetExhausted"] = bool(
+            proposal_discovery
+            and int(proposal_discovery.get("clarificationQuestionCount") or 0) >= 3
+        )
+        stage_context["feasibilityProfile"] = _proposal_feasibility_profile(
+            stage_context.get("stageSnapshot"),
+            context.get("rows") or [],
+            stage_context.get("designContext"),
+            context.get("validation"),
+        )
         stage_context["vagueAestheticRevision"] = _is_vague_aesthetic_revision(
             content
         )
         proposal_state = {
             "proposal": "ready_with_explicit_binding",
             "proposal_conservative": "ready_with_conservative_binding",
-            "proposal_blocked": "blocked_by_fact_conflict",
+            "proposal_blocked": "revision_needed",
+            "proposal_cancelled": "cancelled",
         }.get(revision_routing, "clarifying")
         stage_context["proposalState"] = proposal_state
         stage_context["proposalBindingMode"] = {
@@ -3177,13 +3188,59 @@ def _send_message_locked(
         or time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS
     )
     revision_failure = None
-    if revision_state == "relaxation_confirmed":
+    recovery_execution = _verified_recovery_suggestion_execution(
+        proposal_discovery,
+        content,
+        context["rows"],
+        language,
+        request.state.request_id,
+    ) if proposal_discovery else None
+    if context["stageContext"].get("revisionRouting") == "proposal_cancelled":
+        execution = _proposal_cancelled_execution(
+            language,
+            request.state.request_id,
+        )
+    elif recovery_execution is not None:
+        execution = recovery_execution
+    elif revision_state == "relaxation_confirmed":
         execution = _relaxed_revision_suggestion_execution(
             context["stageContext"],
             language,
             request.state.request_id,
         )
     else:
+        if (
+            proposal_discovery
+            and context["stageContext"].get("revisionRouting")
+            in {"proposal", "proposal_conservative"}
+        ):
+            with connect(immediate=True) as database:
+                duplicate_planning = database.execute(
+                    """
+                    SELECT 1 FROM audit_events
+                    WHERE session_id = ? AND event_type = 'proposal_discovery_progress'
+                      AND json_extract(payload_json, '$.messageKey') = ?
+                      AND json_extract(payload_json, '$.status') = 'planning'
+                    LIMIT 1
+                    """,
+                    (session_id, payload.idempotencyKey),
+                ).fetchone()
+                if duplicate_planning is None:
+                    record_event(
+                        database,
+                        session_id,
+                        "proposal_discovery_progress",
+                        {
+                            "stageId": payload.baseVersionId,
+                            "topicId": proposal_discovery.get("topicId"),
+                            "messageKey": payload.idempotencyKey,
+                            "status": "planning",
+                            "clarificationQuestionCount": proposal_discovery.get(
+                                "clarificationQuestionCount", 0
+                            ),
+                        },
+                        utc_now(),
+                    )
         try:
             execution = generate_chat_reply(
                 context["conversation"],
@@ -3206,6 +3263,12 @@ def _send_message_locked(
             )
             if proposal_retryable_failure:
                 execution = None
+            elif proposal_discovery:
+                execution = _classified_proposal_failure_execution(
+                    language=language,
+                    request_id=exception.request_id,
+                    exception=exception,
+                )
             elif revision_state == "proposal_requested":
                 execution = _automatic_proposal_failure_execution(
                     language=language,
@@ -3262,6 +3325,24 @@ def _send_message_locked(
                             },
                             utc_now(),
                         )
+                        if proposal_discovery:
+                            record_event(
+                                database,
+                                session_id,
+                                "proposal_discovery_progress",
+                                {
+                                    "stageId": payload.baseVersionId,
+                                    "topicId": proposal_discovery.get("topicId"),
+                                    "messageKey": payload.idempotencyKey,
+                                    "status": "retry_pending",
+                                    "retryable": True,
+                                    "failureCode": exception.code,
+                                    "clarificationQuestionCount": proposal_discovery.get(
+                                        "clarificationQuestionCount", 0
+                                    ),
+                                },
+                                utc_now(),
+                            )
                     raise
                 execution = _retry_exhausted_execution(language, exception)
                 with connect(immediate=True) as database:
@@ -3809,6 +3890,17 @@ def _send_message_locked(
                         "failureCode": (execution.proposal_diagnostics or {}).get(
                             "failureCode"
                         ),
+                        "failureEnvelope": (execution.proposal_diagnostics or {}).get(
+                            "failureEnvelope"
+                        ),
+                        "recoverySuggestions": (
+                            execution.proposal_diagnostics or {}
+                        ).get("recoverySuggestions") or [],
+                        "contractPreflightFailures": (
+                            execution.proposal_diagnostics or {}
+                        ).get("contractPreflightFailures"),
+                        "proposalAnswers": proposal_discovery.get("answers") or [],
+                        "proposalSupplements": proposal_discovery.get("supplements") or [],
                         "providerStatus": (execution.proposal_diagnostics or {}).get(
                             "providerStatus"
                         ),
@@ -4750,6 +4842,53 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
     search_candidates = int(search_diagnostics.get("constructedCandidates") or 0)
     search_deadline_reached = bool(search_diagnostics.get("deadlineReached"))
     replan_attempted = bool(diagnostics.get("replanAttempted"))
+    revision_contract = dict(getattr(exception, "revision_contract", {}) or {})
+    original_direction = str(revision_contract.get("authorizedBrief") or "").strip()
+    strategy_summaries = []
+    for strategy in revision_contract.get("strategies") or []:
+        if not isinstance(strategy, dict):
+            continue
+        strategy_summaries.append({
+            "strategyIndex": strategy.get("strategyIndex"),
+            "effect": strategy.get("effect"),
+            "anchors": strategy.get("anchorEntities") or [],
+            "focus": strategy.get("focus"),
+            "allowedOperators": strategy.get("allowedOperators") or [],
+        })
+    recovery_suggestions = []
+    for item in rejections:
+        if not isinstance(item.get("hiddenCandidate"), dict):
+            continue
+        suggestion_id = str(item.get("recoverySuggestionId") or "").strip()
+        if not suggestion_id:
+            continue
+        minimum_delta = item.get("minimumDelta")
+        baseline_value = item.get("baselineValue")
+        candidate_value = item.get("candidateValue")
+        actual_delta = (
+            candidate_value - baseline_value
+            if isinstance(candidate_value, int) and isinstance(baseline_value, int)
+            else None
+        )
+        if language == "zh-CN":
+            suggestion_text = (
+                f"允许把该量化增幅从至少 {minimum_delta} 调整为候选实际达到的 {actual_delta}；"
+                "核心体验目标、局部锚点和其他硬约束保持不变。"
+            )
+        else:
+            suggestion_text = (
+                f"Allow the measurable increase to change from at least {minimum_delta} to the "
+                f"candidate's verified {actual_delta}; keep the core experience goal, local anchor, "
+                "and all other hard constraints unchanged."
+            )
+        recovery_suggestions.append({
+            "suggestionId": suggestion_id,
+            "text": suggestion_text,
+            "verified": True,
+            "avoidsFailure": "hard_objective_not_met",
+        })
+        if len(recovery_suggestions) >= 3:
+            break
     labels_zh = {
         "REVISION_PLAN_INVALID": "RevisionPlan 的结构化内容无法解析",
         "MODEL_RESPONSE_INVALID": "RevisionPlan 的结构化内容无法解析",
@@ -4758,6 +4897,7 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
         "EXACT_TRANSITION_INFEASIBLE": "你明确指定的格子变化无法形成合法且可解的候选",
         "HARD_OBJECTIVE_NOT_MET": "候选没有满足你明确提出的可量化硬指标",
         "SOFT_OBJECTIVE_EVIDENCE_MISSING": "候选虽然可能可解，但缺少支持目标体验的可核验机制变化",
+        "SEMANTIC_CONSTRAINT_NOT_MET": "候选没有满足原方向中尚未被修改的明确语义约束",
         "CANDIDATE_DUPLICATED": "所有候选都重复了已拒绝或正在替换的方案",
         "CANDIDATE_UNSOLVABLE": "所有不同候选都未通过确定性可解性验证",
         "DETERMINISTIC_SEARCH_EXHAUSTED": "修改助手和确定性局部搜索都没有找到满足当前约束的候选",
@@ -4775,6 +4915,7 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
         "EXACT_TRANSITION_INFEASIBLE": "the exact requested tile transitions could not form a valid solvable candidate",
         "HARD_OBJECTIVE_NOT_MET": "no candidate met the explicit measurable requirement",
         "SOFT_OBJECTIVE_EVIDENCE_MISSING": "solvable candidates lacked verified evidence for the requested play mechanism",
+        "SEMANTIC_CONSTRAINT_NOT_MET": "candidates did not satisfy an unchanged explicit semantic constraint from the original direction",
         "CANDIDATE_DUPLICATED": "every candidate repeated a rejected or cited proposal",
         "CANDIDATE_UNSOLVABLE": "every distinct candidate failed deterministic solvability validation",
         "DETERMINISTIC_SEARCH_EXHAUSTED": "the modifier and deterministic local search found no admissible candidate",
@@ -4803,9 +4944,17 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
         detail = ("；".join(details) + "。") if details else ""
         if rejection_categories:
             detail += " 主要拒绝类型：" + "、".join(rejection_categories[:3]) + "。"
+        core = f" 原方向是：{original_direction[:360]}。" if original_direction else ""
+        strategy_detail = ""
+        if strategy_summaries:
+            descriptions = [
+                f"策略{item.get('strategyIndex') or index}（{item.get('effect') or '未命名机制'}，锚点 {','.join(item.get('anchors') or []) or '局部区域'}）"
+                for index, item in enumerate(strategy_summaries[:3], start=1)
+            ]
+            strategy_detail = " 本次尝试覆盖了" + "、".join(descriptions) + "，但均被上述约束或验证结果淘汰。"
         message = (
-            f"RevisionPlan 阶段已经进入正式提案管线，但{reason}。{detail}"
-            "当前地图没有改变，也没有生成紫色方案卡；这不是 Moonshot 接口拒绝。"
+            f"我已经让这次请求进入正式方案管线，但{reason}。{detail}{core}{strategy_detail}"
+            "原样重试仍会保留同一组硬约束，因此大概率重复相同冲突。当前 Stage 没有改变，也没有生成紫色方案卡。"
         )
     else:
         reason = labels_en.get(code, "the proposal pipeline encountered an internal error")
@@ -4821,9 +4970,17 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
         detail = (" " + "; ".join(details) + ".") if details else ""
         if rejection_categories:
             detail += " Main rejection classes: " + ", ".join(rejection_categories[:3]) + "."
+        core = f" The original direction was: {original_direction[:360]}." if original_direction else ""
+        strategy_detail = ""
+        if strategy_summaries:
+            descriptions = [
+                f"strategy {item.get('strategyIndex') or index} ({item.get('effect') or 'unnamed mechanism'}, anchors {','.join(item.get('anchors') or []) or 'local area'})"
+                for index, item in enumerate(strategy_summaries[:3], start=1)
+            ]
+            strategy_detail = " The attempt covered " + ", ".join(descriptions) + ", and each was rejected by the constraints or validation above."
         message = (
-            f"The request entered the formal proposal pipeline, but {reason}.{detail} "
-            "The current map is unchanged and no purple proposal card was created; this was not a Moonshot endpoint rejection."
+            f"I sent this request through the formal proposal pipeline, but {reason}.{detail}{core}{strategy_detail} "
+            "An unchanged retry keeps the same hard constraints and is therefore likely to repeat the conflict. The current Stage is unchanged and no purple proposal card was created."
         )
     diagnostics.update({
         "category": "proposal_pipeline_failed",
@@ -4834,7 +4991,65 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
         "deterministicSearchCandidateCount": search_candidates,
         "deterministicSearchDeadlineReached": search_deadline_reached,
         "replanAttempted": replan_attempted,
+        "failureEnvelope": {
+            "failureCode": code,
+            "modelCandidateCount": model_candidates,
+            "deterministicCandidateCount": search_candidates,
+            "rejectionCategories": rejection_categories[:8],
+            "rejections": rejections[-12:],
+            "replanAttempted": replan_attempted,
+            "originalDirection": original_direction,
+            "strategies": strategy_summaries,
+            "recoverySuggestions": recovery_suggestions,
+        },
+        "recoverySuggestions": recovery_suggestions,
     })
+    if language == "zh-CN":
+        recovery_lines = [
+            "当前主题和前三轮回答均已保留。请补充或修改一个实现维度后继续；不会重新开始三问。",
+        ]
+        if recovery_suggestions:
+            pass
+        elif code in {"REVISION_CONTRACT_INVALID", "REVISION_CONTRACT_CONFLICT", "EXACT_TRANSITION_INFEASIBLE"}:
+            recovery_lines.append("1. 改用同一体验目标下的其他局部区域或实体锚点，避开当前坐标/合同冲突。")
+        elif code == "HARD_OBJECTIVE_NOT_MET":
+            recovery_lines.append("1. 明确是否允许降低量化幅度；未得到你的授权前，系统不会放宽该硬指标。")
+        elif code == "SOFT_OBJECTIVE_EVIDENCE_MISSING":
+            recovery_lines.append("1. 补充希望由运输长度、推箱顺序、绕行或空间限制中的哪种机制产生体验。")
+        else:
+            recovery_lines.append("1. 指定可调整的局部区域、实体锚点或允许的操作类型。")
+        if recovery_suggestions:
+            recovery_lines.extend(
+                f"{index}. {item['text']}（已验证候选）"
+                for index, item in enumerate(recovery_suggestions, start=1)
+            )
+            recovery_lines.append("可回复“建议1”或直接用自然语言补充。")
+        else:
+            recovery_lines.append("目前尚未找到经过完整验证的最小调整，因此不会把这些方向标成已验证建议。")
+        warning = "\n".join(recovery_lines)
+    else:
+        recovery_lines = [
+            "This topic and all three answers are retained. Add or revise one implementation dimension to continue; the three questions will not restart."
+        ]
+        if recovery_suggestions:
+            pass
+        elif code in {"REVISION_CONTRACT_INVALID", "REVISION_CONTRACT_CONFLICT", "EXACT_TRANSITION_INFEASIBLE"}:
+            recovery_lines.append("1. Keep the same experience goal but choose another local area or entity anchor to avoid the coordinate/contract conflict.")
+        elif code == "HARD_OBJECTIVE_NOT_MET":
+            recovery_lines.append("1. Say whether the measurable amount may be reduced; the server will not relax that hard requirement without permission.")
+        elif code == "SOFT_OBJECTIVE_EVIDENCE_MISSING":
+            recovery_lines.append("1. Specify whether transport length, push order, detour, or space restriction should create the experience.")
+        else:
+            recovery_lines.append("1. Name an editable local area, entity anchor, or allowed operation type.")
+        if recovery_suggestions:
+            recovery_lines.extend(
+                f"{index}. {item['text']} (verified candidate)"
+                for index, item in enumerate(recovery_suggestions, start=1)
+            )
+            recovery_lines.append('Reply with "suggestion 1" or add a natural-language supplement.')
+        else:
+            recovery_lines.append("No fully verified minimal adjustment was found yet, so these directions are not labeled as verified suggestions.")
+        warning = "\n".join(recovery_lines)
     return LLMExecutionResult(
         assistant_message=message,
         attempts_used=getattr(exception, "attempts_used", 0),
@@ -4848,11 +5063,125 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
             "followUpQuestion": None,
             "proposalOffer": None,
             "disagreement": None,
-            "uiCues": [],
+            "uiCues": [{"type": "warning", "text": warning}],
         },
         revision_plan=getattr(exception, "revision_plan", {}) or {},
         revision_contract=getattr(exception, "revision_contract", {}) or {},
         proposal_diagnostics=diagnostics,
+    )
+
+
+def _proposal_cancelled_execution(language, request_id):
+    message = (
+        "明白，我已结束当前方案主题并解除方案入口锁定。当前 Stage 没有发生变化。"
+        if language == "zh-CN"
+        else "Understood. I ended the current proposal topic and unlocked proposal entry. The current Stage is unchanged."
+    )
+
+
+def _verified_recovery_suggestion_execution(
+    discovery,
+    content,
+    base_rows,
+    language,
+    request_id,
+):
+    """Replay, then fully revalidate, a user-selected hidden recovery candidate."""
+    match = re.fullmatch(
+        r"\s*(?:建议|方案建议|suggestion)\s*([1-3])\s*[。.!！]?\s*",
+        str(content or ""),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    envelope = (discovery or {}).get("failureEnvelope") or {}
+    suggestions = [
+        item for item in envelope.get("recoverySuggestions") or []
+        if isinstance(item, dict)
+    ]
+    selected_position = int(match.group(1)) - 1
+    if not 0 <= selected_position < len(suggestions):
+        return None
+    suggestion = suggestions[selected_position]
+    suggestion_id = str(suggestion.get("suggestionId") or "")
+    rejection = next((
+        item for item in envelope.get("rejections") or []
+        if isinstance(item, dict)
+        and item.get("recoverySuggestionId") == suggestion_id
+        and isinstance(item.get("hiddenCandidate"), dict)
+    ), None)
+    if rejection is None:
+        return None
+    hidden = rejection["hiddenCandidate"]
+    if hidden.get("baseMapFingerprint") != map_fingerprint(base_rows):
+        return None
+    try:
+        contract = load_json(dump_json(hidden.get("revisionContract") or {}))
+        strategy_index = int(hidden.get("strategyIndex") or 0)
+        strategies = contract.get("strategies") or []
+        if not 1 <= strategy_index <= len(strategies):
+            return None
+        # Selecting this verified suggestion is the user's explicit permission
+        # to replace only the failed numeric threshold with the candidate's
+        # measured result. No other hard constraint is relaxed.
+        strategies[strategy_index - 1]["metricGoals"] = []
+        policy = contract.get("objectivePolicy") or {}
+        policy["hardMetricGoals"] = []
+        contract["objectivePolicy"] = policy
+        rows = execute_revision_operations(
+            base_rows,
+            hidden.get("operations") or [],
+            contract,
+            strategy_index,
+        )
+        validation = _validate_changed_proposal(base_rows, rows)
+        if map_fingerprint(rows) != hidden.get("candidateMapFingerprint"):
+            return None
+    except (TypeError, ValueError, ApiError, LevelValidationError):
+        return None
+    return LLMExecutionResult(
+        assistant_message=(
+            "我已按你选择的已验证调整重新检查隐藏候选；它仍满足结构与可解性要求，下面是等待你审查的方案。"
+            if language == "zh-CN"
+            else "I replayed and revalidated the hidden candidate under your selected adjustment; it still passes structure and solvability checks and is ready for review."
+        ),
+        attempts_used=0,
+        request_id=request_id,
+        proposed_rows=list(rows),
+        model="verified-recovery-replay",
+        guidance={
+            "move": "deliver_revision",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+        },
+        revision_plan=contract.get("revisionPlan") or {},
+        revision_contract=contract,
+        revision_operations=list(hidden.get("operations") or []),
+        proposal_diagnostics={
+            "source": "verified_recovery_replay",
+            "recoverySuggestionId": suggestion_id,
+            "validation": validation.as_dict() if hasattr(validation, "as_dict") else {},
+            "mechanismEvidence": hidden.get("mechanismEvidence") or {},
+        },
+    )
+    return LLMExecutionResult(
+        assistant_message=message,
+        attempts_used=0,
+        request_id=request_id,
+        model="deterministic-proposal-cancel",
+        guidance={
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "disagreement": None,
+            "uiCues": [],
+        },
     )
 
 
@@ -7011,9 +7340,12 @@ def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None
                 active = {
                     "topicId": turn["id"],
                     "sourceTurnId": turn["id"],
+                    "initialRequest": content,
                     "sourceSequence": turn["sequence_number"],
                     "versionId": version_id,
                     "userEvidence": [content],
+                    "answers": [],
+                    "supplements": [],
                     "clarificationQuestionCount": 0,
                     "askedQuestionKeys": [],
                     "lastQuestionKey": None,
@@ -7021,13 +7353,31 @@ def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None
                 }
             elif active is not None:
                 active["userEvidence"].append(content)
-                if (
-                    active.get("status") == "failed"
-                    and _contains_user_design_direction(content)
-                ):
-                    # A failed candidate is not a dead-end: a new concrete
-                    # designer direction re-opens the same Stage topic.
-                    active["status"] = "clarifying"
+                unanswered_key = active.get("lastQuestionKey")
+                answered_keys = {
+                    item.get("questionKey")
+                    for item in active.get("answers") or []
+                    if isinstance(item, dict)
+                }
+                if unanswered_key and unanswered_key not in answered_keys:
+                    active["answers"].append({
+                        "questionKey": unanswered_key,
+                        "questionText": active.get("lastQuestionText") or "",
+                        "answerText": content,
+                        "answerTurnId": turn["id"],
+                    })
+                else:
+                    active["supplements"].append({
+                        "text": content,
+                        "turnId": turn["id"],
+                    })
+                if active.get("status") in {
+                    "failed", "blocked", "revision_needed", "retry_pending",
+                }:
+                    # Failure recovery remains in the same topic. Any ordinary
+                    # user wording is usable as a supplement; it does not need
+                    # to resemble a fresh imperative design command.
+                    active["status"] = "revision_needed"
             continue
         conversation_prefix.append({"role": turn["role"], "content": content})
         if active is None or turn["role"] != "assistant":
@@ -7058,15 +7408,22 @@ def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None
                 active["askedQuestionKeys"].append(key)
         if question_key:
             active["lastQuestionKey"] = question_key
+            active["lastQuestionText"] = str(
+                marker.get("clarificationQuestionText") or content
+            ).strip()
         marker_status = marker.get("status") or active["status"]
+        if isinstance(marker.get("failureEnvelope"), dict):
+            active["failureEnvelope"] = marker.get("failureEnvelope")
         # Earlier releases marked proposal_ready from routing alone, even when
         # no validated candidate existed.  Do not let that historical marker
         # suppress a later, correctly routed proposal attempt.
         if marker_status == "proposal_ready" and not marker.get("hasValidatedCandidate"):
             marker_status = "failed"
-        if marker_status in {"proposal_ready", "failed", "blocked"}:
+        if marker_status in {"proposal_ready", "cancelled"}:
             active = None
             continue
+        if marker_status in {"failed", "blocked"}:
+            marker_status = "revision_needed"
         active["status"] = marker_status
     if active is None:
         return None
@@ -7079,8 +7436,9 @@ def _proposal_topic_reset_requested(content):
     """Only explicit topic changes replace an unfinished proposal discussion."""
     return bool(re.search(
         r"(?:换个(?:方向|目标|话题)|另一个(?:方向|目标|问题)|放弃(?:刚才|这个)|"
-        r"重新开始|不讨论这个了|new\s+(?:direction|goal|topic)|"
-        r"different\s+(?:direction|goal)|drop\s+this|start\s+over)",
+        r"重新开始|不讨论这个了|取消(?:这个)?方案|算了(?:吧)?|"
+        r"new\s+(?:direction|goal|topic)|different\s+(?:direction|goal)|"
+        r"drop\s+this|cancel\s+(?:this\s+)?proposal|start\s+over)",
         str(content or ""),
         flags=re.IGNORECASE,
     ))
@@ -7280,7 +7638,13 @@ def _proposal_clarification_spec(discovery, snapshot, language):
 
 def _proposal_discovery_has_unique_anchor(discovery, snapshot):
     evidence = "\n".join((discovery or {}).get("userEvidence") or [])
-    labels = set(re.findall(r"\b(?:P|B\d+|T\d+)\b", evidence, flags=re.IGNORECASE))
+    # ``\b`` does not split Chinese letters from ASCII labels ("绑定在B1"),
+    # so use ASCII-specific boundaries for stable entity binding.
+    labels = set(re.findall(
+        r"(?<![A-Za-z0-9])(?:P|B\d+|T\d+)(?![A-Za-z0-9])",
+        evidence,
+        flags=re.IGNORECASE,
+    ))
     if labels:
         return (snapshot or {}).get("identityStatus") == "exact"
     lowered = evidence.casefold()
@@ -7310,17 +7674,16 @@ def _proposal_discovery_can_be_completed_conservatively(discovery, snapshot):
     """Allow one reviewed minimal candidate after a bounded, clear direction."""
     if not discovery or (snapshot or {}).get("identityStatus") not in {None, "exact"}:
         return False
-    evidence = "\n".join(discovery.get("userEvidence") or [])
-    return bool(_contains_user_design_direction(evidence))
+    # Once a proposal topic exists, its initial request plus answers are the
+    # authorization. This gate must not reinterpret conversational answers via
+    # the legacy keyword classifier.
+    return bool("\n".join(discovery.get("userEvidence") or []).strip())
 
 
 def _proposal_discovery_is_sufficient(discovery, snapshot):
     if not discovery or (snapshot or {}).get("identityStatus") not in {None, "exact"}:
         return False
-    evidence = "\n".join(discovery.get("userEvidence") or [])
-    return bool(_contains_user_design_direction(evidence)) and (
-        _proposal_discovery_has_unique_anchor(discovery, snapshot)
-    )
+    return _proposal_discovery_has_unique_anchor(discovery, snapshot)
 
 
 def _is_vague_aesthetic_revision(content):
@@ -7345,6 +7708,22 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_d
     text = str(content or "").strip()
     if not text:
         return "none"
+    discovery = proposal_discovery or {}
+    discovery_status = str(discovery.get("status") or "")
+    question_count = int(discovery.get("clarificationQuestionCount") or 0)
+    if discovery and _proposal_topic_reset_requested(text):
+        return "proposal_cancelled"
+    # The third answer is a hard state-machine boundary. From this point the
+    # accumulated topic, not the latest sentence's keywords, authorizes a plan.
+    if discovery and (
+        question_count >= 3
+        or discovery_status in {"revision_needed", "retry_pending", "planning"}
+    ):
+        return (
+            "proposal"
+            if _proposal_discovery_has_unique_anchor(discovery, snapshot)
+            else "proposal_conservative"
+        )
     if (user_map_claims or {}).get("conflicts"):
         return "needs_clarification"
     if _is_vague_aesthetic_revision(text):
@@ -7353,18 +7732,9 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_d
         # turn also asks the assistant to make a change.
         return "needs_clarification"
 
-    discovery = proposal_discovery or {}
     if discovery and discovery.get("status") == "clarifying":
         if _proposal_discovery_is_sufficient(discovery, snapshot):
             return "proposal"
-        if int(discovery.get("clarificationQuestionCount") or 0) >= 3:
-            if _proposal_discovery_has_unique_anchor(discovery, snapshot):
-                return "proposal"
-            return (
-                "proposal_conservative"
-                if _proposal_discovery_can_be_completed_conservatively(discovery, snapshot)
-                else "proposal_blocked"
-            )
         return "needs_clarification"
 
     if _guidance_confusion_request(text):
@@ -7441,6 +7811,77 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_d
         if re.search(r"(?:\u76ee\u6807|target)", text, flags=re.IGNORECASE) and entity_counts["target"] != 1:
             return "needs_clarification"
     return "proposal"
+
+
+def _proposal_feasibility_profile(
+    snapshot,
+    rows,
+    design_context=None,
+    baseline_validation=None,
+):
+    """Build a compact, read-only capability profile from current Stage facts."""
+    snapshot = snapshot or {}
+    water_cells = {
+        (item.get("row"), item.get("column"))
+        for item in snapshot.get("waterCells") or []
+        if isinstance(item, dict)
+    }
+    remaining = set(water_cells)
+    component_sizes = []
+    while remaining:
+        seed = remaining.pop()
+        pending = [seed]
+        size = 0
+        while pending:
+            row, column = pending.pop()
+            size += 1
+            for neighbor in (
+                (row - 1, column), (row + 1, column),
+                (row, column - 1), (row, column + 1),
+            ):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    pending.append(neighbor)
+        component_sizes.append(size)
+    entities = [
+        {
+            "id": item.get("id"),
+            "kind": item.get("kind"),
+            "row": item.get("row"),
+            "column": item.get("column"),
+        }
+        for item in snapshot.get("entities") or []
+        if isinstance(item, dict)
+    ]
+    editable_cells = sum(
+        tile not in {" "}
+        for row in rows or []
+        for tile in row
+    )
+    return {
+        "schemaVersion": 1,
+        "mapFingerprint": snapshot.get("mapFingerprint"),
+        "identityStatus": snapshot.get("identityStatus"),
+        "bindableEntities": entities,
+        "availableOperators": [
+            "add_wall", "remove_wall", "add_water", "remove_water",
+            "move_player", "move_box", "move_target",
+        ],
+        "protected": ["outer_shell", "unrelated_areas", "entity_overlap"],
+        "waterComponents": len(component_sizes),
+        "waterComponentSizes": sorted(component_sizes, reverse=True),
+        "editableCellCount": editable_cells,
+        "baselineSolverMetrics": {
+            key: (baseline_validation or {}).get(key)
+            for key in ("solutionSteps", "solutionPushes", "minimumPushes")
+            if (baseline_validation or {}).get(key) is not None
+        },
+        "confirmedPreserveItems": [
+            item.get("statement")
+            for item in (design_context or {}).get("constraints") or []
+            if isinstance(item, dict) and item.get("status") == "confirmed"
+        ][:8],
+    }
 
 
 def _clarification_question_count(turns):
@@ -8847,7 +9288,7 @@ def _mark_proposal_discovery_guidance(execution, stage_context):
             "proposal_ready"
             if execution.proposed_rows is not None
             or (execution.revision_plan and isinstance(offer, dict))
-            else "failed"
+            else "revision_needed"
         )
     if routing == "needs_clarification":
         specification = (stage_context or {}).get("proposalClarification")
@@ -8895,6 +9336,7 @@ def _mark_proposal_discovery_guidance(execution, stage_context):
                 count_after = count_before
             marker.update({
                 "clarificationQuestionKey": question_key or None,
+                "clarificationQuestionText": question,
                 "lastQuestionKey": question_key or marker.get("lastQuestionKey"),
                 "askedQuestionKeys": asked_keys,
                 "clarificationCountBefore": count_before,
@@ -8935,7 +9377,13 @@ def _mark_proposal_discovery_guidance(execution, stage_context):
                     3, marker["clarificationQuestionCount"] + 1
                 )
     elif routing == "proposal_blocked":
-        marker["status"] = "blocked"
+        marker["status"] = "revision_needed"
+    elif routing == "proposal_cancelled":
+        marker["status"] = "cancelled"
+    failure_envelope = (execution.proposal_diagnostics or {}).get("failureEnvelope")
+    if marker.get("status") == "revision_needed" and isinstance(failure_envelope, dict):
+        marker["failureEnvelope"] = failure_envelope
+        marker["canSupplement"] = True
     guidance["proposalDiscovery"] = marker
     return replace(execution, assistant_message=body, guidance=guidance)
 

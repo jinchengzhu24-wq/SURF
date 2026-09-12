@@ -2288,6 +2288,9 @@ def serialize_session(database, session_id):
 
     proposal_flow_status = "inactive"
     proposal_flow_question_count = 0
+    proposal_flow_topic_id = None
+    proposal_flow_failure_category = None
+    proposal_flow_recovery_suggestions = []
     latest_flow_event = database.execute(
         """
         SELECT event_type, payload_json FROM audit_events
@@ -2305,12 +2308,22 @@ def serialize_session(database, session_id):
             if latest_flow_event["event_type"] == "proposal_discovery_started"
             else str(flow_payload.get("status") or "inactive")
         )
-        if marker_status == "clarifying":
-            proposal_flow_status = "clarifying"
+        if marker_status in {
+            "clarifying", "planning", "retry_pending", "revision_needed",
+            "proposal_ready", "cancelled",
+        }:
+            proposal_flow_status = marker_status
             proposal_flow_question_count = max(
                 0,
                 min(3, int(flow_payload.get("clarificationQuestionCount") or 0)),
             )
+            proposal_flow_topic_id = flow_payload.get("topicId")
+            proposal_flow_failure_category = (
+                flow_payload.get("failureCode") or flow_payload.get("failureClass")
+            )
+            proposal_flow_recovery_suggestions = list(
+                flow_payload.get("recoverySuggestions") or []
+            )[:3]
     if proposal_flow_status == "inactive":
         # Compatibility for sessions created before proposal-flow audit events.
         latest_marker = None
@@ -2321,12 +2334,16 @@ def serialize_session(database, session_id):
             marker = guidance.get("proposalDiscovery")
             if isinstance(marker, dict):
                 latest_marker = marker
-        if isinstance(latest_marker, dict) and latest_marker.get("status") == "clarifying":
-            proposal_flow_status = "clarifying"
+        if isinstance(latest_marker, dict) and latest_marker.get("status") in {
+            "clarifying", "planning", "retry_pending", "revision_needed",
+            "proposal_ready", "cancelled",
+        }:
+            proposal_flow_status = latest_marker.get("status")
             proposal_flow_question_count = max(
                 0,
                 min(3, int(latest_marker.get("clarificationQuestionCount") or 0)),
             )
+            proposal_flow_topic_id = latest_marker.get("topicId")
 
     return {
         "sessionId": session["id"],
@@ -2346,9 +2363,16 @@ def serialize_session(database, session_id):
         "deadlineExpired": _deadline_expired(session["deadline_at"]),
         "remainingSeconds": _remaining_deadline_seconds(session["deadline_at"]),
         "proposalFlowState": {
-            "active": proposal_flow_status == "clarifying",
+            "active": proposal_flow_status in {
+                "clarifying", "planning", "retry_pending", "revision_needed",
+            },
             "status": proposal_flow_status,
+            "topicId": proposal_flow_topic_id,
             "clarificationQuestionCount": proposal_flow_question_count,
+            "canSupplement": proposal_flow_status == "revision_needed",
+            "retryable": proposal_flow_status == "retry_pending",
+            "failureCategory": proposal_flow_failure_category,
+            "recoverySuggestions": proposal_flow_recovery_suggestions,
         },
         "versions": [
             {

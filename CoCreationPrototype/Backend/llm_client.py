@@ -21,6 +21,7 @@ from proposal_search import (
     Focus,
     MetricGoal,
     ProposalSearchExhausted,
+    RevisionPlan,
     parse_revision_plan,
     search_revision_plan,
     validate_revision_plan_against_map,
@@ -3982,8 +3983,8 @@ def _attempt_semantic_revision_replan(
         separators=(",", ":"),
     )[:1000]
     messages[0]["content"] += (
-        "\n\nThe previous semantic plan produced no admissible candidate. Create one materially "
-        "different local strategy while preserving the authorized direction, explicit anchors, "
+        "\n\nThe previous semantic plan produced no admissible candidate. Create one to three materially "
+        "different local strategies while preserving the authorized direction, explicit anchors, "
         "prohibitions, and objectivePolicy. Change focus, effect, or allowed operators as needed. "
         "Do not repeat the previous concrete treatment and keep requiredTransitions empty unless "
         "the supplied execution brief itself froze exact transitions. Previous safe rejection summary: "
@@ -4007,12 +4008,14 @@ def _attempt_semantic_revision_replan(
         objective_policy,
         preserved_components,
     )
-    validate_revision_plan_against_map(
-        rows,
+    plan, replan_preflight_failures = _preflight_revision_strategies(
         plan,
-        stage_context.get("entityBindings"),
+        rows,
+        stage_context,
+        stage_context.get("authorizedRevisionBrief") or "",
     )
-    _validate_revision_plan_entities(plan, rows, stage_context.get("entityBindings"))
+    if not plan.strategies:
+        raise ValueError("Every semantic replan strategy failed contract preflight.")
     contract = _build_revision_execution_contract(
         plan,
         stage_context.get("authorizedRevisionBrief") or "",
@@ -4071,7 +4074,11 @@ def _attempt_semantic_revision_replan(
             excluded_map_fingerprints=excluded_map_fingerprints,
         )
     diagnostics = dict(result.proposal_diagnostics or {})
-    diagnostics.update({"replanAttempted": True, "replanSucceeded": True})
+    diagnostics.update({
+        "replanAttempted": True,
+        "replanSucceeded": True,
+        "replanContractPreflightFailures": replan_preflight_failures,
+    })
     return replace(result, proposal_diagnostics=diagnostics), plan, contract, plan_attempts
 
 
@@ -4203,6 +4210,75 @@ def _generate_revision_search_proposal_sync(
         objective_policy,
         preserved_components,
     )
+    plan, contract_preflight_failures = _preflight_revision_strategies(
+        plan,
+        rows,
+        stage_context,
+        stage_context.get("authorizedRevisionBrief") if stage_context else "",
+    )
+    if not plan.strategies:
+        correction_feedback = json.dumps(
+            contract_preflight_failures[-3:],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )[:1600]
+        try:
+            corrected_plan, correction_attempts, _ = asyncio.run(asyncio.wait_for(
+                _compile_revision_plan(
+                    api_key=api_key,
+                    base_url=base_url,
+                    models=models,
+                    messages=messages,
+                    request_id=request_id,
+                    started_at=started_at,
+                    deadline=min(deadline, time.monotonic() + PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS),
+                    max_attempts=1,
+                    initial_validation_feedback=correction_feedback,
+                    first_attempt_timeout=PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS,
+                ),
+                timeout=max(0.001, min(
+                    PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS,
+                    _remaining_until(deadline),
+                )),
+            ))
+            attempts_used += correction_attempts
+            corrected_plan = _apply_objective_policy_to_plan(
+                corrected_plan,
+                objective_policy,
+                preserved_components,
+            )
+            plan, corrected_failures = _preflight_revision_strategies(
+                corrected_plan,
+                rows,
+                stage_context,
+                stage_context.get("authorizedRevisionBrief") if stage_context else "",
+            )
+            contract_preflight_failures.extend(corrected_failures)
+        except (asyncio.TimeoutError, LLMServiceError):
+            plan = RevisionPlan(tuple())
+    if not plan.strategies:
+        error = LLMServiceError(
+            "REVISION_CONTRACT_CONFLICT",
+            "Every proposed strategy failed contract feasibility preflight.",
+            request_id,
+            False,
+            attempts_used,
+            422,
+        )
+        error.revision_plan = {"strategies": []}
+        error.revision_contract = {
+            "authorizedBrief": str(
+                stage_context.get("authorizedRevisionBrief") if stage_context else ""
+            ).strip()[:1200],
+            "strategies": [],
+        }
+        error.proposal_diagnostics = {
+            "category": "contract_preflight_exhausted",
+            "contractPreflightFailures": contract_preflight_failures[-6:],
+            "rejectionRecords": contract_preflight_failures[-6:],
+            "contractCorrectionAttempted": True,
+        }
+        raise error
     try:
         revision_contract = _build_revision_execution_contract(
             plan,
@@ -4561,6 +4637,7 @@ def _generate_revision_search_proposal_sync(
     diagnostics["objectivePolicy"] = objective_policy
     diagnostics["mechanismEvidence"] = selected_evidence
     diagnostics["planAttempts"] = attempts_used
+    diagnostics["contractPreflightFailures"] = contract_preflight_failures
     diagnostics["modifierAttempts"] = operation_result.attempts_used
     diagnostics["revisionContract"] = revision_contract
     _log_llm_event(
@@ -4681,6 +4758,44 @@ def _validate_revision_plan_entities(plan, rows, entity_bindings=None):
             ) from exception
 
 
+def _preflight_revision_strategies(
+    plan,
+    rows,
+    stage_context,
+    authorized_brief,
+):
+    """Drop only infeasible strategies and return field-level safe failures."""
+    valid = []
+    failures = []
+    for index, strategy in enumerate(plan.strategies, start=1):
+        partial = RevisionPlan((strategy,))
+        try:
+            validate_revision_plan_against_map(
+                rows,
+                partial,
+                (stage_context or {}).get("entityBindings"),
+            )
+            _validate_revision_plan_entities(
+                partial,
+                rows,
+                (stage_context or {}).get("entityBindings"),
+            )
+            _build_revision_execution_contract(
+                partial,
+                authorized_brief,
+                stage_context,
+            )
+        except (TypeError, ValueError) as exception:
+            failures.append({
+                "strategyIndex": index,
+                "category": "contract_preflight",
+                "reason": _safe_validation_reason(exception)[:600],
+            })
+            continue
+        valid.append(strategy)
+    return RevisionPlan(tuple(valid)), failures
+
+
 def _build_revision_plan_messages(
     conversation,
     rows,
@@ -4728,7 +4843,12 @@ def _build_revision_plan_messages(
         "the frozen transitions, while the application owns all cell changes, structural "
         "validation, and solvability. Preserve the authorized direction and every explicit "
         "prohibition. Treat unmentioned areas as protected. Return JSON only with exactly one key, strategies, "
-        "containing one or two objects. Every strategy has exactly: effect, focus, operators, "
+        "containing one to three objects. Prefer three materially different implementation strategies "
+        "for the same core experience goal; vary local anchors, spatial mechanisms, or allowed operators, "
+        "not the goal itself. If three genuinely different strategies are impossible, return fewer and "
+        "never pad the list with duplicates. When a prior failure envelope is present, retain the core "
+        "goal and every unrelaxed hard constraint, incorporate the designer's new supplement, and do not "
+        "repeat failed anchors, transitions, operators, or concrete treatments. Every strategy has exactly: effect, focus, operators, "
         "preserve, editBudget, metricGoals, requiredTransitions, anchorEntities, and playObjective. "
         "effect is one of open_route, narrow_route, "
         "adjust_internal_walls, relocate_start, relocate_box, relocate_target, reshape_water, "
@@ -4767,6 +4887,11 @@ def _build_revision_plan_messages(
         f"Alternative proposal constraint: {alternative_brief!r}. "
         f"Structured execution brief (authoritative when present): "
         f"{json.dumps(execution_brief, ensure_ascii=False, separators=(',', ':'))}. "
+        f"Proposal discovery record (initial request, bound question answers, and supplements): "
+        f"{json.dumps(stage_context.get('proposalDiscovery') or {}, ensure_ascii=False, separators=(',', ':'))}. "
+        f"Clarification budget exhausted: {bool(stage_context.get('clarificationBudgetExhausted'))}. "
+        f"Read-only feasibility profile: "
+        f"{json.dumps(stage_context.get('feasibilityProfile') or {}, ensure_ascii=False, separators=(',', ':'))}. "
         f"Server objective policy (authoritative): {json.dumps(stage_context.get('objectivePolicy') or {}, ensure_ascii=False, separators=(',', ':'))}. "
         f"Original pre-fallback brief: {original_brief!r}. {relaxation_rule} {movement_rule} "
         f"{preservation_rule}\n\n"
@@ -5114,8 +5239,9 @@ def _revision_plan_messages_with_feedback(messages, validation_feedback):
         "never return an object or list for playObjective. "
         "Do not invent coordinates. Do not return map rows or tile operations. If the prior response "
         "reached the token limit, stop reasoning and emit "
-        "the complete compact JSON immediately. Return exactly one strategy unless "
-        "the authorized brief explicitly requires alternatives, and include no explanatory prose."
+        "the complete compact JSON immediately. Return up to three non-duplicate strategies for the "
+        "same authorized goal, replacing any strategy implicated by the validation feedback; include "
+        "no explanatory prose."
     )
     corrected[0]["content"] = f"{corrected[0]['content']}\n\n{instruction}"
     return corrected
@@ -5797,6 +5923,10 @@ def _select_operation_candidate(
     for index, candidate in enumerate(candidates, start=1):
         operation_hash = None
         map_hash = None
+        rows = None
+        validation = None
+        operations = None
+        strategy_index = None
         try:
             if not isinstance(candidate, dict) or set(candidate) != {"strategyIndex", "operations"}:
                 raise ValueError("candidate must be an object")
@@ -5888,6 +6018,36 @@ def _select_operation_candidate(
                 **({"operationSignature": operation_hash} if operation_hash else {}),
                 **({"mapFingerprint": map_hash} if map_hash else {}),
                 **metric_detail,
+                **({
+                    "recoverySuggestionId": f"suggestion-{index}",
+                    "hiddenCandidate": {
+                        "baseMapFingerprint": map_fingerprint(base_rows),
+                        "candidateMapFingerprint": map_fingerprint(rows),
+                        "operations": list(operations or []),
+                        "strategyIndex": strategy_index,
+                        "revisionContract": {
+                            **json.loads(json.dumps(revision_contract)),
+                            "objectivePolicy": {
+                                **json.loads(json.dumps(
+                                    revision_contract.get("objectivePolicy") or {}
+                                )),
+                                "hardMetricGoals": [],
+                            },
+                        },
+                        "validation": (
+                            validation.as_dict()
+                            if hasattr(validation, "as_dict")
+                            else {}
+                        ),
+                        "mechanismEvidence": candidate_evidence.get(
+                            map_fingerprint(rows)
+                        ) or {},
+                    },
+                } if (
+                    isinstance(exception, HardObjectiveError)
+                    and exception.verifiable
+                    and rows is not None
+                ) else {}),
             })
     if valid:
         _, rows, index, operations = max(valid, key=lambda item: item[0])
