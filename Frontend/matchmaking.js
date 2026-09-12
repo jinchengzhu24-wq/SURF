@@ -311,7 +311,7 @@ function renderMatch(match) {
 function buildTimelineStages(match) {
     const flowStages = safeArray(match.players).flatMap(player =>
         safeArray(player.coCreationFlow)
-            .filter(event => event.eventType !== "opening")
+            .filter(event => !["opening", "turn"].includes(event.eventType))
             .map((event, index) => ({
             key: "flow:" + player.playerNumber + ":" + (clean(event.eventId) || index),
             type: "flow",
@@ -336,6 +336,9 @@ function buildTimelineStages(match) {
 }
 
 function flowStageLabel(event) {
+    if (event.eventType === "stage") {
+        return "Stage " + value(event.stageNumber) + " \u00b7 " + (event.source === "ai" ? "AI" : "Manual");
+    }
     const labels = {
         draft: "Draft",
         first_stage: "First Stage",
@@ -344,7 +347,45 @@ function flowStageLabel(event) {
         final: "Final Stage",
         message: "Message"
     };
+    if (event.eventType === "stage") {
+        return "Stage " + value(event.stageNumber) + " · " + (event.source === "ai" ? "AI" : "Manual");
+    }
+    if (event.eventType === "node") return dashboardNodeLabel(event.nodeType);
     return labels[event.eventType] || titleCase(event.eventType || "Flow event");
+}
+
+function dashboardNodeLabel(nodeType) {
+    const labels = {
+        discussion: "General Discussion",
+        intent: "Intent",
+        intent_conflict: "Intent Conflict",
+        proposal: "Proposal",
+        player_challenge: "Player Challenge",
+        manual_edit_review: "Manual Edit Review",
+        llm_challenge: "LLM Challenge"
+    };
+    return labels[nodeType] || "Co-creation Node";
+}
+
+function dashboardNodeStatus(status) {
+    const labels = {
+        in_progress: "In progress",
+        awaiting_player_choice: "Awaiting player choice",
+        clarifying_1: "Proposal clarification 1/3",
+        clarifying_2: "Proposal clarification 2/3",
+        clarifying_3: "Proposal clarification 3/3",
+        proposal_ready: "Proposal ready",
+        pending: "Pending",
+        accepted: "Accepted",
+        rejected: "Rejected",
+        replaced: "Replaced",
+        resolved: "Resolved",
+        confirmed: "Confirmed",
+        cancelled: "Cancelled",
+        reviewed: "Reviewed"
+    };
+    const normalized = clean(status);
+    return labels[normalized] || titleCase(normalized.replace(/_/g, " ") || "In progress");
 }
 
 function eventStageLabel(event) {
@@ -503,8 +544,55 @@ function renderInspector(match, stage) {
     if (["first_stage", "stage", "final"].includes(record.eventType)) {
         appendFlowStageDetails(match, record);
     }
+    if (record.eventType === "node") appendDashboardNodeDetails(record);
     if (record.eventType === "turn") appendFlowTurnDetails(record);
     if (record.eventType === "message") appendFlowMessageDetails(record);
+}
+
+function appendDashboardNodeDetails(record) {
+    const section = createSection(dashboardNodeLabel(record.nodeType));
+    const rows = [
+        ["Status", dashboardNodeStatus(record.nodeStatus)],
+        ["Started", formatTimestamp(record.serverReceivedAt)],
+        ["Last updated", formatTimestamp(record.nodeUpdatedAt || record.serverReceivedAt)]
+    ];
+    if (record.stageNumber !== undefined && record.stageNumber !== null) {
+        rows.push(["Stage", "Stage " + value(record.stageNumber)]);
+    }
+    if (record.nodeParentId) rows.push(["Related node", record.nodeParentId]);
+    const grid = document.createElement("div");
+    grid.className = "record-grid";
+    rows.forEach(([label, rowValue]) => {
+        const row = document.createElement("div");
+        row.className = "record-row";
+        row.append(textNode("span", label), textNode("strong", value(rowValue)));
+        grid.appendChild(row);
+    });
+    section.appendChild(grid);
+
+    const labels = {
+        player_message: "Player",
+        llm_message: "LLM",
+        card: "Card",
+        player_action: "Player action",
+        map_diff: "Verified map change",
+        status: "Status"
+    };
+    const entries = safeArray(record.nodeEntries)
+        .slice()
+        .sort((left, right) => clean(left.occurredAt).localeCompare(clean(right.occurredAt)));
+    if (!entries.length) section.appendChild(emptyNode("No public node entries recorded."));
+    entries.forEach(entry => {
+        const article = document.createElement("article");
+        article.className = "node-entry";
+        article.append(
+            textNode("h4", entry.label || labels[entry.kind] || "Entry"),
+            textNode("p", entry.text || "-"),
+            textNode("small", formatTimestamp(entry.occurredAt))
+        );
+        section.appendChild(article);
+    });
+    elements.inspectorBody.appendChild(section);
 }
 
 function appendDraftDetails(record) {

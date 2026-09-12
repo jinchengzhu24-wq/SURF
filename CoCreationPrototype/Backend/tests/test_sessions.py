@@ -1387,19 +1387,21 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(second_message.status_code, 200, second_message.text)
         events = [call.args[1] for call in sync.call_args_list]
         self.assertEqual(events[0]["eventType"], "opening")
-        turn = next(event for event in events if event["eventType"] == "turn")
+        nodes = [event for event in events if event["eventType"] == "node"]
+        self.assertEqual(len(nodes), 2)
+        self.assertEqual(nodes[0]["nodeType"], "discussion")
         self.assertEqual(
-            turn["openingAssistantText"],
-            backend._repair_stage_one_opening_display(
-                opening.assistant_message,
-                SAMPLE_ROWS,
-                "en",
-            ),
+            [entry["text"] for entry in nodes[0]["nodeEntries"]],
+            ["Could the route feel fair?", reply.assistant_message],
         )
-        self.assertEqual(turn["userText"], "Could the route feel fair?")
-        self.assertEqual(turn["assistantText"], reply.assistant_message)
-        regular_turn = [event for event in events if event["eventType"] == "turn"][1]
-        self.assertNotIn("openingAssistantText", regular_turn)
+        self.assertEqual(nodes[1]["nodeId"], nodes[0]["nodeId"])
+        self.assertEqual(
+            [entry["text"] for entry in nodes[1]["nodeEntries"]],
+            [
+                "Could the route feel fair?", reply.assistant_message,
+                "What should I adjust next?", reply.assistant_message,
+            ],
+        )
 
     def test_legacy_database_receives_nullable_guidance_column(self):
         original_path = repository.DATABASE_PATH

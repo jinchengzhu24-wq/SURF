@@ -760,6 +760,54 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(record["players"][0]["coCreationFlow"][1]["source"], "manual")
         self.assertEqual(record["players"][1]["coCreationFlow"][1]["cards"][0]["type"], "discussion")
 
+    def test_dashboard_node_snapshots_are_validated_and_aggregated(self):
+        host = self.create_room()
+        self.assertEqual(self.submit_first_stage(host["matchId"]).status_code, 200)
+        endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"
+        headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
+        first = {
+            "eventId": "node:discussion-a:one",
+            "eventType": "node",
+            "playerNumber": 1,
+            "sessionId": "session-test-1",
+            "versionId": "version-test-1",
+            "stageNumber": 1,
+            "nodeId": "discussion:assistant-a",
+            "nodeType": "discussion",
+            "nodeStatus": "in_progress",
+            "nodeEntries": [{
+                "entryId": "player:user-a", "kind": "player_message",
+                "label": "Player", "text": "我想让路线更明显。",
+                "occurredAt": "2026-09-12T00:00:00Z", "language": "zh-CN",
+            }],
+        }
+        second = {
+            **first,
+            "eventId": "node:discussion-a:two",
+            "nodeStatus": "completed",
+            "nodeEntries": first["nodeEntries"] + [{
+                "entryId": "llm:assistant-a", "kind": "llm_message",
+                "label": "LLM", "text": "可以先保留一条清晰的可走路线。",
+                "occurredAt": "2026-09-12T00:00:01Z", "language": "zh-CN",
+            }],
+        }
+        invalid = {**first, "eventId": "node:bad", "nodeEntries": [{
+            **first["nodeEntries"][0], "kind": "internal_prompt",
+        }]}
+        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
+            self.assertEqual(self.client.post(endpoint, json=first, headers=headers).status_code, 200)
+            self.assertEqual(self.client.post(endpoint, json=second, headers=headers).status_code, 200)
+            self.assertEqual(self.client.post(endpoint, json=invalid, headers=headers).status_code, 400)
+
+        payload = self.client.get("/matchmaking-records-data").json()
+        record = next(item for item in payload["matches"] if item["matchId"] == host["matchId"])
+        nodes = [item for item in record["players"][0]["coCreationFlow"] if item["eventType"] == "node"]
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["nodeStatus"], "completed")
+        self.assertEqual([item["kind"] for item in nodes[0]["nodeEntries"]], [
+            "player_message", "llm_message",
+        ])
+
     def test_cocreation_events_are_rejected_until_first_stage(self):
         host, _ = self.ready_both_players()
         endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"

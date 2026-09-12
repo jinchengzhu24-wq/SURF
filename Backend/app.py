@@ -227,6 +227,11 @@ class OnlineCoCreationFlowEventRequest(BaseModel):
     openingLanguage: str | None = ""
     openingCards: list[dict] | None = None
     coCreationDurationSeconds: float | None = None
+    nodeId: str | None = ""
+    nodeType: str | None = ""
+    nodeStatus: str | None = ""
+    nodeParentId: str | None = ""
+    nodeEntries: list[dict] | None = None
 
 
 class OnlineResultRequest(BaseModel):
@@ -428,7 +433,7 @@ def normalize_cocreation_cards(cards):
 
 def build_cocreation_flow_event(room, payload):
     event_type = str(payload.eventType or "").strip()
-    if event_type not in {"first_stage", "stage", "opening", "turn", "final"}:
+    if event_type not in {"first_stage", "stage", "opening", "turn", "final", "node"}:
         raise HTTPException(status_code=400, detail="Invalid co-creation event type")
 
     if payload.coCreationDurationSeconds is not None:
@@ -554,6 +559,69 @@ def build_cocreation_flow_event(room, payload):
                 "openingLanguage": opening_language,
                 "openingCards": normalize_cocreation_cards(payload.openingCards),
             })
+
+    if event_type == "node":
+        node_id = normalize_cocreation_sync_id(payload.nodeId, "node ID")
+        node_type = str(payload.nodeType or "").strip()
+        node_status = str(payload.nodeStatus or "").strip()
+        parent_id = str(payload.nodeParentId or "").strip()
+        allowed_node_types = {
+            "discussion", "intent", "intent_conflict", "proposal",
+            "player_challenge", "manual_edit_review", "llm_challenge",
+        }
+        allowed_entry_kinds = {
+            "player_message", "llm_message", "card", "player_action",
+            "map_diff", "status",
+        }
+        if node_type not in allowed_node_types or not re.fullmatch(
+            r"[a-z_]{2,64}", node_status
+        ):
+            raise HTTPException(status_code=400, detail="Invalid dashboard node")
+        if parent_id:
+            parent_id = normalize_cocreation_sync_id(parent_id, "parent node ID")
+        raw_entries = payload.nodeEntries
+        if not isinstance(raw_entries, list) or not raw_entries or len(raw_entries) > 96:
+            raise HTTPException(status_code=400, detail="Invalid dashboard node entries")
+        entries = []
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                raise HTTPException(status_code=400, detail="Invalid dashboard node entry")
+            entry_id = normalize_cocreation_sync_id(item.get("entryId"), "node entry ID")
+            kind = str(item.get("kind") or "").strip()
+            text = str(item.get("text") or "").strip()
+            label = str(item.get("label") or "").strip()
+            occurred_at = str(item.get("occurredAt") or "").strip()
+            language = str(item.get("language") or "").strip()
+            if (
+                kind not in allowed_entry_kinds
+                or not text
+                or len(text) > 12000
+                or len(label) > 160
+                or not occurred_at
+                or (language and language not in {"en", "zh-CN"})
+            ):
+                raise HTTPException(status_code=400, detail="Invalid dashboard node entry")
+            entries.append({
+                "entryId": entry_id,
+                "kind": kind,
+                "text": text,
+                "label": label,
+                "occurredAt": occurred_at,
+                "language": language or None,
+            })
+        event.update({
+            "nodeId": node_id,
+            "nodeType": node_type,
+            "nodeStatus": node_status,
+            "nodeParentId": parent_id or None,
+            "nodeEntries": entries,
+        })
+        if payload.versionId:
+            event["versionId"] = normalize_cocreation_sync_id(
+                payload.versionId, "version ID"
+            )
+        if payload.stageNumber is not None:
+            event["stageNumber"] = int(payload.stageNumber)
 
     return event
 
@@ -3174,6 +3242,30 @@ def read_online_match_flow_events(match_id, player_number):
     return read_jsonl_records(online_match_flow_file(match_id, player_number))
 
 
+def aggregate_dashboard_node_events(events):
+    """Collapse immutable node snapshots into the latest public node view."""
+    nodes = {}
+    passthrough = []
+    for event in events:
+        if event.get("eventType") != "node" or not event.get("nodeId"):
+            passthrough.append(event)
+            continue
+        node_id = event["nodeId"]
+        prior = nodes.get(node_id)
+        if prior is None:
+            nodes[node_id] = dict(event)
+            nodes[node_id]["nodeUpdatedAt"] = event.get("serverReceivedAt")
+            continue
+        if str(event.get("serverReceivedAt") or "") >= str(
+            prior.get("nodeUpdatedAt") or ""
+        ):
+            replacement = dict(event)
+            replacement["serverReceivedAt"] = prior.get("serverReceivedAt")
+            replacement["nodeUpdatedAt"] = event.get("serverReceivedAt")
+            nodes[node_id] = replacement
+    return passthrough + list(nodes.values())
+
+
 def build_matchmaking_records_payload(
     events,
     malformed_count,
@@ -3341,7 +3433,7 @@ def build_matchmaking_records_payload(
                     if not isinstance(event, dict):
                         continue
                     if event.get("eventType") not in {
-                        "draft", "first_stage", "stage", "opening", "turn", "final", "message"
+                        "draft", "first_stage", "stage", "opening", "turn", "final", "message", "node"
                     }:
                         continue
                     safe_flow_events.append({
@@ -3359,15 +3451,29 @@ def build_matchmaking_records_payload(
                             "aiDifficultyRationale", "aiLayoutRationale", "aiRecommendedDifficulty",
                             "aiRecommendedLayout", "aiRecommendationSource", "draftMetadataComplete",
                             "coCreationDurationSeconds", "opponentRestartCount",
+                            "nodeId", "nodeType", "nodeStatus", "nodeParentId",
+                            "nodeEntries", "nodeUpdatedAt",
                         }
                     })
             safe_flow_events.sort(
                 key=lambda event: str(event.get("serverReceivedAt") or "")
             )
-            players[player_number]["coCreationFlow"] = safe_flow_events
-            if safe_flow_events:
+            aggregated_flow_events = aggregate_dashboard_node_events(safe_flow_events)
+            aggregated_flow_events.sort(
+                key=lambda event: str(event.get("serverReceivedAt") or "")
+            )
+            players[player_number]["coCreationFlow"] = aggregated_flow_events
+            if aggregated_flow_events:
                 latest_timestamp = str(
-                    safe_flow_events[-1].get("serverReceivedAt") or ""
+                    max(
+                        (
+                            event.get("nodeUpdatedAt")
+                            or event.get("serverReceivedAt")
+                            or ""
+                            for event in aggregated_flow_events
+                        ),
+                        default="",
+                    )
                 )
                 if latest_timestamp > str(match_record.get("updatedAt") or ""):
                     match_record["updatedAt"] = latest_timestamp
