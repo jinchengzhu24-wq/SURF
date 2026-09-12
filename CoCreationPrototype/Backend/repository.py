@@ -268,7 +268,9 @@ def initialize_database():
         database.execute("PRAGMA foreign_keys=ON")
         database.commit()
         backfill_design_contexts(database)
-        backfill_intent_semantics(database)
+        # Historical natural language is no longer interpreted by keyword rules.
+        # Legacy claims are normalized as unverified and may only be upgraded by
+        # the bounded Kimi review when they participate in a current comparison.
         backfill_entity_bindings(database)
         backfill_revision_challenges(database)
         repair_resolved_challenge_disagreements(database)
@@ -426,7 +428,7 @@ def _has_valid_design_context(raw):
         value = json.loads(raw)
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
-    return isinstance(value, dict) and value.get("schemaVersion") == 5
+    return isinstance(value, dict) and value.get("schemaVersion") == 6
 
 
 def _legacy_visible_questions(content, guidance):
@@ -571,7 +573,7 @@ def backfill_design_contexts(database):
             if version["design_context_json"]:
                 try:
                     raw_context = load_json(version["design_context_json"])
-                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") in {1, 2, 3, 4}:
+                    if isinstance(raw_context, dict) and raw_context.get("schemaVersion") in {1, 2, 3, 4, 5}:
                         legacy_schema_version = raw_context.get("schemaVersion")
                         legacy_context = normalize_design_context(raw_context)
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -621,7 +623,7 @@ def backfill_design_contexts(database):
                         dump_json({
                             "versionId": version["id"],
                             "fromSchemaVersion": legacy_schema_version,
-                            "toSchemaVersion": 5,
+                            "toSchemaVersion": 6,
                         }),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
@@ -718,7 +720,7 @@ def backfill_design_contexts(database):
                     """,
                     (
                         session["id"],
-                        dump_json({"versionId": version["id"], "schemaVersion": 5}),
+                        dump_json({"versionId": version["id"], "schemaVersion": 6}),
                         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     ),
                 )

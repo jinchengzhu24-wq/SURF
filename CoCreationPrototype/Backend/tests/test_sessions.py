@@ -84,17 +84,25 @@ class CoCreationSessionTests(unittest.TestCase):
     def test_deterministic_intent_conflict_requires_same_scope_and_aspect(self):
         decrease = [{
             "subject": "water", "attribute": "coverage", "direction": "decrease",
+            "subjectType": "water", "attributeType": "coverage",
             "degree": "excessive", "aspect": "unspecified", "scope": "stage",
+            "scopeType": "stage", "scopeText": "stage", "evidenceSpan": "water too much",
+            "semanticSource": "kimi_reviewed",
         }]
         increase = [{
             "subject": "water", "attribute": "coverage", "direction": "increase",
+            "subjectType": "water", "attributeType": "coverage",
             "degree": "insufficient", "aspect": "unspecified", "scope": "stage",
+            "scopeType": "stage", "scopeText": "stage", "evidenceSpan": "more water",
+            "semanticSource": "kimi_reviewed",
         }]
         self.assertIsNotNone(backend._deterministic_intent_conflict(increase, decrease))
+        legacy = [dict(decrease[0], semanticSource="legacy_unverified")]
+        self.assertIsNone(backend._deterministic_intent_conflict(increase, legacy))
         visual = [dict(increase[0], aspect="visual")]
         gameplay = [dict(decrease[0], aspect="gameplay")]
         self.assertIsNone(backend._deterministic_intent_conflict(visual, gameplay))
-        right = [dict(increase[0], scope="右侧")]
+        right = [dict(increase[0], scope="右侧", scopeType="region", scopeText="右侧")]
         self.assertIsNone(backend._deterministic_intent_conflict(right, decrease))
 
     @classmethod
@@ -202,6 +210,36 @@ class CoCreationSessionTests(unittest.TestCase):
                 json={"idempotencyKey": f"{key}-opening"[:64]},
             )
         self.assertEqual(assessed.status_code, 200, assessed.text)
+        user_evidence = content or "I care about how the level's decisions feel."
+        reviewed_claim = {
+            "normalizedMeaning": statement,
+            "subjectType": "other", "subjectText": "design",
+            "attributeType": "other", "attributeText": "direction",
+            "direction": "unspecified", "degree": "neutral", "aspect": "unspecified",
+            "scopeType": "stage", "scopeText": "stage", "evidenceSpan": user_evidence,
+            "subject": "other", "attribute": "other", "scope": "stage",
+            "semanticSource": "kimi_reviewed", "reviewVersion": "test-v1",
+        }
+        legacy_test_claims = llm_client._intent_semantic_claims(user_evidence)
+        if legacy_test_claims:
+            reviewed_claim = {
+                **legacy_test_claims[0],
+                "normalizedMeaning": statement,
+                "subjectType": legacy_test_claims[0]["subject"],
+                "subjectText": legacy_test_claims[0]["subject"],
+                "attributeType": legacy_test_claims[0]["attribute"],
+                "attributeText": legacy_test_claims[0]["attribute"],
+                "scopeType": "stage" if legacy_test_claims[0].get("scope") == "stage" else "region",
+                "scopeText": legacy_test_claims[0].get("scope") or "stage",
+                "evidenceSpan": user_evidence,
+                "semanticSource": "kimi_reviewed", "reviewVersion": "test-v1",
+            }
+        intent_review = intent_review or {
+            "verdict": "compatible",
+            "explanation": None,
+            "supersedesHypothesisIds": [],
+            "conflictingHypothesisIds": [],
+        }
         execution = LLMExecutionResult(
             "I may be seeing a longer-term preference here.",
             1,
@@ -215,14 +253,21 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": None,
                 "disagreement": None,
                 "uiCues": [],
+                "_intentDecision": {
+                    "classification": "candidate", "claims": [reviewed_claim],
+                    "cardText": statement,
+                },
+                "_intentSemanticClaims": [reviewed_claim],
+                "_intentCandidateReview": {
+                    "classification": "candidate", "claims": [reviewed_claim],
+                    "cardTextValid": True, "bodyValid": True,
+                    "relation": intent_review.get("verdict", "compatible"),
+                    "conflictingHypothesisIds": intent_review.get("conflictingHypothesisIds", []),
+                    "explanation": intent_review.get("explanation"),
+                    "issues": [], "reviewedActiveClaims": [], "reviewVersion": "test-v1",
+                },
             },
         )
-        intent_review = intent_review or {
-            "verdict": "compatible",
-            "explanation": None,
-            "supersedesHypothesisIds": [],
-            "conflictingHypothesisIds": [],
-        }
         with (
             patch.object(backend, "generate_chat_reply", return_value=execution),
             patch.object(
@@ -234,7 +279,7 @@ class CoCreationSessionTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": content or "I care about how the level's decisions feel.",
+                    "content": user_evidence,
                     "baseVersionId": version_id,
                     "idempotencyKey": key,
                 },
@@ -1115,6 +1160,15 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
+        evidence_text = "I want players to read the first push clearly."
+        claim = {
+            "normalizedMeaning": "Players should read the first push clearly",
+            "subjectType": "route", "subjectText": "first push", "attributeType": "clarity",
+            "attributeText": "readability", "direction": "increase", "degree": "neutral",
+            "aspect": "gameplay", "scopeType": "stage", "scopeText": "stage",
+            "evidenceSpan": evidence_text, "subject": "route", "attribute": "clarity",
+            "scope": "stage", "semanticSource": "kimi_reviewed", "reviewVersion": "test-v1",
+        }
         reply = LLMExecutionResult(
             "I would watch how clearly the first push reads.",
             1,
@@ -1128,6 +1182,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": None,
                 "disagreement": None,
                 "uiCues": [],
+                "_intentDecision": {"classification": "candidate", "claims": [claim], "cardText": "It sounds to me like you care about route readability."},
+                "_intentSemanticClaims": [claim],
+                "_intentCandidateReview": {"classification": "candidate", "claims": [claim], "cardTextValid": True, "bodyValid": True, "relation": "none", "conflictingHypothesisIds": [], "explanation": None, "issues": [], "reviewedActiveClaims": [], "reviewVersion": "test-v1"},
             },
         )
         with patch.object(backend, "generate_stage_assessment", return_value=opening):
@@ -1140,7 +1197,7 @@ class CoCreationSessionTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "I want players to read the first push clearly.",
+                    "content": evidence_text,
                     "baseVersionId": version_id,
                     "idempotencyKey": "intent-message-key",
                 },
@@ -1189,6 +1246,18 @@ class CoCreationSessionTests(unittest.TestCase):
                 json={"idempotencyKey": "target-synonym-opening"},
             )
         self.assertEqual(assessed.status_code, 200, assessed.text)
+        evidence_text = "我认为两个终点不能靠在一起。"
+        claim = {
+            "normalizedMeaning": "两个目标不应靠在一起", "subjectType": "target", "subjectText": "两个终点",
+            "attributeType": "separation", "attributeText": "距离", "direction": "increase",
+            "degree": "neutral", "aspect": "unspecified", "scopeType": "stage", "scopeText": "stage",
+            "evidenceSpan": evidence_text, "subject": "target", "attribute": "separation", "scope": "stage",
+            "semanticSource": "kimi_reviewed", "reviewVersion": "test-v1",
+        }
+        card_text = (
+            "我暂时理解为，你更在意目标点之间保持清楚、可区分的空间关系。"
+            "它主要影响布局观感还是实际推箱路线，目前仍需要由你确认。"
+        )
         reply = LLMExecutionResult(
             "你的判断明确指向两个目标之间的空间关系，我会把视觉分布与玩法效果分开保留。",
             1,
@@ -1196,15 +1265,15 @@ class CoCreationSessionTests(unittest.TestCase):
             model="mock-model",
             guidance={
                 "move": "clarify_intent",
-                "intentHypothesis": (
-                    "我暂时理解为，你更在意目标点之间保持清楚、可区分的空间关系。"
-                    "它主要影响布局观感还是实际推箱路线，目前仍需要由你确认。"
-                ),
+                "intentHypothesis": card_text,
                 "intentConfidence": "medium",
                 "followUpQuestion": None,
                 "proposalOffer": None,
                 "disagreement": None,
                 "uiCues": [],
+                "_intentDecision": {"classification": "candidate", "claims": [claim], "cardText": card_text},
+                "_intentSemanticClaims": [claim],
+                "_intentCandidateReview": {"classification": "candidate", "claims": [claim], "cardTextValid": True, "bodyValid": True, "relation": "none", "conflictingHypothesisIds": [], "explanation": None, "issues": [], "reviewedActiveClaims": [], "reviewVersion": "test-v1"},
             },
         )
 
@@ -1212,7 +1281,7 @@ class CoCreationSessionTests(unittest.TestCase):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "我认为两个终点不能靠在一起。",
+                    "content": evidence_text,
                     "baseVersionId": version_id,
                     "idempotencyKey": "target-synonym-intent",
                 },

@@ -91,7 +91,7 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 - `inferred` / `tentative` 是 AI 的暂定假设，必须保持可纠正，不能直接成为地图执行的硬约束。
 - `intentHypotheses` 保存主题、陈述、状态、置信度、支持/反驳证据 ID、来源 Stage/turn、展示文本和反馈动作。历史假设会保留为 `rejected`、`superseded` 或 `legacy_unverified`，而不是被静默删除。
 - 意图证据会以 `intent_evidence_recorded` 追加到 `audit_events`。证据可来自用户表达、提案接受/拒绝、分歧解决、确定性手工 diff、Stage 恢复和试玩结果；单个行为证据本身不会自动等同于用户意图。
-- 橙色 TENTATIVE INTENT 卡只能通过专用反馈确认、修订或否定。服务器以 DesignContext 内部的结构化语义保留用户明确表达的对象、属性、增减方向、作用面和范围，不用卡片措辞代替语义；同对象同属性的明确反向先确定性进入新旧双卡选择，复杂冲突再由 Kimi 复核。历史卡只补高置信语义和原话证据，不改旧文案或状态。带卡正文必须提供经当前 StageSnapshot 验证的实质分析，弱输出最多重试三次，禁止用固定流程声明补足长度。
+- 橙色 TENTATIVE INTENT 卡只能通过专用反馈确认、修订或否定。每个普通非方案轮次都由主 Kimi 输出必填的 `intentDecision`，再由独立 Kimi `intent_candidate_review` 同时检查误报、漏报、原话证据、正文/卡片一致性和与确认意图的关系；两者不一致时只允许主 Kimi 按锁定语义纠正并再次复核，不能由服务器补写卡片。服务器只验证结构、原文证据、StageSnapshot 地图事实和显示质量，并持久化 `kimi_reviewed` claims；旧关键词抽取结果一律视为 `legacy_unverified`，不得触发确定性冲突。通过复核的同对象同属性明确反向可由服务器确定性进入新旧双卡选择，其余范围、作用面、体验和优先级冲突采用复核结论。带卡正文必须提供经当前 StageSnapshot 验证的实质分析；复核、格式或质量在现有重试预算内仍失败时，整轮返回可重试错误，不写入不完整助手轮次。
 - “设计倾向”只投影 confirmed hypothesis，并显示最多 12 条逐 Stage 的证据轨迹；pending、rejected、tentative 和未经确认的 inferred 内容不会进入 Revision 硬约束。
 
 ## 8010 与 8000 的数据边界

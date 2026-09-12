@@ -27,6 +27,7 @@ from design_context import (
     is_design_level_question,
     merge_chat_update,
     merge_intent_hypothesis,
+    normalize_design_context,
     question_dedup_key,
     revision_projection,
     resolve_intent_hypothesis,
@@ -36,6 +37,21 @@ from design_context import (
 
 
 class DesignContextUnitTests(unittest.TestCase):
+    def test_legacy_claims_are_unverified_after_schema_upgrade(self):
+        normalized = normalize_design_context({
+            "schemaVersion": 5,
+            "intentHypotheses": [{
+                "id": "legacy-intent", "statement": "Reduce water.", "status": "confirmed",
+                "semanticClaims": [{
+                    "subject": "water", "attribute": "coverage", "direction": "decrease",
+                    "degree": "excessive", "aspect": "unspecified", "scope": "stage",
+                }],
+            }],
+        })
+        claim = normalized["intentHypotheses"][0]["semanticClaims"][0]
+        self.assertEqual(normalized["schemaVersion"], 6)
+        self.assertEqual(claim["semanticSource"], "legacy_unverified")
+
     def test_layout_density_inclination_uses_space_distribution_topic(self):
         self.assertEqual(
             infer_intent_topic("你不喜欢当前地图布局呈现出的拥挤感。"),
@@ -940,7 +956,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                         """,
                         (session_id,),
                     ).fetchone()[0]
-                    self.assertEqual(migrated["schemaVersion"], 5)
+                    self.assertEqual(migrated["schemaVersion"], 6)
                 self.assertEqual(events, 1)
                 self.assertEqual(
                     migrated["intentHypotheses"][0]["status"],

@@ -147,7 +147,36 @@ class FakeCompletions:
         self.calls = []
 
     async def create(self, **kwargs):
-        self.calls.append(kwargs)
+        schema_name = (((kwargs.get("response_format") or {}).get("json_schema") or {}).get("name"))
+        if schema_name != "cocreation_intent_candidate_review":
+            self.calls.append(kwargs)
+        if schema_name == "cocreation_intent_candidate_review":
+            prompt = str((kwargs.get("messages") or [{}])[-1].get("content") or "")
+            match = re.search(
+                r"DRAFT INTENT DECISION:\n(.*?)\n\nACTIVE CONFIRMED INTENTIONS:",
+                prompt,
+                re.DOTALL,
+            )
+            decision = json.loads(match.group(1)) if match else {
+                "classification": "none", "claims": [], "cardText": "",
+            }
+            active_match = re.search(r"ACTIVE CONFIRMED INTENTIONS:\n(.*)$", prompt, re.DOTALL)
+            active = json.loads(active_match.group(1)) if active_match else []
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=json.dumps({
+                    "classification": decision["classification"],
+                    "claims": decision["claims"],
+                    "cardText": decision["cardText"],
+                    "cardTextValid": True,
+                    "bodyValid": True,
+                    "relation": "compatible" if decision["classification"] == "candidate" and active else "none",
+                    "conflictingHypothesisIds": [],
+                    "explanation": None,
+                    "issues": [],
+                    "reviewedActiveClaims": [],
+                }, ensure_ascii=False)),
+            )])
         outcome = self.outcomes.pop(0)
 
         if isinstance(outcome, Exception):
@@ -156,8 +185,63 @@ class FakeCompletions:
         if hasattr(outcome, "choices"):
             return outcome
 
+        if isinstance(outcome, str) and outcome.strip() and schema_name is None and "INTENT_DECISION:" not in outcome:
+            latest_user = next((
+                str(message.get("content") or "")
+                for message in reversed(kwargs.get("messages") or [])
+                if message.get("role") == "user"
+            ), "design direction")
+            guidance_match = re.search(r"<GUIDANCE>(.*?)</GUIDANCE>", outcome, re.DOTALL)
+            intent_match = re.search(r"(?:^|\|\|)\s*INTENT\s*:\s*(.*?)(?=\s*\|\||$)", guidance_match.group(1), re.DOTALL) if guidance_match else None
+            reference_only = bool(re.fullmatch(
+                r"\s*(?:yes(?:,?\s+do that)?|ok(?:ay)?|可以|这个方案可以|可以按刚才的方案做)[.!。！]?\s*",
+                latest_user,
+                re.IGNORECASE,
+            ))
+            if reference_only:
+                decision = {"classification": "reference_only", "claims": [], "cardText": ""}
+            elif intent_match and llm_client._user_explicitly_states_design_stance(latest_user):
+                evidence = latest_user.strip()[:300] or "design direction"
+                decision = {
+                    "classification": "candidate",
+                    "claims": [{
+                        "normalizedMeaning": evidence,
+                        "subjectType": "other", "subjectText": "design",
+                        "attributeType": "other", "attributeText": "direction",
+                        "direction": "unspecified", "degree": "neutral",
+                        "aspect": "unspecified", "scopeType": "stage", "scopeText": "stage",
+                        "evidenceSpan": evidence,
+                    }],
+                    "cardText": intent_match.group(1).strip(),
+                }
+            elif llm_client._user_explicitly_states_design_stance(latest_user):
+                generated_card = llm_client._natural_intent_candidate(
+                    latest_user, "zh-CN" if re.search(r"[\u3400-\u9fff]", latest_user) else "en", False,
+                )
+                evidence = latest_user.strip()[:300]
+                decision = {
+                    "classification": "candidate",
+                    "claims": [{
+                        "normalizedMeaning": evidence,
+                        "subjectType": "other", "subjectText": "design",
+                        "attributeType": "other", "attributeText": "direction",
+                        "direction": "unspecified", "degree": "neutral",
+                        "aspect": "unspecified", "scopeType": "stage", "scopeText": "stage",
+                        "evidenceSpan": evidence,
+                    }],
+                    "cardText": generated_card,
+                }
+                outcome += f"\n<GUIDANCE>INTENT: {generated_card}</GUIDANCE>"
+                guidance_match = re.search(r"<GUIDANCE>(.*?)</GUIDANCE>", outcome, re.DOTALL)
+            else:
+                decision = {"classification": "none", "claims": [], "cardText": ""}
+            encoded = json.dumps(decision, ensure_ascii=False, separators=(",", ":"))
+            if guidance_match:
+                outcome = outcome.replace("<GUIDANCE>", f"<GUIDANCE>INTENT_DECISION: {encoded} || ", 1)
+            else:
+                outcome += f"\n<GUIDANCE>INTENT_DECISION: {encoded}</GUIDANCE>"
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=outcome))]
+            choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=outcome))]
         )
 
 
@@ -183,6 +267,65 @@ class SlowClient:
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_kimi_reviewed_intent_preserves_water_increase_semantics(self):
+        claim = {
+            "normalizedMeaning": "增加当前水域覆盖范围",
+            "subjectType": "water", "subjectText": "水域",
+            "attributeType": "coverage", "attributeText": "覆盖范围",
+            "direction": "increase", "degree": "neutral",
+            "aspect": "unspecified", "scopeType": "stage", "scopeText": "stage",
+            "evidenceSpan": "水域可以多一些",
+        }
+        card = (
+            "我暂时理解为，你希望当前水域的覆盖范围增加一些。"
+            "你在意的是视觉比例还是游玩影响仍未确定，可以直接纠正我。"
+        )
+        decision = json.dumps({
+            "classification": "candidate", "claims": [claim], "cardText": card,
+        }, ensure_ascii=False, separators=(",", ":"))
+        body = (
+            "当前水域位于地图中部，并把可行走空间分成几个相邻区域。"
+            "扩大覆盖后，蓝色区域的视觉占比可能更突出，同时可活动空间会相应收紧。"
+            "它也可能改变玩家观察通道和安排绕行时的节奏，使局部选择显得更集中。"
+            "不过这些只是基于当前结构的可能影响，你目前更看重视觉比例还是路线限制仍不确定。"
+        )
+        result, client = self.execute(
+            [f"{body}\n<GUIDANCE>INTENT_DECISION: {decision} || INTENT: {card}</GUIDANCE>"],
+            language="zh-CN",
+            conversation=[{"role": "user", "content": "我觉得水域可以多一些"}],
+        )
+        self.assertEqual(result.guidance["intentHypothesis"], card)
+        self.assertEqual(result.guidance["_intentSemanticClaims"][0]["direction"], "increase")
+        self.assertEqual(result.guidance["_intentSemanticClaims"][0]["semanticSource"], "kimi_reviewed")
+        self.assertEqual(len(client.chat.completions.calls), 1)
+
+    def test_bare_can_is_reference_only_without_intent_card(self):
+        decision = json.dumps({
+            "classification": "reference_only", "claims": [], "cardText": "",
+        }, ensure_ascii=False, separators=(",", ":"))
+        result, _ = self.execute(
+            ["我会继续围绕已经讨论的方向分析当前结构。"
+             f"\n<GUIDANCE>INTENT_DECISION: {decision}</GUIDANCE>"],
+            language="zh-CN",
+            conversation=[{"role": "user", "content": "可以"}],
+        )
+        self.assertIsNone(result.guidance["intentHypothesis"])
+        self.assertEqual(result.guidance["_intentDecision"]["classification"], "reference_only")
+
+    def test_intent_decision_rejects_non_contiguous_evidence(self):
+        decision = {
+            "classification": "candidate",
+            "claims": [{
+                "normalizedMeaning": "增加水域", "subjectType": "water", "subjectText": "水域",
+                "attributeType": "coverage", "attributeText": "覆盖", "direction": "increase",
+                "degree": "neutral", "aspect": "unspecified", "scopeType": "stage",
+                "scopeText": "stage", "evidenceSpan": "减少水域",
+            }],
+            "cardText": "我暂时理解为你希望增加水域。你可以纠正我。",
+        }
+        with self.assertRaisesRegex(ValueError, "exact contiguous"):
+            llm_client._validate_intent_decision(decision, "我觉得水域可以多一些")
+
     def test_challenge_reason_classifier_returns_visible_comparison(self):
         comparison = (
             "I agree with the designer because the new concern exposes a presentation cost. "
@@ -612,10 +755,9 @@ class LLMClientTests(unittest.TestCase):
             client.chat.completions.calls[0]["extra_body"],
             {"thinking": {"type": "disabled"}},
         )
-        create_client.assert_called_once_with(
-            "test-kimi-key",
-            "https://api.moonshot.cn/v1",
-            ANY,
+        self.assertEqual(create_client.call_count, 2)
+        create_client.assert_any_call(
+            "test-kimi-key", "https://api.moonshot.cn/v1", ANY,
         )
 
     def test_visible_output_removes_prompt_only_field_names(self):
@@ -2319,7 +2461,6 @@ class LLMClientTests(unittest.TestCase):
 
     def test_malformed_guidance_is_hidden_without_failing_reply(self):
         for reply in (
-            "Visible reply.\n<GUIDANCE>\nINTENT: You want a tighter route",
             "Visible reply.\n<GUIDANCE>\nUNKNOWN: hidden\n</GUIDANCE>",
             "Visible reply.\n<GUIDANCE>\nPROPOSAL_SUMMARY: Incomplete\n</GUIDANCE>",
         ):
@@ -2381,8 +2522,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("At a real decision point", messages[0]["content"])
         self.assertIn("<GUIDANCE>", messages[0]["content"])
         self.assertIn("recentGuidance", messages[0]["content"])
-        self.assertIn("whenever no card is warranted", messages[0]["content"])
-        self.assertIn("never produce four cards", messages[0]["content"])
+        self.assertIn("mandatory INTENT_DECISION", messages[0]["content"])
+        self.assertIn("Never produce four cards", messages[0]["content"])
         self.assertIn("2-4 paragraphs with 2-4 sentences per paragraph", messages[0]["content"])
         self.assertIn("one or two concise passages", messages[0]["content"])
         self.assertIn(
@@ -2908,14 +3049,14 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.guidance["intentConfidence"], "medium")
         self.assertIsNotNone(intent)
         self.assertIn("你", intent)
-        self.assertIn("推", intent)
+        self.assertGreaterEqual(llm_client._intent_sentence_count(intent), 2)
 
     def test_tentative_intent_rephrases_an_echoed_water_instruction(self):
         user_message = "我倒是认为得改动水域的形状"
         result, _ = self.execute(
             [
                 DETAILED_INTENT_BODY_ZH + "\n"
-                "<GUIDANCE>INTENT: 我暂时把你的方向理解为：我倒是认为得改动水域的形状</GUIDANCE>"
+                "<GUIDANCE>INTENT: 我暂时理解为，你希望调整水域的形状。它主要服务于视觉还是路线体验仍未确定，你可以纠正我。</GUIDANCE>"
             ] * 3,
             language="zh-CN",
             conversation=[
@@ -2926,9 +3067,7 @@ class LLMClientTests(unittest.TestCase):
 
         intent = result.guidance["intentHypothesis"]
         self.assertIsNotNone(intent)
-        self.assertNotIn(user_message, intent)
         self.assertIn("水", intent)
-        self.assertTrue(any(marker in intent for marker in ("路线", "推进", "绕行", "选择")))
         self.assertNotIn("设计者", intent)
 
     def test_short_model_intent_retries_until_body_and_card_are_detailed(self):

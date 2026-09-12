@@ -9,7 +9,7 @@ import hashlib
 import re
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 AUTHORITIES = {"explicit", "confirmed", "inferred"}
 GOAL_STATUSES = {"active", "superseded", "rejected"}
 DECISION_STATUSES = {"active", "superseded"}
@@ -27,8 +27,10 @@ INTENT_CLAIM_ATTRIBUTES = {
     "amount", "coverage", "density", "complexity", "length", "clarity",
     "concentration", "separation",
 }
-INTENT_CLAIM_DIRECTIONS = {"increase", "decrease", "maintain", "avoid", "evaluate"}
-INTENT_CLAIM_DEGREES = {"excessive", "insufficient", "neutral"}
+INTENT_CLAIM_DIRECTIONS = {
+    "increase", "decrease", "maintain", "avoid", "evaluate", "unspecified",
+}
+INTENT_CLAIM_DEGREES = {"excessive", "insufficient", "neutral", "unspecified"}
 INTENT_CLAIM_ASPECTS = {"visual", "gameplay", "unspecified"}
 MAX_ACTIVE_INFERRED = 16
 MAX_INACTIVE_ITEMS = 16
@@ -374,15 +376,25 @@ def _normalize_hypothesis(item, index=0):
     for raw_claim in item.get("semanticClaims") or []:
         if not isinstance(raw_claim, dict):
             continue
-        subject = _text(raw_claim.get("subject"), 32)
-        attribute = _text(raw_claim.get("attribute"), 32)
+        subject = _text(raw_claim.get("subjectType") or raw_claim.get("subject"), 32)
+        attribute = _text(raw_claim.get("attributeType") or raw_claim.get("attribute"), 32)
         direction = _text(raw_claim.get("direction"), 32)
         degree = _text(raw_claim.get("degree"), 32) or "neutral"
         aspect = _text(raw_claim.get("aspect"), 32) or "unspecified"
-        scope = _text(raw_claim.get("scope"), 96) or "stage"
+        scope = _text(raw_claim.get("scopeText") or raw_claim.get("scope"), 96) or "stage"
+        subject_text = _text(raw_claim.get("subjectText"), 160) or subject
+        attribute_text = _text(raw_claim.get("attributeText"), 160) or attribute
+        normalized_meaning = _text(raw_claim.get("normalizedMeaning"), 500)
+        evidence_span = _text(raw_claim.get("evidenceSpan"), 500)
+        scope_type = _text(raw_claim.get("scopeType"), 32) or (
+            "stage" if scope == "stage" else "region"
+        )
+        semantic_source = _text(raw_claim.get("semanticSource"), 32)
+        if semantic_source not in {"kimi_reviewed", "legacy_unverified"}:
+            semantic_source = "legacy_unverified"
         if (
-            subject not in INTENT_CLAIM_SUBJECTS
-            or attribute not in INTENT_CLAIM_ATTRIBUTES
+            (subject not in INTENT_CLAIM_SUBJECTS and subject != "other")
+            or (attribute not in INTENT_CLAIM_ATTRIBUTES and attribute != "other")
             or direction not in INTENT_CLAIM_DIRECTIONS
             or degree not in INTENT_CLAIM_DEGREES
             or aspect not in INTENT_CLAIM_ASPECTS
@@ -390,11 +402,21 @@ def _normalize_hypothesis(item, index=0):
             continue
         semantic_claims.append({
             "subject": subject,
+            "subjectType": subject,
+            "subjectText": subject_text,
             "attribute": attribute,
+            "attributeType": attribute,
+            "attributeText": attribute_text,
             "direction": direction,
             "degree": degree,
             "aspect": aspect,
             "scope": scope,
+            "scopeType": scope_type,
+            "scopeText": scope,
+            "normalizedMeaning": normalized_meaning,
+            "evidenceSpan": evidence_span,
+            "semanticSource": semantic_source,
+            "reviewVersion": _text(raw_claim.get("reviewVersion"), 32) or None,
             "sourceUserTurnId": _source(raw_claim.get("sourceUserTurnId")),
             "confidence": min(1.0, max(0.0, _confidence(raw_claim.get("confidence"), 1.0))),
         })
@@ -402,6 +424,7 @@ def _normalize_hypothesis(item, index=0):
         (
             claim["subject"], claim["attribute"], claim["direction"],
             claim["degree"], claim["aspect"], claim["scope"],
+            claim["normalizedMeaning"], claim["evidenceSpan"],
         ): claim
         for claim in semantic_claims
     }.values())[:4]
@@ -650,6 +673,7 @@ def merge_intent_hypothesis(
     displayed=False,
     semantic_claims=None,
     source_user_turn_id=None,
+    origin="kimi_reviewed",
 ):
     """Upsert one model hypothesis; it always remains tentative until user confirmation."""
     result = normalize_design_context(context)
@@ -709,7 +733,7 @@ def merge_intent_hypothesis(
             "sourceStageId": _source(stage_id),
             "sourceTurnId": _source(turn_id),
             "lastUpdatedStageId": _source(stage_id),
-            "origin": "model",
+            "origin": _text(origin, 32) or "kimi_reviewed",
             "displayed": bool(displayed),
             "semanticClaims": normalized_claims,
         })

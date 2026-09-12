@@ -114,8 +114,10 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v54-manual-edit-review-pair"
+PROMPT_VERSION = "cocreation-v55-kimi-intent-candidate-review"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
+INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
+INTENT_REVIEW_VERSION = "intent-candidate-review-v1"
 QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
 INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
 MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS = 3200
@@ -196,6 +198,62 @@ def _structured_response_format(task=None):
             "required": ["relation", "merit", "comparison"],
         }
         name = "cocreation_challenge_reason_classification"
+    elif task == "intent_candidate_review":
+        claim_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "normalizedMeaning": {"type": "string"},
+                "subjectType": {"type": "string"},
+                "subjectText": {"type": "string"},
+                "attributeType": {"type": "string"},
+                "attributeText": {"type": "string"},
+                "direction": {"type": "string", "enum": [
+                    "increase", "decrease", "maintain", "avoid", "evaluate", "unspecified",
+                ]},
+                "degree": {"type": "string"},
+                "aspect": {"type": "string"},
+                "scopeType": {"type": "string"},
+                "scopeText": {"type": "string"},
+                "evidenceSpan": {"type": "string"},
+            },
+            "required": [
+                "normalizedMeaning", "subjectType", "subjectText", "attributeType",
+                "attributeText", "direction", "degree", "aspect", "scopeType",
+                "scopeText", "evidenceSpan",
+            ],
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "classification": {"type": "string", "enum": ["none", "candidate", "reference_only"]},
+                "claims": {"type": "array", "maxItems": 4, "items": claim_schema},
+                "cardText": {"type": "string"},
+                "cardTextValid": {"type": "boolean"},
+                "bodyValid": {"type": "boolean"},
+                "relation": {"type": "string", "enum": ["none", "compatible", "conflict", "unclear"]},
+                "conflictingHypothesisIds": {"type": "array", "items": {"type": "string"}},
+                "explanation": {"type": ["string", "null"]},
+                "issues": {"type": "array", "items": {"type": "string"}},
+                "reviewedActiveClaims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object", "additionalProperties": False,
+                        "properties": {
+                            "hypothesisId": {"type": "string"},
+                            "claims": {"type": "array", "maxItems": 4, "items": claim_schema},
+                        },
+                        "required": ["hypothesisId", "claims"],
+                    },
+                },
+            },
+            "required": [
+                "classification", "claims", "cardText", "cardTextValid", "bodyValid", "relation",
+                "conflictingHypothesisIds", "explanation", "issues", "reviewedActiveClaims",
+            ],
+        }
+        name = "cocreation_intent_candidate_review"
     elif task == "intent_feedback_review":
         schema = {
             "type": "object",
@@ -1012,9 +1070,9 @@ def build_plain_chat_messages(
         "Do not output a GUIDANCE block for a Stage opening. "
         if stage_opening
         else (
-            "After the visible reply, you may append one optional machine-readable block "
+            "After the visible reply, append one machine-readable block "
             "as one final line using exactly this compact form:\n"
-            "<GUIDANCE>DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
+            "<GUIDANCE>INTENT_DECISION: {JSON} || DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
             "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || EXECUTION_BRIEF: {JSON} || DISAGREEMENT: {JSON} || "
             "COORDINATE_LINKS: [{JSON}, ...] || DESIGN_CONTEXT_PATCH: {JSON}</GUIDANCE>\n"
             "DESIGN_CONTEXT_PATCH.openQuestions may include status open or resolved. A resolved "
@@ -1022,8 +1080,28 @@ def build_plain_chat_messages(
             "the server ignores unsupported or unproven resolutions. Goals and constraints may "
             "include evidenceText only as an exact contiguous user quote. Never use this patch "
             "to claim a confirmed decision.\n"
-            "Omit any field that is not warranted, and omit the entire block whenever no card "
-            "is warranted, including an ordinary project question or factual answer. The very "
+            "INTENT_DECISION is mandatory for every non-opening response and has exactly "
+            "classification (none, candidate, or reference_only), claims (zero to four), and "
+            "cardText. A claim has exactly normalizedMeaning, subjectType, subjectText, "
+            "attributeType, attributeText, direction, degree, aspect, scopeType, scopeText, and "
+            "evidenceSpan. evidenceSpan must be an exact contiguous quote from the latest user "
+            "message. Use these exact enum labels: subjectType=layout, space, route, target, water, "
+            "wall, box, difficulty, rhythm, or other; attributeType=amount, coverage, density, "
+            "complexity, length, clarity, concentration, separation, or other; direction=increase, "
+            "decrease, maintain, avoid, evaluate, or unspecified; degree=excessive, insufficient, "
+            "neutral, or unspecified; aspect=visual, gameplay, or unspecified; scopeType=stage, "
+            "region, entity, or other. Use subjectType or attributeType=other with precise natural-language Text "
+            "when a fixed label is inadequate. candidate requires claims and a two-to-four-sentence "
+            "tentative, correctable cardText; none/reference_only require empty claims and cardText. "
+            "A modal possibility such as 水域可以多一些 expresses a candidate direction, while a "
+            "bare 可以, 这个方案可以, or 可以按刚才的方案做 is reference_only. Do not infer a gameplay "
+            "purpose that the designer did not state. For candidate, the visible reply normally has "
+            "two or three paragraphs and four to seven complete sentences: include at least one "
+            "current-Stage structural fact, two genuinely different possible effects, and one real "
+            "interpretive boundary that remains unknown. Do not restate the card conclusion, ask the "
+            "user to repeat an already explicit direction, leave an introduction such as 你是希望： "
+            "unfinished, show an option list, or explain the intent workflow. INTENT, when present, must exactly equal "
+            "INTENT_DECISION.cardText. Omit every other field that is not warranted. The very "
             "first Stage 1 opening also has no metadata block. Visible cards "
             "belong to exactly one of two "
             "families. The discussion family may use any non-empty combination of DISCUSS, "
@@ -1137,14 +1215,23 @@ def build_plain_chat_messages(
         f"Latest optional play evidence: {json.dumps(play_summary, ensure_ascii=False)}"
     )
     compact_guidance_instruction = (
-        "After the visible prose, optionally add one final <GUIDANCE> block with only "
-        "warranted fields: DISCUSS, WARNING, MANUAL_EDIT, INTENT, PROPOSAL_SUMMARY, "
-        "PROPOSAL_RATIONALE, EXECUTION_BRIEF, DISAGREEMENT, COORDINATE_LINKS, or "
-        "DESIGN_CONTEXT_PATCH. Omit it whenever no card or metadata is warranted; never "
-        "produce four cards. Keep ordinary questions in assistantMessage. Do not repeat "
-        "unchanged cards from recentGuidance. An active disagreement cannot contain a "
-        "proposal; a patch cannot create a confirmed decision. Use exact route metadata "
-        "only for a visible, grounded movement sentence."
+        "For every non-opening reply, finish with exactly one <GUIDANCE> block containing "
+        "INTENT_DECISION: a compact JSON object with exactly classification, claims, and "
+        "cardText. classification is none, candidate, or reference_only. candidate requires "
+        "one to four claims and a tentative correctable cardText; none and reference_only "
+        "require empty claims and cardText. Each claim contains normalizedMeaning, subjectType, "
+        "subjectText, attributeType, attributeText, direction, degree, aspect, scopeType, "
+        "scopeText, and evidenceSpan copied as an exact contiguous quote from the latest user "
+        "message. Use exact enum labels: subjectType=layout, space, route, target, water, wall, box, "
+        "difficulty, rhythm, or other; attributeType=amount, coverage, density, complexity, length, "
+        "clarity, concentration, separation, or other; direction=increase, decrease, maintain, avoid, "
+        "evaluate, or unspecified; degree=excessive, insufficient, neutral, or unspecified; "
+        "aspect=visual, gameplay, or unspecified; scopeType=stage, region, entity, or other. "
+        "A bare acknowledgement such as 可以 or okay is reference_only; 水域可以多一些 "
+        "is candidate, not acknowledgement. Other fields remain optional: DISCUSS, WARNING, "
+        "MANUAL_EDIT, INTENT, PROPOSAL_SUMMARY, PROPOSAL_RATIONALE, EXECUTION_BRIEF, "
+        "DISAGREEMENT, COORDINATE_LINKS, and DESIGN_CONTEXT_PATCH. INTENT, when present, must "
+        "exactly equal cardText. Never produce four cards. Keep ordinary questions in assistantMessage."
     )
     system_prompt = _compact_kimi_plain_prompt(
         stage_opening=stage_opening,
@@ -1457,10 +1544,16 @@ def _compact_kimi_plain_prompt(
         "Do not output a metadata block for a Stage opening."
         if stage_opening
         else (
-            "You may finish with one compact <GUIDANCE> block. Include only warranted fields "
-            "from DISCUSS, WARNING, MANUAL_EDIT, INTENT, PROPOSAL_SUMMARY, PROPOSAL_RATIONALE, "
-            "EXECUTION_BRIEF, DISAGREEMENT, COORDINATE_LINKS, and DESIGN_CONTEXT_PATCH. "
-            "Omit it whenever no card is warranted; never use the block to create a confirmed decision."
+            "Finish with one compact <GUIDANCE> block containing mandatory INTENT_DECISION JSON. "
+            "It has exactly classification (none, candidate, reference_only), claims, and cardText. "
+            "candidate needs evidence-grounded claims and tentative cardText; none/reference_only use "
+            "empty claims and cardText. Claims use exact enum labels: subjectType=layout, space, route, "
+            "target, water, wall, box, difficulty, rhythm, or other; attributeType=amount, coverage, "
+            "density, complexity, length, clarity, concentration, separation, or other; direction=increase, "
+            "decrease, maintain, avoid, evaluate, or unspecified; degree=excessive, insufficient, neutral, "
+            "or unspecified; aspect=visual, gameplay, or unspecified; scopeType=stage, region, entity, or other. "
+            "INTENT is optional and, if present, exactly equals cardText. "
+            "Never use the block to create a confirmed decision."
         )
     )
     route = (
@@ -1886,6 +1979,12 @@ def _prompt_stage_context(rows, stage_context):
     # authoritative snapshot, especially when it contains the wrong B/T
     # coordinate that prompted the check.
     context.pop("userMapClaims", None)
+    # Role-specific semantic memory is serialized separately below. Keeping
+    # the raw snapshots here would duplicate it and would also expose the
+    # transient direct-evidence fields reserved for intent candidate review.
+    context.pop("designContext", None)
+    context.pop("revisionDesignContext", None)
+    context.pop("evaluatorDesignContext", None)
 
     # Keep continuity semantic.  A previous proposal's exact execution brief
     # is a contract for its own card, not a second current-map authority.  The
@@ -1914,6 +2013,8 @@ def _prompt_stage_context(rows, stage_context):
                 if proposal.get(key) is not None
             }
         context["recentGuidance"] = projected_recent
+    elif "recentGuidance" not in context:
+        context["recentGuidance"] = {}
 
     for key in (
         "sourceProposalOffer",
@@ -7242,6 +7343,174 @@ async def _translate_with_model_fallback(
     )
 
 
+async def _review_intent_candidate_async(
+    *, api_key, base_url, user_text, body, decision, active_inclinations,
+    language, request_id, deadline,
+):
+    """Independently review card presence, semantics, prose, and conflicts."""
+    active = []
+    for item in active_inclinations or []:
+        if not isinstance(item, dict):
+            continue
+        hypothesis_id = str(item.get("hypothesisId") or item.get("id") or "").strip()[:96]
+        statement = re.sub(r"\s+", " ", str(item.get("statement") or "")).strip()[:800]
+        if hypothesis_id and statement:
+            active.append({
+                "hypothesisId": hypothesis_id,
+                "statement": statement,
+                "evidenceText": str(item.get("evidenceText") or "")[:800],
+                "evidenceTurnId": item.get("evidenceTurnId"),
+                "semanticClaims": item.get("semanticClaims") or [],
+            })
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    messages = [{"role": "system", "content": (
+        "You are the independent intent-candidate reviewer for a Sokoban co-design chat. "
+        "Return JSON only. Judge the CURRENT USER WORDS, not keywords. classification=candidate "
+        "only when this turn expresses or materially revises the designer's own design direction; "
+        "reference_only is an acknowledgement or reference such as 可以, this is okay, or proceed "
+        "with the prior proposal; none is a question, neutral observation, or unrelated message. "
+        "For candidate, return one to four complete claims grounded in exact contiguous evidenceSpan "
+        "quotes from the current user text. Preserve object, attribute, direction, degree, aspect, and "
+        "scope. subjectType is layout, space, route, target, water, wall, box, difficulty, "
+        "rhythm, or other; attributeType is amount, coverage, density, complexity, length, "
+        "clarity, concentration, separation, or other. degree is excessive, insufficient, "
+        "neutral, or unspecified; aspect is visual, gameplay, or unspecified; scopeType is "
+        "stage, region, entity, or other. Use other plus natural-language Text fields when needed. "
+        "Do not invent a gameplay purpose. For candidate return cardText: two to four complete, "
+        "tentative, correctable sentences that preserve every claim without restating the draft body. "
+        "For non-candidate return empty cardText and no claims. cardTextValid means the "
+        "draft card covers every claim, stays tentative/correctable, and adds no purpose. bodyValid "
+        "means the prose directly responds, does not repeat the card, has verified Stage evidence, two "
+        "distinct possible effects, and one genuine uncertainty boundary when a candidate exists; it "
+        "must reject dangling introductions, option lists, workflow talk, or unfinished paragraphs. "
+        "relation is none without a candidate or active inclination, otherwise compatible, conflict, "
+        "or unclear. conflict must cite exact active IDs and explain in 2-4 first-person sentences in "
+        f"{response_language} why the new and old directions cannot both guide the same decision; never "
+        "choose, recommend compromise, or demand revision. reviewedActiveClaims may provide claims only "
+        "for legacy active inclinations whose evidenceText supports them unambiguously; otherwise omit. "
+        "issues must precisely tell the drafting model what to correct, without hidden reasoning.\n\n"
+        "CURRENT USER TEXT:\n" + str(user_text or "")[:2000] + "\n\n"
+        "DRAFT BODY:\n" + str(body or "")[:5000] + "\n\n"
+        "DRAFT INTENT DECISION:\n" + json.dumps(decision, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+        "ACTIVE CONFIRMED INTENTIONS:\n" + json.dumps(active[:12], ensure_ascii=False, separators=(",", ":"))
+    )}]
+    remaining = _remaining_until(deadline)
+    if remaining <= 0:
+        raise asyncio.TimeoutError()
+    response = await asyncio.wait_for(
+        _request_completion(
+            api_key, base_url, KIMI_MODEL, messages,
+            INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS,
+            min(30.0, remaining), task="intent_candidate_review",
+        ),
+        timeout=min(30.0, remaining),
+    )
+    choice = response.choices[0]
+    if str(getattr(choice, "finish_reason", "") or "") == "length":
+        raise ValueError("The intent candidate review reached its output limit.")
+    payload = json.loads(str(choice.message.content or ""))
+    expected = {
+        "classification", "claims", "cardText", "cardTextValid", "bodyValid", "relation",
+        "conflictingHypothesisIds", "explanation", "issues", "reviewedActiveClaims",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise ValueError("Intent candidate review contains unexpected or missing fields.")
+    classification = payload.get("classification")
+    if classification not in {"none", "candidate", "reference_only"}:
+        raise ValueError("Intent candidate review classification is invalid.")
+    claims = payload.get("claims")
+    if not isinstance(claims, list) or len(claims) > 4:
+        raise ValueError("Intent candidate review claims are invalid.")
+    claims = [_normalize_reviewed_claim(item, user_text) for item in claims]
+    card_text = _normalize_response_paragraphs(str(payload.get("cardText") or ""))[:1000]
+    if classification == "candidate" and not claims:
+        raise ValueError("A reviewed candidate must contain claims.")
+    if classification != "candidate" and claims:
+        raise ValueError("A reviewed non-candidate cannot contain claims.")
+    if classification == "candidate":
+        # The reviewer's card text is a Kimi-only recovery value when the main
+        # reply omitted INTENT_DECISION.  For a normal draft, cardTextValid
+        # evaluates the draft card; rejecting an otherwise correct review
+        # because its unused recovery wording is shorter would cause needless
+        # retries.  If recovery is actually used, the normal card validator
+        # below still applies to that selected text.
+        if not card_text:
+            raise ValueError("A reviewed candidate must include recovery cardText.")
+    elif card_text:
+        raise ValueError("A reviewed non-candidate must have empty cardText.")
+    active_ids = {item["hypothesisId"] for item in active}
+    conflict_ids = payload.get("conflictingHypothesisIds")
+    if not isinstance(conflict_ids, list) or not set(conflict_ids).issubset(active_ids):
+        raise ValueError("Intent candidate review conflict IDs are invalid.")
+    relation = payload.get("relation")
+    if relation not in {"none", "compatible", "conflict", "unclear"}:
+        raise ValueError("Intent candidate review relation is invalid.")
+    if relation == "conflict" and not conflict_ids:
+        raise ValueError("A conflict review must bind a confirmed inclination.")
+    if relation != "conflict" and conflict_ids:
+        raise ValueError("Only a conflict review may cite conflicting IDs.")
+    if classification != "candidate" and relation != "none":
+        raise ValueError("A reviewed non-candidate must use relation none.")
+    if classification == "candidate" and active and relation == "none":
+        raise ValueError("A reviewed candidate with confirmed memory requires a relation.")
+    if classification == "candidate" and not active and relation != "none":
+        raise ValueError("A reviewed candidate without confirmed memory must use relation none.")
+    explanation = _normalize_response_paragraphs(str(payload.get("explanation") or ""))[:1200] or None
+    if relation == "conflict":
+        conflict_sentences = [
+            item for item in re.split(r"[.!?\u3002\uFF01\uFF1F]+", explanation or "")
+            if item.strip()
+        ]
+        forbidden_direction = re.search(
+            r"(?:please\s+(?:revise|rewrite|adjust|change)|compromise|"
+            r"请(?:修改|调整|重新表述)|需要(?:修改|调整|重新表述)|折中|妥协)",
+            explanation or "",
+            flags=re.IGNORECASE,
+        )
+        if len(conflict_sentences) < 2 or len(conflict_sentences) > 4 or forbidden_direction or re.search(r"[?？]", explanation or ""):
+            raise ValueError("A conflict explanation must compare both directions in two to four non-directive sentences.")
+    elif relation in {"none", "compatible"} and explanation is not None:
+        raise ValueError("A non-conflict resolved review must not include an explanation.")
+    legacy_updates = []
+    for update in payload.get("reviewedActiveClaims") or []:
+        if not isinstance(update, dict) or set(update) != {"hypothesisId", "claims"}:
+            raise ValueError("A legacy intent review update is malformed.")
+        if update["hypothesisId"] not in active_ids:
+            raise ValueError("A legacy intent review update cites an unknown ID.")
+        evidence = next(
+            (item["evidenceText"] for item in active if item["hypothesisId"] == update["hypothesisId"]),
+            "",
+        )
+        source_user_turn_id = next(
+            (item.get("evidenceTurnId") for item in active if item["hypothesisId"] == update["hypothesisId"]),
+            None,
+        )
+        normalized_update_claims = [
+            {
+                **_normalize_reviewed_claim(item, evidence),
+                "sourceUserTurnId": source_user_turn_id,
+            }
+            for item in update.get("claims") or []
+        ]
+        legacy_updates.append({
+            "hypothesisId": update["hypothesisId"],
+            "claims": normalized_update_claims,
+        })
+    return {
+        "classification": classification,
+        "claims": claims,
+        "cardText": card_text,
+        "cardTextValid": payload.get("cardTextValid") is True,
+        "bodyValid": payload.get("bodyValid") is True,
+        "relation": relation,
+        "conflictingHypothesisIds": list(dict.fromkeys(conflict_ids)),
+        "explanation": explanation,
+        "issues": [str(item).strip()[:400] for item in payload.get("issues") or [] if str(item).strip()][:8],
+        "reviewedActiveClaims": legacy_updates,
+        "reviewVersion": INTENT_REVIEW_VERSION,
+    }
+
+
 async def _generate_plain_with_model_fallback(
     *,
     api_key,
@@ -7283,6 +7552,7 @@ async def _generate_plain_with_model_fallback(
     )
     clarification_body_candidate = ""
     total_grounding_dropped_count = 0
+    intent_review_corrections = 0
 
     max_attempts = len(models)
     ordinary_discussion = validation_mode in {"ordinary_chat", "route_discussion"}
@@ -7424,6 +7694,10 @@ async def _generate_plain_with_model_fallback(
                 rows=rows,
                 strict_metadata=validation_mode not in {"ordinary_chat", "route_discussion"},
             )
+            intent_decision = _extract_plain_intent_decision(content)
+            latest_user_text = _latest_role_content(semantic_messages, "user")
+            if intent_decision is not None:
+                intent_decision = _validate_intent_decision(intent_decision, latest_user_text)
             if clarification_active:
                 # The proposal topic and its one next question are server-owned.
                 # Model questions and metadata cannot advance or redirect it.
@@ -7798,6 +8072,8 @@ async def _generate_plain_with_model_fallback(
             body = _deduplicate_assistant_body(body)
             ordinary_branch = bool(
                 not stage_opening
+                and not clarification_active
+                and not (stage_context or {}).get("answeredVisibleQuestion")
                 and not _is_proposal_conversation_branch(stage_context)
                 and not isinstance(guidance.get("disagreement"), dict)
                 and guidance.get("proposalOffer") is None
@@ -7809,13 +8085,140 @@ async def _generate_plain_with_model_fallback(
                     raise LowQualityModelResponse(
                         "An ordinary non-proposal reply cannot contain only questions."
                     )
+                # Natural-language intent understanding belongs to Kimi. Any
+                # card manufactured or removed by the legacy keyword helpers
+                # above is discarded before the independent review.
+                draft_decision_missing = intent_decision is None
+                if draft_decision_missing:
+                    # Kimi sometimes omits a trailing metadata block despite
+                    # the instruction. The independent Kimi review remains a
+                    # semantic authority and can synthesize a bounded card;
+                    # the server never creates one from keywords or templates.
+                    intent_decision = {
+                        "classification": "none", "claims": [], "cardText": "",
+                    }
+                draft_classification = intent_decision["classification"]
+                guidance["intentHypothesis"] = (
+                    intent_decision["cardText"]
+                    if draft_classification == "candidate"
+                    else None
+                )
+                guidance["intentConfidence"] = (
+                    "medium" if draft_classification == "candidate" else None
+                )
+                active_intents = [
+                    {
+                        "hypothesisId": item.get("id"),
+                        "statement": item.get("statement"),
+                        "semanticClaims": item.get("semanticClaims") or [],
+                        "evidenceText": item.get("evidenceText") or "",
+                    }
+                    for item in ((stage_context or {}).get("designContext") or {}).get(
+                        "intentHypotheses", []
+                    )
+                    if item.get("status") == "confirmed"
+                ]
+                intent_review = await _review_intent_candidate_async(
+                    api_key=api_key,
+                    base_url=base_url,
+                    user_text=latest_user_text,
+                    body=body,
+                    decision=intent_decision,
+                    active_inclinations=active_intents,
+                    language=language,
+                    request_id=request_id,
+                    deadline=deadline,
+                )
+                core_fields = (
+                    "subjectType", "attributeType", "direction", "degree", "aspect",
+                    "scopeType", "scopeText", "evidenceSpan",
+                )
+                draft_claim_keys = [
+                    tuple(claim.get(key) for key in core_fields)
+                    for claim in intent_decision.get("claims") or []
+                ]
+                reviewed_claim_keys = [
+                    tuple(claim.get(key) for key in core_fields)
+                    for claim in intent_review.get("claims") or []
+                ]
+                review_issue = None
+                if (
+                    not draft_decision_missing
+                    and intent_review["classification"] != draft_classification
+                ):
+                    review_issue = "The independent review changed the intent classification."
+                elif not draft_decision_missing and draft_claim_keys != reviewed_claim_keys:
+                    review_issue = "The independent review found incomplete or inaccurate intent claims."
+                elif (
+                    not draft_decision_missing
+                    and draft_classification == "candidate"
+                    and not intent_review["cardTextValid"]
+                ):
+                    review_issue = "The independent review rejected the tentative-intent card text."
+                elif not intent_review["bodyValid"]:
+                    review_issue = "The independent review rejected the visible response quality."
+                elif intent_review["relation"] == "unclear":
+                    review_issue = "The relation to confirmed intent remains unclear."
+                if review_issue:
+                    details = "; ".join(intent_review.get("issues") or [])
+                    intent_review_corrections += 1
+                    correction_message = (
+                        review_issue
+                        + (" Reviewer correction: " + details if details else "")
+                        + " Locked reviewed decision: "
+                        + json.dumps({
+                            "classification": intent_review["classification"],
+                            "claims": intent_review["claims"],
+                        }, ensure_ascii=False, separators=(",", ":"))
+                    )
+                    if intent_review_corrections >= 2:
+                        raise LLMServiceError(
+                            "INTENT_CANDIDATE_REVIEW_FAILED",
+                            "Kimi could not align the response and tentative intent after correction.",
+                            request_id,
+                            True,
+                            attempt,
+                            502,
+                        )
+                    raise ValueError(correction_message)
+                if draft_decision_missing and intent_review["classification"] == "candidate":
+                    intent_decision = {
+                        "classification": "candidate",
+                        "claims": intent_review["claims"],
+                        "cardText": intent_review["cardText"],
+                    }
+                    guidance["intentHypothesis"] = intent_decision["cardText"]
+                    guidance["intentConfidence"] = "medium"
+                reviewed_claims = []
+                for claim in intent_review.get("claims") or []:
+                    reviewed_claims.append({
+                        **claim,
+                        "subject": claim["subjectType"],
+                        "attribute": claim["attributeType"],
+                        "scope": claim["scopeText"] or "stage",
+                        "semanticSource": "kimi_reviewed",
+                        "reviewVersion": intent_review["reviewVersion"],
+                        "sourceUserTurnId": None,
+                        "confidence": 1.0,
+                    })
+                guidance["_intentDecision"] = intent_decision
+                guidance["_intentSemanticClaims"] = reviewed_claims
+                guidance["_intentCandidateReview"] = intent_review
+            elif (
+                clarification_active
+                or _is_proposal_conversation_branch(stage_context)
+                or (stage_context or {}).get("answeredVisibleQuestion")
+                or guidance.get("proposalOffer") is not None
+                or isinstance(guidance.get("disagreement"), dict)
+            ):
+                guidance["intentHypothesis"] = None
+                guidance["intentConfidence"] = None
             if guidance.get("intentHypothesis"):
                 intent_issue = _intent_hypothesis_detail_issue(
                     guidance["intentHypothesis"], language
                 )
-                latest_user = _latest_role_content(semantic_messages, "user")
-                semantic_issue = _intent_semantic_binding_issue(
-                    guidance["intentHypothesis"], latest_user, language
+                semantic_issue = None if ordinary_branch else _intent_semantic_binding_issue(
+                    guidance["intentHypothesis"], latest_user_text, language
                 )
                 body_issue = _intent_body_detail_issue(
                     body, language, guidance["intentHypothesis"]
@@ -7830,9 +8233,9 @@ async def _generate_plain_with_model_fallback(
                             issue for issue in (intent_issue, semantic_issue, body_issue) if issue
                         )
                     )
-                if intent_issue or semantic_issue:
+                if (intent_issue or semantic_issue) and not ordinary_branch:
                     guidance["intentHypothesis"] = _natural_intent_candidate(
-                        latest_user,
+                        latest_user_text,
                         language,
                         _latest_user_explicitly_agrees(latest_user),
                         difficulty_reframe=_user_reframes_difficulty_judgment(
@@ -10966,7 +11369,7 @@ def _extract_plain_guidance(
 
     for raw_line in re.split(r"\s*\|\|\s*|[\r\n]+", block_tail[:closing_index]):
         match = re.match(
-            r"^(WARNING|MANUAL_EDIT|CLARIFICATION|INTENT|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE|EXECUTION_BRIEF|REVISION_PLAN)\s*:\s*(.+?)\s*$",
+            r"^(WARNING|MANUAL_EDIT|CLARIFICATION|INTENT|INTENT_DECISION|PROPOSAL_SUMMARY|PROPOSAL_RATIONALE|EXECUTION_BRIEF|REVISION_PLAN)\s*:\s*(.+?)\s*$",
             raw_line.strip(),
         )
 
@@ -11064,6 +11467,91 @@ def _extract_plain_guidance(
         ui_cues.append({"type": cue_type, "text": cue_text})
 
     return visible, intent, proposal_offer, ui_cues[:2]
+
+
+def _extract_plain_intent_decision(content):
+    marker = "<GUIDANCE>"
+    marker_index = str(content or "").find(marker)
+    if marker_index < 0:
+        return None
+    tail = str(content)[marker_index + len(marker):]
+    closing_index = tail.find("</GUIDANCE>")
+    if closing_index < 0:
+        return None
+    block = tail[:closing_index]
+    match = re.search(
+        r"(?:^|\|\|)\s*INTENT_DECISION\s*:\s*(\{.*?\})\s*(?=\|\||$)",
+        block,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+    return _validate_intent_decision(json.loads(match.group(1)), None)
+
+
+def _normalize_reviewed_claim(raw_claim, user_text, *, require_evidence=True):
+    if not isinstance(raw_claim, dict):
+        raise ValueError("An intent claim must be an object.")
+    required = {
+        "normalizedMeaning", "subjectType", "subjectText", "attributeType",
+        "attributeText", "direction", "degree", "aspect", "scopeType",
+        "scopeText", "evidenceSpan",
+    }
+    if set(raw_claim) != required:
+        raise ValueError("An intent claim contains unexpected or missing fields.")
+    clean = {
+        key: re.sub(r"\s+", " ", str(raw_claim.get(key) or "")).strip()
+        for key in required
+    }
+    if not clean["normalizedMeaning"] or not clean["subjectText"] or not clean["attributeText"]:
+        raise ValueError("An intent claim is missing its natural-language meaning.")
+    if clean["direction"] not in {
+        "increase", "decrease", "maintain", "avoid", "evaluate", "unspecified",
+    }:
+        raise ValueError("An intent claim direction is invalid.")
+    if clean["subjectType"] not in {
+        "layout", "space", "route", "target", "water", "wall", "box",
+        "difficulty", "rhythm", "other",
+    }:
+        raise ValueError("subjectType must use a supported label or other.")
+    if clean["attributeType"] not in {
+        "amount", "coverage", "density", "complexity", "length", "clarity",
+        "concentration", "separation", "other",
+    }:
+        raise ValueError("attributeType must use a supported label or other.")
+    if clean["degree"] not in {"excessive", "insufficient", "neutral", "unspecified"}:
+        raise ValueError("An intent claim degree is invalid.")
+    if clean["aspect"] not in {"visual", "gameplay", "unspecified"}:
+        raise ValueError("An intent claim aspect is invalid.")
+    if clean["scopeType"] not in {"stage", "region", "entity", "other"}:
+        raise ValueError("An intent claim scopeType is invalid.")
+    if require_evidence and (
+        not clean["evidenceSpan"] or clean["evidenceSpan"] not in str(user_text or "")
+    ):
+        raise ValueError("Intent evidenceSpan must be an exact contiguous current-user quote.")
+    return clean
+
+
+def _validate_intent_decision(payload, user_text):
+    if not isinstance(payload, dict) or set(payload) != {"classification", "claims", "cardText"}:
+        raise ValueError("intentDecision contains unexpected or missing fields.")
+    classification = payload.get("classification")
+    if classification not in {"none", "candidate", "reference_only"}:
+        raise ValueError("intentDecision classification is invalid.")
+    claims = payload.get("claims")
+    if not isinstance(claims, list) or len(claims) > 4:
+        raise ValueError("intentDecision claims must contain at most four items.")
+    normalized = [
+        _normalize_reviewed_claim(item, user_text, require_evidence=user_text is not None)
+        for item in claims
+    ]
+    card_text = _normalize_response_paragraphs(str(payload.get("cardText") or ""))[:1000]
+    if classification == "candidate":
+        if not normalized or len(card_text) < 12:
+            raise ValueError("A candidate intentDecision requires claims and cardText.")
+    elif normalized or card_text:
+        raise ValueError("A non-candidate intentDecision must have empty claims and cardText.")
+    return {"classification": classification, "claims": normalized, "cardText": card_text}
 
 
 def _extract_plain_coordinate_links(content, rows=None):
@@ -16975,12 +17463,24 @@ def _intent_body_detail_issue(value, language, hypothesis=None):
         re.IGNORECASE,
     ):
         return "intent body contains workflow boilerplate"
-    if text.endswith((";", "；", ":", "：", ",", "，")) or re.search(
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", str(value or "")) if part.strip()]
+    if any(part.endswith((";", "；", ":", "：", ",", "，")) for part in paragraphs) or re.search(
         r"(?:^|[。！？.!?]\s*)(?:是让|而是让|还是让|because|while)\s*[^。！？.!?]*[;；]?\s*$",
         text,
         re.IGNORECASE,
     ):
         return "intent body ends with an incomplete clause"
+    if any(re.search(
+        r"(?:你是希望|你希望的是|具体来说|例如|包括|the options are|do you mean)\s*[:：]\s*$",
+        part,
+        re.IGNORECASE,
+    ) for part in paragraphs):
+        return "intent body contains a dangling introduction"
+    if any(
+        re.search(r"^\s*(?:[-*•]|\d+[.)、])\s*\S+", line)
+        for line in str(value or "").splitlines()
+    ):
+        return "intent body contains an option or fragment list"
     if hypothesis and _guidance_reuses_visible_sentence(hypothesis, text):
         return "intent body repeats the intent card"
     map_related = bool(re.search(

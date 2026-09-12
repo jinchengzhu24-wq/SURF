@@ -55,8 +55,6 @@ from llm_client import (
     review_question_answers,
     rewrite_intent_progress,
     _contains_user_design_direction,
-    _intent_semantic_claims,
-    _user_explicitly_states_design_stance,
     _guidance_advice_request,
     _guidance_confusion_request,
     execute_revision_operations,
@@ -109,9 +107,16 @@ from design_context import (
 
 
 def _intent_claim_key(claim):
-    return tuple(str(claim.get(key) or "").strip().casefold() for key in (
-        "subject", "attribute", "direction", "aspect", "scope",
+    base = tuple(str(claim.get(key) or "").strip().casefold() for key in (
+        "subjectType", "attributeType", "direction", "aspect", "scopeType", "scopeText",
     ))
+    if base[0] == "other" or base[1] == "other":
+        return base + (
+            str(claim.get("subjectText") or "").strip().casefold(),
+            str(claim.get("attributeText") or "").strip().casefold(),
+            str(claim.get("normalizedMeaning") or "").strip().casefold(),
+        )
+    return base
 
 
 def _intent_claims_equivalent(left, right):
@@ -126,11 +131,24 @@ def _deterministic_intent_conflict(new_claims, existing_claims):
         for old_claim in existing_claims or []:
             if not isinstance(new_claim, dict) or not isinstance(old_claim, dict):
                 continue
-            if new_claim.get("subject") != old_claim.get("subject"):
+            if (
+                new_claim.get("semanticSource") != "kimi_reviewed"
+                or old_claim.get("semanticSource") != "kimi_reviewed"
+                or not new_claim.get("evidenceSpan")
+                or not old_claim.get("evidenceSpan")
+            ):
                 continue
-            if new_claim.get("attribute") != old_claim.get("attribute"):
+            new_subject = new_claim.get("subjectType") or new_claim.get("subject")
+            old_subject = old_claim.get("subjectType") or old_claim.get("subject")
+            if new_subject != old_subject:
                 continue
-            if (new_claim.get("scope") or "stage") != (old_claim.get("scope") or "stage"):
+            new_attribute = new_claim.get("attributeType") or new_claim.get("attribute")
+            old_attribute = old_claim.get("attributeType") or old_claim.get("attribute")
+            if new_attribute != old_attribute:
+                continue
+            if (new_claim.get("scopeType") or "stage") != (old_claim.get("scopeType") or "stage"):
+                continue
+            if (new_claim.get("scopeText") or "stage") != (old_claim.get("scopeText") or "stage"):
                 continue
             new_aspect = new_claim.get("aspect") or "unspecified"
             old_aspect = old_claim.get("aspect") or "unspecified"
@@ -150,12 +168,12 @@ def _deterministic_conflict_explanation(conflict_pair, language):
         subject = {
             "water": "水域", "wall": "墙体", "box": "箱子", "target": "目标",
             "route": "路线", "layout": "布局", "space": "空间",
-        }.get(new_claim.get("subject"), "设计对象")
+        }.get(new_claim.get("subjectType") or new_claim.get("subject"), new_claim.get("subjectText") or "设计对象")
         attribute = {
             "coverage": "覆盖范围", "amount": "数量", "density": "密度",
             "complexity": "复杂度", "length": "长度", "clarity": "清晰度",
             "concentration": "集中程度", "separation": "分离程度",
-        }.get(new_claim.get("attribute"), "当前属性")
+        }.get(new_claim.get("attributeType") or new_claim.get("attribute"), new_claim.get("attributeText") or "当前属性")
         new_label = f"增加{subject}的{attribute}" if new_direction == "increase" else f"减少{subject}的{attribute}"
         old_label = f"增加{subject}的{attribute}" if old_direction == "increase" else f"减少{subject}的{attribute}"
         return (
@@ -3377,14 +3395,17 @@ def _send_message_locked(
         and execution_guidance["disagreement"].get("status") == "active"
     )
     candidate_intent = str(execution_guidance.get("intentHypothesis") or "").strip()
-    candidate_claims = _intent_semantic_claims(content) if candidate_intent else []
-    if candidate_claims:
-        execution_guidance["_intentSemanticClaims"] = candidate_claims
-        execution = replace(execution, guidance=execution_guidance)
+    candidate_claims = (
+        execution_guidance.get("_intentSemanticClaims") or []
+        if candidate_intent else []
+    )
     intent_allowed = bool(
         context["stageContext"].get("conversationBranch") == "ordinary"
         and not context["stageContext"].get("answeredVisibleQuestion")
-        and _user_explicitly_states_design_stance(content)
+        and (
+            execution_guidance.get("_intentDecision", {}).get("classification")
+            == "candidate"
+        )
     )
     if candidate_intent and (
         not intent_allowed
@@ -3444,16 +3465,20 @@ def _send_message_locked(
                 candidate_intent = ""
                 intent_review = None
             else:
-                intent_review = review_intent_feedback(
-                    candidate_intent,
-                    confirmed_intents,
-                    [],
-                    language,
-                    request.state.request_id,
-                    candidate_claims=candidate_claims,
-                    _deadline=message_deadline,
-                )
-                intent_review["reviewSource"] = "kimi"
+                candidate_review = execution_guidance.get("_intentCandidateReview") or {}
+                intent_review = {
+                    "verdict": candidate_review.get("relation", "unclear"),
+                    "explanation": candidate_review.get("explanation"),
+                    "conflictingHypothesisIds": candidate_review.get(
+                        "conflictingHypothesisIds", []
+                    ),
+                    "supersedesHypothesisIds": [],
+                    "reviewSource": "kimi",
+                    "reviewVersion": candidate_review.get("reviewVersion"),
+                    "reviewedActiveClaims": candidate_review.get(
+                        "reviewedActiveClaims", []
+                    ),
+                }
             if intent_review and intent_review.get("verdict") == "conflict":
                 conflicting_ids = set(
                     intent_review.get("conflictingHypothesisIds") or []
@@ -6542,6 +6567,32 @@ def build_llm_context(database, session_id, version):
                 source="runtime_legacy_untrusted",
             )
     design_context = load_design_context(database, session_id, version["id"])
+    # Attach direct user evidence transiently for the independent Kimi review.
+    # This is not persisted into the DesignContext statement and never changes
+    # a historical card's text, status, or timestamp.
+    turn_by_id = {turn["id"]: turn for turn in turns}
+    ordered_turns = list(reversed(turns))
+    for hypothesis in design_context.get("intentHypotheses", []):
+        if hypothesis.get("status") != "confirmed":
+            continue
+        source_user_id = next((
+            claim.get("sourceUserTurnId")
+            for claim in hypothesis.get("semanticClaims") or []
+            if isinstance(claim, dict) and claim.get("sourceUserTurnId")
+        ), None)
+        source_user = turn_by_id.get(source_user_id)
+        if source_user is None and hypothesis.get("sourceTurnId"):
+            source_assistant = turn_by_id.get(hypothesis.get("sourceTurnId"))
+            if source_assistant is not None:
+                source_user = next((
+                    turn for turn in reversed(ordered_turns)
+                    if turn["role"] == "user"
+                    and turn["sequence_number"] < source_assistant["sequence_number"]
+                ), None)
+        hypothesis["evidenceText"] = (
+            str(source_user["content"])[:1200] if source_user is not None else ""
+        )
+        hypothesis["evidenceTurnId"] = source_user["id"] if source_user is not None else None
     pending_intent_evidence = _pending_intent_evidence(
         database,
         session_id,
@@ -8954,6 +9005,8 @@ def _public_guidance(guidance):
     result.pop("_intentHypothesisId", None)
     result.pop("_intentReviewState", None)
     result.pop("_intentSemanticClaims", None)
+    result.pop("_intentDecision", None)
+    result.pop("_intentCandidateReview", None)
     result.pop("manualEditReview", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and (
@@ -9400,6 +9453,48 @@ def _update_design_context_from_turn(
         patch = None
 
     previous = load_design_context(database, session_id, version_id)
+    candidate_review = guidance.get("_intentCandidateReview") or {}
+    lazy_updates = candidate_review.get("reviewedActiveClaims") or []
+    for update in lazy_updates:
+        target = next((
+            item for item in previous.get("intentHypotheses", [])
+            if item.get("id") == update.get("hypothesisId")
+            and item.get("status") == "confirmed"
+        ), None)
+        if target is None:
+            continue
+        current_claims = target.get("semanticClaims") or []
+        if current_claims and all(
+            claim.get("semanticSource") == "kimi_reviewed"
+            for claim in current_claims if isinstance(claim, dict)
+        ):
+            continue
+        target["semanticClaims"] = [
+            {
+                **claim,
+                "subject": claim.get("subjectType"),
+                "attribute": claim.get("attributeType"),
+                "scope": claim.get("scopeText") or "stage",
+                "semanticSource": "kimi_reviewed",
+                "reviewVersion": candidate_review.get("reviewVersion"),
+                "sourceUserTurnId": claim.get("sourceUserTurnId"),
+                "confidence": 1.0,
+            }
+            for claim in update.get("claims") or []
+        ]
+        record_event(
+            database,
+            session_id,
+            "intent_legacy_semantics_reviewed",
+            {
+                "versionId": version_id,
+                "turnId": turn_id,
+                "hypothesisId": target.get("id"),
+                "reviewVersion": candidate_review.get("reviewVersion"),
+                "semanticClaims": target["semanticClaims"],
+            },
+            utc_now(),
+        )
     effective_patch = patch
     if isinstance(patch, dict):
         # Question progress is server-owned and limited to proposal discovery
@@ -9441,7 +9536,52 @@ def _update_design_context_from_turn(
 
     hypothesis_id = None
     hypothesis = str(guidance.get("intentHypothesis") or "").strip()
+    intent_decision = guidance.get("_intentDecision")
+    intent_candidate_review = guidance.get("_intentCandidateReview")
+    if allow_progress and isinstance(intent_decision, dict):
+        record_event(
+            database,
+            session_id,
+            "intent_candidate_decided",
+            {
+                "versionId": version_id,
+                "turnId": turn_id,
+                "sourceUserTurnId": answer_turn_id,
+                "source": "kimi_draft",
+                "classification": intent_decision.get("classification"),
+                "claims": intent_decision.get("claims") or [],
+            },
+            utc_now(),
+        )
+    if allow_progress and isinstance(intent_candidate_review, dict):
+        record_event(
+            database,
+            session_id,
+            "intent_candidate_reviewed",
+            {
+                "versionId": version_id,
+                "turnId": turn_id,
+                "sourceUserTurnId": answer_turn_id,
+                "reviewVersion": intent_candidate_review.get("reviewVersion"),
+                "classification": intent_candidate_review.get("classification"),
+                "relation": intent_candidate_review.get("relation"),
+                "conflictingHypothesisIds": intent_candidate_review.get(
+                    "conflictingHypothesisIds", []
+                ),
+                "evidenceSpans": [
+                    claim.get("evidenceSpan")
+                    for claim in intent_candidate_review.get("claims") or []
+                ],
+                "claims": guidance.get("_intentSemanticClaims") or [],
+            },
+            utc_now(),
+        )
     if allow_progress and hypothesis:
+        reviewed_semantic_claims = [
+            {**claim, "sourceUserTurnId": answer_turn_id or claim.get("sourceUserTurnId")}
+            for claim in (guidance.get("_intentSemanticClaims") or [])
+            if isinstance(claim, dict)
+        ]
         pending_evidence = _pending_intent_evidence(
             database,
             session_id,
@@ -9464,8 +9604,9 @@ def _update_design_context_from_turn(
             turn_id,
             confidence,
             displayed=True,
-            semantic_claims=guidance.get("_intentSemanticClaims") or [],
+            semantic_claims=reviewed_semantic_claims,
             source_user_turn_id=answer_turn_id,
+            origin="kimi_reviewed",
         )
         stored_turn = database.execute(
             "SELECT guidance_json FROM conversation_turns WHERE id = ?",
@@ -9493,7 +9634,7 @@ def _update_design_context_from_turn(
                 "hypothesisId": hypothesis_id,
                 "evidenceIds": evidence_ids,
                 "confidence": confidence,
-                "semanticClaims": guidance.get("_intentSemanticClaims") or [],
+                "semanticClaims": reviewed_semantic_claims,
                 "sourceUserTurnId": answer_turn_id,
             },
             utc_now(),
