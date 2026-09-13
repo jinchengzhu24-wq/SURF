@@ -587,14 +587,12 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     private static int DifficultyIndex(string value)
     {
-        for (int i = 0; i < DifficultyPresets.Length; i++) if (DifficultyPresets[i].label == value) return i;
-        return -1;
+        return Array.IndexOf(DifficultyLabels, value);
     }
 
     private static int LayoutIndex(string value)
     {
-        for (int i = 0; i < LayoutPresets.Length; i++) if (LayoutPresets[i].label == value) return i;
-        return -1;
+        return Array.IndexOf(LayoutLabels, value);
     }
 
     private static bool IsValidDifficulty(string value) => DifficultyIndex(value) >= 0;
