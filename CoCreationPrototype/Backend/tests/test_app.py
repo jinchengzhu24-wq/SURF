@@ -794,6 +794,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
+        self.assertIn("processed-panel-20260913-1", index_response.text)
         self.assertIn("component-repair-20260913-1", index_response.text)
         self.assertIn("languageSetupSwitch", index_response.text)
         self.assertIn("enterSessionButton", index_response.text)
@@ -805,6 +806,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("--bg: #6f9d31", css_response.text)
         self.assertIn("--wood: #8b562c", css_response.text)
         self.assertIn("--pixel-shadow: 4px 4px 0", css_response.text)
+        self.assertIn(".answered-questions[open] > summary", css_response.text)
+        self.assertIn("background: #e7bdb1", css_response.text)
         self.assertEqual(js_response.status_code, 200)
         self.assertIn("/api/sessions/", js_response.text)
         self.assertIn("play-attempts", js_response.text)
