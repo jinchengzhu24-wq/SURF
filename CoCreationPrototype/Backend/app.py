@@ -1207,6 +1207,21 @@ def create_manual_version(
             if list(validation.rows) == current_rows:
                 raise ApiError(400, "UNCHANGED_LEVEL", "Save requires at least one tile change.")
 
+            inherited_design_context = load_design_context(
+                database, session_id, current["id"]
+            )
+            previous_manual_disagreement = inherited_design_context.get(
+                "activeDisagreement"
+            ) or {}
+            closes_manual_disagreement = (
+                previous_manual_disagreement.get("status") == "active"
+                and previous_manual_disagreement.get("subject") == "human_edit"
+            )
+            if closes_manual_disagreement:
+                inherited_design_context = set_active_disagreement(
+                    inherited_design_context, None, current["id"], None
+                )
+
             version_id = _insert_version(
                 database,
                 session,
@@ -1215,7 +1230,23 @@ def create_manual_version(
                 clean_optional(payload.summary, 1000) or "Designer saved an edited stage",
                 payload.idempotencyKey,
                 current,
+                design_context=inherited_design_context,
             )
+            if closes_manual_disagreement:
+                resolved_disagreement = {
+                    **previous_manual_disagreement,
+                    "status": "resolved",
+                    "resolution": "user",
+                    "displayCard": False,
+                    "resolutionMode": "manual_reedit",
+                }
+                _record_disagreement_event(
+                    database,
+                    session_id,
+                    current["id"],
+                    None,
+                    {"disagreement": resolved_disagreement},
+                )
             record_intent_evidence(
                 database,
                 session_id,
@@ -1521,6 +1552,16 @@ def assess_version(
                         "hasWarning": False,
                         "reviewOutcome": review_metadata.get("outcome"),
                         "evidenceIds": review_metadata.get("evidenceIds", []),
+                        "decisionSource": review_metadata.get("decisionSource"),
+                        "confirmedDirectionIds": review_metadata.get(
+                            "confirmedDirectionIds", []
+                        ),
+                        "effectEvidenceIds": review_metadata.get(
+                            "effectEvidenceIds", []
+                        ),
+                        "relation": review_metadata.get("relation"),
+                        "solverDelta": review_metadata.get("solverDelta", {}),
+                        "comparisons": review_metadata.get("comparisons", []),
                         "disagreement": (
                             review_execution.guidance.get("disagreement")
                             if review_execution is not None else None

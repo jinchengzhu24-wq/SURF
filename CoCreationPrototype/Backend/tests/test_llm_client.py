@@ -4020,7 +4020,15 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIn("The first push is not only about approaching a target", result.assistant_message)
 
-    def test_later_human_edit_uses_one_request_and_returns_two_messages(self):
+    def test_later_human_edit_uses_adjudication_then_returns_two_messages(self):
+        classification = json.dumps({
+            "comparisons": [{
+                "confirmedDirectionId": "design_goal-1",
+                "relation": "aligned",
+                "evidenceIds": ["diff-1"],
+                "explanation": "The wall edit supports the confirmed direction.",
+            }],
+        })
         payload = json.dumps({
             "openingMessage": (
                 "The saved Stage remains solvable. The central space is now tighter. "
@@ -4042,7 +4050,7 @@ class LLMClientTests(unittest.TestCase):
             ),
             "conflict": None,
         })
-        client = FakeClient([payload])
+        client = FakeClient([classification, payload])
 
         with patch.object(llm_client, "_create_async_client", return_value=client):
             result = llm_client.generate_stage_assessment(
@@ -4074,10 +4082,14 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("Compared with the parent Stage", result.secondary_execution.assistant_message)
         self.assertEqual(result.secondary_execution.guidance["uiCues"], [])
         self.assertIsNone(result.secondary_execution.guidance["disagreement"])
-        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertEqual(
             client.chat.completions.calls[0]["response_format"]["json_schema"]["name"],
-            "cocreation_manual_edit_assessment_pair",
+            "cocreation_manual_edit_conflict_classification",
+        )
+        self.assertEqual(
+            client.chat.completions.calls[1]["response_format"]["json_schema"]["name"],
+            "cocreation_manual_edit_assessment_pair_no_conflict",
         )
 
     def test_manual_edit_pair_conflict_creates_discussion_without_warning(self):
@@ -4135,6 +4147,15 @@ class LLMClientTests(unittest.TestCase):
             solver,
             stage_context,
             evidence,
+            {
+                "verdict": "conflict",
+                "decisionSource": "kimi_adjudication",
+                "confirmedDirectionIds": ["design_goal-1"],
+                "effectEvidenceIds": ["diff-1"],
+                "relation": "The edit conflicts with the confirmed recovery goal.",
+                "solverDelta": {},
+                "comparisons": [],
+            },
             "manual-conflict-test",
             1,
             "mock-model",
@@ -4145,6 +4166,261 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(review.guidance["disagreement"]["subject"], "human_edit")
         self.assertEqual(review.guidance["uiCues"], [])
         self.assertEqual(review.guidance["manualEditReview"]["outcome"], "conflict")
+
+    def test_manual_edit_adjudicator_assesses_every_confirmed_direction(self):
+        evidence = [
+            {
+                "id": "confirmed_inclination-1",
+                "kind": "confirmed_inclination",
+                "fact": "Increase internal walls to make routes tighter.",
+            },
+            {
+                "id": "diff-1",
+                "kind": "verified_map_diff",
+                "fact": "row 3, column 9: '#' -> '.'",
+            },
+            {
+                "id": "solver-delta",
+                "kind": "solver_comparison",
+                "fact": {
+                    "parentSolutionSteps": 29,
+                    "currentSolutionSteps": 21,
+                    "parentSolutionPushes": 11,
+                    "currentSolutionPushes": 11,
+                },
+            },
+        ]
+        payload = {
+            "comparisons": [{
+                "confirmedDirectionId": "confirmed_inclination-1",
+                "relation": "conflict",
+                "evidenceIds": ["diff-1", "solver-delta"],
+                "explanation": (
+                    "The edit removes a wall despite the confirmed direction, while the shorter "
+                    "solution is a separate improvement."
+                ),
+            }],
+        }
+
+        decision = llm_client._validate_manual_edit_conflict_classification(
+            payload, evidence
+        )
+
+        self.assertEqual(decision["verdict"], "conflict")
+        self.assertEqual(decision["decisionSource"], "kimi_adjudication")
+        self.assertEqual(
+            decision["confirmedDirectionIds"], ["confirmed_inclination-1"]
+        )
+        self.assertEqual(decision["solverDelta"]["currentSolutionSteps"], 21)
+
+    def test_manual_edit_evidence_excludes_unconfirmed_directions_and_keeps_rows(self):
+        stage_context = {
+            "diff": [{"x": 1, "y": 1, "before": "#", "after": "."}],
+            "beforeRows": ["###", "#p#", "###"],
+            "afterRows": ["###", ".p#", "###"],
+            "evaluatorDesignContext": {
+                "intentHypotheses": [
+                    {"status": "confirmed", "statement": "Keep the route compact."},
+                    {"status": "tentative", "statement": "Maybe add more water."},
+                    {"status": "rejected", "statement": "Remove every wall."},
+                ],
+                "userGoals": [
+                    {"status": "active", "authority": "explicit", "goal": "Keep recovery space."},
+                    {"status": "active", "authority": "inferred", "goal": "Make it symmetrical."},
+                    {"status": "pending", "authority": "explicit", "goal": "Add a detour."},
+                ],
+                "designConstraints": [
+                    {"status": "active", "authority": "confirmed", "constraint": "Remain solvable."},
+                    {"status": "rejected", "authority": "confirmed", "constraint": "Avoid water."},
+                ],
+                "confirmedDecisions": [
+                    {"status": "active", "decision": "Preserve both targets."},
+                    {"status": "rejected", "decision": "Move the player."},
+                ],
+            },
+        }
+
+        evidence = llm_client._manual_edit_review_evidence(
+            stage_context, {"solvable": True}, {}
+        )
+        facts = [item.get("fact") for item in evidence]
+
+        self.assertIn("Keep the route compact.", facts)
+        self.assertIn("Keep recovery space.", facts)
+        self.assertIn("Remain solvable.", facts)
+        self.assertIn("Preserve both targets.", facts)
+        self.assertNotIn("Maybe add more water.", facts)
+        self.assertNotIn("Remove every wall.", facts)
+        self.assertNotIn("Make it symmetrical.", facts)
+        self.assertNotIn("Add a detour.", facts)
+        self.assertNotIn("Avoid water.", facts)
+        self.assertNotIn("Move the player.", facts)
+        rows_evidence = next(item for item in evidence if item["id"] == "stage-rows")
+        self.assertEqual(rows_evidence["fact"]["parentRows"], stage_context["beforeRows"])
+        self.assertEqual(rows_evidence["fact"]["currentRows"], stage_context["afterRows"])
+
+    def test_manual_edit_adjudicator_rejects_an_omitted_confirmed_direction(self):
+        evidence = [
+            {"id": "design_goal-1", "kind": "design_goal", "fact": "Keep routes tight."},
+            {"id": "design_constraint-1", "kind": "design_constraint", "fact": "Keep recovery space."},
+            {"id": "diff-1", "kind": "verified_map_diff", "fact": "one verified tile changed"},
+        ]
+        payload = {
+            "comparisons": [{
+                "confirmedDirectionId": "design_goal-1",
+                "relation": "aligned",
+                "evidenceIds": ["diff-1"],
+                "explanation": "The edit supports the goal.",
+            }],
+        }
+
+        with self.assertRaisesRegex(ValueError, "every active confirmed design direction"):
+            llm_client._validate_manual_edit_conflict_classification(payload, evidence)
+
+    def test_manual_edit_frozen_conflict_rejects_null_card(self):
+        stage_context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "diff": [{"x": 1, "y": 1, "before": "#", "after": "."}],
+            "evaluatorDesignContext": {
+                "userGoals": [{
+                    "id": "goal-1",
+                    "goal": "Increase internal walls.",
+                    "status": "active",
+                    "authority": "confirmed",
+                }],
+            },
+        }
+        solver = {"solvable": True, "solutionSteps": 21, "solutionPushes": 11}
+        evidence = llm_client._manual_edit_review_evidence(stage_context, solver, {})
+        payload = {
+            "openingMessage": (
+                "The saved Stage remains solvable. The open center connects both routes. "
+                "The first box has a direct approach. The second box needs a longer return. "
+                "The push order remains readable. I would inspect both lanes before moving."
+            ),
+            "assessment": {
+                "solutionSummary": "The saved Stage remains solvable.",
+                "difficultyOpinion": "The routes are more direct.",
+                "features": ["A connected center"],
+                "suggestions": ["Review the route trade-off"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": (
+                "The wall removal opposes the confirmed direction even though the route is shorter."
+            ),
+            "conflict": None,
+        }
+        decision = {
+            "verdict": "conflict",
+            "decisionSource": "kimi_adjudication",
+            "confirmedDirectionIds": ["design_goal-1"],
+            "effectEvidenceIds": ["diff-1"],
+            "relation": "The edit opposes the confirmed direction.",
+            "solverDelta": {},
+            "comparisons": [],
+        }
+
+        with self.assertRaisesRegex(ValueError, "requires a discussion card"):
+            llm_client._validate_manual_edit_pair_payload(
+                payload, OPERATION_BASE_ROWS, "en", solver, stage_context, evidence,
+                decision, "frozen-conflict-test", 1, "mock-model", 10,
+            )
+
+    def test_manual_edit_conflict_keeps_solver_improvement_and_free_kimi_wording(self):
+        classification = json.dumps({
+            "comparisons": [{
+                "confirmedDirectionId": "confirmed_inclination-1",
+                "relation": "conflict",
+                "evidenceIds": ["diff-1", "diff-2", "solver-delta"],
+                "explanation": (
+                    "Removing the walls runs against the confirmed wish for more internal walls, "
+                    "although the verified solution becomes shorter."
+                ),
+            }],
+        })
+        pair = json.dumps({
+            "openingMessage": (
+                "The saved Stage remains solvable. The opened passages connect the right side more directly. "
+                "The two box routes still differ in length. The push count remains stable. "
+                "I would read the new cross-connection before choosing a box. That makes the opening feel quicker."
+            ),
+            "assessment": {
+                "solutionSummary": "The saved Stage remains solvable in 21 steps and 11 pushes.",
+                "difficultyOpinion": "The shorter walking route makes navigation more fluid.",
+                "features": ["Two newly opened passages"],
+                "suggestions": ["Compare fluidity with the intended tighter routing"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": (
+                "Opening the passages shortens the verified solution from 29 to 21 steps while preserving "
+                "11 pushes. That is a useful gain in fluidity, and it also moves away from the confirmed "
+                "direction of adding internal walls for tighter, more winding routes."
+            ),
+            "conflict": {
+                "evidenceIds": [
+                    "confirmed_inclination-1", "diff-1", "diff-2", "solver-delta"
+                ],
+                "userPosition": "The saved edit opens the passages and makes traversal more fluid.",
+                "aiPosition": "The earlier confirmed direction favored more internal walls and tighter routes.",
+                "coreDisagreement": (
+                    "The shorter solution is a real improvement, but it changes the previously confirmed "
+                    "priority. You can reshape the Stage again or we can discuss whether fluidity should now lead."
+                ),
+                "nextQuestion": (
+                    "Would you rather revise the map toward the earlier direction, or talk through this new trade-off?"
+                ),
+            },
+        })
+        invalid_pair = json.loads(pair)
+        invalid_pair["conflict"] = None
+        client = FakeClient([classification, json.dumps(invalid_pair), pair])
+        stage_context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "diff": [
+                {"x": 1, "y": 1, "before": "#", "after": "."},
+                {"x": 2, "y": 1, "before": "#", "after": "."},
+            ],
+            "changeSummary": {"components": ["internalWalls"], "changedCellCount": 2},
+            "parentValidation": {
+                "solvable": True, "solutionSteps": 29, "solutionPushes": 11,
+            },
+            "evaluatorDesignContext": {
+                "intentHypotheses": [{
+                    "id": "inclination-1",
+                    "statement": "Add internal walls to make the routes tighter and more winding.",
+                    "displayStatement": "Prefer more internal walls and tighter routes.",
+                    "status": "confirmed",
+                    "sourceStageId": "stage-1",
+                    "sourceTurnId": "intent-turn",
+                    "semanticClaims": [],
+                }],
+            },
+        }
+        with patch.object(llm_client, "_create_async_client", return_value=client):
+            result = llm_client.generate_stage_assessment(
+                [], OPERATION_BASE_ROWS, "en",
+                {"solvable": True, "solutionSteps": 21, "solutionPushes": 11},
+                {}, "manual-free-language-test", stage_context,
+            )
+
+        review = result.secondary_execution
+        self.assertEqual(review.guidance["disagreement"]["subject"], "human_edit")
+        self.assertEqual(review.guidance["manualEditReview"]["outcome"], "conflict")
+        self.assertIn("29 to 21", review.assistant_message)
+        self.assertIn("fluidity", review.guidance["disagreement"]["coreDisagreement"])
+        self.assertEqual(len(client.chat.completions.calls), 3)
+        self.assertEqual(
+            client.chat.completions.calls[1]["response_format"]["json_schema"]["name"],
+            "cocreation_manual_edit_assessment_pair_conflict",
+        )
+        self.assertEqual(
+            client.chat.completions.calls[2]["response_format"]["json_schema"]["name"],
+            "cocreation_manual_edit_assessment_pair_conflict",
+        )
+        retry_messages = client.chat.completions.calls[2]["messages"]
+        self.assertIn("frozen conflict decision", retry_messages[-1]["content"])
 
     def test_manual_edit_pair_rejects_conflict_without_concrete_evidence(self):
         stage_context = {
@@ -4183,6 +4459,15 @@ class LLMClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "concrete map, solver, or play evidence"):
             llm_client._validate_manual_edit_pair_payload(
                 payload, OPERATION_BASE_ROWS, "en", solver, stage_context, evidence,
+                {
+                    "verdict": "conflict",
+                    "decisionSource": "kimi_adjudication",
+                    "confirmedDirectionIds": ["design_goal-1"],
+                    "effectEvidenceIds": [],
+                    "relation": "The edit conflicts with the confirmed goal.",
+                    "solverDelta": {},
+                    "comparisons": [],
+                },
                 "manual-no-evidence-test", 1, "mock-model", 10,
             )
 
@@ -4219,6 +4504,15 @@ class LLMClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported designer intention"):
             llm_client._validate_manual_edit_pair_payload(
                 payload, OPERATION_BASE_ROWS, "en", solver, stage_context, evidence,
+                {
+                    "verdict": "no_conflict",
+                    "decisionSource": "deterministic_no_comparable_evidence",
+                    "confirmedDirectionIds": [],
+                    "effectEvidenceIds": [],
+                    "relation": "no comparable direction",
+                    "solverDelta": {},
+                    "comparisons": [],
+                },
                 "manual-implicit-intent-test", 1, "mock-model", 10,
             )
 
@@ -4254,6 +4548,15 @@ class LLMClientTests(unittest.TestCase):
 
         result = llm_client._validate_manual_edit_pair_payload(
             payload, OPERATION_BASE_ROWS, "en", solver, stage_context, evidence,
+            {
+                "verdict": "no_conflict",
+                "decisionSource": "deterministic_no_comparable_evidence",
+                "confirmedDirectionIds": [],
+                "effectEvidenceIds": [],
+                "relation": "no comparable direction",
+                "solverDelta": {},
+                "comparisons": [],
+            },
             "manual-neutral-review-test", 1, "mock-model", 10,
         )
 

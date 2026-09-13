@@ -115,7 +115,7 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v55-kimi-intent-candidate-review"
+PROMPT_VERSION = "cocreation-v56-kimi-manual-edit-adjudication"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -123,6 +123,7 @@ INTENT_REVIEW_VERSION = "intent-candidate-review-v1"
 QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
 INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
 MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS = 3200
+MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS = 1600
 
 
 def _structured_response_format(task=None):
@@ -133,7 +134,10 @@ def _structured_response_format(task=None):
     the model to infer the wire shape from the much larger design rules.
     """
     task = str(task or "chat")
-    if task == "manual_edit_assessment_pair":
+    if task in {
+        "manual_edit_assessment_pair_conflict",
+        "manual_edit_assessment_pair_no_conflict",
+    }:
         assessment_schema = {
             "type": "object",
             "additionalProperties": False,
@@ -153,7 +157,7 @@ def _structured_response_format(task=None):
             ],
         }
         conflict_schema = {
-            "type": ["object", "null"],
+            "type": "object",
             "additionalProperties": False,
             "properties": {
                 "evidenceIds": {"type": "array", "items": {"type": "string"}},
@@ -170,6 +174,8 @@ def _structured_response_format(task=None):
                 "nextQuestion",
             ],
         }
+        if task == "manual_edit_assessment_pair_no_conflict":
+            conflict_schema = {"type": "null"}
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -181,7 +187,43 @@ def _structured_response_format(task=None):
             },
             "required": ["openingMessage", "assessment", "reviewMessage", "conflict"],
         }
-        name = "cocreation_manual_edit_assessment_pair"
+        name = (
+            "cocreation_manual_edit_assessment_pair_conflict"
+            if task == "manual_edit_assessment_pair_conflict"
+            else "cocreation_manual_edit_assessment_pair_no_conflict"
+        )
+    elif task == "manual_edit_conflict_classification":
+        comparison_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "confirmedDirectionId": {"type": "string"},
+                "relation": {
+                    "type": "string",
+                    "enum": ["conflict", "aligned", "tradeoff", "unrelated", "unclear"],
+                },
+                "evidenceIds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "explanation": {"type": "string"},
+            },
+            "required": [
+                "confirmedDirectionId", "relation", "evidenceIds", "explanation",
+            ],
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "comparisons": {
+                    "type": "array",
+                    "items": comparison_schema,
+                },
+            },
+            "required": ["comparisons"],
+        }
+        name = "cocreation_manual_edit_conflict_classification"
     elif task == "challenge_reason_classification":
         schema = {
             "type": "object",
@@ -2892,6 +2934,18 @@ def _manual_edit_review_evidence(stage_context, solver_metrics, play_summary):
             "fact": f"row {row}, column {column}: {before!r} -> {after!r}",
         })
 
+    before_rows = context.get("beforeRows")
+    after_rows = context.get("afterRows")
+    if isinstance(before_rows, list) and isinstance(after_rows, list):
+        evidence.append({
+            "id": "stage-rows",
+            "kind": "verified_stage_rows",
+            "fact": {
+                "parentRows": [str(row) for row in before_rows],
+                "currentRows": [str(row) for row in after_rows],
+            },
+        })
+
     current_solver = solver_metrics or {}
     if current_solver.get("solvable"):
         evidence.append({
@@ -2929,6 +2983,36 @@ def _manual_edit_review_evidence(stage_context, solver_metrics, play_summary):
         })
 
     design = context.get("evaluatorDesignContext") or {}
+    for index, item in enumerate((design.get("intentHypotheses") or [])[-12:], start=1):
+        if not isinstance(item, dict) or item.get("status") != "confirmed":
+            continue
+        statement = str(
+            item.get("displayStatement") or item.get("statement") or ""
+        ).strip()
+        semantic_claims = [
+            claim for claim in (item.get("semanticClaims") or [])
+            if isinstance(claim, dict)
+        ]
+        if not statement:
+            continue
+        evidence.append({
+            "id": f"confirmed_inclination-{index}",
+            "kind": "confirmed_inclination",
+            "fact": statement[:800],
+            "semanticClaims": semantic_claims[:4],
+            "sourceStageId": item.get("sourceStageId"),
+            "sourceTurnId": item.get("sourceTurnId"),
+        })
+    confirmed_inclination_keys = {
+        str(item.get("fact") or "").strip().casefold()
+        for item in evidence
+        if item.get("kind") == "confirmed_inclination"
+    }
+    confirmed_inclination_turn_ids = {
+        item.get("sourceTurnId")
+        for item in evidence
+        if item.get("kind") == "confirmed_inclination" and item.get("sourceTurnId")
+    }
     design_sources = (
         ("userGoals", "goal", "design_goal"),
         ("designConstraints", "constraint", "design_constraint"),
@@ -2945,22 +3029,232 @@ def _manual_edit_review_evidence(stage_context, solver_metrics, play_summary):
             statement = str(item.get(text_key) or "").strip()
             if not statement:
                 continue
+            if (
+                collection == "userGoals"
+                and (
+                    statement.casefold() in confirmed_inclination_keys
+                    or item.get("sourceTurnId") in confirmed_inclination_turn_ids
+                )
+            ):
+                continue
             evidence.append({
                 "id": f"{kind}-{index}",
                 "kind": kind,
                 "fact": statement[:800],
                 "sourceStageId": item.get("sourceStageId"),
             })
-    return evidence[:64]
+    return evidence[:96]
 
 
 def _manual_edit_has_design_evidence(evidence):
     return any(
         item.get("kind") in {
-            "design_goal", "design_constraint", "confirmed_decision"
+            "design_goal", "design_constraint", "confirmed_decision",
+            "confirmed_inclination",
         }
         for item in (evidence or [])
         if isinstance(item, dict)
+    )
+
+
+def _manual_edit_solver_delta(evidence):
+    item = next(
+        (
+            entry for entry in (evidence or [])
+            if isinstance(entry, dict) and entry.get("id") == "solver-delta"
+        ),
+        None,
+    )
+    return dict(item.get("fact") or {}) if item else {}
+
+
+def _validate_manual_edit_conflict_classification(payload, evidence):
+    if not isinstance(payload, dict) or set(payload) != {"comparisons"}:
+        raise ValueError("The manual-edit conflict classification has an invalid envelope.")
+    known = {
+        item["id"]: item for item in (evidence or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    design_kinds = {
+        "design_goal", "design_constraint", "confirmed_decision", "confirmed_inclination",
+    }
+    concrete_kinds = {
+        "verified_map_diff", "verified_stage_rows", "solver_comparison", "play_evidence",
+    }
+    expected_direction_ids = [
+        item["id"] for item in (evidence or [])
+        if isinstance(item, dict) and item.get("kind") in design_kinds and item.get("id")
+    ]
+    raw_comparisons = payload.get("comparisons")
+    if not isinstance(raw_comparisons, list):
+        raise ValueError("The manual-edit conflict classification requires comparisons.")
+    comparisons = []
+    seen_direction_ids = set()
+    for raw in raw_comparisons:
+        if not isinstance(raw, dict) or set(raw) != {
+            "confirmedDirectionId", "relation", "evidenceIds", "explanation"
+        }:
+            raise ValueError("A manual-edit direction comparison has an invalid envelope.")
+        direction_id = raw.get("confirmedDirectionId")
+        if (
+            direction_id not in known
+            or known[direction_id].get("kind") not in design_kinds
+            or direction_id in seen_direction_ids
+        ):
+            raise ValueError("A manual-edit comparison must bind one unique confirmed direction.")
+        relation = raw.get("relation")
+        if relation not in {"conflict", "aligned", "tradeoff", "unrelated", "unclear"}:
+            raise ValueError("A manual-edit direction comparison has an invalid relation.")
+        evidence_ids = list(dict.fromkeys(raw.get("evidenceIds") or []))[:12]
+        if any(
+            not isinstance(item, str)
+            or item not in known
+            or known[item].get("kind") not in concrete_kinds
+            for item in evidence_ids
+        ):
+            raise ValueError("A manual-edit comparison cites unknown evidence.")
+        if not any(known[item].get("kind") in concrete_kinds for item in evidence_ids):
+            raise ValueError("Every manual-edit comparison must cite concrete edit evidence.")
+        explanation = str(raw.get("explanation") or "").strip()
+        if not explanation:
+            raise ValueError("Every manual-edit comparison requires an explanation.")
+        seen_direction_ids.add(direction_id)
+        comparisons.append({
+            "confirmedDirectionId": direction_id,
+            "relation": relation,
+            "evidenceIds": evidence_ids,
+            "explanation": explanation[:800],
+        })
+    if seen_direction_ids != set(expected_direction_ids):
+        raise ValueError("Kimi must assess every active confirmed design direction exactly once.")
+    conflicts = [item for item in comparisons if item["relation"] == "conflict"]
+    verdict = (
+        "conflict" if conflicts
+        else "unclear" if any(item["relation"] == "unclear" for item in comparisons)
+        else "no_conflict"
+    )
+    relevant = conflicts if conflicts else comparisons
+    direction_ids = [item["confirmedDirectionId"] for item in relevant]
+    effect_ids = list(dict.fromkeys(
+        evidence_id
+        for item in relevant
+        for evidence_id in item["evidenceIds"]
+    ))
+    return {
+        "verdict": verdict,
+        "decisionSource": "kimi_adjudication",
+        "confirmedDirectionIds": direction_ids,
+        "effectEvidenceIds": effect_ids,
+        "relation": "\n".join(item["explanation"] for item in relevant)[:1600],
+        "solverDelta": _manual_edit_solver_delta(evidence),
+        "comparisons": comparisons,
+    }
+
+
+def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
+    design_kinds = {
+        "design_goal", "design_constraint", "confirmed_decision", "confirmed_inclination",
+    }
+    concrete_kinds = {
+        "verified_map_diff", "verified_stage_rows", "solver_comparison", "play_evidence",
+    }
+    direction_ids = [
+        item["id"] for item in (evidence or [])
+        if isinstance(item, dict) and item.get("kind") in design_kinds and item.get("id")
+    ]
+    has_concrete = any(
+        isinstance(item, dict) and item.get("kind") in concrete_kinds
+        for item in (evidence or [])
+    )
+    if not direction_ids or not has_concrete:
+        return {
+            "verdict": "unrelated",
+            "decisionSource": "deterministic_no_comparable_evidence",
+            "confirmedDirectionIds": [],
+            "effectEvidenceIds": [],
+            "relation": "no_comparable_confirmed_direction_and_effect",
+            "solverDelta": _manual_edit_solver_delta(evidence),
+            "comparisons": [],
+        }
+
+    api_key, base_url = _llm_credentials()
+    if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR", "The configured LLM API key is missing.",
+            request_id, False, 0, 503,
+        )
+    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    messages = [{
+        "role": "system",
+        "content": (
+            "You are the Kimi K2.6 manual-edit conflict adjudicator. Decide only whether the "
+            "verified edit conflicts with each active explicit/confirmed design direction. Return "
+            "exactly one comparison for every confirmed direction ID, with no omissions or duplicates. "
+            "You—not the server—judge whether each relationship is conflict, aligned, tradeoff, "
+            "unrelated, or unclear. Bind every comparison to concrete map, solver, or play evidence IDs. "
+            "Use conflict when the edit directly reverses a confirmed direction, even if it improves "
+            "another metric; reserve tradeoff for competing effects without a direct reversal. "
+            "Aesthetic difference alone is not conflict. Solver improvement may coexist with conflict "
+            "and must not erase a directional contradiction. Use unclear when evidence is insufficient. "
+            f"Write each explanation in {response_language}. Confirmed direction IDs: "
+            + json.dumps(direction_ids, ensure_ascii=False)
+            + ". Evidence:\n"
+            + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+        ),
+    }]
+    last_error = None
+    for attempt, cap in enumerate((25.0, 15.0), start=1):
+        raw_content = None
+        remaining = _remaining_until(deadline)
+        if remaining < MIN_RETRY_BUDGET_SECONDS:
+            break
+        timeout_seconds = min(cap, remaining)
+        try:
+            response = asyncio.run(asyncio.wait_for(
+                _request_completion(
+                    api_key, base_url, KIMI_MODEL, messages,
+                    MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS,
+                    timeout_seconds,
+                    task="manual_edit_conflict_classification",
+                ),
+                timeout=timeout_seconds,
+            ))
+            choice = response.choices[0]
+            if str(getattr(choice, "finish_reason", "") or "") == "length":
+                raise ValueError("The manual-edit conflict classification reached its output limit.")
+            raw_content = str(choice.message.content or "")
+            return _validate_manual_edit_conflict_classification(
+                json.loads(raw_content), evidence
+            )
+        except asyncio.TimeoutError:
+            last_error = LLMServiceError(
+                "UPSTREAM_TIMEOUT",
+                "Kimi did not complete the manual-edit conflict classification in time.",
+                request_id, True, attempt, 504,
+            )
+        except LLMServiceError:
+            raise
+        except Exception as exception:
+            last_error = classify_exception(exception, request_id, attempt)
+            last_error.retryable = True
+            if raw_content and attempt < 2:
+                messages.extend([
+                    {"role": "assistant", "content": raw_content},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your classification failed server validation: "
+                            f"{exception}. Return a corrected JSON object that assesses every "
+                            "confirmed direction exactly once and cites only concrete evidence IDs."
+                        ),
+                    },
+                ])
+    if last_error is not None:
+        raise last_error
+    raise LLMServiceError(
+        "UPSTREAM_TIMEOUT",
+        "Kimi did not complete the manual-edit conflict classification in time.",
+        request_id, True, 0, 504,
     )
 
 
@@ -2996,6 +3290,7 @@ def _validate_manual_edit_pair_payload(
     solver_metrics,
     stage_context,
     evidence,
+    conflict_decision,
     request_id,
     attempts_used,
     model,
@@ -3005,6 +3300,13 @@ def _validate_manual_edit_pair_payload(
         "openingMessage", "assessment", "reviewMessage", "conflict"
     }:
         raise ValueError("The manual-edit assessment pair has an invalid envelope.")
+
+    conflict = payload.get("conflict")
+    requires_conflict = (conflict_decision or {}).get("verdict") == "conflict"
+    if requires_conflict and conflict is None:
+        raise ValueError("The frozen manual-edit conflict decision requires a discussion card.")
+    if not requires_conflict and conflict is not None:
+        raise ValueError("The frozen manual-edit review decision requires conflict to be null.")
 
     opening_payload = {
         "assistantMessage": payload.get("openingMessage"),
@@ -3051,7 +3353,6 @@ def _validate_manual_edit_pair_payload(
     if review_message.count("?") + review_message.count("\uFF1F"):
         raise ValueError("The manual-edit review body must remain declarative.")
 
-    conflict = payload.get("conflict")
     disagreement = None
     cited_evidence_ids = []
     if conflict is not None:
@@ -3071,10 +3372,15 @@ def _validate_manual_edit_pair_payload(
         ):
             raise ValueError("A manual-edit conflict cites unknown evidence.")
         cited_evidence_ids = list(dict.fromkeys(cited_evidence_ids))[:12]
+        required_evidence_ids = set(
+            (conflict_decision or {}).get("confirmedDirectionIds") or []
+        ).union((conflict_decision or {}).get("effectEvidenceIds") or [])
+        if not required_evidence_ids.issubset(set(cited_evidence_ids)):
+            raise ValueError("The discussion card must cite the frozen conflict evidence.")
         concrete_ids = {
             item["id"] for item in evidence
             if item.get("kind") in {
-                "verified_map_diff", "solver_comparison", "play_evidence"
+                "verified_map_diff", "verified_stage_rows", "solver_comparison", "play_evidence"
             }
         }
         if not concrete_ids.intersection(cited_evidence_ids):
@@ -3112,7 +3418,17 @@ def _validate_manual_edit_pair_payload(
         "discussionCardMode": "disagreement_only",
         "manualEditReview": {
             "evidenceIds": cited_evidence_ids,
-            "outcome": "conflict" if disagreement else "no_conflict",
+            "outcome": (conflict_decision or {}).get("verdict", "no_conflict"),
+            "decisionSource": (conflict_decision or {}).get("decisionSource"),
+            "confirmedDirectionIds": (
+                (conflict_decision or {}).get("confirmedDirectionIds") or []
+            ),
+            "effectEvidenceIds": (
+                (conflict_decision or {}).get("effectEvidenceIds") or []
+            ),
+            "relation": (conflict_decision or {}).get("relation"),
+            "solverDelta": (conflict_decision or {}).get("solverDelta") or {},
+            "comparisons": (conflict_decision or {}).get("comparisons") or [],
         },
     }
     grounding_texts = [review_message]
@@ -3170,6 +3486,15 @@ def _generate_manual_edit_assessment_pair(
     evidence = _manual_edit_review_evidence(
         stage_context, solver_metrics, play_summary
     )
+    started_at = time.monotonic()
+    deadline = _request_deadline(started_at)
+    conflict_decision = _classify_manual_edit_conflict(
+        evidence,
+        language,
+        f"{request_id}:manual-conflict",
+        deadline,
+    )
+    requires_conflict = conflict_decision.get("verdict") == "conflict"
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     current_snapshot = _stage_snapshot_for_prompt(rows, stage_context)
     progress = (stage_context or {}).get("progressContext") or {}
@@ -3177,9 +3502,24 @@ def _generate_manual_edit_assessment_pair(
         "changeSummary": (stage_context or {}).get("changeSummary"),
         "evidence": evidence,
         "confirmedDesignDirectionAvailable": _manual_edit_has_design_evidence(evidence),
+        "conflictDecision": conflict_decision,
         "stageLineage": progress.get("stageLineage", [])[-12:],
         "rejectedDecisions": progress.get("rejectedDecisions", [])[-12:],
     }
+    conflict_instruction = (
+        "The conflict decision is frozen as conflict. conflict must be a non-null object and must "
+        "cite every ID in conflictDecision.confirmedDirectionIds and conflictDecision.effectEvidenceIds. "
+        "In your own natural language, remind the designer that this edit moves against a previously "
+        "confirmed direction. You may positively describe verified solver or play improvements, but they "
+        "do not cancel the disagreement. Warmly present two available paths: manually revise the Stage "
+        "again, or continue discussing the changed design priority with me. Let nextQuestion naturally "
+        "invite that choice or explanation. Do not use a stock sentence or a fixed response template."
+        if requires_conflict
+        else
+        "The frozen decision does not establish a conflict. conflict must be null. Describe any verified "
+        "alignment, trade-off, uncertainty, or improvement in your own natural language without inventing "
+        "a disagreement."
+    )
     messages = [{
         "role": "system",
         "content": (
@@ -3197,12 +3537,10 @@ def _generate_manual_edit_assessment_pair(
             "direction available for comparison and discuss only verified map, solver, or play effects. In that "
             "case, never describe the edit as expressing, supporting, or conflicting with an implicit intention, "
             "preference, pursuit, hope, or goal. The saved edit itself is not proof of motive.\n\n"
-            "Set conflict to null unless server evidence supports a concrete mechanical conflict or a "
-            "specific conflict with an active explicit/confirmed direction. Mere aesthetic difference, an "
-            "unconfirmed hypothesis, or simply using a different edit is not a conflict. When conflict is "
-            "non-null, cite at least one supplied concrete map/solver/play evidence ID and fill one warm "
-            "human_edit discussion: userPosition, aiPosition, a substantive coreDisagreement, and exactly "
-            "one nextQuestion. This produces LET'S DISCUSS only; never produce WARNING. Historical Stage "
+            + conflict_instruction + "\n\n"
+            "When conflict is non-null, fill one warm human_edit discussion: userPosition, aiPosition, "
+            "a substantive coreDisagreement, and exactly one nextQuestion. This produces LET'S DISCUSS "
+            "only; never produce WARNING. Historical Stage "
             "facts are comparison-only. Current-map claims must use only the Current Stage Snapshot. Avoid "
             "coordinates in reviewMessage and conflict fields. assessment.satisfactionQuestion must be null.\n\n"
             f"Current Stage Snapshot (authoritative):\n{current_snapshot}\n\n"
@@ -3210,31 +3548,36 @@ def _generate_manual_edit_assessment_pair(
             + json.dumps(review_context, ensure_ascii=False, separators=(",", ":"))
         ),
     }]
-    started_at = time.monotonic()
-    deadline = _request_deadline(started_at)
     last_error = None
     for attempt in range(1, 3):
+        raw_content = None
         remaining = _remaining_until(deadline)
         if remaining <= 0:
             break
-        timeout_seconds = min(70.0 if attempt == 1 else remaining, remaining)
+        timeout_seconds = min(60.0 if attempt == 1 else remaining, remaining)
         try:
             response = asyncio.run(asyncio.wait_for(
                 _request_completion(
                     api_key, base_url, KIMI_MODEL, messages,
                     MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS,
                     timeout_seconds,
-                    task="manual_edit_assessment_pair",
+                    task=(
+                        "manual_edit_assessment_pair_conflict"
+                        if requires_conflict
+                        else "manual_edit_assessment_pair_no_conflict"
+                    ),
                 ),
                 timeout=timeout_seconds,
             ))
             choice = response.choices[0]
             if str(getattr(choice, "finish_reason", "") or "") == "length":
                 raise ValueError("The manual-edit assessment pair reached its output limit.")
-            payload = json.loads(str(choice.message.content or ""))
+            raw_content = str(choice.message.content or "")
+            payload = json.loads(raw_content)
             latency_ms = int((time.monotonic() - started_at) * 1000)
             return _validate_manual_edit_pair_payload(
                 payload, rows, language, solver_metrics, stage_context, evidence,
+                conflict_decision,
                 request_id, attempt, KIMI_MODEL, latency_ms,
             )
         except asyncio.TimeoutError as exception:
@@ -3248,6 +3591,18 @@ def _generate_manual_edit_assessment_pair(
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
             last_error.retryable = True
+            if raw_content and attempt < 2:
+                messages.extend([
+                    {"role": "assistant", "content": raw_content},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your review failed server validation: "
+                            f"{exception}. Keep the frozen conflict decision unchanged and return "
+                            "a corrected complete JSON object."
+                        ),
+                    },
+                ])
     if last_error is not None:
         raise last_error
     raise LLMServiceError(

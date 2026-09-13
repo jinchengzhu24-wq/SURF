@@ -1320,6 +1320,60 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(context["intentHypotheses"], [])
         self.assertEqual(json.loads(row["payload_json"])["kind"], "manual_edit")
 
+    def test_new_manual_stage_closes_prior_human_edit_disagreement_only_for_child(self):
+        version_id = self.read_session()["currentVersionId"]
+        disagreement = {
+            "status": "active",
+            "subject": "human_edit",
+            "userPosition": "Open the center for a shorter route.",
+            "aiPosition": "Keep the confirmed internal-wall direction.",
+            "coreDisagreement": "Whether route fluidity should replace the confirmed wall direction.",
+            "nextQuestion": "Would you rather revise the map or discuss that trade-off?",
+            "resolution": None,
+            "displayCard": True,
+        }
+        with repository.connect(immediate=True) as database:
+            context = repository.load_design_context(
+                database, self.session_id, version_id
+            )
+            context["activeDisagreement"] = disagreement
+            repository.save_design_context(database, version_id, context)
+
+        response = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": version_id,
+                "idempotencyKey": "manual-reedit-closes-prior-card",
+                "summary": "Try a new manual layout.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        child_id = response.json()["currentVersionId"]
+        with repository.connect() as database:
+            parent_context = repository.load_design_context(
+                database, self.session_id, version_id
+            )
+            child_context = repository.load_design_context(
+                database, self.session_id, child_id
+            )
+            event_row = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'disagreement_resolved'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (self.session_id,),
+            ).fetchone()
+
+        self.assertEqual(parent_context["activeDisagreement"], disagreement)
+        self.assertIsNone(child_context["activeDisagreement"])
+        event = json.loads(event_row["payload_json"])
+        self.assertEqual(event["versionId"], version_id)
+        self.assertEqual(event["disagreement"]["resolutionMode"], "manual_reedit")
+        self.assertFalse(event["disagreement"]["displayCard"])
+
     def test_opening_and_first_user_turn_sync_as_three_part_record(self):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(
@@ -4784,6 +4838,24 @@ class CoCreationSessionTests(unittest.TestCase):
                     "resolution": None,
                 },
                 "discussionCardMode": "disagreement_only",
+                "manualEditReview": {
+                    "outcome": "conflict",
+                    "evidenceIds": ["confirmed_inclination-1", "diff-1"],
+                    "decisionSource": "kimi_adjudication",
+                    "confirmedDirectionIds": ["confirmed_inclination-1"],
+                    "effectEvidenceIds": ["diff-1"],
+                    "relation": "The edit moves against the confirmed direction.",
+                    "solverDelta": {
+                        "parentSolutionSteps": 29,
+                        "currentSolutionSteps": 21,
+                    },
+                    "comparisons": [{
+                        "confirmedDirectionId": "confirmed_inclination-1",
+                        "relation": "conflict",
+                        "evidenceIds": ["diff-1"],
+                        "explanation": "The edit reverses the confirmed direction.",
+                    }],
+                },
             },
         )
         execution = LLMExecutionResult(
@@ -4826,6 +4898,21 @@ class CoCreationSessionTests(unittest.TestCase):
             for cue in review_turn["guidance"].get("uiCues", [])
         ))
         self.assertEqual(assessed.json()["currentVersionId"], stage_id)
+        with repository.connect() as database:
+            event_row = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'human_edit_reviewed'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (self.session_id,),
+            ).fetchone()
+        event = json.loads(event_row["payload_json"])
+        self.assertEqual(event["reviewOutcome"], "conflict")
+        self.assertEqual(event["decisionSource"], "kimi_adjudication")
+        self.assertEqual(event["confirmedDirectionIds"], ["confirmed_inclination-1"])
+        self.assertEqual(event["effectEvidenceIds"], ["diff-1"])
+        self.assertEqual(event["solverDelta"]["currentSolutionSteps"], 21)
 
     def test_chat_patch_stays_hidden_and_cannot_create_ordinary_questions(self):
         version_id = self.read_session()["currentVersionId"]
