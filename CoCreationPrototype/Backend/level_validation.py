@@ -11,6 +11,15 @@ ALLOWED_TILES = frozenset(" #.@pst")
 WALKABLE_TILES = frozenset(".pst")
 MAX_SEARCH_STATES = 300_000
 ENTITY_BINDINGS_SCHEMA_VERSION = 1
+TILE_LEGEND = {
+    " ": "void",
+    "#": "wall",
+    ".": "floor",
+    "@": "water",
+    "p": "player",
+    "s": "box",
+    "t": "target",
+}
 
 
 class LevelValidationError(ValueError):
@@ -926,6 +935,7 @@ def build_map_facts(rows, before_rows=None, entity_bindings=None):
 
     facts = {
         "schemaVersion": 1,
+        "legend": dict(TILE_LEGEND),
         "dimensions": {"rows": HEIGHT, "columns": WIDTH},
         "mapFingerprint": _rows_fingerprint(normalized),
         "entityBindingFingerprint": entity_binding_fingerprint(bindings),
@@ -1039,6 +1049,7 @@ def build_stage_snapshot(
     )
     snapshot = {
         "schemaVersion": 1,
+        "legend": dict(facts["legend"]),
         "versionId": version_id,
         "stageNumber": stage_number,
         "rows": list(normalized),

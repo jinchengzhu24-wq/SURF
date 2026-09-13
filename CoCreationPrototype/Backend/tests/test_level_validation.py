@@ -128,6 +128,8 @@ class EntityBindingTests(unittest.TestCase):
         self.assertEqual(snapshot["stageNumber"], 3)
         self.assertEqual(snapshot["dimensions"], {"rows": 10, "columns": 12})
         self.assertEqual(snapshot["rows"], IDENTITY_ROWS)
+        self.assertEqual(snapshot["legend"]["@"], "water")
+        self.assertEqual(snapshot["legend"]["p"], "player")
         self.assertEqual(snapshot["mapFingerprint"], bindings["mapFingerprint"])
         self.assertEqual(
             snapshot["entityBindingFingerprint"], bindings["bindingFingerprint"]

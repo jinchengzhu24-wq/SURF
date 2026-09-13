@@ -2266,9 +2266,12 @@ async function ensureAssessment(versionId) {
             body: { idempotencyKey: uniqueId("assessment") },
             timeoutMs: LLM_REQUEST_TIMEOUT_MS
         });
+        if (state.retryAction?.assessmentVersionId === versionId) hideNotice();
         render();
     } catch (error) {
-        showError(error, () => ensureAssessment(versionId));
+        const retryAction = () => ensureAssessment(versionId);
+        retryAction.assessmentVersionId = versionId;
+        showError(error, retryAction);
     } finally {
         state.assessing.delete(versionId);
     }

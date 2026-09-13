@@ -27,9 +27,11 @@ from proposal_search import (
     validate_revision_plan_against_map,
 )
 from level_validation import (
+    TILE_LEGEND,
     build_map_facts,
     build_stage_snapshot,
     minimum_pushes,
+    summarize_verified_diff,
     validate_and_solve,
 )
 from design_context import validate_design_context_patch
@@ -2914,7 +2916,9 @@ def _validate_entity_coordinate_claims(text, rows, *, entity_bindings=None):
             )
 
 
-def _manual_edit_review_evidence(stage_context, solver_metrics, play_summary):
+def _manual_edit_review_evidence(
+    stage_context, solver_metrics, play_summary, language="en"
+):
     """Build bounded, server-owned evidence that a manual-edit review may cite."""
     context = stage_context or {}
     evidence = []
@@ -2931,7 +2935,14 @@ def _manual_edit_review_evidence(stage_context, solver_metrics, play_summary):
         evidence.append({
             "id": f"diff-{index}",
             "kind": "verified_map_diff",
-            "fact": f"row {row}, column {column}: {before!r} -> {after!r}",
+            "fact": {
+                "row": row,
+                "column": column,
+                "beforeSymbol": before,
+                "beforeTile": TILE_LEGEND.get(before, "unknown"),
+                "afterSymbol": after,
+                "afterTile": TILE_LEGEND.get(after, "unknown"),
+            },
         })
 
     before_rows = context.get("beforeRows")
@@ -2943,6 +2954,21 @@ def _manual_edit_review_evidence(stage_context, solver_metrics, play_summary):
             "fact": {
                 "parentRows": [str(row) for row in before_rows],
                 "currentRows": [str(row) for row in after_rows],
+            },
+        })
+    change_summary = context.get("changeSummary")
+    verified_diff = str(context.get("verifiedDiff") or "").strip()
+    if isinstance(before_rows, list) and isinstance(after_rows, list):
+        verified_diff = summarize_verified_diff(
+            before_rows, after_rows, language=language
+        )
+    if isinstance(change_summary, dict) or verified_diff:
+        evidence.append({
+            "id": "verified-change-summary",
+            "kind": "verified_change_summary",
+            "fact": {
+                "structured": change_summary if isinstance(change_summary, dict) else {},
+                "description": verified_diff[:1600],
             },
         })
 
@@ -3079,7 +3105,8 @@ def _validate_manual_edit_conflict_classification(payload, evidence):
         "design_goal", "design_constraint", "confirmed_decision", "confirmed_inclination",
     }
     concrete_kinds = {
-        "verified_map_diff", "verified_stage_rows", "solver_comparison", "play_evidence",
+        "verified_map_diff", "verified_stage_rows", "verified_change_summary",
+        "solver_comparison", "play_evidence",
     }
     expected_direction_ids = [
         item["id"] for item in (evidence or [])
@@ -3152,11 +3179,13 @@ def _validate_manual_edit_conflict_classification(payload, evidence):
 
 
 def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
+    started_at = time.monotonic()
     design_kinds = {
         "design_goal", "design_constraint", "confirmed_decision", "confirmed_inclination",
     }
     concrete_kinds = {
-        "verified_map_diff", "verified_stage_rows", "solver_comparison", "play_evidence",
+        "verified_map_diff", "verified_stage_rows", "verified_change_summary",
+        "solver_comparison", "play_evidence",
     }
     direction_ids = [
         item["id"] for item in (evidence or [])
@@ -3192,6 +3221,9 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
             "exactly one comparison for every confirmed direction ID, with no omissions or duplicates. "
             "You—not the server—judge whether each relationship is conflict, aligned, tradeoff, "
             "unrelated, or unclear. Bind every comparison to concrete map, solver, or play evidence IDs. "
+            "The map legend is: # wall, . floor, @ water, p player, s box, t target. Never apply "
+            "conventional Sokoban glyph meanings to this project. Treat verified_change_summary as "
+            "the authoritative semantic description of changed tile types when it is present. "
             "Use conflict when the edit directly reverses a confirmed direction, even if it improves "
             "another metric; reserve tradeoff for competing effects without a direct reversal. "
             "Aesthetic difference alone is not conflict. Solver improvement may coexist with conflict "
@@ -3209,6 +3241,16 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
         if remaining < MIN_RETRY_BUDGET_SECONDS:
             break
         timeout_seconds = min(cap, remaining)
+        _log_llm_event(
+            "llm_attempt_started",
+            requestId=request_id,
+            task="manual_edit_conflict_classification",
+            model=KIMI_MODEL,
+            attempt=attempt,
+            maxAttempts=2,
+            timeoutSeconds=round(timeout_seconds, 3),
+            responseMode="json_schema",
+        )
         try:
             response = asyncio.run(asyncio.wait_for(
                 _request_completion(
@@ -3223,20 +3265,68 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
             if str(getattr(choice, "finish_reason", "") or "") == "length":
                 raise ValueError("The manual-edit conflict classification reached its output limit.")
             raw_content = str(choice.message.content or "")
-            return _validate_manual_edit_conflict_classification(
+            decision = _validate_manual_edit_conflict_classification(
                 json.loads(raw_content), evidence
             )
+            _log_llm_event(
+                "llm_request_completed",
+                requestId=request_id,
+                task="manual_edit_conflict_classification",
+                outcome="success",
+                model=KIMI_MODEL,
+                attemptsUsed=attempt,
+                latencyMs=int((time.monotonic() - started_at) * 1000),
+                verdict=decision.get("verdict"),
+                comparisonCount=len(decision.get("comparisons") or []),
+            )
+            return decision
         except asyncio.TimeoutError:
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
                 "Kimi did not complete the manual-edit conflict classification in time.",
                 request_id, True, attempt, 504,
             )
-        except LLMServiceError:
+            _log_llm_event(
+                "llm_attempt_failed",
+                requestId=request_id,
+                task="manual_edit_conflict_classification",
+                model=KIMI_MODEL,
+                attempt=attempt,
+                maxAttempts=2,
+                code=last_error.code,
+                retryable=True,
+                latencyMs=int((time.monotonic() - started_at) * 1000),
+                validationReason="The Kimi request exceeded the classification time budget.",
+            )
+        except LLMServiceError as exception:
+            _log_llm_event(
+                "llm_attempt_failed",
+                requestId=request_id,
+                task="manual_edit_conflict_classification",
+                model=KIMI_MODEL,
+                attempt=attempt,
+                maxAttempts=2,
+                code=exception.code,
+                retryable=exception.retryable,
+                latencyMs=int((time.monotonic() - started_at) * 1000),
+                validationReason=_safe_validation_reason(exception),
+            )
             raise
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
             last_error.retryable = True
+            _log_llm_event(
+                "llm_attempt_failed",
+                requestId=request_id,
+                task="manual_edit_conflict_classification",
+                model=KIMI_MODEL,
+                attempt=attempt,
+                maxAttempts=2,
+                code=last_error.code,
+                retryable=True,
+                latencyMs=int((time.monotonic() - started_at) * 1000),
+                validationReason=_safe_validation_reason(exception),
+            )
             if raw_content and attempt < 2:
                 messages.extend([
                     {"role": "assistant", "content": raw_content},
@@ -3380,7 +3470,8 @@ def _validate_manual_edit_pair_payload(
         concrete_ids = {
             item["id"] for item in evidence
             if item.get("kind") in {
-                "verified_map_diff", "verified_stage_rows", "solver_comparison", "play_evidence"
+                "verified_map_diff", "verified_stage_rows", "verified_change_summary",
+                "solver_comparison", "play_evidence"
             }
         }
         if not concrete_ids.intersection(cited_evidence_ids):
@@ -3484,7 +3575,7 @@ def _generate_manual_edit_assessment_pair(
             request_id, False, 0, 503,
         )
     evidence = _manual_edit_review_evidence(
-        stage_context, solver_metrics, play_summary
+        stage_context, solver_metrics, play_summary, language
     )
     started_at = time.monotonic()
     deadline = _request_deadline(started_at)
@@ -3533,6 +3624,9 @@ def _generate_manual_edit_assessment_pair(
             "with active explicit/confirmed design directions and the bounded Stage lineage. Explain where "
             "the edit aligns, shifts, or creates a trade-off. Do not invent a motive, proposal, map change, "
             "question, or warning card. Do not print evidence IDs or raw tile transitions in visible prose.\n\n"
+            "This project's tile legend is # wall, . floor, @ water, p player, s box, t target. "
+            "Never reinterpret these glyphs using another Sokoban convention. The server's verified change "
+            "summary and named beforeTile/afterTile fields are authoritative for changed tile types.\n\n"
             "If confirmedDesignDirectionAvailable is false, explicitly say that there is no confirmed design "
             "direction available for comparison and discuss only verified map, solver, or play effects. In that "
             "case, never describe the edit as expressing, supporting, or conflicting with an implicit intention, "
@@ -3555,6 +3649,17 @@ def _generate_manual_edit_assessment_pair(
         if remaining <= 0:
             break
         timeout_seconds = min(60.0 if attempt == 1 else remaining, remaining)
+        _log_llm_event(
+            "llm_attempt_started",
+            requestId=request_id,
+            task="manual_edit_assessment_pair",
+            model=KIMI_MODEL,
+            attempt=attempt,
+            maxAttempts=2,
+            timeoutSeconds=round(timeout_seconds, 3),
+            responseMode="json_schema",
+            frozenVerdict=conflict_decision.get("verdict"),
+        )
         try:
             response = asyncio.run(asyncio.wait_for(
                 _request_completion(
@@ -3575,22 +3680,73 @@ def _generate_manual_edit_assessment_pair(
             raw_content = str(choice.message.content or "")
             payload = json.loads(raw_content)
             latency_ms = int((time.monotonic() - started_at) * 1000)
-            return _validate_manual_edit_pair_payload(
+            result = _validate_manual_edit_pair_payload(
                 payload, rows, language, solver_metrics, stage_context, evidence,
                 conflict_decision,
                 request_id, attempt, KIMI_MODEL, latency_ms,
             )
+            _log_llm_event(
+                "llm_request_completed",
+                requestId=request_id,
+                task="manual_edit_assessment_pair",
+                outcome="success",
+                model=KIMI_MODEL,
+                attemptsUsed=attempt,
+                latencyMs=latency_ms,
+                frozenVerdict=conflict_decision.get("verdict"),
+                discussionCard=bool(result.secondary_execution.guidance.get("disagreement")),
+            )
+            return result
         except asyncio.TimeoutError as exception:
             last_error = LLMServiceError(
                 "UPSTREAM_TIMEOUT",
                 "Kimi did not complete the manual-edit review before the request deadline.",
                 request_id, True, attempt, 504,
             )
-        except LLMServiceError:
+            _log_llm_event(
+                "llm_attempt_failed",
+                requestId=request_id,
+                task="manual_edit_assessment_pair",
+                model=KIMI_MODEL,
+                attempt=attempt,
+                maxAttempts=2,
+                code=last_error.code,
+                retryable=True,
+                latencyMs=int((time.monotonic() - started_at) * 1000),
+                validationReason="The Kimi request exceeded the manual-review time budget.",
+                frozenVerdict=conflict_decision.get("verdict"),
+            )
+        except LLMServiceError as exception:
+            _log_llm_event(
+                "llm_attempt_failed",
+                requestId=request_id,
+                task="manual_edit_assessment_pair",
+                model=KIMI_MODEL,
+                attempt=attempt,
+                maxAttempts=2,
+                code=exception.code,
+                retryable=exception.retryable,
+                latencyMs=int((time.monotonic() - started_at) * 1000),
+                validationReason=_safe_validation_reason(exception),
+                frozenVerdict=conflict_decision.get("verdict"),
+            )
             raise
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
             last_error.retryable = True
+            _log_llm_event(
+                "llm_attempt_failed",
+                requestId=request_id,
+                task="manual_edit_assessment_pair",
+                model=KIMI_MODEL,
+                attempt=attempt,
+                maxAttempts=2,
+                code=last_error.code,
+                retryable=True,
+                latencyMs=int((time.monotonic() - started_at) * 1000),
+                validationReason=_safe_validation_reason(exception),
+                frozenVerdict=conflict_decision.get("verdict"),
+            )
             if raw_content and attempt < 2:
                 messages.extend([
                     {"role": "assistant", "content": raw_content},

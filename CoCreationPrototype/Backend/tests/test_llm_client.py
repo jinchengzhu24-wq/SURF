@@ -4215,9 +4215,23 @@ class LLMClientTests(unittest.TestCase):
 
     def test_manual_edit_evidence_excludes_unconfirmed_directions_and_keeps_rows(self):
         stage_context = {
-            "diff": [{"x": 1, "y": 1, "before": "#", "after": "."}],
-            "beforeRows": ["###", "#p#", "###"],
-            "afterRows": ["###", ".p#", "###"],
+            "diff": [{"x": 1, "y": 1, "before": "@", "after": "."}],
+            "beforeRows": [
+                "############", "#@.........#", "#..........#", "#..........#",
+                "#..........#", "#..........#", "#..........#", "#..........#",
+                "#..........#", "############",
+            ],
+            "afterRows": [
+                "############", "#..........#", "#..........#", "#..........#",
+                "#..........#", "#..........#", "#..........#", "#..........#",
+                "#..........#", "############",
+            ],
+            "changeSummary": {
+                "components": ["water"],
+                "changedCellCount": 1,
+                "componentCellCounts": {"water": 1},
+            },
+            "verifiedDiff": "Verified actual change: row 2, column 2, water to floor.",
             "evaluatorDesignContext": {
                 "intentHypotheses": [
                     {"status": "confirmed", "statement": "Keep the route compact."},
@@ -4244,6 +4258,7 @@ class LLMClientTests(unittest.TestCase):
             stage_context, {"solvable": True}, {}
         )
         facts = [item.get("fact") for item in evidence]
+        diff_evidence = next(item for item in evidence if item["id"] == "diff-1")
 
         self.assertIn("Keep the route compact.", facts)
         self.assertIn("Keep recovery space.", facts)
@@ -4255,9 +4270,22 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("Add a detour.", facts)
         self.assertNotIn("Avoid water.", facts)
         self.assertNotIn("Move the player.", facts)
+        self.assertEqual(diff_evidence["fact"]["beforeSymbol"], "@")
+        self.assertEqual(diff_evidence["fact"]["beforeTile"], "water")
+        self.assertEqual(diff_evidence["fact"]["afterSymbol"], ".")
+        self.assertEqual(diff_evidence["fact"]["afterTile"], "floor")
         rows_evidence = next(item for item in evidence if item["id"] == "stage-rows")
         self.assertEqual(rows_evidence["fact"]["parentRows"], stage_context["beforeRows"])
         self.assertEqual(rows_evidence["fact"]["currentRows"], stage_context["afterRows"])
+        summary_evidence = next(
+            item for item in evidence if item["id"] == "verified-change-summary"
+        )
+        self.assertEqual(summary_evidence["kind"], "verified_change_summary")
+        self.assertEqual(
+            summary_evidence["fact"]["structured"]["components"], ["water"]
+        )
+        self.assertIn("water", summary_evidence["fact"]["description"])
+        self.assertIn("floor", summary_evidence["fact"]["description"])
 
     def test_manual_edit_adjudicator_rejects_an_omitted_confirmed_direction(self):
         evidence = [
@@ -4332,7 +4360,9 @@ class LLMClientTests(unittest.TestCase):
             "comparisons": [{
                 "confirmedDirectionId": "confirmed_inclination-1",
                 "relation": "conflict",
-                "evidenceIds": ["diff-1", "diff-2", "solver-delta"],
+                "evidenceIds": [
+                    "diff-1", "diff-2", "verified-change-summary", "solver-delta"
+                ],
                 "explanation": (
                     "Removing the walls runs against the confirmed wish for more internal walls, "
                     "although the verified solution becomes shorter."
@@ -4359,7 +4389,8 @@ class LLMClientTests(unittest.TestCase):
             ),
             "conflict": {
                 "evidenceIds": [
-                    "confirmed_inclination-1", "diff-1", "diff-2", "solver-delta"
+                    "confirmed_inclination-1", "diff-1", "diff-2",
+                    "verified-change-summary", "solver-delta"
                 ],
                 "userPosition": "The saved edit opens the passages and makes traversal more fluid.",
                 "aiPosition": "The earlier confirmed direction favored more internal walls and tighter routes.",
@@ -4383,6 +4414,9 @@ class LLMClientTests(unittest.TestCase):
                 {"x": 2, "y": 1, "before": "#", "after": "."},
             ],
             "changeSummary": {"components": ["internalWalls"], "changedCellCount": 2},
+            "verifiedDiff": (
+                "Verified actual changes: two internal wall tiles changed to floor tiles."
+            ),
             "parentValidation": {
                 "solvable": True, "solutionSteps": 29, "solutionPushes": 11,
             },
@@ -4419,6 +4453,9 @@ class LLMClientTests(unittest.TestCase):
             client.chat.completions.calls[2]["response_format"]["json_schema"]["name"],
             "cocreation_manual_edit_assessment_pair_conflict",
         )
+        adjudication_prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+        self.assertIn("@ water", adjudication_prompt)
+        self.assertIn("verified_change_summary", adjudication_prompt)
         retry_messages = client.chat.completions.calls[2]["messages"]
         self.assertIn("frozen conflict decision", retry_messages[-1]["content"])
 
