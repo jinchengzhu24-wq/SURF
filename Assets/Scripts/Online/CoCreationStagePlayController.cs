@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
 
 [DefaultExecutionOrder(-400)]
 public sealed class CoCreationStagePlayController : MonoBehaviour
@@ -35,6 +36,9 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
     private static extern void SokobanNavigateCurrentPage(string url);
+
+    [DllImport("__Internal")]
+    private static extern void SokobanReturnToCoCreationLab(string status);
 #endif
 
     private void Awake()
@@ -233,6 +237,31 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
     private void NavigateToLab(string playReturnStatus)
     {
+        bool returnInsideExistingUnity =
+            CoCreationPlayContext.UsesExistingUnityInstance;
+
+        if (returnInsideExistingUnity)
+        {
+            CoCreationPlayContext.MarkEmbeddedReturnPending();
+            CoCreationPlayContext.Clear();
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+            SokobanReturnToCoCreationLab(playReturnStatus ?? "");
+#endif
+
+            const string entrySceneName = "CoCreation_Entry";
+            if (!Application.CanStreamedLevelBeLoaded(entrySceneName))
+            {
+                Debug.LogError(
+                    "CoCreationStagePlayController: CoCreation_Entry is unavailable."
+                );
+                return;
+            }
+
+            SceneManager.LoadScene(entrySceneName);
+            return;
+        }
+
         string returnUrl = ResolveReturnUrl(playReturnStatus);
         CoCreationPlayContext.Clear();
 

@@ -9,6 +9,14 @@ const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
 const API_PREFIX = window.location.pathname.startsWith("/cocreation")
     ? "/cocreation"
     : "";
+const UNITY_PLAY_BRIDGE_TIMEOUT_MS = 1500;
+const UNITY_ORIGINS = Array.from(new Set([
+    window.location.origin,
+    "http://111.231.136.4",
+    "http://111.231.136.4:8000",
+    "http://127.0.0.1:8000",
+    "http://localhost:8000"
+]));
 const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
 const DISCUSSION_FOCUS_LABEL = "LET'S DISCUSS / 一起聊聊";
 const GUIDANCE_CUE_LABELS = {
@@ -82,6 +90,7 @@ const translations = {
         sendHint: "Enter to send · Shift+Enter for a new line",
         currentLevel: "Current level",
         playStage: "Play this Stage",
+        playOpenedInUnity: "The selected Stage is opening in the existing Unity tab.",
         saveStage: "Save as new Stage",
         discard: "Discard draft",
         continueFromStage: "Continue from this Stage",
@@ -336,6 +345,7 @@ const translations = {
 translations.en.entityLegend = "P: Player · B1/B2: Boxes · T1/T2: Targets · ~: Water";
 translations["zh-CN"].entityLegend = "P\uFF1A\u73A9\u5BB6 \u00B7 B1/B2\uFF1A\u7BB1\u5B50 \u00B7 T1/T2\uFF1A\u76EE\u6807 \u00B7 ~\uFF1A\u6C34\u57DF";
 
+translations["zh-CN"].playOpenedInUnity = "\u6240\u9009 Stage \u6b63\u5728\u539f Unity \u6807\u7b7e\u9875\u4e2d\u6253\u5f00\u3002";
 translations.en.progressTitle = "Co-creation progress";
 translations.en.expressedDirections = "Expressed directions";
 translations.en.noExpressedDirections = "No explicit directions yet.";
@@ -494,6 +504,7 @@ const state = {
     translationInProgress: false,
     translationRemainingCount: 0,
     retryAction: null,
+    unityPlayActive: false,
     activeCoordinateLink: null,
     renderedMessageStageId: null,
     renderedMessageCount: 0,
@@ -622,6 +633,9 @@ elements.cancelFinalizeButton.addEventListener("click", () => elements.finalizeM
 elements.confirmFinalizeButton.addEventListener("click", finalizeSession);
 elements.intentionForm.addEventListener("submit", submitIntention);
 elements.returnUnityButton.addEventListener("click", returnToUnity);
+window.addEventListener("message", event => {
+    void handleUnityBridgeMessage(event);
+});
 window.addEventListener("resize", () => {
     if (state.activeCoordinateLink) requestAnimationFrame(drawActiveCoordinateRoute);
     requestAnimationFrame(updateProgressPanelMaxHeight);
@@ -753,7 +767,9 @@ function renderStages() {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "stage-card";
-        button.disabled = deadlineExpired() || state.translationInProgress;
+        button.disabled = deadlineExpired()
+            || state.translationInProgress
+            || state.unityPlayActive;
         if (version.versionId === state.selectedVersionId) button.classList.add("selected");
         if (version.versionId === state.session.currentVersionId) button.classList.add("current");
         button.addEventListener("click", () => selectVersion(version.versionId));
@@ -2149,13 +2165,14 @@ function updateControls() {
     const proposalFlowStatus = state.session?.proposalFlowState?.status || "inactive";
     const proposalPlanning = proposalFlowStatus === "planning";
     const proposalRetryPending = proposalFlowStatus === "retry_pending";
-    elements.saveStageButton.disabled = !editable || !state.dirty || state.busy;
-    elements.discardDraftButton.disabled = !editable || !state.dirty || state.busy;
+    const interactionBusy = state.busy || state.unityPlayActive;
+    elements.saveStageButton.disabled = !editable || !state.dirty || interactionBusy;
+    elements.discardDraftButton.disabled = !editable || !state.dirty || interactionBusy;
     elements.restoreStageButton.hidden = state.selectedVersionId === state.session.currentVersionId || state.session.status !== "active";
-    elements.restoreStageButton.disabled = state.busy || expired;
-    elements.playButton.disabled = state.busy || expired || state.dirty || pending || !selectedVersion();
-    elements.finalizeButton.disabled = state.busy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
-    elements.messageInput.disabled = state.busy || !editable || intentConflictPending
+    elements.restoreStageButton.disabled = interactionBusy || expired;
+    elements.playButton.disabled = interactionBusy || expired || state.dirty || pending || !selectedVersion();
+    elements.finalizeButton.disabled = interactionBusy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
+    elements.messageInput.disabled = interactionBusy || !editable || intentConflictPending
         || proposalPlanning || proposalRetryPending;
     elements.messageInput.placeholder = intentConflictPending
         ? t("intentConflictPlaceholder")
@@ -2173,16 +2190,16 @@ function updateControls() {
     }
     const proposalActive = state.proposalMode || proposalLocked;
     elements.proposalRequestButton.disabled = (
-        state.busy || !editable || disagreementActive || proposalLocked
+        interactionBusy || !editable || disagreementActive || proposalLocked
         || intentConflictPending
     );
     elements.proposalRequestButton.classList.toggle("is-active", proposalActive);
     elements.proposalRequestButton.setAttribute("aria-pressed", proposalActive ? "true" : "false");
-    elements.sendButton.disabled = state.busy || !editable || intentConflictPending
+    elements.sendButton.disabled = interactionBusy || !editable || intentConflictPending
         || proposalPlanning || proposalRetryPending
         || !elements.messageInput.value.trim();
     document.querySelectorAll(".question-feedback-button").forEach(button => {
-        button.disabled = state.busy || !editable
+        button.disabled = interactionBusy || !editable
             || state.questionFeedbackBusy.has(button.dataset.feedbackKey || "");
     });
     elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
@@ -2454,8 +2471,90 @@ async function playSelectedStage() {
             method: "POST",
             body: { idempotencyKey: uniqueId("play") }
         });
+
+        if (!state.session.demoMode
+            && await tryOpenPlayInExistingUnity(payload.playUrl)) {
+            state.unityPlayActive = true;
+            renderMap();
+            updateControls();
+            showNotice(t("playOpenedInUnity"));
+            return;
+        }
+
         window.location.assign(payload.playUrl);
     });
+}
+
+function tryOpenPlayInExistingUnity(playUrl) {
+    const unityWindow = window.opener;
+    if (!unityWindow || unityWindow.closed) return Promise.resolve(false);
+
+    const requestId = uniqueId("unity_play");
+
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = value => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timeoutId);
+            window.removeEventListener("message", receiveAcknowledgement);
+            resolve(value);
+        };
+        const receiveAcknowledgement = event => {
+            const message = event.data;
+            if (event.source !== unityWindow
+                || !UNITY_ORIGINS.includes(event.origin)
+                || !message
+                || message.type !== "sokoban:cocreation-play-ack"
+                || message.requestId !== requestId) {
+                return;
+            }
+            finish(message.accepted === true);
+        };
+        const timeoutId = window.setTimeout(
+            () => finish(false),
+            UNITY_PLAY_BRIDGE_TIMEOUT_MS
+        );
+
+        window.addEventListener("message", receiveAcknowledgement);
+        const message = {
+            type: "sokoban:cocreation-play-request",
+            requestId,
+            sessionId: state.sessionId,
+            playUrl
+        };
+
+        UNITY_ORIGINS.forEach(origin => {
+            try {
+                unityWindow.postMessage(message, origin);
+            } catch (_error) {
+                // Try the remaining known Unity origins before falling back.
+            }
+        });
+    });
+}
+
+async function handleUnityBridgeMessage(event) {
+    const message = event.data;
+    if (event.source !== window.opener
+        || !UNITY_ORIGINS.includes(event.origin)
+        || !message
+        || message.type !== "sokoban:cocreation-play-return"
+        || message.sessionId !== state.sessionId) {
+        return;
+    }
+
+    try {
+        state.unityPlayActive = false;
+        const enteredWorkspace = await refreshSession();
+        if (enteredWorkspace) {
+            restoreComposerDraft();
+            showPlayReturnNotice(message.status);
+        }
+        window.focus();
+    } catch (error) {
+        showError(error, () => handleUnityBridgeMessage(event));
+    }
 }
 
 async function finalizeSession() {
@@ -2741,7 +2840,11 @@ function editTile(x, y) {
 }
 
 function canEditSelected() {
-    return state.session && state.session.status === "active" && !deadlineExpired() && state.selectedVersionId === state.session.currentVersionId;
+    return state.session
+        && state.session.status === "active"
+        && !state.unityPlayActive
+        && !deadlineExpired()
+        && state.selectedVersionId === state.session.currentVersionId;
 }
 
 function currentPendingProposal() {

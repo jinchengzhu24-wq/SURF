@@ -10,6 +10,9 @@ public static class CoCreationPlayContext
     public static string Language { get; private set; } = "en";
     public static string AttemptToken { get; private set; } = "";
     public static string ReturnUrl { get; private set; } = "";
+    public static bool UsesExistingUnityInstance { get; private set; }
+
+    private static bool embeddedReturnPending;
 
     public static bool IsActive =>
         !string.IsNullOrWhiteSpace(AttemptId)
@@ -17,7 +20,9 @@ public static class CoCreationPlayContext
         && Rows != null
         && Rows.Length == 10;
 
-    public static void Initialize(CoCreationPlayBootstrapResponse response)
+    public static void Initialize(
+        CoCreationPlayBootstrapResponse response,
+        bool usesExistingUnityInstance = false)
     {
         if (response == null || response.rows == null || response.rows.Length != 10)
         {
@@ -32,6 +37,7 @@ public static class CoCreationPlayContext
         Language = response.language == "zh-CN" ? "zh-CN" : "en";
         AttemptToken = response.attemptToken ?? "";
         ReturnUrl = response.returnUrl ?? "";
+        UsesExistingUnityInstance = usesExistingUnityInstance;
     }
 
     public static string ResolveSceneName()
@@ -54,6 +60,19 @@ public static class CoCreationPlayContext
         Language = "en";
         AttemptToken = "";
         ReturnUrl = "";
+        UsesExistingUnityInstance = false;
+    }
+
+    public static void MarkEmbeddedReturnPending()
+    {
+        embeddedReturnPending = true;
+    }
+
+    public static bool ConsumeEmbeddedReturnPending()
+    {
+        bool pending = embeddedReturnPending;
+        embeddedReturnPending = false;
+        return pending;
     }
 
     private static string[] CloneRows(string[] rows)

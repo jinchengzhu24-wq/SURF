@@ -20,7 +20,7 @@ public static class OnlineSceneBootstrap
 
     private static void AttachController(Scene scene)
     {
-        if (scene.name == "Menu"
+        if ((scene.name == "Menu" || scene.name == "CoCreation_Entry")
             && Object.FindObjectOfType<CoCreationPlayBootstrap>() == null)
         {
             GameObject controller = new GameObject("CoCreationPlayBootstrap");

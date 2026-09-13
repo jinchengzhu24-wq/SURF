@@ -8,6 +8,16 @@ mergeInto(LibraryManager.library, {
         url.searchParams.delete('cocreationPlay');
         window.history.replaceState({}, document.title, url.toString());
     },
+    SokobanSetCoCreationPlayBridgeReady: function (ready) {
+        if (window.SokobanSetCoCreationPlayBridgeReady) {
+            window.SokobanSetCoCreationPlayBridgeReady(ready !== 0);
+        }
+    },
+    SokobanReturnToCoCreationLab: function (statusPointer) {
+        if (window.SokobanReturnToCoCreationLab) {
+            window.SokobanReturnToCoCreationLab(UTF8ToString(statusPointer));
+        }
+    },
     SokobanLobbySetOverlayVisible: function (visible) {
         if (window.SokobanSetLobbyOverlayVisible) {
             window.SokobanSetLobbyOverlayVisible(visible !== 0);

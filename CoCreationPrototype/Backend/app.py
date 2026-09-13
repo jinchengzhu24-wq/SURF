@@ -514,7 +514,7 @@ PUBLIC_BASE_URL = os.getenv(
 ).rstrip("/")
 WEBGL_BASE_URL = os.getenv(
     "COCREATION_WEBGL_BASE_URL",
-    "http://111.231.136.4:8000/game/",
+    "http://111.231.136.4/game/",
 )
 ONLINE_MATCH_SYNC_URL = os.getenv(
     "COCREATION_ONLINE_MATCH_SYNC_URL",

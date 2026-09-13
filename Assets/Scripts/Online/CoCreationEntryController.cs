@@ -50,6 +50,28 @@ public sealed class CoCreationEntryController : MonoBehaviour
             return;
         }
 
+        if (CoCreationPlayContext.ConsumeEmbeddedReturnPending())
+        {
+            if (!CoCreationDraftContext.HasSession
+                || !TryBuildResumeLabUrl(
+                    CoCreationDraftContext.SessionId,
+                    out launchUrl))
+            {
+                ApplyFailure(
+                    "The existing co-creation session could not be resumed."
+                );
+                return;
+            }
+
+            SetButtonState(true, "RETURN TO CO-CREATION LAB");
+            SetStatus(
+                "Stage play complete. Continue designing in the existing lab tab.",
+                ReadyStatusColor
+            );
+            trackingRoutine = StartCoroutine(TrackSessionCompletion());
+            return;
+        }
+
         StartCoroutine(CreateSession());
     }
 
@@ -303,6 +325,23 @@ public sealed class CoCreationEntryController : MonoBehaviour
     private bool TryGetCoCreationUrl(out string targetUrl)
     {
         return TryValidateLaunchUrl(coCreationUrl, out targetUrl);
+    }
+
+    private bool TryBuildResumeLabUrl(string sessionId, out string targetUrl)
+    {
+        targetUrl = "";
+
+        if (!TryGetCoCreationUrl(out string baseUrl)
+            || string.IsNullOrWhiteSpace(sessionId)
+            || !Uri.TryCreate(baseUrl, UriKind.Absolute, out Uri baseUri))
+        {
+            return false;
+        }
+
+        UriBuilder builder = new UriBuilder(baseUri);
+        builder.Fragment = "session=" + Uri.EscapeDataString(sessionId);
+        targetUrl = builder.Uri.AbsoluteUri;
+        return true;
     }
 
     private static bool TryValidateLaunchUrl(string value, out string targetUrl)

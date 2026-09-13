@@ -20,18 +20,114 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
     [SerializeField]
     private int requestTimeoutSeconds = 15;
 
+    private bool bootstrapping;
+
 #if UNITY_WEBGL && !UNITY_EDITOR
     [DllImport("__Internal")]
     private static extern void SokobanClearCoCreationPlayQuery();
+
+    [DllImport("__Internal")]
+    private static extern void SokobanSetCoCreationPlayBridgeReady(int ready);
+
+    [DllImport("__Internal")]
+    private static extern void SokobanReturnToCoCreationLab(string status);
 #endif
+
+    private void Awake()
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanSetCoCreationPlayBridgeReady(
+            CoCreationDraftContext.HasDraft
+            && !string.IsNullOrWhiteSpace(CoCreationDraftContext.SessionId)
+                ? 1
+                : 0
+        );
+#endif
+    }
+
+    private void OnDestroy()
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanSetCoCreationPlayBridgeReady(0);
+#endif
+    }
 
     private IEnumerator Start()
     {
-        if (!TryReadQueryValue("cocreationAttempt", out string attemptId)
-            || !TryReadQueryValue("cocreationPlay", out string ticket))
+        string launchUrl = Application.absoluteURL;
+        if (!TryReadQueryValue(launchUrl, "cocreationAttempt", out _)
+            || !TryReadQueryValue(launchUrl, "cocreationPlay", out _))
         {
             yield break;
         }
+
+        yield return BootstrapAndLoad(launchUrl, "", false);
+    }
+
+    public void ReceiveBrowserPlayRequest(string messageJson)
+    {
+        if (bootstrapping)
+        {
+            return;
+        }
+
+        CoCreationBrowserPlayRequest message;
+
+        try
+        {
+            message = JsonUtility.FromJson<CoCreationBrowserPlayRequest>(messageJson);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogWarning(
+                "CoCreationPlayBootstrap: Invalid browser Play message. "
+                + exception.Message
+            );
+            NotifyEmbeddedFailure();
+            return;
+        }
+
+        if (message == null
+            || string.IsNullOrWhiteSpace(message.playUrl)
+            || string.IsNullOrWhiteSpace(message.sessionId)
+            || !string.Equals(
+                message.sessionId,
+                CoCreationDraftContext.SessionId,
+                StringComparison.Ordinal))
+        {
+            Debug.LogWarning(
+                "CoCreationPlayBootstrap: Browser Play message did not match the active session."
+            );
+            NotifyEmbeddedFailure();
+            return;
+        }
+
+        StartCoroutine(
+            BootstrapAndLoad(message.playUrl, message.sessionId, true)
+        );
+    }
+
+    private IEnumerator BootstrapAndLoad(
+        string launchUrl,
+        string expectedSessionId,
+        bool usesExistingUnityInstance)
+    {
+        if (bootstrapping)
+        {
+            yield break;
+        }
+
+        if (!TryReadQueryValue(launchUrl, "cocreationAttempt", out string attemptId)
+            || !TryReadQueryValue(launchUrl, "cocreationPlay", out string ticket))
+        {
+            if (usesExistingUnityInstance)
+            {
+                NotifyEmbeddedFailure();
+            }
+            yield break;
+        }
+
+        bootstrapping = true;
 
         string endpoint = backendBaseUrl.TrimEnd('/')
             + "/api/play-attempts/"
@@ -57,6 +153,11 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
                     + " response="
                     + request.downloadHandler.text
                 );
+                bootstrapping = false;
+                if (usesExistingUnityInstance)
+                {
+                    NotifyEmbeddedFailure();
+                }
                 yield break;
             }
 
@@ -67,7 +168,22 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
                 response = JsonUtility.FromJson<CoCreationPlayBootstrapResponse>(
                     request.downloadHandler.text
                 );
-                CoCreationPlayContext.Initialize(response);
+
+                if (usesExistingUnityInstance
+                    && !string.Equals(
+                        response != null ? response.sessionId : "",
+                        expectedSessionId,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "The Play response belongs to another co-creation session."
+                    );
+                }
+
+                CoCreationPlayContext.Initialize(
+                    response,
+                    usesExistingUnityInstance
+                );
             }
             catch (Exception exception)
             {
@@ -75,12 +191,20 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
                     "CoCreationPlayBootstrap: Invalid Play bootstrap response. "
                     + exception.Message
                 );
+                bootstrapping = false;
+                if (usesExistingUnityInstance)
+                {
+                    NotifyEmbeddedFailure();
+                }
                 yield break;
             }
         }
 
 #if UNITY_WEBGL && !UNITY_EDITOR
-        SokobanClearCoCreationPlayQuery();
+        if (!usesExistingUnityInstance)
+        {
+            SokobanClearCoCreationPlayQuery();
+        }
 #endif
 
         string targetScene = CoCreationPlayContext.ResolveSceneName();
@@ -92,16 +216,23 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
                 + targetScene
             );
             CoCreationPlayContext.Clear();
+            bootstrapping = false;
+            if (usesExistingUnityInstance)
+            {
+                NotifyEmbeddedFailure();
+            }
             yield break;
         }
 
         SceneManager.LoadScene(targetScene);
     }
 
-    private static bool TryReadQueryValue(string key, out string value)
+    private static bool TryReadQueryValue(
+        string absoluteUrl,
+        string key,
+        out string value)
     {
         value = "";
-        string absoluteUrl = Application.absoluteURL;
 
         if (string.IsNullOrWhiteSpace(absoluteUrl)
             || !Uri.TryCreate(absoluteUrl, UriKind.Absolute, out Uri uri))
@@ -134,10 +265,24 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
 
         return false;
     }
+
+    private static void NotifyEmbeddedFailure()
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanReturnToCoCreationLab("load_failed");
+#endif
+    }
 }
 
 [Serializable]
 public sealed class CoCreationPlayBootstrapRequest
 {
     public string ticket;
+}
+
+[Serializable]
+public sealed class CoCreationBrowserPlayRequest
+{
+    public string sessionId;
+    public string playUrl;
 }

@@ -13,6 +13,11 @@ public static class CoCreationDraftContext
         && Rows.Length == 10
         && !string.IsNullOrWhiteSpace(InitialDraftMethod);
 
+    public static bool HasSession =>
+        HasDraft
+        && !string.IsNullOrWhiteSpace(SessionId)
+        && !string.IsNullOrWhiteSpace(IntegrationToken);
+
     public static void Stage(string[] rows, string initialDraftMethod)
     {
         if (rows == null || rows.Length != 10)
