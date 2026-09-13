@@ -794,7 +794,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("intent-conflict-20260911-1", index_response.text)
+        self.assertIn("proposal-flow-20260912-1", index_response.text)
         self.assertIn("languageSetupSwitch", index_response.text)
         self.assertIn("enterSessionButton", index_response.text)
         self.assertIn("proposal-mode-toggle", index_response.text)

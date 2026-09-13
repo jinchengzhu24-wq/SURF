@@ -443,7 +443,7 @@ def build_cocreation_flow_event(room, payload):
                 status_code=400,
                 detail="Co-creation duration is only valid for the final event",
             )
-        if not math.isfinite(duration) or duration < 0 or duration > 600:
+        if not math.isfinite(duration) or duration < 0 or duration > 1200:
             raise HTTPException(
                 status_code=400,
                 detail="Invalid co-creation duration",
@@ -574,7 +574,7 @@ def build_cocreation_flow_event(room, payload):
             "map_diff", "status",
         }
         if node_type not in allowed_node_types or not re.fullmatch(
-            r"[a-z_]{2,64}", node_status
+            r"[a-z0-9_]{2,64}", node_status
         ):
             raise HTTPException(status_code=400, detail="Invalid dashboard node")
         if parent_id:

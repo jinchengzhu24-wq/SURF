@@ -1,4 +1,5 @@
 import json
+import httpx
 import sqlite3
 import sys
 import tempfile
@@ -3135,6 +3136,115 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(sync.call_args.args[3], "message:" + self.session_id + ":message_send_001")
         self.assertEqual(sync.call_args.args[4], self.session_id)
+
+    def test_saved_message_retry_replays_online_sync(self):
+        version_id = self.read_session()["currentVersionId"]
+        reply = LLMExecutionResult(
+            "I would keep the route readable.",
+            1,
+            "sync_retry_message_001",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+            },
+        )
+        saved_error = backend.ApiError(
+            503,
+            "ONLINE_FLOW_SYNC_UNAVAILABLE",
+            "Saved but not synchronized.",
+            retryable=True,
+        )
+        request_body = {
+            "content": "Could this route remain readable?",
+            "baseVersionId": version_id,
+            "idempotencyKey": "sync_retry_message_001",
+        }
+        with patch.object(backend, "generate_chat_reply", return_value=reply), patch.object(
+            backend,
+            "synchronize_turn_with_online_match",
+            side_effect=[saved_error, None],
+        ) as sync:
+            first = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_body,
+            )
+            second = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json=request_body,
+            )
+
+        self.assertEqual(first.status_code, 503, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(sync.call_count, 2)
+        turns = [
+            turn for turn in second.json()["turns"]
+            if turn["requestId"] == "sync_retry_message_001"
+        ]
+        self.assertEqual(len(turns), 2)
+
+    def test_saved_finalization_retry_replays_online_sync(self):
+        version_id = self.read_session()["currentVersionId"]
+        saved_error = backend.ApiError(
+            503,
+            "ONLINE_FLOW_SYNC_UNAVAILABLE",
+            "Saved but not synchronized.",
+            retryable=True,
+        )
+        request_body = {
+            "baseVersionId": version_id,
+            "idempotencyKey": "sync_retry_final_001",
+        }
+        with patch.object(
+            backend,
+            "synchronize_version_with_online_match",
+            side_effect=[saved_error, None],
+        ) as sync:
+            first = self.client.post(
+                f"/api/sessions/{self.session_id}/finalize",
+                json=request_body,
+            )
+            second = self.client.post(
+                f"/api/sessions/{self.session_id}/finalize",
+                json=request_body,
+            )
+
+        self.assertEqual(first.status_code, 503, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["status"], "awaiting_intention")
+        self.assertEqual(sync.call_count, 2)
+
+    def test_upstream_validation_rejection_is_not_reported_as_retryable_outage(self):
+        request = httpx.Request("POST", "http://online.example/cocreation-events")
+        response = httpx.Response(
+            400,
+            request=request,
+            json={"detail": "Invalid dashboard node"},
+        )
+        error = httpx.HTTPStatusError(
+            "Client error",
+            request=request,
+            response=response,
+        )
+
+        api_error = backend._online_sync_api_error(
+            error,
+            rejected_code="ONLINE_FLOW_SYNC_REJECTED",
+            unavailable_code="ONLINE_FLOW_SYNC_UNAVAILABLE",
+            saved_item="co-creation change",
+        )
+
+        self.assertEqual(api_error.status_code, 502)
+        self.assertEqual(api_error.code, "ONLINE_FLOW_SYNC_REJECTED")
+        self.assertFalse(api_error.retryable)
+        self.assertEqual(api_error.details["upstreamStatus"], 400)
+        self.assertEqual(
+            api_error.details["upstreamDetail"],
+            "Invalid dashboard node",
+        )
 
     def test_expired_deadline_locks_edits_and_finalizes_the_current_draft(self):
         with repository.connect(immediate=True) as database:

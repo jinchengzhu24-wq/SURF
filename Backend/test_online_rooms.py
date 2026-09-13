@@ -903,7 +903,7 @@ class OnlineRoomTests(unittest.TestCase):
             response = self.client.post(endpoint, json=final, headers=headers)
             invalid_value = self.client.post(
                 endpoint,
-                json={**final, "eventId": "final:invalid", "coCreationDurationSeconds": 601},
+                json={**final, "eventId": "final:invalid", "coCreationDurationSeconds": 1201},
                 headers=headers,
             )
             invalid_event = self.client.post(

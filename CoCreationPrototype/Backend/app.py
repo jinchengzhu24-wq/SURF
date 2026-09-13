@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -105,6 +106,9 @@ from design_context import (
     set_active_disagreement,
     sanitize_user_design_text,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _intent_claim_key(claim):
@@ -2485,7 +2489,13 @@ def _send_message_locked(
         ).fetchone()
 
         if prior_assistant is not None:
-            return serialize_session(database, session_id)
+            session_payload = serialize_session(database, session_id)
+            # The first request may have committed both turns before online
+            # synchronization failed. Release the SQLite write transaction,
+            # then retry the same immutable dashboard projection.
+            database.commit()
+            synchronize_turn_with_online_match(session_id, payload.idempotencyKey)
+            return session_payload
 
         if payload.action in {"none", "continue_challenge"}:
             require_current_base(session, payload.baseVersionId)
@@ -5825,30 +5835,30 @@ def finalize_session(
     deadline_stage_version_id = None
     with connect(immediate=True) as database:
         session = require_browser_session(database, session_id, access_cookie)
-        if session["status"] != "active":
-            raise ApiError(409, "SESSION_LOCKED", "This co-creation session is no longer editable.")
-        deadline_expired = session_deadline_expired(session)
-        require_current_base(session, payload.baseVersionId)
-        pending = database.execute(
-            """
-            SELECT COUNT(*) FROM change_proposals
-            WHERE session_id = ? AND status = 'pending'
-            """,
-            (session_id,),
-        ).fetchone()[0]
-
-        if pending and not deadline_expired:
-            raise ApiError(409, "PENDING_PROPOSAL", "Decide the pending proposal first.")
-
         existing = database.execute(
             """
-            SELECT id FROM designer_decisions
+            SELECT id, decision_type, version_id FROM designer_decisions
             WHERE session_id = ? AND idempotency_key = ?
             """,
             (session_id, payload.idempotencyKey),
         ).fetchone()
 
         if existing is None:
+            if session["status"] != "active":
+                raise ApiError(409, "SESSION_LOCKED", "This co-creation session is no longer editable.")
+            deadline_expired = session_deadline_expired(session)
+            require_current_base(session, payload.baseVersionId)
+            pending = database.execute(
+                """
+                SELECT COUNT(*) FROM change_proposals
+                WHERE session_id = ? AND status = 'pending'
+                """,
+                (session_id,),
+            ).fetchone()[0]
+
+            if pending and not deadline_expired:
+                raise ApiError(409, "PENDING_PROPOSAL", "Decide the pending proposal first.")
+
             final_version_id = payload.baseVersionId
             if deadline_expired and payload.rows is not None:
                 validation = _solve_or_api_error(payload.rows)
@@ -5882,7 +5892,23 @@ def finalize_session(
             if deadline_expired:
                 record_event(database, session_id, "deadline_finalized", {"versionId": final_version_id}, now)
         else:
-            final_version_id = session["final_version_id"] or payload.baseVersionId
+            if existing["decision_type"] != "finalize":
+                raise ApiError(
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                    "The request key was already used for another decision.",
+                )
+            final_version_id = (
+                existing["version_id"]
+                or session["final_version_id"]
+                or payload.baseVersionId
+            )
+            if final_version_id != payload.baseVersionId:
+                raise ApiError(
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                    "The finalization key was already used for another Stage.",
+                )
 
         session_payload = serialize_session(database, session_id)
 
@@ -6000,12 +6026,60 @@ def synchronize_final_intention_with_online_match(
         )
         response.raise_for_status()
     except httpx.HTTPError as error:
-        raise ApiError(
-            503,
-            "ONLINE_INTENTION_SYNC_UNAVAILABLE",
-            "The final design intention was saved but cannot yet be synchronized to the online match. Please retry.",
-            retryable=True,
+        raise _online_sync_api_error(
+            error,
+            rejected_code="ONLINE_INTENTION_SYNC_REJECTED",
+            unavailable_code="ONLINE_INTENTION_SYNC_UNAVAILABLE",
+            saved_item="final design intention",
         ) from error
+
+
+def _online_sync_api_error(
+    error,
+    *,
+    rejected_code,
+    unavailable_code,
+    saved_item,
+):
+    """Keep permanent upstream rejections distinct from retryable outages."""
+    response = error.response if isinstance(error, httpx.HTTPStatusError) else None
+    upstream_status = response.status_code if response is not None else None
+    upstream_detail = ""
+    if response is not None:
+        try:
+            body = response.json()
+            upstream_detail = str(
+                body.get("detail") or body.get("message") or ""
+            ).strip()
+        except (ValueError, AttributeError):
+            upstream_detail = str(response.text or "").strip()
+        upstream_detail = upstream_detail[:500]
+
+    logger.warning(
+        "Online match synchronization failed: status=%s detail=%s error=%s",
+        upstream_status,
+        upstream_detail,
+        type(error).__name__,
+    )
+    details = {
+        "upstreamStatus": upstream_status,
+        "upstreamDetail": upstream_detail or None,
+    }
+    if upstream_status is not None and 400 <= upstream_status < 500 and upstream_status not in {408, 429}:
+        return ApiError(
+            502,
+            rejected_code,
+            f"The {saved_item} was saved, but the online match rejected its synchronization data.",
+            retryable=False,
+            details=details,
+        )
+    return ApiError(
+        503,
+        unavailable_code,
+        f"The {saved_item} was saved but cannot yet be synchronized to the online match. Please retry.",
+        retryable=True,
+        details=details,
+    )
 
 
 def synchronize_cocreation_event_with_online_match(session, event):
@@ -6040,11 +6114,11 @@ def synchronize_cocreation_event_with_online_match(session, event):
         )
         response.raise_for_status()
     except httpx.HTTPError as error:
-        raise ApiError(
-            503,
-            "ONLINE_FLOW_SYNC_UNAVAILABLE",
-            "The co-creation change was saved but cannot yet be synchronized to the online match. Please retry.",
-            retryable=True,
+        raise _online_sync_api_error(
+            error,
+            rejected_code="ONLINE_FLOW_SYNC_REJECTED",
+            unavailable_code="ONLINE_FLOW_SYNC_UNAVAILABLE",
+            saved_item="co-creation change",
         ) from error
 
 
