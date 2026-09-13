@@ -4128,7 +4128,6 @@ class LLMClientTests(unittest.TestCase):
                 "against the confirmed goal of preserving recovery space after a mistaken push."
             ),
             "conflict": {
-                "evidenceIds": ["diff-1", "design_goal-1"],
                 "userPosition": "Preserve recovery space after a mistaken push.",
                 "aiPosition": "The verified wall change reduces that recovery space.",
                 "coreDisagreement": (
@@ -4166,6 +4165,14 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(review.guidance["disagreement"]["subject"], "human_edit")
         self.assertEqual(review.guidance["uiCues"], [])
         self.assertEqual(review.guidance["manualEditReview"]["outcome"], "conflict")
+        self.assertEqual(
+            review.guidance["manualEditReview"]["evidenceIds"],
+            ["design_goal-1", "diff-1"],
+        )
+        conflict_schema = llm_client._structured_response_format(
+            "manual_edit_assessment_pair_conflict"
+        )["json_schema"]["schema"]["properties"]["conflict"]
+        self.assertNotIn("evidenceIds", conflict_schema["properties"])
 
     def test_manual_edit_adjudicator_assesses_every_confirmed_direction(self):
         evidence = [
@@ -4388,10 +4395,6 @@ class LLMClientTests(unittest.TestCase):
                 "direction of adding internal walls for tighter, more winding routes."
             ),
             "conflict": {
-                "evidenceIds": [
-                    "confirmed_inclination-1", "diff-1", "diff-2",
-                    "verified-change-summary", "solver-delta"
-                ],
                 "userPosition": "The saved edit opens the passages and makes traversal more fluid.",
                 "aiPosition": "The earlier confirmed direction favored more internal walls and tighter routes.",
                 "coreDisagreement": (
@@ -4485,7 +4488,6 @@ class LLMClientTests(unittest.TestCase):
             },
             "reviewMessage": "The edit looks different, but there is no concrete map evidence of a conflict.",
             "conflict": {
-                "evidenceIds": ["design_goal-1"],
                 "userPosition": "Keep recovery space.",
                 "aiPosition": "The layout looks different.",
                 "coreDisagreement": "Whether this visual difference should change the design direction.",

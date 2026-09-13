@@ -1125,13 +1125,18 @@ def translate_session_turns(
         if not pending:
             return serialize_session(database, session["id"])
 
-    execution = translate_turns(pending, language, request.state.request_id)
-
-    with connect(immediate=True) as database:
-        session = require_active_session(database, session_id, access_cookie)
-
-        for translated in execution.translations:
-            source = next(item for item in pending if item["turnId"] == translated["turnId"])
+    first_error = None
+    for source in pending:
+        try:
+            execution = translate_turns(
+                [source], language, f"{request.state.request_id}:{source['turnId']}"
+            )
+            translated = execution.translations[0]
+        except LLMServiceError as exception:
+            first_error = first_error or exception
+            continue
+        with connect(immediate=True) as database:
+            session = require_active_session(database, session_id, access_cookie)
             guidance = _translated_guidance(source["guidance"], translated)
             database.execute(
                 """
@@ -1154,18 +1159,25 @@ def translate_session_turns(
                     utc_now(),
                 ),
             )
+            record_event(
+                database,
+                session_id,
+                "turn_translations_created",
+                {
+                    "language": language,
+                    "turnIds": [translated["turnId"]],
+                    "model": execution.model,
+                },
+                utc_now(),
+            )
 
-        record_event(
-            database,
-            session_id,
-            "turn_translations_created",
-            {
-                "language": language,
-                "turnIds": [item["turnId"] for item in execution.translations],
-                "model": execution.model,
-            },
-            utc_now(),
-        )
+    if first_error is not None:
+        # Completed turns remain committed. A retry asks only for still-missing
+        # turns, so one malformed translation can no longer erase its siblings.
+        raise first_error
+
+    with connect(immediate=True) as database:
+        session = require_active_session(database, session_id, access_cookie)
         return serialize_session(database, session["id"])
 
 

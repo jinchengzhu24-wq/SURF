@@ -117,7 +117,7 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
-PROMPT_VERSION = "cocreation-v56-kimi-manual-edit-adjudication"
+PROMPT_VERSION = "cocreation-v57-server-owned-card-evidence"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -162,14 +162,12 @@ def _structured_response_format(task=None):
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "evidenceIds": {"type": "array", "items": {"type": "string"}},
                 "userPosition": {"type": "string"},
                 "aiPosition": {"type": "string"},
                 "coreDisagreement": {"type": "string"},
                 "nextQuestion": {"type": "string"},
             },
             "required": [
-                "evidenceIds",
                 "userPosition",
                 "aiPosition",
                 "coreDisagreement",
@@ -3447,26 +3445,24 @@ def _validate_manual_edit_pair_payload(
     cited_evidence_ids = []
     if conflict is not None:
         expected_fields = {
-            "evidenceIds", "userPosition", "aiPosition",
+            "userPosition", "aiPosition",
             "coreDisagreement", "nextQuestion",
         }
         if not isinstance(conflict, dict) or set(conflict) != expected_fields:
             raise ValueError("The manual-edit conflict has an invalid envelope.")
-        cited_evidence_ids = conflict.get("evidenceIds")
-        if not isinstance(cited_evidence_ids, list) or not cited_evidence_ids:
-            raise ValueError("A manual-edit conflict must cite server evidence.")
+        # Evidence identity is frozen by the adjudication task and belongs to
+        # the server.  Requiring the prose writer to copy opaque IDs made a
+        # perfectly valid card capable of discarding the complete response.
+        cited_evidence_ids = list(dict.fromkeys(
+            list((conflict_decision or {}).get("confirmedDirectionIds") or [])
+            + list((conflict_decision or {}).get("effectEvidenceIds") or [])
+        ))[:12]
         allowed_ids = {item["id"] for item in evidence}
         if any(
             not isinstance(item, str) or item not in allowed_ids
             for item in cited_evidence_ids
         ):
-            raise ValueError("A manual-edit conflict cites unknown evidence.")
-        cited_evidence_ids = list(dict.fromkeys(cited_evidence_ids))[:12]
-        required_evidence_ids = set(
-            (conflict_decision or {}).get("confirmedDirectionIds") or []
-        ).union((conflict_decision or {}).get("effectEvidenceIds") or [])
-        if not required_evidence_ids.issubset(set(cited_evidence_ids)):
-            raise ValueError("The discussion card must cite the frozen conflict evidence.")
+            raise ValueError("The frozen manual-edit conflict cites unknown evidence.")
         concrete_ids = {
             item["id"] for item in evidence
             if item.get("kind") in {
@@ -3598,8 +3594,8 @@ def _generate_manual_edit_assessment_pair(
         "rejectedDecisions": progress.get("rejectedDecisions", [])[-12:],
     }
     conflict_instruction = (
-        "The conflict decision is frozen as conflict. conflict must be a non-null object and must "
-        "cite every ID in conflictDecision.confirmedDirectionIds and conflictDecision.effectEvidenceIds. "
+        "The conflict decision is frozen as conflict. conflict must be a non-null object. The server "
+        "owns and binds every evidence ID; do not copy, print, or return evidence IDs. "
         "In your own natural language, remind the designer that this edit moves against a previously "
         "confirmed direction. You may positively describe verified solver or play improvements, but they "
         "do not cancel the disagreement. Warmly present two available paths: manually revise the Stage "

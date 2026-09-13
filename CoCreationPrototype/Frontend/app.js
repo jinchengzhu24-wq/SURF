@@ -494,15 +494,20 @@ const state = {
     chatError: null,
     chatStartedAt: 0,
     chatTimerId: null,
+    chatRetryTimerId: null,
+    chatRetryCount: 0,
     deadlineTimerId: null,
     pendingMessage: null,
     proposalMode: false,
     questionFeedbackBusy: new Set(),
     assessing: new Set(),
+    assessmentRetryCounts: new Map(),
+    assessmentRetryTimers: new Map(),
     translating: new Set(),
     translationFailures: new Set(),
     translationInProgress: false,
     translationRemainingCount: 0,
+    translationRetryTimerId: null,
     retryAction: null,
     unityPlayActive: false,
     activeCoordinateLink: null,
@@ -2166,12 +2171,17 @@ function updateControls() {
     const proposalPlanning = proposalFlowStatus === "planning";
     const proposalRetryPending = proposalFlowStatus === "retry_pending";
     const interactionBusy = state.busy || state.unityPlayActive;
+    const generationPending = state.chatStatus === "waiting"
+        || state.assessmentRetryTimers.size > 0
+        || state.assessing.size > 0;
     elements.saveStageButton.disabled = !editable || !state.dirty || interactionBusy;
     elements.discardDraftButton.disabled = !editable || !state.dirty || interactionBusy;
     elements.restoreStageButton.hidden = state.selectedVersionId === state.session.currentVersionId || state.session.status !== "active";
     elements.restoreStageButton.disabled = interactionBusy || expired;
     elements.playButton.disabled = interactionBusy || expired || state.dirty || pending || !selectedVersion();
-    elements.finalizeButton.disabled = interactionBusy || state.selectedVersionId !== state.session.currentVersionId || (!expired && (state.dirty || pending));
+    elements.finalizeButton.disabled = interactionBusy || generationPending
+        || state.selectedVersionId !== state.session.currentVersionId
+        || (!expired && (state.dirty || pending));
     elements.messageInput.disabled = interactionBusy || !editable || intentConflictPending
         || proposalPlanning || proposalRetryPending;
     elements.messageInput.placeholder = intentConflictPending
@@ -2256,6 +2266,30 @@ function stopChatTimer() {
     }
 }
 
+function retryDelay(attempt) {
+    return Math.min(60000, 2000 * (2 ** Math.min(Math.max(0, attempt), 5)));
+}
+
+function scheduleAssessmentRetry(versionId) {
+    if (state.assessmentRetryTimers.has(versionId)) return;
+    const attempt = state.assessmentRetryCounts.get(versionId) || 0;
+    state.assessmentRetryCounts.set(versionId, attempt + 1);
+    const timerId = window.setTimeout(() => {
+        state.assessmentRetryTimers.delete(versionId);
+        ensureAssessment(versionId);
+    }, retryDelay(attempt));
+    state.assessmentRetryTimers.set(versionId, timerId);
+}
+
+function scheduleChatRetry() {
+    if (state.chatRetryTimerId !== null || !state.pendingMessage) return;
+    const delay = retryDelay(state.chatRetryCount++);
+    state.chatRetryTimerId = window.setTimeout(() => {
+        state.chatRetryTimerId = null;
+        submitPendingMessage();
+    }, delay);
+}
+
 async function ensureAssessment(versionId) {
     const version = findVersion(versionId);
     if (!state.session || version?.openingTurnId || state.session.assessments.some(item => item.versionId === versionId) || state.assessing.has(versionId)) return;
@@ -2266,9 +2300,15 @@ async function ensureAssessment(versionId) {
             body: { idempotencyKey: uniqueId("assessment") },
             timeoutMs: LLM_REQUEST_TIMEOUT_MS
         });
-        if (state.retryAction?.assessmentVersionId === versionId) hideNotice();
+        state.assessmentRetryCounts.delete(versionId);
+        hideNotice();
         render();
     } catch (error) {
+        if (error?.retryable) {
+            scheduleAssessmentRetry(versionId);
+            render();
+            return;
+        }
         const retryAction = () => ensureAssessment(versionId);
         retryAction.assessmentVersionId = versionId;
         showError(error, retryAction);
@@ -2364,6 +2404,11 @@ async function submitPendingMessage() {
         clearPendingMessage();
         state.chatStatus = "idle";
         state.chatError = null;
+        state.chatRetryCount = 0;
+        if (state.chatRetryTimerId !== null) {
+            window.clearTimeout(state.chatRetryTimerId);
+            state.chatRetryTimerId = null;
+        }
         updateCharacterCount();
         render();
     } catch (error) {
@@ -2400,8 +2445,14 @@ async function submitPendingMessage() {
                 // The original retryable error remains the useful action.
             }
         }
-        state.chatStatus = "error";
-        state.chatError = error;
+        if (error?.retryable && state.pendingMessage) {
+            state.chatStatus = "waiting";
+            state.chatError = null;
+            scheduleChatRetry();
+        } else {
+            state.chatStatus = "error";
+            state.chatError = error;
+        }
     } finally {
         stopChatTimer();
         state.busy = false;
@@ -2769,6 +2820,12 @@ async function translateVisibleBatch(batch, targetLanguage) {
         turnIds.forEach(turnId => {
             state.translationFailures.add(`${turnId}:${targetLanguage}`);
         });
+        if (state.translationRetryTimerId === null) {
+            state.translationRetryTimerId = window.setTimeout(() => {
+                state.translationRetryTimerId = null;
+                ensureVisibleTranslations();
+            }, 5000);
+        }
     } finally {
         state.translating.delete(requestKey);
         state.translationRemainingCount = Math.max(0, state.translationRemainingCount - batch.length);
@@ -3141,12 +3198,9 @@ function recoverPendingMessage() {
     persistPendingMessage();
     elements.messageInput.value = pending.content;
     localStorage.setItem(composerKey(), pending.content);
-    state.chatStatus = "error";
-    state.chatError = {
-        code: "PENDING_MESSAGE",
-        message: t("chatRetryPending"),
-        retryable: true
-    };
+    state.chatStatus = "waiting";
+    state.chatError = null;
+    scheduleChatRetry();
     updateCharacterCount();
     renderChatRequestStatus();
     updateControls();
@@ -3203,6 +3257,11 @@ function persistPendingMessage() {
 }
 
 function clearPendingMessage() {
+    if (state.chatRetryTimerId !== null) {
+        window.clearTimeout(state.chatRetryTimerId);
+        state.chatRetryTimerId = null;
+    }
+    state.chatRetryCount = 0;
     state.pendingMessage = null;
     localStorage.removeItem(pendingMessageKey());
     localStorage.removeItem(`cocreationPendingMessage:${state.sessionId}`);

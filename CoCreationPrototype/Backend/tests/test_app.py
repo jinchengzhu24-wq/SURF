@@ -794,7 +794,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("manual-review-grounding-20260913-1", index_response.text)
+        self.assertIn("component-repair-20260913-1", index_response.text)
         self.assertIn("languageSetupSwitch", index_response.text)
         self.assertIn("enterSessionButton", index_response.text)
         self.assertIn("proposal-mode-toggle", index_response.text)
@@ -915,6 +915,9 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('void ensureVisibleTranslations()', js_response.text)
         self.assertNotIn('withBusy(ensureVisibleTranslations)', js_response.text)
         self.assertIn('chatRetryPending', js_response.text)
+        self.assertIn('scheduleAssessmentRetry(versionId)', js_response.text)
+        self.assertIn('scheduleChatRetry()', js_response.text)
+        self.assertIn('generationPending', js_response.text)
         self.assertIn('selectedStageTurns()', js_response.text)
         self.assertIn('turn.versionId === state.selectedVersionId', js_response.text)
         self.assertIn('version?.openingTurnId', js_response.text)
