@@ -152,6 +152,12 @@ public class LevelManager : MonoBehaviour
 
         if (!generatedLevel)
         {
+            if (CoCreationDraftContext.IsRegenerating)
+            {
+                CoCreationDraftContext.FailRegeneration("generation_failed");
+                SceneManager.LoadScene("CoCreation_Entry");
+                yield break;
+            }
             SetBlackPanelAlpha(0);
             SetInitialLLMLoadingText(true, GetInitialLLMFailureMessage());
             SetInitialLLMRetryButtonVisible(true);
@@ -165,6 +171,12 @@ public class LevelManager : MonoBehaviour
 
             if (levelLoader.levelData == null || levelLoader.levelData.rows == null)
             {
+                if (CoCreationDraftContext.IsRegenerating)
+                {
+                    CoCreationDraftContext.FailRegeneration("validation_failed");
+                    SceneManager.LoadScene(coCreationEntrySceneName);
+                    yield break;
+                }
                 SetInitialLLMLoadingText(true, "The generated draft is missing.");
                 SetInitialLLMRetryButtonVisible(true);
                 yield break;
@@ -180,10 +192,17 @@ public class LevelManager : MonoBehaviour
                 yield break;
             }
 
-            CoCreationDraftContext.Stage(
-                levelLoader.levelData.rows,
-                AIAssistantModeController.DescriptionGenerationApiMode
-            );
+            if (CoCreationDraftContext.IsRegenerating)
+            {
+                CoCreationDraftContext.CompleteRegeneration(levelLoader.levelData.rows);
+            }
+            else
+            {
+                CoCreationDraftContext.Stage(
+                    levelLoader.levelData.rows,
+                    AIAssistantModeController.DescriptionGenerationApiMode
+                );
+            }
             SceneManager.LoadScene(coCreationEntrySceneName);
             yield break;
         }

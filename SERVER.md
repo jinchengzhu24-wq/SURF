@@ -341,21 +341,24 @@ are marked `draftMetadataComplete: false`. See the current question list in
 DG 的 Difficulty 仅由 Q1/Q2 计算，Layout 仅由 Q3/Q4 计算。每组先按低/中/高方向得到确定性基准：相邻冲突取对应端点，跨两级冲突取中间档；单题 `no_preference` 使用另一题，两题均为 `no_preference` 才是 `Random`。只有两题明确冲突时，AI 可以在该基准上下调整一档；同方向或无偏好时不得调整。Draft 记录实际 AI 推荐值，基准值可由四个答案重新计算。
 
 The 8010 co-creation `final` flow event also carries `coCreationDurationSeconds`, calculated
-from the existing ten-minute browser deadline as `600 - remainingSeconds` at final Stage
-confirmation and capped at 600 seconds after timeout. The 8000 dashboard shows this value as
+from the 20-minute deadline that starts only when the user enters co-creation and the current
+Draft is promoted to Stage 1. It is capped at 1200 seconds after timeout. The 8000 dashboard shows this value as
 `Co-creation time` in the `Final map` details. Opponent-level play time remains the existing
 Match Result `result_submitted.durationSeconds` record and is shown in the Result submitted
 details and the corresponding challenge map details; it is not duplicated on Final map.
 
 ## 8010 直访问单次测试模式
 
-直接访问 `http://111.231.136.4/cocreation/` 时，页面显示“创建示例会话” landing，不读取
-旧的浏览器 `localStorage` 会话，也不加载上一轮的对话、Stage 或地图记录。点击按钮后立即显示
-“正在使用算法创建示例地图……”，8010 后端参考 Unity `Algorithm_Level` 的结构模板、
-墙体/水域布局和反向拉箱流程生成 10×12、两箱、两目标的可解地图，并开始首轮 AI 对话；
+直接访问 `http://111.231.136.4/cocreation/` 时，页面不读取旧的浏览器 `localStorage`
+会话，也不加载上一轮的对话、Stage 或地图记录；它会自动创建新的演示会话。创建期间已显示
+统一的 Draft 地图区域、弯曲箭头旋转动画，以及禁用的“重新生成”和“进入共创流程”按钮。
+8010 后端参考 Unity `Algorithm_Level` 的结构模板、墙体/水域布局和反向拉箱流程生成 10×12、
+两箱、两目标的可解 Draft，并在同一页面原位替换加载动画。演示标题为“算法生成的首版 Draft”；
+正式 Unity 会话显示“AI 规划并生成的首版 Draft”，且只沿用既有 LLM 蓝图和 Unity 验证链路。
+进入前可点击“重新生成”，8010 只保留最新候选；点击“进入共创流程”后才固化 Stage 1 并开始首轮 AI 对话；
 刷新带有当前会话 hash 的 URL 可以继续测试。
-演示会话只保存在 8010，不调用 8000 同步接口，不创建十分钟 deadline，也不写入正式匹配的
+演示会话只保存在 8010，不调用 8000 同步接口，不创建正式 deadline，也不写入正式匹配的
 `coCreationDurationSeconds`。演示页面没有倒计时，完成后不显示“返回 Unity 继续”。
 每次新演示会话创建成功后只保留最新一轮演示记录；正式 Unity 会话和正式研究数据不受影响，
 新地图或新会话失败时保留上一轮记录。当前静态资源缓存键为
-`cocreation-translation-parallel-20260830-6`。
+`draft-preview-unified-20260914-1`。

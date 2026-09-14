@@ -15,7 +15,8 @@ Menu
   → DG_Level（生成并验证首版）
   → CoCreation_Entry
   → 8010 Co-Creation Lab
-      → Stage 1 = Unity 首版 rows
+      → 只读首版 Draft 预览（可重新生成）
+      → 点击“进入共创流程”后 Stage 1 = 当时最新的 Unity 首版 rows
       → 聊天、手工编辑、AI 提案和 Stage 试玩
       → 明确确认最终 Stage
       → 填写设计意图
@@ -35,13 +36,13 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 - DG 使用四道中立地图设计问题：首步检查、推箱依赖、空间分布和路线结构。Q1–Q2 只用于 8000 的难度建议，Q3–Q4 只用于 8000 的布局建议；DG context 不会传入 8010 或其 LLM 上下文。
 - 8000 的两个 Agent 使用 `deepseek-v4-flash`；8010 的聊天助手、关卡修改助手、Stage 开场、翻译、Revision 和意图反馈审查使用 Kimi `kimi-k2.6`。8010 不读取或回退到 8000 的 DeepSeek 环境变量。
 - `Draft` 场景已退役。`PC`、`PC_Design` 和 `PC_Level` 仅作为历史实现资产保留，不在当前 Build Settings 或在线导航中。
-- 8010 正式 Unity 会话在首次浏览器访问后启动服务端 deadline，当前为 20 分钟。到期后聊天、编辑、保存、恢复、试玩和提案锁定，只保留最终 Stage 提交；提交时可将当前可解的本地草稿原子保存为最终 `human_edit` Stage。
+- 8010 正式 Unity 会话在用户点击“进入共创流程”、最新 Draft 被原子固化为 Stage 1 后才启动服务端 deadline，当前为 20 分钟。浏览首版 Draft、刷新页面和重新生成均不计时。到期后聊天、编辑、保存、恢复、试玩和提案锁定，只保留最终 Stage 提交；提交时可将当前可解的本地草稿原子保存为最终 `human_edit` Stage。
 - 直接访问 `/cocreation/` 创建的是独立演示会话，不启动 deadline、不同步 8000，也不写入正式匹配记录。
 
 ## 8010 工作台规则
 
 - 一个会话始终只包含同一个关卡；`Stage 1`、`Stage 2` 及后续 Stage 都是该关卡的不可变版本，不是不同关卡或关卡 progression。
-- Stage 1 必须与 Unity DG 验证后的 rows 一致。手工编辑和 AI 提案都必须通过尺寸、符号、实体数量、外墙和 Sokoban 可解性校验。
+- 入场页只读展示 Unity DG 验证后的当前首版 Draft；可基于 Unity 中已保存的 DG 参数串行重新生成，8010 仅保存最新候选 rows，不接收 DG 参数。点击“进入共创流程”后，该候选才成为不可变 Stage 1。手工编辑和 AI 提案都必须通过尺寸、符号、实体数量、外墙和 Sokoban 可解性校验。
 - 手工草稿只有保存为新 Stage 后才持久化。AI 提案先保存为待审查 proposal，只有用户明确接受并再次通过后端验证，才创建新 Stage。
 - Play 只针对已保存 Stage，不会修改地图、创建 Stage、确认最终版本或提交在线挑战。试玩会保存到对应 Stage 的 `play_attempts`。
 - 地图事实以当前 StageSnapshot 为唯一来源。服务器会重新校验当前坐标、实体、路线和可点击链接；历史 Stage、旧助手文本和用户错误坐标不能作为当前地图事实。
@@ -53,7 +54,7 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 
 | 表 | 当前保留的数据 |
 | --- | --- |
-| `design_sessions` | 会话身份、demo 标记、匹配 ID/玩家编号、初稿方法、语言与锁定时间、deadline、当前/最终版本、状态和时间戳。访问、集成和 bootstrap token 只保存哈希，不保存明文 token。 |
+| `design_sessions` | 会话身份、demo 标记、匹配 ID/玩家编号、初稿方法、进入前的当前 Draft 候选与重生成任务状态、语言与锁定时间、deadline、当前/最终版本、状态和时间戳。访问、集成和 bootstrap token 只保存哈希，不保存明文 token。 |
 | `level_versions` | 每个不可变 Stage 的编号、`parent_version_id`、来源、完整地图 rows、摘要、diff、验证结果、实体绑定和该 Stage 的 `design_context_json` 快照。 |
 | `conversation_turns` | 用户与助手的完整消息、角色、序号、所属 Stage、语言、请求 ID，以及必要的模型尝试次数、延迟、引导信息和 proposal binding。 |
 | `turn_translations` | 已翻译的助手正文、翻译后的引导/提案摘要、语言、模型元数据和时间戳。 |
@@ -97,7 +98,7 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 
 ## 8010 与 8000 的数据边界
 
-8010 是完整共创记录的权威来源。正式会话只向 8000 同步必要的研究投影：首版 `first_stage`、已保存的人工/AI Stage、Stage opening/turn 以及最终 `final` 事件。最终事件中的 `coCreationDurationSeconds` 由 8010 服务端计算，当前范围为 0–1200 秒；对手游玩时长仍使用 8000 的 `result_submitted.durationSeconds`。
+8010 是完整共创记录的权威来源。预览候选不会同步到 8000；用户进入共创时才把最终候选作为 `first_stage` 同步一次。之后正式会话只向 8000 同步必要的研究投影：已保存的人工/AI Stage、Stage opening/turn 以及最终 `final` 事件。最终事件中的 `coCreationDurationSeconds` 由 8010 服务端计算，当前范围为 0–1200 秒；对手游玩时长仍使用 8000 的 `result_submitted.durationSeconds`。
 
 Unity 的集成接口只有在会话完成后返回最终 rows 和用户最终自报告意图。8010 不把 DesignContext、intentHypotheses、完整聊天、研究者目标或实验条件发送给 8000 的 LLM 或 Unity 执行流程。
 
@@ -135,7 +136,7 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online2).unity
 
 ## 演示模式
 
-直接访问 `/cocreation/` 时，页面显示“创建示例会话”。8010 后端生成 `algorithm_demo` 的 10×12、两箱、两目标可解地图并开始 Stage 1 开场。演示数据只写入 8010，不创建正式 deadline、不同步 8000，也不记录正式匹配的 `coCreationDurationSeconds`。
+直接访问 `/cocreation/` 时，页面会自动创建 `algorithm_demo` 会话：先显示统一的 Draft 地图区域、旋转箭头和禁用的操作按钮，再原位显示 10×12、两箱、两目标的可解算法 Draft。演示页标题为“算法生成的首版 Draft”；正式 Unity 会话的同一位置显示“AI 规划并生成的首版 Draft”。两种入口都可在进入前不限次数重新生成且只保留最新候选，点击“进入共创流程”后才创建 Stage 1 并开始开场。演示数据只写入 8010，不创建正式 deadline、不同步 8000，也不记录正式匹配的 `coCreationDurationSeconds`。
 
 创建新的演示会话成功后，只清理上一轮演示会话及其关联的聊天、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。如果新地图或新会话创建失败，上一轮演示记录保持不变。
 

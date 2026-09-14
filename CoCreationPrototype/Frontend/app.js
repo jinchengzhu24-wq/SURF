@@ -10,6 +10,7 @@ const API_PREFIX = window.location.pathname.startsWith("/cocreation")
     ? "/cocreation"
     : "";
 const UNITY_PLAY_BRIDGE_TIMEOUT_MS = 1500;
+const DRAFT_REGENERATION_POLL_MS = 1000;
 const UNITY_ORIGINS = Array.from(new Set([
     window.location.origin,
     "http://111.231.136.4",
@@ -479,6 +480,44 @@ translations["zh-CN"].error_CHALLENGE_EXIT_UNSUPPORTED = "\u8bf7\u901a\u8fc7\u7e
 translations["zh-CN"].proposalChallenged = "\u8fd9\u4e2a\u65b9\u6848\u5df2\u6682\u505c\uff0c\u9700\u5148\u5904\u7406\u5bf9\u5b83\u7684\u8d28\u7591\u3002";
 translations["zh-CN"].alternativeRevision = "\u91cd\u65b0\u751f\u6210\u65b9\u6848";
 translations["zh-CN"].proposalDisagreementActive = "\u8bf7\u5148\u89e3\u51b3\u5f53\u524d\u5206\u6b67\uff0c\u518d\u4f7f\u7528\u8fd9\u4e2a\u65b9\u6848";
+translations.en.regenerateDraft = "Regenerate";
+translations.en.enterSession = "Enter co-creation flow";
+translations.en.draftPreviewTitle = "First draft preview";
+translations.en.draftGeneration = "Generation {generation}";
+translations.en.draftReady = "Verified and ready to enter co-creation.";
+translations.en.draftRegenerating = "Unity is regenerating and validating a new draft. The current preview is preserved.";
+translations.en.draftRegenerationFailed = "Regeneration did not complete. The previous draft is still available.";
+translations.en.draftUnityUnavailable = "Keep the original Unity game tab open, then try again.";
+translations.en.formalLandingTitle = "Review the first draft, then enter co-creation.";
+translations.en.formalLandingBody = "You can regenerate from the parameters selected in Unity. Only the draft you enter with becomes Stage 1.";
+translations.en.demoLanguageLock = "The selected language is locked when you enter co-creation.";
+translations.en.demoLandingTitle = "Algorithm-generated first Draft";
+translations.en.demoLandingBody = "The algorithm is preparing a verified sample map. You can regenerate it before entering co-creation.";
+translations.en.formalLandingTitle = "AI-planned and generated first Draft";
+translations.en.formalLandingBody = "Unity generated and verified this map from the AI planning result. Only the draft you enter with becomes Stage 1.";
+translations.en.demoDraftPreviewTitle = "Algorithm-generated first Draft";
+translations.en.formalDraftPreviewTitle = "AI-planned and generated first Draft";
+translations.en.draftInitialGenerating = "Generating and verifying the algorithm Draft…";
+translations.en.draftInitialFailed = "The Draft could not be generated. Select Regenerate to try again.";
+translations["zh-CN"].regenerateDraft = "\u91cd\u65b0\u751f\u6210";
+translations["zh-CN"].enterSession = "\u8fdb\u5165\u5171\u521b\u6d41\u7a0b";
+translations["zh-CN"].draftPreviewTitle = "\u9996\u7248 Draft \u9884\u89c8";
+translations["zh-CN"].draftGeneration = "\u7b2c {generation} \u7248";
+translations["zh-CN"].draftReady = "\u5df2\u901a\u8fc7\u9a8c\u8bc1\uff0c\u53ef\u8fdb\u5165\u5171\u521b\u6d41\u7a0b\u3002";
+translations["zh-CN"].draftRegenerating = "Unity \u6b63\u5728\u91cd\u65b0\u751f\u6210\u5e76\u9a8c\u8bc1 Draft\uff0c\u5f53\u524d\u9884\u89c8\u4f1a\u4fdd\u7559\u3002";
+translations["zh-CN"].draftRegenerationFailed = "\u91cd\u65b0\u751f\u6210\u672a\u5b8c\u6210\uff0c\u5df2\u4fdd\u7559\u4e0a\u4e00\u7248 Draft\u3002";
+translations["zh-CN"].draftUnityUnavailable = "\u8bf7\u4fdd\u6301\u539f Unity \u6e38\u620f\u6807\u7b7e\u9875\u6253\u5f00\u540e\u91cd\u8bd5\u3002";
+translations["zh-CN"].formalLandingTitle = "\u67e5\u770b\u9996\u7248 Draft\uff0c\u518d\u8fdb\u5165\u5171\u521b\u6d41\u7a0b\u3002";
+translations["zh-CN"].formalLandingBody = "\u4f60\u53ef\u4ee5\u57fa\u4e8e Unity \u4e2d\u9009\u62e9\u7684\u53c2\u6570\u91cd\u65b0\u751f\u6210\u3002\u53ea\u6709\u8fdb\u5165\u65f6\u7684\u5f53\u524d Draft \u4f1a\u6210\u4e3a Stage 1\u3002";
+translations["zh-CN"].demoLanguageLock = "\u8fdb\u5165\u5171\u521b\u6d41\u7a0b\u540e\uff0c\u5f53\u524d\u8bed\u8a00\u9009\u62e9\u5c06\u9501\u5b9a\u3002";
+translations["zh-CN"].demoLandingTitle = "\u7b97\u6cd5\u751f\u6210\u7684\u9996\u7248 Draft";
+translations["zh-CN"].demoLandingBody = "\u7b97\u6cd5\u6b63\u5728\u51c6\u5907\u5df2\u9a8c\u8bc1\u7684\u793a\u4f8b\u5730\u56fe\uff0c\u8fdb\u5165\u5171\u521b\u524d\u53ef\u4ee5\u91cd\u65b0\u751f\u6210\u3002";
+translations["zh-CN"].formalLandingTitle = "AI \u89c4\u5212\u5e76\u751f\u6210\u7684\u9996\u7248 Draft";
+translations["zh-CN"].formalLandingBody = "Unity \u5df2\u57fa\u4e8e AI \u89c4\u5212\u7ed3\u679c\u751f\u6210\u5e76\u9a8c\u8bc1\u6b64\u5730\u56fe\uff0c\u53ea\u6709\u8fdb\u5165\u65f6\u7684\u5f53\u524d Draft \u4f1a\u6210\u4e3a Stage 1\u3002";
+translations["zh-CN"].demoDraftPreviewTitle = "\u7b97\u6cd5\u751f\u6210\u7684\u9996\u7248 Draft";
+translations["zh-CN"].formalDraftPreviewTitle = "AI \u89c4\u5212\u5e76\u751f\u6210\u7684\u9996\u7248 Draft";
+translations["zh-CN"].draftInitialGenerating = "\u6b63\u5728\u751f\u6210\u5e76\u9a8c\u8bc1\u7b97\u6cd5 Draft\u2026";
+translations["zh-CN"].draftInitialFailed = "Draft \u751f\u6210\u5931\u8d25\uff0c\u8bf7\u70b9\u51fb\u201c\u91cd\u65b0\u751f\u6210\u201d\u518d\u8bd5\u3002";
 
 const state = {
     session: null,
@@ -512,7 +551,11 @@ const state = {
     renderedMessageStageId: null,
     renderedMessageCount: 0,
     language: "zh-CN",
-    landingMode: "demo"
+    landingMode: "demo",
+    draftPollTimerId: null,
+    demoCreationPending: false,
+    demoCreationFailed: false,
+    draftRegenerationPending: false
 };
 
 const chineseApiErrors = {
@@ -585,7 +628,7 @@ const validationTileNames = {
 
 const elements = Object.fromEntries([
     "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
-    "landingEyebrow", "landingTitle", "landingBody", "languageSetupSwitch", "languageLockNotice", "enterSessionButton", "demoButton", "demoGenerationStatus", "stageList", "stageCount", "methodPill", "historyBanner",
+    "landingEyebrow", "landingTitle", "landingBody", "languageSetupSwitch", "languageLockNotice", "draftActions", "regenerateDraftButton", "enterSessionButton", "draftPreview", "draftPreviewTitle", "draftGenerationLabel", "draftPreviewGrid", "draftPreviewLoading", "draftPreviewLoadingMessage", "draftPreviewStatus", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "progressPanel", "progressSummary", "unresolvedQuestionsList", "answeredQuestionsPanel", "answeredQuestionsSummary", "answeredQuestionsList", "designInclinationsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
     "proposalRequestButton", "sendButton", "characterCount", "selectedStageEyebrow", "mapFrame", "mapBoard", "mapGrid", "mapOverlay",
@@ -597,7 +640,7 @@ const elements = Object.fromEntries([
 
 elements.languageSetupSwitch.addEventListener("click", toggleSetupLanguage);
 elements.enterSessionButton.addEventListener("click", confirmSessionLanguage);
-elements.demoButton.addEventListener("click", createDemoSession);
+elements.regenerateDraftButton.addEventListener("click", regenerateDraft);
 elements.retryButton.addEventListener("click", () => state.retryAction && state.retryAction());
 elements.chatRetryButton.addEventListener("click", retryPendingMessage);
 elements.returnCurrentButton.addEventListener("click", selectCurrentVersion);
@@ -654,7 +697,7 @@ async function initialize() {
     if (!state.sessionId) {
         state.session = null;
         state.language = "zh-CN";
-        showLanding("demo");
+        void createDemoSession();
         return;
     }
 
@@ -680,17 +723,13 @@ async function initialize() {
 }
 
 async function createDemoSession() {
-    const showGenerationStatus = () => {
-        elements.demoGenerationStatus.hidden = false;
-        elements.demoGenerationStatus.textContent = t("demoGenerationStatus");
-    };
-    const hideGenerationStatus = () => {
-        elements.demoGenerationStatus.hidden = true;
-        elements.demoGenerationStatus.textContent = "";
-    };
-    showGenerationStatus();
-    await withBusy(async () => {
-        showGenerationStatus();
+    if (state.busy || state.demoCreationPending) return;
+    state.demoCreationPending = true;
+    state.demoCreationFailed = false;
+    state.busy = true;
+    hideNotice();
+    showLanding("demo-loading");
+    try {
         const created = await api("/api/demo-sessions", {
             method: "POST",
             body: {
@@ -699,7 +738,18 @@ async function createDemoSession() {
             }
         });
         await openCreatedSession(created.launchUrl);
-    }, hideGenerationStatus);
+    } catch (error) {
+        state.demoCreationFailed = true;
+        showError(error, () => void createDemoSession());
+    } finally {
+        state.busy = false;
+        state.demoCreationPending = false;
+        if (state.session?.demoMode && !state.session.languageLocked) {
+            showLanding("demo-preview");
+        } else if (!state.session) {
+            showLanding("demo-error");
+        }
+    }
 }
 
 async function openCreatedSession(launchUrl) {
@@ -723,8 +773,9 @@ async function refreshSession() {
     state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
 
     if (!state.session.languageLocked) {
-        state.language = "zh-CN";
-        showLanding("formal");
+        state.language = state.session.language || state.language;
+        showLanding(state.session.demoMode ? "demo-preview" : "formal");
+        resumeDraftRegenerationPolling();
         return false;
     }
 
@@ -747,8 +798,8 @@ async function refreshSession() {
 function render() {
     elements.landing.hidden = true;
     elements.workspace.hidden = false;
-    setStatus(t("ready"), "ready");
     applyTranslations();
+    setStatus(t("ready"), "ready");
     elements.methodPill.textContent = t(state.session.initialDraftMethod);
     renderStages();
     renderDeadline();
@@ -2150,13 +2201,19 @@ function renderDeadline() {
 
 function updateControls() {
     if (!state.session) {
-        elements.demoButton.disabled = state.busy;
-        elements.languageSetupSwitch.disabled = state.busy;
+        elements.regenerateDraftButton.disabled = state.busy || state.demoCreationPending;
+        elements.enterSessionButton.disabled = true;
+        elements.languageSetupSwitch.disabled = state.busy || state.demoCreationPending;
         return;
     }
 
     if (!state.session.languageLocked) {
-        elements.enterSessionButton.disabled = state.busy;
+        const regenerating = ["pending", "claimed"].includes(
+            state.session.draftPreview?.regenerationStatus
+        ) || state.draftRegenerationPending;
+        elements.enterSessionButton.disabled = state.busy || regenerating;
+        elements.regenerateDraftButton.disabled = state.busy || regenerating
+            || !state.session.draftPreview?.mutable;
         elements.languageSetupSwitch.disabled = state.busy;
         return;
     }
@@ -2645,6 +2702,10 @@ function toggleSetupLanguage() {
     const next = state.language === "en" ? "zh-CN" : "en";
     state.language = next;
     applyTranslations();
+    if (!elements.landing.hidden) {
+        renderDraftPreview();
+        renderLandingStatus();
+    }
 }
 
 async function confirmSessionLanguage() {
@@ -2660,6 +2721,103 @@ async function confirmSessionLanguage() {
             recoverPendingMessage();
         }
     });
+}
+
+async function regenerateDraft() {
+    if (!state.session) {
+        void createDemoSession();
+        return;
+    }
+    if (!state.session.draftPreview?.mutable || state.session.languageLocked) return;
+    state.draftRegenerationPending = true;
+    state.busy = true;
+    hideNotice();
+    renderDraftPreview();
+    updateControls();
+    try {
+        state.session = await api(`/api/sessions/${state.sessionId}/draft-regenerations`, {
+            method: "POST",
+            body: { idempotencyKey: uniqueId("draft_regeneration") }
+        });
+        renderDraftPreview();
+        updateControls();
+
+        const requestId = state.session.draftPreview?.regenerationRequestId;
+        if (!state.session.demoMode && requestId) {
+            await tryWakeUnityForDraftRegeneration(requestId);
+            await waitForDraftRegeneration(requestId);
+        }
+    } catch (error) {
+        showError(error, () => void regenerateDraft());
+    } finally {
+        state.busy = false;
+        state.draftRegenerationPending = false;
+        renderDraftPreview();
+        updateControls();
+    }
+}
+
+function tryWakeUnityForDraftRegeneration(requestId) {
+    const unityWindow = window.opener;
+    if (!unityWindow || unityWindow.closed) return Promise.resolve(false);
+    const bridgeRequestId = uniqueId("unity_draft_regeneration");
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = accepted => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timeoutId);
+            window.removeEventListener("message", receiveAcknowledgement);
+            resolve(accepted);
+        };
+        const receiveAcknowledgement = event => {
+            const message = event.data;
+            if (event.source !== unityWindow || !UNITY_ORIGINS.includes(event.origin)
+                || message?.type !== "sokoban:cocreation-draft-regenerate-ack"
+                || message.requestId !== bridgeRequestId) return;
+            finish(message.accepted === true);
+        };
+        const timeoutId = window.setTimeout(() => finish(false), UNITY_PLAY_BRIDGE_TIMEOUT_MS);
+        window.addEventListener("message", receiveAcknowledgement);
+        const message = {
+            type: "sokoban:cocreation-draft-regenerate-request",
+            requestId: bridgeRequestId,
+            sessionId: state.sessionId,
+            regenerationRequestId: requestId
+        };
+        UNITY_ORIGINS.forEach(origin => {
+            try { unityWindow.postMessage(message, origin); } catch (_error) { /* continue */ }
+        });
+    });
+}
+
+async function waitForDraftRegeneration(requestId) {
+    while (state.sessionId && !state.session?.languageLocked) {
+        await new Promise(resolve => window.setTimeout(resolve, DRAFT_REGENERATION_POLL_MS));
+        const latest = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
+        if (latest.draftPreview?.regenerationRequestId !== requestId) return;
+        state.session = latest;
+        renderDraftPreview();
+        updateControls();
+        const status = latest.draftPreview?.regenerationStatus;
+        if (!["pending", "claimed"].includes(status)) {
+            if (["failed", "cancelled", "timed_out"].includes(status)) {
+                showNotice(`${t("draftRegenerationFailed")} ${t("draftUnityUnavailable")}`);
+            }
+            return;
+        }
+    }
+}
+
+function resumeDraftRegenerationPolling() {
+    const preview = state.session?.draftPreview;
+    if (!["pending", "claimed"].includes(preview?.regenerationStatus)
+        || state.draftPollTimerId) return;
+    state.draftPollTimerId = window.setTimeout(async () => {
+        state.draftPollTimerId = null;
+        try { await waitForDraftRegeneration(preview.regenerationRequestId); }
+        catch (error) { showError(error, resumeDraftRegenerationPolling); }
+    }, 0);
 }
 
 function selectVersion(versionId, shouldRender = true) {
@@ -2925,16 +3083,80 @@ function showLanding(mode = "demo") {
     state.landingMode = mode;
     elements.workspace.hidden = true;
     elements.landing.hidden = false;
-    const formal = mode === "formal";
-    elements.landingEyebrow.dataset.i18n = formal ? "sessionSetup" : "neutralBrief";
-    elements.landingTitle.dataset.i18n = formal ? "formalLandingTitle" : "openFromUnity";
-    elements.landingBody.dataset.i18n = formal ? "formalLandingBody" : "landingBody";
-    elements.languageLockNotice.dataset.i18n = formal ? "formalLanguageLock" : "demoLanguageLock";
-    elements.enterSessionButton.hidden = !formal;
-    elements.demoButton.hidden = formal;
-    setStatus(formal ? t("loading") : t("errorNoSession"), "pending");
+    const isFormal = mode === "formal";
+    elements.landingEyebrow.dataset.i18n = "sessionSetup";
+    elements.landingTitle.dataset.i18n = isFormal ? "formalLandingTitle" : "demoLandingTitle";
+    elements.landingBody.dataset.i18n = isFormal ? "formalLandingBody" : "demoLandingBody";
+    elements.languageLockNotice.dataset.i18n = mode === "formal" ? "formalLanguageLock" : "demoLanguageLock";
+    elements.draftActions.hidden = false;
     applyTranslations();
+    renderDraftPreview();
+    renderLandingStatus();
     updateControls();
+}
+
+function renderDraftPreview() {
+    const preview = state.session?.draftPreview;
+    let rows = preview?.rows;
+    if (!rows && state.session && !state.session.languageLocked) {
+        rows = state.session.versions?.find(item => item.versionId === state.session.currentVersionId)?.rows;
+    }
+    const hasRows = Array.isArray(rows) && rows.length === 10;
+    const isDemoLanding = state.landingMode.startsWith("demo");
+    const regenerationStatus = preview?.regenerationStatus;
+    const loading = state.demoCreationPending || state.draftRegenerationPending
+        || ["pending", "claimed"].includes(regenerationStatus);
+    elements.draftPreview.hidden = !hasRows && !isDemoLanding;
+    if (elements.draftPreview.hidden) return;
+
+    const isFormal = state.landingMode === "formal";
+    elements.draftPreviewTitle.dataset.i18n = isFormal
+        ? "formalDraftPreviewTitle"
+        : "demoDraftPreviewTitle";
+    elements.draftPreviewTitle.textContent = t(elements.draftPreviewTitle.dataset.i18n);
+    elements.draftPreviewGrid.hidden = !hasRows;
+    elements.draftPreviewLoading.hidden = !loading;
+    elements.draftPreviewLoading.classList.toggle("over-map", hasRows);
+    elements.draftPreviewLoadingMessage.textContent = state.demoCreationPending
+        ? t("draftInitialGenerating")
+        : t("draftRegenerating");
+
+    if (hasRows) {
+        elements.draftPreviewGrid.textContent = "";
+        elements.draftPreviewGrid.setAttribute("aria-label", t(elements.draftPreviewTitle.dataset.i18n));
+        const entityLabels = buildEntityLabels(rows);
+        rows.forEach((row, y) => [...row].forEach((tile, x) => {
+            const cell = document.createElement("span");
+            cell.className = `draft-preview-cell ${tileClass(tile)}`;
+            const label = entityLabels.get(`${x},${y}`);
+            cell.textContent = label || tileLabel(tile);
+            cell.title = formatEntityCoordinate(label, x, y);
+            elements.draftPreviewGrid.appendChild(cell);
+        }));
+    }
+
+    elements.draftGenerationLabel.textContent = hasRows
+        ? t("draftGeneration").replace("{generation}", String(preview?.generation || 1))
+        : "";
+    elements.draftPreviewStatus.textContent = loading
+        ? (state.demoCreationPending ? t("draftInitialGenerating") : t("draftRegenerating"))
+        : state.demoCreationFailed
+            ? t("draftInitialFailed")
+            : ["failed", "cancelled", "timed_out"].includes(regenerationStatus)
+                ? t("draftRegenerationFailed")
+                : t("draftReady");
+}
+
+function renderLandingStatus() {
+    if (state.demoCreationPending) {
+        setStatus(t("draftInitialGenerating"), "pending");
+        return;
+    }
+    if (state.session && !state.session.languageLocked) {
+        setStatus(t("ready"), "ready");
+        return;
+    }
+    setStatus(t("errorNoSession"), "pending");
 }
 
 async function withBusy(action, onError = null) {
@@ -3115,6 +3337,9 @@ function applyTranslations() {
     updateCharacterCount();
     renderChatRequestStatus();
     renderTranslationStatus();
+    if (!elements.landing.hidden && state.session && !state.session.languageLocked) {
+        renderDraftPreview();
+    }
 }
 
 function handleComposerInput() {

@@ -59,7 +59,16 @@ CREATE TABLE IF NOT EXISTS design_sessions (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     finalized_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    draft_rows_json TEXT,
+    draft_validation_json TEXT,
+    draft_generation INTEGER NOT NULL DEFAULT 1,
+    draft_regeneration_status TEXT,
+    draft_regeneration_request_id TEXT,
+    draft_regeneration_key TEXT,
+    draft_regeneration_requested_at TEXT,
+    draft_regeneration_updated_at TEXT,
+    draft_regeneration_failure_code TEXT
 );
 
 CREATE TABLE IF NOT EXISTS level_versions (
@@ -264,6 +273,15 @@ def initialize_database():
         _ensure_column(database, "design_sessions", "deadline_started_at", "TEXT")
         _ensure_column(database, "design_sessions", "deadline_at", "TEXT")
         _ensure_column(database, "design_sessions", "language_locked_at", "TEXT")
+        _ensure_column(database, "design_sessions", "draft_rows_json", "TEXT")
+        _ensure_column(database, "design_sessions", "draft_validation_json", "TEXT")
+        _ensure_column(database, "design_sessions", "draft_generation", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(database, "design_sessions", "draft_regeneration_status", "TEXT")
+        _ensure_column(database, "design_sessions", "draft_regeneration_request_id", "TEXT")
+        _ensure_column(database, "design_sessions", "draft_regeneration_key", "TEXT")
+        _ensure_column(database, "design_sessions", "draft_regeneration_requested_at", "TEXT")
+        _ensure_column(database, "design_sessions", "draft_regeneration_updated_at", "TEXT")
+        _ensure_column(database, "design_sessions", "draft_regeneration_failure_code", "TEXT")
         database.execute("PRAGMA journal_mode=WAL")
         database.execute("PRAGMA foreign_keys=ON")
         database.commit()
@@ -317,7 +335,7 @@ def backfill_language_locks(database):
         SET language_locked_at = COALESCE(deadline_started_at, created_at)
         WHERE language_locked_at IS NULL
           AND (
-              demo_mode = 1
+              (demo_mode = 1 AND current_version_id IS NOT NULL)
               OR deadline_started_at IS NOT NULL
               OR EXISTS (
                   SELECT 1 FROM conversation_turns
@@ -2395,6 +2413,21 @@ def serialize_session(database, session_id):
         "deadlineAt": session["deadline_at"],
         "deadlineExpired": _deadline_expired(session["deadline_at"]),
         "remainingSeconds": _remaining_deadline_seconds(session["deadline_at"]),
+        "draftPreview": (
+            {
+                "rows": load_json(session["draft_rows_json"]),
+                "validation": load_json(session["draft_validation_json"]),
+                "generation": int(session["draft_generation"] or 1),
+                "regenerationStatus": session["draft_regeneration_status"],
+                "regenerationRequestId": session["draft_regeneration_request_id"],
+                "regenerationRequestedAt": session["draft_regeneration_requested_at"],
+                "regenerationUpdatedAt": session["draft_regeneration_updated_at"],
+                "failureCode": session["draft_regeneration_failure_code"],
+                "mutable": session["current_version_id"] is None,
+            }
+            if session["draft_rows_json"]
+            else None
+        ),
         "proposalFlowState": {
             "active": proposal_flow_status in {
                 "clarifying", "planning", "retry_pending", "revision_needed",

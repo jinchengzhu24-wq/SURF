@@ -332,6 +332,48 @@
         }
       });
 
+      window.addEventListener("message", function (event) {
+        var message = event.data;
+        if (!isAllowedCoCreationOrigin(event.origin)
+          || !message
+          || message.type !== "sokoban:cocreation-draft-regenerate-request"
+          || typeof message.requestId !== "string") {
+          return;
+        }
+
+        var accepted = coCreationPlayBridgeReady
+          && !!window.SokobanUnityInstance
+          && typeof message.sessionId === "string"
+          && typeof message.regenerationRequestId === "string";
+
+        if (accepted) {
+          coCreationLabWindow = event.source;
+          coCreationLabOrigin = event.origin;
+          coCreationSessionId = message.sessionId;
+          try {
+            window.SokobanUnityInstance.SendMessage(
+              "CoCreationEntryController",
+              "ReceiveBrowserDraftRegenerationRequest",
+              JSON.stringify({
+                sessionId: message.sessionId,
+                requestId: message.regenerationRequestId
+              })
+            );
+            window.focus();
+          } catch (_error) {
+            accepted = false;
+          }
+        }
+
+        if (event.source) {
+          event.source.postMessage({
+            type: "sokoban:cocreation-draft-regenerate-ack",
+            requestId: message.requestId,
+            accepted: accepted
+          }, event.origin);
+        }
+      });
+
       function normalizeLobbyRoomCode(value) {
         return (value || "")
           .toUpperCase()
@@ -537,7 +579,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=random-preference-fix-20260913-1";
+      var buildVersion = "?v=draft-regeneration-20260914-1";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,

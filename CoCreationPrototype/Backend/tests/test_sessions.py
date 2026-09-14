@@ -991,6 +991,14 @@ class CoCreationSessionTests(unittest.TestCase):
     def test_demo_session_has_no_deadline_and_skips_online_sync(self):
         with patch.object(backend, "synchronize_version_with_online_match") as sync:
             demo_session_id = self.create_and_open_demo_session("demo_no_deadline_001")
+            preview = self.client.get(f"/api/sessions/{demo_session_id}").json()
+            self.assertEqual(preview["versions"], [])
+            self.assertIsNotNone(preview["draftPreview"])
+            entered = self.client.patch(
+                f"/api/sessions/{demo_session_id}/language",
+                json={"language": "en"},
+            )
+            self.assertEqual(entered.status_code, 200, entered.text)
 
         sync.assert_not_called()
         response = self.client.get(f"/api/sessions/{demo_session_id}")
@@ -1025,6 +1033,152 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertGreaterEqual(audit_payload["generationAttempts"], 1)
         self.assertIn("qualityScore", audit_payload["generationSummary"])
         self.assertIn("waterAreas", audit_payload["generationSummary"])
+
+    def test_formal_draft_preview_promotes_only_on_entry_and_starts_deadline_then(self):
+        with patch.object(backend, "synchronize_version_with_online_match") as sync:
+            created = self.client.post(
+                "/api/sessions",
+                json={
+                    "rows": SAMPLE_ROWS,
+                    "initialDraftMethod": "partial_completion",
+                    "language": "en",
+                    "idempotencyKey": "preview_lifecycle_001",
+                    "matchId": "preview-match",
+                    "playerNumber": 2,
+                },
+            )
+            self.assertEqual(created.status_code, 200, created.text)
+            payload = created.json()
+            fragment = parse_qs(urlparse(payload["launchUrl"]).fragment)
+            exchanged = self.client.post(
+                f"/api/sessions/{payload['sessionId']}/browser-access",
+                json={"bootstrapToken": fragment["bootstrap"][0]},
+            )
+            self.assertEqual(exchanged.status_code, 200, exchanged.text)
+            before = self.client.get(f"/api/sessions/{payload['sessionId']}").json()
+            self.assertEqual(before["versions"], [])
+            self.assertIsNone(before["currentVersionId"])
+            self.assertIsNone(before["deadlineStartedAt"])
+            self.assertEqual(before["draftPreview"]["rows"], SAMPLE_ROWS)
+            sync.assert_not_called()
+
+            entered = self.client.patch(
+                f"/api/sessions/{payload['sessionId']}/language",
+                json={"language": "en"},
+            )
+            self.assertEqual(entered.status_code, 200, entered.text)
+            session = entered.json()
+            self.assertIsNone(session["draftPreview"])
+            self.assertEqual(len(session["versions"]), 1)
+            self.assertIsNotNone(session["deadlineStartedAt"])
+            self.assertIsNotNone(session["deadlineAt"])
+            sync.assert_called_once_with(
+                payload["sessionId"], session["currentVersionId"], "first_stage"
+            )
+
+    def test_formal_draft_regeneration_is_persistent_and_idempotent(self):
+        created = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "description_generation",
+                "language": "en",
+                "idempotencyKey": "regeneration_lifecycle_001",
+            },
+        ).json()
+        fragment = parse_qs(urlparse(created["launchUrl"]).fragment)
+        self.client.post(
+            f"/api/sessions/{created['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        requested = self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations",
+            json={"idempotencyKey": "regenerate_once_001"},
+        )
+        self.assertEqual(requested.status_code, 200, requested.text)
+        request_id = requested.json()["draftPreview"]["regenerationRequestId"]
+        headers = {"Authorization": f"Bearer {created['integrationToken']}"}
+
+        claim = self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/claim",
+            headers=headers,
+        )
+        self.assertEqual(claim.status_code, 200, claim.text)
+        duplicate_claim = self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/claim",
+            headers=headers,
+        )
+        self.assertEqual(duplicate_claim.status_code, 200, duplicate_claim.text)
+        completed = self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/complete",
+            headers=headers,
+            json={"rows": SAMPLE_ROWS},
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        duplicate_complete = self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/complete",
+            headers=headers,
+            json={"rows": SAMPLE_ROWS},
+        )
+        self.assertEqual(duplicate_complete.status_code, 200, duplicate_complete.text)
+        session = self.client.get(f"/api/sessions/{created['sessionId']}").json()
+        self.assertEqual(session["draftPreview"]["generation"], 2)
+        self.assertEqual(session["draftPreview"]["regenerationStatus"], "completed")
+        self.assertEqual(session["versions"], [])
+        self.assertIsNone(session["deadlineStartedAt"])
+
+    def test_failed_formal_regeneration_preserves_preview_and_blocks_entry_while_active(self):
+        created = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "partial_completion",
+                "language": "en",
+                "idempotencyKey": "regeneration_failure_001",
+            },
+        ).json()
+        fragment = parse_qs(urlparse(created["launchUrl"]).fragment)
+        self.client.post(
+            f"/api/sessions/{created['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        requested = self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations",
+            json={"idempotencyKey": "regeneration_failure_request_001"},
+        ).json()
+        request_id = requested["draftPreview"]["regenerationRequestId"]
+        blocked = self.client.patch(
+            f"/api/sessions/{created['sessionId']}/language",
+            json={"language": "en"},
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(blocked.json()["code"], "DRAFT_REGENERATION_ACTIVE")
+
+        failed = self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/fail",
+            headers={"Authorization": f"Bearer {created['integrationToken']}"},
+            json={"failureCode": "generation_failed"},
+        )
+        self.assertEqual(failed.status_code, 200, failed.text)
+        retained = self.client.get(f"/api/sessions/{created['sessionId']}").json()
+        self.assertEqual(retained["draftPreview"]["rows"], SAMPLE_ROWS)
+        self.assertEqual(retained["draftPreview"]["generation"], 1)
+        self.assertEqual(retained["draftPreview"]["regenerationStatus"], "failed")
+
+    def test_demo_draft_can_regenerate_repeatedly_without_stage_or_deadline(self):
+        demo_session_id = self.create_and_open_demo_session("demo_regeneration_001")
+        for index in range(2):
+            response = self.client.post(
+                f"/api/sessions/{demo_session_id}/draft-regenerations",
+                json={"idempotencyKey": f"demo_regeneration_request_{index}"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+        session = self.client.get(f"/api/sessions/{demo_session_id}").json()
+        self.assertEqual(session["draftPreview"]["generation"], 3)
+        self.assertEqual(session["draftPreview"]["regenerationStatus"], "completed")
+        self.assertEqual(session["versions"], [])
+        self.assertIsNone(session["deadlineStartedAt"])
+        self.assertIsNone(session["deadlineAt"])
 
     def test_new_demo_session_removes_only_previous_demo_data(self):
         first_demo_id = self.create_and_open_demo_session("demo_cleanup_001")

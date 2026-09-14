@@ -7,6 +7,9 @@ public static class CoCreationDraftContext
     public static string CreationKey { get; private set; } = "";
     public static string SessionId { get; private set; } = "";
     public static string IntegrationToken { get; private set; } = "";
+    public static string RegenerationRequestId { get; private set; } = "";
+    public static string RegenerationFailureCode { get; private set; } = "";
+    public static bool RegenerationResultReady { get; private set; }
 
     public static bool HasDraft =>
         Rows != null
@@ -17,6 +20,16 @@ public static class CoCreationDraftContext
         HasDraft
         && !string.IsNullOrWhiteSpace(SessionId)
         && !string.IsNullOrWhiteSpace(IntegrationToken);
+
+    public static bool IsRegenerating =>
+        HasSession
+        && !string.IsNullOrWhiteSpace(RegenerationRequestId)
+        && !RegenerationResultReady;
+
+    public static bool HasRegenerationResult =>
+        HasSession
+        && !string.IsNullOrWhiteSpace(RegenerationRequestId)
+        && RegenerationResultReady;
 
     public static void Stage(string[] rows, string initialDraftMethod)
     {
@@ -30,12 +43,57 @@ public static class CoCreationDraftContext
         CreationKey = "unity_" + Guid.NewGuid().ToString("N");
         SessionId = "";
         IntegrationToken = "";
+        ClearRegeneration();
     }
 
     public static void RecordSession(string sessionId, string integrationToken)
     {
         SessionId = sessionId ?? "";
         IntegrationToken = integrationToken ?? "";
+    }
+
+    public static void BeginRegeneration(string requestId)
+    {
+        if (!HasSession || string.IsNullOrWhiteSpace(requestId))
+        {
+            throw new InvalidOperationException("A session and regeneration request are required.");
+        }
+
+        RegenerationRequestId = requestId.Trim();
+        RegenerationFailureCode = "";
+        RegenerationResultReady = false;
+    }
+
+    public static void CompleteRegeneration(string[] rows)
+    {
+        if (!IsRegenerating || rows == null || rows.Length != 10)
+        {
+            throw new InvalidOperationException("A complete regenerated draft is required.");
+        }
+
+        Rows = CloneRows(rows);
+        RegenerationFailureCode = "";
+        RegenerationResultReady = true;
+    }
+
+    public static void FailRegeneration(string failureCode)
+    {
+        if (!IsRegenerating)
+        {
+            return;
+        }
+
+        RegenerationFailureCode = string.IsNullOrWhiteSpace(failureCode)
+            ? "generation_failed"
+            : failureCode.Trim();
+        RegenerationResultReady = true;
+    }
+
+    public static void ClearRegeneration()
+    {
+        RegenerationRequestId = "";
+        RegenerationFailureCode = "";
+        RegenerationResultReady = false;
     }
 
     public static void Clear()
@@ -45,6 +103,7 @@ public static class CoCreationDraftContext
         CreationKey = "";
         SessionId = "";
         IntegrationToken = "";
+        ClearRegeneration();
     }
 
     private static string[] CloneRows(string[] rows)

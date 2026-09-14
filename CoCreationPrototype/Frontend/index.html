@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=mini-map-rows-20260914-1">
+    <link rel="stylesheet" href="./styles.css?v=draft-preview-unified-20260914-1">
 </head>
 <body>
     <div class="app">
@@ -48,9 +48,26 @@
                     </div>
                     <p class="language-lock-notice" id="languageLockNotice" data-i18n="demoLanguageLock">Your selection cannot be changed after the session is created.</p>
                 </div>
-                <button class="primary-button" id="enterSessionButton" type="button" hidden data-i18n="enterSession">Enter co-creation session</button>
-                <button class="primary-button" id="demoButton" type="button" data-i18n="startDemo">Start a sample session</button>
-                <p class="demo-generation-status" id="demoGenerationStatus" role="status" aria-live="polite" hidden data-i18n="demoGenerationStatus">Creating a sample map with the algorithm…</p>
+                <div class="draft-actions" id="draftActions" hidden>
+                    <button class="secondary-button" id="regenerateDraftButton" type="button" data-i18n="regenerateDraft">Regenerate</button>
+                    <button class="primary-button" id="enterSessionButton" type="button" data-i18n="enterSession">Enter co-creation flow</button>
+                </div>
+                <section class="draft-preview" id="draftPreview" hidden aria-labelledby="draftPreviewTitle">
+                    <div class="draft-preview-heading">
+                        <h3 id="draftPreviewTitle" data-i18n="draftPreviewTitle">First draft preview</h3>
+                        <span id="draftGenerationLabel"></span>
+                    </div>
+                    <div class="draft-preview-stage">
+                        <div class="draft-preview-grid" id="draftPreviewGrid" role="img"></div>
+                        <div class="draft-preview-loading" id="draftPreviewLoading" hidden role="status" aria-live="polite">
+                            <svg class="draft-preview-spinner" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+                                <path d="M39 23a15 15 0 1 0-4.4 10.6M39 8v15H24" />
+                            </svg>
+                            <span id="draftPreviewLoadingMessage"></span>
+                        </div>
+                    </div>
+                    <p class="draft-preview-status" id="draftPreviewStatus" role="status" aria-live="polite"></p>
+                </section>
             </section>
 
             <section class="workspace" id="workspace" hidden aria-label="Co-creation workspace">
@@ -206,6 +223,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=human-edit-ack-20260914-1"></script>
+    <script src="./app.js?v=draft-preview-unified-20260914-1"></script>
 </body>
 </html>

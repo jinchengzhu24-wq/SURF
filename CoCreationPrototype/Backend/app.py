@@ -576,6 +576,23 @@ class DemoSessionRequest(StrictModel):
     idempotencyKey: str
 
 
+class DraftRegenerationRequest(StrictModel):
+    idempotencyKey: str
+
+
+class DraftRegenerationCompleteRequest(StrictModel):
+    rows: list[str]
+
+
+class DraftRegenerationFailRequest(StrictModel):
+    failureCode: Literal[
+        "generation_failed",
+        "llm_failed",
+        "validation_failed",
+        "unity_unavailable",
+    ]
+
+
 class BrowserAccessRequest(StrictModel):
     bootstrapToken: str
 
@@ -809,7 +826,7 @@ def legacy_chat(payload: LegacyChatRequest, request: Request, response: Response
 @app.post("/api/sessions")
 def create_session(payload: CreateSessionRequest):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
-    session_id, version_id, bootstrap_token, integration_token = _create_session_record(
+    session_id, _version_id, bootstrap_token, integration_token = _create_session_record(
         rows=payload.rows,
         initial_draft_method=payload.initialDraftMethod,
         language=payload.language,
@@ -817,8 +834,6 @@ def create_session(payload: CreateSessionRequest):
         match_id=payload.matchId,
         player_number=payload.playerNumber,
     )
-    synchronize_version_with_online_match(session_id, version_id, "first_stage")
-
     return {
         "sessionId": session_id,
         "launchUrl": build_launch_url(session_id, bootstrap_token),
@@ -872,11 +887,7 @@ def _create_session_record(
 
         if existing is None:
             session_id = uuid.uuid4().hex
-            version_id = uuid.uuid4().hex
-            initial_bindings = build_entity_bindings(
-                validation.rows,
-                source="initial",
-            )
+            version_id = None
             access_token = derive_token("access", session_id)
             integration_token = derive_token("integration", session_id)
             bootstrap_token = derive_token("bootstrap", session_id)
@@ -886,8 +897,9 @@ def _create_session_record(
                     id, creation_key, access_hash, integration_hash,
                     bootstrap_hash, demo_mode, match_id, player_number,
                     initial_draft_method, language, language_locked_at, status,
-                    current_version_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                    current_version_id, created_at, updated_at,
+                    draft_rows_json, draft_validation_json, draft_generation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'active', NULL, ?, ?, ?, ?, 1)
                 """,
                 (
                     session_id,
@@ -900,38 +912,13 @@ def _create_session_record(
                     player_number if player_number in (1, 2) else None,
                     initial_draft_method,
                     language,
-                    created_at if demo_mode else None,
-                    version_id,
                     created_at,
                     created_at,
-                ),
-            )
-            database.execute(
-                """
-                INSERT INTO level_versions(
-                    id, session_id, stage_number, parent_version_id, source,
-                    rows_json, summary, diff_json, validation_json,
-                    design_context_json, entity_bindings_json,
-                    idempotency_key, created_at
-                ) VALUES (?, ?, 1, NULL, 'initial', ?, ?, '[]', ?, ?, ?, ?, ?)
-                """,
-                (
-                    version_id,
-                    session_id,
                     dump_json(list(validation.rows)),
-                    initial_summary,
                     dump_json(validation.as_dict()),
-                    dump_json({
-                        **empty_design_context(),
-                        "updatedFromStageId": version_id,
-                    }),
-                    dump_json(initial_bindings),
-                    "initial:" + idempotency_key,
-                    created_at,
                 ),
             )
             event_payload = {
-                "versionId": version_id,
                 "initialDraftMethod": initial_draft_method,
                 "demoMode": bool(demo_mode),
             }
@@ -948,27 +935,6 @@ def _create_session_record(
                 event_payload,
                 created_at,
             )
-            if not demo_mode:
-                record_agent_handoff(
-                    database,
-                    session_id,
-                    "blueprint_planning",
-                    "co_creation_chat",
-                    "validated_initial_stage",
-                    {
-                        "versionId": version_id,
-                        "initialDraftMethod": initial_draft_method,
-                    },
-                    evidence=[
-                        {
-                            "type": "deterministic_solver",
-                            "status": "passed",
-                            "validation": validation.as_dict(),
-                        }
-                    ],
-                    status="confirmed",
-                    created_at=created_at,
-                )
             if demo_mode:
                 delete_demo_sessions(database, keep_session_id=session_id)
         else:
@@ -981,6 +947,11 @@ def _create_session_record(
                 (session_id,),
             ).fetchone()
 
+            candidate_rows = (
+                load_json(existing["draft_rows_json"])
+                if existing["draft_rows_json"]
+                else None
+            )
             same_demo_request = (
                 demo_mode
                 and bool(existing["demo_mode"])
@@ -990,10 +961,15 @@ def _create_session_record(
                 not demo_mode
                 and not bool(existing["demo_mode"])
                 and existing["initial_draft_method"] == initial_draft_method
-                and existing_version is not None
-                and load_json(existing_version["rows_json"]) == list(validation.rows)
+                and (
+                    candidate_rows == list(validation.rows)
+                    or (
+                        existing_version is not None
+                        and load_json(existing_version["rows_json"]) == list(validation.rows)
+                    )
+                )
             )
-            if existing_version is None or not (same_demo_request or same_regular_request):
+            if not (same_demo_request or same_regular_request):
                 raise ApiError(
                     409,
                     "IDEMPOTENCY_CONFLICT",
@@ -1003,9 +979,198 @@ def _create_session_record(
             access_token = derive_token("access", session_id)
             integration_token = derive_token("integration", session_id)
             bootstrap_token = derive_token("bootstrap", session_id)
-            version_id = existing_version["id"]
+            version_id = existing_version["id"] if existing_version is not None else None
 
     return session_id, version_id, bootstrap_token, integration_token
+
+
+DRAFT_REGENERATION_TIMEOUT_SECONDS = 240
+
+
+def _expire_draft_regeneration(database, session):
+    if session is None or session["draft_regeneration_status"] not in {"pending", "claimed"}:
+        return session
+    requested_at = session["draft_regeneration_requested_at"]
+    if not requested_at:
+        return session
+    age = (datetime.now(timezone.utc) - parse_time(requested_at)).total_seconds()
+    if age < DRAFT_REGENERATION_TIMEOUT_SECONDS:
+        return session
+    now = utc_now()
+    database.execute(
+        """UPDATE design_sessions
+           SET draft_regeneration_status = 'timed_out',
+               draft_regeneration_updated_at = ?,
+               draft_regeneration_failure_code = 'unity_unavailable',
+               updated_at = ?
+           WHERE id = ? AND draft_regeneration_status IN ('pending', 'claimed')""",
+        (now, now, session["id"]),
+    )
+    record_event(
+        database,
+        session["id"],
+        "draft_regeneration_timed_out",
+        {"requestId": session["draft_regeneration_request_id"]},
+        now,
+    )
+    return get_session(database, session["id"])
+
+
+def _require_draft_preview(database, session):
+    if session["status"] != "active" or session["language_locked_at"] is not None:
+        raise ApiError(409, "SESSION_LOCKED", "The co-creation session already started.")
+    if session["current_version_id"] is not None or not session["draft_rows_json"]:
+        raise ApiError(409, "DRAFT_PREVIEW_UNAVAILABLE", "This session has no mutable draft preview.")
+
+
+def _promote_draft_preview(database, session, created_at):
+    if session["current_version_id"] is not None:
+        return session["current_version_id"], False
+    _require_draft_preview(database, session)
+    session = _expire_draft_regeneration(database, session)
+    if session["draft_regeneration_status"] in {"pending", "claimed"}:
+        raise ApiError(409, "DRAFT_REGENERATION_ACTIVE", "Wait for draft regeneration to finish.")
+    rows = load_json(session["draft_rows_json"])
+    validation = _solve_or_api_error(rows)
+    version_id = uuid.uuid4().hex
+    bindings = build_entity_bindings(validation.rows, source="initial")
+    database.execute(
+        """
+        INSERT INTO level_versions(
+            id, session_id, stage_number, parent_version_id, source,
+            rows_json, summary, diff_json, validation_json,
+            design_context_json, entity_bindings_json,
+            idempotency_key, created_at
+        ) VALUES (?, ?, 1, NULL, 'initial', ?, ?, '[]', ?, ?, ?, ?, ?)
+        """,
+        (
+            version_id,
+            session["id"],
+            dump_json(list(validation.rows)),
+            "Algorithm-generated demo map" if bool(session["demo_mode"]) else "Initial draft from Unity",
+            dump_json(validation.as_dict()),
+            dump_json({**empty_design_context(), "updatedFromStageId": version_id}),
+            dump_json(bindings),
+            "initial:" + session["creation_key"],
+            created_at,
+        ),
+    )
+    database.execute(
+        """UPDATE design_sessions
+           SET current_version_id = ?, draft_rows_json = NULL,
+               draft_validation_json = NULL, draft_regeneration_status = NULL,
+               draft_regeneration_request_id = NULL, draft_regeneration_key = NULL,
+               draft_regeneration_requested_at = NULL,
+               draft_regeneration_updated_at = NULL,
+               draft_regeneration_failure_code = NULL, updated_at = ?
+           WHERE id = ? AND current_version_id IS NULL""",
+        (version_id, created_at, session["id"]),
+    )
+    if not bool(session["demo_mode"]):
+        record_agent_handoff(
+            database,
+            session["id"],
+            "blueprint_planning",
+            "co_creation_chat",
+            "validated_initial_stage",
+            {"versionId": version_id, "initialDraftMethod": session["initial_draft_method"]},
+            evidence=[{"type": "deterministic_solver", "status": "passed", "validation": validation.as_dict()}],
+            status="confirmed",
+            created_at=created_at,
+        )
+    record_event(
+        database,
+        session["id"],
+        "draft_preview_promoted",
+        {"versionId": version_id, "generation": int(session["draft_generation"] or 1)},
+        created_at,
+    )
+    return version_id, True
+
+
+@app.post("/api/sessions/{session_id}/draft-regenerations")
+def request_draft_regeneration(
+    session_id: str,
+    payload: DraftRegenerationRequest,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
+):
+    _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    with connect(immediate=True) as database:
+        session = require_browser_session(database, session_id, access_cookie)
+        _require_draft_preview(database, session)
+        session = _expire_draft_regeneration(database, session)
+        if session["draft_regeneration_key"] == payload.idempotencyKey:
+            return serialize_session(database, session_id)
+        if session["draft_regeneration_status"] in {"pending", "claimed"}:
+            raise ApiError(409, "DRAFT_REGENERATION_ACTIVE", "Draft regeneration is already running.")
+
+        if bool(session["demo_mode"]):
+            generated = generate_demo_level()
+            validation = _solve_or_api_error(list(generated.rows))
+            request_id = uuid.uuid4().hex
+            now = utc_now()
+            database.execute(
+                """UPDATE design_sessions
+                   SET draft_rows_json = ?, draft_validation_json = ?,
+                       draft_generation = draft_generation + 1,
+                       draft_regeneration_status = 'completed',
+                       draft_regeneration_request_id = ?, draft_regeneration_key = ?,
+                       draft_regeneration_requested_at = ?, draft_regeneration_updated_at = ?,
+                       draft_regeneration_failure_code = NULL, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    dump_json(list(validation.rows)), dump_json(validation.as_dict()),
+                    request_id, payload.idempotencyKey, now, now, now, session_id,
+                ),
+            )
+            record_event(database, session_id, "draft_regeneration_completed", {
+                "requestId": request_id,
+                "generation": int(session["draft_generation"] or 1) + 1,
+                "mode": "algorithm_demo",
+            }, now)
+            return serialize_session(database, session_id)
+
+        request_id = uuid.uuid4().hex
+        now = utc_now()
+        database.execute(
+            """UPDATE design_sessions
+               SET draft_regeneration_status = 'pending',
+                   draft_regeneration_request_id = ?, draft_regeneration_key = ?,
+                   draft_regeneration_requested_at = ?, draft_regeneration_updated_at = ?,
+                   draft_regeneration_failure_code = NULL, updated_at = ?
+               WHERE id = ?""",
+            (request_id, payload.idempotencyKey, now, now, now, session_id),
+        )
+        record_event(database, session_id, "draft_regeneration_requested", {
+            "requestId": request_id,
+            "generation": int(session["draft_generation"] or 1) + 1,
+            "mode": "unity",
+        }, now)
+        return serialize_session(database, session_id)
+
+
+@app.post("/api/sessions/{session_id}/draft-regenerations/{request_id}/cancel")
+def cancel_draft_regeneration(
+    session_id: str,
+    request_id: str,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
+):
+    with connect(immediate=True) as database:
+        session = require_browser_session(database, session_id, access_cookie)
+        _require_draft_preview(database, session)
+        if session["draft_regeneration_request_id"] != request_id:
+            raise ApiError(409, "STALE_DRAFT_REGENERATION", "The regeneration request is no longer current.")
+        if session["draft_regeneration_status"] in {"completed", "failed", "cancelled", "timed_out"}:
+            return serialize_session(database, session_id)
+        now = utc_now()
+        database.execute(
+            """UPDATE design_sessions SET draft_regeneration_status = 'cancelled',
+               draft_regeneration_updated_at = ?, draft_regeneration_failure_code = 'unity_unavailable',
+               updated_at = ? WHERE id = ?""",
+            (now, now, session_id),
+        )
+        record_event(database, session_id, "draft_regeneration_cancelled", {"requestId": request_id}, now)
+        return serialize_session(database, session_id)
 
 
 @app.post("/api/sessions/{session_id}/browser-access")
@@ -1065,6 +1230,7 @@ def read_session(
             session_id,
             access_cookie or session_token,
         )
+        session = _expire_draft_regeneration(database, session)
         expire_interrupted_attempts(database, session_id)
         return serialize_session(database, session["id"])
 
@@ -1075,6 +1241,7 @@ def change_language(
     payload: LanguageRequest,
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
+    promoted_version_id = None
     with connect(immediate=True) as database:
         session = require_browser_session(database, session_id, access_cookie)
         if session["status"] != "active":
@@ -1088,13 +1255,16 @@ def change_language(
                 "The session language was already selected and cannot be changed.",
             )
         now = utc_now()
+        promoted_version_id, promoted = _promote_draft_preview(database, session, now)
+        should_sync_first_stage = promoted and not bool(session["demo_mode"])
+        session = get_session(database, session_id)
         database.execute(
             """UPDATE design_sessions
                SET language = ?, language_locked_at = ?, updated_at = ?
                WHERE id = ?""",
             (payload.language, now, now, session_id),
         )
-        deadline_started_at, deadline_at = start_deadline_if_missing(database, session)
+        _deadline_started_at, deadline_at = start_deadline_if_missing(database, session)
         record_event(
             database,
             session_id,
@@ -1102,7 +1272,11 @@ def change_language(
             {"language": payload.language, "deadlineAt": deadline_at},
             now,
         )
-        return serialize_session(database, session["id"])
+        result = serialize_session(database, session["id"])
+
+    if should_sync_first_stage and promoted_version_id is not None:
+        synchronize_version_with_online_match(session_id, promoted_version_id, "first_stage")
+    return result
 
 
 @app.post("/api/sessions/{session_id}/translations/{language}")
@@ -6799,16 +6973,9 @@ def integration_status(
     session_id: str,
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    token = ""
-
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization[7:].strip()
-
-    with connect() as database:
-        session = get_session(database, session_id)
-
-        if session is None or not token_matches(token, session["integration_hash"]):
-            raise ApiError(401, "INVALID_INTEGRATION_TOKEN", "Integration access was denied.")
+    with connect(immediate=True) as database:
+        session = _require_integration_session(database, session_id, authorization)
+        session = _expire_draft_regeneration(database, session)
 
         payload = {
             "sessionId": session_id,
@@ -6816,7 +6983,18 @@ def integration_status(
             "finalVersionId": session["final_version_id"],
             "finalRows": None,
             "designerIntention": None,
+            "draftRegeneration": None,
         }
+
+        if session["current_version_id"] is None and session["draft_regeneration_request_id"]:
+            payload["draftRegeneration"] = {
+                "requestId": session["draft_regeneration_request_id"],
+                "status": session["draft_regeneration_status"],
+                "generation": int(session["draft_generation"] or 1) + (
+                    1 if session["draft_regeneration_status"] in {"pending", "claimed"} else 0
+                ),
+                "requestedAt": session["draft_regeneration_requested_at"],
+            }
 
         if session["status"] == "completed" and session["final_version_id"]:
             version = get_version(database, session_id, session["final_version_id"])
@@ -6828,6 +7006,111 @@ def integration_status(
             payload["designerIntention"] = intention["content"] if intention else None
 
         return payload
+
+
+def _require_integration_session(database, session_id, authorization):
+    token = ""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+    session = get_session(database, session_id)
+    if session is None or not token_matches(token, session["integration_hash"]):
+        raise ApiError(401, "INVALID_INTEGRATION_TOKEN", "Integration access was denied.")
+    return session
+
+
+@app.post("/api/integrations/sessions/{session_id}/draft-regenerations/{request_id}/claim")
+def claim_draft_regeneration(
+    session_id: str,
+    request_id: str,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    with connect(immediate=True) as database:
+        session = _require_integration_session(database, session_id, authorization)
+        _require_draft_preview(database, session)
+        session = _expire_draft_regeneration(database, session)
+        if session["draft_regeneration_request_id"] != request_id:
+            raise ApiError(409, "STALE_DRAFT_REGENERATION", "The regeneration request is no longer current.")
+        status = session["draft_regeneration_status"]
+        if status == "claimed":
+            return {"sessionId": session_id, "requestId": request_id, "status": status}
+        if status != "pending":
+            raise ApiError(409, "DRAFT_REGENERATION_NOT_PENDING", "The regeneration request cannot be claimed.")
+        now = utc_now()
+        database.execute(
+            """UPDATE design_sessions SET draft_regeneration_status = 'claimed',
+               draft_regeneration_updated_at = ?, updated_at = ? WHERE id = ?""",
+            (now, now, session_id),
+        )
+        record_event(database, session_id, "draft_regeneration_claimed", {"requestId": request_id}, now)
+        return {"sessionId": session_id, "requestId": request_id, "status": "claimed"}
+
+
+@app.post("/api/integrations/sessions/{session_id}/draft-regenerations/{request_id}/complete")
+def complete_draft_regeneration(
+    session_id: str,
+    request_id: str,
+    payload: DraftRegenerationCompleteRequest,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    with connect() as database:
+        _require_integration_session(database, session_id, authorization)
+    validation = _solve_or_api_error(payload.rows)
+    normalized_rows = list(validation.rows)
+    with connect(immediate=True) as database:
+        session = _require_integration_session(database, session_id, authorization)
+        _require_draft_preview(database, session)
+        session = _expire_draft_regeneration(database, session)
+        if session["draft_regeneration_request_id"] != request_id:
+            raise ApiError(409, "STALE_DRAFT_REGENERATION", "The regeneration request is no longer current.")
+        if session["draft_regeneration_status"] == "completed":
+            if load_json(session["draft_rows_json"]) != normalized_rows:
+                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "Completed regeneration rows cannot be replaced.")
+            return {"sessionId": session_id, "requestId": request_id, "status": "completed"}
+        if session["draft_regeneration_status"] != "claimed":
+            raise ApiError(409, "DRAFT_REGENERATION_NOT_CLAIMED", "The regeneration request is not claimable.")
+        now = utc_now()
+        generation = int(session["draft_generation"] or 1) + 1
+        database.execute(
+            """UPDATE design_sessions SET draft_rows_json = ?, draft_validation_json = ?,
+               draft_generation = ?, draft_regeneration_status = 'completed',
+               draft_regeneration_updated_at = ?, draft_regeneration_failure_code = NULL,
+               updated_at = ? WHERE id = ?""",
+            (dump_json(normalized_rows), dump_json(validation.as_dict()), generation, now, now, session_id),
+        )
+        record_event(database, session_id, "draft_regeneration_completed", {
+            "requestId": request_id, "generation": generation, "mode": "unity",
+        }, now)
+        return {"sessionId": session_id, "requestId": request_id, "status": "completed"}
+
+
+@app.post("/api/integrations/sessions/{session_id}/draft-regenerations/{request_id}/fail")
+def fail_draft_regeneration(
+    session_id: str,
+    request_id: str,
+    payload: DraftRegenerationFailRequest,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    with connect(immediate=True) as database:
+        session = _require_integration_session(database, session_id, authorization)
+        _require_draft_preview(database, session)
+        session = _expire_draft_regeneration(database, session)
+        if session["draft_regeneration_request_id"] != request_id:
+            raise ApiError(409, "STALE_DRAFT_REGENERATION", "The regeneration request is no longer current.")
+        if session["draft_regeneration_status"] == "failed":
+            return {"sessionId": session_id, "requestId": request_id, "status": "failed"}
+        if session["draft_regeneration_status"] not in {"pending", "claimed"}:
+            raise ApiError(409, "DRAFT_REGENERATION_NOT_ACTIVE", "The regeneration request is not active.")
+        now = utc_now()
+        database.execute(
+            """UPDATE design_sessions SET draft_regeneration_status = 'failed',
+               draft_regeneration_updated_at = ?, draft_regeneration_failure_code = ?,
+               updated_at = ? WHERE id = ?""",
+            (now, payload.failureCode, now, session_id),
+        )
+        record_event(database, session_id, "draft_regeneration_failed", {
+            "requestId": request_id, "failureCode": payload.failureCode,
+        }, now)
+        return {"sessionId": session_id, "requestId": request_id, "status": "failed"}
 
 
 def update_play_attempt(attempt_id, payload, requested_status):

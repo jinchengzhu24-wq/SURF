@@ -20,6 +20,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
 
     private string launchUrl = "";
     private bool creatingSession;
+    private bool processingRegeneration;
     private Coroutine trackingRoutine;
 
     private void Awake()
@@ -50,6 +51,19 @@ public sealed class CoCreationEntryController : MonoBehaviour
             return;
         }
 
+        if (CoCreationDraftContext.HasRegenerationResult)
+        {
+            if (!TryBuildResumeLabUrl(CoCreationDraftContext.SessionId, out launchUrl))
+            {
+                ApplyFailure("The existing co-creation session could not be resumed.");
+                return;
+            }
+            SetButtonState(false, "SYNCING NEW DRAFT...");
+            SetStatus("Returning the regenerated draft to the co-creation lab...", WaitingStatusColor);
+            StartCoroutine(SubmitRegenerationResult());
+            return;
+        }
+
         if (CoCreationPlayContext.ConsumeEmbeddedReturnPending())
         {
             if (!CoCreationDraftContext.HasSession
@@ -68,6 +82,19 @@ public sealed class CoCreationEntryController : MonoBehaviour
                 "Stage play complete. Continue designing in the existing lab tab.",
                 ReadyStatusColor
             );
+            trackingRoutine = StartCoroutine(TrackSessionCompletion());
+            return;
+        }
+
+        if (CoCreationDraftContext.HasSession)
+        {
+            if (!TryBuildResumeLabUrl(CoCreationDraftContext.SessionId, out launchUrl))
+            {
+                ApplyFailure("The existing co-creation session could not be resumed.");
+                return;
+            }
+            SetButtonState(true, "RETURN TO CO-CREATION LAB");
+            SetStatus("Draft preview is synchronized. Continue in the existing lab tab.", ReadyStatusColor);
             trackingRoutine = StartCoroutine(TrackSessionCompletion());
             return;
         }
@@ -115,6 +142,30 @@ public sealed class CoCreationEntryController : MonoBehaviour
         );
     }
 
+    public void ReceiveBrowserDraftRegenerationRequest(string payloadJson)
+    {
+        DraftRegenerationBridgeRequest payload = null;
+        try
+        {
+            payload = JsonUtility.FromJson<DraftRegenerationBridgeRequest>(payloadJson);
+        }
+        catch (Exception exception)
+        {
+            Debug.LogWarning("CoCreationEntryController: Invalid regeneration bridge payload. " + exception.Message);
+        }
+
+        if (payload == null
+            || payload.sessionId != CoCreationDraftContext.SessionId
+            || string.IsNullOrWhiteSpace(payload.requestId)
+            || processingRegeneration
+            || CoCreationDraftContext.IsRegenerating)
+        {
+            return;
+        }
+
+        StartCoroutine(ClaimAndStartRegeneration(payload.requestId));
+    }
+
     private IEnumerator CreateSession()
     {
         if (creatingSession || !TryGetCoCreationUrl(out string baseUrl))
@@ -126,7 +177,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
         launchUrl = "";
         SetButtonState(false, "CREATING SESSION...");
         SetStatus(
-            "Uploading the verified first draft as Stage 1...",
+            "Uploading the verified first draft for preview...",
             WaitingStatusColor
         );
 
@@ -201,7 +252,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
             );
             SetButtonState(true, "OPEN CO-CREATION LAB");
             SetStatus(
-                "Stage 1 is synchronized. Open the lab to begin co-creation.",
+                "Draft preview is synchronized. Open the lab to review it.",
                 ReadyStatusColor
             );
 
@@ -258,6 +309,18 @@ public sealed class CoCreationEntryController : MonoBehaviour
                         );
                     }
                     else if (response != null
+                        && response.draftRegeneration != null
+                        && (response.draftRegeneration.status == "pending"
+                            || response.draftRegeneration.status == "claimed")
+                        && !processingRegeneration
+                        && !CoCreationDraftContext.IsRegenerating)
+                    {
+                        StartCoroutine(ClaimAndStartRegeneration(
+                            response.draftRegeneration.requestId
+                        ));
+                        yield break;
+                    }
+                    else if (response != null
                         && response.status == "completed"
                         && response.finalRows != null
                         && response.finalRows.Length == 10)
@@ -273,6 +336,108 @@ public sealed class CoCreationEntryController : MonoBehaviour
 
             yield return new WaitForSecondsRealtime(1f);
         }
+    }
+
+    private IEnumerator ClaimAndStartRegeneration(string requestId)
+    {
+        if (processingRegeneration || !CoCreationDraftContext.HasSession)
+        {
+            yield break;
+        }
+
+        processingRegeneration = true;
+        SetButtonState(false, "REGENERATING DRAFT...");
+        SetStatus("Claiming the persistent draft regeneration request...", WaitingStatusColor);
+        string endpoint = coCreationUrl.TrimEnd('/')
+            + "/api/integrations/sessions/"
+            + UnityWebRequest.EscapeURL(CoCreationDraftContext.SessionId)
+            + "/draft-regenerations/"
+            + UnityWebRequest.EscapeURL(requestId)
+            + "/claim";
+
+        using (UnityWebRequest request = new UnityWebRequest(endpoint, "POST"))
+        {
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Authorization", "Bearer " + CoCreationDraftContext.IntegrationToken);
+            request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+            yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                processingRegeneration = false;
+                ApplyFailure("The regeneration request could not be claimed. Return to the lab and retry.");
+                yield break;
+            }
+        }
+
+        CoCreationDraftContext.BeginRegeneration(requestId);
+        const string generationScene = "DG_Level";
+        if (!Application.CanStreamedLevelBeLoaded(generationScene))
+        {
+            CoCreationDraftContext.FailRegeneration("generation_failed");
+            processingRegeneration = false;
+            StartCoroutine(SubmitRegenerationResult());
+            yield break;
+        }
+        SceneManager.LoadScene(generationScene);
+    }
+
+    private IEnumerator SubmitRegenerationResult()
+    {
+        if (processingRegeneration || !CoCreationDraftContext.HasRegenerationResult)
+        {
+            yield break;
+        }
+        processingRegeneration = true;
+        string requestId = CoCreationDraftContext.RegenerationRequestId;
+        bool succeeded = string.IsNullOrWhiteSpace(CoCreationDraftContext.RegenerationFailureCode);
+        string action = succeeded ? "complete" : "fail";
+        string endpoint = coCreationUrl.TrimEnd('/')
+            + "/api/integrations/sessions/"
+            + UnityWebRequest.EscapeURL(CoCreationDraftContext.SessionId)
+            + "/draft-regenerations/"
+            + UnityWebRequest.EscapeURL(requestId)
+            + "/" + action;
+        string json = succeeded
+            ? JsonUtility.ToJson(new DraftRegenerationCompleteRequest { rows = CoCreationDraftContext.Rows })
+            : JsonUtility.ToJson(new DraftRegenerationFailRequest { failureCode = CoCreationDraftContext.RegenerationFailureCode });
+
+        using (UnityWebRequest request = new UnityWebRequest(endpoint, "POST"))
+        {
+            request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.SetRequestHeader("Authorization", "Bearer " + CoCreationDraftContext.IntegrationToken);
+            request.timeout = Mathf.Max(1, requestTimeoutSeconds);
+            yield return request.SendWebRequest();
+
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                if (request.responseCode >= 400 && request.responseCode < 500)
+                {
+                    CoCreationDraftContext.ClearRegeneration();
+                    processingRegeneration = false;
+                    SetButtonState(true, "RETURN TO CO-CREATION LAB");
+                    SetStatus("The regeneration request expired or was cancelled. The previous draft was preserved.", ErrorStatusColor);
+                    trackingRoutine = StartCoroutine(TrackSessionCompletion());
+                    yield break;
+                }
+                processingRegeneration = false;
+                SetStatus("Draft result synchronization failed. Retrying...", ErrorStatusColor);
+                yield return new WaitForSecondsRealtime(2f);
+                StartCoroutine(SubmitRegenerationResult());
+                yield break;
+            }
+        }
+
+        CoCreationDraftContext.ClearRegeneration();
+        processingRegeneration = false;
+        SetButtonState(true, "RETURN TO CO-CREATION LAB");
+        SetStatus(
+            succeeded ? "The regenerated draft is ready in the lab." : "Regeneration failed; the previous draft was preserved.",
+            succeeded ? ReadyStatusColor : ErrorStatusColor
+        );
+        trackingRoutine = StartCoroutine(TrackSessionCompletion());
     }
 
     private void HandleCompletedSession(
@@ -419,4 +584,33 @@ public sealed class CoCreationIntegrationResponse
     public string finalVersionId;
     public string[] finalRows;
     public string designerIntention;
+    public DraftRegenerationIntegrationState draftRegeneration;
+}
+
+[Serializable]
+public sealed class DraftRegenerationIntegrationState
+{
+    public string requestId;
+    public string status;
+    public int generation;
+    public string requestedAt;
+}
+
+[Serializable]
+public sealed class DraftRegenerationBridgeRequest
+{
+    public string sessionId;
+    public string requestId;
+}
+
+[Serializable]
+public sealed class DraftRegenerationCompleteRequest
+{
+    public string[] rows;
+}
+
+[Serializable]
+public sealed class DraftRegenerationFailRequest
+{
+    public string failureCode;
 }
