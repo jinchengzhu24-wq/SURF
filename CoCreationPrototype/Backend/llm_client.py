@@ -18356,7 +18356,7 @@ def _intent_hypothesis_detail_issue(value, language):
         )
     else:
         tentative = re.search(
-            r"\b(?:for now|it sounds|i read|i understand|my current reading|may|might|seem)\b",
+            r"\b(?:for now|it sounds|i read|i understand|my current(?: tentative)? reading|may|might|seem)\b",
             text,
             re.IGNORECASE,
         )

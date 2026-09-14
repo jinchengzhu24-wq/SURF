@@ -494,8 +494,6 @@ const state = {
     chatError: null,
     chatStartedAt: 0,
     chatTimerId: null,
-    chatRetryTimerId: null,
-    chatRetryCount: 0,
     deadlineTimerId: null,
     pendingMessage: null,
     proposalMode: false,
@@ -2281,15 +2279,6 @@ function scheduleAssessmentRetry(versionId) {
     state.assessmentRetryTimers.set(versionId, timerId);
 }
 
-function scheduleChatRetry() {
-    if (state.chatRetryTimerId !== null || !state.pendingMessage) return;
-    const delay = retryDelay(state.chatRetryCount++);
-    state.chatRetryTimerId = window.setTimeout(() => {
-        state.chatRetryTimerId = null;
-        submitPendingMessage();
-    }, delay);
-}
-
 async function ensureAssessment(versionId) {
     const version = findVersion(versionId);
     if (!state.session || version?.openingTurnId || state.session.assessments.some(item => item.versionId === versionId) || state.assessing.has(versionId)) return;
@@ -2404,11 +2393,6 @@ async function submitPendingMessage() {
         clearPendingMessage();
         state.chatStatus = "idle";
         state.chatError = null;
-        state.chatRetryCount = 0;
-        if (state.chatRetryTimerId !== null) {
-            window.clearTimeout(state.chatRetryTimerId);
-            state.chatRetryTimerId = null;
-        }
         updateCharacterCount();
         render();
     } catch (error) {
@@ -2446,9 +2430,8 @@ async function submitPendingMessage() {
             }
         }
         if (error?.retryable && state.pendingMessage) {
-            state.chatStatus = "waiting";
-            state.chatError = null;
-            scheduleChatRetry();
+            state.chatStatus = "error";
+            state.chatError = error;
         } else {
             state.chatStatus = "error";
             state.chatError = error;
@@ -3198,9 +3181,11 @@ function recoverPendingMessage() {
     persistPendingMessage();
     elements.messageInput.value = pending.content;
     localStorage.setItem(composerKey(), pending.content);
-    state.chatStatus = "waiting";
-    state.chatError = null;
-    scheduleChatRetry();
+    const pendingError = new Error(t("chatRetryPending"));
+    pendingError.code = "PENDING_MESSAGE";
+    pendingError.retryable = true;
+    state.chatStatus = "error";
+    state.chatError = pendingError;
     updateCharacterCount();
     renderChatRequestStatus();
     updateControls();
@@ -3257,11 +3242,6 @@ function persistPendingMessage() {
 }
 
 function clearPendingMessage() {
-    if (state.chatRetryTimerId !== null) {
-        window.clearTimeout(state.chatRetryTimerId);
-        state.chatRetryTimerId = null;
-    }
-    state.chatRetryCount = 0;
     state.pendingMessage = null;
     localStorage.removeItem(pendingMessageKey());
     localStorage.removeItem(`cocreationPendingMessage:${state.sessionId}`);

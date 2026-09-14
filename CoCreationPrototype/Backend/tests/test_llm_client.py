@@ -3364,6 +3364,18 @@ class LLMClientTests(unittest.TestCase):
             "certainty",
             llm_client._intent_hypothesis_detail_issue(overcertain, "en"),
         )
+
+    def test_intent_detail_accepts_component_repair_tentative_prefix(self):
+        repaired = (
+            "My current tentative reading is that you may prefer less water coverage. "
+            "That could make the central route feel more open. "
+            "This remains a correctable reading."
+        )
+
+        self.assertIsNone(
+            llm_client._intent_hypothesis_detail_issue(repaired, "en")
+        )
+
     def test_direction_question_goes_deeper_instead_of_asking_for_approval(self):
         question = llm_client._deterministic_key_question(
             [{"role": "user", "content": "我想让箱子贴着水边推进时更有路线判断。"}],
