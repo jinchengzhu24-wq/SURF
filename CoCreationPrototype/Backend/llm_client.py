@@ -1135,7 +1135,7 @@ def build_plain_chat_messages(
             "as one final line using exactly this compact form:\n"
             "<GUIDANCE>INTENT_DECISION: {JSON} || DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
             "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || EXECUTION_BRIEF: {JSON} || DISAGREEMENT: {JSON} || "
-            "COORDINATE_LINKS: [{JSON}, ...] || DESIGN_CONTEXT_PATCH: {JSON}</GUIDANCE>\n"
+            "HUMAN_EDIT_ENGAGEMENT: {JSON} || COORDINATE_LINKS: [{JSON}, ...] || DESIGN_CONTEXT_PATCH: {JSON}</GUIDANCE>\n"
             "DESIGN_CONTEXT_PATCH.openQuestions may include status open or resolved. A resolved "
             "question must include evidenceText copied exactly from the latest user message; "
             "the server ignores unsupported or unproven resolutions. Goals and constraints may "
@@ -1202,7 +1202,11 @@ def build_plain_chat_messages(
             "retain_current, which ends without a proposal. Status acknowledged is reserved for an "
             "existing human_edit disagreement when the designer explicitly agrees to keep discussing, "
             "explain, adjust, or re-edit; it has a null resolution, creates no proposal in that reply, "
-            "and does not mean either design position won. "
+            "and does not mean either design position won. While a human_edit disagreement is active, "
+            "HUMAN_EDIT_ENGAGEMENT is mandatory and contains exactly decision and evidenceSpan. decision "
+            "must be active or acknowledged and must equal DISAGREEMENT.status; evidenceSpan must copy an "
+            "exact, non-empty contiguous substring from the latest designer message that supports that "
+            "classification. Do not copy assistant prose or infer evidence that the designer did not write. "
             "Use a clarification cue when the designer's direction is too unclear to turn into a "
             "single safely bound proposal; it must ask for the missing map decision without "
             "silently hiding the response. Use MANUAL_EDIT alone when the designer's direction is too unclear to turn into a "
@@ -8357,6 +8361,7 @@ async def _generate_plain_with_model_fallback(
 
     max_attempts = len(models)
     ordinary_discussion = validation_mode in {"ordinary_chat", "route_discussion"}
+    human_edit_engagement_required = _active_human_edit_disagreement(stage_context)
     for attempt, model in enumerate(models[:max_attempts], start=1):
         remaining = _remaining_until(deadline)
 
@@ -8399,7 +8404,11 @@ async def _generate_plain_with_model_fallback(
                 validation_mode=validation_mode,
                 rows=rows,
                 stage_context=stage_context,
-                coordinate_free_recovery=(ordinary_discussion and attempt == max_attempts),
+                coordinate_free_recovery=(
+                    ordinary_discussion
+                    and attempt == max_attempts
+                    and not _active_human_edit_disagreement(stage_context)
+                ),
             )
             response = await asyncio.wait_for(
                 _request_completion(
@@ -8664,6 +8673,12 @@ async def _generate_plain_with_model_fallback(
                 language,
                 stage_context,
             )
+            human_edit_engagement = _extract_plain_human_edit_engagement(
+                content,
+                _latest_role_content(semantic_messages, "user"),
+                stage_context,
+                disagreement,
+            )
             proposal_binding_downgraded = False
             intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = (
                 _apply_deterministic_guidance_fallback(
@@ -8865,6 +8880,8 @@ async def _generate_plain_with_model_fallback(
                 "uiCues": ui_cues[:2],
                 "coordinateLinks": coordinate_links,
             }
+            if human_edit_engagement is not None:
+                guidance["_humanEditEngagement"] = human_edit_engagement
             guidance = _sanitize_visible_guidance(guidance, language)
             if design_context_patch is not None:
                 guidance["designContextPatch"] = design_context_patch
@@ -9502,7 +9519,11 @@ async def _generate_plain_with_model_fallback(
             latencyMs=int((time.monotonic() - started_at) * 1000),
             responseMode="plain_text",
             failureClass=_llm_failure_class(last_error, validation_feedback),
-            salvageAction="return_error" if ordinary_discussion else "pending_fallback",
+            salvageAction=(
+                "return_error"
+                if ordinary_discussion or human_edit_engagement_required
+                else "pending_fallback"
+            ),
             routeSentenceCount=0,
             routeCoordinateCount=0,
             droppedSentenceCount=total_grounding_dropped_count,
@@ -9525,7 +9546,7 @@ async def _generate_plain_with_model_fallback(
                 stage_context=stage_context,
                 solver_metrics=solver_metrics,
             )
-        if ordinary_discussion:
+        if ordinary_discussion or human_edit_engagement_required:
             raise last_error
         if _is_length_failure(last_error, validation_feedback):
             fallback_message = (
@@ -9999,6 +10020,18 @@ def _plain_messages_with_validation_feedback(
             "grounded passage with only the key corridor, endpoint, and design consequence. "
             "Do not enumerate every coordinate, movement, alternative, BFS result, or solver "
             "state. Do not mention this correction to the designer."
+        )
+    elif (
+        "HUMAN_EDIT_ENGAGEMENT" in feedback_text
+        or "human-edit engagement" in feedback_lower
+    ):
+        instruction = (
+            "Your previous reply for this active human-edit disagreement failed the required engagement "
+            f"contract: {feedback_text} Write a fresh complete visible reply and trailing GUIDANCE block. "
+            "Include DISAGREEMENT plus HUMAN_EDIT_ENGAGEMENT with exactly decision and evidenceSpan. "
+            "Use acknowledged only for explicit willingness to discuss, explain, adjust, modify, or re-edit; "
+            "otherwise use active. The two status values must match, resolution must be null, and evidenceSpan "
+            "must copy an exact non-empty substring from the latest designer message. Do not mention this repair."
         )
     elif "REVISION_ADVICE" in validation_feedback or "proposalOffer" in validation_feedback:
         instruction = (
@@ -12532,6 +12565,63 @@ def _extract_plain_disagreement(content, language, stage_context=None):
         return None
 
 
+def _active_human_edit_disagreement(stage_context):
+    disagreement = (stage_context or {}).get("activeDisagreement") or {}
+    return bool(
+        disagreement.get("status") == "active"
+        and disagreement.get("subject") == "human_edit"
+    )
+
+
+def _extract_plain_human_edit_engagement(
+    content,
+    latest_user,
+    stage_context,
+    disagreement,
+):
+    """Require Kimi's human-edit engagement decision and exact user evidence."""
+    if not _active_human_edit_disagreement(stage_context):
+        return None
+    marker = re.search(
+        r"HUMAN_EDIT_ENGAGEMENT\s*:\s*(\{.*?\})(?:\s*\|\||\s*</GUIDANCE>)",
+        str(content or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if marker is None:
+        raise ValueError(
+            "HUMAN_EDIT_ENGAGEMENT is required for an active human_edit disagreement."
+        )
+    try:
+        value = json.loads(marker.group(1))
+    except (TypeError, json.JSONDecodeError) as exception:
+        raise ValueError("HUMAN_EDIT_ENGAGEMENT must be valid JSON.") from exception
+    if not isinstance(value, dict) or set(value) != {"decision", "evidenceSpan"}:
+        raise ValueError(
+            "HUMAN_EDIT_ENGAGEMENT must contain exactly decision and evidenceSpan."
+        )
+    decision = value.get("decision")
+    if decision not in {"active", "acknowledged"}:
+        raise ValueError(
+            "HUMAN_EDIT_ENGAGEMENT.decision must be active or acknowledged."
+        )
+    evidence_span = str(value.get("evidenceSpan") or "").strip()
+    user_text = str(latest_user or "")
+    if not evidence_span or evidence_span not in user_text:
+        raise ValueError(
+            "HUMAN_EDIT_ENGAGEMENT.evidenceSpan must be an exact non-empty substring "
+            "of the latest designer message."
+        )
+    if not (
+        isinstance(disagreement, dict)
+        and disagreement.get("subject") == "human_edit"
+        and disagreement.get("status") == decision
+    ):
+        raise ValueError(
+            "HUMAN_EDIT_ENGAGEMENT.decision must match the human_edit disagreement status."
+        )
+    return {"decision": decision, "evidenceSpan": evidence_span[:500]}
+
+
 def _warning_text_is_evidence_grounded(text, language):
     lowered = str(text or "").casefold()
     if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", lowered):
@@ -13370,8 +13460,10 @@ def _plain_action_instruction(stage_context):
             "the design, modify it, or re-edit it. Acknowledged only releases the interaction block; it "
             "does not accept either position, form consensus, or authorize a proposal. For a negative, "
             "unrelated, or ambiguous reply, keep status active. Keep the visible response in ordinary "
-            "prose and do not output a proposal. The server owns displayCard and will not show another "
-            "card for this disagreement."
+            "prose and do not output a proposal. Also return mandatory HUMAN_EDIT_ENGAGEMENT with exactly "
+            "decision and evidenceSpan: decision must match DISAGREEMENT.status, and evidenceSpan must be "
+            "an exact non-empty substring of the latest designer message supporting the classification. "
+            "The server owns displayCard and will not show another card for this disagreement."
         )
     if context.get("activeDisagreement"):
         return (
@@ -14634,6 +14726,15 @@ def _ensure_required_guidance_card(
     )
 
     active_disagreement = (stage_context or {}).get("activeDisagreement")
+    if (
+        isinstance(active_disagreement, dict)
+        and active_disagreement.get("status") == "active"
+        and active_disagreement.get("subject") == "human_edit"
+        and normalized.get("disagreement") is None
+    ):
+        raise ValueError(
+            "A human-edit engagement response cannot silently restore the previous active disagreement."
+        )
     if (
         normalized.get("disagreement") is None
         and isinstance(active_disagreement, dict)

@@ -4738,6 +4738,7 @@ class CoCreationSessionTests(unittest.TestCase):
         latest = response.json()["turns"][-1]["guidance"]
         self.assertEqual(latest["disagreement"]["status"], "acknowledged")
         self.assertFalse(latest["disagreement"]["displayCard"])
+        self.assertNotIn("_humanEditEngagement", latest)
         self.assertIsNone(latest.get("intentHypothesis"))
         self.assertEqual(latest.get("uiCues"), [])
         with repository.connect() as database:

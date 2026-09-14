@@ -394,6 +394,80 @@ class LLMClientTests(unittest.TestCase):
                 rows=OPERATION_BASE_ROWS,
             )
 
+    def test_human_edit_engagement_retries_missing_contract_then_accepts_exact_evidence(self):
+        active = {
+            "status": "active",
+            "subject": "human_edit",
+            "userPosition": "Keep the denser water area.",
+            "aiPosition": "Preserve the earlier reduced-water direction.",
+            "coreDisagreement": "Which water direction should lead the design?",
+            "nextQuestion": "Would you like to discuss it?",
+            "resolution": None,
+            "displayCard": False,
+        }
+        acknowledged = {
+            **{key: value for key, value in active.items() if key != "displayCard"},
+            "status": "acknowledged",
+        }
+        decision = json.dumps(
+            {"classification": "none", "claims": [], "cardText": ""},
+            separators=(",", ":"),
+        )
+        disagreement_json = json.dumps(acknowledged, separators=(",", ":"))
+        engagement_json = json.dumps(
+            {"decision": "acknowledged", "evidenceSpan": "ok, lets talk"},
+            separators=(",", ":"),
+        )
+        missing_contract = (
+            "I understand that you want to continue the discussion.\n"
+            f"<GUIDANCE>INTENT_DECISION: {decision} || DISAGREEMENT: {disagreement_json}</GUIDANCE>"
+        )
+        corrected = (
+            "I understand that you want to continue the discussion, without treating either position as accepted.\n"
+            f"<GUIDANCE>INTENT_DECISION: {decision} || DISAGREEMENT: {disagreement_json} || "
+            f"HUMAN_EDIT_ENGAGEMENT: {engagement_json}</GUIDANCE>"
+        )
+        result, client = self.execute(
+            [missing_contract, corrected],
+            rows=OPERATION_BASE_ROWS,
+            conversation=[{"role": "user", "content": "ok, lets talk"}],
+            stage_context={
+                "activeDisagreement": active,
+                "discussionCardMode": "disagreement_only",
+            },
+        )
+        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(result.guidance["disagreement"]["status"], "acknowledged")
+        self.assertEqual(
+            result.guidance["_humanEditEngagement"],
+            {"decision": "acknowledged", "evidenceSpan": "ok, lets talk"},
+        )
+        self.assertIn("HUMAN_EDIT_ENGAGEMENT", client.chat.completions.calls[1]["messages"][0]["content"])
+
+    def test_human_edit_engagement_failure_never_restores_old_active_state(self):
+        active = {
+            "status": "active",
+            "subject": "human_edit",
+            "userPosition": "Keep the denser water area.",
+            "aiPosition": "Preserve the earlier reduced-water direction.",
+            "coreDisagreement": "Which water direction should lead the design?",
+            "nextQuestion": "Would you like to discuss it?",
+            "resolution": None,
+            "displayCard": False,
+        }
+        invalid = "I understand that you want to continue talking, but I omitted the required contract."
+        with self.assertRaises(llm_client.LLMServiceError) as raised:
+            self.execute(
+                [invalid, invalid],
+                rows=OPERATION_BASE_ROWS,
+                conversation=[{"role": "user", "content": "ok, lets talk"}],
+                stage_context={
+                    "activeDisagreement": active,
+                    "discussionCardMode": "disagreement_only",
+                },
+            )
+        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+
     def test_review_false_positive_candidate_is_removed_without_regeneration(self):
         claim = {
             "normalizedMeaning": "评价地图", "subjectType": "layout", "subjectText": "地图",

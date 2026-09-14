@@ -10105,6 +10105,7 @@ def _public_guidance(guidance):
     result.pop("_intentSemanticClaims", None)
     result.pop("_intentDecision", None)
     result.pop("_intentCandidateReview", None)
+    result.pop("_humanEditEngagement", None)
     result.pop("manualEditReview", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and (
