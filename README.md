@@ -45,7 +45,7 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 - 手工草稿只有保存为新 Stage 后才持久化。AI 提案先保存为待审查 proposal，只有用户明确接受并再次通过后端验证，才创建新 Stage。
 - Play 只针对已保存 Stage，不会修改地图、创建 Stage、确认最终版本或提交在线挑战。试玩会保存到对应 Stage 的 `play_attempts`。
 - 地图事实以当前 StageSnapshot 为唯一来源。服务器会重新校验当前坐标、实体、路线和可点击链接；历史 Stage、旧助手文本和用户错误坐标不能作为当前地图事实。
-- 普通聊天只返回经过校验的分析文本；proposal、disagreement、intent hypothesis 等内部字段经过服务端投影后才可供前端显示。研究者目标、实验条件和 8000 DG context 不进入 8010。
+- 普通聊天只返回经过校验的分析文本；proposal、disagreement、intent hypothesis 等内部字段经过服务端投影后才可供前端显示。人工修改产生证据充分的冲突时，`LET'S DISCUSS` 卡只在入口消息显示一次，后续讨论使用普通气泡；Kimi 在用户明确愿意讨论、解释、调整或重新修改时返回仅适用于 `human_edit` 的 `acknowledged`，解除方案阻塞但不形成任何胜方或 confirmed decision。AI 方案质疑流程保持原有规则。研究者目标、实验条件和 8000 DG context 不进入 8010。
 
 ## 8010 后端数据保留
 

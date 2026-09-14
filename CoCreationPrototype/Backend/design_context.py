@@ -466,7 +466,7 @@ def _normalize_disagreement(value):
     if not isinstance(value, dict):
         return None
     status = value.get("status")
-    if status not in {"active", "resolved"}:
+    if status not in {"active", "acknowledged", "resolved"}:
         return None
     result = {"status": status}
     for field in (
@@ -491,8 +491,10 @@ def _normalize_disagreement(value):
         text = _text(value.get(field), MAX_TEXT)
         if text:
             result[field] = text
-    if status == "active":
+    if status in {"active", "acknowledged"}:
         result["resolution"] = None
+    if status == "acknowledged" and result.get("subject") != "human_edit":
+        return None
     return result
 
 
@@ -560,8 +562,11 @@ def normalize_design_context(value):
     result["processedEvidenceIds"] = list(dict.fromkeys(
         _source(value) for value in value.get("processedEvidenceIds", []) if _source(value)
     ))[-128:]
-    result["activeDisagreement"] = _normalize_disagreement(
-        value.get("activeDisagreement")
+    active_disagreement = _normalize_disagreement(value.get("activeDisagreement"))
+    result["activeDisagreement"] = (
+        active_disagreement
+        if active_disagreement and active_disagreement.get("status") == "active"
+        else None
     )
     result["updatedFromStageId"] = _source(value.get("updatedFromStageId"))
     result["updatedFromTurnId"] = _source(value.get("updatedFromTurnId"))

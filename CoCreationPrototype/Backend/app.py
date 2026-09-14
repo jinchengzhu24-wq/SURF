@@ -1439,9 +1439,15 @@ def assess_version(
         stage_context=context["stageContext"],
     )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
+    execution = _mark_initial_human_edit_disagreement_card(
+        execution, context["stageContext"]
+    )
     review_execution = getattr(execution, "secondary_execution", None)
     if review_execution is not None:
         review_execution = _mark_new_discussion_guidance(
+            review_execution, context["stageContext"]
+        )
+        review_execution = _mark_initial_human_edit_disagreement_card(
             review_execution, context["stageContext"]
         )
     review_metadata = (
@@ -3547,6 +3553,10 @@ def _send_message_locked(
         )
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
     execution = _mark_proposal_discovery_guidance(execution, context["stageContext"])
+    execution = _enforce_human_edit_disagreement_followup(
+        execution,
+        context["stageContext"],
+    )
     execution_guidance = dict(execution.guidance or {})
     active_disagreement_card = (
         isinstance(execution_guidance.get("disagreement"), dict)
@@ -9733,13 +9743,76 @@ def _normalize_manual_edit_review_execution(execution, stage_context):
         return execution
     guidance = dict(execution.guidance or {})
     disagreement = guidance.get("disagreement")
-    if isinstance(disagreement, dict) and disagreement.get("status") == "active":
+    if (
+        isinstance(disagreement, dict)
+        and disagreement.get("status") in {"active", "acknowledged"}
+    ):
         return execution
     if (stage_context or {}).get("discussionCardMode") != "disagreement_only":
         return execution
     guidance["followUpQuestion"] = None
     guidance["disagreement"] = None
     return replace(execution, guidance=guidance)
+
+
+def _mark_initial_human_edit_disagreement_card(execution, stage_context):
+    """Make the evidence-backed human-edit entry card explicit in stored JSON."""
+    if (stage_context or {}).get("source") != "human_edit":
+        return execution
+    guidance = dict(execution.guidance or {})
+    disagreement = guidance.get("disagreement")
+    if not (
+        isinstance(disagreement, dict)
+        and disagreement.get("status") == "active"
+        and disagreement.get("subject") == "human_edit"
+    ):
+        return execution
+    disagreement = dict(disagreement)
+    disagreement["displayCard"] = True
+    guidance["disagreement"] = disagreement
+    return replace(execution, guidance=guidance)
+
+
+def _enforce_human_edit_disagreement_followup(execution, stage_context):
+    """Keep a human-edit disagreement card single-use and bound acknowledgements safe."""
+    active = (stage_context or {}).get("activeDisagreement") or {}
+    if not (
+        active.get("status") == "active"
+        and active.get("subject") == "human_edit"
+    ):
+        return execution
+
+    guidance = dict(execution.guidance or {})
+    disagreement = guidance.get("disagreement")
+    if not isinstance(disagreement, dict) or disagreement.get("subject") != "human_edit":
+        return execution
+    if disagreement.get("status") not in {"active", "acknowledged"}:
+        return execution
+
+    disagreement = dict(disagreement)
+    disagreement["displayCard"] = False
+    guidance["disagreement"] = disagreement
+    guidance["proposalOffer"] = None
+    if disagreement.get("status") == "acknowledged":
+        # This turn only releases the discussion block. It is not an intent
+        # decision and cannot smuggle a new proposal or inferred preference.
+        guidance["move"] = "offer_perspective"
+        guidance["intentHypothesis"] = None
+        guidance["intentConfidence"] = None
+        guidance.pop("designContextPatch", None)
+        guidance.pop("designContextPatchError", None)
+        guidance.pop("_intentSemanticClaims", None)
+        guidance.pop("_intentDecision", None)
+        guidance["uiCues"] = []
+    return replace(
+        execution,
+        guidance=guidance,
+        proposed_rows=None,
+        revision_plan={},
+        revision_contract={},
+        revision_operations=[],
+        proposal_binding={},
+    )
 
 
 def _ensure_human_edit_disagreement_execution(execution, stage_context, language):
@@ -9952,14 +10025,14 @@ def _record_disagreement_event(database, session_id, version_id, turn_id, guidan
     if not isinstance(disagreement, dict):
         return
     status = disagreement.get("status")
-    if status not in {"active", "resolved"}:
+    if status not in {"active", "acknowledged", "resolved"}:
         return
     previous = database.execute(
         """
         SELECT event_type FROM audit_events
         WHERE session_id = ?
           AND event_type IN ('disagreement_started', 'disagreement_updated',
-                             'disagreement_resolved')
+                             'disagreement_acknowledged', 'disagreement_resolved')
           AND json_extract(payload_json, '$.versionId') = ?
         ORDER BY id DESC LIMIT 1
         """,
@@ -9971,6 +10044,8 @@ def _record_disagreement_event(database, session_id, version_id, turn_id, guidan
             if previous is not None and previous["event_type"] != "disagreement_resolved"
             else "disagreement_started"
         )
+    elif status == "acknowledged":
+        event_type = "disagreement_acknowledged"
     else:
         event_type = "disagreement_resolved"
     record_event(
@@ -9986,6 +10061,8 @@ def _record_disagreement_event(database, session_id, version_id, turn_id, guidan
         },
         utc_now(),
     )
+    if status == "acknowledged":
+        return
     record_intent_evidence(
         database,
         session_id,
@@ -10731,6 +10808,8 @@ def _update_design_context_from_turn(
     disagreement = guidance.get("disagreement")
     if isinstance(disagreement, dict) and disagreement.get("status") == "active":
         context = set_active_disagreement(context, disagreement, version_id, turn_id)
+    elif isinstance(disagreement, dict) and disagreement.get("status") == "acknowledged":
+        context = set_active_disagreement(context, None, version_id, turn_id)
     elif isinstance(disagreement, dict) and disagreement.get("status") == "resolved":
         resolution = disagreement.get("resolution")
         context = set_active_disagreement(context, None, version_id, turn_id)

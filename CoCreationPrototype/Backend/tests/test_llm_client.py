@@ -320,6 +320,80 @@ class SlowClient:
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_acknowledged_disagreement_is_human_edit_only_and_requires_null_resolution(self):
+        payload = {
+            "status": "acknowledged",
+            "subject": "human_edit",
+            "userPosition": "I am willing to keep discussing the edit.",
+            "aiPosition": "I still want to examine the recovery-space risk.",
+            "coreDisagreement": "The design trade-off remains open.",
+            "nextQuestion": "What should we inspect next?",
+            "resolution": None,
+        }
+        normalized = llm_client._validate_disagreement(payload, "en")
+        self.assertEqual(normalized["status"], "acknowledged")
+        self.assertIsNone(normalized["resolution"])
+
+        with self.assertRaisesRegex(ValueError, "Only a human_edit"):
+            llm_client._validate_disagreement(
+                {**payload, "subject": "ai_revision"}, "en"
+            )
+        with self.assertRaisesRegex(ValueError, "must have a null resolution"):
+            llm_client._validate_disagreement(
+                {**payload, "resolution": "user"}, "en"
+            )
+
+    def test_acknowledged_requires_existing_active_human_edit_context(self):
+        disagreement = {
+            "status": "acknowledged",
+            "subject": "human_edit",
+            "userPosition": "I can explain the edit.",
+            "aiPosition": "I want to inspect its recovery-space cost.",
+            "coreDisagreement": "The design trade-off remains open.",
+            "nextQuestion": "What should we inspect next?",
+            "resolution": None,
+        }
+        guidance = {
+            "move": "offer_perspective",
+            "intentHypothesis": None,
+            "intentConfidence": None,
+            "followUpQuestion": None,
+            "proposalOffer": None,
+            "uiCues": [],
+            "disagreement": disagreement,
+        }
+        with self.assertRaisesRegex(ValueError, "existing active human_edit"):
+            llm_client._validate_guidance(
+                guidance, False, "en", stage_context={}, rows=OPERATION_BASE_ROWS
+            )
+        normalized = llm_client._validate_guidance(
+            guidance,
+            False,
+            "en",
+            stage_context={"activeDisagreement": {
+                "status": "active", "subject": "human_edit"
+            }},
+            rows=OPERATION_BASE_ROWS,
+        )
+        self.assertEqual(normalized["disagreement"]["status"], "acknowledged")
+        with self.assertRaisesRegex(ValueError, "remain active or become acknowledged"):
+            llm_client._validate_guidance(
+                {
+                    **guidance,
+                    "disagreement": {
+                        **disagreement,
+                        "status": "resolved",
+                        "resolution": "user",
+                    },
+                },
+                False,
+                "en",
+                stage_context={"activeDisagreement": {
+                    "status": "active", "subject": "human_edit"
+                }},
+                rows=OPERATION_BASE_ROWS,
+            )
+
     def test_review_false_positive_candidate_is_removed_without_regeneration(self):
         claim = {
             "normalizedMeaning": "评价地图", "subjectType": "layout", "subjectText": "地图",

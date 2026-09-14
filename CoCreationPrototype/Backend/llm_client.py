@@ -529,7 +529,7 @@ UI_CUE_TYPES = {"manual_edit", "warning", "tradeoff", "clarification"}
 GUIDANCE_REQUEST_MODES = {
     "revision_advice", "discussion", "needs_clarification", "proposal_blocked", "none"
 }
-DISAGREEMENT_STATUSES = {"active", "resolved"}
+DISAGREEMENT_STATUSES = {"active", "acknowledged", "resolved"}
 DISAGREEMENT_SUBJECTS = {"ai_revision", "human_edit", "user_request"}
 DISAGREEMENT_RESOLUTIONS = {"user", "ai", "compromise", "retain_current"}
 
@@ -1199,7 +1199,10 @@ def build_plain_chat_messages(
             "unresolved decision: userPosition, aiPosition, coreDisagreement, and nextQuestion. "
             "Ordinary questions stay in assistantMessage. An active disagreement cannot include "
             "a proposal. A resolved disagreement may lead to a new conceptual proposal, except "
-            "retain_current, which ends without a proposal. "
+            "retain_current, which ends without a proposal. Status acknowledged is reserved for an "
+            "existing human_edit disagreement when the designer explicitly agrees to keep discussing, "
+            "explain, adjust, or re-edit; it has a null resolution, creates no proposal in that reply, "
+            "and does not mean either design position won. "
             "Use a clarification cue when the designer's direction is too unclear to turn into a "
             "single safely bound proposal; it must ask for the missing map decision without "
             "silently hiding the response. Use MANUAL_EDIT alone when the designer's direction is too unclear to turn into a "
@@ -13355,6 +13358,21 @@ def _plain_action_instruction(stage_context):
             "resolution, emit a resolved DISAGREEMENT and a new conceptual proposal. If both sides "
             "retain the current map, use resolution retain_current and omit the proposal."
         )
+    if (
+        active.get("status") == "active"
+        and active.get("subject") == "human_edit"
+    ):
+        return (
+            "CARD STATE: an evidence-backed human-edit disagreement is already active and its single "
+            "entry card has already been shown. In the same DISAGREEMENT object, return status "
+            "acknowledged with subject human_edit and resolution null only when the latest designer "
+            "message explicitly shows willingness to continue discussing, explain the choice, adjust "
+            "the design, modify it, or re-edit it. Acknowledged only releases the interaction block; it "
+            "does not accept either position, form consensus, or authorize a proposal. For a negative, "
+            "unrelated, or ambiguous reply, keep status active. Keep the visible response in ordinary "
+            "prose and do not output a proposal. The server owns displayCard and will not show another "
+            "card for this disagreement."
+        )
     if context.get("activeDisagreement"):
         return (
             "CARD STATE: an unresolved disagreement is active. Use DISAGREEMENT as an object with "
@@ -14871,8 +14889,11 @@ def _guidance_mode_instruction(guidance_mode):
         return (
             "Deterministic routing found an unresolved design disagreement. Use the four-field "
             "DISAGREEMENT object to summarize the user's position, your current position, the "
-            "core disagreement, and the next question. Keep status active until the latest user "
-            "reason genuinely resolves the issue. Do not output a proposalOffer while active; "
+            "core disagreement, and the next question. For an existing human_edit disagreement, "
+            "use acknowledged with null resolution when the latest message explicitly accepts further "
+            "discussion, explanation, adjustment, modification, or re-editing; otherwise keep it active. "
+            "For every other subject, keep status active until the latest user reason genuinely resolves "
+            "the issue. Do not output a proposalOffer while active or acknowledged; "
             "ordinary questions without a real disagreement stay in assistantMessage."
         )
     return ""
@@ -16705,12 +16726,22 @@ def _build_task_instructions(assessment_only, stage_context=None):
             "The caller, not ordinary chat, controls the two-agent map execution and validation pipeline."
         )
     elif context.get("activeDisagreement"):
-        action_instruction = (
-            "An unresolved disagreement is active. Keep the disagreement summary current. Return an active "
-            "disagreement unless the latest designer message gives a reason that resolves it. Do not output "
-            "a purple proposal while status is active. If consensus is reached, use resolved with resolution "
-            "user, ai, compromise, or retain_current; retain_current must not create a map proposal."
-        )
+        active_disagreement = context.get("activeDisagreement") or {}
+        if active_disagreement.get("subject") == "human_edit":
+            action_instruction = (
+                "An evidence-backed human-edit disagreement is active. Use the same response to judge the "
+                "designer's latest message: return acknowledged with resolution null only when they explicitly "
+                "show willingness to continue discussing, explain, adjust, modify, or re-edit; negative, "
+                "unrelated, and ambiguous replies remain active. Acknowledged is interaction consent only, "
+                "not a design resolution. Do not output a purple proposal in this reply."
+            )
+        else:
+            action_instruction = (
+                "An unresolved disagreement is active. Keep the disagreement summary current. Return an active "
+                "disagreement unless the latest designer message gives a reason that resolves it. Do not output "
+                "a purple proposal while status is active. If consensus is reached, use resolved with resolution "
+                "user, ai, compromise, or retain_current; retain_current must not create a map proposal."
+            )
     elif context.get("deferRevisionExecution"):
         action_instruction = (
             "This ordinary web chat request may describe a direct map change, but it is not an execution action. "
@@ -17409,11 +17440,35 @@ def _validate_guidance(payload, assessment_only, language="en", stage_context=No
         raise ValueError("challenge_tradeoff requires a warning uiCue.")
 
     disagreement = _validate_disagreement(payload.get("disagreement"), language)
-    if disagreement and disagreement["status"] == "active":
+    existing_disagreement = (stage_context or {}).get("activeDisagreement") or {}
+    if (
+        existing_disagreement.get("status") == "active"
+        and existing_disagreement.get("subject") == "human_edit"
+        and (
+            disagreement is None
+            or disagreement.get("subject") != "human_edit"
+            or disagreement.get("status") not in {"active", "acknowledged"}
+        )
+    ):
+        raise ValueError(
+            "An active human_edit disagreement must remain active or become acknowledged."
+        )
+    if disagreement and disagreement["status"] in {"active", "acknowledged"}:
         if proposal_offer is not None:
-            raise ValueError("An active disagreement cannot contain a proposalOffer.")
+            raise ValueError("An active or acknowledged disagreement cannot contain a proposalOffer.")
         if move == "offer_revision":
-            raise ValueError("An active disagreement cannot use offer_revision.")
+            raise ValueError("An active or acknowledged disagreement cannot use offer_revision.")
+    if disagreement and disagreement["status"] == "acknowledged":
+        active_disagreement = existing_disagreement
+        if not (
+            disagreement["subject"] == "human_edit"
+            and active_disagreement.get("status") == "active"
+            and active_disagreement.get("subject") == "human_edit"
+        ):
+            raise ValueError(
+                "acknowledged is valid only for an existing active human_edit disagreement."
+            )
+    if disagreement and disagreement["status"] == "active":
         if not risk_cue_types and disagreement["subject"] in {
             "ai_revision", "human_edit", "user_request"
         }:
@@ -18121,8 +18176,10 @@ def _validate_disagreement(value, language):
         raise ValueError("guidance.disagreement.status is invalid.")
     if subject not in DISAGREEMENT_SUBJECTS:
         raise ValueError("guidance.disagreement.subject is invalid.")
-    if status == "active" and resolution is not None:
-        raise ValueError("An active disagreement must have a null resolution.")
+    if status in {"active", "acknowledged"} and resolution is not None:
+        raise ValueError("An active or acknowledged disagreement must have a null resolution.")
+    if status == "acknowledged" and subject != "human_edit":
+        raise ValueError("Only a human_edit disagreement may be acknowledged.")
     if status == "resolved" and resolution not in DISAGREEMENT_RESOLUTIONS:
         raise ValueError("A resolved disagreement requires a valid resolution.")
 

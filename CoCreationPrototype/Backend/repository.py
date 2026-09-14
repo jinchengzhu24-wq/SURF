@@ -1686,6 +1686,25 @@ def serialize_session(database, session_id):
         )
         for turn in turns
     }
+    shown_human_edit_disagreements = set()
+    for turn in turns:
+        if turn["role"] != "assistant":
+            continue
+        guidance = public_guidance_by_turn.get(turn["id"]) or {}
+        disagreement = guidance.get("disagreement")
+        if not (
+            isinstance(disagreement, dict)
+            and disagreement.get("status") == "active"
+            and disagreement.get("subject") == "human_edit"
+        ):
+            continue
+        version_id = turn["version_id"]
+        if version_id in shown_human_edit_disagreements:
+            disagreement = dict(disagreement)
+            disagreement["displayCard"] = False
+            guidance["disagreement"] = disagreement
+        elif disagreement.get("displayCard") is not False:
+            shown_human_edit_disagreements.add(version_id)
 
     latest_intent_turn = {}
     stored_guidance_by_turn = {}
@@ -2265,6 +2284,20 @@ def serialize_session(database, session_id):
             source_intent_state = public_guidance_by_turn.get(
                 translation["turn_id"], {}
             ).get("intentState")
+            source_disagreement = public_guidance_by_turn.get(
+                translation["turn_id"], {}
+            ).get("disagreement")
+            translated_disagreement = translation_guidance.get("disagreement")
+            if (
+                isinstance(source_disagreement, dict)
+                and source_disagreement.get("subject") == "human_edit"
+                and source_disagreement.get("displayCard") is False
+                and isinstance(translated_disagreement, dict)
+                and translated_disagreement.get("subject") == "human_edit"
+            ):
+                translated_disagreement = dict(translated_disagreement)
+                translated_disagreement["displayCard"] = False
+                translation_guidance["disagreement"] = translated_disagreement
             if source_intent_state is not None:
                 source_intent_state = json.loads(json.dumps(source_intent_state))
                 conflict_choice = source_intent_state.get("conflictChoice")

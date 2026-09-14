@@ -4618,6 +4618,229 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["code"], "DISAGREEMENT_ACTIVE")
 
+    def test_human_edit_disagreement_followup_hides_card_and_stays_blocking(self):
+        parent_id = self.read_session()["currentVersionId"]
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": parent_id,
+                "idempotencyKey": "human-edit-active-stage",
+                "summary": "Move player left.",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        version_id = saved.json()["currentVersionId"]
+        disagreement = {
+            "status": "active",
+            "subject": "human_edit",
+            "userPosition": "Keep the tighter route.",
+            "aiPosition": "Preserve recovery space.",
+            "coreDisagreement": "Which effect should lead the design?",
+            "nextQuestion": "Would you like to discuss the trade-off?",
+            "resolution": None,
+            "displayCard": True,
+        }
+        with repository.connect(immediate=True) as database:
+            context = repository.load_design_context(database, self.session_id, version_id)
+            context["activeDisagreement"] = disagreement
+            repository.save_design_context(database, version_id, context)
+
+        execution = LLMExecutionResult(
+            "I still see the same unresolved trade-off.",
+            1,
+            "human-edit-active-followup",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": None,
+                "intentConfidence": None,
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [],
+                "disagreement": disagreement,
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "I do not want to discuss that yet.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "human-edit-active-followup",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        latest = response.json()["turns"][-1]["guidance"]["disagreement"]
+        self.assertEqual(latest["status"], "active")
+        self.assertFalse(latest["displayCard"])
+        self.assertEqual(backend._displayed_cards(response.json()["turns"][-1]["guidance"]), [])
+        with repository.connect() as database:
+            context = repository.load_design_context(database, self.session_id, version_id)
+        self.assertEqual(context["activeDisagreement"]["status"], "active")
+
+    def test_human_edit_acknowledgement_clears_block_without_confirmed_decision(self):
+        parent_id = self.read_session()["currentVersionId"]
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": parent_id,
+                "idempotencyKey": "human-edit-ack-stage",
+                "summary": "Move player left.",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        version_id = saved.json()["currentVersionId"]
+        disagreement = {
+            "status": "active",
+            "subject": "human_edit",
+            "userPosition": "Keep the tighter route.",
+            "aiPosition": "Preserve recovery space.",
+            "coreDisagreement": "Which effect should lead the design?",
+            "nextQuestion": "Would you like to discuss the trade-off?",
+            "resolution": None,
+            "displayCard": True,
+        }
+        with repository.connect(immediate=True) as database:
+            context = repository.load_design_context(database, self.session_id, version_id)
+            context["activeDisagreement"] = disagreement
+            repository.save_design_context(database, version_id, context)
+            decisions_before = list(context["confirmedDecisions"])
+
+        acknowledged = {**disagreement, "status": "acknowledged", "displayCard": True}
+        execution = LLMExecutionResult(
+            "Yes, let's inspect that trade-off together.",
+            1,
+            "human-edit-acknowledged",
+            model="mock-model",
+            guidance={
+                "move": "offer_perspective",
+                "intentHypothesis": "The designer accepts my position.",
+                "intentConfidence": "high",
+                "followUpQuestion": None,
+                "proposalOffer": None,
+                "uiCues": [{"type": "warning", "text": "This should be stripped."}],
+                "disagreement": acknowledged,
+                "designContextPatch": {"goals": [{"goal": "Accept the AI position."}]},
+            },
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=execution):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Let's discuss it and I can modify it afterward.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "human-edit-acknowledged",
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        latest = response.json()["turns"][-1]["guidance"]
+        self.assertEqual(latest["disagreement"]["status"], "acknowledged")
+        self.assertFalse(latest["disagreement"]["displayCard"])
+        self.assertIsNone(latest.get("intentHypothesis"))
+        self.assertEqual(latest.get("uiCues"), [])
+        with repository.connect() as database:
+            context = repository.load_design_context(database, self.session_id, version_id)
+            acknowledged_events = database.execute(
+                """
+                SELECT COUNT(*) FROM audit_events
+                WHERE session_id = ? AND event_type = 'disagreement_acknowledged'
+                """,
+                (self.session_id,),
+            ).fetchone()[0]
+            acknowledged_evidence = database.execute(
+                """
+                SELECT COUNT(*) FROM audit_events
+                WHERE session_id = ? AND event_type = 'intent_evidence_recorded'
+                  AND json_extract(payload_json, '$.kind') = 'disagreement_acknowledged'
+                """,
+                (self.session_id,),
+            ).fetchone()[0]
+        self.assertIsNone(context["activeDisagreement"])
+        self.assertEqual(context["confirmedDecisions"], decisions_before)
+        self.assertEqual(acknowledged_events, 1)
+        self.assertEqual(acknowledged_evidence, 0)
+
+    def test_session_read_hides_legacy_duplicate_human_edit_cards(self):
+        version_id = self.read_session()["currentVersionId"]
+        disagreement = {
+            "status": "active",
+            "subject": "human_edit",
+            "userPosition": "Keep the tighter route.",
+            "aiPosition": "Preserve recovery space.",
+            "coreDisagreement": "Which effect should lead the design?",
+            "nextQuestion": "Would you like to discuss the trade-off?",
+            "resolution": None,
+            "displayCard": True,
+        }
+        with repository.connect(immediate=True) as database:
+            session = database.execute(
+                "SELECT * FROM design_sessions WHERE id = ?", (self.session_id,)
+            ).fetchone()
+            backend.insert_turn(
+                database,
+                session,
+                "assistant",
+                "Initial Stage observation.",
+                version_id,
+                "legacy-opening",
+                LLMExecutionResult(
+                    "Initial Stage observation.", 1, "legacy-opening", model="mock-model",
+                    guidance={"move": "observe_stage"},
+                ),
+            )
+            backend.insert_turn(
+                database,
+                session,
+                "user",
+                "Start the discussion.",
+                version_id,
+                "legacy-discussion-start",
+                None,
+            )
+            for index in range(2):
+                backend.insert_turn(
+                    database,
+                    session,
+                    "assistant",
+                    f"Legacy disagreement reply {index + 1}.",
+                    version_id,
+                    f"legacy-human-edit-card-{index + 1}",
+                    LLMExecutionResult(
+                        f"Legacy disagreement reply {index + 1}.",
+                        1,
+                        f"legacy-human-edit-card-{index + 1}",
+                        model="mock-model",
+                        guidance={
+                            "move": "offer_perspective",
+                            "intentHypothesis": None,
+                            "intentConfidence": None,
+                            "followUpQuestion": None,
+                            "proposalOffer": None,
+                            "uiCues": [],
+                            "disagreement": disagreement,
+                        },
+                    ),
+                )
+
+        turns = [
+            turn for turn in self.read_session()["turns"]
+            if turn["content"].startswith("Legacy disagreement reply")
+        ]
+        self.assertEqual(len(turns), 2)
+        self.assertTrue(turns[0]["guidance"]["disagreement"]["displayCard"])
+        self.assertFalse(turns[1]["guidance"]["disagreement"]["displayCard"])
+        with repository.connect() as database:
+            stored = database.execute(
+                """
+                SELECT guidance_json FROM conversation_turns
+                WHERE session_id = ? AND request_id = ?
+                """,
+                (self.session_id, "legacy-human-edit-card-2"),
+            ).fetchone()
+        self.assertTrue(json.loads(stored["guidance_json"])["disagreement"]["displayCard"])
+
     def test_choice_pending_yes_runs_a_new_validated_proposal_pipeline(self):
         version_id = self.read_session()["currentVersionId"]
         with repository.connect(immediate=True) as database:
@@ -4889,6 +5112,7 @@ class CoCreationSessionTests(unittest.TestCase):
         opening, review_turn = assessed.json()["turns"][-2:]
         self.assertIsNone(opening["guidance"].get("disagreement"))
         self.assertEqual(review_turn["guidance"]["disagreement"]["status"], "active")
+        self.assertTrue(review_turn["guidance"]["disagreement"]["displayCard"])
         self.assertEqual(
             [card["type"] for card in backend._displayed_cards(review_turn["guidance"])],
             ["discussion"],
