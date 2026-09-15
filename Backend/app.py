@@ -1237,6 +1237,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-LLM-Attempts-Used"],
 )
 
 

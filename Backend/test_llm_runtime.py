@@ -376,7 +376,10 @@ class LLMApiContractTests(unittest.TestCase):
             response = self.client.post(
                 "/generate-level-plan",
                 json={"ideaText": "test"},
-                headers={"X-Request-ID": "error-request"},
+                headers={
+                    "X-Request-ID": "error-request",
+                    "Origin": "http://localhost:8000",
+                },
             )
 
         self.assertEqual(response.status_code, 502)
@@ -395,6 +398,9 @@ class LLMApiContractTests(unittest.TestCase):
         )
         self.assertEqual(response.headers["X-Request-ID"], "error-request")
         self.assertEqual(response.headers["X-LLM-Attempts-Used"], "2")
+        exposed_headers = response.headers["Access-Control-Expose-Headers"]
+        self.assertIn("X-Request-ID", exposed_headers)
+        self.assertIn("X-LLM-Attempts-Used", exposed_headers)
 
 
 if __name__ == "__main__":

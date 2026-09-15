@@ -460,7 +460,16 @@ public static class LLMBackendError
         }
 
         string value = request.GetResponseHeader("X-LLM-Attempts-Used");
-        return int.TryParse(value, out int attempts) ? Mathf.Max(0, attempts) : 0;
+        if (int.TryParse(value, out int headerAttempts))
+        {
+            return Mathf.Max(0, headerAttempts);
+        }
+
+        string responseBody = request.downloadHandler != null
+            ? request.downloadHandler.text
+            : string.Empty;
+        ErrorDetail detail = ParseDetail(responseBody);
+        return detail != null ? Mathf.Max(0, detail.attemptsUsed) : 0;
     }
 
     public static string GetRequestId(
