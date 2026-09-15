@@ -794,7 +794,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("draft-regeneration-v2-20260915-1", index_response.text)
+        self.assertIn("iframe-host-v3-20260915-1", index_response.text)
         self.assertIn("languageSetupSwitch", index_response.text)
         self.assertIn("enterSessionButton", index_response.text)
         self.assertIn("regenerateDraftButton", index_response.text)
@@ -831,7 +831,13 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('language: "zh-CN"', js_response.text)
         self.assertIn('apiError.details = payload.details || null;', js_response.text)
         self.assertIn('validationFailed', js_response.text)
-        self.assertIn("DRAFT_REGENERATION_PROTOCOL_VERSION = 2", js_response.text)
+        self.assertIn("DRAFT_REGENERATION_PROTOCOL_VERSION = 3", js_response.text)
+        self.assertIn("LEGACY_DRAFT_REGENERATION_PROTOCOL_VERSION = 2", js_response.text)
+        self.assertIn("sokoban:cocreation-host-init", js_response.text)
+        self.assertIn("sokoban:cocreation-lab-ready", js_response.text)
+        self.assertIn("sokoban:cocreation-show-unity", js_response.text)
+        self.assertIn("sokoban:cocreation-show-lab", js_response.text)
+        self.assertIn("function activeUnityBridge()", js_response.text)
         self.assertIn("draft-regenerate-prepare-ack", js_response.text)
         self.assertIn("ensureDraftRegenerationPolling", js_response.text)
         self.assertIn('OPEN_OUTER_WALL', js_response.text)
@@ -903,6 +909,28 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('algorithm_demo', js_response.text)
         self.assertNotIn('|| !state.session.matchId', js_response.text)
         self.assertIn('.complete-card .primary-button', css_response.text)
+
+        project_root = Path(__file__).resolve().parents[3]
+        webgl_template = (
+            project_root / "Assets" / "WebGLTemplates" / "SokobanPixel" / "index.html"
+        ).read_text(encoding="utf-8")
+        browser_bridge = (
+            project_root / "Assets" / "Plugins" / "WebGL" / "BrowserNavigation.jslib"
+        ).read_text(encoding="utf-8")
+        entry_controller = (
+            project_root / "Assets" / "Scripts" / "Online" / "CoCreationEntryController.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('id="cocreation-host"', webgl_template)
+        self.assertIn('id="cocreation-frame"', webgl_template)
+        self.assertIn("draftRegenerationProtocolVersion = 3", webgl_template)
+        self.assertIn("function parkCoCreationHost()", webgl_template)
+        self.assertIn("function showCoCreationHost()", webgl_template)
+        self.assertIn("function isKnownProtocol3CoCreationSource", webgl_template)
+        self.assertIn("coCreationStandaloneWindow = window.open", webgl_template)
+        self.assertIn("sokoban:cocreation-lab-ready", webgl_template)
+        self.assertIn("SokobanShowCoCreationLab", browser_bridge)
+        self.assertIn("SokobanShowCoCreationLab(", entry_controller)
+        self.assertIn("#if UNITY_WEBGL && !UNITY_EDITOR", entry_controller)
 
         self.assertIn("LET'S DISCUSS / 一起聊聊", js_response.text)
         self.assertIn(".discussion-focus", css_response.text)

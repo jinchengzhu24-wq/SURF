@@ -40,6 +40,12 @@ public sealed class CoCreationEntryController : MonoBehaviour
         string requestId,
         string status
     );
+
+    [DllImport("__Internal")]
+    private static extern void SokobanShowCoCreationLab(
+        string url,
+        string sessionId
+    );
 #endif
 
     private void Awake()
@@ -58,7 +64,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
 #if UNITY_WEBGL && !UNITY_EDITOR
         SokobanSetDraftRegenerationBridgeSession(
             CoCreationDraftContext.SessionId ?? "",
-            2
+            3
         );
 #endif
     }
@@ -170,7 +176,14 @@ public sealed class CoCreationEntryController : MonoBehaviour
             return;
         }
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanShowCoCreationLab(
+            launchUrl,
+            CoCreationDraftContext.SessionId ?? ""
+        );
+#else
         Application.OpenURL(launchUrl);
+#endif
         SetStatus(
             "Co-creation lab opened. Unity is waiting for final confirmation and intention.",
             ReadyStatusColor
@@ -288,7 +301,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
 #if UNITY_WEBGL && !UNITY_EDITOR
             SokobanSetDraftRegenerationBridgeSession(
                 CoCreationDraftContext.SessionId,
-                2
+                3
             );
 #endif
             SetButtonState(true, "OPEN CO-CREATION LAB");

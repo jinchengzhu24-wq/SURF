@@ -11,7 +11,8 @@ const API_PREFIX = window.location.pathname.startsWith("/cocreation")
     : "";
 const UNITY_PLAY_BRIDGE_TIMEOUT_MS = 1500;
 const DRAFT_REGENERATION_POLL_MS = 1000;
-const DRAFT_REGENERATION_PROTOCOL_VERSION = 2;
+const DRAFT_REGENERATION_PROTOCOL_VERSION = 3;
+const LEGACY_DRAFT_REGENERATION_PROTOCOL_VERSION = 2;
 const UNITY_ORIGINS = Array.from(new Set([
     window.location.origin,
     "http://111.231.136.4",
@@ -19,6 +20,14 @@ const UNITY_ORIGINS = Array.from(new Set([
     "http://127.0.0.1:8000",
     "http://localhost:8000"
 ]));
+const unityHost = {
+    targetWindow: null,
+    origin: "",
+    sessionId: "",
+    protocolVersion: 0,
+    embedded: false,
+    ready: false
+};
 const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
 const DISCUSSION_FOCUS_LABEL = "LET'S DISCUSS / 一起聊聊";
 const GUIDANCE_CUE_LABELS = {
@@ -92,7 +101,8 @@ const translations = {
         sendHint: "Enter to send · Shift+Enter for a new line",
         currentLevel: "Current level",
         playStage: "Play this Stage",
-        playOpenedInUnity: "The selected Stage is opening in the existing Unity tab.",
+        playOpenedInUnity: "The selected Stage is opening in the Unity view.",
+        playUnityUnavailable: "The embedded Unity view is unavailable. The co-creation workspace remains open; retry from the original game page.",
         saveStage: "Save as new Stage",
         discard: "Discard draft",
         continueFromStage: "Continue from this Stage",
@@ -347,7 +357,8 @@ const translations = {
 translations.en.entityLegend = "P: Player · B1/B2: Boxes · T1/T2: Targets · ~: Water";
 translations["zh-CN"].entityLegend = "P\uFF1A\u73A9\u5BB6 \u00B7 B1/B2\uFF1A\u7BB1\u5B50 \u00B7 T1/T2\uFF1A\u76EE\u6807 \u00B7 ~\uFF1A\u6C34\u57DF";
 
-translations["zh-CN"].playOpenedInUnity = "\u6240\u9009 Stage \u6b63\u5728\u539f Unity \u6807\u7b7e\u9875\u4e2d\u6253\u5f00\u3002";
+translations["zh-CN"].playOpenedInUnity = "\u6240\u9009 Stage \u6b63\u5728 Unity \u89c6\u56fe\u4e2d\u6253\u5f00\u3002";
+translations["zh-CN"].playUnityUnavailable = "\u5d4c\u5165\u7684 Unity \u89c6\u56fe\u4e0d\u53ef\u7528\u3002\u5171\u521b\u5de5\u4f5c\u53f0\u4ecd\u4fdd\u6301\u6253\u5f00\uff0c\u8bf7\u4ece\u539f\u6e38\u620f\u9875\u91cd\u8bd5\u3002";
 translations.en.progressTitle = "Co-creation progress";
 translations.en.expressedDirections = "Expressed directions";
 translations.en.noExpressedDirections = "No explicit directions yet.";
@@ -714,10 +725,24 @@ async function initialize() {
 
     try {
         if (hash.bootstrap) {
-            await api(`/api/sessions/${encodeURIComponent(state.sessionId)}/browser-access`, {
-                method: "POST",
-                body: { bootstrapToken: hash.bootstrap }
-            });
+            try {
+                await api(`/api/sessions/${encodeURIComponent(state.sessionId)}/browser-access`, {
+                    method: "POST",
+                    body: { bootstrapToken: hash.bootstrap }
+                });
+            } catch (error) {
+                // A same-browser iframe or named-window recovery may reuse the
+                // one-time URL after the HttpOnly access cookie was issued.
+                // The following session read still fails closed without it.
+                if (error?.code !== "BOOTSTRAP_TOKEN_USED") throw error;
+            }
+            const cleanHash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+            cleanHash.delete("bootstrap");
+            history.replaceState(
+                null,
+                "",
+                `${window.location.pathname}${window.location.search}#${cleanHash}`
+            );
         }
 
         localStorage.setItem(SESSION_STORAGE_KEY, state.sessionId);
@@ -782,6 +807,7 @@ async function openCreatedSession(launchUrl) {
 
 async function refreshSession() {
     state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
+    announceEmbeddedLabReady();
 
     if (!state.session.languageLocked) {
         state.language = state.session.language || state.language;
@@ -2577,22 +2603,97 @@ async function playSelectedStage() {
             body: { idempotencyKey: uniqueId("play") }
         });
 
-        if (!state.session.demoMode
-            && await tryOpenPlayInExistingUnity(payload.playUrl)) {
-            state.unityPlayActive = true;
-            renderMap();
-            updateControls();
-            showNotice(t("playOpenedInUnity"));
-            return;
+        if (!state.session.demoMode) {
+            if (await tryOpenPlayInExistingUnity(payload.playUrl)) {
+                state.unityPlayActive = true;
+                renderMap();
+                updateControls();
+                showNotice(t("playOpenedInUnity"));
+                return;
+            }
+            if (unityHost.embedded) {
+                showNotice(t("playUnityUnavailable"));
+                return;
+            }
         }
 
         window.location.assign(payload.playUrl);
     });
 }
 
-function tryOpenPlayInExistingUnity(playUrl) {
+function handleUnityHostInit(event, message) {
+    if (window.parent === window
+        || event.source !== window.parent
+        || !UNITY_ORIGINS.includes(event.origin)
+        || message.protocolVersion !== DRAFT_REGENERATION_PROTOCOL_VERSION
+        || !message.sessionId
+        || message.sessionId !== state.sessionId) {
+        return false;
+    }
+    unityHost.targetWindow = event.source;
+    unityHost.origin = event.origin;
+    unityHost.sessionId = message.sessionId;
+    unityHost.protocolVersion = message.protocolVersion;
+    unityHost.embedded = true;
+    unityHost.ready = true;
+    announceEmbeddedLabReady();
+    return true;
+}
+
+function announceEmbeddedLabReady() {
+    if (!unityHost.embedded
+        || !unityHost.ready
+        || !state.session
+        || unityHost.sessionId !== state.sessionId) {
+        return;
+    }
+    unityHost.targetWindow.postMessage({
+        type: "sokoban:cocreation-lab-ready",
+        protocolVersion: DRAFT_REGENERATION_PROTOCOL_VERSION,
+        sessionId: state.sessionId
+    }, unityHost.origin);
+}
+
+function activeUnityBridge() {
+    if (unityHost.embedded
+        && unityHost.ready
+        && unityHost.targetWindow
+        && unityHost.sessionId === state.sessionId) {
+        return {
+            unityWindow: unityHost.targetWindow,
+            origins: [unityHost.origin],
+            protocolVersion: DRAFT_REGENERATION_PROTOCOL_VERSION,
+            embedded: true
+        };
+    }
     const unityWindow = window.opener;
-    if (!unityWindow || unityWindow.closed) return Promise.resolve(false);
+    if (!unityWindow || unityWindow.closed) return null;
+    return {
+        unityWindow,
+        origins: UNITY_ORIGINS,
+        protocolVersion: new URLSearchParams(window.location.search).get("unityBridge") === "3"
+            ? DRAFT_REGENERATION_PROTOCOL_VERSION
+            : LEGACY_DRAFT_REGENERATION_PROTOCOL_VERSION,
+        embedded: false
+    };
+}
+
+function requestEmbeddedHostView(type, requestId = "") {
+    const bridge = activeUnityBridge();
+    if (!bridge?.embedded) return false;
+    bridge.unityWindow.postMessage({
+        type,
+        protocolVersion: DRAFT_REGENERATION_PROTOCOL_VERSION,
+        sessionId: state.sessionId,
+        requestId
+    }, bridge.origins[0]);
+    return true;
+}
+
+function tryOpenPlayInExistingUnity(playUrl) {
+    const bridge = activeUnityBridge();
+    if (!bridge) return Promise.resolve(false);
+    const unityWindow = bridge.unityWindow;
 
     const requestId = uniqueId("unity_play");
 
@@ -2603,15 +2704,19 @@ function tryOpenPlayInExistingUnity(playUrl) {
             settled = true;
             window.clearTimeout(timeoutId);
             window.removeEventListener("message", receiveAcknowledgement);
+            if (!value && bridge.embedded) {
+                requestEmbeddedHostView("sokoban:cocreation-show-lab");
+            }
             resolve(value);
         };
         const receiveAcknowledgement = event => {
             const message = event.data;
             if (event.source !== unityWindow
-                || !UNITY_ORIGINS.includes(event.origin)
+                || !bridge.origins.includes(event.origin)
                 || !message
                 || message.type !== "sokoban:cocreation-play-ack"
-                || message.requestId !== requestId) {
+                || message.requestId !== requestId
+                || (bridge.embedded && message.protocolVersion !== bridge.protocolVersion)) {
                 return;
             }
             finish(message.accepted === true);
@@ -2626,10 +2731,11 @@ function tryOpenPlayInExistingUnity(playUrl) {
             type: "sokoban:cocreation-play-request",
             requestId,
             sessionId: state.sessionId,
-            playUrl
+            playUrl,
+            protocolVersion: bridge.protocolVersion
         };
 
-        UNITY_ORIGINS.forEach(origin => {
+        bridge.origins.forEach(origin => {
             try {
                 unityWindow.postMessage(message, origin);
             } catch (_error) {
@@ -2641,8 +2747,15 @@ function tryOpenPlayInExistingUnity(playUrl) {
 
 async function handleUnityBridgeMessage(event) {
     const message = event.data;
-    if (event.source !== window.opener
-        || !UNITY_ORIGINS.includes(event.origin)
+    if (message?.type === "sokoban:cocreation-host-init") {
+        handleUnityHostInit(event, message);
+        return;
+    }
+
+    const bridge = activeUnityBridge();
+    if (!bridge
+        || event.source !== bridge.unityWindow
+        || !bridge.origins.includes(event.origin)
         || !message
         || message.sessionId !== state.sessionId) {
         return;
@@ -2651,7 +2764,7 @@ async function handleUnityBridgeMessage(event) {
     if (message.type === "sokoban:cocreation-draft-regenerate-return") {
         const currentRequestId = state.session?.draftPreview?.regenerationRequestId
             || state.draftPollRequestId;
-        if (message.protocolVersion !== DRAFT_REGENERATION_PROTOCOL_VERSION
+        if (message.protocolVersion !== bridge.protocolVersion
             || !currentRequestId
             || message.requestId !== currentRequestId
             || !["completed", "failed"].includes(message.status)) {
@@ -2662,7 +2775,7 @@ async function handleUnityBridgeMessage(event) {
             renderDraftPreview();
             renderLandingStatus();
             updateControls();
-            window.focus();
+            if (!bridge.embedded) window.focus();
         } catch (error) {
             showError(error, () => handleUnityBridgeMessage(event));
         }
@@ -2678,7 +2791,7 @@ async function handleUnityBridgeMessage(event) {
             restoreComposerDraft();
             showPlayReturnNotice(message.status);
         }
-        window.focus();
+        if (!bridge.embedded) window.focus();
     } catch (error) {
         showError(error, () => handleUnityBridgeMessage(event));
     }
@@ -2715,6 +2828,10 @@ async function submitIntention(event) {
 
 function returnToUnity() {
     hideNotice();
+    if (requestEmbeddedHostView("sokoban:cocreation-show-unity")) {
+        return;
+    }
+
     const unityWindow = window.opener;
 
     if (!unityWindow || unityWindow.closed) {
@@ -2795,6 +2912,12 @@ async function regenerateDraft() {
         if (preparedBridge) abortPreparedDraftRegeneration(preparedBridge);
         showError(error, () => void regenerateDraft());
     } finally {
+        if (!state.session?.demoMode) {
+            requestEmbeddedHostView(
+                "sokoban:cocreation-show-lab",
+                state.session?.draftPreview?.regenerationRequestId || ""
+            );
+        }
         state.busy = false;
         state.draftRegenerationPending = false;
         renderDraftPreview();
@@ -2803,10 +2926,13 @@ async function regenerateDraft() {
 }
 
 function prepareUnityForDraftRegeneration() {
-    const unityWindow = window.opener;
-    if (!unityWindow || unityWindow.closed) return Promise.resolve(false);
+    const bridge = activeUnityBridge();
+    if (!bridge) return Promise.resolve(false);
+    const unityWindow = bridge.unityWindow;
     const bridgeRequestId = uniqueId("unity_draft_regeneration_prepare");
-    try { unityWindow.focus(); } catch (_error) { /* acknowledgement still decides */ }
+    if (!bridge.embedded) {
+        try { unityWindow.focus(); } catch (_error) { /* acknowledgement still decides */ }
+    }
     return new Promise(resolve => {
         let settled = false;
         const finish = accepted => {
@@ -2814,16 +2940,22 @@ function prepareUnityForDraftRegeneration() {
             settled = true;
             window.clearTimeout(timeoutId);
             window.removeEventListener("message", receiveAcknowledgement);
-            resolve(accepted ? { unityWindow, prepareRequestId: bridgeRequestId } : null);
+            resolve(accepted ? {
+                unityWindow,
+                origins: bridge.origins,
+                protocolVersion: bridge.protocolVersion,
+                embedded: bridge.embedded,
+                prepareRequestId: bridgeRequestId
+            } : null);
         };
         const receiveAcknowledgement = event => {
             const message = event.data;
-            if (event.source !== unityWindow || !UNITY_ORIGINS.includes(event.origin)
+            if (event.source !== unityWindow || !bridge.origins.includes(event.origin)
                 || message?.type !== "sokoban:cocreation-draft-regenerate-prepare-ack"
                 || message.requestId !== bridgeRequestId
                 || message.sessionId !== state.sessionId) return;
             finish(message.accepted === true
-                && message.protocolVersion === DRAFT_REGENERATION_PROTOCOL_VERSION);
+                && message.protocolVersion === bridge.protocolVersion);
         };
         const timeoutId = window.setTimeout(() => finish(false), UNITY_PLAY_BRIDGE_TIMEOUT_MS);
         window.addEventListener("message", receiveAcknowledgement);
@@ -2831,11 +2963,14 @@ function prepareUnityForDraftRegeneration() {
             type: "sokoban:cocreation-draft-regenerate-prepare",
             requestId: bridgeRequestId,
             sessionId: state.sessionId,
-            protocolVersion: DRAFT_REGENERATION_PROTOCOL_VERSION
+            protocolVersion: bridge.protocolVersion
         };
-        UNITY_ORIGINS.forEach(origin => {
+        bridge.origins.forEach(origin => {
             try { unityWindow.postMessage(message, origin); } catch (_error) { /* continue */ }
         });
+        if (bridge.embedded) {
+            requestEmbeddedHostView("sokoban:cocreation-show-unity");
+        }
     });
 }
 
@@ -2856,11 +2991,11 @@ function sendUnityDraftRegenerationRequest(preparedBridge, requestId) {
         const receiveAcknowledgement = event => {
             const message = event.data;
             if (event.source !== preparedBridge.unityWindow
-                || !UNITY_ORIGINS.includes(event.origin)
+                || !preparedBridge.origins.includes(event.origin)
                 || message?.type !== "sokoban:cocreation-draft-regenerate-ack"
                 || message.requestId !== bridgeRequestId) return;
             finish(message.accepted === true
-                && message.protocolVersion === DRAFT_REGENERATION_PROTOCOL_VERSION);
+                && message.protocolVersion === preparedBridge.protocolVersion);
         };
         const timeoutId = window.setTimeout(() => finish(false), UNITY_PLAY_BRIDGE_TIMEOUT_MS);
         window.addEventListener("message", receiveAcknowledgement);
@@ -2868,11 +3003,11 @@ function sendUnityDraftRegenerationRequest(preparedBridge, requestId) {
             type: "sokoban:cocreation-draft-regenerate-request",
             requestId: bridgeRequestId,
             prepareRequestId: preparedBridge.prepareRequestId,
-            protocolVersion: DRAFT_REGENERATION_PROTOCOL_VERSION,
+            protocolVersion: preparedBridge.protocolVersion,
             sessionId: state.sessionId,
             regenerationRequestId: requestId
         };
-        UNITY_ORIGINS.forEach(origin => {
+        preparedBridge.origins.forEach(origin => {
             try { preparedBridge.unityWindow.postMessage(message, origin); } catch (_error) { /* continue */ }
         });
     });
@@ -2882,14 +3017,18 @@ function abortPreparedDraftRegeneration(preparedBridge) {
     if (!preparedBridge?.unityWindow || preparedBridge.unityWindow.closed) return;
     const message = {
         type: "sokoban:cocreation-draft-regenerate-abort",
-        protocolVersion: DRAFT_REGENERATION_PROTOCOL_VERSION,
+        protocolVersion: preparedBridge.protocolVersion,
         sessionId: state.sessionId,
         prepareRequestId: preparedBridge.prepareRequestId
     };
-    UNITY_ORIGINS.forEach(origin => {
+    preparedBridge.origins.forEach(origin => {
         try { preparedBridge.unityWindow.postMessage(message, origin); } catch (_error) { /* continue */ }
     });
-    try { window.focus(); } catch (_error) { /* browser may reject focus */ }
+    if (preparedBridge.embedded) {
+        requestEmbeddedHostView("sokoban:cocreation-show-lab");
+    } else {
+        try { window.focus(); } catch (_error) { /* browser may reject focus */ }
+    }
 }
 
 async function waitForDraftRegeneration(requestId) {

@@ -76,6 +76,69 @@
       #dashboard-access-submit { color: #fff5d1; background: #b84c3e; }
       .dashboard-access-actions button:disabled { cursor: wait; opacity: 0.6; }
 
+      #cocreation-host[hidden] { display: none; }
+      #cocreation-host {
+        position: fixed;
+        inset: 0;
+        z-index: 2000;
+        display: block;
+        overflow: hidden;
+        background: #6f9d31;
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
+      }
+      #cocreation-host.parked {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      #cocreation-frame {
+        width: 100%;
+        height: 100%;
+        border: 0;
+        background: #6f9d31;
+      }
+      .cocreation-host-status {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        color: #23302a;
+        background: #6f9d31;
+      }
+      .cocreation-host-status[hidden] { display: none; }
+      .cocreation-host-card {
+        width: min(560px, 100%);
+        padding: 24px;
+        border: 4px solid var(--wood-dark);
+        color: var(--ink);
+        background: var(--paper);
+        box-shadow: var(--pixel-shadow);
+        text-align: center;
+      }
+      .cocreation-host-card h2 { margin: 0 0 12px; }
+      .cocreation-host-card p { margin: 0; line-height: 1.5; }
+      .cocreation-host-actions {
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
+      }
+      .cocreation-host-actions button {
+        min-height: 42px;
+        padding: 8px 14px;
+        border: 3px solid var(--wood-dark);
+        color: var(--ink);
+        background: var(--stone-light);
+        cursor: pointer;
+        font-weight: 700;
+      }
+      #cocreation-open-standalone { color: #fff5d1; background: #315a73; }
+
       #sokoban-lobby-native-overlay[hidden] { display: none; }
       #sokoban-lobby-native-overlay {
         position: absolute;
@@ -209,6 +272,30 @@
       </section>
     </main>
 
+    <section id="cocreation-host" hidden aria-label="Sokoban co-creation workspace">
+      <iframe
+        id="cocreation-frame"
+        title="Sokoban Co-Creation Lab"
+        referrerpolicy="same-origin"
+      ></iframe>
+      <div id="cocreation-host-loading" class="cocreation-host-status" role="status" aria-live="polite">
+        <div class="cocreation-host-card">
+          <h2>OPENING CO-CREATION LAB</h2>
+          <p>Loading the persistent design workspace...</p>
+        </div>
+      </div>
+      <div id="cocreation-host-error" class="cocreation-host-status" role="alert" hidden>
+        <div class="cocreation-host-card">
+          <h2>CO-CREATION LAB UNAVAILABLE</h2>
+          <p>The embedded workspace did not respond. The Unity session is still available.</p>
+          <div class="cocreation-host-actions">
+            <button id="cocreation-retry" type="button">RETRY</button>
+            <button id="cocreation-open-standalone" type="button">OPEN SEPARATE PAGE</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <div id="dashboard-access-modal" class="dashboard-access-modal" hidden>
       <form id="dashboard-access-form" class="dashboard-access-card">
         <div class="dashboard-access-header">
@@ -246,12 +333,19 @@
       var lobbyNativeOverlay = document.querySelector("#sokoban-lobby-native-overlay");
       var lobbyGeneratedRoomCode = document.querySelector("#sokoban-lobby-generated-room-code");
       var lobbyJoinRoomCode = document.querySelector("#sokoban-lobby-join-room-code");
+      var coCreationHost = document.querySelector("#cocreation-host");
+      var coCreationFrame = document.querySelector("#cocreation-frame");
+      var coCreationHostLoading = document.querySelector("#cocreation-host-loading");
+      var coCreationHostError = document.querySelector("#cocreation-host-error");
+      var coCreationRetry = document.querySelector("#cocreation-retry");
+      var coCreationOpenStandalone = document.querySelector("#cocreation-open-standalone");
       var lobbyReferenceWidth = 1920;
       var lobbyReferenceHeight = 1080;
       var lobbyOverlayVisible = false;
       window.SokobanUnityInstance = null;
       var coCreationPlayBridgeReady = false;
       var coCreationLabWindow = null;
+      var coCreationStandaloneWindow = null;
       var coCreationLabOrigin = "";
       var coCreationSessionId = "";
       var allowedCoCreationOrigins = [
@@ -266,6 +360,13 @@
         return allowedCoCreationOrigins.indexOf(origin) !== -1;
       }
 
+      function isKnownProtocol3CoCreationSource(source) {
+        return isEmbeddedCoCreationSource(source)
+          || (!!coCreationStandaloneWindow
+            && !coCreationStandaloneWindow.closed
+            && source === coCreationStandaloneWindow);
+      }
+
       window.SokobanSetCoCreationPlayBridgeReady = function (ready) {
         coCreationPlayBridgeReady = !!ready;
       };
@@ -278,14 +379,21 @@
 
         coCreationLabWindow.postMessage({
           type: "sokoban:cocreation-play-return",
+          protocolVersion: isKnownProtocol3CoCreationSource(coCreationLabWindow)
+            ? draftRegenerationProtocolVersion
+            : 2,
           sessionId: coCreationSessionId,
           status: status || ""
         }, coCreationLabOrigin);
 
-        try {
-          coCreationLabWindow.focus();
-        } catch (_error) {
-          // The browser may require the user to switch tabs manually.
+        if (isEmbeddedCoCreationSource(coCreationLabWindow)) {
+          showCoCreationHost();
+        } else {
+          try {
+            coCreationLabWindow.focus();
+          } catch (_error) {
+            // Legacy separate-tab mode remains best effort.
+          }
         }
       };
 
@@ -301,7 +409,11 @@
         var accepted = coCreationPlayBridgeReady
           && !!window.SokobanUnityInstance
           && typeof message.sessionId === "string"
-          && typeof message.playUrl === "string";
+          && typeof message.playUrl === "string"
+          && (isKnownProtocol3CoCreationSource(event.source)
+            ? message.protocolVersion === draftRegenerationProtocolVersion
+              && message.sessionId === coCreationSessionId
+            : message.protocolVersion === 2);
 
         if (accepted) {
           coCreationLabWindow = event.source;
@@ -317,7 +429,11 @@
                 playUrl: message.playUrl
               })
             );
-            window.focus();
+            if (isEmbeddedCoCreationSource(event.source)) {
+              parkCoCreationHost();
+            } else {
+              window.focus();
+            }
           } catch (_error) {
             accepted = false;
           }
@@ -327,15 +443,179 @@
           event.source.postMessage({
             type: "sokoban:cocreation-play-ack",
             requestId: message.requestId,
-            accepted: accepted
+            accepted: accepted,
+            protocolVersion: isKnownProtocol3CoCreationSource(event.source)
+              ? draftRegenerationProtocolVersion
+              : 2
           }, event.origin);
         }
       });
 
-      var draftRegenerationProtocolVersion = 2;
+      var draftRegenerationProtocolVersion = 3;
       var activeDraftRegenerationSessionId = "";
       var activeDraftRegenerationProtocolVersion = 0;
       var preparedDraftRegeneration = null;
+      var coCreationHostReady = false;
+      var coCreationHostUrl = "";
+      var coCreationHostTimer = 0;
+      var coCreationHostStartedAt = 0;
+
+      function isEmbeddedCoCreationSource(source) {
+        return !!coCreationFrame && source === coCreationFrame.contentWindow;
+      }
+
+      function postCoCreationHostInit() {
+        if (!coCreationFrame || !coCreationFrame.contentWindow || !coCreationSessionId) return;
+        var targetUrl;
+        try {
+          targetUrl = new URL(coCreationHostUrl, window.location.href);
+        } catch (_error) {
+          return;
+        }
+        coCreationFrame.contentWindow.postMessage({
+          type: "sokoban:cocreation-host-init",
+          protocolVersion: draftRegenerationProtocolVersion,
+          sessionId: coCreationSessionId
+        }, targetUrl.origin);
+      }
+
+      function stopCoCreationHostHandshake() {
+        if (!coCreationHostTimer) return;
+        window.clearInterval(coCreationHostTimer);
+        coCreationHostTimer = 0;
+      }
+
+      function startCoCreationHostHandshake() {
+        stopCoCreationHostHandshake();
+        coCreationHostStartedAt = Date.now();
+        coCreationHostTimer = window.setInterval(function () {
+          if (coCreationHostReady) {
+            stopCoCreationHostHandshake();
+            return;
+          }
+          if (Date.now() - coCreationHostStartedAt >= 5000) {
+            stopCoCreationHostHandshake();
+            coCreationHostLoading.hidden = true;
+            coCreationHostError.hidden = false;
+            return;
+          }
+          postCoCreationHostInit();
+        }, 250);
+        postCoCreationHostInit();
+      }
+
+      function showCoCreationHost() {
+        if (!coCreationHost) return;
+        coCreationHost.hidden = false;
+        coCreationHost.classList.remove("parked");
+        coCreationHost.setAttribute("aria-hidden", "false");
+        canvas.blur();
+        if (coCreationHostReady) {
+          coCreationHostLoading.hidden = true;
+          coCreationHostError.hidden = true;
+          coCreationFrame.focus();
+        }
+      }
+
+      function parkCoCreationHost() {
+        if (!coCreationHost || coCreationHost.hidden) return;
+        coCreationHost.classList.add("parked");
+        coCreationHost.setAttribute("aria-hidden", "true");
+        canvas.focus();
+      }
+
+      window.SokobanShowCoCreationLab = function (url, sessionId) {
+        var targetUrl;
+        try {
+          targetUrl = new URL(url, window.location.href);
+        } catch (_error) {
+          unityShowBanner("The co-creation lab URL is invalid.", "error");
+          return;
+        }
+        if (!isAllowedCoCreationOrigin(targetUrl.origin) || !sessionId) {
+          unityShowBanner("The co-creation lab URL or session is not allowed.", "error");
+          return;
+        }
+
+        var sessionChanged = coCreationSessionId !== sessionId;
+        coCreationSessionId = sessionId;
+        coCreationHostUrl = targetUrl.href;
+        coCreationLabWindow = coCreationFrame.contentWindow;
+        coCreationLabOrigin = targetUrl.origin;
+        coCreationHostReady = sessionChanged ? false : coCreationHostReady;
+        coCreationHostLoading.hidden = coCreationHostReady;
+        coCreationHostError.hidden = true;
+        showCoCreationHost();
+
+        if (sessionChanged || coCreationFrame.src !== targetUrl.href) {
+          coCreationHostReady = false;
+          coCreationHostLoading.hidden = false;
+          coCreationFrame.src = targetUrl.href;
+        }
+        startCoCreationHostHandshake();
+      };
+
+      coCreationFrame.addEventListener("load", function () {
+        if (!coCreationSessionId) return;
+        coCreationHostReady = false;
+        coCreationHostLoading.hidden = false;
+        coCreationHostError.hidden = true;
+        startCoCreationHostHandshake();
+      });
+
+      coCreationRetry.addEventListener("click", function () {
+        if (!coCreationHostUrl) return;
+        coCreationHostReady = false;
+        coCreationHostLoading.hidden = false;
+        coCreationHostError.hidden = true;
+        startCoCreationHostHandshake();
+      });
+
+      coCreationOpenStandalone.addEventListener("click", function () {
+        if (!coCreationHostUrl) return;
+        var windowName = "sokoban-cocreation-" + coCreationSessionId.replace(/[^a-zA-Z0-9_-]/g, "");
+        var standaloneUrl = new URL(coCreationHostUrl, window.location.href);
+        standaloneUrl.searchParams.set("unityBridge", String(draftRegenerationProtocolVersion));
+        coCreationStandaloneWindow = window.open(
+          standaloneUrl.href,
+          windowName || "sokoban-cocreation"
+        );
+      });
+
+      window.addEventListener("message", function (event) {
+        var message = event.data;
+        if (!isEmbeddedCoCreationSource(event.source)
+          || !isAllowedCoCreationOrigin(event.origin)
+          || !message
+          || message.type !== "sokoban:cocreation-lab-ready"
+          || message.protocolVersion !== draftRegenerationProtocolVersion
+          || message.sessionId !== coCreationSessionId) {
+          return;
+        }
+        coCreationHostReady = true;
+        coCreationLabWindow = event.source;
+        coCreationLabOrigin = event.origin;
+        stopCoCreationHostHandshake();
+        coCreationHostLoading.hidden = true;
+        coCreationHostError.hidden = true;
+        showCoCreationHost();
+      });
+
+      window.addEventListener("message", function (event) {
+        var message = event.data;
+        if (!isEmbeddedCoCreationSource(event.source)
+          || !isAllowedCoCreationOrigin(event.origin)
+          || !message
+          || message.protocolVersion !== draftRegenerationProtocolVersion
+          || message.sessionId !== coCreationSessionId) {
+          return;
+        }
+        if (message.type === "sokoban:cocreation-show-unity") {
+          parkCoCreationHost();
+        } else if (message.type === "sokoban:cocreation-show-lab") {
+          showCoCreationHost();
+        }
+      });
 
       window.SokobanSetDraftRegenerationBridgeSession = function (sessionId, protocolVersion) {
         activeDraftRegenerationSessionId = sessionId || "";
@@ -359,7 +639,8 @@
           && !!window.SokobanUnityInstance
           && message.protocolVersion === draftRegenerationProtocolVersion
           && activeDraftRegenerationProtocolVersion === draftRegenerationProtocolVersion
-          && message.sessionId === activeDraftRegenerationSessionId;
+          && message.sessionId === activeDraftRegenerationSessionId
+          && isKnownProtocol3CoCreationSource(event.source);
 
         if (accepted) {
           preparedDraftRegeneration = {
@@ -372,7 +653,11 @@
           coCreationLabWindow = event.source;
           coCreationLabOrigin = event.origin;
           coCreationSessionId = message.sessionId;
-          window.focus();
+          if (isEmbeddedCoCreationSource(event.source)) {
+            parkCoCreationHost();
+          } else {
+            window.focus();
+          }
         }
 
         if (event.source) {
@@ -421,7 +706,11 @@
                 requestId: message.regenerationRequestId
               })
             );
-            window.focus();
+            if (isEmbeddedCoCreationSource(event.source)) {
+              parkCoCreationHost();
+            } else {
+              window.focus();
+            }
           } catch (_error) {
             accepted = false;
           }
@@ -454,7 +743,9 @@
           && preparedDraftRegeneration.sessionId === message.sessionId
           && preparedDraftRegeneration.requestId === message.prepareRequestId) {
           preparedDraftRegeneration = null;
-          if (event.source && !event.source.closed) {
+          if (isEmbeddedCoCreationSource(event.source)) {
+            showCoCreationHost();
+          } else if (event.source && !event.source.closed) {
             event.source.focus();
           }
         }
@@ -471,7 +762,11 @@
           requestId: requestId || "",
           status: status || "failed"
         }, coCreationLabOrigin);
-        coCreationLabWindow.focus();
+        if (isEmbeddedCoCreationSource(coCreationLabWindow)) {
+          showCoCreationHost();
+        } else {
+          coCreationLabWindow.focus();
+        }
       };
 
       function normalizeLobbyRoomCode(value) {
@@ -679,7 +974,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=draft-regeneration-v2-20260915-1";
+      var buildVersion = "?v=iframe-host-v3-20260915-1";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,

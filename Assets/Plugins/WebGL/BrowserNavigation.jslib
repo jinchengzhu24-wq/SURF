@@ -35,6 +35,14 @@ mergeInto(LibraryManager.library, {
             );
         }
     },
+    SokobanShowCoCreationLab: function (urlPointer, sessionIdPointer) {
+        if (window.SokobanShowCoCreationLab) {
+            window.SokobanShowCoCreationLab(
+                UTF8ToString(urlPointer),
+                UTF8ToString(sessionIdPointer)
+            );
+        }
+    },
     SokobanLobbySetOverlayVisible: function (visible) {
         if (window.SokobanSetLobbyOverlayVisible) {
             window.SokobanSetLobbyOverlayVisible(visible !== 0);
