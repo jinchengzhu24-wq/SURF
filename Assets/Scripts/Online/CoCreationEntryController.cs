@@ -6,6 +6,10 @@ using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+using System.Runtime.InteropServices;
+#endif
+
 public sealed class CoCreationEntryController : MonoBehaviour
 {
     private const string DefaultCoCreationUrl = "http://111.231.136.4/cocreation/";
@@ -23,6 +27,21 @@ public sealed class CoCreationEntryController : MonoBehaviour
     private bool processingRegeneration;
     private Coroutine trackingRoutine;
 
+#if UNITY_WEBGL && !UNITY_EDITOR
+    [DllImport("__Internal")]
+    private static extern void SokobanSetDraftRegenerationBridgeSession(
+        string sessionId,
+        int protocolVersion
+    );
+
+    [DllImport("__Internal")]
+    private static extern void SokobanReturnDraftRegeneration(
+        string sessionId,
+        string requestId,
+        string status
+    );
+#endif
+
     private void Awake()
     {
         if (openLabButton != null)
@@ -35,6 +54,13 @@ public sealed class CoCreationEntryController : MonoBehaviour
         {
             Debug.LogWarning("CoCreationEntryController: Open lab button is missing.");
         }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanSetDraftRegenerationBridgeSession(
+            CoCreationDraftContext.SessionId ?? "",
+            2
+        );
+#endif
     }
 
     private void Start()
@@ -104,6 +130,9 @@ public sealed class CoCreationEntryController : MonoBehaviour
 
     private void OnDestroy()
     {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanSetDraftRegenerationBridgeSession("", 0);
+#endif
         if (openLabButton != null)
         {
             openLabButton.onClick.RemoveListener(OpenCoCreationLab);
@@ -119,6 +148,12 @@ public sealed class CoCreationEntryController : MonoBehaviour
     {
         if (creatingSession)
         {
+            return;
+        }
+
+        if (CoCreationDraftContext.HasRegenerationResult && !processingRegeneration)
+        {
+            StartCoroutine(SubmitRegenerationResult());
             return;
         }
 
@@ -250,6 +285,12 @@ public sealed class CoCreationEntryController : MonoBehaviour
                 response.sessionId,
                 response.integrationToken
             );
+#if UNITY_WEBGL && !UNITY_EDITOR
+            SokobanSetDraftRegenerationBridgeSession(
+                CoCreationDraftContext.SessionId,
+                2
+            );
+#endif
             SetButtonState(true, "OPEN CO-CREATION LAB");
             SetStatus(
                 "Draft preview is synchronized. Open the lab to review it.",
@@ -365,12 +406,26 @@ public sealed class CoCreationEntryController : MonoBehaviour
             if (request.result != UnityWebRequest.Result.Success)
             {
                 processingRegeneration = false;
-                ApplyFailure("The regeneration request could not be claimed. Return to the lab and retry.");
+                TryBuildResumeLabUrl(CoCreationDraftContext.SessionId, out launchUrl);
+                SetButtonState(true, "RETURN TO CO-CREATION LAB");
+                SetStatus(
+                    "The regeneration request could not be claimed. Return to the lab; the previous draft is preserved.",
+                    ErrorStatusColor
+                );
+                NotifyBrowserRegenerationReturn(requestId, "failed");
+                trackingRoutine = StartCoroutine(TrackSessionCompletion());
                 yield break;
             }
         }
 
         CoCreationDraftContext.BeginRegeneration(requestId);
+        if (!CoCreationDraftContext.HasSavedLevelDesignPlan)
+        {
+            CoCreationDraftContext.FailRegeneration("blueprint_unavailable");
+            processingRegeneration = false;
+            StartCoroutine(SubmitRegenerationResult());
+            yield break;
+        }
         const string generationScene = "DG_Level";
         if (!Application.CanStreamedLevelBeLoaded(generationScene))
         {
@@ -399,22 +454,29 @@ public sealed class CoCreationEntryController : MonoBehaviour
             + UnityWebRequest.EscapeURL(requestId)
             + "/" + action;
         string json = succeeded
-            ? JsonUtility.ToJson(new DraftRegenerationCompleteRequest { rows = CoCreationDraftContext.Rows })
+            ? JsonUtility.ToJson(new DraftRegenerationCompleteRequest { rows = CoCreationDraftContext.RegeneratedRows })
             : JsonUtility.ToJson(new DraftRegenerationFailRequest { failureCode = CoCreationDraftContext.RegenerationFailureCode });
 
-        using (UnityWebRequest request = new UnityWebRequest(endpoint, "POST"))
+        const int maxSubmitAttempts = 3;
+        for (int attempt = 1; attempt <= maxSubmitAttempts; attempt++)
         {
-            request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
-            request.downloadHandler = new DownloadHandlerBuffer();
-            request.SetRequestHeader("Content-Type", "application/json");
-            request.SetRequestHeader("Authorization", "Bearer " + CoCreationDraftContext.IntegrationToken);
-            request.timeout = Mathf.Max(1, requestTimeoutSeconds);
-            yield return request.SendWebRequest();
-
-            if (request.result != UnityWebRequest.Result.Success)
+            using (UnityWebRequest request = new UnityWebRequest(endpoint, "POST"))
             {
+                request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
+                request.downloadHandler = new DownloadHandlerBuffer();
+                request.SetRequestHeader("Content-Type", "application/json");
+                request.SetRequestHeader("Authorization", "Bearer " + CoCreationDraftContext.IntegrationToken);
+                request.timeout = Mathf.Clamp(requestTimeoutSeconds, 1, 10);
+                yield return request.SendWebRequest();
+
+                if (request.result == UnityWebRequest.Result.Success)
+                {
+                    break;
+                }
+
                 if (request.responseCode >= 400 && request.responseCode < 500)
                 {
+                    NotifyBrowserRegenerationReturn(requestId, "failed");
                     CoCreationDraftContext.ClearRegeneration();
                     processingRegeneration = false;
                     SetButtonState(true, "RETURN TO CO-CREATION LAB");
@@ -422,14 +484,28 @@ public sealed class CoCreationEntryController : MonoBehaviour
                     trackingRoutine = StartCoroutine(TrackSessionCompletion());
                     yield break;
                 }
-                processingRegeneration = false;
-                SetStatus("Draft result synchronization failed. Retrying...", ErrorStatusColor);
-                yield return new WaitForSecondsRealtime(2f);
-                StartCoroutine(SubmitRegenerationResult());
-                yield break;
+
+                if (attempt == maxSubmitAttempts)
+                {
+                    processingRegeneration = false;
+                    SetButtonState(true, "RETRY DRAFT SYNC");
+                    SetStatus(
+                        "Draft result synchronization is unavailable. Select the button to retry; the generated result is preserved locally.",
+                        ErrorStatusColor
+                    );
+                    yield break;
+                }
             }
+
+            SetStatus("Draft result synchronization failed. Retrying...", ErrorStatusColor);
+            yield return new WaitForSecondsRealtime(2f);
         }
 
+        if (succeeded)
+        {
+            CoCreationDraftContext.AcceptRegenerationResult();
+        }
+        NotifyBrowserRegenerationReturn(requestId, succeeded ? "completed" : "failed");
         CoCreationDraftContext.ClearRegeneration();
         processingRegeneration = false;
         SetButtonState(true, "RETURN TO CO-CREATION LAB");
@@ -438,6 +514,17 @@ public sealed class CoCreationEntryController : MonoBehaviour
             succeeded ? ReadyStatusColor : ErrorStatusColor
         );
         trackingRoutine = StartCoroutine(TrackSessionCompletion());
+    }
+
+    private static void NotifyBrowserRegenerationReturn(string requestId, string status)
+    {
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanReturnDraftRegeneration(
+            CoCreationDraftContext.SessionId,
+            requestId ?? "",
+            status ?? "failed"
+        );
+#endif
     }
 
     private void HandleCompletedSession(
@@ -469,6 +556,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
 
         if (!OnlineMatchContext.HasMatch)
         {
+            CoCreationDraftContext.Clear();
             return;
         }
 

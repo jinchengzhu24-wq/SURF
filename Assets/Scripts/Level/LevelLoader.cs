@@ -75,8 +75,10 @@ public class LevelLoader : MonoBehaviour
     private bool currentLoadUsedLLMPlan;
     private bool currentLoadUsedAlgorithmFallbackAfterLLM;
     private LevelDesignPlan pendingLLMPlan;
+    private LevelDesignPlan lastValidatedLLMPlan;
     private bool hasPreparedInitialLevel;
     public string LastGenerationFailureMessage { get; private set; }
+    public string LastGenerationFailureCode { get; private set; }
 
     public bool HasPreparedInitialLevel => hasPreparedInitialLevel;
 
@@ -169,6 +171,72 @@ public class LevelLoader : MonoBehaviour
         yield return GenerateWithLLMPlanAttemptsRoutine(false, onComplete);
     }
 
+    public IEnumerator PrepareRegeneratedLevelWithSavedPlanRoutine(
+        System.Action<bool, string> onComplete = null)
+    {
+        hasPreparedInitialLevel = false;
+        LastGenerationFailureMessage = "";
+        LastGenerationFailureCode = "";
+        ResolveGenerationReferences();
+        LevelDesignPlan savedPlan = CoCreationDraftContext.GetSavedLevelDesignPlan();
+
+        if (savedPlan == null)
+        {
+            LastGenerationFailureCode = "blueprint_unavailable";
+            LastGenerationFailureMessage = "The validated session blueprint is unavailable.";
+            onComplete?.Invoke(false, LastGenerationFailureCode);
+            yield break;
+        }
+
+        if (levelGenerator == null)
+        {
+            LastGenerationFailureCode = "generation_failed";
+            LastGenerationFailureMessage = "The level generator is unavailable.";
+            onComplete?.Invoke(false, LastGenerationFailureCode);
+            yield break;
+        }
+
+        if (levelData != null)
+        {
+            levelGenerator.levelData = levelData;
+        }
+        levelGenerator.levelLoader = this;
+        levelGenerator.ApplyPlan(savedPlan);
+
+        bool generated = false;
+        string failureCode = "generation_failed";
+        yield return levelGenerator.GenerateSavedPlanRoutine(
+            45f,
+            (result, code) =>
+            {
+                generated = result;
+                failureCode = string.IsNullOrWhiteSpace(code) ? "generation_failed" : code;
+            }
+        );
+
+        if (generated && levelGenerator.levelData != null)
+        {
+            levelData = levelGenerator.levelData;
+            hasPreparedInitialLevel = true;
+            currentLoadUsedLLMPlan = true;
+            currentLoadUsedAlgorithmFallbackAfterLLM = false;
+            onComplete?.Invoke(true, "");
+            yield break;
+        }
+
+        LastGenerationFailureCode = failureCode;
+        LastGenerationFailureMessage = failureCode == "generation_timed_out"
+            ? "Saved-blueprint regeneration exceeded its 45-second budget."
+            : "The saved blueprint could not produce a valid level.";
+        hasPreparedInitialLevel = false;
+        onComplete?.Invoke(false, failureCode);
+    }
+
+    public LevelDesignPlan GetLastValidatedLLMPlan()
+    {
+        return lastValidatedLLMPlan == null ? null : lastValidatedLLMPlan.Copy();
+    }
+
     public bool CommitPreparedInitialLevel()
     {
         if (!hasPreparedInitialLevel)
@@ -199,6 +267,8 @@ public class LevelLoader : MonoBehaviour
         currentLoadUsedLLMPlan = false;
         currentLoadUsedAlgorithmFallbackAfterLLM = false;
         LastGenerationFailureMessage = "";
+        LastGenerationFailureCode = "";
+        lastValidatedLLMPlan = null;
         ClearPendingLLMPlanContext();
 
         if (levelGenerator != null)
@@ -471,7 +541,8 @@ public class LevelLoader : MonoBehaviour
         }
 
         levelGenerator.ApplyPlan(plan);
-        pendingLLMPlan = plan;
+        pendingLLMPlan = plan.Copy();
+        lastValidatedLLMPlan = plan.Copy();
     }
 
     private void SaveSuccessfulLLMPlanContext()

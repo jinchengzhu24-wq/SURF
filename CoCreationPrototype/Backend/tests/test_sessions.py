@@ -1157,13 +1157,99 @@ class CoCreationSessionTests(unittest.TestCase):
         failed = self.client.post(
             f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/fail",
             headers={"Authorization": f"Bearer {created['integrationToken']}"},
-            json={"failureCode": "generation_failed"},
+            json={"failureCode": "blueprint_unavailable"},
         )
         self.assertEqual(failed.status_code, 200, failed.text)
         retained = self.client.get(f"/api/sessions/{created['sessionId']}").json()
         self.assertEqual(retained["draftPreview"]["rows"], SAMPLE_ROWS)
         self.assertEqual(retained["draftPreview"]["generation"], 1)
         self.assertEqual(retained["draftPreview"]["regenerationStatus"], "failed")
+        self.assertEqual(retained["draftPreview"]["failureCode"], "blueprint_unavailable")
+
+    def test_pending_regeneration_expires_after_its_own_claim_lease(self):
+        created = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "description_generation",
+                "language": "en",
+                "idempotencyKey": "pending_lease_001",
+            },
+        ).json()
+        fragment = parse_qs(urlparse(created["launchUrl"]).fragment)
+        self.client.post(
+            f"/api/sessions/{created['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations",
+            json={"idempotencyKey": "pending_lease_request_001"},
+        )
+        with repository.connect(immediate=True) as database:
+            database.execute(
+                "UPDATE design_sessions SET draft_regeneration_requested_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00Z", created["sessionId"]),
+            )
+
+        expired = self.client.get(f"/api/sessions/{created['sessionId']}").json()
+        self.assertEqual(expired["draftPreview"]["regenerationStatus"], "timed_out")
+        self.assertEqual(expired["draftPreview"]["failureCode"], "unity_unavailable")
+        self.assertEqual(expired["draftPreview"]["rows"], SAMPLE_ROWS)
+
+    def test_claimed_regeneration_gets_a_fresh_execution_lease(self):
+        created = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "description_generation",
+                "language": "en",
+                "idempotencyKey": "claimed_lease_001",
+            },
+        ).json()
+        fragment = parse_qs(urlparse(created["launchUrl"]).fragment)
+        self.client.post(
+            f"/api/sessions/{created['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        requested = self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations",
+            json={"idempotencyKey": "claimed_lease_request_001"},
+        ).json()
+        request_id = requested["draftPreview"]["regenerationRequestId"]
+        with repository.connect(immediate=True) as database:
+            database.execute(
+                "UPDATE design_sessions SET draft_regeneration_requested_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00Z", created["sessionId"]),
+            )
+        headers = {"Authorization": f"Bearer {created['integrationToken']}"}
+        claim = self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/claim",
+            headers=headers,
+        )
+        self.assertEqual(claim.status_code, 409, claim.text)
+
+        requested = self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations",
+            json={"idempotencyKey": "claimed_lease_request_002"},
+        ).json()
+        request_id = requested["draftPreview"]["regenerationRequestId"]
+        claim = self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/claim",
+            headers=headers,
+        )
+        self.assertEqual(claim.status_code, 200, claim.text)
+        active = self.client.get(f"/api/sessions/{created['sessionId']}").json()
+        self.assertEqual(active["draftPreview"]["regenerationStatus"], "claimed")
+
+        with repository.connect(immediate=True) as database:
+            database.execute(
+                "UPDATE design_sessions SET draft_regeneration_updated_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00Z", created["sessionId"]),
+            )
+        expired = self.client.get(f"/api/sessions/{created['sessionId']}").json()
+        self.assertEqual(expired["draftPreview"]["regenerationStatus"], "timed_out")
+        self.assertEqual(expired["draftPreview"]["failureCode"], "generation_timed_out")
+        self.assertEqual(expired["draftPreview"]["generation"], 1)
 
     def test_demo_draft_can_regenerate_repeatedly_without_stage_or_deadline(self):
         demo_session_id = self.create_and_open_demo_session("demo_regeneration_001")

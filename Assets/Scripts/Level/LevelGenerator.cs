@@ -1,3 +1,5 @@
+using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -287,6 +289,142 @@ public class LevelGenerator : MonoBehaviour
 
         Debug.LogWarning("LevelGenerator: Failed to generate a solvable level.");
         return false;
+    }
+
+    public IEnumerator GenerateSavedPlanRoutine(
+        float budgetSeconds,
+        Action<bool, string> onComplete)
+    {
+        ResolveReferences();
+
+        if (!CanGenerate() || !hasDesignBlueprint || !activeLLMQualityGate)
+        {
+            onComplete?.Invoke(false, "generation_failed");
+            yield break;
+        }
+
+        float deadline = Time.realtimeSinceStartup + Mathf.Max(1f, budgetSeconds);
+        random = rules.useFixedSeed
+            ? new System.Random(unchecked(rules.seed + GetRuntimeSeed()))
+            : new System.Random(GetRuntimeSeed());
+
+        for (int attempt = 0; attempt < rules.maxGenerateAttempts; attempt++)
+        {
+            if (Time.realtimeSinceStartup >= deadline)
+            {
+                onComplete?.Invoke(false, "generation_timed_out");
+                yield break;
+            }
+
+            bool generated;
+            try
+            {
+                generated = TryGenerateWithCurrentRules(
+                    "saved-blueprint-strict",
+                    1,
+                    false
+                );
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                onComplete?.Invoke(false, "generation_failed");
+                yield break;
+            }
+
+            if (Time.realtimeSinceStartup >= deadline)
+            {
+                onComplete?.Invoke(false, "generation_timed_out");
+                yield break;
+            }
+
+            if (generated)
+            {
+                onComplete?.Invoke(true, "");
+                yield break;
+            }
+
+            yield return null;
+        }
+
+        int originalMinSolutionSteps = rules.minSolutionSteps;
+        int originalMaxSolutionSteps = rules.maxSolutionSteps;
+        int originalMinPushes = rules.minPushes;
+        int originalMaxPushes = rules.maxPushes;
+        int originalMinWaterAreas = rules.minWaterAreas;
+        int originalMaxWaterAreas = rules.maxWaterAreas;
+        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
+        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
+        int originalMinReversePulls = rules.minReversePulls;
+        int originalMaxReversePulls = rules.maxReversePulls;
+        bool originalHasDesignBlueprint = hasDesignBlueprint;
+        bool originalActiveLLMQualityGate = activeLLMQualityGate;
+        bool originalActiveRelaxedBlueprint = activeRelaxedBlueprint;
+        bool relaxedGenerated = false;
+        string failureCode = "generation_failed";
+
+        activeRelaxedBlueprint = true;
+        rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 10);
+        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 20);
+        rules.minPushes = Mathf.Max(4, originalMinPushes - 6);
+        rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 10);
+        rules.minReversePulls = Mathf.Max(8, originalMinReversePulls - 10);
+        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls);
+
+        for (int attempt = 0; attempt < rules.maxGenerateAttempts; attempt++)
+        {
+            if (Time.realtimeSinceStartup >= deadline)
+            {
+                failureCode = "generation_timed_out";
+                break;
+            }
+
+            try
+            {
+                relaxedGenerated = TryGenerateWithCurrentRules(
+                    "saved-blueprint-relaxed",
+                    1,
+                    false
+                );
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                failureCode = "generation_failed";
+                break;
+            }
+
+            if (Time.realtimeSinceStartup >= deadline)
+            {
+                relaxedGenerated = false;
+                failureCode = "generation_timed_out";
+                break;
+            }
+
+            if (relaxedGenerated)
+            {
+                break;
+            }
+
+            yield return null;
+        }
+
+        RestoreGenerationRules(
+            originalMinSolutionSteps,
+            originalMaxSolutionSteps,
+            originalMinPushes,
+            originalMaxPushes,
+            originalMinWaterAreas,
+            originalMaxWaterAreas,
+            originalMinWallObstacleBlocks,
+            originalMaxWallObstacleBlocks,
+            originalMinReversePulls,
+            originalMaxReversePulls,
+            originalHasDesignBlueprint,
+            originalActiveLLMQualityGate
+        );
+        activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
+        onComplete?.Invoke(relaxedGenerated, relaxedGenerated ? "" : failureCode);
     }
 
     public bool GenerateAlgorithmFallbackAfterLLM()

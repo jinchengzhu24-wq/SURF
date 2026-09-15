@@ -590,6 +590,8 @@ class DraftRegenerationFailRequest(StrictModel):
         "llm_failed",
         "validation_failed",
         "unity_unavailable",
+        "blueprint_unavailable",
+        "generation_timed_out",
     ]
 
 
@@ -984,33 +986,50 @@ def _create_session_record(
     return session_id, version_id, bootstrap_token, integration_token
 
 
-DRAFT_REGENERATION_TIMEOUT_SECONDS = 240
+DRAFT_REGENERATION_PENDING_TIMEOUT_SECONDS = 60
+DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS = 90
 
 
 def _expire_draft_regeneration(database, session):
     if session is None or session["draft_regeneration_status"] not in {"pending", "claimed"}:
         return session
-    requested_at = session["draft_regeneration_requested_at"]
-    if not requested_at:
+    status = session["draft_regeneration_status"]
+    lease_started_at = (
+        session["draft_regeneration_requested_at"]
+        if status == "pending"
+        else session["draft_regeneration_updated_at"]
+    )
+    if not lease_started_at:
         return session
-    age = (datetime.now(timezone.utc) - parse_time(requested_at)).total_seconds()
-    if age < DRAFT_REGENERATION_TIMEOUT_SECONDS:
+    age = (datetime.now(timezone.utc) - parse_time(lease_started_at)).total_seconds()
+    timeout_seconds = (
+        DRAFT_REGENERATION_PENDING_TIMEOUT_SECONDS
+        if status == "pending"
+        else DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS
+    )
+    if age < timeout_seconds:
         return session
+    failure_code = "unity_unavailable" if status == "pending" else "generation_timed_out"
     now = utc_now()
     database.execute(
         """UPDATE design_sessions
            SET draft_regeneration_status = 'timed_out',
                draft_regeneration_updated_at = ?,
-               draft_regeneration_failure_code = 'unity_unavailable',
+               draft_regeneration_failure_code = ?,
                updated_at = ?
-           WHERE id = ? AND draft_regeneration_status IN ('pending', 'claimed')""",
-        (now, now, session["id"]),
+           WHERE id = ? AND draft_regeneration_status = ?""",
+        (now, failure_code, now, session["id"], status),
     )
     record_event(
         database,
         session["id"],
         "draft_regeneration_timed_out",
-        {"requestId": session["draft_regeneration_request_id"]},
+        {
+            "requestId": session["draft_regeneration_request_id"],
+            "phase": status,
+            "failureCode": failure_code,
+            "leaseAgeSeconds": max(0, round(age, 3)),
+        },
         now,
     )
     return get_session(database, session["id"])
@@ -7036,12 +7055,22 @@ def claim_draft_regeneration(
         if status != "pending":
             raise ApiError(409, "DRAFT_REGENERATION_NOT_PENDING", "The regeneration request cannot be claimed.")
         now = utc_now()
+        requested_at = session["draft_regeneration_requested_at"]
+        claim_delay_seconds = None
+        if requested_at:
+            claim_delay_seconds = max(
+                0,
+                round((parse_time(now) - parse_time(requested_at)).total_seconds(), 3),
+            )
         database.execute(
             """UPDATE design_sessions SET draft_regeneration_status = 'claimed',
                draft_regeneration_updated_at = ?, updated_at = ? WHERE id = ?""",
             (now, now, session_id),
         )
-        record_event(database, session_id, "draft_regeneration_claimed", {"requestId": request_id}, now)
+        record_event(database, session_id, "draft_regeneration_claimed", {
+            "requestId": request_id,
+            "claimDelaySeconds": claim_delay_seconds,
+        }, now)
         return {"sessionId": session_id, "requestId": request_id, "status": "claimed"}
 
 
@@ -7069,6 +7098,13 @@ def complete_draft_regeneration(
         if session["draft_regeneration_status"] != "claimed":
             raise ApiError(409, "DRAFT_REGENERATION_NOT_CLAIMED", "The regeneration request is not claimable.")
         now = utc_now()
+        claimed_at = session["draft_regeneration_updated_at"]
+        execution_seconds = None
+        if claimed_at:
+            execution_seconds = max(
+                0,
+                round((parse_time(now) - parse_time(claimed_at)).total_seconds(), 3),
+            )
         generation = int(session["draft_generation"] or 1) + 1
         database.execute(
             """UPDATE design_sessions SET draft_rows_json = ?, draft_validation_json = ?,
@@ -7078,7 +7114,10 @@ def complete_draft_regeneration(
             (dump_json(normalized_rows), dump_json(validation.as_dict()), generation, now, now, session_id),
         )
         record_event(database, session_id, "draft_regeneration_completed", {
-            "requestId": request_id, "generation": generation, "mode": "unity",
+            "requestId": request_id,
+            "generation": generation,
+            "mode": "unity",
+            "executionSeconds": execution_seconds,
         }, now)
         return {"sessionId": session_id, "requestId": request_id, "status": "completed"}
 
@@ -7101,6 +7140,17 @@ def fail_draft_regeneration(
         if session["draft_regeneration_status"] not in {"pending", "claimed"}:
             raise ApiError(409, "DRAFT_REGENERATION_NOT_ACTIVE", "The regeneration request is not active.")
         now = utc_now()
+        lease_started_at = (
+            session["draft_regeneration_requested_at"]
+            if session["draft_regeneration_status"] == "pending"
+            else session["draft_regeneration_updated_at"]
+        )
+        terminal_delay_seconds = None
+        if lease_started_at:
+            terminal_delay_seconds = max(
+                0,
+                round((parse_time(now) - parse_time(lease_started_at)).total_seconds(), 3),
+            )
         database.execute(
             """UPDATE design_sessions SET draft_regeneration_status = 'failed',
                draft_regeneration_updated_at = ?, draft_regeneration_failure_code = ?,
@@ -7108,7 +7158,10 @@ def fail_draft_regeneration(
             (now, payload.failureCode, now, session_id),
         )
         record_event(database, session_id, "draft_regeneration_failed", {
-            "requestId": request_id, "failureCode": payload.failureCode,
+            "requestId": request_id,
+            "failureCode": payload.failureCode,
+            "phase": session["draft_regeneration_status"],
+            "phaseDurationSeconds": terminal_delay_seconds,
         }, now)
         return {"sessionId": session_id, "requestId": request_id, "status": "failed"}
 

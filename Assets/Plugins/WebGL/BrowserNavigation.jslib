@@ -18,6 +18,23 @@ mergeInto(LibraryManager.library, {
             window.SokobanReturnToCoCreationLab(UTF8ToString(statusPointer));
         }
     },
+    SokobanReturnDraftRegeneration: function (sessionIdPointer, requestIdPointer, statusPointer) {
+        if (window.SokobanReturnDraftRegeneration) {
+            window.SokobanReturnDraftRegeneration(
+                UTF8ToString(sessionIdPointer),
+                UTF8ToString(requestIdPointer),
+                UTF8ToString(statusPointer)
+            );
+        }
+    },
+    SokobanSetDraftRegenerationBridgeSession: function (sessionIdPointer, protocolVersion) {
+        if (window.SokobanSetDraftRegenerationBridgeSession) {
+            window.SokobanSetDraftRegenerationBridgeSession(
+                UTF8ToString(sessionIdPointer),
+                protocolVersion
+            );
+        }
+    },
     SokobanLobbySetOverlayVisible: function (visible) {
         if (window.SokobanSetLobbyOverlayVisible) {
             window.SokobanSetLobbyOverlayVisible(visible !== 0);

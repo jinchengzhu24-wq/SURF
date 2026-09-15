@@ -78,6 +78,22 @@ class MatchmakingRecordTests(unittest.TestCase):
 
         self.temp_dir.cleanup()
 
+    def test_match_list_uses_created_date_with_legacy_updated_date_fallback(self):
+        frontend_dir = Path(backend.FRONTEND_DIR)
+        script = (frontend_dir / "matchmaking.js").read_text(encoding="utf-8")
+        index = (frontend_dir / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'formatShortDate(getMatchDisplayTimestamp(match))',
+            script,
+        )
+        self.assertIn(
+            'return clean(match && (match.createdAt || match.updatedAt));',
+            script,
+        )
+        self.assertNotIn('formatShortDate(match.updatedAt)', script)
+        self.assertIn('match-created-date-20260915-1', index)
+
     @staticmethod
     def headers(player):
         return {"X-Player-Token": player["playerToken"]}

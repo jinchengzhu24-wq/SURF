@@ -230,7 +230,7 @@ function renderMatchList() {
         top.className = "idea-item-top";
         top.append(
             textNode("span", "ROOM " + (match.roomCode || "------"), "idea-hash"),
-            textNode("span", formatShortDate(match.updatedAt))
+            textNode("span", formatShortDate(getMatchDisplayTimestamp(match)))
         );
         const snippet = textNode("p", "Match " + compactId(match.matchId), "idea-snippet");
         const fullMatchId = clean(match.matchId);
@@ -1045,6 +1045,10 @@ function copyWithFallback(text) {
 
 function getTimestamp(record) {
     return clean(record && (record.serverReceivedAt || record.timestamp));
+}
+
+function getMatchDisplayTimestamp(match) {
+    return clean(match && (match.createdAt || match.updatedAt));
 }
 
 function statusLabel(status) {

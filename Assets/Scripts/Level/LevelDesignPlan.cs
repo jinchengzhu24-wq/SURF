@@ -22,6 +22,34 @@ public class LevelDesignPlan
     public string corridorOrientation;
     public string corridorRole;
     public string corridorPriority;
+
+    public LevelDesignPlan Copy()
+    {
+        return new LevelDesignPlan
+        {
+            minSolutionSteps = minSolutionSteps,
+            maxSolutionSteps = maxSolutionSteps,
+            minWaterAreas = minWaterAreas,
+            maxWaterAreas = maxWaterAreas,
+            minWallObstacleBlocks = minWallObstacleBlocks,
+            maxWallObstacleBlocks = maxWallObstacleBlocks,
+            minPushes = minPushes,
+            maxPushes = maxPushes,
+            minReversePulls = minReversePulls,
+            maxReversePulls = maxReversePulls,
+            style = style,
+            archetype = archetype,
+            targetLayout = targetLayout,
+            obstacleStyle = obstacleStyle,
+            waterStyle = waterStyle,
+            designNote = designNote,
+            corridorPlacement = corridorPlacement,
+            corridorWidth = corridorWidth,
+            corridorOrientation = corridorOrientation,
+            corridorRole = corridorRole,
+            corridorPriority = corridorPriority
+        };
+    }
 }
 
 [System.Serializable]

@@ -332,6 +332,60 @@
         }
       });
 
+      var draftRegenerationProtocolVersion = 2;
+      var activeDraftRegenerationSessionId = "";
+      var activeDraftRegenerationProtocolVersion = 0;
+      var preparedDraftRegeneration = null;
+
+      window.SokobanSetDraftRegenerationBridgeSession = function (sessionId, protocolVersion) {
+        activeDraftRegenerationSessionId = sessionId || "";
+        activeDraftRegenerationProtocolVersion = protocolVersion || 0;
+        if (!activeDraftRegenerationSessionId) {
+          preparedDraftRegeneration = null;
+        }
+      };
+
+      window.addEventListener("message", function (event) {
+        var message = event.data;
+        if (!isAllowedCoCreationOrigin(event.origin)
+          || !message
+          || message.type !== "sokoban:cocreation-draft-regenerate-prepare"
+          || typeof message.requestId !== "string"
+          || typeof message.sessionId !== "string") {
+          return;
+        }
+
+        var accepted = coCreationPlayBridgeReady
+          && !!window.SokobanUnityInstance
+          && message.protocolVersion === draftRegenerationProtocolVersion
+          && activeDraftRegenerationProtocolVersion === draftRegenerationProtocolVersion
+          && message.sessionId === activeDraftRegenerationSessionId;
+
+        if (accepted) {
+          preparedDraftRegeneration = {
+            requestId: message.requestId,
+            sessionId: message.sessionId,
+            source: event.source,
+            origin: event.origin,
+            expiresAt: Date.now() + 10000
+          };
+          coCreationLabWindow = event.source;
+          coCreationLabOrigin = event.origin;
+          coCreationSessionId = message.sessionId;
+          window.focus();
+        }
+
+        if (event.source) {
+          event.source.postMessage({
+            type: "sokoban:cocreation-draft-regenerate-prepare-ack",
+            requestId: message.requestId,
+            sessionId: message.sessionId,
+            accepted: accepted,
+            protocolVersion: draftRegenerationProtocolVersion
+          }, event.origin);
+        }
+      });
+
       window.addEventListener("message", function (event) {
         var message = event.data;
         if (!isAllowedCoCreationOrigin(event.origin)
@@ -341,10 +395,18 @@
           return;
         }
 
+        var matchesPreparedRequest = preparedDraftRegeneration
+          && preparedDraftRegeneration.expiresAt >= Date.now()
+          && preparedDraftRegeneration.requestId === message.prepareRequestId
+          && preparedDraftRegeneration.sessionId === message.sessionId
+          && preparedDraftRegeneration.source === event.source
+          && preparedDraftRegeneration.origin === event.origin;
         var accepted = coCreationPlayBridgeReady
           && !!window.SokobanUnityInstance
           && typeof message.sessionId === "string"
-          && typeof message.regenerationRequestId === "string";
+          && typeof message.regenerationRequestId === "string"
+          && message.protocolVersion === draftRegenerationProtocolVersion
+          && matchesPreparedRequest;
 
         if (accepted) {
           coCreationLabWindow = event.source;
@@ -365,14 +427,52 @@
           }
         }
 
+        if (matchesPreparedRequest) {
+          preparedDraftRegeneration = null;
+        }
+
         if (event.source) {
           event.source.postMessage({
             type: "sokoban:cocreation-draft-regenerate-ack",
             requestId: message.requestId,
-            accepted: accepted
+            accepted: accepted,
+            protocolVersion: draftRegenerationProtocolVersion
           }, event.origin);
         }
       });
+
+      window.addEventListener("message", function (event) {
+        var message = event.data;
+        if (!isAllowedCoCreationOrigin(event.origin)
+          || !message
+          || message.type !== "sokoban:cocreation-draft-regenerate-abort") {
+          return;
+        }
+        if (preparedDraftRegeneration
+          && preparedDraftRegeneration.source === event.source
+          && preparedDraftRegeneration.origin === event.origin
+          && preparedDraftRegeneration.sessionId === message.sessionId
+          && preparedDraftRegeneration.requestId === message.prepareRequestId) {
+          preparedDraftRegeneration = null;
+          if (event.source && !event.source.closed) {
+            event.source.focus();
+          }
+        }
+      });
+
+      window.SokobanReturnDraftRegeneration = function (sessionId, requestId, status) {
+        if (!coCreationLabWindow || coCreationLabWindow.closed || !coCreationLabOrigin) {
+          return;
+        }
+        coCreationLabWindow.postMessage({
+          type: "sokoban:cocreation-draft-regenerate-return",
+          protocolVersion: draftRegenerationProtocolVersion,
+          sessionId: sessionId || coCreationSessionId,
+          requestId: requestId || "",
+          status: status || "failed"
+        }, coCreationLabOrigin);
+        coCreationLabWindow.focus();
+      };
 
       function normalizeLobbyRoomCode(value) {
         return (value || "")
@@ -579,7 +679,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=draft-regeneration-20260914-1";
+      var buildVersion = "?v=draft-regeneration-v2-20260915-1";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,

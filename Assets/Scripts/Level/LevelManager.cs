@@ -148,13 +148,35 @@ public class LevelManager : MonoBehaviour
         }
 
         bool generatedLevel = false;
-        yield return levelLoader.PrepareInitialLevelWithLLMPlanRoutine(result => generatedLevel = result);
+        string regenerationFailureCode = "generation_failed";
+        if (CoCreationDraftContext.IsRegenerating)
+        {
+            SetInitialLLMLoadingText(
+                true,
+                "Generating from the saved blueprint. Keep this tab in the foreground..."
+            );
+            yield return levelLoader.PrepareRegeneratedLevelWithSavedPlanRoutine(
+                (result, failureCode) =>
+                {
+                    generatedLevel = result;
+                    regenerationFailureCode = string.IsNullOrWhiteSpace(failureCode)
+                        ? "generation_failed"
+                        : failureCode;
+                }
+            );
+        }
+        else
+        {
+            yield return levelLoader.PrepareInitialLevelWithLLMPlanRoutine(
+                result => generatedLevel = result
+            );
+        }
 
         if (!generatedLevel)
         {
             if (CoCreationDraftContext.IsRegenerating)
             {
-                CoCreationDraftContext.FailRegeneration("generation_failed");
+                CoCreationDraftContext.FailRegeneration(regenerationFailureCode);
                 SceneManager.LoadScene("CoCreation_Entry");
                 yield break;
             }
@@ -194,13 +216,31 @@ public class LevelManager : MonoBehaviour
 
             if (CoCreationDraftContext.IsRegenerating)
             {
+                LevelSolver solver = levelLoader.levelGenerator != null
+                    ? levelLoader.levelGenerator.levelSolver
+                    : null;
+                if (solver == null)
+                {
+                    CoCreationDraftContext.FailRegeneration("validation_failed");
+                    SceneManager.LoadScene(coCreationEntrySceneName);
+                    yield break;
+                }
+                solver.levelData = levelLoader.levelData;
+                if (!solver.ParseLevel()
+                    || !solver.CanSolve(out _, out _, out _))
+                {
+                    CoCreationDraftContext.FailRegeneration("validation_failed");
+                    SceneManager.LoadScene(coCreationEntrySceneName);
+                    yield break;
+                }
                 CoCreationDraftContext.CompleteRegeneration(levelLoader.levelData.rows);
             }
             else
             {
                 CoCreationDraftContext.Stage(
                     levelLoader.levelData.rows,
-                    AIAssistantModeController.DescriptionGenerationApiMode
+                    AIAssistantModeController.DescriptionGenerationApiMode,
+                    levelLoader.GetLastValidatedLLMPlan()
                 );
             }
             SceneManager.LoadScene(coCreationEntrySceneName);

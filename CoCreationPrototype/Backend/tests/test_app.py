@@ -794,7 +794,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("draft-preview-unified-20260914-1", index_response.text)
+        self.assertIn("draft-regeneration-v2-20260915-1", index_response.text)
         self.assertIn("languageSetupSwitch", index_response.text)
         self.assertIn("enterSessionButton", index_response.text)
         self.assertIn("regenerateDraftButton", index_response.text)
@@ -831,6 +831,9 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('language: "zh-CN"', js_response.text)
         self.assertIn('apiError.details = payload.details || null;', js_response.text)
         self.assertIn('validationFailed', js_response.text)
+        self.assertIn("DRAFT_REGENERATION_PROTOCOL_VERSION = 2", js_response.text)
+        self.assertIn("draft-regenerate-prepare-ack", js_response.text)
+        self.assertIn("ensureDraftRegenerationPolling", js_response.text)
         self.assertIn('OPEN_OUTER_WALL', js_response.text)
         self.assertIn('validation-card.invalid', css_response.text)
         self.assertIn('body: { language: state.language }', js_response.text)

@@ -10,6 +10,13 @@ public static class CoCreationDraftContext
     public static string RegenerationRequestId { get; private set; } = "";
     public static string RegenerationFailureCode { get; private set; } = "";
     public static bool RegenerationResultReady { get; private set; }
+    private static LevelDesignPlan savedLevelDesignPlan;
+    private static string[] regeneratedRows;
+
+    public static bool HasSavedLevelDesignPlan => savedLevelDesignPlan != null;
+    public static string[] RegeneratedRows => regeneratedRows == null
+        ? null
+        : CloneRows(regeneratedRows);
 
     public static bool HasDraft =>
         Rows != null
@@ -31,7 +38,10 @@ public static class CoCreationDraftContext
         && !string.IsNullOrWhiteSpace(RegenerationRequestId)
         && RegenerationResultReady;
 
-    public static void Stage(string[] rows, string initialDraftMethod)
+    public static void Stage(
+        string[] rows,
+        string initialDraftMethod,
+        LevelDesignPlan levelDesignPlan = null)
     {
         if (rows == null || rows.Length != 10)
         {
@@ -43,7 +53,13 @@ public static class CoCreationDraftContext
         CreationKey = "unity_" + Guid.NewGuid().ToString("N");
         SessionId = "";
         IntegrationToken = "";
+        savedLevelDesignPlan = levelDesignPlan == null ? null : levelDesignPlan.Copy();
         ClearRegeneration();
+    }
+
+    public static LevelDesignPlan GetSavedLevelDesignPlan()
+    {
+        return savedLevelDesignPlan == null ? null : savedLevelDesignPlan.Copy();
     }
 
     public static void RecordSession(string sessionId, string integrationToken)
@@ -71,9 +87,21 @@ public static class CoCreationDraftContext
             throw new InvalidOperationException("A complete regenerated draft is required.");
         }
 
-        Rows = CloneRows(rows);
+        regeneratedRows = CloneRows(rows);
         RegenerationFailureCode = "";
         RegenerationResultReady = true;
+    }
+
+    public static void AcceptRegenerationResult()
+    {
+        if (!HasRegenerationResult
+            || !string.IsNullOrWhiteSpace(RegenerationFailureCode)
+            || regeneratedRows == null)
+        {
+            return;
+        }
+
+        Rows = CloneRows(regeneratedRows);
     }
 
     public static void FailRegeneration(string failureCode)
@@ -94,6 +122,7 @@ public static class CoCreationDraftContext
         RegenerationRequestId = "";
         RegenerationFailureCode = "";
         RegenerationResultReady = false;
+        regeneratedRows = null;
     }
 
     public static void Clear()
@@ -103,6 +132,7 @@ public static class CoCreationDraftContext
         CreationKey = "";
         SessionId = "";
         IntegrationToken = "";
+        savedLevelDesignPlan = null;
         ClearRegeneration();
     }
 
