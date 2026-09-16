@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -7,7 +8,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -109,6 +110,17 @@ from design_context import (
 
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def app_lifespan(_app):
+    sweeper = asyncio.create_task(_draft_regeneration_sweeper())
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
 
 
 def _intent_claim_key(claim):
@@ -699,6 +711,7 @@ class PlayMetricsRequest(StrictModel):
 app = FastAPI(
     title="Sokoban Co-Creation Prototype",
     version="1.0.0",
+    lifespan=app_lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -720,6 +733,8 @@ async def attach_request_id(request: Request, call_next):
     request.state.request_id = request_id
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    if request.url.path in {"/", "/index.html", "/cocreation/", "/cocreation/index.html"}:
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
 
@@ -988,6 +1003,7 @@ def _create_session_record(
 
 DRAFT_REGENERATION_PENDING_TIMEOUT_SECONDS = 60
 DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS = 120
+DRAFT_REGENERATION_SWEEP_INTERVAL_SECONDS = 10
 
 
 def _expire_draft_regeneration(database, session):
@@ -1033,6 +1049,32 @@ def _expire_draft_regeneration(database, session):
         now,
     )
     return get_session(database, session["id"])
+
+
+def sweep_expired_draft_regenerations():
+    expired_count = 0
+    with connect(immediate=True) as database:
+        sessions = database.execute(
+            """SELECT * FROM design_sessions
+               WHERE draft_regeneration_status IN ('pending', 'claimed')"""
+        ).fetchall()
+        for session in sessions:
+            previous_status = session["draft_regeneration_status"]
+            refreshed = _expire_draft_regeneration(database, session)
+            if refreshed["draft_regeneration_status"] != previous_status:
+                expired_count += 1
+    return expired_count
+
+
+async def _draft_regeneration_sweeper():
+    while True:
+        try:
+            await asyncio.to_thread(sweep_expired_draft_regenerations)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Draft regeneration lease sweep failed.")
+        await asyncio.sleep(DRAFT_REGENERATION_SWEEP_INTERVAL_SECONDS)
 
 
 def _require_draft_preview(database, session):

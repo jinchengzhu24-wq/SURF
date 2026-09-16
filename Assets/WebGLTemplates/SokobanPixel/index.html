@@ -99,6 +99,24 @@
         border: 0;
         background: #6f9d31;
       }
+      #cocreation-refresh {
+        position: absolute;
+        top: 18px;
+        right: 220px;
+        z-index: 3;
+        min-height: 38px;
+        padding: 7px 12px;
+        border: 3px solid var(--wood-dark);
+        color: #fff5d1;
+        background: #315a73;
+        box-shadow: var(--pixel-shadow);
+        cursor: pointer;
+        font-weight: 700;
+      }
+      #cocreation-refresh:disabled { cursor: wait; opacity: 0.65; }
+      @media (max-width: 900px) {
+        #cocreation-refresh { top: 96px; right: 12px; }
+      }
       .cocreation-host-status {
         position: absolute;
         inset: 0;
@@ -137,8 +155,6 @@
         cursor: pointer;
         font-weight: 700;
       }
-      #cocreation-open-standalone { color: #fff5d1; background: #315a73; }
-
       #sokoban-lobby-native-overlay[hidden] { display: none; }
       #sokoban-lobby-native-overlay {
         position: absolute;
@@ -273,6 +289,7 @@
     </main>
 
     <section id="cocreation-host" hidden aria-label="Sokoban co-creation workspace">
+      <button id="cocreation-refresh" type="button">REFRESH WORKSPACE / 刷新工作台</button>
       <iframe
         id="cocreation-frame"
         title="Sokoban Co-Creation Lab"
@@ -290,7 +307,6 @@
           <p>The embedded workspace did not respond. The Unity session is still available.</p>
           <div class="cocreation-host-actions">
             <button id="cocreation-retry" type="button">RETRY</button>
-            <button id="cocreation-open-standalone" type="button">OPEN SEPARATE PAGE</button>
           </div>
         </div>
       </div>
@@ -314,7 +330,7 @@
       </form>
     </div>
 
-    <script src="co-creation-bridge-contract.js?v=iframe-host-v4-20260916-1"></script>
+    <script src="co-creation-bridge-contract.js?v=iframe-host-v5-20260916-1"></script>
     <script>
       var container = document.querySelector("#unity-container");
       var canvas = document.querySelector("#unity-canvas");
@@ -339,14 +355,13 @@
       var coCreationHostLoading = document.querySelector("#cocreation-host-loading");
       var coCreationHostError = document.querySelector("#cocreation-host-error");
       var coCreationRetry = document.querySelector("#cocreation-retry");
-      var coCreationOpenStandalone = document.querySelector("#cocreation-open-standalone");
+      var coCreationRefresh = document.querySelector("#cocreation-refresh");
       var lobbyReferenceWidth = 1920;
       var lobbyReferenceHeight = 1080;
       var lobbyOverlayVisible = false;
       window.SokobanUnityInstance = null;
       var coCreationPlayBridgeReady = false;
       var coCreationLabWindow = null;
-      var coCreationStandaloneWindow = null;
       var coCreationLabOrigin = "";
       var coCreationSessionId = "";
       var allowedCoCreationOrigins = [
@@ -362,10 +377,7 @@
       }
 
       function isKnownCoCreationSource(source) {
-        return isEmbeddedCoCreationSource(source)
-          || (!!coCreationStandaloneWindow
-            && !coCreationStandaloneWindow.closed
-            && source === coCreationStandaloneWindow);
+        return isEmbeddedCoCreationSource(source);
       }
 
       window.SokobanSetCoCreationPlayBridgeReady = function (ready) {
@@ -385,15 +397,7 @@
           status: status || ""
         }, coCreationLabOrigin);
 
-        if (isEmbeddedCoCreationSource(coCreationLabWindow)) {
-          showCoCreationHost();
-        } else {
-          try {
-            coCreationLabWindow.focus();
-          } catch (_error) {
-            // Legacy separate-tab mode remains best effort.
-          }
-        }
+        showCoCreationHost();
       };
 
       window.addEventListener("message", function (event) {
@@ -429,11 +433,7 @@
                 playUrl: message.playUrl
               })
             );
-            if (isEmbeddedCoCreationSource(event.source)) {
-              parkCoCreationHost();
-            } else {
-              window.focus();
-            }
+            parkCoCreationHost();
           } catch (_error) {
             accepted = false;
           }
@@ -449,7 +449,8 @@
         }
       });
 
-      var draftRegenerationProtocolVersion = 4;
+      var draftRegenerationProtocolVersion = 5;
+      var coCreationHostRelease = "iframe-host-v5-20260916-1";
       var activeDraftRegenerationSessionId = "";
       var activeDraftRegenerationProtocolVersion = 0;
       var draftRegenerationBridgeReady = false;
@@ -458,6 +459,7 @@
       var coCreationHostUrl = "";
       var coCreationHostTimer = 0;
       var coCreationHostStartedAt = 0;
+      var coCreationHostReloadSequence = 0;
 
       function isEmbeddedCoCreationSource(source) {
         return !!coCreationFrame && source === coCreationFrame.contentWindow;
@@ -467,7 +469,7 @@
         if (!coCreationFrame || !coCreationFrame.contentWindow || !coCreationSessionId) return;
         var targetUrl;
         try {
-          targetUrl = new URL(coCreationHostUrl, window.location.href);
+          targetUrl = new URL(coCreationFrame.src || coCreationHostUrl, window.location.href);
         } catch (_error) {
           return;
         }
@@ -496,6 +498,7 @@
             stopCoCreationHostHandshake();
             coCreationHostLoading.hidden = true;
             coCreationHostError.hidden = false;
+            coCreationRefresh.hidden = true;
             return;
           }
           postCoCreationHostInit();
@@ -514,6 +517,62 @@
           coCreationHostError.hidden = true;
           coCreationFrame.focus();
         }
+      }
+
+      function bindCoCreationFrame(frame) {
+        frame.addEventListener("load", function () {
+          if (frame !== coCreationFrame || !coCreationSessionId) return;
+          coCreationHostReady = false;
+          coCreationHostLoading.hidden = false;
+          coCreationHostError.hidden = true;
+          coCreationRefresh.disabled = true;
+          startCoCreationHostHandshake();
+        });
+      }
+
+      function buildCoCreationFrameUrl(forceReload) {
+        var targetUrl = new URL(coCreationHostUrl, window.location.href);
+        targetUrl.searchParams.set("hostRelease", coCreationHostRelease);
+        if (forceReload) {
+          coCreationHostReloadSequence += 1;
+          targetUrl.searchParams.set(
+            "workspaceReload",
+            Date.now().toString(36) + "-" + coCreationHostReloadSequence
+          );
+        } else {
+          targetUrl.searchParams.delete("workspaceReload");
+        }
+        return targetUrl;
+      }
+
+      function canonicalCoCreationFrameUrl(value) {
+        try {
+          var targetUrl = new URL(value, window.location.href);
+          targetUrl.searchParams.delete("workspaceReload");
+          return targetUrl.href;
+        } catch (_error) {
+          return "";
+        }
+      }
+
+      function reloadCoCreationFrame(forceReload) {
+        if (!coCreationHostUrl || !coCreationHost || !coCreationFrame) return;
+        stopCoCreationHostHandshake();
+        preparedDraftRegeneration = null;
+        coCreationHostReady = false;
+        coCreationHostLoading.hidden = false;
+        coCreationHostError.hidden = true;
+        coCreationRefresh.hidden = false;
+        coCreationRefresh.disabled = true;
+
+        var replacement = coCreationFrame.cloneNode(false);
+        replacement.removeAttribute("src");
+        bindCoCreationFrame(replacement);
+        coCreationFrame.replaceWith(replacement);
+        coCreationFrame = replacement;
+        coCreationLabWindow = replacement.contentWindow;
+        replacement.src = buildCoCreationFrameUrl(forceReload).href;
+        startCoCreationHostHandshake();
       }
 
       function parkCoCreationHost() {
@@ -541,6 +600,8 @@
           preparedDraftRegeneration = null;
         }
         coCreationSessionId = sessionId;
+        targetUrl.searchParams.set("hostRelease", coCreationHostRelease);
+        targetUrl.searchParams.delete("workspaceReload");
         coCreationHostUrl = targetUrl.href;
         coCreationLabWindow = coCreationFrame.contentWindow;
         coCreationLabOrigin = targetUrl.origin;
@@ -549,39 +610,22 @@
         coCreationHostError.hidden = true;
         showCoCreationHost();
 
-        if (sessionChanged || coCreationFrame.src !== targetUrl.href) {
-          coCreationHostReady = false;
-          coCreationHostLoading.hidden = false;
-          coCreationFrame.src = targetUrl.href;
+        if (sessionChanged
+          || canonicalCoCreationFrameUrl(coCreationFrame.src) !== coCreationHostUrl) {
+          reloadCoCreationFrame(false);
+        } else {
+          startCoCreationHostHandshake();
         }
-        startCoCreationHostHandshake();
       };
 
-      coCreationFrame.addEventListener("load", function () {
-        if (!coCreationSessionId) return;
-        coCreationHostReady = false;
-        coCreationHostLoading.hidden = false;
-        coCreationHostError.hidden = true;
-        startCoCreationHostHandshake();
-      });
+      bindCoCreationFrame(coCreationFrame);
 
       coCreationRetry.addEventListener("click", function () {
-        if (!coCreationHostUrl) return;
-        coCreationHostReady = false;
-        coCreationHostLoading.hidden = false;
-        coCreationHostError.hidden = true;
-        startCoCreationHostHandshake();
+        reloadCoCreationFrame(true);
       });
 
-      coCreationOpenStandalone.addEventListener("click", function () {
-        if (!coCreationHostUrl) return;
-        var windowName = "sokoban-cocreation-" + coCreationSessionId.replace(/[^a-zA-Z0-9_-]/g, "");
-        var standaloneUrl = new URL(coCreationHostUrl, window.location.href);
-        standaloneUrl.searchParams.set("unityBridge", String(draftRegenerationProtocolVersion));
-        coCreationStandaloneWindow = window.open(
-          standaloneUrl.href,
-          windowName || "sokoban-cocreation"
-        );
+      coCreationRefresh.addEventListener("click", function () {
+        reloadCoCreationFrame(true);
       });
 
       window.addEventListener("message", function (event) {
@@ -600,6 +644,8 @@
         stopCoCreationHostHandshake();
         coCreationHostLoading.hidden = true;
         coCreationHostError.hidden = true;
+        coCreationRefresh.hidden = false;
+        coCreationRefresh.disabled = false;
         showCoCreationHost();
       });
 
@@ -1003,7 +1049,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=iframe-host-v4-20260916-1";
+      var buildVersion = "?v=iframe-host-v5-20260916-1";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,

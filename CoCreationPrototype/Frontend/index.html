@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
     <title>Sokoban Co-Creation Lab</title>
-    <link rel="stylesheet" href="./styles.css?v=iframe-host-v4-20260916-1">
+    <link rel="stylesheet" href="./styles.css?v=iframe-host-v5-20260916-1">
 </head>
 <body>
     <div class="app">
@@ -31,6 +31,13 @@
                 <span id="noticeMessage"></span>
                 <button class="notice-retry" id="retryButton" type="button" hidden data-i18n="retry">Retry</button>
             </div>
+
+            <section class="landing panel" id="formalStandaloneBlock" hidden>
+                <div class="landing-mark">S</div>
+                <p class="eyebrow" data-i18n="neutralBrief">Neutral design brief</p>
+                <h2 data-i18n="embeddedOnlyTitle">Return to the original Unity game page</h2>
+                <p data-i18n="embeddedOnlyBody">Formal co-creation runs only inside the embedded workspace. This page cannot regenerate, play, or enter the formal flow on its own.</p>
+            </section>
 
             <section class="landing panel" id="landing" hidden>
                 <div class="landing-mark">S</div>
@@ -223,6 +230,6 @@
         </section>
     </div>
 
-    <script src="./app.js?v=iframe-host-v4-20260916-1"></script>
+    <script src="./app.js?v=iframe-host-v5-20260916-1"></script>
 </body>
 </html>

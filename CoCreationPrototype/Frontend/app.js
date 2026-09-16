@@ -13,7 +13,7 @@ const UNITY_PLAY_BRIDGE_TIMEOUT_MS = 1500;
 const DRAFT_REGENERATION_POLL_MS = 1000;
 const DRAFT_REGENERATION_API_TIMEOUT_MS = 8000;
 const DRAFT_REGENERATION_POLL_TIMEOUT_MS = 5000;
-const DRAFT_REGENERATION_PROTOCOL_VERSION = 4;
+const DRAFT_REGENERATION_PROTOCOL_VERSION = 5;
 const UNITY_ORIGINS = Array.from(new Set([
     window.location.origin,
     "http://111.231.136.4",
@@ -551,6 +551,12 @@ translations["zh-CN"].demoDraftPreviewTitle = "\u7b97\u6cd5\u751f\u6210\u7684\u9
 translations["zh-CN"].formalDraftPreviewTitle = "AI \u89c4\u5212\u5e76\u751f\u6210\u7684\u9996\u7248 Draft";
 translations["zh-CN"].draftInitialGenerating = "\u6b63\u5728\u751f\u6210\u5e76\u9a8c\u8bc1\u7b97\u6cd5 Draft\u2026";
 translations["zh-CN"].draftInitialFailed = "Draft \u751f\u6210\u5931\u8d25\uff0c\u8bf7\u70b9\u51fb\u201c\u91cd\u65b0\u751f\u6210\u201d\u518d\u8bd5\u3002";
+translations.en.embeddedOnlyTitle = "Return to the original Unity game page";
+translations.en.embeddedOnlyBody = "Formal co-creation is available only inside the embedded workspace. This standalone page cannot regenerate, play, or enter the formal flow.";
+translations["zh-CN"].embeddedOnlyTitle = "\u8bf7\u8fd4\u56de\u539f Unity \u6e38\u620f\u9875\u9762";
+translations["zh-CN"].embeddedOnlyBody = "\u6b63\u5f0f\u5171\u521b\u4ec5\u5728\u6e38\u620f\u9875\u9762\u5185\u5d4c\u7684\u5de5\u4f5c\u53f0\u4e2d\u8fdb\u884c\u3002\u6b64\u72ec\u7acb\u9875\u9762\u4e0d\u80fd\u91cd\u65b0\u751f\u6210\u3001\u8bd5\u73a9\u6216\u8fdb\u5165\u6b63\u5f0f\u6d41\u7a0b\u3002";
+translations.en.unsavedDraftRestored = "Your unsaved map edits were restored after the workspace refresh.";
+translations["zh-CN"].unsavedDraftRestored = "\u5df2\u6062\u590d\u5237\u65b0\u524d\u672a\u4fdd\u5b58\u7684\u5730\u56fe\u4fee\u6539\u3002";
 
 const state = {
     session: null,
@@ -663,7 +669,7 @@ const validationTileNames = {
 };
 
 const elements = Object.fromEntries([
-    "workspace", "landing", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
+    "workspace", "landing", "formalStandaloneBlock", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
     "landingEyebrow", "landingTitle", "landingBody", "languageSetupSwitch", "languageLockNotice", "draftActions", "regenerateDraftButton", "enterSessionButton", "draftPreview", "draftPreviewTitle", "draftGenerationLabel", "draftPreviewGrid", "draftPreviewLoading", "draftPreviewLoadingMessage", "draftPreviewStatus", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "progressPanel", "progressSummary", "unresolvedQuestionsList", "answeredQuestionsPanel", "answeredQuestionsSummary", "answeredQuestionsList", "designInclinationsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
@@ -827,6 +833,12 @@ async function refreshSession() {
     state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
     announceEmbeddedLabReady();
 
+    if (!state.session.demoMode && !hasEmbeddedFormalHost()) {
+        showFormalStandaloneBlock();
+        return false;
+    }
+    elements.formalStandaloneBlock.hidden = true;
+
     if (!state.session.languageLocked) {
         state.language = state.session.language || state.language;
         showLanding(state.session.demoMode ? "demo-preview" : "formal");
@@ -844,6 +856,7 @@ async function refreshSession() {
     syncHash();
     state.activeCoordinateLink = null;
     resetDraftFromSelection();
+    restoreUnsavedMapDraft();
     render();
     void ensureVisibleTranslations();
     await ensureAssessment(state.session.currentVersionId);
@@ -851,6 +864,7 @@ async function refreshSession() {
 }
 
 function render() {
+    elements.formalStandaloneBlock.hidden = true;
     elements.landing.hidden = true;
     elements.workspace.hidden = false;
     applyTranslations();
@@ -2572,6 +2586,7 @@ async function saveManualStage() {
                     summary: state.language === "zh-CN" ? "设计者保存的地图修改" : "Designer-saved map edit"
                 }
             });
+            clearUnsavedMapDraft();
             selectVersion(state.session.currentVersionId, false);
             render();
             await ensureAssessment(state.session.currentVersionId);
@@ -2592,6 +2607,7 @@ async function restoreSelectedStage() {
             method: "POST",
             body: { baseVersionId: state.session.currentVersionId, idempotencyKey: uniqueId("restore") }
         });
+        clearUnsavedMapDraft();
         selectVersion(state.session.currentVersionId, false);
         render();
         await ensureAssessment(state.session.currentVersionId);
@@ -2610,6 +2626,10 @@ async function decideProposal(proposal, decision) {
 }
 
 async function playSelectedStage() {
+    if (!state.session?.demoMode && !hasEmbeddedFormalHost()) {
+        showFormalStandaloneBlock();
+        return;
+    }
     if (state.dirty) return showNotice(t("errorDirtyPlay"));
     if (currentPendingProposal()) return showNotice(t("errorPendingPlay"));
     const version = selectedVersion();
@@ -2655,7 +2675,31 @@ function handleUnityHostInit(event, message) {
     unityHost.embedded = true;
     unityHost.ready = true;
     announceEmbeddedLabReady();
+    if (state.session && !state.session.demoMode && !elements.formalStandaloneBlock.hidden) {
+        void refreshSession().then(enteredWorkspace => {
+            if (enteredWorkspace) restoreComposerDraft();
+        }).catch(error => showError(error, initialize));
+    }
     return true;
+}
+
+function hasEmbeddedFormalHost() {
+    return window.parent !== window
+        && unityHost.embedded
+        && unityHost.ready
+        && unityHost.targetWindow === window.parent
+        && unityHost.sessionId === state.sessionId
+        && unityHost.protocolVersion === DRAFT_REGENERATION_PROTOCOL_VERSION;
+}
+
+function showFormalStandaloneBlock() {
+    window.clearInterval(state.deadlineTimerId);
+    elements.deadlineStatus.hidden = true;
+    elements.landing.hidden = true;
+    elements.workspace.hidden = true;
+    elements.formalStandaloneBlock.hidden = false;
+    applyTranslations();
+    setStatus(t("ready"), "ready");
 }
 
 function announceEmbeddedLabReady() {
@@ -2684,16 +2728,7 @@ function activeUnityBridge() {
             embedded: true
         };
     }
-    const unityWindow = window.opener;
-    if (!unityWindow || unityWindow.closed) return null;
-    return {
-        unityWindow,
-        origins: UNITY_ORIGINS,
-        protocolVersion: new URLSearchParams(window.location.search).get("unityBridge") === "4"
-            ? DRAFT_REGENERATION_PROTOCOL_VERSION
-            : 0,
-        embedded: false
-    };
+    return null;
 }
 
 function requestEmbeddedHostView(type, requestId = "") {
@@ -2790,7 +2825,6 @@ async function handleUnityBridgeMessage(event) {
         }
         try {
             await ensureDraftRegenerationPolling(currentRequestId);
-            if (!bridge.embedded) window.focus();
         } catch (error) {
             showError(error, () => handleUnityBridgeMessage(event));
         }
@@ -2806,7 +2840,6 @@ async function handleUnityBridgeMessage(event) {
             restoreComposerDraft();
             showPlayReturnNotice(message.status);
         }
-        if (!bridge.embedded) window.focus();
     } catch (error) {
         showError(error, () => handleUnityBridgeMessage(event));
     }
@@ -2823,6 +2856,7 @@ async function finalizeSession() {
                 rows: deadlineExpired() ? state.draftRows : null
             }
         });
+        clearUnsavedMapDraft();
         render();
         elements.intentionInput.focus();
     });
@@ -2837,6 +2871,7 @@ async function submitIntention(event) {
             method: "POST",
             body: { content, idempotencyKey: uniqueId("intention") }
         });
+        clearUnsavedMapDraft();
         render();
     });
 }
@@ -2846,21 +2881,7 @@ function returnToUnity() {
     if (requestEmbeddedHostView("sokoban:cocreation-show-unity")) {
         return;
     }
-
-    const unityWindow = window.opener;
-
-    if (!unityWindow || unityWindow.closed) {
-        showNotice(t("returnUnityUnavailable"));
-        return;
-    }
-
-    try {
-        unityWindow.focus();
-        window.close();
-        window.setTimeout(() => showNotice(t("returnUnityCloseBlocked")), 150);
-    } catch (_error) {
-        showNotice(t("returnUnityUnavailable"));
-    }
+    showNotice(t("returnUnityUnavailable"));
 }
 
 function toggleSetupLanguage() {
@@ -2875,6 +2896,10 @@ function toggleSetupLanguage() {
 
 async function confirmSessionLanguage() {
     if (!state.session || state.session.languageLocked) return;
+    if (!state.session.demoMode && !hasEmbeddedFormalHost()) {
+        showFormalStandaloneBlock();
+        return;
+    }
     await withBusy(async () => {
         await api(`/api/sessions/${state.sessionId}/language`, {
             method: "PATCH",
@@ -2894,6 +2919,10 @@ async function regenerateDraft() {
         return;
     }
     if (!state.session.draftPreview?.mutable || state.session.languageLocked) return;
+    if (!state.session.demoMode && !hasEmbeddedFormalHost()) {
+        showFormalStandaloneBlock();
+        return;
+    }
     const regenerationKey = state.draftRegenerationKey || uniqueId("draft_regeneration");
     state.draftRegenerationKey = regenerationKey;
     let preparedBridge = null;
@@ -3005,9 +3034,6 @@ function prepareUnityForDraftRegeneration() {
     if (!bridge) return Promise.resolve({ accepted: false, reason: "unity_not_ready" });
     const unityWindow = bridge.unityWindow;
     const bridgeRequestId = uniqueId("unity_draft_regeneration_prepare");
-    if (!bridge.embedded) {
-        try { unityWindow.focus(); } catch (_error) { /* acknowledgement still decides */ }
-    }
     return new Promise(resolve => {
         let settled = false;
         const finish = result => {
@@ -3118,11 +3144,7 @@ function abortPreparedDraftRegeneration(preparedBridge) {
     preparedBridge.origins.forEach(origin => {
         try { preparedBridge.unityWindow.postMessage(message, origin); } catch (_error) { /* continue */ }
     });
-    if (preparedBridge.embedded) {
-        requestEmbeddedHostView("sokoban:cocreation-show-lab");
-    } else {
-        try { window.focus(); } catch (_error) { /* browser may reject focus */ }
-    }
+    requestEmbeddedHostView("sokoban:cocreation-show-lab");
 }
 
 async function waitForDraftRegeneration(requestId) {
@@ -3197,6 +3219,7 @@ function selectVersion(versionId, shouldRender = true) {
     if (!findVersion(versionId)) return;
     if (state.selectedVersionId && state.selectedVersionId !== versionId) {
         setProposalMode(false);
+        clearUnsavedMapDraft();
     }
     state.selectedVersionId = versionId;
     localStorage.removeItem(proposalModeKey());
@@ -3394,9 +3417,72 @@ function resetDraftFromSelection() {
     state.validationError = null;
 }
 
+function unsavedMapDraftKey() {
+    return `cocreationUnsavedMap:${state.sessionId}`;
+}
+
+function persistUnsavedMapDraft() {
+    if (!state.sessionId || !state.session?.currentVersionId || !state.dirty) {
+        clearUnsavedMapDraft();
+        return;
+    }
+    localStorage.setItem(unsavedMapDraftKey(), JSON.stringify({
+        sessionId: state.sessionId,
+        baseVersionId: state.session.currentVersionId,
+        rows: state.draftRows.slice(),
+        dirty: true,
+        savedAt: new Date().toISOString()
+    }));
+}
+
+function clearUnsavedMapDraft() {
+    if (state.sessionId) localStorage.removeItem(unsavedMapDraftKey());
+}
+
+function restoreUnsavedMapDraft() {
+    if (!state.sessionId
+        || !state.session?.currentVersionId
+        || state.selectedVersionId !== state.session.currentVersionId) return false;
+    try {
+        const snapshot = JSON.parse(localStorage.getItem(unsavedMapDraftKey()) || "null");
+        const validRows = Array.isArray(snapshot?.rows)
+            && snapshot.rows.length === 10
+            && snapshot.rows.every(row => typeof row === "string"
+                && row.length === 12
+                && [...row].every(tile => TILE_ORDER.includes(tile)));
+        if (!snapshot
+            || snapshot.sessionId !== state.sessionId
+            || snapshot.baseVersionId !== state.session.currentVersionId
+            || snapshot.dirty !== true
+            || !validRows) {
+            clearUnsavedMapDraft();
+            return false;
+        }
+        const version = selectedVersion();
+        if (!version) {
+            clearUnsavedMapDraft();
+            return false;
+        }
+        state.draftRows = snapshot.rows.slice();
+        state.dirty = state.draftRows.some(
+            (row, index) => row !== version.rows[index]
+        );
+        if (!state.dirty) {
+            clearUnsavedMapDraft();
+            return false;
+        }
+        showNotice(t("unsavedDraftRestored"));
+        return true;
+    } catch (_error) {
+        clearUnsavedMapDraft();
+        return false;
+    }
+}
+
 function discardDraft() {
     state.activeCoordinateLink = null;
     resetDraftFromSelection();
+    clearUnsavedMapDraft();
     renderMap();
     updateControls();
 }
@@ -3408,6 +3494,7 @@ function editTile(x, y) {
     row[x] = state.selectedTile;
     state.draftRows[y] = row.join("");
     state.dirty = state.draftRows.some((value, index) => value !== selectedVersion().rows[index]);
+    persistUnsavedMapDraft();
     state.validationError = null;
     renderMap();
     updateControls();
@@ -3454,6 +3541,7 @@ function formatAttempt(attempt) {
 
 function showLanding(mode = "demo") {
     state.landingMode = mode;
+    elements.formalStandaloneBlock.hidden = true;
     elements.workspace.hidden = true;
     elements.landing.hidden = false;
     const isFormal = mode === "formal";

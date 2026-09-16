@@ -1270,6 +1270,51 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(expired["draftPreview"]["failureCode"], "unity_unavailable")
         self.assertEqual(expired["draftPreview"]["rows"], SAMPLE_ROWS)
 
+    def test_background_sweep_expires_regeneration_without_session_read(self):
+        created = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "description_generation",
+                "language": "en",
+                "idempotencyKey": "background_sweep_001",
+            },
+        ).json()
+        fragment = parse_qs(urlparse(created["launchUrl"]).fragment)
+        self.client.post(
+            f"/api/sessions/{created['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        requested = self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations",
+            json={"idempotencyKey": "background_sweep_request_001"},
+        ).json()
+        request_id = requested["draftPreview"]["regenerationRequestId"]
+        headers = {"Authorization": f"Bearer {created['integrationToken']}"}
+        self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/claim",
+            headers=headers,
+        )
+        with repository.connect(immediate=True) as database:
+            database.execute(
+                "UPDATE design_sessions SET draft_regeneration_updated_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00Z", created["sessionId"]),
+            )
+
+        self.assertEqual(backend.sweep_expired_draft_regenerations(), 1)
+        with repository.connect() as database:
+            session = repository.get_session(database, created["sessionId"])
+            self.assertEqual(session["draft_regeneration_status"], "timed_out")
+            self.assertEqual(session["draft_regeneration_failure_code"], "generation_timed_out")
+            events = database.execute(
+                """SELECT COUNT(*) AS total FROM audit_events
+                   WHERE session_id = ? AND event_type = 'draft_regeneration_timed_out'""",
+                (created["sessionId"],),
+            ).fetchone()
+            self.assertEqual(events["total"], 1)
+
+        self.assertEqual(backend.sweep_expired_draft_regenerations(), 0)
+
     def test_claimed_regeneration_gets_a_fresh_execution_lease(self):
         self.assertEqual(backend.DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS, 120)
         created = self.client.post(
