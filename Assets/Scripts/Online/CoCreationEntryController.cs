@@ -13,6 +13,7 @@ using System.Runtime.InteropServices;
 public sealed class CoCreationEntryController : MonoBehaviour
 {
     private const string DefaultCoCreationUrl = "http://111.231.136.4/cocreation/";
+    private const int DraftRegenerationProtocolVersion = 4;
     private static readonly Color ReadyStatusColor = new Color(0.36f, 0.36f, 0.36f, 1f);
     private static readonly Color WaitingStatusColor = new Color(0.60f, 0.40f, 0f, 1f);
     private static readonly Color ErrorStatusColor = new Color(0.71f, 0.14f, 0.09f, 1f);
@@ -64,9 +65,10 @@ public sealed class CoCreationEntryController : MonoBehaviour
 #if UNITY_WEBGL && !UNITY_EDITOR
         SokobanSetDraftRegenerationBridgeSession(
             CoCreationDraftContext.SessionId ?? "",
-            3
+            DraftRegenerationProtocolVersion
         );
 #endif
+        CoCreationPlayBootstrap.RefreshBrowserBridgeReady();
     }
 
     private void Start()
@@ -298,10 +300,11 @@ public sealed class CoCreationEntryController : MonoBehaviour
                 response.sessionId,
                 response.integrationToken
             );
+            CoCreationPlayBootstrap.RefreshBrowserBridgeReady();
 #if UNITY_WEBGL && !UNITY_EDITOR
             SokobanSetDraftRegenerationBridgeSession(
                 CoCreationDraftContext.SessionId,
-                3
+                DraftRegenerationProtocolVersion
             );
 #endif
             SetButtonState(true, "OPEN CO-CREATION LAB");
@@ -422,10 +425,11 @@ public sealed class CoCreationEntryController : MonoBehaviour
                 TryBuildResumeLabUrl(CoCreationDraftContext.SessionId, out launchUrl);
                 SetButtonState(true, "RETURN TO CO-CREATION LAB");
                 SetStatus(
-                    "The regeneration request could not be claimed. Return to the lab; the previous draft is preserved.",
+                    request.responseCode == 401
+                        ? "Regeneration authorization was rejected. Return to the lab; the previous draft is preserved."
+                        : "The regeneration service is temporarily unavailable. Unity will reconcile the persistent request; the previous draft is preserved.",
                     ErrorStatusColor
                 );
-                NotifyBrowserRegenerationReturn(requestId, "failed");
                 trackingRoutine = StartCoroutine(TrackSessionCompletion());
                 yield break;
             }
@@ -487,14 +491,31 @@ public sealed class CoCreationEntryController : MonoBehaviour
                     break;
                 }
 
-                if (request.responseCode >= 400 && request.responseCode < 500)
+                if (succeeded && request.responseCode == 422)
                 {
                     NotifyBrowserRegenerationReturn(requestId, "failed");
                     CoCreationDraftContext.ClearRegeneration();
                     processingRegeneration = false;
                     SetButtonState(true, "RETURN TO CO-CREATION LAB");
-                    SetStatus("The regeneration request expired or was cancelled. The previous draft was preserved.", ErrorStatusColor);
+                    SetStatus("The server rejected the generated map during validation. The previous draft was preserved.", ErrorStatusColor);
                     trackingRoutine = StartCoroutine(TrackSessionCompletion());
+                    yield break;
+                }
+
+                if (request.responseCode == 409)
+                {
+                    yield return ReconcileRegenerationSubmission(requestId, succeeded);
+                    yield break;
+                }
+
+                if (request.responseCode == 401)
+                {
+                    processingRegeneration = false;
+                    SetButtonState(true, "RETRY DRAFT SYNC");
+                    SetStatus(
+                        "Draft synchronization authorization failed. The generated result remains available locally.",
+                        ErrorStatusColor
+                    );
                     yield break;
                 }
 
@@ -527,6 +548,81 @@ public sealed class CoCreationEntryController : MonoBehaviour
             succeeded ? ReadyStatusColor : ErrorStatusColor
         );
         trackingRoutine = StartCoroutine(TrackSessionCompletion());
+    }
+
+    private IEnumerator ReconcileRegenerationSubmission(string requestId, bool localSucceeded)
+    {
+        string endpoint = coCreationUrl.TrimEnd('/')
+            + "/api/integrations/sessions/"
+            + UnityWebRequest.EscapeURL(CoCreationDraftContext.SessionId);
+        using (UnityWebRequest request = UnityWebRequest.Get(endpoint))
+        {
+            request.SetRequestHeader("Authorization", "Bearer " + CoCreationDraftContext.IntegrationToken);
+            request.timeout = Mathf.Clamp(requestTimeoutSeconds, 1, 10);
+            yield return request.SendWebRequest();
+
+            CoCreationIntegrationResponse response = null;
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                try
+                {
+                    response = JsonUtility.FromJson<CoCreationIntegrationResponse>(request.downloadHandler.text);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning("CoCreationEntryController: Invalid reconciliation response. " + exception.Message);
+                }
+            }
+
+            DraftRegenerationIntegrationState remote = response != null
+                ? response.draftRegeneration
+                : null;
+            bool sameRequest = remote != null && remote.requestId == requestId;
+            bool terminal = sameRequest && (remote.status == "completed"
+                || remote.status == "failed"
+                || remote.status == "cancelled"
+                || remote.status == "timed_out");
+            if (terminal)
+            {
+                bool completed = remote.status == "completed" && localSucceeded;
+                if (completed)
+                {
+                    CoCreationDraftContext.AcceptRegenerationResult();
+                }
+                NotifyBrowserRegenerationReturn(requestId, completed ? "completed" : "failed");
+                CoCreationDraftContext.ClearRegeneration();
+                processingRegeneration = false;
+                SetButtonState(true, "RETURN TO CO-CREATION LAB");
+                SetStatus(
+                    completed
+                        ? "The regenerated draft is ready in the lab."
+                        : "The server closed this regeneration request. The previous draft was preserved.",
+                    completed ? ReadyStatusColor : ErrorStatusColor
+                );
+                trackingRoutine = StartCoroutine(TrackSessionCompletion());
+                yield break;
+            }
+            if (remote != null && remote.requestId != requestId)
+            {
+                NotifyBrowserRegenerationReturn(requestId, "failed");
+                CoCreationDraftContext.ClearRegeneration();
+                processingRegeneration = false;
+                SetButtonState(true, "RETURN TO CO-CREATION LAB");
+                SetStatus(
+                    "A newer regeneration request is active. The stale local result was discarded without changing the draft.",
+                    ErrorStatusColor
+                );
+                trackingRoutine = StartCoroutine(TrackSessionCompletion());
+                yield break;
+            }
+        }
+
+        processingRegeneration = false;
+        SetButtonState(true, "RETRY DRAFT SYNC");
+        SetStatus(
+            "The server state could not be confirmed. Select the button to retry synchronization; the generated result is preserved locally.",
+            ErrorStatusColor
+        );
     }
 
     private static void NotifyBrowserRegenerationReturn(string requestId, string status)
@@ -695,6 +791,8 @@ public sealed class DraftRegenerationIntegrationState
     public string status;
     public int generation;
     public string requestedAt;
+    public string updatedAt;
+    public string failureCode;
 }
 
 [Serializable]

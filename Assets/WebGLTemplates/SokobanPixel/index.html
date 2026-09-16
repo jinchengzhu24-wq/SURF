@@ -314,6 +314,7 @@
       </form>
     </div>
 
+    <script src="co-creation-bridge-contract.js?v=iframe-host-v4-20260916-1"></script>
     <script>
       var container = document.querySelector("#unity-container");
       var canvas = document.querySelector("#unity-canvas");
@@ -360,7 +361,7 @@
         return allowedCoCreationOrigins.indexOf(origin) !== -1;
       }
 
-      function isKnownProtocol3CoCreationSource(source) {
+      function isKnownCoCreationSource(source) {
         return isEmbeddedCoCreationSource(source)
           || (!!coCreationStandaloneWindow
             && !coCreationStandaloneWindow.closed
@@ -379,9 +380,7 @@
 
         coCreationLabWindow.postMessage({
           type: "sokoban:cocreation-play-return",
-          protocolVersion: isKnownProtocol3CoCreationSource(coCreationLabWindow)
-            ? draftRegenerationProtocolVersion
-            : 2,
+          protocolVersion: draftRegenerationProtocolVersion,
           sessionId: coCreationSessionId,
           status: status || ""
         }, coCreationLabOrigin);
@@ -405,15 +404,16 @@
           || typeof message.requestId !== "string") {
           return;
         }
+        if (!window.SokobanCoCreationBridgeContract.shouldHandleSource(
+          isKnownCoCreationSource(event.source)
+        )) return;
 
         var accepted = coCreationPlayBridgeReady
           && !!window.SokobanUnityInstance
           && typeof message.sessionId === "string"
           && typeof message.playUrl === "string"
-          && (isKnownProtocol3CoCreationSource(event.source)
-            ? message.protocolVersion === draftRegenerationProtocolVersion
-              && message.sessionId === coCreationSessionId
-            : message.protocolVersion === 2);
+          && message.protocolVersion === draftRegenerationProtocolVersion
+          && message.sessionId === coCreationSessionId;
 
         if (accepted) {
           coCreationLabWindow = event.source;
@@ -444,16 +444,15 @@
             type: "sokoban:cocreation-play-ack",
             requestId: message.requestId,
             accepted: accepted,
-            protocolVersion: isKnownProtocol3CoCreationSource(event.source)
-              ? draftRegenerationProtocolVersion
-              : 2
+            protocolVersion: draftRegenerationProtocolVersion
           }, event.origin);
         }
       });
 
-      var draftRegenerationProtocolVersion = 3;
+      var draftRegenerationProtocolVersion = 4;
       var activeDraftRegenerationSessionId = "";
       var activeDraftRegenerationProtocolVersion = 0;
+      var draftRegenerationBridgeReady = false;
       var preparedDraftRegeneration = null;
       var coCreationHostReady = false;
       var coCreationHostUrl = "";
@@ -538,6 +537,9 @@
         }
 
         var sessionChanged = coCreationSessionId !== sessionId;
+        if (sessionChanged) {
+          preparedDraftRegeneration = null;
+        }
         coCreationSessionId = sessionId;
         coCreationHostUrl = targetUrl.href;
         coCreationLabWindow = coCreationFrame.contentWindow;
@@ -618,11 +620,20 @@
       });
 
       window.SokobanSetDraftRegenerationBridgeSession = function (sessionId, protocolVersion) {
-        activeDraftRegenerationSessionId = sessionId || "";
-        activeDraftRegenerationProtocolVersion = protocolVersion || 0;
-        if (!activeDraftRegenerationSessionId) {
+        var nextSessionId = sessionId || "";
+        var nextProtocolVersion = protocolVersion || 0;
+        if (window.SokobanCoCreationBridgeContract.bridgeStateChanged(
+          activeDraftRegenerationSessionId,
+          activeDraftRegenerationProtocolVersion,
+          nextSessionId,
+          nextProtocolVersion
+        )) {
           preparedDraftRegeneration = null;
         }
+        activeDraftRegenerationSessionId = nextSessionId;
+        activeDraftRegenerationProtocolVersion = nextProtocolVersion;
+        draftRegenerationBridgeReady = !!activeDraftRegenerationSessionId
+          && activeDraftRegenerationProtocolVersion === draftRegenerationProtocolVersion;
       };
 
       window.addEventListener("message", function (event) {
@@ -634,13 +645,18 @@
           || typeof message.sessionId !== "string") {
           return;
         }
+        if (!window.SokobanCoCreationBridgeContract.shouldHandleSource(
+          isKnownCoCreationSource(event.source)
+        )) return;
 
-        var accepted = coCreationPlayBridgeReady
-          && !!window.SokobanUnityInstance
-          && message.protocolVersion === draftRegenerationProtocolVersion
-          && activeDraftRegenerationProtocolVersion === draftRegenerationProtocolVersion
-          && message.sessionId === activeDraftRegenerationSessionId
-          && isKnownProtocol3CoCreationSource(event.source);
+        var rejectionReason = window.SokobanCoCreationBridgeContract.prepareRejectionReason({
+          protocolVersion: draftRegenerationProtocolVersion,
+          activeProtocolVersion: activeDraftRegenerationProtocolVersion,
+          activeSessionId: activeDraftRegenerationSessionId,
+          unityReady: !!window.SokobanUnityInstance,
+          receiverReady: draftRegenerationBridgeReady
+        }, message);
+        var accepted = !rejectionReason;
 
         if (accepted) {
           preparedDraftRegeneration = {
@@ -666,6 +682,7 @@
             requestId: message.requestId,
             sessionId: message.sessionId,
             accepted: accepted,
+            reason: rejectionReason,
             protocolVersion: draftRegenerationProtocolVersion
           }, event.origin);
         }
@@ -679,19 +696,20 @@
           || typeof message.requestId !== "string") {
           return;
         }
+        if (!window.SokobanCoCreationBridgeContract.shouldHandleSource(
+          isKnownCoCreationSource(event.source)
+        )) return;
 
-        var matchesPreparedRequest = preparedDraftRegeneration
-          && preparedDraftRegeneration.expiresAt >= Date.now()
-          && preparedDraftRegeneration.requestId === message.prepareRequestId
-          && preparedDraftRegeneration.sessionId === message.sessionId
-          && preparedDraftRegeneration.source === event.source
-          && preparedDraftRegeneration.origin === event.origin;
-        var accepted = coCreationPlayBridgeReady
-          && !!window.SokobanUnityInstance
-          && typeof message.sessionId === "string"
-          && typeof message.regenerationRequestId === "string"
-          && message.protocolVersion === draftRegenerationProtocolVersion
-          && matchesPreparedRequest;
+        var rejectionReason = window.SokobanCoCreationBridgeContract.requestRejectionReason({
+          protocolVersion: draftRegenerationProtocolVersion,
+          activeProtocolVersion: activeDraftRegenerationProtocolVersion,
+          activeSessionId: activeDraftRegenerationSessionId,
+          unityReady: !!window.SokobanUnityInstance,
+          receiverReady: draftRegenerationBridgeReady,
+          source: event.source,
+          origin: event.origin
+        }, message, preparedDraftRegeneration, Date.now());
+        var accepted = !rejectionReason;
 
         if (accepted) {
           coCreationLabWindow = event.source;
@@ -713,10 +731,14 @@
             }
           } catch (_error) {
             accepted = false;
+            rejectionReason = "receiver_not_ready";
           }
         }
 
-        if (matchesPreparedRequest) {
+        if (preparedDraftRegeneration
+          && preparedDraftRegeneration.requestId === message.prepareRequestId
+          && preparedDraftRegeneration.source === event.source
+          && preparedDraftRegeneration.origin === event.origin) {
           preparedDraftRegeneration = null;
         }
 
@@ -724,7 +746,10 @@
           event.source.postMessage({
             type: "sokoban:cocreation-draft-regenerate-ack",
             requestId: message.requestId,
+            sessionId: message.sessionId,
+            regenerationRequestId: message.regenerationRequestId || "",
             accepted: accepted,
+            reason: rejectionReason,
             protocolVersion: draftRegenerationProtocolVersion
           }, event.origin);
         }
@@ -734,9 +759,13 @@
         var message = event.data;
         if (!isAllowedCoCreationOrigin(event.origin)
           || !message
-          || message.type !== "sokoban:cocreation-draft-regenerate-abort") {
+          || message.type !== "sokoban:cocreation-draft-regenerate-abort"
+          || message.protocolVersion !== draftRegenerationProtocolVersion) {
           return;
         }
+        if (!window.SokobanCoCreationBridgeContract.shouldHandleSource(
+          isKnownCoCreationSource(event.source)
+        )) return;
         if (preparedDraftRegeneration
           && preparedDraftRegeneration.source === event.source
           && preparedDraftRegeneration.origin === event.origin
@@ -974,7 +1003,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=iframe-host-v3-20260915-2";
+      var buildVersion = "?v=iframe-host-v4-20260916-1";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,

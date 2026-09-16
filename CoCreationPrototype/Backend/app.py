@@ -987,7 +987,7 @@ def _create_session_record(
 
 
 DRAFT_REGENERATION_PENDING_TIMEOUT_SECONDS = 60
-DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS = 90
+DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS = 120
 
 
 def _expire_draft_regeneration(database, session):
@@ -1177,9 +1177,12 @@ def cancel_draft_regeneration(
     with connect(immediate=True) as database:
         session = require_browser_session(database, session_id, access_cookie)
         _require_draft_preview(database, session)
+        session = _expire_draft_regeneration(database, session)
         if session["draft_regeneration_request_id"] != request_id:
             raise ApiError(409, "STALE_DRAFT_REGENERATION", "The regeneration request is no longer current.")
         if session["draft_regeneration_status"] in {"completed", "failed", "cancelled", "timed_out"}:
+            return serialize_session(database, session_id)
+        if session["draft_regeneration_status"] != "pending":
             return serialize_session(database, session_id)
         now = utc_now()
         database.execute(
@@ -7013,6 +7016,8 @@ def integration_status(
                     1 if session["draft_regeneration_status"] in {"pending", "claimed"} else 0
                 ),
                 "requestedAt": session["draft_regeneration_requested_at"],
+                "updatedAt": session["draft_regeneration_updated_at"],
+                "failureCode": session["draft_regeneration_failure_code"],
             }
 
         if session["status"] == "completed" and session["final_version_id"]:
@@ -7081,9 +7086,48 @@ def complete_draft_regeneration(
     payload: DraftRegenerationCompleteRequest,
     authorization: str | None = Header(None, alias="Authorization"),
 ):
-    with connect() as database:
-        _require_integration_session(database, session_id, authorization)
-    validation = _solve_or_api_error(payload.rows)
+    with connect(immediate=True) as database:
+        session = _require_integration_session(database, session_id, authorization)
+        _require_draft_preview(database, session)
+        session = _expire_draft_regeneration(database, session)
+        if session["draft_regeneration_request_id"] != request_id:
+            raise ApiError(409, "STALE_DRAFT_REGENERATION", "The regeneration request is no longer current.")
+        if session["draft_regeneration_status"] == "completed":
+            validation = _solve_or_api_error(payload.rows)
+            if load_json(session["draft_rows_json"]) != list(validation.rows):
+                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "Completed regeneration rows cannot be replaced.")
+            return {"sessionId": session_id, "requestId": request_id, "status": "completed"}
+        if session["draft_regeneration_status"] != "claimed":
+            raise ApiError(409, "DRAFT_REGENERATION_NOT_CLAIMED", "The regeneration request is not claimable.")
+    try:
+        validation = _solve_or_api_error(payload.rows)
+    except ApiError as exception:
+        with connect(immediate=True) as database:
+            session = _require_integration_session(database, session_id, authorization)
+            session = _expire_draft_regeneration(database, session)
+            if (session["draft_regeneration_request_id"] == request_id
+                    and session["draft_regeneration_status"] == "claimed"):
+                now = utc_now()
+                database.execute(
+                    """UPDATE design_sessions SET draft_regeneration_status = 'failed',
+                       draft_regeneration_updated_at = ?,
+                       draft_regeneration_failure_code = 'validation_failed', updated_at = ?
+                       WHERE id = ? AND draft_regeneration_request_id = ?
+                         AND draft_regeneration_status = 'claimed'""",
+                    (now, now, session_id, request_id),
+                )
+                record_event(database, session_id, "draft_regeneration_failed", {
+                    "requestId": request_id,
+                    "failureCode": "validation_failed",
+                    "phase": "claimed",
+                }, now)
+        raise ApiError(
+            422,
+            exception.code,
+            exception.message,
+            exception.retryable,
+            exception.details,
+        ) from exception
     normalized_rows = list(validation.rows)
     with connect(immediate=True) as database:
         session = _require_integration_session(database, session_id, authorization)

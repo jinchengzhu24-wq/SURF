@@ -35,6 +35,11 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
 
     private void Awake()
     {
+        RefreshBrowserBridgeReady();
+    }
+
+    public static void RefreshBrowserBridgeReady()
+    {
 #if UNITY_WEBGL && !UNITY_EDITOR
         SokobanSetCoCreationPlayBridgeReady(
             CoCreationDraftContext.HasDraft

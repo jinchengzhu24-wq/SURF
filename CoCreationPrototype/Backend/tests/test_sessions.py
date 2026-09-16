@@ -1109,6 +1109,12 @@ class CoCreationSessionTests(unittest.TestCase):
             headers=headers,
         )
         self.assertEqual(duplicate_claim.status_code, 200, duplicate_claim.text)
+        integration = self.client.get(
+            f"/api/integrations/sessions/{created['sessionId']}",
+            headers=headers,
+        ).json()
+        self.assertIsNotNone(integration["draftRegeneration"]["updatedAt"])
+        self.assertIsNone(integration["draftRegeneration"]["failureCode"])
         completed = self.client.post(
             f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/complete",
             headers=headers,
@@ -1126,6 +1132,74 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(session["draftPreview"]["regenerationStatus"], "completed")
         self.assertEqual(session["versions"], [])
         self.assertIsNone(session["deadlineStartedAt"])
+
+    def test_claimed_regeneration_cannot_be_cancelled_by_browser(self):
+        created = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "description_generation",
+                "language": "en",
+                "idempotencyKey": "claimed_cancel_guard_001",
+            },
+        ).json()
+        fragment = parse_qs(urlparse(created["launchUrl"]).fragment)
+        self.client.post(
+            f"/api/sessions/{created['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        requested = self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations",
+            json={"idempotencyKey": "claimed_cancel_guard_request_001"},
+        ).json()
+        request_id = requested["draftPreview"]["regenerationRequestId"]
+        headers = {"Authorization": f"Bearer {created['integrationToken']}"}
+        self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/claim",
+            headers=headers,
+        )
+        cancelled = self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations/{request_id}/cancel"
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(cancelled.json()["draftPreview"]["regenerationStatus"], "claimed")
+
+    def test_invalid_completed_rows_close_claim_as_validation_failed(self):
+        created = self.client.post(
+            "/api/sessions",
+            json={
+                "rows": SAMPLE_ROWS,
+                "initialDraftMethod": "description_generation",
+                "language": "en",
+                "idempotencyKey": "invalid_complete_guard_001",
+            },
+        ).json()
+        fragment = parse_qs(urlparse(created["launchUrl"]).fragment)
+        self.client.post(
+            f"/api/sessions/{created['sessionId']}/browser-access",
+            json={"bootstrapToken": fragment["bootstrap"][0]},
+        )
+        requested = self.client.post(
+            f"/api/sessions/{created['sessionId']}/draft-regenerations",
+            json={"idempotencyKey": "invalid_complete_guard_request_001"},
+        ).json()
+        request_id = requested["draftPreview"]["regenerationRequestId"]
+        headers = {"Authorization": f"Bearer {created['integrationToken']}"}
+        self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/claim",
+            headers=headers,
+        )
+        rejected = self.client.post(
+            f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/complete",
+            headers=headers,
+            json={"rows": SAMPLE_ROWS[:-1]},
+        )
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        retained = self.client.get(f"/api/sessions/{created['sessionId']}").json()
+        self.assertEqual(retained["draftPreview"]["regenerationStatus"], "failed")
+        self.assertEqual(retained["draftPreview"]["failureCode"], "validation_failed")
+        self.assertEqual(retained["draftPreview"]["rows"], SAMPLE_ROWS)
+        self.assertEqual(retained["draftPreview"]["generation"], 1)
 
     def test_failed_formal_regeneration_preserves_preview_and_blocks_entry_while_active(self):
         created = self.client.post(
@@ -1197,6 +1271,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(expired["draftPreview"]["rows"], SAMPLE_ROWS)
 
     def test_claimed_regeneration_gets_a_fresh_execution_lease(self):
+        self.assertEqual(backend.DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS, 120)
         created = self.client.post(
             "/api/sessions",
             json={

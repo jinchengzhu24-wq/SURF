@@ -361,6 +361,7 @@ details and the corresponding challenge map details; it is not duplicated on Fin
 `coCreationDurationSeconds`。演示页面没有倒计时，完成后不显示“返回 Unity 继续”。
 每次新演示会话创建成功后只保留最新一轮演示记录；正式 Unity 会话和正式研究数据不受影响，
 新地图或新会话失败时保留上一轮记录。当前静态资源缓存键为
-`iframe-host-v3-20260915-1`。正式 WebGL 共创使用 `/game/` 内的全屏 8010 iframe；
-Unity 与工作台之间通过版本 3 的同页宿主消息切换，不再依赖后台标签页 `focus()`。
-旧独立标签页仍兼容版本 2，嵌入失败时只能由用户点击会话专属的命名窗口兜底入口。
+`iframe-host-v4-20260916-1`。正式 WebGL 共创使用 `/game/` 内的全屏 8010 iframe；
+Unity 与工作台之间通过版本 4 的同页宿主消息切换，iframe、试玩和 Draft 重生成分别维护 ready 状态，
+不再依赖后台标签页 `focus()`。独立页面只作为故障恢复入口，并且同样必须通过版本 4 会话预检。
+重生成的 pending/claimed 租约分别为 60/120 秒，浏览器消息 ACK 仅表示投递，8010 持久任务状态是终态依据。

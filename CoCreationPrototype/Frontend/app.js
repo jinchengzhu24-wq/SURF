@@ -11,8 +11,9 @@ const API_PREFIX = window.location.pathname.startsWith("/cocreation")
     : "";
 const UNITY_PLAY_BRIDGE_TIMEOUT_MS = 1500;
 const DRAFT_REGENERATION_POLL_MS = 1000;
-const DRAFT_REGENERATION_PROTOCOL_VERSION = 3;
-const LEGACY_DRAFT_REGENERATION_PROTOCOL_VERSION = 2;
+const DRAFT_REGENERATION_API_TIMEOUT_MS = 8000;
+const DRAFT_REGENERATION_POLL_TIMEOUT_MS = 5000;
+const DRAFT_REGENERATION_PROTOCOL_VERSION = 4;
 const UNITY_ORIGINS = Array.from(new Set([
     window.location.origin,
     "http://111.231.136.4",
@@ -501,6 +502,12 @@ translations.en.draftRegenerating = "Unity is regenerating and validating a new 
 translations.en.draftRegenerationFailed = "Regeneration did not complete. The previous draft is still available.";
 translations.en.draftUnityUnavailable = "Keep the original Unity game tab open, then try again.";
 translations.en.draftProtocolUnavailable = "The original Unity tab is unavailable or outdated. Reopen or refresh the game page before regenerating.";
+translations.en.draftProtocolMismatch = "Unity and the co-creation page use different bridge versions. Refresh the game page.";
+translations.en.draftSessionMismatch = "Unity is connected to a different co-creation session. Return from the current game session.";
+translations.en.draftUnityNotReady = "Unity is still loading. Wait for the game view to become ready, then try again.";
+translations.en.draftReceiverNotReady = "The regeneration controller is not ready yet. Wait a moment, then try again.";
+translations.en.draftPrepareExpired = "The regeneration handoff expired before delivery. Try again.";
+translations.en.draftReconnecting = "The connection was interrupted. Reconnecting to the persistent regeneration task…";
 translations.en.draftBlueprintUnavailable = "The saved AI blueprint is unavailable. Start a new formal draft from Unity.";
 translations.en.draftGenerationTimedOut = "Unity could not finish generation within the safe time limit.";
 translations.en.draftValidationFailed = "Unity generated a candidate, but validation did not accept it.";
@@ -524,6 +531,12 @@ translations["zh-CN"].draftRegenerating = "Unity \u6b63\u5728\u91cd\u65b0\u751f\
 translations["zh-CN"].draftRegenerationFailed = "\u91cd\u65b0\u751f\u6210\u672a\u5b8c\u6210\uff0c\u5df2\u4fdd\u7559\u4e0a\u4e00\u7248 Draft\u3002";
 translations["zh-CN"].draftUnityUnavailable = "\u8bf7\u4fdd\u6301\u539f Unity \u6e38\u620f\u6807\u7b7e\u9875\u6253\u5f00\u540e\u91cd\u8bd5\u3002";
 translations["zh-CN"].draftProtocolUnavailable = "\u539f Unity \u6807\u7b7e\u9875\u4e0d\u53ef\u7528\u6216\u7248\u672c\u8fc7\u65e7\uff0c\u8bf7\u91cd\u65b0\u6253\u5f00\u6216\u5237\u65b0\u6e38\u620f\u9875\u540e\u518d\u751f\u6210\u3002";
+translations["zh-CN"].draftProtocolMismatch = "Unity \u4e0e\u5171\u521b\u9875\u7684\u6865\u63a5\u7248\u672c\u4e0d\u4e00\u81f4\uff0c\u8bf7\u5237\u65b0\u6e38\u620f\u9875\u3002";
+translations["zh-CN"].draftSessionMismatch = "Unity \u5f53\u524d\u8fde\u63a5\u7684\u662f\u53e6\u4e00\u4e2a\u5171\u521b\u4f1a\u8bdd\uff0c\u8bf7\u8fd4\u56de\u5f53\u524d\u6e38\u620f\u4f1a\u8bdd\u3002";
+translations["zh-CN"].draftUnityNotReady = "Unity \u4ecd\u5728\u52a0\u8f7d\uff0c\u8bf7\u7b49\u6e38\u620f\u753b\u9762\u5c31\u7eea\u540e\u91cd\u8bd5\u3002";
+translations["zh-CN"].draftReceiverNotReady = "\u91cd\u65b0\u751f\u6210\u63a7\u5236\u5668\u5c1a\u672a\u5c31\u7eea\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002";
+translations["zh-CN"].draftPrepareExpired = "\u91cd\u65b0\u751f\u6210\u4ea4\u63a5\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u8bd5\u3002";
+translations["zh-CN"].draftReconnecting = "\u7f51\u7edc\u8fde\u63a5\u4e2d\u65ad\uff0c\u6b63\u5728\u91cd\u65b0\u8fde\u63a5\u6301\u4e45\u5316\u7684\u91cd\u751f\u6210\u4efb\u52a1\u2026";
 translations["zh-CN"].draftBlueprintUnavailable = "\u5df2\u4fdd\u5b58\u7684 AI \u84dd\u56fe\u4e0d\u53ef\u7528\uff0c\u8bf7\u4ece Unity \u91cd\u65b0\u521b\u5efa\u6b63\u5f0f Draft\u3002";
 translations["zh-CN"].draftGenerationTimedOut = "Unity \u672a\u80fd\u5728\u5b89\u5168\u65f6\u9650\u5185\u5b8c\u6210\u751f\u6210\u3002";
 translations["zh-CN"].draftValidationFailed = "Unity \u5df2\u751f\u6210\u5019\u9009\u5730\u56fe\uff0c\u4f46\u9a8c\u8bc1\u672a\u901a\u8fc7\u3002";
@@ -575,6 +588,7 @@ const state = {
     draftPollTimerId: null,
     draftPollRequestId: "",
     draftPollPromise: null,
+    draftRegenerationKey: "",
     demoCreationPending: false,
     demoCreationFailed: false,
     draftRegenerationPending: false
@@ -662,7 +676,7 @@ const elements = Object.fromEntries([
 
 elements.languageSetupSwitch.addEventListener("click", toggleSetupLanguage);
 elements.enterSessionButton.addEventListener("click", confirmSessionLanguage);
-elements.regenerateDraftButton.addEventListener("click", regenerateDraft);
+elements.regenerateDraftButton.addEventListener("click", () => void regenerateDraft());
 elements.retryButton.addEventListener("click", () => state.retryAction && state.retryAction());
 elements.chatRetryButton.addEventListener("click", retryPendingMessage);
 elements.returnCurrentButton.addEventListener("click", selectCurrentVersion);
@@ -707,6 +721,10 @@ window.addEventListener("message", event => {
 window.addEventListener("resize", () => {
     if (state.activeCoordinateLink) requestAnimationFrame(drawActiveCoordinateRoute);
     requestAnimationFrame(updateProgressPanelMaxHeight);
+});
+window.addEventListener("online", resumeDraftRegenerationPolling);
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) resumeDraftRegenerationPolling();
 });
 
 applyTranslations();
@@ -2671,9 +2689,9 @@ function activeUnityBridge() {
     return {
         unityWindow,
         origins: UNITY_ORIGINS,
-        protocolVersion: new URLSearchParams(window.location.search).get("unityBridge") === "3"
+        protocolVersion: new URLSearchParams(window.location.search).get("unityBridge") === "4"
             ? DRAFT_REGENERATION_PROTOCOL_VERSION
-            : LEGACY_DRAFT_REGENERATION_PROTOCOL_VERSION,
+            : 0,
         embedded: false
     };
 }
@@ -2771,10 +2789,7 @@ async function handleUnityBridgeMessage(event) {
             return;
         }
         try {
-            state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
-            renderDraftPreview();
-            renderLandingStatus();
-            updateControls();
+            await ensureDraftRegenerationPolling(currentRequestId);
             if (!bridge.embedded) window.focus();
         } catch (error) {
             showError(error, () => handleUnityBridgeMessage(event));
@@ -2879,6 +2894,8 @@ async function regenerateDraft() {
         return;
     }
     if (!state.session.draftPreview?.mutable || state.session.languageLocked) return;
+    const regenerationKey = state.draftRegenerationKey || uniqueId("draft_regeneration");
+    state.draftRegenerationKey = regenerationKey;
     let preparedBridge = null;
     if (!state.session.demoMode) {
         preparedBridge = prepareUnityForDraftRegeneration();
@@ -2891,23 +2908,37 @@ async function regenerateDraft() {
     try {
         if (!state.session.demoMode) {
             preparedBridge = await preparedBridge;
-            if (!preparedBridge) {
-                showNotice(t("draftProtocolUnavailable"));
+            if (!preparedBridge?.accepted) {
+                showNotice(draftBridgeFailureMessage(preparedBridge?.reason));
                 return;
             }
         }
-        state.session = await api(`/api/sessions/${state.sessionId}/draft-regenerations`, {
-            method: "POST",
-            body: { idempotencyKey: uniqueId("draft_regeneration") }
-        });
+        state.session = await createOrRecoverDraftRegeneration(regenerationKey);
         renderDraftPreview();
         updateControls();
 
         const requestId = state.session.draftPreview?.regenerationRequestId;
         if (!state.session.demoMode && requestId) {
-            await sendUnityDraftRegenerationRequest(preparedBridge, requestId);
+            const delivery = await sendUnityDraftRegenerationRequest(preparedBridge, requestId);
+            if (delivery.received && !delivery.accepted) {
+                const latest = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`, {
+                    timeoutMs: DRAFT_REGENERATION_POLL_TIMEOUT_MS
+                });
+                state.session = latest;
+                if (latest.draftPreview?.regenerationRequestId === requestId
+                    && latest.draftPreview?.regenerationStatus === "pending") {
+                    state.session = await api(
+                        `/api/sessions/${encodeURIComponent(state.sessionId)}/draft-regenerations/${encodeURIComponent(requestId)}/cancel`,
+                        { method: "POST", timeoutMs: DRAFT_REGENERATION_API_TIMEOUT_MS }
+                    );
+                    state.draftRegenerationKey = "";
+                    showNotice(draftBridgeFailureMessage(delivery.reason));
+                    return;
+                }
+            }
             await ensureDraftRegenerationPolling(requestId);
         }
+        state.draftRegenerationKey = "";
     } catch (error) {
         if (preparedBridge) abortPreparedDraftRegeneration(preparedBridge);
         showError(error, () => void regenerateDraft());
@@ -2925,9 +2956,53 @@ async function regenerateDraft() {
     }
 }
 
+async function createOrRecoverDraftRegeneration(idempotencyKey) {
+    const create = () => api(`/api/sessions/${encodeURIComponent(state.sessionId)}/draft-regenerations`, {
+        method: "POST",
+        body: { idempotencyKey },
+        timeoutMs: DRAFT_REGENERATION_API_TIMEOUT_MS
+    });
+    try {
+        return await create();
+    } catch (error) {
+        if (error?.code && error.code !== "CLIENT_TIMEOUT" && error.code !== "REQUEST_FAILED") {
+            throw error;
+        }
+        try {
+            const latest = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`, {
+                timeoutMs: DRAFT_REGENERATION_POLL_TIMEOUT_MS
+            });
+            if (["pending", "claimed"].includes(latest.draftPreview?.regenerationStatus)) {
+                return latest;
+            }
+        } catch (_recoveryError) {
+            // Retry the same idempotency key; the server decides whether this is a replay.
+        }
+        try {
+            return await create();
+        } catch (retryError) {
+            retryError.retryable = true;
+            throw retryError;
+        }
+    }
+}
+
+function draftBridgeFailureMessage(reason) {
+    const key = {
+        protocol_mismatch: "draftProtocolMismatch",
+        session_mismatch: "draftSessionMismatch",
+        unity_not_ready: "draftUnityNotReady",
+        receiver_not_ready: "draftReceiverNotReady",
+        prepare_missing: "draftPrepareExpired",
+        prepare_expired: "draftPrepareExpired",
+        request_mismatch: "draftPrepareExpired"
+    }[reason] || "draftProtocolUnavailable";
+    return t(key);
+}
+
 function prepareUnityForDraftRegeneration() {
     const bridge = activeUnityBridge();
-    if (!bridge) return Promise.resolve(false);
+    if (!bridge) return Promise.resolve({ accepted: false, reason: "unity_not_ready" });
     const unityWindow = bridge.unityWindow;
     const bridgeRequestId = uniqueId("unity_draft_regeneration_prepare");
     if (!bridge.embedded) {
@@ -2935,18 +3010,20 @@ function prepareUnityForDraftRegeneration() {
     }
     return new Promise(resolve => {
         let settled = false;
-        const finish = accepted => {
+        const finish = result => {
             if (settled) return;
             settled = true;
             window.clearTimeout(timeoutId);
             window.removeEventListener("message", receiveAcknowledgement);
-            resolve(accepted ? {
+            resolve(result.accepted ? {
                 unityWindow,
                 origins: bridge.origins,
                 protocolVersion: bridge.protocolVersion,
                 embedded: bridge.embedded,
-                prepareRequestId: bridgeRequestId
-            } : null);
+                prepareRequestId: bridgeRequestId,
+                accepted: true,
+                reason: ""
+            } : result);
         };
         const receiveAcknowledgement = event => {
             const message = event.data;
@@ -2954,10 +3031,18 @@ function prepareUnityForDraftRegeneration() {
                 || message?.type !== "sokoban:cocreation-draft-regenerate-prepare-ack"
                 || message.requestId !== bridgeRequestId
                 || message.sessionId !== state.sessionId) return;
-            finish(message.accepted === true
-                && message.protocolVersion === bridge.protocolVersion);
+            finish({
+                accepted: message.accepted === true
+                    && message.protocolVersion === bridge.protocolVersion,
+                reason: message.reason || (message.protocolVersion === bridge.protocolVersion
+                    ? "receiver_not_ready"
+                    : "protocol_mismatch")
+            });
         };
-        const timeoutId = window.setTimeout(() => finish(false), UNITY_PLAY_BRIDGE_TIMEOUT_MS);
+        const timeoutId = window.setTimeout(
+            () => finish({ accepted: false, reason: "unity_not_ready" }),
+            UNITY_PLAY_BRIDGE_TIMEOUT_MS
+        );
         window.addEventListener("message", receiveAcknowledgement);
         const message = {
             type: "sokoban:cocreation-draft-regenerate-prepare",
@@ -2976,28 +3061,37 @@ function prepareUnityForDraftRegeneration() {
 
 function sendUnityDraftRegenerationRequest(preparedBridge, requestId) {
     if (!preparedBridge?.unityWindow || preparedBridge.unityWindow.closed) {
-        return Promise.resolve(false);
+        return Promise.resolve({ received: true, accepted: false, reason: "unity_not_ready" });
     }
     const bridgeRequestId = uniqueId("unity_draft_regeneration");
     return new Promise(resolve => {
         let settled = false;
-        const finish = accepted => {
+        const finish = result => {
             if (settled) return;
             settled = true;
             window.clearTimeout(timeoutId);
             window.removeEventListener("message", receiveAcknowledgement);
-            resolve(accepted);
+            resolve(result);
         };
         const receiveAcknowledgement = event => {
             const message = event.data;
             if (event.source !== preparedBridge.unityWindow
                 || !preparedBridge.origins.includes(event.origin)
                 || message?.type !== "sokoban:cocreation-draft-regenerate-ack"
-                || message.requestId !== bridgeRequestId) return;
-            finish(message.accepted === true
-                && message.protocolVersion === preparedBridge.protocolVersion);
+                || message.requestId !== bridgeRequestId
+                || message.sessionId !== state.sessionId
+                || message.regenerationRequestId !== requestId) return;
+            finish({
+                received: true,
+                accepted: message.accepted === true
+                    && message.protocolVersion === preparedBridge.protocolVersion,
+                reason: message.reason || ""
+            });
         };
-        const timeoutId = window.setTimeout(() => finish(false), UNITY_PLAY_BRIDGE_TIMEOUT_MS);
+        const timeoutId = window.setTimeout(
+            () => finish({ received: false, accepted: false, reason: "" }),
+            UNITY_PLAY_BRIDGE_TIMEOUT_MS
+        );
         window.addEventListener("message", receiveAcknowledgement);
         const message = {
             type: "sokoban:cocreation-draft-regenerate-request",
@@ -3034,15 +3128,28 @@ function abortPreparedDraftRegeneration(preparedBridge) {
 async function waitForDraftRegeneration(requestId) {
     while (state.sessionId && !state.session?.languageLocked) {
         await new Promise(resolve => window.setTimeout(resolve, DRAFT_REGENERATION_POLL_MS));
-        const latest = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
+        let latest;
+        try {
+            latest = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`, {
+                timeoutMs: DRAFT_REGENERATION_POLL_TIMEOUT_MS
+            });
+        } catch (_error) {
+            showNotice(t("draftReconnecting"));
+            requestEmbeddedHostView("sokoban:cocreation-show-lab", requestId);
+            await new Promise(resolve => window.setTimeout(resolve, 2000));
+            continue;
+        }
         if (latest.draftPreview?.regenerationRequestId !== requestId) return;
         state.session = latest;
         renderDraftPreview();
         updateControls();
         const status = latest.draftPreview?.regenerationStatus;
         if (!["pending", "claimed"].includes(status)) {
+            state.draftRegenerationKey = "";
             if (["failed", "cancelled", "timed_out"].includes(status)) {
                 showNotice(draftRegenerationFailureMessage(latest.draftPreview?.failureCode));
+            } else {
+                hideNotice();
             }
             return;
         }
