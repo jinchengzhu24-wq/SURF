@@ -101,19 +101,20 @@
       }
       #cocreation-refresh {
         position: absolute;
-        top: 18px;
+        top: 22px;
         right: 220px;
         z-index: 3;
         min-height: 38px;
         padding: 7px 12px;
-        border: 3px solid var(--wood-dark);
-        color: #fff5d1;
-        background: #315a73;
-        box-shadow: var(--pixel-shadow);
-        cursor: pointer;
-        font-weight: 700;
+        white-space: nowrap;
       }
-      #cocreation-refresh:disabled { cursor: wait; opacity: 0.65; }
+      #cocreation-refresh:disabled {
+        cursor: wait;
+        opacity: 0.65;
+        filter: none;
+        outline: none;
+        transform: none;
+      }
       @media (max-width: 900px) {
         #cocreation-refresh { top: 96px; right: 12px; }
       }
@@ -289,7 +290,7 @@
     </main>
 
     <section id="cocreation-host" hidden aria-label="Sokoban co-creation workspace">
-      <button id="cocreation-refresh" type="button">REFRESH WORKSPACE / 刷新工作台</button>
+      <button id="cocreation-refresh" class="pixel-button" type="button">REFRESH WORKSPACE / 刷新工作台</button>
       <iframe
         id="cocreation-frame"
         title="Sokoban Co-Creation Lab"
@@ -330,7 +331,7 @@
       </form>
     </div>
 
-    <script src="co-creation-bridge-contract.js?v=iframe-host-v5-20260916-1"></script>
+    <script src="co-creation-bridge-contract.js?v=iframe-host-v5-20260917-1"></script>
     <script>
       var container = document.querySelector("#unity-container");
       var canvas = document.querySelector("#unity-canvas");
@@ -450,7 +451,7 @@
       });
 
       var draftRegenerationProtocolVersion = 5;
-      var coCreationHostRelease = "iframe-host-v5-20260916-1";
+      var coCreationHostRelease = "iframe-host-v5-20260917-1";
       var activeDraftRegenerationSessionId = "";
       var activeDraftRegenerationProtocolVersion = 0;
       var draftRegenerationBridgeReady = false;
@@ -1049,7 +1050,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=iframe-host-v5-20260916-1";
+      var buildVersion = "?v=iframe-host-v5-20260917-1";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,

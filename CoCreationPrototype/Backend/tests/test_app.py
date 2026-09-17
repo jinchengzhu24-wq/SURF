@@ -928,6 +928,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('id="cocreation-frame"', webgl_template)
         self.assertIn("draftRegenerationProtocolVersion = 5", webgl_template)
         self.assertIn('id="cocreation-refresh"', webgl_template)
+        self.assertIn('id="cocreation-refresh" class="pixel-button"', webgl_template)
+        self.assertIn("iframe-host-v5-20260917-1", webgl_template)
         self.assertIn("function reloadCoCreationFrame", webgl_template)
         self.assertIn('targetUrl.searchParams.set("hostRelease"', webgl_template)
         self.assertIn("co-creation-bridge-contract.js", webgl_template)
