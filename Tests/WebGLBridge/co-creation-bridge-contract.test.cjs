@@ -10,7 +10,7 @@ const baseState = {
   unityReady: true,
   receiverReady: true,
   source,
-  origin: "http://111.231.136.4"
+  origin: "http://sokobanaidemo.top"
 };
 
 test("prepare requires a registered regeneration receiver", () => {

@@ -8,7 +8,7 @@ using UnityEngine.SceneManagement;
 
 public class LevelStudyRecorder : MonoBehaviour
 {
-    private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
+    private const string DefaultBackendBaseUrl = PublicEndpointResolver.ProductionOrigin;
     private const string LevelStartPath = "/record-level-start";
     private const string LevelEndPath = "/record-level-end";
     private const string JourneyEventPath = "/record-journey-event";
@@ -661,9 +661,9 @@ public class LevelStudyRecorder : MonoBehaviour
 
     private string GetBackendUrl(string path)
     {
-        string baseUrl = string.IsNullOrEmpty(backendBaseUrl)
-            ? DefaultBackendBaseUrl
-            : backendBaseUrl.TrimEnd('/');
+        string baseUrl = PublicEndpointResolver.ResolveBackendBaseUrl(
+            backendBaseUrl
+        );
 
         return baseUrl + path;
     }

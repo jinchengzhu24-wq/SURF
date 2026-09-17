@@ -16,8 +16,8 @@ const DRAFT_REGENERATION_POLL_TIMEOUT_MS = 5000;
 const DRAFT_REGENERATION_PROTOCOL_VERSION = 5;
 const UNITY_ORIGINS = Array.from(new Set([
     window.location.origin,
-    "http://111.231.136.4",
-    "http://111.231.136.4:8000",
+    "http://sokobanaidemo.top",
+    "http://www.sokobanaidemo.top",
     "http://127.0.0.1:8000",
     "http://localhost:8000"
 ]));

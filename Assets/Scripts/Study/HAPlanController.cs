@@ -9,7 +9,7 @@ using UnityEngine.UI;
 
 public class HAPlanController : MonoBehaviour
 {
-    private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
+    private const string DefaultBackendBaseUrl = PublicEndpointResolver.ProductionOrigin;
     private const string GeneratePath = "/generate-ha-revision-plans";
     private const string EditPath = "/revise-ha-revision-plan";
     private const string ChoicePath = "/record-ha-plan-choice";
@@ -919,9 +919,9 @@ public class HAPlanController : MonoBehaviour
 
     private string GetBackendUrl(string path)
     {
-        string baseUrl = string.IsNullOrWhiteSpace(backendBaseUrl)
-            ? DefaultBackendBaseUrl
-            : backendBaseUrl.TrimEnd('/');
+        string baseUrl = PublicEndpointResolver.ResolveBackendBaseUrl(
+            backendBaseUrl
+        );
         return baseUrl + path;
     }
 

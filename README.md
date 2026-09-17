@@ -28,11 +28,11 @@ Menu
 ```
 
 Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都是每轮在线匹配的一部分。Tutorial 按钮打开浏览器 PDF：
-`http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。
+`http://sokobanaidemo.top/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。
 
 ## 系统边界与当前实现
 
-- 公网入口为 `http://111.231.136.4/game/`、`http://111.231.136.4/frontend/` 和 `http://111.231.136.4/cocreation/`。用户访问时使用 Nginx 的 80 端口，不在公开链接中使用 `:8000` 或 `:8010`。
+- 唯一正式公网入口为 `http://sokobanaidemo.top/game/`、`http://sokobanaidemo.top/frontend/` 和 `http://sokobanaidemo.top/cocreation/`；`www` 和旧 IP 永久跳转到根域名。WebGL 运行时从当前页面 origin 解析首方地址，公开链接不使用 `:8000` 或 `:8010`。
 - DG 使用四道中立地图设计问题：首步检查、推箱依赖、空间分布和路线结构。Q1–Q2 只用于 8000 的难度建议，Q3–Q4 只用于 8000 的布局建议；DG context 不会传入 8010 或其 LLM 上下文。
 - 8000 的两个 Agent 使用 `deepseek-v4-flash`；8010 的聊天助手、关卡修改助手、Stage 开场、翻译、Revision 和意图反馈审查使用 Kimi `kimi-k2.6`。8010 不读取或回退到 8000 的 DeepSeek 环境变量。
 - `Draft` 场景已退役。`PC`、`PC_Design` 和 `PC_Level` 仅作为历史实现资产保留，不在当前 Build Settings 或在线导航中。

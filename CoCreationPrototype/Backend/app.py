@@ -522,11 +522,11 @@ def _relevant_intent_evidence(hypothesis, evidence, current_turn_id=None):
 load_dotenv(BACKEND_DIR / ".env")
 PUBLIC_BASE_URL = os.getenv(
     "COCREATION_PUBLIC_BASE_URL",
-    "http://111.231.136.4:8010",
+    "http://sokobanaidemo.top/cocreation",
 ).rstrip("/")
 WEBGL_BASE_URL = os.getenv(
     "COCREATION_WEBGL_BASE_URL",
-    "http://111.231.136.4/game/",
+    "http://sokobanaidemo.top/game/",
 )
 ONLINE_MATCH_SYNC_URL = os.getenv(
     "COCREATION_ONLINE_MATCH_SYNC_URL",
@@ -545,7 +545,7 @@ ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "COCREATION_ALLOWED_ORIGINS",
-        "http://111.231.136.4:8000,http://127.0.0.1:8000,http://localhost:8000",
+        "http://sokobanaidemo.top,http://www.sokobanaidemo.top,http://127.0.0.1:8000,http://localhost:8000",
     ).split(",")
     if origin.strip()
 ]

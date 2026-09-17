@@ -276,7 +276,7 @@
           <div class="footer-actions">
             <a
               class="pixel-button secondary"
-              href="http://111.231.136.4/frontend/"
+              href="/frontend/"
               data-dashboard-link
               target="_blank"
               rel="noopener noreferrer"
@@ -331,7 +331,7 @@
       </form>
     </div>
 
-    <script src="co-creation-bridge-contract.js?v=iframe-host-v5-20260917-1"></script>
+    <script src="co-creation-bridge-contract.js?v=iframe-host-v5-20260917-2"></script>
     <script>
       var container = document.querySelector("#unity-container");
       var canvas = document.querySelector("#unity-canvas");
@@ -347,7 +347,7 @@
       var dashboardAccessStatus = document.querySelector("#dashboard-access-status");
       var dashboardAccessCancel = document.querySelector("#dashboard-access-cancel");
       var dashboardAccessSubmit = document.querySelector("#dashboard-access-submit");
-      var dashboardAccessTarget = "http://111.231.136.4/frontend/";
+      var dashboardAccessTarget = "/frontend/";
       var lobbyNativeOverlay = document.querySelector("#sokoban-lobby-native-overlay");
       var lobbyGeneratedRoomCode = document.querySelector("#sokoban-lobby-generated-room-code");
       var lobbyJoinRoomCode = document.querySelector("#sokoban-lobby-join-room-code");
@@ -367,8 +367,8 @@
       var coCreationSessionId = "";
       var allowedCoCreationOrigins = [
         window.location.origin,
-        "http://111.231.136.4",
-        "http://111.231.136.4:8010",
+        "http://sokobanaidemo.top",
+        "http://www.sokobanaidemo.top",
         "http://127.0.0.1:8010",
         "http://localhost:8010"
       ];
@@ -451,7 +451,7 @@
       });
 
       var draftRegenerationProtocolVersion = 5;
-      var coCreationHostRelease = "iframe-host-v5-20260917-1";
+      var coCreationHostRelease = "iframe-host-v5-20260917-2";
       var activeDraftRegenerationSessionId = "";
       var activeDraftRegenerationProtocolVersion = 0;
       var draftRegenerationBridgeReady = false;
@@ -1000,7 +1000,7 @@
         dashboardAccessStatus.textContent = "Checking password...";
 
         var popup = window.open("about:blank", "_blank");
-        fetch("http://111.231.136.4:8000/verify-dashboard-password", {
+        fetch("/verify-dashboard-password", {
           method: "POST",
           headers: { "X-Delete-Password": password }
         }).then(function (response) {
@@ -1050,7 +1050,7 @@
       }
 
       var buildUrl = "Build";
-      var buildVersion = "?v=iframe-host-v5-20260917-1";
+      var buildVersion = "?v=iframe-host-v5-20260917-2";
       var loaderUrl = buildUrl + "/{{{ LOADER_FILENAME }}}" + buildVersion;
       var config = {
         dataUrl: buildUrl + "/{{{ DATA_FILENAME }}}" + buildVersion,

@@ -1,4 +1,4 @@
-const DEFAULT_API_BASE = "http://111.231.136.4:8000";
+const DEFAULT_API_BASE = "http://sokobanaidemo.top";
 const DASHBOARD_LEVEL_SCENE = "Custom_Level";
 
 const state = {

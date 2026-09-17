@@ -8,7 +8,9 @@ public class MenuController : MonoBehaviour
     public string targetSceneName = "Algorithm_Level";
     public string creativeWorkshopSceneName = "Questionnaire(Before)";
     public string matchmakingSceneName = "Online_Lobby";
-    public string tutorialUrl = "http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf";
+    public string tutorialUrl =
+        PublicEndpointResolver.ProductionOrigin
+        + "/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf";
     public Image tryTransitionPanel;
     public float tryTransitionFadeTime = 1f;
 
@@ -83,7 +85,11 @@ public class MenuController : MonoBehaviour
 
     public void OpenTutorial()
     {
-        if (TryGetHttpUrl(tutorialUrl, "Tutorial", out string resolvedTutorialUrl))
+        string targetUrl = PublicEndpointResolver.ResolvePublicUrl(
+            tutorialUrl,
+            "/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf"
+        );
+        if (TryGetHttpUrl(targetUrl, "Tutorial", out string resolvedTutorialUrl))
         {
             Debug.Log("MenuController: Opening tutorial: " + resolvedTutorialUrl);
             Application.OpenURL(resolvedTutorialUrl);

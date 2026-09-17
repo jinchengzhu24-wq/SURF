@@ -16,7 +16,8 @@ public class LLMLevelDesignClient : MonoBehaviour
     private const string CreativeIdeaSessionIdPrefsKey = "SokobanCreativeWorkshopIdeaSessionId";
     private const string CreativeIdeaTextPrefsKey = "SokobanCreativeWorkshopIdeaText";
 
-    public string endpoint = "http://111.231.136.4:8000/generate-level-plan";
+    public string endpoint =
+        PublicEndpointResolver.ProductionOrigin + "/generate-level-plan";
     public int requestTimeoutSeconds = 180;
     public bool includeCreativeWorkshopIdea;
     [Tooltip(
@@ -122,10 +123,14 @@ public class LLMLevelDesignClient : MonoBehaviour
         string json = JsonUtility.ToJson(BuildRequestPayload(boundedMaxAttempts));
         byte[] body = Encoding.UTF8.GetBytes(json);
 
+        string resolvedEndpoint = PublicEndpointResolver.ResolveEndpoint(
+            endpoint,
+            "/generate-level-plan"
+        );
         float startedAt = Time.realtimeSinceStartup;
         Debug.Log(
             "LLMLevelDesignClient request started:"
-            + " endpoint=" + endpoint
+            + " endpoint=" + resolvedEndpoint
             + ", timeoutSeconds=" + requestTimeoutSeconds
             + ", maxAttempts=" + boundedMaxAttempts
             + ", requestId=" + requestId
@@ -133,7 +138,7 @@ public class LLMLevelDesignClient : MonoBehaviour
             + ", ideaTextLength=" + ideaText.Length
         );
 
-        UnityWebRequest request = new UnityWebRequest(endpoint, "POST");
+        UnityWebRequest request = new UnityWebRequest(resolvedEndpoint, "POST");
         request.uploadHandler = new UploadHandlerRaw(body);
         request.downloadHandler = new DownloadHandlerBuffer();
         request.timeout = Mathf.Max(1, requestTimeoutSeconds);

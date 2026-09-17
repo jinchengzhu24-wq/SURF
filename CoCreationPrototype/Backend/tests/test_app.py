@@ -794,7 +794,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("iframe-host-v5-20260916-1", index_response.text)
+        self.assertIn("iframe-host-v5-20260917-2", index_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
         self.assertIn('id="formalStandaloneBlock"', index_response.text)
         self.assertIn("languageSetupSwitch", index_response.text)
@@ -929,7 +929,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("draftRegenerationProtocolVersion = 5", webgl_template)
         self.assertIn('id="cocreation-refresh"', webgl_template)
         self.assertIn('id="cocreation-refresh" class="pixel-button"', webgl_template)
-        self.assertIn("iframe-host-v5-20260917-1", webgl_template)
+        self.assertIn("iframe-host-v5-20260917-2", webgl_template)
         self.assertIn("function reloadCoCreationFrame", webgl_template)
         self.assertIn('targetUrl.searchParams.set("hostRelease"', webgl_template)
         self.assertIn("co-creation-bridge-contract.js", webgl_template)

@@ -38,7 +38,8 @@ public class AdjustmentController : MonoBehaviour
     public bool validateHumanClarity;
     public bool loadPendingHumanAdjustment;
     public string clarificationSceneName = "Clarification(Human)";
-    public string humanClarityEndpoint = "http://111.231.136.4:8000/validate-human-adjustment";
+    public string humanClarityEndpoint =
+        PublicEndpointResolver.ProductionOrigin + "/validate-human-adjustment";
     public int clarityRequestTimeoutSeconds = 60;
     public bool logAdjustmentEvents = true;
 
@@ -256,7 +257,11 @@ public class AdjustmentController : MonoBehaviour
             };
         byte[] body = Encoding.UTF8.GetBytes(JsonUtility.ToJson(requestBody));
         string requestId = LLMBackendError.CreateRequestId();
-        activeClarityRequest = new UnityWebRequest(humanClarityEndpoint, "POST");
+        string resolvedEndpoint = PublicEndpointResolver.ResolveEndpoint(
+            humanClarityEndpoint,
+            "/validate-human-adjustment"
+        );
+        activeClarityRequest = new UnityWebRequest(resolvedEndpoint, "POST");
         activeClarityRequest.uploadHandler = new UploadHandlerRaw(body);
         activeClarityRequest.downloadHandler = new DownloadHandlerBuffer();
         activeClarityRequest.SetRequestHeader("Content-Type", "application/json");

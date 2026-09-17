@@ -3,16 +3,16 @@
 当前线上地址：
 
 ```text
-http://111.231.136.4/frontend/
-http://111.231.136.4/game/
-http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf
-http://111.231.136.4/cocreation/
+http://sokobanaidemo.top/frontend/
+http://sokobanaidemo.top/game/
+http://sokobanaidemo.top/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf
+http://sokobanaidemo.top/cocreation/
 
 https://v.wjx.cn/vm/YXvrnKg.aspx#
 https://v.wjx.cn/vm/O6tj8nu.aspx#
 ```
 
-端口说明：`8000` 是 Nginx 转发的内部匹配、dashboard 和 WebGL 上游端口，`8010` 是 Nginx 转发的内部共创服务端口；用户访问时统一使用 Nginx 的 80 端口，因此公开地址不带 `:8000` 或 `:8010`。公开入口为 `http://111.231.136.4/game/`、`http://111.231.136.4/frontend/` 和 `http://111.231.136.4/cocreation/`。
+端口说明：`8000` 是 Nginx 转发的内部匹配、dashboard 和 WebGL 上游端口，`8010` 是 Nginx 转发的内部共创服务端口；用户访问时统一使用 Nginx 的 80 端口，因此公开地址不带 `:8000` 或 `:8010`。正式入口为 `http://sokobanaidemo.top/game/`、`http://sokobanaidemo.top/frontend/` 和 `http://sokobanaidemo.top/cocreation/`。
 
 从 WebGL 页面底部的 `DATA DASHBOARD` 按钮进入 Dashboard 时，会先在游戏页面内显示访问密码框；密码通过 8000 的 `/verify-dashboard-password` 校验成功后，才打开 `/frontend/`。取消或校验失败都不会跳转。Dashboard 内的删除/清空操作仍会再次要求原删除密码。直接访问 `/frontend/` 不经过 WebGL 入口时保持原行为。
 
@@ -120,7 +120,7 @@ cd /root/SURF
 以后如果只更新了 Unity 游戏或 WebGL 页面模板，只需重新构建并上传 `WebGLBuild`，通常不需要重启后端。上传后访问：
 
 ```text
-http://111.231.136.4/game/
+http://sokobanaidemo.top/game/
 ```
 
 如仍显示旧版本，使用 `Ctrl + F5` 强制刷新。
@@ -148,7 +148,7 @@ scp D:\Sokoban_AI_Demo\Frontend\styles.css root@111.231.136.4:/root/SURF/Fronten
 上传完成后，直接刷新：
 
 ```text
-http://111.231.136.4/frontend/
+http://sokobanaidemo.top/frontend/
 ```
 
 如果浏览器仍显示旧样式，按：
@@ -318,8 +318,8 @@ bash deploy_scp
 重启后依次检查：
 
 ```text
-http://111.231.136.4/health
-http://111.231.136.4/ready
+http://sokobanaidemo.top/health
+http://sokobanaidemo.top/ready
 ```
 
 `/health` 表示进程可访问；`/ready` 还会检查 API Key、模型配置和日志目录。运维日志位于 `Backend/logs/backend.log`，单文件 5 MB，保留 5 份轮转文件。当前后端只能使用一个 Uvicorn worker。
@@ -328,7 +328,7 @@ http://111.231.136.4/ready
 
 ## Tutorial PDF 静态资源
 
-`Frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf` 由现有 `/frontend/` 静态路由公开为 `http://111.231.136.4/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。浏览器会直接使用内置 PDF 查看器在线打开；只更新教程文件时，上传该目录即可，无需重启 8000 服务。Menu 按钮事件的改动需随下一次 WebGL 构建发布。
+`Frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf` 由现有 `/frontend/` 静态路由公开为 `http://sokobanaidemo.top/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。浏览器会直接使用内置 PDF 查看器在线打开；只更新教程文件时，上传该目录即可，无需重启 8000 服务。Menu 按钮事件的改动需随下一次 WebGL 构建发布。
 
 ## DG Draft research record
 
@@ -349,7 +349,7 @@ details and the corresponding challenge map details; it is not duplicated on Fin
 
 ## 8010 直访问单次测试模式
 
-直接访问 `http://111.231.136.4/cocreation/` 时，页面不读取旧的浏览器 `localStorage`
+直接访问 `http://sokobanaidemo.top/cocreation/` 时，页面不读取旧的浏览器 `localStorage`
 会话，也不加载上一轮的对话、Stage 或地图记录；它会自动创建新的演示会话。创建期间已显示
 统一的 Draft 地图区域、弯曲箭头旋转动画，以及禁用的“重新生成”和“进入共创流程”按钮。
 8010 后端参考 Unity `Algorithm_Level` 的结构模板、墙体/水域布局和反向拉箱流程生成 10×12、
@@ -361,7 +361,7 @@ details and the corresponding challenge map details; it is not duplicated on Fin
 `coCreationDurationSeconds`。演示页面没有倒计时，完成后不显示“返回 Unity 继续”。
 每次新演示会话创建成功后只保留最新一轮演示记录；正式 Unity 会话和正式研究数据不受影响，
 新地图或新会话失败时保留上一轮记录。当前静态资源缓存键为
-`iframe-host-v5-20260916-1`。正式 WebGL 共创只使用 `/game/` 内的全屏 8010 iframe；
+`iframe-host-v5-20260917-2`。正式 WebGL 共创只使用 `/game/` 内的全屏 8010 iframe；
 Unity 与工作台之间通过版本 5 的同页宿主消息切换，iframe、试玩和 Draft 重生成分别维护 ready 状态，
 不再保留独立页面、`window.opener` 或后台标签页 `focus()` 操作链路。工作台刷新会重建 iframe 并附加发布版本与刷新 nonce，
 入口 HTML 使用 `no-cache, must-revalidate`。重生成的 pending/claimed 租约分别为 60/120 秒，8010 后台每 10 秒主动扫描，

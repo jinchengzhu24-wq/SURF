@@ -12,7 +12,8 @@ using System.Runtime.InteropServices;
 
 public sealed class CoCreationEntryController : MonoBehaviour
 {
-    private const string DefaultCoCreationUrl = "http://111.231.136.4/cocreation/";
+    private const string DefaultCoCreationUrl =
+        PublicEndpointResolver.ProductionOrigin + "/cocreation/";
     private const int DraftRegenerationProtocolVersion = 5;
     private static readonly Color ReadyStatusColor = new Color(0.36f, 0.36f, 0.36f, 1f);
     private static readonly Color WaitingStatusColor = new Color(0.60f, 0.40f, 0f, 1f);
@@ -51,6 +52,10 @@ public sealed class CoCreationEntryController : MonoBehaviour
 
     private void Awake()
     {
+        coCreationUrl = PublicEndpointResolver.ResolveCoCreationBaseUrl(
+            coCreationUrl
+        ) + "/";
+
         if (openLabButton != null)
         {
             openLabButton.onClick.RemoveListener(OpenCoCreationLab);

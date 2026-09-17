@@ -9,7 +9,8 @@ using UnityEngine.SceneManagement;
 [DefaultExecutionOrder(-400)]
 public sealed class CoCreationStagePlayController : MonoBehaviour
 {
-    private const string DefaultBackendBaseUrl = "http://111.231.136.4/cocreation";
+    private const string DefaultBackendBaseUrl =
+        PublicEndpointResolver.ProductionOrigin + "/cocreation";
     private const int CompletionSubmitMaxAttempts = 2;
     private const int CompletionRequestTimeoutSeconds = 5;
     private const float CompletionRetryDelaySeconds = 0.5f;
@@ -43,6 +44,9 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
     private void Awake()
     {
+        backendBaseUrl = PublicEndpointResolver.ResolveCoCreationBaseUrl(
+            backendBaseUrl
+        );
         ResolveReferences();
 
         if (levelLoader != null)

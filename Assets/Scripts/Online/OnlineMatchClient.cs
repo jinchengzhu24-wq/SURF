@@ -7,7 +7,7 @@ using UnityEngine.Networking;
 
 public class OnlineMatchClient : MonoBehaviour
 {
-    public const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
+    public const string DefaultBackendBaseUrl = PublicEndpointResolver.ProductionOrigin;
 
     [SerializeField]
     private string backendBaseUrl = DefaultBackendBaseUrl;
@@ -167,7 +167,8 @@ public class OnlineMatchClient : MonoBehaviour
             yield break;
         }
 
-        string url = backendBaseUrl.TrimEnd('/') + path;
+        string url = PublicEndpointResolver.ResolveBackendBaseUrl(backendBaseUrl)
+            + path;
         using (UnityWebRequest request = new UnityWebRequest(url, method))
         {
             request.downloadHandler = new DownloadHandlerBuffer();

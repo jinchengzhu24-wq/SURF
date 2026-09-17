@@ -8,7 +8,7 @@ using UnityEngine.UI;
 
 public class CreativeWorkshopInputController : MonoBehaviour
 {
-    private const string DefaultBackendBaseUrl = "http://111.231.136.4:8000";
+    private const string DefaultBackendBaseUrl = PublicEndpointResolver.ProductionOrigin;
     private const string CreativeIdeaPath = "/record-creative-idea";
 
     [Header("Scene UI")]
@@ -233,9 +233,9 @@ public class CreativeWorkshopInputController : MonoBehaviour
 
     private string GetBackendUrl(string path)
     {
-        string baseUrl = string.IsNullOrEmpty(backendBaseUrl)
-            ? DefaultBackendBaseUrl
-            : backendBaseUrl.TrimEnd('/');
+        string baseUrl = PublicEndpointResolver.ResolveBackendBaseUrl(
+            backendBaseUrl
+        );
 
         return baseUrl + path;
     }

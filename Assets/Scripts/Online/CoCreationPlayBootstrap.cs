@@ -12,7 +12,8 @@ using System.Runtime.InteropServices;
 [DefaultExecutionOrder(-500)]
 public sealed class CoCreationPlayBootstrap : MonoBehaviour
 {
-    private const string DefaultBackendBaseUrl = "http://111.231.136.4/cocreation";
+    private const string DefaultBackendBaseUrl =
+        PublicEndpointResolver.ProductionOrigin + "/cocreation";
 
     [SerializeField]
     private string backendBaseUrl = DefaultBackendBaseUrl;
@@ -35,6 +36,9 @@ public sealed class CoCreationPlayBootstrap : MonoBehaviour
 
     private void Awake()
     {
+        backendBaseUrl = PublicEndpointResolver.ResolveCoCreationBaseUrl(
+            backendBaseUrl
+        );
         RefreshBrowserBridgeReady();
     }
 

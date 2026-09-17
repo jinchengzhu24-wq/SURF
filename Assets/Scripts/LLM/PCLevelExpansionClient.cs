@@ -12,7 +12,8 @@ public class PCLevelCandidateResponse
 
 public class PCLevelExpansionClient : MonoBehaviour
 {
-    public string endpoint = "http://111.231.136.4:8000/generate-pc-level";
+    public string endpoint =
+        PublicEndpointResolver.ProductionOrigin + "/generate-pc-level";
     public int requestTimeoutSeconds = 30;
 
     public int LastAttemptsUsed { get; private set; }
@@ -73,7 +74,12 @@ public class PCLevelExpansionClient : MonoBehaviour
 
         byte[] body = Encoding.UTF8.GetBytes(json);
 
-        using (UnityWebRequest request = new UnityWebRequest(endpoint, "POST"))
+        string resolvedEndpoint = PublicEndpointResolver.ResolveEndpoint(
+            endpoint,
+            "/generate-pc-level"
+        );
+
+        using (UnityWebRequest request = new UnityWebRequest(resolvedEndpoint, "POST"))
         {
             request.uploadHandler = new UploadHandlerRaw(body);
             request.downloadHandler = new DownloadHandlerBuffer();

@@ -9,7 +9,7 @@ public class RoutingController : MonoBehaviour
     private const int HumanOptionIndex = 1;
     private const int HaOptionIndex = 2;
     private const string NavigationUrl =
-        "http://111.231.136.4:8000/frontend/Images/Routing.png";
+        PublicEndpointResolver.ProductionOrigin + "/frontend/Images/Routing.png";
 
     [Header("Scene UI")]
     public Button confirmButton;
@@ -205,7 +205,12 @@ public class RoutingController : MonoBehaviour
 
     private void OpenNavigation()
     {
-        Application.OpenURL(NavigationUrl);
+        Application.OpenURL(
+            PublicEndpointResolver.ResolvePublicUrl(
+                NavigationUrl,
+                "/frontend/Images/Routing.png"
+            )
+        );
     }
 
     private void SelectOption(QuestionnaireOptionButton option)

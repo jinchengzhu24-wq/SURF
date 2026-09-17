@@ -9,7 +9,7 @@ using UnityEngine.UI;
 // The DG scene owns every visible control. This controller binds only serialized references.
 public sealed class DescriptionGenerationController : MonoBehaviour
 {
-    private const string BackendBaseUrl = "http://111.231.136.4:8000";
+    private const string BackendBaseUrl = PublicEndpointResolver.ProductionOrigin;
     private const string GuideEndpoint = BackendBaseUrl + "/dg/guide/summary";
     private static readonly string[] DifficultyLabels = { "Easy", "Medium", "Hard", "Random" };
     private static readonly string[] LayoutLabels = { "Compact", "Balanced", "Open", "Random" };
@@ -250,7 +250,10 @@ public sealed class DescriptionGenerationController : MonoBehaviour
             routeRhythmPreference = settings.routeRhythmPreference,
             language = "en"
         };
-        string endpoint = string.IsNullOrWhiteSpace(guideEndpoint) ? GuideEndpoint : guideEndpoint.Trim();
+        string endpoint = PublicEndpointResolver.ResolveEndpoint(
+            guideEndpoint,
+            "/dg/guide/summary"
+        );
         using (UnityWebRequest request = new UnityWebRequest(endpoint, UnityWebRequest.kHttpVerbPOST))
         {
             request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(JsonUtility.ToJson(payload)));
@@ -516,7 +519,9 @@ public sealed class DescriptionGenerationController : MonoBehaviour
             yield break;
         }
 
-        string baseUrl = string.IsNullOrWhiteSpace(backendBaseUrl) ? BackendBaseUrl : backendBaseUrl.TrimEnd('/');
+        string baseUrl = PublicEndpointResolver.ResolveBackendBaseUrl(
+            backendBaseUrl
+        );
         string endpoint = baseUrl + "/online/rooms/" + UnityWebRequest.EscapeURL(OnlineMatchContext.MatchId) + "/draft";
         DraftRequest payload = new DraftRequest
         {
