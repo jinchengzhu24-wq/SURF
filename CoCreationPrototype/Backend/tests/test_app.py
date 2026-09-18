@@ -119,7 +119,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIsNone(execution.guidance["proposalOffer"])
 
     def setUp(self):
-        self.client = TestClient(backend.app)
+        self.client = TestClient(backend.app, base_url="https://testserver")
 
     def tearDown(self):
         self.client.close()
@@ -794,8 +794,11 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("iframe-host-v5-20260917-2", index_response.text)
+        self.assertIn("iframe-host-v5-20260918-2", index_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
+        self.assertIn('id="deadlineLabel"', index_response.text)
+        self.assertIn('id="deadlineValue"', index_response.text)
+        self.assertIn('id="deadlineAnnouncement" aria-live="polite"', index_response.text)
         self.assertIn('id="formalStandaloneBlock"', index_response.text)
         self.assertIn("languageSetupSwitch", index_response.text)
         self.assertIn("enterSessionButton", index_response.text)
@@ -819,6 +822,9 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("aspect-ratio: 12 / 10", css_response.text)
         self.assertIn("@keyframes draft-spinner-turn", css_response.text)
         self.assertIn("grid-auto-rows: minmax(0, 1fr)", css_response.text)
+        self.assertIn(".deadline-status.warning", css_response.text)
+        self.assertIn(".deadline-status.critical", css_response.text)
+        self.assertIn(".deadline-status.expired", css_response.text)
         self.assertEqual(js_response.status_code, 200)
         self.assertIn("/api/sessions/", js_response.text)
         self.assertIn("play-attempts", js_response.text)
@@ -906,6 +912,15 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("formalDraftPreviewTitle", js_response.text)
         self.assertIn("Algorithm-generated first Draft", js_response.text)
         self.assertIn("AI-planned and generated first Draft", js_response.text)
+        self.assertIn('translations.en.deadlineRemaining = "LEFT";', js_response.text)
+        self.assertIn('translations["zh-CN"].deadlineRemaining', js_response.text)
+        self.assertIn("state.session.remainingSeconds = seconds;", js_response.text)
+        deadline_start = js_response.text.index("function renderDeadline()")
+        deadline_end = js_response.text.index("function updateControls()")
+        deadline_source = js_response.text[deadline_start:deadline_end]
+        self.assertIn("Number(state.session.remainingSeconds)", deadline_source)
+        self.assertIn("performance.now()", deadline_source)
+        self.assertEqual(deadline_source.count("updateControls();"), 1)
         render_start = js_response.text.index("function render()")
         render_end = js_response.text.index("function renderStages()")
         render_source = js_response.text[render_start:render_end]
@@ -927,9 +942,11 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('id="cocreation-host"', webgl_template)
         self.assertIn('id="cocreation-frame"', webgl_template)
         self.assertIn("draftRegenerationProtocolVersion = 5", webgl_template)
-        self.assertIn('id="cocreation-refresh"', webgl_template)
-        self.assertIn('id="cocreation-refresh" class="pixel-button"', webgl_template)
-        self.assertIn("iframe-host-v5-20260917-2", webgl_template)
+        self.assertNotIn('id="cocreation-refresh"', webgl_template)
+        self.assertNotIn("coCreationRefresh", webgl_template)
+        self.assertIn('id="cocreation-retry"', webgl_template)
+        self.assertIn("reloadCoCreationFrame(true)", webgl_template)
+        self.assertIn("iframe-host-v5-20260918-2", webgl_template)
         self.assertIn("function reloadCoCreationFrame", webgl_template)
         self.assertIn('targetUrl.searchParams.set("hostRelease"', webgl_template)
         self.assertIn("co-creation-bridge-contract.js", webgl_template)

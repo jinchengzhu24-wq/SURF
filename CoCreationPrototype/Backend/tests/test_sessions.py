@@ -135,7 +135,7 @@ class CoCreationSessionTests(unittest.TestCase):
             ):
                 database.execute(f"DELETE FROM {table}")
 
-        self.client = TestClient(backend.app)
+        self.client = TestClient(backend.app, base_url="https://testserver")
         self.session_id, self.integration_token = self.create_and_open_session()
 
     def tearDown(self):
@@ -161,6 +161,7 @@ class CoCreationSessionTests(unittest.TestCase):
             json={"bootstrapToken": fragment["bootstrap"][0]},
         )
         self.assertEqual(exchange.status_code, 200, exchange.text)
+        self.assertIn("Secure", exchange.headers.get("set-cookie", ""))
         confirmed = self.client.patch(
             f"/api/sessions/{payload['sessionId']}/language",
             json={"language": "en"},

@@ -85,8 +85,29 @@ h1 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: -0.02em; }
 .language-button { padding: 0 11px; color: var(--text); cursor: pointer; }
 .language-button:hover { border-color: var(--brand); color: var(--brand-dark); background: var(--brand-soft); }
 .prototype-status { gap: 7px; padding: 0 11px; color: var(--muted); background: var(--surface-soft); }
-.deadline-status { max-width: 340px; padding: 7px 10px; border: 2px solid #806000; color: #684d00; background: var(--amber-soft); font-size: 11px; font-weight: 850; letter-spacing: .03em; text-align: center; }
-.deadline-status.expired { border-color: var(--red); color: #7a271a; background: var(--red-soft); }
+.deadline-status {
+    display: inline-flex;
+    min-height: 34px;
+    max-width: 340px;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 0 11px;
+    border: 2px solid var(--stone-dark);
+    border-radius: 3px;
+    color: #1e292e;
+    background: var(--stone-light);
+    font-size: 11px;
+    font-weight: 850;
+    line-height: 1.2;
+    text-align: center;
+    white-space: nowrap;
+}
+.deadline-status.warning { color: #604500; background: #e7c667; }
+.deadline-status.critical { color: #672a20; background: #e9a268; }
+.deadline-status.expired { color: #672a20; background: #e2a58e; }
+.deadline-label { font-weight: 900; }
+.deadline-value { font-variant-numeric: tabular-nums; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px rgba(154, 103, 0, 0.12); }
 .prototype-status.ready .status-dot { background: var(--green); box-shadow: 0 0 0 3px rgba(24, 121, 78, 0.12); }
 .prototype-status.error .status-dot { background: var(--red); }
@@ -406,6 +427,8 @@ main { width: min(1800px, 100%); margin: 0 auto; padding: 18px 22px 32px; }
     .subtitle { font-size: 10px; }
     .topbar-actions { gap: 5px; }
     .prototype-status { display: none; }
+    .deadline-status { min-height: 34px; padding: 0 8px; font-size: 10px; }
+    .deadline-status.expired .deadline-value { display: none; }
     main { padding: 12px 10px 24px; }
     .panel-header { min-height: 64px; padding: 11px; }
     .progress-panel-body { grid-template-columns: 1fr; padding: 9px 10px 10px; }
@@ -547,6 +570,7 @@ select {
 
 button,
 .prototype-status,
+.deadline-status,
 .count-pill,
 .method-pill {
     border-radius: 3px;
@@ -568,6 +592,7 @@ h1,
 .play-button,
 .finalize-button,
 .prototype-status,
+.deadline-status,
 .language-button,
 .validation-card,
 .section-heading,
@@ -635,7 +660,8 @@ h1 {
 }
 
 .language-button,
-.prototype-status {
+.prototype-status,
+.deadline-status {
     min-height: 38px;
     border: 2px solid var(--stone-dark);
     border-radius: 3px;
@@ -664,6 +690,30 @@ h1 {
 .prototype-status.error {
     color: #672a20;
     background: #e2a58e;
+}
+
+.deadline-status.warning {
+    color: #594000;
+    background: #e7c667;
+    box-shadow:
+        inset 0 0 0 2px #f5dea0,
+        2px 2px 0 #3d3228;
+}
+
+.deadline-status.critical {
+    color: #652b1d;
+    background: #e9a268;
+    box-shadow:
+        inset 0 0 0 2px #f4c08f,
+        2px 2px 0 #3d3228;
+}
+
+.deadline-status.expired {
+    color: #672a20;
+    background: #e2a58e;
+    box-shadow:
+        inset 0 0 0 2px #f5c9b8,
+        2px 2px 0 #3d3228;
 }
 
 main {
@@ -2220,6 +2270,14 @@ textarea:focus-visible {
     .landing {
         box-shadow: 2px 2px 0 rgba(31, 39, 32, 0.3);
     }
+
+    .deadline-status {
+        min-height: 34px;
+        padding: 0 8px;
+        font-size: 10px;
+    }
+
+    .deadline-status.expired .deadline-value { display: none; }
 
     main {
         padding: 14px 12px 24px;

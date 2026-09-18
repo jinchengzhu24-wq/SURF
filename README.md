@@ -28,11 +28,11 @@ Menu
 ```
 
 Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都是每轮在线匹配的一部分。Tutorial 按钮打开浏览器 PDF：
-`http://sokobanaidemo.top/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。
+`https://sokobanaidemo.top/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。
 
 ## 系统边界与当前实现
 
-- 唯一正式公网入口为 `http://sokobanaidemo.top/game/`、`http://sokobanaidemo.top/frontend/` 和 `http://sokobanaidemo.top/cocreation/`；`www` 和旧 IP 永久跳转到根域名。WebGL 运行时从当前页面 origin 解析首方地址，公开链接不使用 `:8000` 或 `:8010`。
+- 唯一正式公网入口为 `https://sokobanaidemo.top/game/`、`https://sokobanaidemo.top/frontend/` 和 `https://sokobanaidemo.top/cocreation/`；HTTP、`www` 和旧 IP 永久跳转到 HTTPS 根域名。WebGL 运行时从当前页面 origin 解析首方地址，公开链接不使用 `:8000` 或 `:8010`。
 - DG 使用四道中立地图设计问题：首步检查、推箱依赖、空间分布和路线结构。Q1–Q2 只用于 8000 的难度建议，Q3–Q4 只用于 8000 的布局建议；DG context 不会传入 8010 或其 LLM 上下文。
 - 8000 的两个 Agent 使用 `deepseek-v4-flash`；8010 的聊天助手、关卡修改助手、Stage 开场、翻译、Revision 和意图反馈审查使用 Kimi `kimi-k2.6`。8010 不读取或回退到 8000 的 DeepSeek 环境变量。
 - `Draft` 场景已退役。`PC`、`PC_Design` 和 `PC_Level` 仅作为历史实现资产保留，不在当前 Build Settings 或在线导航中。
@@ -136,7 +136,7 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online2).unity
 
 ## 演示模式
 
-直接访问 `/cocreation/` 时，页面会自动创建 `algorithm_demo` 会话：先显示统一的 Draft 地图区域、旋转箭头和禁用的操作按钮，再原位显示 10×12、两箱、两目标的可解算法 Draft。演示页标题为“算法生成的首版 Draft”；正式 Unity 会话的同一位置显示“AI 规划并生成的首版 Draft”。正式会话只允许在 `/game/` 的同页 iframe 中操作，并在创建持久任务前完成版本 5 协议预检；顶层打开正式会话只显示返回原游戏页的拦截说明。iframe、试玩接收器和重生成接收器分别维护 ready 状态，消息 ACK 只代表已投递，最终结果以 8010 持久任务为准。待领取和已领取任务分别使用 60 秒和 120 秒租约，后台扫描保证即使浏览器停止轮询也会进入超时终态；网络中断、失败或超时均保留旧 Draft。刷新工作台只重建 iframe，同一 Stage 的未保存地图编辑由浏览器本地快照恢复。两种入口都可在进入前不限次数重新生成且只保留最新候选，点击“进入共创流程”后才创建 Stage 1 并开始开场。演示数据只写入 8010，不创建正式 deadline、不同步 8000，也不记录正式匹配的 `coCreationDurationSeconds`。
+直接访问 `/cocreation/` 时，页面会自动创建 `algorithm_demo` 会话：先显示统一的 Draft 地图区域、旋转箭头和禁用的操作按钮，再原位显示 10×12、两箱、两目标的可解算法 Draft。演示页标题为“算法生成的首版 Draft”；正式 Unity 会话的同一位置显示“AI 规划并生成的首版 Draft”。正式会话只允许在 `/game/` 的同页 iframe 中操作，并在创建持久任务前完成版本 5 协议预检；顶层打开正式会话只显示返回原游戏页的拦截说明。iframe、试玩接收器和重生成接收器分别维护 ready 状态，消息 ACK 只代表已投递，最终结果以 8010 持久任务为准。待领取和已领取任务分别使用 60 秒和 120 秒租约，后台扫描保证即使浏览器停止轮询也会进入超时终态；网络中断、失败或超时均保留旧 Draft。正常工作台不显示刷新控件；只有握手故障遮罩中的“重新尝试”会重建 iframe，同一 Stage 的未保存地图编辑由浏览器本地快照恢复。两种入口都可在进入前不限次数重新生成且只保留最新候选，点击“进入共创流程”后才创建 Stage 1 并开始开场。演示数据只写入 8010，不创建正式 deadline、不同步 8000，也不记录正式匹配的 `coCreationDurationSeconds`。
 
 创建新的演示会话成功后，只清理上一轮演示会话及其关联的聊天、版本、试玩、提案和审计记录；正式 Unity 会话不会被清理。如果新地图或新会话创建失败，上一轮演示记录保持不变。
 

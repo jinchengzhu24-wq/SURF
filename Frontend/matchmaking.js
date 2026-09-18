@@ -1,4 +1,4 @@
-const DEFAULT_API_BASE = "http://sokobanaidemo.top";
+const DEFAULT_API_BASE = "https://sokobanaidemo.top";
 
 const state = {
     apiBase: resolveApiBase(),

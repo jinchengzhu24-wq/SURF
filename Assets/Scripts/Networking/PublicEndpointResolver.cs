@@ -3,7 +3,8 @@ using UnityEngine;
 
 public static class PublicEndpointResolver
 {
-    public const string ProductionOrigin = "http://sokobanaidemo.top";
+    public const string ProductionOrigin = "https://sokobanaidemo.top";
+    private const string ProductionHost = "sokobanaidemo.top";
     private const string LegacyPublicHost = "111.231.136.4";
 
     public static string ResolveBackendBaseUrl(string configuredFallback = null)
@@ -63,7 +64,9 @@ public static class PublicEndpointResolver
             return false;
         }
 
-        origin = uri.GetLeftPart(UriPartial.Authority).TrimEnd('/');
+        origin = NormalizeProductionScheme(uri)
+            .GetLeftPart(UriPartial.Authority)
+            .TrimEnd('/');
         return true;
     }
 
@@ -98,8 +101,27 @@ public static class PublicEndpointResolver
             return false;
         }
 
-        resolvedUrl = uri.AbsoluteUri.TrimEnd('/');
+        resolvedUrl = NormalizeProductionScheme(uri).AbsoluteUri.TrimEnd('/');
         return true;
+    }
+
+    private static Uri NormalizeProductionScheme(Uri uri)
+    {
+        if (uri.Scheme == Uri.UriSchemeHttp
+            && string.Equals(
+                uri.Host,
+                ProductionHost,
+                StringComparison.OrdinalIgnoreCase
+            ))
+        {
+            return new UriBuilder(uri)
+            {
+                Scheme = Uri.UriSchemeHttps,
+                Port = -1,
+            }.Uri;
+        }
+
+        return uri;
     }
 
     private static string JoinOriginAndPath(string origin, string path)

@@ -16,8 +16,8 @@ const DRAFT_REGENERATION_POLL_TIMEOUT_MS = 5000;
 const DRAFT_REGENERATION_PROTOCOL_VERSION = 5;
 const UNITY_ORIGINS = Array.from(new Set([
     window.location.origin,
-    "http://sokobanaidemo.top",
-    "http://www.sokobanaidemo.top",
+    "https://sokobanaidemo.top",
+    "https://www.sokobanaidemo.top",
     "http://127.0.0.1:8000",
     "http://localhost:8000"
 ]));
@@ -557,6 +557,18 @@ translations["zh-CN"].embeddedOnlyTitle = "\u8bf7\u8fd4\u56de\u539f Unity \u6e38
 translations["zh-CN"].embeddedOnlyBody = "\u6b63\u5f0f\u5171\u521b\u4ec5\u5728\u6e38\u620f\u9875\u9762\u5185\u5d4c\u7684\u5de5\u4f5c\u53f0\u4e2d\u8fdb\u884c\u3002\u6b64\u72ec\u7acb\u9875\u9762\u4e0d\u80fd\u91cd\u65b0\u751f\u6210\u3001\u8bd5\u73a9\u6216\u8fdb\u5165\u6b63\u5f0f\u6d41\u7a0b\u3002";
 translations.en.unsavedDraftRestored = "Your unsaved map edits were restored after the workspace refresh.";
 translations["zh-CN"].unsavedDraftRestored = "\u5df2\u6062\u590d\u5237\u65b0\u524d\u672a\u4fdd\u5b58\u7684\u5730\u56fe\u4fee\u6539\u3002";
+translations.en.deadlineRemaining = "LEFT";
+translations.en.deadlineExpired = "TIME UP";
+translations.en.deadlineExpiredAction = "SUBMIT FINAL STAGE";
+translations.en.deadlineWarningAnnouncement = "Five minutes remain in the co-creation session.";
+translations.en.deadlineCriticalAnnouncement = "One minute remains in the co-creation session.";
+translations.en.deadlineExpiredAnnouncement = "Time is up. Submit the current map as the final Stage.";
+translations["zh-CN"].deadlineRemaining = "\u5269\u4f59";
+translations["zh-CN"].deadlineExpired = "\u65f6\u95f4\u5230";
+translations["zh-CN"].deadlineExpiredAction = "\u8bf7\u63d0\u4ea4\u6700\u7ec8\u5173\u5361";
+translations["zh-CN"].deadlineWarningAnnouncement = "\u5171\u521b\u65f6\u95f4\u8fd8\u5269\u4e94\u5206\u949f\u3002";
+translations["zh-CN"].deadlineCriticalAnnouncement = "\u5171\u521b\u65f6\u95f4\u8fd8\u5269\u4e00\u5206\u949f\u3002";
+translations["zh-CN"].deadlineExpiredAnnouncement = "\u65f6\u95f4\u5df2\u5230，\u8bf7\u5c06\u5f53\u524d\u5730\u56fe\u63d0\u4ea4\u4e3a\u6700\u7ec8 Stage\u3002";
 
 const state = {
     session: null,
@@ -573,6 +585,10 @@ const state = {
     chatStartedAt: 0,
     chatTimerId: null,
     deadlineTimerId: null,
+    deadlineAnchorSeconds: null,
+    deadlineAnchorStartedAt: 0,
+    deadlineIdentity: "",
+    deadlinePresentationState: "",
     pendingMessage: null,
     proposalMode: false,
     questionFeedbackBusy: new Set(),
@@ -669,7 +685,7 @@ const validationTileNames = {
 };
 
 const elements = Object.fromEntries([
-    "workspace", "landing", "formalStandaloneBlock", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus",
+    "workspace", "landing", "formalStandaloneBlock", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus", "deadlineLabel", "deadlineValue", "deadlineAnnouncement",
     "landingEyebrow", "landingTitle", "landingBody", "languageSetupSwitch", "languageLockNotice", "draftActions", "regenerateDraftButton", "enterSessionButton", "draftPreview", "draftPreviewTitle", "draftGenerationLabel", "draftPreviewGrid", "draftPreviewLoading", "draftPreviewLoadingMessage", "draftPreviewStatus", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "progressPanel", "progressSummary", "unresolvedQuestionsList", "answeredQuestionsPanel", "answeredQuestionsSummary", "answeredQuestionsList", "designInclinationsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
     "chatRequestStatus", "chatRequestMessage", "chatRetryButton", "chatForm", "messageInput",
@@ -2246,26 +2262,76 @@ function renderSessionState() {
 
 function deadlineExpired() { return Boolean(state.session?.deadlineExpired); }
 
+function deadlinePresentationState(seconds) {
+    if (seconds <= 0 || deadlineExpired()) return "expired";
+    if (seconds <= 60) return "critical";
+    if (seconds <= 300) return "warning";
+    return "normal";
+}
+
+function deadlineAnnouncement(stateName) {
+    if (stateName === "warning") return t("deadlineWarningAnnouncement");
+    if (stateName === "critical") return t("deadlineCriticalAnnouncement");
+    if (stateName === "expired") return t("deadlineExpiredAnnouncement");
+    return "";
+}
+
 function renderDeadline() {
     window.clearInterval(state.deadlineTimerId);
+    state.deadlineTimerId = null;
     if (!state.session?.deadlineAt || state.session.status !== "active") {
         elements.deadlineStatus.hidden = true;
+        state.deadlineAnchorSeconds = null;
+        state.deadlineAnchorStartedAt = 0;
+        state.deadlineIdentity = "";
+        state.deadlinePresentationState = "";
         return;
     }
+
+    const deadlineIdentity = `${state.sessionId}:${state.session.deadlineAt}`;
+    if (deadlineIdentity !== state.deadlineIdentity) {
+        state.deadlineIdentity = deadlineIdentity;
+        state.deadlinePresentationState = "";
+    }
+    const serverRemaining = Number(state.session.remainingSeconds);
+    state.deadlineAnchorSeconds = Number.isFinite(serverRemaining)
+        ? Math.max(0, Math.ceil(serverRemaining))
+        : Math.max(0, Math.ceil((Date.parse(state.session.deadlineAt) - Date.now()) / 1000));
+    state.deadlineAnchorStartedAt = performance.now();
+
     const update = () => {
-        const seconds = Math.max(0, Math.ceil((Date.parse(state.session.deadlineAt) - Date.now()) / 1000));
+        const elapsedSeconds = Math.floor((performance.now() - state.deadlineAnchorStartedAt) / 1000);
+        const seconds = Math.max(0, state.deadlineAnchorSeconds - elapsedSeconds);
         if (seconds <= 0) state.session.deadlineExpired = true;
+        state.session.remainingSeconds = seconds;
         const minutes = String(Math.floor(seconds / 60)).padStart(2, "0");
         const remainder = String(seconds % 60).padStart(2, "0");
+        const presentationState = deadlinePresentationState(seconds);
+        const stateChanged = presentationState !== state.deadlinePresentationState;
+
         elements.deadlineStatus.hidden = false;
-        elements.deadlineStatus.className = `deadline-status ${deadlineExpired() ? "expired" : ""}`;
-        elements.deadlineStatus.textContent = deadlineExpired()
-            ? "TIME IS UP — SUBMIT THE CURRENT MAP AS THE FINAL STAGE."
-            : `TIME LEFT ${minutes}:${remainder}`;
-        updateControls();
+        elements.deadlineStatus.className = `deadline-status ${presentationState}`;
+        elements.deadlineLabel.textContent = deadlineExpired()
+            ? t("deadlineExpired")
+            : t("deadlineRemaining");
+        elements.deadlineValue.textContent = deadlineExpired()
+            ? `\u00b7 ${t("deadlineExpiredAction")}`
+            : `${minutes}:${remainder}`;
+        elements.deadlineStatus.setAttribute(
+            "aria-label",
+            deadlineExpired()
+                ? `${t("deadlineExpired")}. ${t("deadlineExpiredAction")}`
+                : `${t("deadlineRemaining")} ${minutes}:${remainder}`
+        );
+
+        if (stateChanged) {
+            state.deadlinePresentationState = presentationState;
+            elements.deadlineAnnouncement.textContent = deadlineAnnouncement(presentationState);
+            updateControls();
+        }
     };
     update();
-    state.deadlineTimerId = window.setInterval(update, 1000);
+    if (!deadlineExpired()) state.deadlineTimerId = window.setInterval(update, 1000);
 }
 
 function updateControls() {
