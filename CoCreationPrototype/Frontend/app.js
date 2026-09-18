@@ -2357,6 +2357,7 @@ function updateControls() {
     const expired = deadlineExpired();
     const editable = canEditSelected();
     const pending = Boolean(currentPendingProposal());
+    const selectedHistoricalStage = state.selectedVersionId !== state.session.currentVersionId;
     const intentConflictPending = selectedStageHasPendingIntentConflict();
     const proposalFlowStatus = state.session?.proposalFlowState?.status || "inactive";
     const proposalPlanning = proposalFlowStatus === "planning";
@@ -2371,8 +2372,8 @@ function updateControls() {
     elements.restoreStageButton.disabled = interactionBusy || expired;
     elements.playButton.disabled = interactionBusy || expired || state.dirty || pending || !selectedVersion();
     elements.finalizeButton.disabled = interactionBusy || generationPending
-        || state.selectedVersionId !== state.session.currentVersionId
-        || (!expired && (state.dirty || pending));
+        || !selectedVersion()
+        || (!selectedHistoricalStage && !expired && (state.dirty || pending));
     elements.messageInput.disabled = interactionBusy || !editable || intentConflictPending
         || proposalPlanning || proposalRetryPending;
     elements.messageInput.placeholder = intentConflictPending
@@ -2918,13 +2919,15 @@ async function handleUnityBridgeMessage(event) {
 
 async function finalizeSession() {
     elements.finalizeModal.hidden = true;
+    const targetVersionId = state.selectedVersionId;
+    const targetIsCurrent = targetVersionId === state.session.currentVersionId;
     await withBusy(async () => {
         state.session = await api(`/api/sessions/${state.sessionId}/finalize`, {
             method: "POST",
             body: {
-                baseVersionId: state.session.currentVersionId,
+                baseVersionId: targetVersionId,
                 idempotencyKey: uniqueId("finalize"),
-                rows: deadlineExpired() ? state.draftRows : null
+                rows: deadlineExpired() && targetIsCurrent ? state.draftRows : null
             }
         });
         clearUnsavedMapDraft();

@@ -6148,16 +6148,25 @@ def finalize_session(
             if session["status"] != "active":
                 raise ApiError(409, "SESSION_LOCKED", "This co-creation session is no longer editable.")
             deadline_expired = session_deadline_expired(session)
-            require_current_base(session, payload.baseVersionId)
+            target_version = get_version(database, session_id, payload.baseVersionId)
+            if target_version is None:
+                raise ApiError(404, "VERSION_NOT_FOUND", "The selected Stage was not found.")
+            historical_target = target_version["id"] != session["current_version_id"]
+            if historical_target and payload.rows is not None:
+                raise ApiError(
+                    409,
+                    "HISTORICAL_FINALIZE_ROWS_NOT_ALLOWED",
+                    "An unsaved draft can only finalize the current Stage.",
+                )
             pending = database.execute(
                 """
-                SELECT COUNT(*) FROM change_proposals
+                SELECT id FROM change_proposals
                 WHERE session_id = ? AND status = 'pending'
                 """,
                 (session_id,),
-            ).fetchone()[0]
+            ).fetchall()
 
-            if pending and not deadline_expired:
+            if pending and not deadline_expired and not historical_target:
                 raise ApiError(409, "PENDING_PROPOSAL", "Decide the pending proposal first.")
 
             final_version_id = payload.baseVersionId
@@ -6173,6 +6182,26 @@ def finalize_session(
                     deadline_stage_version_id = final_version_id
                     session = get_session(database, session_id)
             now = utc_now()
+            if historical_target and pending:
+                pending_proposal_ids = [row["id"] for row in pending]
+                database.execute(
+                    """
+                    UPDATE change_proposals
+                    SET status = 'superseded', decided_at = ?
+                    WHERE session_id = ? AND status = 'pending'
+                    """,
+                    (now, session_id),
+                )
+                record_event(
+                    database,
+                    session_id,
+                    "pending_proposals_superseded_by_historical_finalization",
+                    {
+                        "finalVersionId": final_version_id,
+                        "proposalIds": pending_proposal_ids,
+                    },
+                    now,
+                )
             database.execute(
                 """
                 UPDATE design_sessions

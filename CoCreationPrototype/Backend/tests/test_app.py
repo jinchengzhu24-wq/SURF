@@ -997,6 +997,10 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('void ensureVisibleTranslations()', js_response.text)
         self.assertNotIn('withBusy(ensureVisibleTranslations)', js_response.text)
         self.assertIn('chatRetryPending', js_response.text)
+        self.assertIn('const selectedHistoricalStage = state.selectedVersionId !== state.session.currentVersionId;', js_response.text)
+        self.assertIn('!selectedHistoricalStage && !expired && (state.dirty || pending)', js_response.text)
+        self.assertIn('const targetVersionId = state.selectedVersionId;', js_response.text)
+        self.assertIn('rows: deadlineExpired() && targetIsCurrent ? state.draftRows : null', js_response.text)
         self.assertIn('chatBusyVersionId: ""', js_response.text)
         self.assertIn('state.chatBusyVersionId = pending.baseVersionId;', js_response.text)
         self.assertIn(

@@ -3482,6 +3482,137 @@ class CoCreationSessionTests(unittest.TestCase):
             "I wanted a compact introductory puzzle.",
         )
 
+    def test_historical_stage_can_be_finalized_and_sent_to_the_opponent(self):
+        stage_one = self.read_session()["currentVersionId"]
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": stage_one,
+                "idempotencyKey": "historical_final_stage_two_001",
+                "summary": "Create a later Stage.",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        stage_two = saved.json()["currentVersionId"]
+
+        with patch.object(backend, "synchronize_cocreation_event_with_online_match") as sync:
+            finalized = self.client.post(
+                f"/api/sessions/{self.session_id}/finalize",
+                json={
+                    "baseVersionId": stage_one,
+                    "idempotencyKey": "historical_final_stage_one_001",
+                },
+            )
+
+        self.assertEqual(finalized.status_code, 200, finalized.text)
+        self.assertEqual(finalized.json()["status"], "awaiting_intention")
+        self.assertEqual(finalized.json()["currentVersionId"], stage_two)
+        self.assertEqual(finalized.json()["finalVersionId"], stage_one)
+        event = sync.call_args.args[1]
+        self.assertEqual(event["eventType"], "final")
+        self.assertEqual(event["versionId"], stage_one)
+        self.assertEqual(event["rows"], SAMPLE_ROWS)
+
+        intention = self.client.post(
+            f"/api/sessions/{self.session_id}/intention",
+            json={
+                "content": "I chose the earlier route structure.",
+                "idempotencyKey": "historical_final_intention_001",
+            },
+        )
+        self.assertEqual(intention.status_code, 200, intention.text)
+        integration = self.client.get(
+            f"/api/integrations/sessions/{self.session_id}",
+            headers={"Authorization": f"Bearer {self.integration_token}"},
+        )
+        self.assertEqual(integration.json()["finalRows"], SAMPLE_ROWS)
+
+    def test_historical_finalization_supersedes_pending_proposals(self):
+        stage_one = self.read_session()["currentVersionId"]
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": stage_one,
+                "idempotencyKey": "historical_pending_stage_two_001",
+                "summary": "Create a later Stage.",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        stage_two = saved.json()["currentVersionId"]
+        with repository.connect(immediate=True) as database:
+            database.execute(
+                """
+                INSERT INTO change_proposals(
+                    id, session_id, base_version_id, proposed_rows_json, summary,
+                    diff_json, validation_json, status, assistant_turn_id,
+                    idempotency_key, created_at, decided_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL)
+                """,
+                (
+                    "historical-final-pending-proposal",
+                    self.session_id,
+                    stage_two,
+                    repository.dump_json(EDITED_ROWS),
+                    "Pending later-Stage proposal",
+                    "[]",
+                    repository.dump_json(backend.validate_and_solve(EDITED_ROWS).as_dict()),
+                    "historical-final-pending-turn",
+                    "historical-final-pending-key",
+                    backend.utc_now(),
+                ),
+            )
+
+        finalized = self.client.post(
+            f"/api/sessions/{self.session_id}/finalize",
+            json={
+                "baseVersionId": stage_one,
+                "idempotencyKey": "historical_final_with_pending_001",
+            },
+        )
+        self.assertEqual(finalized.status_code, 200, finalized.text)
+        self.assertEqual(finalized.json()["finalVersionId"], stage_one)
+        self.assertEqual(finalized.json()["proposals"][0]["status"], "superseded")
+        with repository.connect() as database:
+            event = database.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE session_id = ?
+                  AND event_type = 'pending_proposals_superseded_by_historical_finalization'
+                """,
+                (self.session_id,),
+            ).fetchone()
+        self.assertIsNotNone(event)
+        self.assertEqual(repository.load_json(event["payload_json"])["finalVersionId"], stage_one)
+
+    def test_historical_finalization_rejects_unsaved_current_rows(self):
+        stage_one = self.read_session()["currentVersionId"]
+        saved = self.client.post(
+            f"/api/sessions/{self.session_id}/versions",
+            json={
+                "rows": EDITED_ROWS,
+                "baseVersionId": stage_one,
+                "idempotencyKey": "historical_rows_stage_two_001",
+                "summary": "Create a later Stage.",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+
+        rejected = self.client.post(
+            f"/api/sessions/{self.session_id}/finalize",
+            json={
+                "baseVersionId": stage_one,
+                "idempotencyKey": "historical_rows_final_001",
+                "rows": EDITED_ROWS,
+            },
+        )
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+        self.assertEqual(rejected.json()["code"], "HISTORICAL_FINALIZE_ROWS_NOT_ALLOWED")
+        session = self.read_session()
+        self.assertEqual(session["status"], "active")
+        self.assertIsNone(session["finalVersionId"])
+
     def test_manual_stage_and_final_are_synchronized_as_compact_flow_events(self):
         initial_version_id = self.read_session()["currentVersionId"]
         with patch.object(backend, "synchronize_cocreation_event_with_online_match") as sync:

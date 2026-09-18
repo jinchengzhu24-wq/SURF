@@ -94,6 +94,8 @@ journalctl -u sokoban-cocreation -f
 
 每个 Stage 是同一关卡的版本快照。新 Stage 通过 `parentVersionId` 连接父 Stage，保存父 Stage 的最新地图和 DesignContext 副本，再追加本次事件；父快照保持不变。历史 Stage 只读取自己的 lineage，不会看到后续 Stage 的回答、记忆、忽略/恢复状态或证据。
 
+历史 Stage 保持聊天和编辑只读，但可以试玩、作为新 Stage 的恢复来源，或直接确认为最终 Stage。直接确认历史 Stage 不会创建副本；它会保留当前 Stage 的 lineage，将 `finalVersionId` 指向所选历史版本，并在填写设计意图后由现有 Unity 流程把该版本交给对手。若当前 Stage 仍有待处理的 AI 提案，选择历史 Stage 为最终版本会将这些提案归档为 `superseded`。
+
 每个 `level_versions.design_context_json` 快照可包含：
 
 - 用户目标 `userGoals` 和设计约束 `designConstraints`；
