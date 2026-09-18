@@ -1,46 +1,21 @@
-# Sokoban AI Demo 部署说明
+# Sokoban AI Demo 服务器运维与部署
 
-当前线上地址：
+本文只记录服务器、反向代理、进程托管、发布和回滚信息。产品流程、共创规则和 Unity 场景说明见 [README.md](README.md)。
+
+## 公网入口
+
+正式入口统一使用 HTTPS 根域名：
 
 ```text
-https://sokobanaidemo.top/frontend/
 https://sokobanaidemo.top/game/
-https://sokobanaidemo.top/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf
+https://sokobanaidemo.top/frontend/
 https://sokobanaidemo.top/cocreation/
-
-https://v.wjx.cn/vm/YXvrnKg.aspx#
-https://v.wjx.cn/vm/O6tj8nu.aspx#
+https://sokobanaidemo.top/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf
 ```
 
-端口说明：`8000` 是 Nginx 转发的内部匹配、dashboard 和 WebGL 上游端口，`8010` 是 Nginx 转发的内部共创服务端口；Cloudflare 对外提供 443 HTTPS，源站由 Nginx 通过受控 HTTP 端口接收代理请求，因此公开地址不带 `:8000`、`:8010` 或源站端口。正式入口为 `https://sokobanaidemo.top/game/`、`https://sokobanaidemo.top/frontend/` 和 `https://sokobanaidemo.top/cocreation/`。
+Cloudflare 对外提供 443 HTTPS，源站通过 HTTP 回源。`www`、旧 IP 和其他非规范 Host 由 Nginx 保留路径并返回 `308` 到根域名；公开链接不使用 8000、8010 或 16384 端口。SSH、SCP 和运维登录仍使用服务器 IP，不使用公网域名。
 
-从 WebGL 页面底部的 `DATA DASHBOARD` 按钮进入 Dashboard 时，会先在游戏页面内显示访问密码框；密码通过 8000 的 `/verify-dashboard-password` 校验成功后，才打开 `/frontend/`。取消或校验失败都不会跳转。Dashboard 内的删除/清空操作仍会再次要求原删除密码。直接访问 `/frontend/` 不经过 WebGL 入口时保持原行为。
-
-当前在线路线为 `Menu → Online1 → Online_Lobby → Match_Briefing → DG → DG_Level → CoCreation_Entry → 8010 → Challenge_Waiting → Online_Level → Match_Result → Online2`。Online1 的隐藏第 5 题使用 `q5=<studySessionId>`，Online2 的隐藏第 22 题使用 `q22=<studySessionId>`；问卷通过玩家 `studySessionId` 与 Dashboard 中的玩家记录人工核对，`matchId` 用于识别比赛。Unity Draft 场景已退役，但 8000 Dashboard 仍保留不可变的 `Draft` 研究记录节点。
-
-DG 目前使用四道中立地图问题：首步检查、推箱依赖、空间分布和路线结构。Q1/Q2 只推断 Difficulty，Q3/Q4 只推断 Layout；AI 会返回 reflection、理由和建议，完整链路写入 8000 Draft，不传入 8010。双 `no_preference` 时对应建议保持 `Random`；AI 仅可在明确冲突时将确定性基准上下调整一档。
-
-8000 共创流程仅从 `Menu` 在线入口启动、且玩家在 8010 成功产生 `first_stage` 后才正式记录。DG 中确认 Draft 但未进入 8010 的合格玩家只保留房间生命周期内的临时设置，不写入流程 JSONL；收到 `first_stage` 时才按 Draft → First Stage 顺序落盘。未从 Menu 启动的玩家不写匹配生命周期或共创流程 JSONL；其 8010 同步成功但被直接丢弃，不会中断工作台。Dashboard 默认只显示至少一位玩家同时具有 Menu 起点标记与 `first_stage` 的比赛；缺少新标记的旧记录不会显示。达到门槛但未完整结束的比赛仍显示实际的 `In progress`、`Expired` 或 `Cancelled` 状态，只有两位玩家都提交结果才标记为 `Completed`。Final Stage 对手游玩中的 `R` 重开次数通过 `restartCount` 记录，并在 Challenge maps、Compare player challenges 和 Final map 的 `Opponent restarts` 中显示；旧结果缺少该字段时显示 `-`。
-
-8010 的统一地图校验要求固定尺寸与合法符号、恰好一名玩家、一至两个箱子且目标数相同、封闭的外墙及 Sokoban 可解。地图可为不规则轮廓并在画布外围保留空白 void；从画布外部或外围 void 只能接触连续的 `#` 墙，地面、玩家、箱子、目标和水域 `@` 都不能作为外墙。发现破口时返回 `OPEN_OUTER_WALL` 和首个破口的行、列坐标。8010 地图修改的失败分为两类：模型/传输错误（超时、连接失败、空响应、非法 JSON 等）第一次返回 `retryable=true`，前端用同一消息幂等键提供一次 Retry；再次失败后保存手动编辑/继续讨论的说明，不再提供 Retry。若已得到有效 `RevisionPlan`，但确定性搜索找不到同时满足要求且可解的候选，则返回 200 的助手说明和 `warning` 提示，不创建提案、不放宽要求、不改变当前 Stage，也不显示 Retry。说明会邀请玩家亲自在编辑器调整，或继续与 AI 商讨如何缩小或重新表述目标。零候选仍会先执行一次内部结构修正；旧会话已保存的 `relaxationOffer` 仍可按旧逻辑读取和确认，但新失败请求不再创建放宽流程。
-
-Online Lobby 的生成房间码位于静态浏览器只读输入框中，可选中后手动复制；加入房间输入框支持粘贴并规范化为六位字母数字码。两个输入框通过 `BrowserNavigation.jslib` 与 Unity 同步，不使用 `COPY CODE` 按钮。若修改此模板或其桥接代码，必须重新构建并上传完整 `WebGLBuild/`。
-
-8000 Dashboard 的 Match ID 和两位玩家 Study Session ID 默认显示前 8 位，复制按钮复制完整值，搜索支持完整值及短值；每个流程节点的 Record details 都显示两位玩家的 Study Session ID。Final map 显示共创耗时，Result submitted 和挑战地图详情继续显示对手游玩时长。Dashboard 不再显示已淘汰的 `AI assistant` 模式，`Designer intention` 的用户可见标签统一为 `Message`；兼容字段仍保留在后端原始记录中。
-
-8010 普通聊天会对明显的求助请求做确定性卡片路由：已有具体体验目标或修改方向、并请求建议、方案或修改方法时，优先返回 `proposalOffer` 修改建议卡；没有明确方向、表现出迷茫并请求思路时，优先返回 `followUpQuestion` 聊聊卡。两者同时满足时修改建议优先。“帮我改”但没有方向仍沿用 `MANUAL_EDIT` 引导；修改建议卡不会自动改图，只有用户继续明确授权后才进入地图提案和确定性验证。该分类仅用于选择现有卡片，不新增公开 API 字段；服务日志只记录分类名称和最终卡片类型。
-
-## 端口速查
-
-```text
-80    = HTTP 默认端口（Nginx 公网入口）
-443   = HTTPS 默认端口
-8000  = FastAPI 常用端口之一（匹配、dashboard 和 WebGL 上游服务）
-8010  = 共创服务使用的内部端口
-22    = SSH 常用端口
-```
-
-服务器项目目录：
+当前服务器项目目录：
 
 ```text
 /root/SURF
@@ -52,317 +27,158 @@ Online Lobby 的生成房间码位于静态浏览器只读输入框中，可选�
 D:\Sokoban_AI_Demo
 ```
 
-## 更新方式总览
-
-现在主要分四种情况：
-
-1. 只改数据前端：用本地 Windows CMD 的 `scp` 上传 `Frontend` 文件，然后刷新浏览器。
-2. 改了后端，并且服务器能连 GitHub：本地 push 后，在服务器运行 `deploy_github`。
-3. 改了后端，但 GitHub 不稳定或不想用 GitHub：本地用 `scp` 上传文件，然后在服务器运行 `deploy_scp`。
-4. 只改网页游戏：Unity 重新构建后上传整个 `WebGLBuild`，不需要上传 Unity 工程源码。
-
-## 网页游戏需要同步哪些文件
-
-本次首次部署网页游戏时，必须同步：
-
-| 本地文件或目录 | 服务器位置 | 作用 |
-| --- | --- | --- |
-| `Backend/app.py` | `/root/SURF/Backend/app.py` | 提供 `/game/` 静态路由和 WebGL MIME 类型 |
-| `WebGLBuild/` | `/root/SURF/WebGLBuild/` | Unity 生成的完整网页游戏 |
-
-如果同时修改了数据 Dashboard，还需要按实际改动同步：
+## 端口与进程
 
 ```text
-Frontend/index.html
-Frontend/app.js
-Frontend/matchmaking.js
-Frontend/styles.css
-Frontend/Images/
+22    SSH
+80    源站 Nginx HTTP 监听
+16384 源站 Nginx 额外回源/测试监听
+443   Cloudflare HTTPS 边缘端口（源站不直接监听）
+8000  sokoban-backend，FastAPI 匹配、Dashboard 和 WebGL 上游
+8010  sokoban-cocreation，8010 共创服务上游
 ```
 
-如果修改了 WebGL 页面底部的 `DATA DASHBOARD` 链接、访问密码框、房间码原生输入或其桥接，还需要用 Unity 重新构建并同步完整 `WebGLBuild/`；入口来自 `Assets/WebGLTemplates/SokobanPixel/index.html`。
+Nginx 将 `/game/`、`/frontend/` 和根 API 转发到 `127.0.0.1:8000`，将 `/cocreation/` 转发到 `127.0.0.1:8010`。用户不应直接访问 8000、8010 或 16384。
 
-以下文件只参与本地 Unity 开发或构建，不需要上传服务器：
+## systemd 服务
+
+两个 Python 服务由 systemd 托管，已设置开机启动，并在异常退出后自动重启。不要在 SSH 会话里另外启动常驻的 `python app.py` 或 `uvicorn`，否则会与托管进程争抢端口。
+
+| 服务 | 工作目录 | 端口 | 生产配置 |
+| --- | --- | ---: | --- |
+| `sokoban-backend` | `/root/SURF/Backend` | 8000 | `/root/SURF/Backend/.env` |
+| `sokoban-cocreation` | `/root/SURF/CoCreationPrototype/Backend` | 8010 | `/root/SURF/CoCreationPrototype/Backend/.env` |
+
+常用命令：
+
+```bash
+systemctl status sokoban-backend sokoban-cocreation nginx
+systemctl is-enabled sokoban-backend sokoban-cocreation
+systemctl restart sokoban-backend
+systemctl restart sokoban-cocreation
+systemctl reload nginx
+```
+
+查看最近日志或持续跟踪：
+
+```bash
+journalctl -u sokoban-backend --since "1 hour ago"
+journalctl -u sokoban-cocreation --since "1 hour ago"
+journalctl -u nginx --since "1 hour ago"
+journalctl -u sokoban-cocreation -f
+```
+
+生产环境变量中的公开地址应保持：
 
 ```text
-Assets/WebGLTemplates/
-Assets/Scripts/
-Assets/Scenes/
-ProjectSettings/
-Packages/
-Library/
-Temp/
-deploy_scp.ps1
+COCREATION_PUBLIC_BASE_URL=https://sokobanaidemo.top/cocreation
+COCREATION_WEBGL_BASE_URL=https://sokobanaidemo.top/game/
+COCREATION_ALLOWED_ORIGINS=https://sokobanaidemo.top,https://www.sokobanaidemo.top
+COCREATION_ONLINE_MATCH_SYNC_URL=http://127.0.0.1:8000
 ```
 
-其中，`deploy_scp.ps1` 是在本地 Windows 上执行的上传脚本；服务器上的 `deploy_scp` 是另一个用于重启后端的 Linux 脚本。
+不要把 `.env`、API Key、SQLite 数据库或研究日志提交到 Git。
 
-推荐先在 Unity 中重新构建：
+## Nginx 配置
+
+仓库中的配置模板：
 
 ```text
-D:\Sokoban_AI_Demo\WebGLBuild
+CoCreationPrototype/Deployment/nginx-sokoban.conf
 ```
 
-然后在本地 PowerShell 执行：
+配置要点：
+
+- 源站监听 80 和 16384，不在源站配置证书或 `listen 443`。
+- Cloudflare 的 `X-Forwarded-Proto: https` 被转换为公开协议；非 HTTPS 公网请求返回 `308` 到 `https://sokobanaidemo.top$request_uri`。
+- `/cocreation/` 的长请求使用 320 秒代理预算。
+- 共创入口 HTML 使用 `no-cache, must-revalidate`；带版本号的 JS/CSS/WebGL 资源可缓存。
+
+修改 Nginx 后先检查再加载：
+
+```bash
+nginx -t
+systemctl reload nginx
+```
+
+## 发布方式
+
+### 8000 后端、Dashboard 或 WebGL
+
+本地 `deploy_scp.ps1` 会上传 8000 后端文件、`Frontend/` 和完整 `WebGLBuild/`；它不会上传 8010，也不会替代 systemd。
 
 ```powershell
 cd D:\Sokoban_AI_Demo
 .\deploy_scp.ps1
 ```
 
-该脚本会同步核心后端文件、数据前端和完整的 `WebGLBuild`。首次加入 `/game/` 路由后，还需要在服务器执行：
+脚本默认通过 SSH/SCP 连接服务器 IP。上传后按修改范围操作：
 
 ```bash
-cd /root/SURF
-./deploy_scp
+# 修改 Backend 或 requirements.txt 后
+/root/SURF/Backend/venv/bin/python -m pip install -r /root/SURF/Backend/requirements.txt
+systemctl restart sokoban-backend
+
+# 只修改 Frontend 或 WebGLBuild 时无需重启 Python 服务
 ```
 
-以后如果只更新了 Unity 游戏或 WebGL 页面模板，只需重新构建并上传 `WebGLBuild`，通常不需要重启后端。上传后访问：
+Unity WebGL 必须由用户使用项目规定的 Unity 版本构建后，上传完整 `WebGLBuild/`；不要只上传单个 loader、wasm 或 data 文件。当前发布缓存键为 `iframe-host-v5-20260918-2`。
 
-```text
-https://sokobanaidemo.top/game/
-```
+### 8010 共创服务
 
-如仍显示旧版本，使用 `Ctrl + F5` 强制刷新。
-
-## 情况一：只改数据前端
-
-适用文件：
-
-```text
-Frontend/index.html
-Frontend/app.js
-Frontend/matchmaking.js
-Frontend/styles.css
-```
-
-在 Windows CMD 里执行：
-
-```cmd
-scp D:\Sokoban_AI_Demo\Frontend\index.html root@111.231.136.4:/root/SURF/Frontend/index.html
-scp D:\Sokoban_AI_Demo\Frontend\app.js root@111.231.136.4:/root/SURF/Frontend/app.js
-scp D:\Sokoban_AI_Demo\Frontend\matchmaking.js root@111.231.136.4:/root/SURF/Frontend/matchmaking.js
-scp D:\Sokoban_AI_Demo\Frontend\styles.css root@111.231.136.4:/root/SURF/Frontend/styles.css
-```
-
-上传完成后，直接刷新：
-
-```text
-https://sokobanaidemo.top/frontend/
-```
-
-如果浏览器仍显示旧样式，按：
-
-```text
-Ctrl + F5
-```
-
-只改数据前端时通常不需要重启后端，也不需要运行服务器脚本。
-
-## 情况二：后端改动走 GitHub
-
-适用情况：
-
-- 改了 `Backend/app.py`
-- 本地已经 `commit` 并 `push`
-- 服务器能正常连接 GitHub
-
-在服务器 OrcaTerm 里执行：
+8010-only 发布前先备份 SQLite，然后只上传变更的 `CoCreationPrototype` 文件；不要使用 8000/WebGL 上传脚本，也不要重置数据库。
 
 ```bash
-cd /root/SURF
-./deploy_github
+cp -a /root/SURF/CoCreationPrototype/Backend/data/cocreation.sqlite3 \
+  /root/SURF/CoCreationPrototype/Backend/data/cocreation.sqlite3.backup-$(date -u +%Y%m%dT%H%M%SZ)
+
+/root/SURF/CoCreationPrototype/Backend/venv/bin/python -m pip install \
+  -r /root/SURF/CoCreationPrototype/Backend/requirements.txt
+systemctl restart sokoban-cocreation
+systemctl status sokoban-cocreation --no-pager
 ```
 
-这个脚本会做这些事：
+正式实验进行中不要覆盖数据库或切换整套 WebGL/8010 版本。若需要发布 Nginx 配置，先备份 `/etc/nginx`，通过 `nginx -t` 后再 reload。
 
-- 从 GitHub 拉取最新代码
-- 检查 `Backend` 和 `Frontend` 必要文件
-- 停止旧的后端进程
-- 重新启动 uvicorn 后端
-- 检查 `/health`
+## 备份与回滚
 
-如果卡在 `git fetch` 或 `git pull`，说明服务器连接 GitHub 不稳定，改用 `deploy_scp` 方案。
-
-## 情况三：后端改动走 scp
-
-适用情况：
-
-- 改了 `Backend/app.py`
-- 改了 `Backend/llm_runtime.py` 或 `Backend/requirements.txt`
-- GitHub 连接失败或不想依赖 GitHub
-- 想直接把本地文件覆盖到服务器
-
-推荐在本地 PowerShell 里运行项目自带脚本上传前后端文件：
-
-```powershell
-cd D:\Sokoban_AI_Demo
-.\deploy_scp.ps1
-```
-
-说明：
-
-- `.ps1` 是 PowerShell 脚本的标准后缀名，不是自定义后缀。
-- `.\deploy_scp.ps1` 里的 `.\` 表示“当前目录下的这个文件”，这是 Windows PowerShell 的常用写法。
-- 服务器 Linux/bash 里通常写 `./deploy_scp`，因为 Linux 路径分隔符是 `/`。
-
-如果 PowerShell 提示不允许执行脚本，改用：
-
-```powershell
-cd D:\Sokoban_AI_Demo
-powershell -ExecutionPolicy Bypass -File .\deploy_scp.ps1
-```
-
-这个本地脚本会上传：
+发布前至少备份：
 
 ```text
-Backend/app.py
-Backend/llm_runtime.py
-Backend/prompt.py
-Backend/requirements.txt
-Frontend/index.html
-Frontend/app.js
-Frontend/matchmaking.js
-Frontend/styles.css
-Frontend/Images
-WebGLBuild
+/root/SURF/CoCreationPrototype/Backend/data/cocreation.sqlite3
+/root/SURF/CoCreationPrototype/Backend/.env
+/root/SURF/Backend/.env
+/etc/nginx/
+/etc/systemd/system/sokoban-backend.service
+/etc/systemd/system/sokoban-cocreation.service
+/root/SURF/WebGLBuild/
 ```
 
-上传完成后，在服务器 OrcaTerm 里执行：
+回滚时必须成套恢复与版本匹配的 8010 后端、前端/iframe 资源、WebGLBuild、Nginx 配置和环境变量，然后分别重启对应 systemd 服务。不要把旧 IP 版前端、域名版 8010 或不同桥接协议的 WebGLBuild 混用。
+
+## 健康检查与发布验收
 
 ```bash
-cd /root/SURF
-python3 -m pip install -r Backend/requirements.txt
-./deploy_scp
+curl -fsS https://sokobanaidemo.top/health
+curl -fsS https://sokobanaidemo.top/ready
+nginx -t
+systemctl is-active sokoban-backend sokoban-cocreation nginx
 ```
 
-如果不想用 PowerShell 脚本，也可以手动执行下面的 `scp` 命令。
+公网检查：
 
-先在 Windows CMD 上传后端文件：
+- 根域名的 `/game/`、`/frontend/`、`/cocreation/` 返回 200。
+- `www` 和旧 IP 对相同路径返回 308，并保留原路径。
+- 入口 HTML 重新验证缓存；版本化静态资源、Unity loader/data/framework/wasm 返回 200。
+- 浏览器控制台没有 Mixed Content、CORS、Cookie 或 iframe origin 错误。
+- WebGL 与 8010 使用同一发布版本；重生成期间 8000 日志不应新增 LLM 规划请求。
 
-```cmd
-scp D:\Sokoban_AI_Demo\Backend\app.py root@111.231.136.4:/root/SURF/Backend/app.py
-scp D:\Sokoban_AI_Demo\Backend\llm_runtime.py root@111.231.136.4:/root/SURF/Backend/llm_runtime.py
-scp D:\Sokoban_AI_Demo\Backend\prompt.py root@111.231.136.4:/root/SURF/Backend/prompt.py
-scp D:\Sokoban_AI_Demo\Backend\requirements.txt root@111.231.136.4:/root/SURF/Backend/requirements.txt
-```
-
-如果同时改了前端，也一起上传：
-
-```cmd
-scp D:\Sokoban_AI_Demo\Frontend\index.html root@111.231.136.4:/root/SURF/Frontend/index.html
-scp D:\Sokoban_AI_Demo\Frontend\app.js root@111.231.136.4:/root/SURF/Frontend/app.js
-scp D:\Sokoban_AI_Demo\Frontend\matchmaking.js root@111.231.136.4:/root/SURF/Frontend/matchmaking.js
-scp D:\Sokoban_AI_Demo\Frontend\styles.css root@111.231.136.4:/root/SURF/Frontend/styles.css
-```
-
-如果同时更新了网页游戏，先在 Unity 中重新构建，然后上传完整目录：
-
-```cmd
-scp -r D:\Sokoban_AI_Demo\WebGLBuild root@111.231.136.4:/root/SURF/
-```
-
-然后在服务器 OrcaTerm 里执行：
-
-```bash
-cd /root/SURF
-./deploy_scp
-```
-
-注意：`deploy_scp` 不负责上传文件。它只负责检查服务器上已经存在的文件，并重启后端。
-
-## 什么时候需要重启后端
-
-需要运行 `deploy_github` 或 `deploy_scp`：
-
-- 改了 `Backend/app.py`
-- 改了 `Backend/llm_runtime.py`、`Backend/prompt.py` 或 `Backend/requirements.txt`
-- 改了后端启动方式
-- 后端接口没有响应
-- 想让服务器重新加载后端代码
-
-不需要重启后端：
-
-- 只改了 `Frontend/index.html`
-- 只改了 `Frontend/app.js`
-- 只改了 `Frontend/matchmaking.js`
-- 只改了 `Frontend/styles.css`
-- 只重新构建并上传了 `WebGLBuild`
-
-数据前端和 WebGL 构建文件都由后端静态服务直接读取，上传覆盖后刷新浏览器即可。
-
-## 脚本权限
-
-如果运行脚本时出现：
+8010 的普通日志也可通过 systemd 查看；8000 的应用轮转日志位于：
 
 ```text
-Permission denied
+/root/SURF/Backend/logs/backend.log
 ```
 
-在服务器里执行：
+## 不再使用的旧方式
 
-```bash
-cd /root/SURF
-chmod +x deploy_github deploy_scp
-```
-
-也可以直接用 bash 运行：
-
-```bash
-bash deploy_github
-bash deploy_scp
-```
-
-## 后端状态与运维日志
-
-重启后依次检查：
-
-```text
-https://sokobanaidemo.top/health
-https://sokobanaidemo.top/ready
-```
-
-`/health` 表示进程可访问；`/ready` 还会检查 API Key、模型配置和日志目录。运维日志位于 `Backend/logs/backend.log`，单文件 5 MB，保留 5 份轮转文件。当前后端只能使用一个 Uvicorn worker。
-
-完整错误码和排查方法见 [Old_md/LLM_ERRORS.md](Old_md/LLM_ERRORS.md)。
-
-## Tutorial PDF 静态资源
-
-`Frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf` 由现有 `/frontend/` 静态路由公开为 `https://sokobanaidemo.top/frontend/tutorial/Sokoban_Tutorial_Bilingual.pdf`。浏览器会直接使用内置 PDF 查看器在线打开；只更新教程文件时，上传该目录即可，无需重启 8000 服务。Menu 按钮事件的改动需随下一次 WebGL 构建发布。
-
-## DG Draft research record
-
-The 8000 `POST /online/rooms/{match_id}/draft` record now keeps the four DG answer codes,
-the AI reflection and both recommendation rationales, the AI recommendation and source, and
-the user's final difficulty and layout. Older clients remain compatible; incomplete records
-are marked `draftMetadataComplete: false`. See the current question list in
-`Draft_question.md` and the bilingual prompt specification in `Draft_prompt.md`.
-
-DG 的 Difficulty 仅由 Q1/Q2 计算，Layout 仅由 Q3/Q4 计算。每组先按低/中/高方向得到确定性基准：相邻冲突取对应端点，跨两级冲突取中间档；单题 `no_preference` 使用另一题，两题均为 `no_preference` 才是 `Random`。只有两题明确冲突时，AI 可以在该基准上下调整一档；同方向或无偏好时不得调整。Draft 记录实际 AI 推荐值，基准值可由四个答案重新计算。
-
-The 8010 co-creation `final` flow event also carries `coCreationDurationSeconds`, calculated
-from the 20-minute deadline that starts only when the user enters co-creation and the current
-Draft is promoted to Stage 1. It is capped at 1200 seconds after timeout. The 8000 dashboard shows this value as
-`Co-creation time` in the `Final map` details. Opponent-level play time remains the existing
-Match Result `result_submitted.durationSeconds` record and is shown in the Result submitted
-details and the corresponding challenge map details; it is not duplicated on Final map.
-
-## 8010 直访问单次测试模式
-
-直接访问 `https://sokobanaidemo.top/cocreation/` 时，页面不读取旧的浏览器 `localStorage`
-会话，也不加载上一轮的对话、Stage 或地图记录；它会自动创建新的演示会话。创建期间已显示
-统一的 Draft 地图区域、弯曲箭头旋转动画，以及禁用的“重新生成”和“进入共创流程”按钮。
-8010 后端参考 Unity `Algorithm_Level` 的结构模板、墙体/水域布局和反向拉箱流程生成 10×12、
-两箱、两目标的可解 Draft，并在同一页面原位替换加载动画。演示标题为“算法生成的首版 Draft”；
-正式 Unity 会话显示“AI 规划并生成的首版 Draft”，且只沿用既有 LLM 蓝图和 Unity 验证链路。
-进入前可点击“重新生成”，8010 只保留最新候选；点击“进入共创流程”后才固化 Stage 1 并开始首轮 AI 对话；
-刷新带有当前会话 hash 的 URL 可以继续测试。
-演示会话只保存在 8010，不调用 8000 同步接口，不创建正式 deadline，也不写入正式匹配的
-`coCreationDurationSeconds`。演示页面没有倒计时，完成后不显示“返回 Unity 继续”。
-每次新演示会话创建成功后只保留最新一轮演示记录；正式 Unity 会话和正式研究数据不受影响，
-新地图或新会话失败时保留上一轮记录。当前静态资源缓存键为
-`iframe-host-v5-20260918-1`。正式 WebGL 共创只使用 `/game/` 内的全屏 8010 iframe；
-Unity 与工作台之间通过版本 5 的同页宿主消息切换，iframe、试玩和 Draft 重生成分别维护 ready 状态，
-不再保留独立页面、`window.opener` 或后台标签页 `focus()` 操作链路。正常工作台不显示刷新控件；只有握手故障遮罩中的“重新尝试”会重建 iframe 并附加发布版本与刷新 nonce，
-入口 HTML 使用 `no-cache, must-revalidate`。重生成的 pending/claimed 租约分别为 60/120 秒，8010 后台每 10 秒主动扫描，
-浏览器消息 ACK 仅表示投递，8010 持久任务状态是终态依据。
+服务器端 `deploy_github`、`deploy_scp` 和手动常驻 `uvicorn` 不再是当前发布链路；不要根据旧笔记执行这些命令。当前唯一的进程重启入口是 systemd，当前唯一的本地批量上传脚本是 `deploy_scp.ps1`。

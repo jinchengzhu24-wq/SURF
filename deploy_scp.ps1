@@ -61,5 +61,7 @@ foreach ($file in $files) {
 
 Write-Host ""
 Write-Host "Upload complete."
-Write-Host "Next, run this on the server:"
-Write-Host "cd $RemoteRoot && python3 -m pip install -r Backend/requirements.txt && ./deploy_scp"
+Write-Host "If Backend files changed, run on the server:"
+Write-Host "/root/SURF/Backend/venv/bin/python -m pip install -r /root/SURF/Backend/requirements.txt"
+Write-Host "systemctl restart sokoban-backend"
+Write-Host "WebGLBuild and Frontend-only changes do not require a Python restart."

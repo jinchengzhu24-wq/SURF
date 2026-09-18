@@ -32,12 +32,33 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 
 ## 系统边界与当前实现
 
-- 唯一正式公网入口为 `https://sokobanaidemo.top/game/`、`https://sokobanaidemo.top/frontend/` 和 `https://sokobanaidemo.top/cocreation/`；HTTP、`www` 和旧 IP 永久跳转到 HTTPS 根域名。WebGL 运行时从当前页面 origin 解析首方地址，公开链接不使用 `:8000` 或 `:8010`。
+- 唯一正式公网入口为 `https://sokobanaidemo.top/game/`、`https://sokobanaidemo.top/frontend/` 和 `https://sokobanaidemo.top/cocreation/`；Cloudflare 对外提供 HTTPS，HTTP、`www` 和旧 IP 统一跳转到 HTTPS 根域名。WebGL 运行时从当前页面 origin 解析首方地址，公开链接不使用 `:8000` 或 `:8010`。
 - DG 使用四道中立地图设计问题：首步检查、推箱依赖、空间分布和路线结构。Q1–Q2 只用于 8000 的难度建议，Q3–Q4 只用于 8000 的布局建议；DG context 不会传入 8010 或其 LLM 上下文。
 - 8000 的两个 Agent 使用 `deepseek-v4-flash`；8010 的聊天助手、关卡修改助手、Stage 开场、翻译、Revision 和意图反馈审查使用 Kimi `kimi-k2.6`。8010 不读取或回退到 8000 的 DeepSeek 环境变量。
 - `Draft` 场景已退役。`PC`、`PC_Design` 和 `PC_Level` 仅作为历史实现资产保留，不在当前 Build Settings 或在线导航中。
 - 8010 正式 Unity 会话在用户点击“进入共创流程”、最新 Draft 被原子固化为 Stage 1 后才启动服务端 deadline，当前为 20 分钟。浏览首版 Draft、刷新页面和重新生成均不计时。到期后聊天、编辑、保存、恢复、试玩和提案锁定，只保留最终 Stage 提交；提交时可将当前可解的本地草稿原子保存为最终 `human_edit` Stage。
 - 直接访问 `/cocreation/` 创建的是独立演示会话，不启动 deadline、不同步 8000，也不写入正式匹配记录。
+
+## 服务器运行与部署
+
+线上 Python 服务由 systemd 托管，不需要在 SSH 会话中手动常驻运行 `python app.py` 或 `uvicorn`：
+
+- `sokoban-backend`：8000 服务，工作目录 `/root/SURF/Backend`。
+- `sokoban-cocreation`：8010 共创服务，工作目录 `/root/SURF/CoCreationPrototype/Backend`，读取该目录的生产 `.env`。
+
+两个服务均已设置为开机启动，并在异常退出后自动重启。源站 Nginx 监听 80 和 16384，Cloudflare 对外提供 443 HTTPS；用户应使用上面的域名入口，不直接访问 8000、8010 或 16384。
+
+常用运维命令：
+
+```bash
+systemctl status sokoban-backend sokoban-cocreation nginx
+systemctl restart sokoban-backend
+systemctl restart sokoban-cocreation
+journalctl -u sokoban-backend -f
+journalctl -u sokoban-cocreation -f
+```
+
+只改 8000 后端时重启 `sokoban-backend`，只改 8010 后端时重启 `sokoban-cocreation`；只改静态前端或已构建的 WebGL 文件时不重启 Python 服务。部署前应备份 8010 SQLite 和生产 `.env`。完整上传、回滚和公网检查见 [SERVER.md](SERVER.md)。
 
 ## 8010 工作台规则
 
