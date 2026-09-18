@@ -997,6 +997,14 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('void ensureVisibleTranslations()', js_response.text)
         self.assertNotIn('withBusy(ensureVisibleTranslations)', js_response.text)
         self.assertIn('chatRetryPending', js_response.text)
+        self.assertIn('chatBusyVersionId: ""', js_response.text)
+        self.assertIn('state.chatBusyVersionId = pending.baseVersionId;', js_response.text)
+        self.assertIn(
+            'state.chatBusyVersionId === state.selectedVersionId;',
+            js_response.text,
+        )
+        self.assertIn('elements.typingRow.hidden = !selectedStageChatBusy;', js_response.text)
+        self.assertIn('state.chatBusyVersionId = "";', js_response.text)
         self.assertIn('scheduleAssessmentRetry(versionId)', js_response.text)
         self.assertNotIn('scheduleChatRetry()', js_response.text)
         self.assertIn('state.chatStatus = "error";', js_response.text)

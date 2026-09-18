@@ -59,6 +59,7 @@ This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, an
 - The 8010 `final` event records server-derived `coCreationDurationSeconds` in the 0–1200 second range; opponent play time remains the 8000 `result_submitted.durationSeconds` field.
 - When a requested change is safely deployable to the server, deploy it autonomously after verification. Do not build WebGL autonomously; if a WebGL build is required, ask the user to build or provide it, then upload that build when requested.
 - For an 8010-only deployment, back up its SQLite database, upload only changed `CoCreationPrototype` files, and restart `sokoban-cocreation`. Never use `/root/SURF/deploy_scp` for an 8010-only change.
+- From Windows, production SSH and SCP must explicitly use the non-default private key `%USERPROFILE%\.ssh\sokoban` with `IdentitiesOnly=yes` (for example, `ssh -i "$env:USERPROFILE\.ssh\sokoban" -o IdentitiesOnly=yes root@111.231.136.4`). Do not rely on OpenSSH's default `id_*` key discovery, and never upload or print the private key.
 - For a WebGL update, use Unity `2022.3.62f2c1` only when the user has built or explicitly requested the build, bump the WebGL template cache key when browser assets can be stale, upload `WebGLBuild/`, and verify the public index plus loader/data/framework/wasm responses. Uploading `Frontend/tutorial/` alone does not require an 8000 restart.
 - Do not commit `.env`, API keys, SQLite databases, research logs, Unity caches, or generated WebGL output. Preserve unrelated user changes in a dirty worktree.
 

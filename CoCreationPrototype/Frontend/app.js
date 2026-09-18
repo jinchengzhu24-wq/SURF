@@ -580,6 +580,7 @@ const state = {
     selectedTile: ".",
     busy: false,
     chatBusy: false,
+    chatBusyVersionId: "",
     chatStatus: "idle",
     chatError: null,
     chatStartedAt: 0,
@@ -2402,8 +2403,10 @@ function updateControls() {
         button.disabled = interactionBusy || !editable
             || state.questionFeedbackBusy.has(button.dataset.feedbackKey || "");
     });
-    elements.sendButton.textContent = state.chatBusy ? t("sending") : t("send");
-    elements.typingRow.hidden = !state.chatBusy;
+    const selectedStageChatBusy = state.chatBusy
+        && state.chatBusyVersionId === state.selectedVersionId;
+    elements.sendButton.textContent = selectedStageChatBusy ? t("sending") : t("send");
+    elements.typingRow.hidden = !selectedStageChatBusy;
 }
 
 function renderChatRequestStatus() {
@@ -2566,6 +2569,7 @@ async function submitPendingMessage() {
 
     state.busy = true;
     state.chatBusy = true;
+    state.chatBusyVersionId = pending.baseVersionId;
     state.chatStatus = "waiting";
     state.chatError = null;
     startChatTimer();
@@ -2632,6 +2636,7 @@ async function submitPendingMessage() {
         stopChatTimer();
         state.busy = false;
         state.chatBusy = false;
+        state.chatBusyVersionId = "";
         renderChatRequestStatus();
         updateControls();
     }
