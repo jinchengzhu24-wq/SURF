@@ -2864,6 +2864,56 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("Post-opening progress and route rule", messages[0]["content"])
         self.assertIn("COORDINATE_LINKS", messages[0]["content"])
 
+    def test_chat_compact_experiment_is_opt_in_for_ordinary_chat(self):
+        conversation = [{"role": "user", "content": "What does the opening ask the player to notice?"}]
+        with patch.dict(os.environ, {}, clear=True):
+            disabled = llm_client.build_plain_chat_messages(
+                conversation, OPERATION_BASE_ROWS, validation_mode="ordinary_chat"
+            )[0]["content"]
+        self.assertNotIn("Compact-chat experiment:", disabled)
+
+        with patch.dict(os.environ, {llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "1"}, clear=True):
+            enabled = llm_client.build_plain_chat_messages(
+                conversation, OPERATION_BASE_ROWS, validation_mode="ordinary_chat"
+            )[0]["content"]
+        self.assertIn("Compact-chat experiment: remove repetition", enabled)
+        self.assertIn("State each design judgment once", enabled)
+        self.assertIn("valid current-Stage fact", enabled)
+
+    def test_chat_compact_experiment_keeps_route_discussion_grounding_rules(self):
+        conversation = [{"role": "user", "content": "How does the route from B1 to T1 shape the first push?"}]
+        with patch.dict(os.environ, {llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "true"}, clear=True):
+            prompt = llm_client.build_plain_chat_messages(
+                conversation, ENTITY_ROUTE_ROWS, validation_mode="route_discussion"
+            )[0]["content"]
+        self.assertIn("Compact-chat experiment:", prompt)
+        self.assertIn("at most one concise passage per distinct route judgment", prompt)
+        self.assertIn("at most two concise route passages", prompt)
+        self.assertIn("authoritative endpoints", prompt)
+
+    def test_chat_compact_experiment_does_not_change_protected_prompt_branches(self):
+        with patch.dict(os.environ, {llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "on"}, clear=True):
+            opening = llm_client.build_plain_chat_messages(
+                [], OPERATION_BASE_ROWS, stage_opening=True, validation_mode="ordinary_chat"
+            )[0]["content"]
+            proposal = llm_client.build_plain_chat_messages(
+                [{"role": "user", "content": "Suggest a plan."}],
+                OPERATION_BASE_ROWS,
+                validation_mode="edit_request",
+                stage_context={"revisionRouting": "proposal"},
+            )[0]["content"]
+            clarification = llm_client.build_plain_chat_messages(
+                [{"role": "user", "content": "Please help revise this."}],
+                OPERATION_BASE_ROWS,
+                validation_mode="edit_request",
+                stage_context={
+                    "proposalClarification": {"questionKey": "focus"},
+                },
+            )[0]["content"]
+        self.assertNotIn("Compact-chat experiment:", opening)
+        self.assertNotIn("Compact-chat experiment:", proposal)
+        self.assertNotIn("Compact-chat experiment:", clarification)
+
     def test_chat_prompt_carries_confirmed_decisions_and_open_questions_naturally(self):
         stage_context = {
             "progressContext": {

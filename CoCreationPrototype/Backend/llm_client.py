@@ -117,6 +117,7 @@ CHAT_MAX_PARAGRAPHS = 6
 CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
+CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
 PROMPT_VERSION = "cocreation-v57-server-owned-card-evidence"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
@@ -567,6 +568,13 @@ def _request_deadline(started_at=None, budget_seconds=None):
         else float(budget_seconds)
     )
     return base + budget
+
+
+def _chat_compact_experiment_enabled():
+    """Read the opt-in presentation experiment at request-build time."""
+    return os.getenv(CHAT_COMPACT_EXPERIMENT_ENV, "").strip().casefold() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def _remaining_until(deadline):
@@ -1093,6 +1101,13 @@ def build_plain_chat_messages(
         stage_context,
         stage_opening=stage_opening,
     )
+    compact_experiment = bool(
+        _chat_compact_experiment_enabled()
+        and not stage_opening
+        and validation_mode in {"ordinary_chat", "route_discussion"}
+        and guidance_mode in {"none", "discussion"}
+        and not prompt_stage_context.get("proposalClarification")
+    )
     guidance_mode_instruction = _guidance_mode_instruction(guidance_mode)
     action_instruction = _plain_action_instruction(stage_context)
     revision_request_state = stage_context.get("revisionRequestState")
@@ -1323,6 +1338,7 @@ def build_plain_chat_messages(
         post_opening_progress_instruction=post_opening_progress_instruction,
         historical_reference_instruction=historical_reference_instruction,
         validation_mode=validation_mode,
+        compact_experiment=compact_experiment,
     )
     return [
         {"role": "system", "content": system_prompt},
@@ -1524,6 +1540,7 @@ def _compact_kimi_plain_prompt(
     post_opening_progress_instruction,
     historical_reference_instruction="",
     validation_mode="ordinary_chat",
+    compact_experiment=False,
 ):
     """Use the same compact facts/routing contract for text fallback."""
     clarification_count = max(
@@ -1657,6 +1674,18 @@ def _compact_kimi_plain_prompt(
         "more than three tightly related clarification questions and stop early when the direction "
         "becomes sufficient. End with a complete sentence."
     )
+    compact_experiment_instruction = (
+        "Compact-chat experiment: remove repetition before adding detail. State each design "
+        "judgment once, combine one authoritative map fact with its playable consequence in "
+        "the same passage, and do not restate a conclusion in a later summary paragraph. "
+        "Keep one primary design judgment and one concrete first-person reaction when they "
+        "are useful. In route discussion, keep at most one concise passage per distinct "
+        "route judgment and never repeat the same route consequence in another paragraph. "
+        "Do not shorten by dropping a valid current-Stage fact, verified route endpoint, "
+        "or direct response to the designer."
+        if compact_experiment
+        else ""
+    )
     if stage_opening:
         # The recovery prompt must be just as unambiguous as the structured
         # opening contract.  Do not inherit chat's clarification, revision, or
@@ -1696,6 +1725,7 @@ def _compact_kimi_plain_prompt(
         route,
         metadata,
         safety,
+        compact_experiment_instruction,
         (
             f"Clarification budget for this Stage: {clarification_count} related question(s) "
             f"have already been asked; at most {clarification_budget} more may be asked before "
