@@ -1504,6 +1504,44 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(progress["unresolvedQuestions"], [])
         self.assertEqual(progress["questionRecords"], [])
 
+    def test_failed_stage_opening_does_not_persist_partial_records(self):
+        version_id = self.read_session()["currentVersionId"]
+        failure = LLMServiceError(
+            "MODEL_RESPONSE_INVALID",
+            "The LLM returned an invalid response.",
+            "failed-opening-request",
+            True,
+            2,
+            502,
+        )
+
+        with patch.object(
+            backend,
+            "generate_stage_assessment",
+            side_effect=failure,
+        ):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
+                json={"idempotencyKey": "failed-opening-key"},
+            )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(response.json()["code"], "MODEL_RESPONSE_INVALID")
+        with repository.connect() as database:
+            assessment_count = database.execute(
+                "SELECT COUNT(*) FROM llm_assessments WHERE version_id = ?",
+                (version_id,),
+            ).fetchone()[0]
+            assistant_turn_count = database.execute(
+                """
+                SELECT COUNT(*) FROM conversation_turns
+                WHERE version_id = ? AND role = 'assistant'
+                """,
+                (version_id,),
+            ).fetchone()[0]
+        self.assertEqual(assessment_count, 0)
+        self.assertEqual(assistant_turn_count, 0)
+
     def test_next_ordinary_chat_links_evidence_to_persistent_hypothesis(self):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(

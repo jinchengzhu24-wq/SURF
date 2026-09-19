@@ -4232,12 +4232,10 @@ class LLMClientTests(unittest.TestCase):
 
     def test_later_human_edit_uses_adjudication_then_returns_two_messages(self):
         classification = json.dumps({
-            "comparisons": [{
-                "confirmedDirectionId": "design_goal-1",
+            "comparisons": {"direction_1": {
                 "relation": "aligned",
-                "evidenceIds": ["diff-1"],
                 "explanation": "The wall edit supports the confirmed direction.",
-            }],
+            }},
         })
         payload = json.dumps({
             "openingMessage": (
@@ -4408,15 +4406,13 @@ class LLMClientTests(unittest.TestCase):
             },
         ]
         payload = {
-            "comparisons": [{
-                "confirmedDirectionId": "confirmed_inclination-1",
+            "comparisons": {"direction_1": {
                 "relation": "conflict",
-                "evidenceIds": ["diff-1", "solver-delta"],
                 "explanation": (
                     "The edit removes a wall despite the confirmed direction, while the shorter "
                     "solution is a separate improvement."
                 ),
-            }],
+            }},
         }
 
         decision = llm_client._validate_manual_edit_conflict_classification(
@@ -4428,7 +4424,151 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(
             decision["confirmedDirectionIds"], ["confirmed_inclination-1"]
         )
+        self.assertEqual(
+            decision["effectEvidenceIds"], ["diff-1", "solver-delta"]
+        )
         self.assertEqual(decision["solverDelta"]["currentSolutionSteps"], 21)
+
+    def test_manual_edit_adjudicator_uses_server_slots_and_server_evidence(self):
+        evidence = [
+            {
+                "id": "confirmed_inclination-1",
+                "kind": "confirmed_inclination",
+                "fact": "Reduce the water area.",
+            },
+            {
+                "id": "design_goal-1",
+                "kind": "design_goal",
+                "fact": "Make the player spend more time.",
+            },
+            {
+                "id": "diff-1",
+                "kind": "verified_map_diff",
+                "fact": {"beforeTile": "floor", "afterTile": "water"},
+            },
+            {
+                "id": "diff-2",
+                "kind": "verified_map_diff",
+                "fact": {"beforeTile": "floor", "afterTile": "water"},
+            },
+            {
+                "id": "verified-change-summary",
+                "kind": "verified_change_summary",
+                "fact": "Two floor tiles became water.",
+            },
+            {
+                "id": "solver-current",
+                "kind": "solver",
+                "fact": {"solvable": True, "solutionSteps": 29, "solutionPushes": 14},
+            },
+            {
+                "id": "solver-delta",
+                "kind": "solver_comparison",
+                "fact": {
+                    "parentSolutionSteps": 29,
+                    "currentSolutionSteps": 29,
+                    "parentSolutionPushes": 14,
+                    "currentSolutionPushes": 14,
+                },
+            },
+        ]
+        payload = {
+            "comparisons": {
+                "direction_1": {
+                    "relation": "conflict",
+                    "explanation": "Adding water directly reverses the confirmed reduction.",
+                },
+                "direction_2": {
+                    "relation": "unclear",
+                    "explanation": "The verified solver length did not change.",
+                },
+            },
+        }
+
+        decision = llm_client._validate_manual_edit_conflict_classification(
+            payload, evidence
+        )
+
+        self.assertEqual(decision["verdict"], "conflict")
+        self.assertEqual(
+            decision["confirmedDirectionIds"], ["confirmed_inclination-1"]
+        )
+        self.assertEqual(
+            decision["effectEvidenceIds"],
+            ["verified-change-summary", "diff-1", "diff-2", "solver-delta"],
+        )
+        self.assertNotIn("solver-current", decision["effectEvidenceIds"])
+        self.assertEqual(
+            [item["confirmedDirectionId"] for item in decision["comparisons"]],
+            ["confirmed_inclination-1", "design_goal-1"],
+        )
+        schema = llm_client._structured_response_format(
+            "manual_edit_conflict_classification",
+            manual_edit_direction_count=2,
+        )["json_schema"]["schema"]["properties"]["comparisons"]
+        self.assertEqual(
+            list(schema["properties"]), ["direction_1", "direction_2"]
+        )
+        self.assertEqual(
+            set(schema["properties"]["direction_1"]["properties"]),
+            {"relation", "explanation"},
+        )
+
+    def test_manual_edit_adjudicator_rejects_legacy_model_owned_ids(self):
+        evidence = [
+            {"id": "design_goal-1", "kind": "design_goal", "fact": "Add walls."},
+            {"id": "diff-1", "kind": "verified_map_diff", "fact": "one tile changed"},
+        ]
+        payload = {
+            "comparisons": {
+                "direction_1": {
+                    "confirmedDirectionId": "design_goal-1",
+                    "relation": "aligned",
+                    "evidenceIds": ["diff-1"],
+                    "explanation": "The edit supports the goal.",
+                },
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "invalid envelope"):
+            llm_client._validate_manual_edit_conflict_classification(payload, evidence)
+
+    def test_manual_edit_adjudicator_fails_after_two_invalid_slot_responses(self):
+        legacy_payload = json.dumps({
+            "comparisons": {
+                "direction_1": {
+                    "confirmedDirectionId": "design_goal-1",
+                    "relation": "aligned",
+                    "evidenceIds": ["diff-1"],
+                    "explanation": "The edit supports the goal.",
+                },
+            },
+        })
+        evidence = [
+            {"id": "design_goal-1", "kind": "design_goal", "fact": "Add walls."},
+            {"id": "diff-1", "kind": "verified_map_diff", "fact": "one tile changed"},
+        ]
+        client = FakeClient([legacy_payload, legacy_payload])
+
+        with (
+            patch.object(llm_client, "_llm_credentials", return_value=("test-key", "https://example.test")),
+            patch.object(llm_client, "_create_async_client", return_value=client),
+            self.assertRaises(llm_client.LLMServiceError) as captured,
+        ):
+            llm_client._classify_manual_edit_conflict(
+                evidence,
+                "en",
+                "invalid-slot-retry-test",
+                time.monotonic() + 116.0,
+            )
+
+        self.assertEqual(captured.exception.code, "MODEL_RESPONSE_INVALID")
+        self.assertEqual(captured.exception.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertIn(
+            "no direction IDs, evidence IDs",
+            client.chat.completions.calls[1]["messages"][-1]["content"],
+        )
 
     def test_manual_edit_evidence_excludes_unconfirmed_directions_and_keeps_rows(self):
         stage_context = {
@@ -4511,15 +4651,13 @@ class LLMClientTests(unittest.TestCase):
             {"id": "diff-1", "kind": "verified_map_diff", "fact": "one verified tile changed"},
         ]
         payload = {
-            "comparisons": [{
-                "confirmedDirectionId": "design_goal-1",
+            "comparisons": {"direction_1": {
                 "relation": "aligned",
-                "evidenceIds": ["diff-1"],
                 "explanation": "The edit supports the goal.",
-            }],
+            }},
         }
 
-        with self.assertRaisesRegex(ValueError, "every active confirmed design direction"):
+        with self.assertRaisesRegex(ValueError, "requires comparisons"):
             llm_client._validate_manual_edit_conflict_classification(payload, evidence)
 
     def test_manual_edit_frozen_conflict_rejects_null_card(self):
@@ -4574,17 +4712,13 @@ class LLMClientTests(unittest.TestCase):
 
     def test_manual_edit_conflict_keeps_solver_improvement_and_free_kimi_wording(self):
         classification = json.dumps({
-            "comparisons": [{
-                "confirmedDirectionId": "confirmed_inclination-1",
+            "comparisons": {"direction_1": {
                 "relation": "conflict",
-                "evidenceIds": [
-                    "diff-1", "diff-2", "verified-change-summary", "solver-delta"
-                ],
                 "explanation": (
                     "Removing the walls runs against the confirmed wish for more internal walls, "
                     "although the verified solution becomes shorter."
                 ),
-            }],
+            }},
         })
         pair = json.dumps({
             "openingMessage": (
@@ -4622,6 +4756,7 @@ class LLMClientTests(unittest.TestCase):
         stage_context = {
             "stageNumber": 2,
             "source": "human_edit",
+            "discussionCardMode": "disagreement_only",
             "diff": [
                 {"x": 1, "y": 1, "before": "#", "after": "."},
                 {"x": 2, "y": 1, "before": "#", "after": "."},
@@ -4671,6 +4806,129 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("verified_change_summary", adjudication_prompt)
         retry_messages = client.chat.completions.calls[2]["messages"]
         self.assertIn("frozen conflict decision", retry_messages[-1]["content"])
+
+    def test_two_water_tile_edit_completes_classification_and_review_pair(self):
+        classification = json.dumps({
+            "comparisons": {
+                "direction_1": {
+                    "relation": "conflict",
+                    "explanation": "Adding two water tiles reverses the confirmed water reduction.",
+                },
+                "direction_2": {
+                    "relation": "unclear",
+                    "explanation": "The verified solution length and push count are unchanged.",
+                },
+            },
+        })
+        pair = json.dumps({
+            "openingMessage": (
+                "The saved Stage remains solvable in 29 steps and 14 pushes. "
+                "The two added water tiles extend the upper part of the central barrier. "
+                "That makes the upper crossing less open while leaving the lower approach intact. "
+                "The two box routes still ask for different approach angles. "
+                "I would inspect the upper lane before committing to the first push. "
+                "The unchanged solver length suggests that this is a spatial shift rather than a longer route."
+            ),
+            "assessment": {
+                "solutionSummary": "The saved Stage remains solvable in 29 steps and 14 pushes.",
+                "difficultyOpinion": "The upper crossing is less open, but the verified route length is unchanged.",
+                "features": ["Two added water tiles in the upper central area"],
+                "suggestions": ["Compare the upper crossing with the earlier water direction"],
+                "satisfactionQuestion": None,
+            },
+            "reviewMessage": (
+                "The verified edit adds two water tiles while the earlier confirmed direction was to reduce "
+                "water. The solver remains at 29 steps and 14 pushes, so there is not yet evidence that the "
+                "edit makes the player spend more time."
+            ),
+            "conflict": {
+                "userPosition": "The saved edit adds two water tiles to reshape the upper crossing.",
+                "aiPosition": "The earlier confirmed direction was to reduce the water area.",
+                "coreDisagreement": (
+                    "The verified edit directly reverses that water direction, while the unchanged solver "
+                    "metrics do not establish a longer experience."
+                ),
+                "nextQuestion": "Should we discuss changing the water priority, or revise the Stage toward less water?",
+            },
+        })
+        client = FakeClient([classification, pair])
+        current_rows = [
+            " #########  ",
+            " #.......#  ",
+            "##.@@###t#  ",
+            "#..@@....## ",
+            "#..@@###.t# ",
+            "##.@@..#..# ",
+            " #.###....##",
+            " #.ps..s...#",
+            " ##.......##",
+            "  ######### ",
+        ]
+        stage_context = {
+            "stageNumber": 2,
+            "source": "human_edit",
+            "discussionCardMode": "disagreement_only",
+            "diff": [
+                {"x": 3, "y": 2, "before": ".", "after": "@"},
+                {"x": 4, "y": 2, "before": ".", "after": "@"},
+            ],
+            "changeSummary": {
+                "components": ["water"],
+                "changedCellCount": 2,
+                "componentCellCounts": {"water": 2},
+            },
+            "parentValidation": {
+                "solvable": True,
+                "solutionSteps": 29,
+                "solutionPushes": 14,
+            },
+            "evaluatorDesignContext": {
+                "intentHypotheses": [{
+                    "statement": "Reduce the water area to increase walkable floor.",
+                    "displayStatement": "Prefer less water and more walkable floor.",
+                    "status": "confirmed",
+                    "sourceStageId": "stage-1",
+                    "sourceTurnId": "water-intent-turn",
+                    "semanticClaims": [],
+                }],
+                "userGoals": [{
+                    "goal": "Make the player spend more time.",
+                    "status": "active",
+                    "authority": "explicit",
+                    "sourceStageId": "stage-1",
+                    "sourceTurnId": "time-goal-turn",
+                }],
+            },
+        }
+
+        with patch.object(llm_client, "_create_async_client", return_value=client):
+            result = llm_client.generate_stage_assessment(
+                [], current_rows, "en",
+                {"solvable": True, "solutionSteps": 29, "solutionPushes": 14},
+                {}, "two-water-tile-review-test", stage_context,
+            )
+
+        review = result.secondary_execution
+        self.assertEqual(review.guidance["manualEditReview"]["outcome"], "conflict")
+        self.assertEqual(
+            review.guidance["manualEditReview"]["confirmedDirectionIds"],
+            ["confirmed_inclination-1"],
+        )
+        self.assertEqual(
+            review.guidance["manualEditReview"]["effectEvidenceIds"],
+            ["verified-change-summary", "diff-1", "diff-2", "solver-delta"],
+        )
+        self.assertIsNotNone(review.guidance["disagreement"])
+        classification_call = client.chat.completions.calls[0]
+        classification_schema = classification_call["response_format"]["json_schema"]["schema"]
+        self.assertEqual(
+            list(classification_schema["properties"]["comparisons"]["properties"]),
+            ["direction_1", "direction_2"],
+        )
+        classification_prompt = classification_call["messages"][0]["content"]
+        self.assertNotIn("solver-current", classification_prompt)
+        self.assertNotIn("confirmed_inclination-1", classification_prompt)
+        self.assertIn("solver_comparison", classification_prompt)
 
     def test_manual_edit_pair_rejects_conflict_without_concrete_evidence(self):
         stage_context = {

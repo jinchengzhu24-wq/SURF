@@ -118,7 +118,7 @@ CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
 CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
-PROMPT_VERSION = "cocreation-v57-server-owned-card-evidence"
+PROMPT_VERSION = "cocreation-v58-server-owned-review-evidence"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -127,9 +127,21 @@ QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
 INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
 MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS = 3200
 MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS = 1600
+MANUAL_EDIT_DIRECTION_KINDS = frozenset({
+    "design_goal",
+    "design_constraint",
+    "confirmed_decision",
+    "confirmed_inclination",
+})
+MANUAL_EDIT_EFFECT_EVIDENCE_KINDS = frozenset({
+    "verified_map_diff",
+    "verified_change_summary",
+    "solver_comparison",
+    "play_evidence",
+})
 
 
-def _structured_response_format(task=None):
+def _structured_response_format(task=None, manual_edit_direction_count=None):
     """Build a compact schema contract that Kimi can follow reliably.
 
     The application still performs the authoritative validation after parsing.
@@ -198,28 +210,32 @@ def _structured_response_format(task=None):
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "confirmedDirectionId": {"type": "string"},
                 "relation": {
                     "type": "string",
                     "enum": ["conflict", "aligned", "tradeoff", "unrelated", "unclear"],
                 },
-                "evidenceIds": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
                 "explanation": {"type": "string"},
             },
-            "required": [
-                "confirmedDirectionId", "relation", "evidenceIds", "explanation",
-            ],
+            "required": ["relation", "explanation"],
+        }
+        direction_count = int(manual_edit_direction_count or 0)
+        if direction_count < 1:
+            raise ValueError(
+                "manual_edit_direction_count is required for conflict classification."
+            )
+        comparison_properties = {
+            f"direction_{index}": comparison_schema
+            for index in range(1, direction_count + 1)
         }
         schema = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "comparisons": {
-                    "type": "array",
-                    "items": comparison_schema,
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": comparison_properties,
+                    "required": list(comparison_properties),
                 },
             },
             "required": ["comparisons"],
@@ -3109,10 +3125,7 @@ def _manual_edit_review_evidence(
 
 def _manual_edit_has_design_evidence(evidence):
     return any(
-        item.get("kind") in {
-            "design_goal", "design_constraint", "confirmed_decision",
-            "confirmed_inclination",
-        }
+        item.get("kind") in MANUAL_EDIT_DIRECTION_KINDS
         for item in (evidence or [])
         if isinstance(item, dict)
     )
@@ -3129,66 +3142,73 @@ def _manual_edit_solver_delta(evidence):
     return dict(item.get("fact") or {}) if item else {}
 
 
+def _manual_edit_direction_evidence(evidence):
+    return [
+        item for item in (evidence or [])
+        if isinstance(item, dict)
+        and item.get("kind") in MANUAL_EDIT_DIRECTION_KINDS
+        and item.get("id")
+    ]
+
+
+def _manual_edit_effect_evidence(evidence):
+    """Return the bounded server-owned evidence that may support a comparison."""
+    eligible = [
+        item for item in (evidence or [])
+        if isinstance(item, dict)
+        and item.get("kind") in MANUAL_EDIT_EFFECT_EVIDENCE_KINDS
+        and item.get("id")
+    ]
+    priority = {
+        "verified_change_summary": 0,
+        "verified_map_diff": 1,
+        "solver_comparison": 2,
+        "play_evidence": 3,
+    }
+    return sorted(
+        eligible,
+        key=lambda item: (
+            priority.get(item.get("kind"), 99),
+            str(item.get("id")),
+        ),
+    )[:12]
+
+
 def _validate_manual_edit_conflict_classification(payload, evidence):
     if not isinstance(payload, dict) or set(payload) != {"comparisons"}:
         raise ValueError("The manual-edit conflict classification has an invalid envelope.")
-    known = {
-        item["id"]: item for item in (evidence or [])
-        if isinstance(item, dict) and item.get("id")
-    }
-    design_kinds = {
-        "design_goal", "design_constraint", "confirmed_decision", "confirmed_inclination",
-    }
-    concrete_kinds = {
-        "verified_map_diff", "verified_stage_rows", "verified_change_summary",
-        "solver_comparison", "play_evidence",
-    }
-    expected_direction_ids = [
-        item["id"] for item in (evidence or [])
-        if isinstance(item, dict) and item.get("kind") in design_kinds and item.get("id")
+    directions = _manual_edit_direction_evidence(evidence)
+    effect_evidence_ids = [
+        item["id"] for item in _manual_edit_effect_evidence(evidence)
     ]
     raw_comparisons = payload.get("comparisons")
-    if not isinstance(raw_comparisons, list):
+    expected_slots = [
+        f"direction_{index}" for index in range(1, len(directions) + 1)
+    ]
+    if (
+        not isinstance(raw_comparisons, dict)
+        or set(raw_comparisons) != set(expected_slots)
+    ):
         raise ValueError("The manual-edit conflict classification requires comparisons.")
     comparisons = []
-    seen_direction_ids = set()
-    for raw in raw_comparisons:
-        if not isinstance(raw, dict) or set(raw) != {
-            "confirmedDirectionId", "relation", "evidenceIds", "explanation"
-        }:
+    for slot, direction in zip(expected_slots, directions):
+        raw = raw_comparisons.get(slot)
+        if not isinstance(raw, dict) or set(raw) != {"relation", "explanation"}:
             raise ValueError("A manual-edit direction comparison has an invalid envelope.")
-        direction_id = raw.get("confirmedDirectionId")
-        if (
-            direction_id not in known
-            or known[direction_id].get("kind") not in design_kinds
-            or direction_id in seen_direction_ids
-        ):
-            raise ValueError("A manual-edit comparison must bind one unique confirmed direction.")
         relation = raw.get("relation")
         if relation not in {"conflict", "aligned", "tradeoff", "unrelated", "unclear"}:
             raise ValueError("A manual-edit direction comparison has an invalid relation.")
-        evidence_ids = list(dict.fromkeys(raw.get("evidenceIds") or []))[:12]
-        if any(
-            not isinstance(item, str)
-            or item not in known
-            or known[item].get("kind") not in concrete_kinds
-            for item in evidence_ids
-        ):
-            raise ValueError("A manual-edit comparison cites unknown evidence.")
-        if not any(known[item].get("kind") in concrete_kinds for item in evidence_ids):
+        if not effect_evidence_ids:
             raise ValueError("Every manual-edit comparison must cite concrete edit evidence.")
         explanation = str(raw.get("explanation") or "").strip()
         if not explanation:
             raise ValueError("Every manual-edit comparison requires an explanation.")
-        seen_direction_ids.add(direction_id)
         comparisons.append({
-            "confirmedDirectionId": direction_id,
+            "confirmedDirectionId": direction["id"],
             "relation": relation,
-            "evidenceIds": evidence_ids,
+            "evidenceIds": list(effect_evidence_ids),
             "explanation": explanation[:800],
         })
-    if seen_direction_ids != set(expected_direction_ids):
-        raise ValueError("Kimi must assess every active confirmed design direction exactly once.")
     conflicts = [item for item in comparisons if item["relation"] == "conflict"]
     verdict = (
         "conflict" if conflicts
@@ -3215,22 +3235,9 @@ def _validate_manual_edit_conflict_classification(payload, evidence):
 
 def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
     started_at = time.monotonic()
-    design_kinds = {
-        "design_goal", "design_constraint", "confirmed_decision", "confirmed_inclination",
-    }
-    concrete_kinds = {
-        "verified_map_diff", "verified_stage_rows", "verified_change_summary",
-        "solver_comparison", "play_evidence",
-    }
-    direction_ids = [
-        item["id"] for item in (evidence or [])
-        if isinstance(item, dict) and item.get("kind") in design_kinds and item.get("id")
-    ]
-    has_concrete = any(
-        isinstance(item, dict) and item.get("kind") in concrete_kinds
-        for item in (evidence or [])
-    )
-    if not direction_ids or not has_concrete:
+    directions = _manual_edit_direction_evidence(evidence)
+    effect_evidence = _manual_edit_effect_evidence(evidence)
+    if not directions or not effect_evidence:
         return {
             "verdict": "unrelated",
             "decisionSource": "deterministic_no_comparable_evidence",
@@ -3248,14 +3255,30 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
             request_id, False, 0, 503,
         )
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
+    direction_slots = {
+        f"direction_{index}": {
+            "kind": item.get("kind"),
+            "fact": item.get("fact"),
+            "semanticClaims": item.get("semanticClaims") or [],
+        }
+        for index, item in enumerate(directions, start=1)
+    }
+    effect_facts = [
+        {
+            "kind": item.get("kind"),
+            "fact": item.get("fact"),
+        }
+        for item in effect_evidence
+    ]
     messages = [{
         "role": "system",
         "content": (
             "You are the Kimi K2.6 manual-edit conflict adjudicator. Decide only whether the "
-            "verified edit conflicts with each active explicit/confirmed design direction. Return "
-            "exactly one comparison for every confirmed direction ID, with no omissions or duplicates. "
+            "verified edit conflicts with each active explicit/confirmed design direction. Fill "
+            "exactly the server-provided direction slots, with no omissions or additional slots. "
             "You—not the server—judge whether each relationship is conflict, aligned, tradeoff, "
-            "unrelated, or unclear. Bind every comparison to concrete map, solver, or play evidence IDs. "
+            "unrelated, or unclear. Do not return direction IDs or evidence IDs; the server owns those "
+            "bindings. Judge only from the eligible effect evidence supplied below. "
             "The map legend is: # wall, . floor, @ water, p player, s box, t target. Never apply "
             "conventional Sokoban glyph meanings to this project. Treat verified_change_summary as "
             "the authoritative semantic description of changed tile types when it is present. "
@@ -3263,10 +3286,10 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
             "another metric; reserve tradeoff for competing effects without a direct reversal. "
             "Aesthetic difference alone is not conflict. Solver improvement may coexist with conflict "
             "and must not erase a directional contradiction. Use unclear when evidence is insufficient. "
-            f"Write each explanation in {response_language}. Confirmed direction IDs: "
-            + json.dumps(direction_ids, ensure_ascii=False)
-            + ". Evidence:\n"
-            + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+            f"Write each explanation in {response_language}. Direction slots:\n"
+            + json.dumps(direction_slots, ensure_ascii=False, separators=(",", ":"))
+            + "\nEligible effect evidence:\n"
+            + json.dumps(effect_facts, ensure_ascii=False, separators=(",", ":"))
         ),
     }]
     last_error = None
@@ -3293,6 +3316,7 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
                     MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS,
                     timeout_seconds,
                     task="manual_edit_conflict_classification",
+                    manual_edit_direction_count=len(directions),
                 ),
                 timeout=timeout_seconds,
             ))
@@ -3369,8 +3393,9 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
                         "role": "user",
                         "content": (
                             "Your classification failed server validation: "
-                            f"{exception}. Return a corrected JSON object that assesses every "
-                            "confirmed direction exactly once and cites only concrete evidence IDs."
+                            f"{exception}. Return a corrected JSON object with exactly the supplied "
+                            "direction slots, one valid relation and one non-empty explanation per slot, "
+                            "and no direction IDs, evidence IDs, omissions, or additional fields."
                         ),
                     },
                 ])
@@ -3502,10 +3527,7 @@ def _validate_manual_edit_pair_payload(
             raise ValueError("The frozen manual-edit conflict cites unknown evidence.")
         concrete_ids = {
             item["id"] for item in evidence
-            if item.get("kind") in {
-                "verified_map_diff", "verified_stage_rows", "verified_change_summary",
-                "solver_comparison", "play_evidence"
-            }
+            if item.get("kind") in MANUAL_EDIT_EFFECT_EVIDENCE_KINDS
         }
         if not concrete_ids.intersection(cited_evidence_ids):
             raise ValueError("A manual-edit conflict requires concrete map, solver, or play evidence.")
@@ -10382,6 +10404,7 @@ async def _request_completion(
     timeout_seconds,
     structured=True,
     task=None,
+    manual_edit_direction_count=None,
 ):
     client = _create_async_client(api_key, base_url, timeout_seconds)
     request_options = {
@@ -10401,7 +10424,10 @@ async def _request_completion(
     }
 
     if structured:
-        request_options["response_format"] = _structured_response_format(task)
+        request_options["response_format"] = _structured_response_format(
+            task,
+            manual_edit_direction_count=manual_edit_direction_count,
+        )
 
     try:
         try:
