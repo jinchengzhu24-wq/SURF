@@ -118,6 +118,9 @@ CHAT_MAX_SENTENCES = 12
 CHAT_PARAGRAPH_MAX_CHINESE_CHARS = 240
 CHAT_PARAGRAPH_MAX_LATIN_WORDS = 160
 CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
+PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV = (
+    "COCREATION_PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT"
+)
 PROMPT_VERSION = "cocreation-v58-server-owned-review-evidence"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
@@ -591,6 +594,12 @@ def _chat_compact_experiment_enabled():
     return os.getenv(CHAT_COMPACT_EXPERIMENT_ENV, "").strip().casefold() in {
         "1", "true", "yes", "on",
     }
+
+
+def _proposal_clarification_compact_experiment_enabled():
+    return os.getenv(
+        PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV, ""
+    ).strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _remaining_until(deadline):
@@ -1573,6 +1582,7 @@ def _compact_kimi_plain_prompt(
         else None
     )
     if isinstance(proposal_clarification, dict) and proposal_clarification.get("questionKey"):
+        compact_clarification = _proposal_clarification_compact_experiment_enabled()
         discovery = (stage_context or {}).get("proposalDiscovery") or {}
         topic_brief = str(discovery.get("brief") or "").strip()[-2400:]
         target_key = str(proposal_clarification.get("questionKey") or "").strip()
@@ -1596,10 +1606,24 @@ def _compact_kimi_plain_prompt(
             ),
             (
                 "Return JSON only with exactly two string fields: "
-                '{"body":"...","question":"...?"}. The body must contain two paragraphs and '
-                "five to eight declarative sentences in total, with no question. The question field must contain exactly "
+                '{"body":"...","question":"...?"}. '
+                + (
+                    "Keep the body concise, usually two to four declarative sentences, without "
+                    "a fixed paragraph count or a hard sentence limit. The body must contain no question. "
+                    if compact_clarification
+                    else "The body must contain two paragraphs and five to eight declarative sentences "
+                    "in total, with no question. "
+                )
+                + "The question field must contain exactly "
                 "one question and must address the target dimension below."
             ),
+            *([
+                "State each design judgment once. Combine a relevant mechanism and its playable "
+                "consequence in the same sentence or adjacent sentences; do not repeat the user's "
+                "answer or recap a conclusion before the question. Keep the body useful: when the "
+                "question names choices, briefly explain each choice and its different effect. "
+                "Do not discard a necessary distinction merely to shorten the body."
+            ] if compact_clarification else []),
             (
                 "You may discuss design effects, push transport, judgment cost, local mechanisms, "
                 "the allowed entity labels and the private authoritative route-analysis context below. "

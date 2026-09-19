@@ -2325,6 +2325,131 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("你希望先围绕哪个箱子", prompt)
         self.assertNotIn("Current Stage Snapshot", prompt)
 
+    def test_proposal_clarification_compact_experiment_is_independent_and_opt_in(self):
+        conversation = [{"role": "user", "content": "Make the transport longer."}]
+        context = {
+            "revisionRouting": "needs_clarification",
+            "proposalClarification": {
+                "questionKey": "binding",
+                "questionIntent": "select the box to change",
+                "allowedEntityLabels": ["P", "B1", "B2", "T1", "T2"],
+            },
+        }
+
+        def prompt():
+            return llm_client.build_plain_chat_messages(
+                conversation, ENTITY_ROUTE_ROWS, stage_context=context,
+                validation_mode="edit_request",
+            )[0]["content"]
+
+        with patch.dict(os.environ, {}, clear=True):
+            disabled = prompt()
+        with patch.dict(os.environ, {llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "on"}, clear=True):
+            old_switch_only = prompt()
+        with patch.dict(os.environ, {
+            llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: "true",
+        }, clear=True):
+            enabled = prompt()
+        with patch.dict(os.environ, {
+            llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: "true",
+            llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "on",
+        }, clear=True):
+            both_switches = prompt()
+
+        self.assertEqual(disabled, old_switch_only)
+        self.assertEqual(enabled, both_switches)
+        self.assertIn("two paragraphs and five to eight declarative sentences", disabled)
+        self.assertNotIn("State each design judgment once", disabled)
+        self.assertIn("usually two to four declarative sentences", enabled)
+        self.assertIn("without a fixed paragraph count or a hard sentence limit", enabled)
+        self.assertIn("State each design judgment once", enabled)
+        self.assertIn("briefly explain each choice and its different effect", enabled)
+        self.assertNotIn("five to eight declarative sentences", enabled)
+        self.assertIn('{"body":"...","question":"...?"}', enabled)
+        self.assertIn("exactly one question", enabled)
+        self.assertIn("Target question dimension: binding", enabled)
+        self.assertIn("Do not state or infer coordinates", enabled)
+        self.assertIn("Do not output cards, proposal metadata, or editing instructions", enabled)
+
+    def test_proposal_clarification_compact_experiment_preserves_other_prompts(self):
+        conversation = [{"role": "user", "content": "What should change?"}]
+        cases = (
+            {"stage_opening": True, "validation_mode": "ordinary_chat"},
+            {"stage_context": {"revisionRouting": "proposal"}, "validation_mode": "edit_request"},
+            {"stage_context": {"revisionRouting": "disagreement"}, "validation_mode": "ordinary_chat"},
+            {"stage_context": {"revisionRouting": "needs_clarification",
+                               "proposalClarification": {"questionKey": ""}},
+             "validation_mode": "edit_request"},
+        )
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                with patch.dict(os.environ, {}, clear=True):
+                    baseline = llm_client.build_plain_chat_messages(
+                        conversation, OPERATION_BASE_ROWS, **kwargs
+                    )[0]["content"]
+                with patch.dict(os.environ, {
+                    llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: "1",
+                }, clear=True):
+                    experimental = llm_client.build_plain_chat_messages(
+                        conversation, OPERATION_BASE_ROWS, **kwargs
+                    )[0]["content"]
+                self.assertEqual(baseline, experimental)
+
+    def test_compact_proposal_clarification_keeps_short_options_and_question_guards(self):
+        context = {
+            "revisionRouting": "needs_clarification",
+            "proposalDiscovery": {"topicId": "request", "status": "clarifying",
+                                  "brief": "Longer box transport"},
+            "proposalClarification": {
+                "questionKey": "binding",
+                "questionIntent": "select the box to change",
+                "allowedEntityLabels": ["P", "B1", "B2", "T1", "T2"],
+                "fallbackQuestion": "Which box should carry the longer transport?",
+                "fallbackAcknowledgement": "I can look at that transport direction.",
+            },
+        }
+        body = (
+            "Changing B1 could extend its push transport and raise route-planning cost. "
+            "Changing B2 could shift that cost to its own delivery instead."
+        )
+        valid = json.dumps({
+            "body": body,
+            "question": "Which box, B1 or B2, should carry the longer transport?",
+        })
+        wrong_dimension = json.dumps({
+            "body": body, "question": "Should the experience remain unchanged?",
+        })
+        coordinate_request = json.dumps({
+            "body": body, "question": "Which exact coordinates should I change?",
+        })
+        kwargs = {
+            "rows": ENTITY_ROUTE_ROWS,
+            "conversation": [{"role": "user", "content": "I want longer box transport."}],
+            "stage_context": context,
+        }
+        with patch.dict(os.environ, {
+            llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: "1",
+        }):
+            result, client = self.execute([valid], **kwargs)
+            repaired, retry_client = self.execute([wrong_dimension, valid], **kwargs)
+            filtered, _ = self.execute([coordinate_request, coordinate_request], **kwargs)
+
+        self.assertIn("B1 could extend", result.assistant_message)
+        self.assertIn("B2 could shift", result.assistant_message)
+        self.assertIn("B1 or B2", result.assistant_message)
+        self.assertEqual(result.assistant_message.count("?"), 1)
+        self.assertEqual(result.proposal_diagnostics["clarificationBodySentenceCount"], 2)
+        self.assertTrue(result.proposal_diagnostics["clarificationOptionsCovered"])
+        self.assertTrue(result.proposal_diagnostics["clarificationQuestionValidated"])
+        self.assertEqual(len(client.chat.completions.calls), 1)
+        self.assertNotIn("proposalOffer", result.assistant_message)
+        self.assertEqual(repaired.proposal_diagnostics["clarificationQuestionRepairAttempts"], 1)
+        self.assertEqual(len(retry_client.chat.completions.calls), 2)
+        self.assertIn("Which box", repaired.assistant_message)
+        self.assertIn("Which box", filtered.assistant_message)
+        self.assertNotIn("coordinates", filtered.assistant_message)
+        self.assertFalse(filtered.proposal_diagnostics["clarificationQuestionValidated"])
+
     def test_proposal_clarification_route_evidence_replays_verified_solution(self):
         bindings = build_entity_bindings(ENTITY_ROUTE_ROWS, source="initial")
         validation = validate_and_solve(ENTITY_ROUTE_ROWS).as_dict()
