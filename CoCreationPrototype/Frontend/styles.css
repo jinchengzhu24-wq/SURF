@@ -1083,8 +1083,13 @@ main {
     font-weight: 900;
 }
 
-.proposal-v2-line {
+.proposal-v2-list {
+    list-style-type: disc;
+}
+
+.proposal-v2-item {
     line-height: 1.55;
+    font-weight: 400;
     overflow-wrap: anywhere;
 }
 

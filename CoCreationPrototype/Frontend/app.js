@@ -2075,14 +2075,17 @@ function createProposalPresentationV2(presentation) {
         section.className = "proposal-v2-section";
         const title = document.createElement("strong");
         title.className = "proposal-v2-title";
-        title.textContent = t(labelKey);
+        title.textContent = `${t(labelKey)}${state.language === "zh-CN" ? "：" : ":"}`;
         section.appendChild(title);
+        const list = document.createElement("ul");
+        list.className = "proposal-v2-list";
         items.forEach(value => {
-            const line = document.createElement("div");
-            line.className = "proposal-v2-line";
-            line.textContent = value;
-            section.appendChild(line);
+            const item = document.createElement("li");
+            item.className = "proposal-v2-item";
+            item.textContent = value;
+            list.appendChild(item);
         });
+        section.appendChild(list);
         container.appendChild(section);
     };
 
