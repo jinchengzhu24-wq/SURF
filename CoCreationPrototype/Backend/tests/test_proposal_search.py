@@ -94,6 +94,34 @@ class ProposalSearchTests(unittest.TestCase):
         with self.assertRaisesRegex(RevisionPlanError, "between 1 and 12"):
             plan_for("narrow_route", "add_wall", edit_budget=13)
 
+    def test_display_reason_is_optional_and_never_invalidates_a_strategy(self):
+        base_strategy = {
+            "effect": "narrow_route",
+            "focus": None,
+            "operators": ["add_wall"],
+            "preserve": [
+                "outer_shell", "unrelated_areas", "player", "boxes",
+                "targets", "water",
+            ],
+            "editBudget": 2,
+            "metricGoals": [],
+        }
+        valid = parse_revision_plan({
+            "strategies": [{
+                **base_strategy,
+                "displayReason": "  Make the route choice clearer.  ",
+            }],
+        })
+        self.assertEqual(
+            valid.strategies[0].display_reason,
+            "Make the route choice clearer.",
+        )
+
+        malformed = parse_revision_plan({
+            "strategies": [{**base_strategy, "displayReason": {"bad": True}}],
+        })
+        self.assertIsNone(malformed.strategies[0].display_reason)
+
     def test_every_semantic_operator_returns_a_solved_map_and_preserves_counts(self):
         cases = [
             ("narrow_route", "add_wall", BASE_ROWS),

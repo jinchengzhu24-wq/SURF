@@ -34,6 +34,104 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "Should the first push remain direct?",
         ])
 
+    def test_v2_presentation_freezes_origin_diff_reason_and_one_route_metrics(self):
+        validation = backend.validate_and_solve(backend.SAMPLE_ROWS)
+        presentation = backend._verified_offer_presentation_v2(
+            {
+                "effect": "open_route",
+                "requiredTransitions": [
+                    {"row": 5, "column": 6, "from": "#", "to": "."},
+                ],
+            },
+            validation,
+            {
+                "proposalDiscovery": {
+                    "initialRequest": "  Please open\nthat route.  ",
+                    "answers": [
+                        {"answerText": "  Keep the first push readable.  "},
+                        {"answerText": "Do not move the boxes."},
+                    ],
+                },
+            },
+            "This opens a clearer choice before the first push.",
+            "en",
+        )
+
+        self.assertEqual(presentation["schemaVersion"], 2)
+        self.assertEqual(presentation["requestText"], "Please open that route.")
+        self.assertEqual(
+            presentation["answerTexts"],
+            ["Keep the first push readable.", "Do not move the boxes."],
+        )
+        self.assertEqual(
+            presentation["changes"],
+            [{"row": 5, "column": 6, "before": "#", "after": "."}],
+        )
+        self.assertEqual(
+            presentation["reason"],
+            "This opens a clearer choice before the first push.",
+        )
+        self.assertEqual(
+            presentation["solution"],
+            {
+                "minimumMoves": validation.solution_steps,
+                "pushesOnMinimumMoveSolution": validation.solution_pushes,
+            },
+        )
+
+        fallback = backend._verified_offer_presentation_v2(
+            {"effect": "open_route", "requiredTransitions": []},
+            validation,
+            {
+                "proposalDiscovery": {
+                    "initialRequest": "Open it.",
+                    "answers": [{"answerText": "Keep it readable."}],
+                },
+            },
+            {"invalid": True},
+            "en",
+        )
+        self.assertIn("Opening this local passage", fallback["reason"])
+
+    def test_v2_translation_changes_reason_but_preserves_designer_words(self):
+        source = {
+            "proposalOffer": {
+                "summary": "source summary",
+                "rationale": "source rationale",
+                "proposalPresentation": {
+                    "schemaVersion": 2,
+                    "requestText": "\u8bf7\u6253\u5f00\u8fd9\u6761\u8def",
+                    "answerTexts": ["\u4fdd\u7559\u7b2c\u4e00\u6b21\u63a8\u7bb1\u7684\u611f\u89c9"],
+                    "changes": [],
+                    "reason": "\u8fd9\u6837\u8def\u7ebf\u66f4\u6e05\u695a\u3002",
+                    "solution": {
+                        "minimumMoves": 30,
+                        "pushesOnMinimumMoveSolution": 13,
+                    },
+                },
+            },
+            "uiCues": [],
+        }
+        translated = {
+            "followUpQuestion": None,
+            "intentHypothesis": None,
+            "proposalOfferSummary": "translated summary",
+            "proposalOfferRationale": "translated rationale",
+            "proposalPresentationReason": "This makes the route clearer.",
+            "uiCueTexts": [],
+            "proposalSummary": None,
+            "body": "",
+        }
+
+        localized = backend._translated_guidance(source, translated)
+        presentation = localized["proposalOffer"]["proposalPresentation"]
+        self.assertEqual(presentation["requestText"], "\u8bf7\u6253\u5f00\u8fd9\u6761\u8def")
+        self.assertEqual(
+            presentation["answerTexts"],
+            ["\u4fdd\u7559\u7b2c\u4e00\u6b21\u63a8\u7bb1\u7684\u611f\u89c9"],
+        )
+        self.assertEqual(presentation["reason"], "This makes the route clearer.")
+
     def test_automatic_candidate_is_frozen_into_actionable_purple_offer(self):
         proposed = list(backend.SAMPLE_ROWS)
         proposed[1] = "##.........#"
@@ -173,6 +271,47 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 snapshot,
             ),
             "confused",
+        )
+
+    def test_new_proposal_requires_one_answer_and_never_asks_a_fourth_question(self):
+        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        initial = {
+            "status": "clarifying",
+            "clarificationQuestionCount": 0,
+            "userEvidence": ["Please move player P one cell to open the route."],
+        }
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                initial["userEvidence"][-1], {"conflicts": []}, snapshot,
+                proposal_discovery=initial,
+            ),
+            "needs_clarification",
+        )
+
+        answered = {
+            **initial,
+            "clarificationQuestionCount": 1,
+            "userEvidence": [*initial["userEvidence"], "Keep the opening readable."],
+        }
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                answered["userEvidence"][-1], {"conflicts": []}, snapshot,
+                proposal_discovery=answered,
+            ),
+            "proposal",
+        )
+
+        exhausted = {
+            "status": "clarifying",
+            "clarificationQuestionCount": 3,
+            "userEvidence": ["Make the route more deliberate.", "Not sure."],
+        }
+        self.assertEqual(
+            backend._adaptive_revision_routing(
+                exhausted["userEvidence"][-1], {"conflicts": []}, snapshot,
+                proposal_discovery=exhausted,
+            ),
+            "proposal_conservative",
         )
 
     def test_proposal_discovery_keeps_answers_until_a_bound_plan_is_ready(self):
@@ -794,7 +933,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("iframe-host-v5-20260918-2", index_response.text)
+        self.assertIn("proposal-v2-20260920-1", index_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
         self.assertIn('id="deadlineLabel"', index_response.text)
         self.assertIn('id="deadlineValue"', index_response.text)

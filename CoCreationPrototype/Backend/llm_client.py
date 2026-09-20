@@ -5438,8 +5438,8 @@ def _build_revision_plan_messages(
         "not the goal itself. If three genuinely different strategies are impossible, return fewer and "
         "never pad the list with duplicates. When a prior failure envelope is present, retain the core "
         "goal and every unrelaxed hard constraint, incorporate the designer's new supplement, and do not "
-        "repeat failed anchors, transitions, operators, or concrete treatments. Every strategy has exactly: effect, focus, operators, "
-        "preserve, editBudget, metricGoals, requiredTransitions, anchorEntities, and playObjective. "
+        "repeat failed anchors, transitions, operators, or concrete treatments. Every strategy has: effect, focus, operators, "
+        "preserve, editBudget, metricGoals, requiredTransitions, anchorEntities, playObjective, and optional displayReason. "
         "effect is one of open_route, narrow_route, "
         "adjust_internal_walls, relocate_start, relocate_box, relocate_target, reshape_water, "
         "change_box_order. focus is null or {row,column,radius}; coordinates are one-based, row "
@@ -5454,6 +5454,9 @@ def _build_revision_plan_messages(
         "structured execution brief already contains them; otherwise return an empty list so the "
         "modifier can explore concrete cells inside focus and the allowed operators. Never invent a "
         "hard coordinate binding from a qualitative experience goal. " + conservative_binding_rule + " "
+        "When possible, set displayReason to a short, natural participant-facing explanation in the response language: say why this strategy "
+        "fits the designer's request and what play benefit it should create. Do not put coordinates, internal field names, metric identifiers, "
+        "or implementation vocabulary in displayReason. This presentation field is optional and must not replace any execution field. "
         "focus must contain every required transition. editBudget is an integer 1..12; a single "
         "structural tile change may use budget 1, while moving a player, box, or target requires "
         "two paired cells. Set the budget to the smallest honest upper bound, never a range that "
@@ -5827,6 +5830,8 @@ def _revision_plan_messages_with_feedback(messages, validation_feedback):
         "exact transitions only when the supplied structured execution brief already froze them. "
         "Set playObjective to null or one concise single-line string no longer than 120 characters; "
         "never return an object or list for playObjective. "
+        "Optionally include displayReason as short natural participant-facing prose explaining the reason and expected play benefit, without "
+        "coordinates, internal field names, metric identifiers, or implementation vocabulary. "
         "Do not invent coordinates. Do not return map rows or tile operations. If the prior response "
         "reached the token limit, stop reasoning and emit "
         "the complete compact JSON immediately. Return up to three non-duplicate strategies for the "
@@ -5980,6 +5985,7 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
             "requiredTransitions": required_transitions,
             "anchorEntities": strategy_data.get("anchorEntities") or [],
             "playObjective": strategy_data.get("playObjective"),
+            "displayReason": strategy_data.get("displayReason"),
         })
     source_offer = (stage_context or {}).get("sourceProposalOffer") or {}
     source_workflow = (
@@ -7284,7 +7290,8 @@ def translate_turns(items, target_language, request_id):
                 "the same order. Return exactly {\"translations\":[{\"turnId\":\"...\","
                 "\"body\":\"...\",\"followUpQuestion\":null,"
                 "\"intentHypothesis\":null,\"proposalOfferSummary\":null,"
-                "\"proposalOfferRationale\":null,\"uiCueTexts\":[],"
+                "\"proposalOfferRationale\":null,\"proposalPresentationReason\":null,"
+                "\"uiCueTexts\":[],"
                 "\"proposalSummary\":null,\"disagreement\":null}]}."
                 " When the source item has a disagreement object, preserve its status, subject, "
                 "and resolution, and translate only its userPosition, aiPosition, "
@@ -10225,7 +10232,11 @@ def validate_translation_response(payload, source_items, target_language="en"):
         source_links = source_items[index].get("coordinateLinks") or []
         item_expected_fields = expected_fields | (
             {"disagreement"} if "disagreement" in source_items[index] else set()
-        ) | ({"coordinateLinkTexts"} if source_links else set())
+        ) | ({"coordinateLinkTexts"} if source_links else set()) | (
+            {"proposalPresentationReason"}
+            if "proposalPresentationReason" in source_items[index]
+            else set()
+        )
         if not isinstance(translation, dict) or set(translation) != item_expected_fields:
             raise ValueError(f"Translation item {index} does not match the required fields.")
 
@@ -10258,13 +10269,16 @@ def validate_translation_response(payload, source_items, target_language="en"):
                 else "I will continue from the current saved Stage."
             )
 
-        for field_name in (
+        translated_text_fields = [
             "followUpQuestion",
             "intentHypothesis",
             "proposalOfferSummary",
             "proposalOfferRationale",
             "proposalSummary",
-        ):
+        ]
+        if "proposalPresentationReason" in item_expected_fields:
+            translated_text_fields.append("proposalPresentationReason")
+        for field_name in translated_text_fields:
             normalized[field_name] = _validate_translated_text(
                 translation[field_name],
                 source[field_name],
@@ -10354,6 +10368,7 @@ def validate_translation_response(payload, source_items, target_language="en"):
             normalized.get("intentHypothesis"),
             normalized.get("proposalOfferSummary"),
             normalized.get("proposalOfferRationale"),
+            normalized.get("proposalPresentationReason"),
             normalized.get("proposalSummary"),
             *(normalized.get("uiCueTexts") or []),
             *(normalized.get("coordinateLinkTexts") or []),

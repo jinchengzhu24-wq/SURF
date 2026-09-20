@@ -693,6 +693,57 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(offered.status_code, 200, offered.text)
         return offered.json()["turns"][-1]
 
+    def seed_answered_proposal_topic(self, initial_request, answer, *, key):
+        """Create the mandatory first question/answer without consuming an LLM mock."""
+        version_id = self.read_session()["currentVersionId"]
+        with repository.connect(immediate=True) as database:
+            session = repository.get_session(database, self.session_id)
+            topic_id = backend.insert_turn(
+                database, session, "user", initial_request, version_id,
+                f"{key}-request", None,
+            )
+            backend.record_event(
+                database,
+                self.session_id,
+                "proposal_request_requested",
+                {
+                    "messageKey": f"{key}-request",
+                    "turnId": topic_id,
+                    "baseVersionId": version_id,
+                },
+                backend.utc_now(),
+            )
+            question = "What should this change preserve in the play experience?"
+            question_execution = LLMExecutionResult(
+                question,
+                1,
+                f"{key}-question",
+                model="mock-model",
+                guidance={
+                    "move": "clarify_intent",
+                    "intentHypothesis": None,
+                    "followUpQuestion": question,
+                    "proposalOffer": None,
+                    "uiCues": [],
+                    "proposalDiscovery": {
+                        "topicId": topic_id,
+                        "clarificationQuestionCount": 1,
+                        "clarificationQuestionKey": "preserve",
+                        "clarificationQuestionText": question,
+                        "askedQuestionKeys": ["preserve"],
+                        "status": "clarifying",
+                    },
+                },
+            )
+            backend.insert_turn(
+                database, session, "assistant", question, version_id,
+                f"{key}-question", question_execution,
+            )
+            backend.insert_turn(
+                database, session, "user", answer, version_id,
+                f"{key}-answer", None,
+            )
+
     def test_initial_stage_matches_unity_rows_and_bootstrap_is_single_use(self):
         session = self.read_session()
 
@@ -2565,6 +2616,11 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_exhausted_deterministic_search_returns_guidance_without_relaxation_offer(self):
         version_id = self.read_session()["currentVersionId"]
+        self.seed_answered_proposal_topic(
+            "Please move target T1 one cell to the right.",
+            "Keep the opening route readable.",
+            key="strict-search-seed",
+        )
         request_payload = {
             "content": "Please revise the map by moving the target one cell to the right.",
             "baseVersionId": version_id,
@@ -2640,6 +2696,11 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_transport_failures_never_trigger_relaxation_offer(self):
         version_id = self.read_session()["currentVersionId"]
+        self.seed_answered_proposal_topic(
+            "Please move target T1 one cell to the right.",
+            "Keep the opening route readable.",
+            key="transport-failure-seed",
+        )
         request_payload = {
             "content": "Please revise the map by moving the target one cell to the right.",
             "baseVersionId": version_id,
@@ -2682,7 +2743,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 """,
                 (self.session_id,),
             ).fetchone()[0]
-        self.assertEqual(count, 3)
+        # Includes the seeded mandatory first-question proposal request plus
+        # the transport-failure lifecycle events under test.
+        self.assertEqual(count, 4)
 
     def test_retry_after_ordinary_chat_failure_never_saves_server_prose(self):
         version_id = self.read_session()["currentVersionId"]
@@ -3325,6 +3388,11 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_unchanged_llm_proposal_is_rejected_before_it_can_be_saved(self):
         version_id = self.read_session()["currentVersionId"]
+        self.seed_answered_proposal_topic(
+            "Please shift player P left.",
+            "Keep the first route readable.",
+            key="unchanged-offer-seed",
+        )
         unchanged_execution = LLMExecutionResult(
             "I drafted that revision.",
             1,
@@ -3398,6 +3466,11 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_unchanged_pending_proposal_cannot_be_accepted(self):
         version_id = self.read_session()["currentVersionId"]
+        self.seed_answered_proposal_topic(
+            "Please shift player P left.",
+            "Keep the first route readable.",
+            key="tamper-offer-seed",
+        )
         execution = LLMExecutionResult(
             "Here is a real revision for review.",
             1,
@@ -4144,6 +4217,11 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_bidirectional_revision_actions_are_visible_and_audited(self):
         version_id = self.read_session()["currentVersionId"]
+        self.seed_answered_proposal_topic(
+            "Make B1's first push create a detour choice.",
+            "Keep the central route understandable.",
+            key="bidirectional-offer-seed",
+        )
         offer_execution = LLMExecutionResult(
             "I see one focused direction worth comparing.",
             1,
@@ -4443,6 +4521,11 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_normal_assistant_turn_does_not_make_latest_revision_offer_stale(self):
         version_id = self.read_session()["currentVersionId"]
+        self.seed_answered_proposal_topic(
+            "Keep B1's first route readable.",
+            "Preserve the opening comparison.",
+            key="latest-card-normal-seed",
+        )
         offer = LLMExecutionResult(
             "A concrete direction.",
             1,
@@ -4546,6 +4629,11 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_challenge_reason_keeps_or_resolves_structured_disagreement(self):
         version_id = self.read_session()["currentVersionId"]
+        self.seed_answered_proposal_topic(
+            "Make B1's first push create a detour choice.",
+            "Keep the central route understandable.",
+            key="challenge-reason-seed",
+        )
         offer = {
             "summary": "Make the first push create a detour choice",
             "rationale": "The player should compare the central route with a local detour.",

@@ -2,6 +2,7 @@ from collections import deque
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 import time
 
 from level_validation import build_map_facts, minimum_pushes
@@ -104,6 +105,7 @@ class RevisionStrategy:
     required_transition_entities: tuple[str | None, ...] = ()
     anchor_entities: tuple[str, ...] = ()
     play_objective: str | None = None
+    display_reason: str | None = None
 
     def as_dict(self):
         return {
@@ -151,6 +153,11 @@ class RevisionStrategy:
             ],
             "anchorEntities": list(self.anchor_entities),
             "playObjective": self.play_objective,
+            **(
+                {"displayReason": self.display_reason}
+                if self.display_reason
+                else {}
+            ),
         }
 
 
@@ -238,7 +245,9 @@ def parse_revision_plan(payload):
 
 def _parse_strategy(payload, index):
     required = {"effect", "focus", "operators", "preserve", "editBudget", "metricGoals"}
-    optional = {"requiredTransitions", "anchorEntities", "playObjective"}
+    optional = {
+        "requiredTransitions", "anchorEntities", "playObjective", "displayReason",
+    }
     if not isinstance(payload, dict) or not required.issubset(payload) or not set(payload).issubset(required | optional):
         raise RevisionPlanError(f"strategy {index} does not match the required fields.")
     effect = payload["effect"]
@@ -315,6 +324,7 @@ def _parse_strategy(payload, index):
         index,
     )
     play_objective = _parse_play_objective(payload.get("playObjective"), index)
+    display_reason = _parse_display_reason(payload.get("displayReason"))
     return RevisionStrategy(
         effect=effect,
         focus=focus,
@@ -326,6 +336,7 @@ def _parse_strategy(payload, index):
         required_transition_entities=transition_entities,
         anchor_entities=anchor_entities,
         play_objective=play_objective,
+        display_reason=display_reason,
     )
 
 
@@ -388,6 +399,14 @@ def _parse_play_objective(payload, strategy_index):
     if "\n" in payload or "\r" in payload:
         raise RevisionPlanError(f"strategy {strategy_index} playObjective is invalid.")
     return payload.strip()
+
+
+def _parse_display_reason(payload):
+    """Keep presentation prose best-effort and outside plan validity."""
+    if not isinstance(payload, str):
+        return None
+    normalized = re.sub(r"\s+", " ", payload).strip()
+    return normalized[:600] or None
 
 
 def _parse_focus(payload, strategy_index):

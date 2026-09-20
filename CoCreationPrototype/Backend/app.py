@@ -4675,6 +4675,122 @@ def _verified_offer_rationale(authorized, brief, mechanism, validation, language
     )
 
 
+def _fallback_proposal_reason(brief, language):
+    effect = str((brief or {}).get("effect") or "")
+    chinese = language == "zh-CN"
+    reasons = {
+        "open_route": (
+            "打开这段局部通路，有助于减少不必要的绕行，并给玩家更清楚的路线选择。",
+            "Opening this local passage can reduce unnecessary detours and give the player a clearer route choice.",
+        ),
+        "narrow_route": (
+            "收紧这段通路，有助于让玩家更早判断推箱顺序，避免直接通过。",
+            "Narrowing this passage can make the player judge the push order earlier instead of taking a direct route.",
+        ),
+        "adjust_internal_walls": (
+            "调整这里的墙体会改变原来的通行关系，让玩家在行动前比较不同路线。",
+            "Adjusting these walls changes the local passage relationship so the player compares routes before acting.",
+        ),
+        "reshape_water": (
+            "调整这里的水域会重新组织可通行空间，让路线边界和选择更清楚。",
+            "Reshaping this water area reorganizes the walkable space so route boundaries and choices are clearer.",
+        ),
+        "relocate_start": (
+            "调整玩家起点会改变开局接近各条路线的方式，让第一步判断更有意义。",
+            "Relocating the player start changes how the opening routes are approached and makes the first decision more meaningful.",
+        ),
+        "relocate_box": (
+            "调整箱子位置会改变它进入主要路线的时机，让推运过程产生新的判断。",
+            "Relocating the box changes when it enters the main route and creates a new transport decision.",
+        ),
+        "relocate_target": (
+            "调整目标位置会改变箱子的最终推进方向，让后段路线需要重新规划。",
+            "Relocating the target changes the box's final approach and asks the player to replan the later route.",
+        ),
+        "change_box_order": (
+            "这项局部调整会改变两个箱子的先后关系，让玩家更早考虑整体推箱顺序。",
+            "This local adjustment changes the boxes' ordering relationship and encourages earlier planning of the overall push sequence.",
+        ),
+    }
+    pair = reasons.get(effect) or (
+        "这项局部调整会改变路线选择，让玩家在推动前有更明确的判断。",
+        "This local adjustment changes the route choice and gives the player a clearer decision before pushing.",
+    )
+    return pair[0 if chinese else 1]
+
+
+def _safe_proposal_reason(value, brief, language):
+    if not isinstance(value, str):
+        return _fallback_proposal_reason(brief, language)
+    text = _inline_display_text(value)[:600]
+    coordinate = re.search(r"[（(]\s*\d+\s*[,，]\s*\d+\s*[）)]", text)
+    internal = re.search(
+        r"(?:[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*|solutionSteps|solutionPushes|"
+        r"playObjective|displayReason|metricGoals|executionBrief|RevisionPlan|"
+        r"\u76f8\u5173\u8bbe\u8ba1\u6307\u6807|\u5904\u7406\u76f8\u5173\u6307\u6807|relevant design metrics?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not text or coordinate or internal:
+        return _fallback_proposal_reason(brief, language)
+    return text
+
+
+def _proposal_origin_texts(stage_context):
+    context = stage_context or {}
+    discovery = context.get("proposalDiscovery") or {}
+    request_text = _inline_display_text(discovery.get("initialRequest"))
+    answer_texts = [
+        _inline_display_text(item.get("answerText"))
+        for item in discovery.get("answers") or []
+        if isinstance(item, dict) and _inline_display_text(item.get("answerText"))
+    ][:3]
+    if request_text and answer_texts:
+        return request_text[:2000], [item[:2000] for item in answer_texts]
+
+    source_offer = context.get("sourceProposalOffer") or {}
+    source_presentation = source_offer.get("proposalPresentation") or {}
+    if source_presentation.get("schemaVersion") == 2:
+        request_text = _inline_display_text(source_presentation.get("requestText"))
+        answer_texts = [
+            _inline_display_text(item)
+            for item in source_presentation.get("answerTexts") or []
+            if _inline_display_text(item)
+        ][:3]
+        if request_text and answer_texts:
+            return request_text[:2000], [item[:2000] for item in answer_texts]
+    return None
+
+
+def _verified_offer_presentation_v2(
+    brief, validation, stage_context, display_reason, language,
+):
+    origin = _proposal_origin_texts(stage_context)
+    if origin is None:
+        return None
+    request_text, answer_texts = origin
+    metrics = validation.as_dict()
+    return {
+        "schemaVersion": 2,
+        "requestText": request_text,
+        "answerTexts": answer_texts,
+        "changes": [
+            {
+                "row": item["row"],
+                "column": item["column"],
+                "before": item["from"],
+                "after": item["to"],
+            }
+            for item in (brief or {}).get("requiredTransitions") or []
+        ],
+        "reason": _safe_proposal_reason(display_reason, brief, language),
+        "solution": {
+            "minimumMoves": metrics.get("solutionSteps"),
+            "pushesOnMinimumMoveSolution": metrics.get("solutionPushes"),
+        },
+    }
+
+
 def _materialize_verified_automatic_offer(execution, base_rows, language, stage_context):
     """Freeze a validated semantic candidate into the existing exact purple-card binding."""
     _execute_revision_candidate_or_api_error(base_rows, execution)
@@ -4722,6 +4838,13 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
         validation,
         language,
     )
+    presentation = _verified_offer_presentation_v2(
+        brief,
+        validation,
+        stage_context,
+        strategy.get("displayReason"),
+        language,
+    )
     if language == "zh-CN":
         body = (
             "我已经把刚才确认的方向落实成一份可审查候选。"
@@ -4745,6 +4868,11 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
             "summary": summary,
             "rationale": rationale,
             "executionBrief": brief,
+            **(
+                {"proposalPresentation": presentation}
+                if presentation is not None
+                else {}
+            ),
             "revisionWorkflow": (
                 revision_workflow
             ),
@@ -7596,6 +7724,12 @@ def _pending_assistant_translations(database, session_id, language, turn_ids):
     for row in rows:
         guidance = load_json(row["guidance_json"]) or {}
         proposal_offer = guidance.get("proposalOffer") or {}
+        proposal_presentation = proposal_offer.get("proposalPresentation") or {}
+        presentation_reason = (
+            proposal_presentation.get("reason")
+            if proposal_presentation.get("schemaVersion") == 2
+            else None
+        )
         ui_cues = guidance.get("uiCues") or []
         excluded_suffixes = [
             *[str(cue.get("text") or "").strip() for cue in ui_cues],
@@ -7614,6 +7748,7 @@ def _pending_assistant_translations(database, session_id, language, turn_ids):
             "intentHypothesis": guidance.get("intentHypothesis"),
             "proposalOfferSummary": proposal_offer.get("summary"),
             "proposalOfferRationale": proposal_offer.get("rationale"),
+            "proposalPresentationReason": presentation_reason,
             "uiCueTexts": [cue.get("text") for cue in ui_cues],
             "proposalSummary": row["summary"],
             "disagreement": guidance.get("disagreement"),
@@ -7647,10 +7782,14 @@ def _translated_guidance(source_guidance, translated):
         presentation = source_offer.get("proposalPresentation")
         if isinstance(presentation, dict):
             presentation = dict(presentation)
-            if translated["proposalOfferSummary"] is not None:
-                presentation["summary"] = translated["proposalOfferSummary"]
-            if translated["proposalOfferRationale"] is not None:
-                presentation["rationale"] = translated["proposalOfferRationale"]
+            if presentation.get("schemaVersion") == 2:
+                if translated["proposalPresentationReason"] is not None:
+                    presentation["reason"] = translated["proposalPresentationReason"]
+            else:
+                if translated["proposalOfferSummary"] is not None:
+                    presentation["summary"] = translated["proposalOfferSummary"]
+                if translated["proposalOfferRationale"] is not None:
+                    presentation["rationale"] = translated["proposalOfferRationale"]
             guidance["proposalOffer"]["proposalPresentation"] = presentation
 
     translated_cues = translated["uiCueTexts"]
@@ -8556,15 +8695,15 @@ def _proposal_clarification_spec(discovery, snapshot, language):
             )
         else:
             question = (
-                "你希望玩家增加的时间主要花在规划推箱顺序上，还是花在执行更长的运输路线上？"
+                "完成你提出的这项调整后，你最希望玩家在哪个具体游玩时刻感受到变化？"
                 if chinese else
-                "Should the added solving time come mainly from planning the push order or from executing a longer transport route?"
+                "After making the change you described, at what specific play moment should the player feel its effect most?"
             )
     elif question_key == "mechanism":
         question = (
-            "你希望额外时间主要来自更长的推箱运输，还是来自需要反复判断顺序的局部陷阱？"
+            "你希望这项调整主要通过什么局部玩法机制产生效果？"
             if chinese else
-            "Should the extra time come mainly from longer box transport or from a local trap that demands repeated order judgments?"
+            "What local play mechanism should make this change take effect?"
         )
     elif question_key == "binding" and len(box_labels) > 1:
         first, second = box_labels[:2]
@@ -8602,15 +8741,15 @@ def _proposal_clarification_spec(discovery, snapshot, language):
     fallback_questions = {
         "experience_goal": (
             question if spatial_emptiness else (
-                "你希望额外的解题时间主要消耗在哪种判断或操作上？"
+                "完成你提出的调整后，你最希望玩家在哪个具体游玩时刻感受到变化？"
                 if chinese else
-                "What kind of judgment or action should account for the extra solving time?"
+                "After making the change you described, at what specific play moment should the player feel its effect most?"
             )
         ),
         "mechanism": (
-            "你希望通过哪种局部机制增加实际推箱次数？"
+            "你希望这项调整主要通过什么局部玩法机制产生效果？"
             if chinese else
-            "What local mechanism should create the additional box pushes?"
+            "What local play mechanism should make this change take effect?"
         ),
         "binding": (
             "你希望先围绕哪个箱子或局部区域增加运输长度？"
@@ -8635,7 +8774,7 @@ def _proposal_clarification_spec(discovery, snapshot, language):
             "experience_goal": (
                 "clarify whether the sparse area should improve visual balance or affect routes and push rhythm"
                 if spatial_emptiness else
-                "clarify where the added player time or difficulty should come from"
+                "clarify the desired player experience after carrying out the stated direction without changing or reversing that direction"
             ),
             "mechanism": "clarify the local play mechanism that should create the requested effect",
             "binding": "clarify which existing entity or local area should carry the change",
@@ -8744,6 +8883,10 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_d
             if _proposal_discovery_has_unique_anchor(discovery, snapshot)
             else "proposal_conservative"
         )
+    # Every newly requested proposal must include at least one designer answer,
+    # even when its initial direction is already concrete enough to execute.
+    if discovery and discovery_status == "clarifying" and question_count == 0:
+        return "needs_clarification"
     if (user_map_claims or {}).get("conflicts"):
         return "needs_clarification"
     if _is_vague_aesthetic_revision(text):
@@ -10616,6 +10759,7 @@ def _proposal_presentation_for_binding(
     language="en",
     summary=None,
     rationale=None,
+    source_presentation=None,
 ):
     """Create the safe, human-readable projection of an exact proposal."""
     brief = binding.get("executionBrief") if isinstance(binding, dict) else None
@@ -10624,6 +10768,46 @@ def _proposal_presentation_for_binding(
     transitions = brief.get("requiredTransitions") or []
     if not transitions:
         return None
+    if (
+        isinstance(source_presentation, dict)
+        and source_presentation.get("schemaVersion") == 2
+    ):
+        request_text = _inline_display_text(source_presentation.get("requestText"))
+        answer_texts = [
+            _inline_display_text(item)
+            for item in source_presentation.get("answerTexts") or []
+            if _inline_display_text(item)
+        ][:3]
+        solution = source_presentation.get("solution") or {}
+        minimum_moves = solution.get("minimumMoves")
+        route_pushes = solution.get("pushesOnMinimumMoveSolution")
+        if (
+            request_text
+            and answer_texts
+            and isinstance(minimum_moves, int)
+            and isinstance(route_pushes, int)
+        ):
+            return {
+                "schemaVersion": 2,
+                "requestText": request_text[:2000],
+                "answerTexts": [item[:2000] for item in answer_texts],
+                "changes": [
+                    {
+                        "row": item["row"],
+                        "column": item["column"],
+                        "before": item["from"],
+                        "after": item["to"],
+                    }
+                    for item in transitions
+                ],
+                "reason": _safe_proposal_reason(
+                    source_presentation.get("reason"), brief, language
+                ),
+                "solution": {
+                    "minimumMoves": minimum_moves,
+                    "pushesOnMinimumMoveSolution": route_pushes,
+                },
+            }
     presentation = {
         "schemaVersion": 1,
         "changes": [
@@ -10842,6 +11026,7 @@ def _bind_execution_to_stage(
         language,
         offer.get("summary"),
         offer.get("rationale"),
+        offer.get("proposalPresentation"),
     )
     if presentation is not None:
         public_offer = dict(offer)

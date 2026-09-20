@@ -420,6 +420,11 @@ translations.en.proposalObjective = "What this should achieve";
 translations.en.proposalMustSatisfy = "Must satisfy";
 translations.en.proposalTryToAchieve = "Try to achieve";
 translations.en.proposalActualChanges = "Actual changes prepared";
+translations.en.proposalRequestText = "Your request";
+translations.en.proposalAnswerTexts = "Your description";
+translations.en.proposalChangeList = "How I will change it";
+translations.en.proposalReason = "Why I will change it this way";
+translations.en.proposalSolution = "Solution verification";
 translations.en.executeBoundProposal = "Execute the bound proposal.";
 translations.en.error_SEMANTIC_CONSTRAINT_NOT_MET = "No candidate satisfied every explicit requirement; the current map was not changed.";
 translations.en.error_SEMANTIC_POSTCONDITION_FAILED = "The reviewed proposal failed its semantic postcondition and was not applied.";
@@ -486,6 +491,11 @@ translations["zh-CN"].proposalObjective = "\u60f3\u5b9e\u73b0\u4ec0\u4e48";
 translations["zh-CN"].proposalMustSatisfy = "\u5fc5\u987b\u6ee1\u8db3";
 translations["zh-CN"].proposalTryToAchieve = "\u5c3d\u91cf\u5b9e\u73b0";
 translations["zh-CN"].proposalActualChanges = "\u5b9e\u9645\u51c6\u5907\u4fee\u6539";
+translations["zh-CN"].proposalRequestText = "\u4f60\u7684\u9700\u6c42";
+translations["zh-CN"].proposalAnswerTexts = "\u4f60\u7684\u63cf\u8ff0";
+translations["zh-CN"].proposalChangeList = "\u6211\u4f1a\u600e\u6837\u6539";
+translations["zh-CN"].proposalReason = "\u6211\u4e3a\u4ec0\u4e48\u8fd9\u6837\u6539";
+translations["zh-CN"].proposalSolution = "\u89e3\u6cd5\u9a8c\u8bc1";
 translations["zh-CN"].executeBoundProposal = "\u6267\u884c\u5df2\u7ed1\u5b9a\u7684\u65b9\u6848\u3002";
 translations["zh-CN"].error_CHALLENGE_REVIEW_FAILED = "Kimi \u672a\u80fd\u53ef\u9760\u5730\u5224\u65ad\u8fd9\u6761\u7406\u7531\uff0c\u8bf7\u91cd\u8bd5\u8be5\u6d88\u606f\u3002";
 translations["zh-CN"].error_CHALLENGE_REVIEW_RETRY_RETIRED = "\u8bf7\u4f7f\u7528\u804a\u5929\u8bf7\u6c42\u7684\u901a\u7528\u91cd\u8bd5\u3002";
@@ -1310,13 +1320,14 @@ function renderAssistantBubble(turn, bubble) {
     const offer = guidance.proposalOffer;
 
     const presentation = offer?.proposalPresentation;
+    const v2Presentation = presentation?.schemaVersion === 2;
     const proposalSummary = presentation?.summary || offer?.summary;
     const proposalRationale = presentation?.rationale || offer?.rationale || "";
-    if (offer && proposalSummary) {
+    if (offer && (v2Presentation || proposalSummary)) {
         const revisionCue = createGuidanceCue(
             "revision",
-            proposalSummary,
-            proposalRationale,
+            v2Presentation ? "" : proposalSummary,
+            v2Presentation ? "" : proposalRationale,
         );
         if (presentation) {
             revisionCue.appendChild(
@@ -1728,9 +1739,12 @@ function createGuidanceCue(type, text, detail = "") {
     label.className = "guidance-cue-label";
     label.textContent = GUIDANCE_CUE_LABELS[state.language]?.[type]
         || GUIDANCE_CUE_LABELS.en[type];
-    const message = document.createElement("strong");
-    message.textContent = text;
-    cue.append(label, message);
+    cue.appendChild(label);
+    if (text) {
+        const message = document.createElement("strong");
+        message.textContent = text;
+        cue.appendChild(message);
+    }
 
     if (detail) {
         const rationale = document.createElement("p");
@@ -1976,6 +1990,9 @@ function proposalPreservedLabel(value) {
 }
 
 function createProposalPresentation(presentation) {
+    if (presentation?.schemaVersion === 2) {
+        return createProposalPresentationV2(presentation);
+    }
     const section = document.createElement("div");
     section.className = "proposal-plan-details";
 
@@ -2043,6 +2060,56 @@ function createProposalPresentation(presentation) {
         section.appendChild(preservedText);
     }
     return section;
+}
+
+function createProposalPresentationV2(presentation) {
+    const container = document.createElement("div");
+    container.className = "proposal-plan-details proposal-plan-details-v2";
+
+    const appendSection = (labelKey, values) => {
+        const items = (Array.isArray(values) ? values : [values])
+            .map(value => String(value ?? "").trim())
+            .filter(Boolean);
+        if (!items.length) return;
+        const section = document.createElement("section");
+        section.className = "proposal-v2-section";
+        const title = document.createElement("strong");
+        title.className = "proposal-v2-title";
+        title.textContent = t(labelKey);
+        section.appendChild(title);
+        items.forEach(value => {
+            const line = document.createElement("div");
+            line.className = "proposal-v2-line";
+            line.textContent = value;
+            section.appendChild(line);
+        });
+        container.appendChild(section);
+    };
+
+    appendSection("proposalRequestText", presentation.requestText);
+    appendSection("proposalAnswerTexts", presentation.answerTexts);
+
+    const changes = (Array.isArray(presentation.changes) ? presentation.changes : [])
+        .filter(change => Number.isInteger(change?.row) && Number.isInteger(change?.column))
+        .map(change => {
+            const before = proposalPresentationTileLabel(change.before);
+            const after = proposalPresentationTileLabel(change.after);
+            return `(${change.row}, ${change.column})：${before} → ${after}`;
+        });
+    appendSection("proposalChangeList", changes);
+    appendSection("proposalReason", presentation.reason);
+
+    const solution = presentation.solution || {};
+    if (
+        Number.isInteger(solution.minimumMoves)
+        && Number.isInteger(solution.pushesOnMinimumMoveSolution)
+    ) {
+        const text = state.language === "zh-CN"
+            ? `最少移动 ${solution.minimumMoves} 步，其中推动 ${solution.pushesOnMinimumMoveSolution} 次。`
+            : `Minimum ${solution.minimumMoves} moves, including ${solution.pushesOnMinimumMoveSolution} pushes.`;
+        appendSection("proposalSolution", text);
+    }
+    return container;
 }
 
 function prefillProposalConsent(offer) {
