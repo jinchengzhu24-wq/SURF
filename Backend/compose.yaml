@@ -1,0 +1,12 @@
+services:
+  backend:
+    build: .
+    container_name: sokoban-backend
+    env_file:
+      - .env
+    ports:
+      - "18000:8000"
+    volumes:
+      - ./study_logs:/app/study_logs
+      - ./logs:/app/logs
+    restart: unless-stopped
