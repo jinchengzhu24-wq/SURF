@@ -53,6 +53,7 @@ from llm_client import (
     PROMPT_VERSION,
     PROPOSAL_GENERATION_ATTEMPTS,
     classify_challenge_reason,
+    challenge_choice_card_copy,
     classify_revision_request,
     review_intent_feedback,
     review_question_answers,
@@ -649,6 +650,7 @@ class MessageRequest(StrictModel):
     ] = "none"
     sourceTurnId: str | None = None
     challengeId: str | None = None
+    challengeChoice: Literal["ai", "user"] | None = None
     exitChallenge: bool = False
 
 
@@ -2828,6 +2830,7 @@ def _send_message_locked(
                 payload.baseVersionId,
                 payload.sourceTurnId,
             )
+            _require_offer_action(source_offer, payload.action)
 
         current = get_current_version(database, session)
         if payload.action in REVISION_CARD_ACTIONS:
@@ -3087,14 +3090,38 @@ def _send_message_locked(
                 )
 
     pending_disagreement = stage_context.get("activeDisagreement") or {}
+    if payload.challengeChoice is not None and not (
+        pending_disagreement.get("subject") == "ai_revision_challenge"
+        and pending_disagreement.get("phase") == "choice_pending"
+        and pending_disagreement.get("challengeId") == payload.challengeId
+    ):
+        raise ApiError(409, "CHALLENGE_STALE", "This choice no longer belongs to the active challenge.")
     deterministic_challenge_choice = (
-        _challenge_choice(content, language)
+        payload.challengeChoice or _challenge_choice(content, language)
         if (
             pending_disagreement.get("subject") == "ai_revision_challenge"
             and pending_disagreement.get("phase") == "choice_pending"
         )
         else None
     )
+    if deterministic_challenge_choice is not None:
+        with connect() as challenge_database:
+            challenge_row = challenge_database.execute(
+                """SELECT source.version_id, source.proposal_binding_json
+                FROM revision_challenges AS challenge
+                JOIN conversation_turns AS source ON source.id = challenge.source_proposal_turn_id
+                WHERE challenge.session_id = ? AND challenge.challenge_id = ?
+                  AND challenge.base_version_id = ?""",
+                (session_id, pending_disagreement.get("challengeId"), payload.baseVersionId),
+            ).fetchone()
+        binding = (load_json(challenge_row["proposal_binding_json"]) or {}) if challenge_row else {}
+        if (
+            challenge_row is None
+            or challenge_row["version_id"] != payload.baseVersionId
+            or binding.get("mapFingerprint") != map_fingerprint(context["rows"])
+            or not (binding.get("executionBrief") or {}).get("requiredTransitions")
+        ):
+            raise ApiError(409, "CHALLENGE_STALE", "The challenged proposal is no longer available on this Stage.")
     question_answer_review = {"answeredQuestionIds": [], "results": []}
     if (
         payload.action in {"none", "continue_challenge"}
@@ -3248,6 +3275,7 @@ def _send_message_locked(
                         or challenge_context.get("proposalSummary"),
                         request.state.request_id,
                         _deadline=challenge_deadline,
+                        simple=True,
                     )
                 except LLMServiceError as exception:
                     # Keep the already-persisted user reason exactly once. The
@@ -3331,14 +3359,14 @@ def _send_message_locked(
                     ) from exception
                 comparison = challenge_reason_classification.get("comparison")
                 if comparison:
-                    from llm_client import _validate_map_grounding_texts
-                    try:
-                        _validate_map_grounding_texts(
-                            [comparison],
-                            context["rows"],
-                            entity_bindings=stage_context.get("entityBindings"),
-                        )
-                    except ValueError as exception:
+                    safe_comparison = _salvage_challenge_analysis(
+                        comparison,
+                        context["rows"],
+                        stage_context.get("entityBindings"),
+                        language,
+                    )
+                    if not safe_comparison:
+                        exception = ValueError("No grounded comparison remained after removing invalid fragments.")
                         with connect(immediate=True) as database:
                             active_session = require_active_session(
                                 database, session_id, access_cookie
@@ -3400,6 +3428,7 @@ def _send_message_locked(
                                 "maximumAttempts": 2,
                             },
                         ) from exception
+                    challenge_reason_classification["comparison"] = safe_comparison
                 stage_context["challengeReasonClassification"] = (
                     challenge_reason_classification
                 )
@@ -3463,9 +3492,59 @@ def _send_message_locked(
         accepted_reason = str(active_disagreement.get("acceptedReason") or "").strip()
         proposal_summary = str(active_disagreement.get("proposalSummary") or "").strip()
         if challenge_choice_resolution == "ai":
-            revision_brief = (
-                f"{proposal_summary}\nAccepted designer concern to address as a soft goal: {accepted_reason}"
-            ).strip()
+            # "Use the original approach" names the reviewed cells, not a
+            # fresh search direction. Revalidate those cells as a new pending
+            # proposal so the designer can still inspect and accept them.
+            challenge_source_id = (
+                (context["stageContext"].get("challengeContext") or {}).get("sourceTurnId")
+            )
+            challenge_id = active_disagreement.get("challengeId")
+            if challenge_id:
+                with connect() as database:
+                    challenge_row = database.execute(
+                        """SELECT source_proposal_turn_id FROM revision_challenges
+                        WHERE session_id = ? AND challenge_id = ? AND base_version_id = ?""",
+                        (session_id, challenge_id, payload.baseVersionId),
+                    ).fetchone()
+                if challenge_row is None:
+                    raise ApiError(409, "CHALLENGE_STALE", "The challenged proposal is no longer available.")
+                challenge_source_id = challenge_row["source_proposal_turn_id"]
+            else:
+                raise ApiError(409, "CHALLENGE_STALE", "The active challenge has no source record.")
+            if not challenge_source_id:
+                raise ApiError(409, "INVALID_CARD_SOURCE", "The challenged proposal has no source card.")
+            if challenge_source_id:
+                with connect() as database:
+                    challenge_source = database.execute(
+                        """SELECT version_id, guidance_json, proposal_binding_json
+                        FROM conversation_turns WHERE session_id = ? AND id = ?""",
+                        (session_id, challenge_source_id),
+                    ).fetchone()
+                if challenge_source is None or challenge_source["version_id"] != payload.baseVersionId:
+                    raise ApiError(409, "PROPOSAL_STALE", "The challenged proposal belongs to another Stage.")
+                challenged_binding = load_json(challenge_source["proposal_binding_json"]) or {}
+                challenged_brief = challenged_binding.get("executionBrief")
+                if not isinstance(challenged_brief, dict) or not challenged_brief.get("requiredTransitions"):
+                    raise ApiError(409, "INVALID_CARD_SOURCE", "The challenged proposal has no exact tile changes.")
+                if challenged_binding.get("mapFingerprint") != map_fingerprint(context["rows"]):
+                    raise ApiError(409, "PROPOSAL_STALE", "The challenged map has changed.")
+                try:
+                    challenged_brief = validate_execution_brief(
+                        challenged_brief,
+                        context["rows"],
+                        context["stageContext"].get("entityBindings"),
+                    )
+                except ValueError as error:
+                    raise ApiError(409, "PROPOSAL_PRECONDITION_FAILED", "The challenged tile changes are no longer applicable.") from error
+                source_guidance = load_json(challenge_source["guidance_json"]) or {}
+                context["stageContext"].update({
+                    "explicitAction": "execute_revision",
+                    "deterministicExactExecution": True,
+                    "proposalBindingFrozen": True,
+                    "authorizedExecutionBrief": challenged_brief,
+                    "sourceProposalOffer": source_guidance.get("proposalOffer") or {},
+                })
+            revision_brief = proposal_summary
         else:
             revision_brief = (
                 f"Use the designer's accepted reason as the primary direction: {accepted_reason}"
@@ -3516,7 +3595,30 @@ def _send_message_locked(
         language,
         request.state.request_id,
     ) if proposal_discovery else None
-    if context["stageContext"].get("revisionRouting") == "proposal_cancelled":
+    if payload.action == "challenge_revision":
+        execution = LLMExecutionResult(
+            "请说明你质疑的理由。" if language == "zh-CN" else "Please explain why you challenge this proposal.",
+            0,
+            request.state.request_id,
+            model="server",
+            guidance={"proposalOffer": None, "disagreement": None, "uiCues": []},
+        )
+    elif challenge_reason_classification is not None:
+        comparison = str(challenge_reason_classification.get("comparison") or "").strip()
+        if not comparison:
+            comparison = (
+                "我还无法判断这个理由具体指向哪处玩法变化。请再说明你担心的效果。"
+                if language == "zh-CN" else
+                "I cannot yet tell which play effect concerns you. Please explain that effect more concretely."
+            )
+        execution = LLMExecutionResult(
+            comparison,
+            challenge_reason_classification.get("attemptsUsed", 1),
+            request.state.request_id,
+            model="kimi-k2.6",
+            guidance={"proposalOffer": None, "disagreement": None, "uiCues": []},
+        )
+    elif context["stageContext"].get("revisionRouting") == "proposal_cancelled":
         execution = _proposal_cancelled_execution(
             language,
             request.state.request_id,
@@ -3705,7 +3807,7 @@ def _send_message_locked(
     if (
         payload.action != "challenge_revision"
         and payload.action != "execute_revision"
-        and payload.action != "continue_challenge"
+        and (payload.action != "continue_challenge" or challenge_choice_resolution == "user")
         and execution.proposed_rows is not None
     ):
         if revision_state == "proposal_requested":
@@ -3743,6 +3845,36 @@ def _send_message_locked(
             challenge_choice_resolution,
             language,
         )
+    if challenge_choice_resolution == "user":
+        offer = (execution.guidance or {}).get("proposalOffer")
+        if not isinstance(offer, dict) or not offer.get("executionBrief"):
+            raise ApiError(
+                502,
+                "PROPOSAL_SEARCH_EXHAUSTED",
+                "No verified new proposal could be produced from this reason; the map was not changed.",
+                retryable=True,
+            )
+        with connect() as database:
+            source_row = database.execute(
+                """SELECT turn.proposal_binding_json FROM revision_challenges AS challenge
+                JOIN conversation_turns AS turn ON turn.id = challenge.source_proposal_turn_id
+                WHERE challenge.session_id = ? AND challenge.challenge_id = ?
+                  AND challenge.base_version_id = ?""",
+                (session_id, active_disagreement.get("challengeId"), payload.baseVersionId),
+            ).fetchone()
+        if source_row is None:
+            raise ApiError(409, "CHALLENGE_STALE", "The challenged proposal is no longer available.")
+        original_brief = (load_json(source_row["proposal_binding_json"]) or {}).get("executionBrief") or {}
+        def transition_set(brief):
+            return {
+                (item.get("row"), item.get("column"), item.get("from"), item.get("to"))
+                for item in brief.get("requiredTransitions") or [] if isinstance(item, dict)
+            }
+        if transition_set(offer["executionBrief"]) == transition_set(original_brief):
+            raise ApiError(502, "PROPOSAL_SEARCH_EXHAUSTED", "The new direction repeated the challenged proposal; the map was not changed.", retryable=True)
+        guidance = dict(execution.guidance or {})
+        guidance["proposalOffer"] = {**offer, "availableActions": ["execute_revision"]}
+        execution = replace(execution, guidance=guidance)
     if payload.action == "none" and context["stageContext"].get("source") == "human_edit":
         execution = _normalize_manual_edit_review_execution(
             execution,
@@ -3994,6 +4126,7 @@ def _send_message_locked(
                 payload.baseVersionId,
                 payload.sourceTurnId,
             )
+            _require_offer_action(source_offer, payload.action)
             source_binding = _preflight_proposal(
                 database,
                 session_id,
@@ -9274,6 +9407,10 @@ def _validate_message_action_payload(payload):
             "CHALLENGE_EXIT_UNSUPPORTED",
             "An active proposal challenge must be resolved through the conversation.",
         )
+    if payload.challengeChoice is not None:
+        expected = "是" if payload.challengeChoice == "ai" else "否"
+        if action != "continue_challenge" or payload.content.strip() != expected:
+            raise ApiError(400, "INVALID_MESSAGE_ACTION", "The challenge choice does not match its button.")
     if action in {"none", "continue_challenge"} and source_turn_id:
         raise ApiError(
             400,
@@ -9334,6 +9471,12 @@ def _latest_revision_offer_source(database, session_id, version_id):
         if offer is not None:
             return source, offer
     return None, None
+
+
+def _require_offer_action(offer, action):
+    allowed = (offer or {}).get("availableActions")
+    if allowed is not None and action not in allowed:
+        raise ApiError(409, "INVALID_CARD_SOURCE", "This revision card does not allow that action.")
 
 
 def _source_revision_offer(database, session_id, version_id, source_turn_id):
@@ -9887,6 +10030,31 @@ def _challenge_choice(value, language):
     return None
 
 
+def _salvage_challenge_analysis(value, rows, entity_bindings, language):
+    """Keep grounded, correctly localized sentences instead of rejecting a whole review."""
+    from llm_client import (
+        _sanitize_visible_model_text,
+        _validate_map_grounding_texts,
+        _visible_chinese_language_issue,
+    )
+
+    sentences = re.split(r"(?<=[。！？.!?])\s*", str(value or "").strip())
+    kept = []
+    for sentence in sentences:
+        sentence = _sanitize_visible_model_text(sentence, language).strip()
+        if not sentence or (language == "zh-CN" and _visible_chinese_language_issue(sentence)):
+            continue
+        try:
+            _validate_map_grounding_texts([sentence], rows, entity_bindings=entity_bindings)
+        except ValueError:
+            continue
+        if sentence not in kept:
+            kept.append(sentence)
+        if len(kept) == 2:
+            break
+    return " ".join(kept)[:380]
+
+
 def _enforce_challenge_reason_execution(
     execution,
     classification,
@@ -9919,13 +10087,6 @@ def _enforce_challenge_reason_execution(
             revision_operations=[],
             proposal_binding={},
         )
-    if relation != "different" and not (
-        isinstance(active_disagreement, dict)
-        and active_disagreement.get("subject") == "ai_revision_challenge"
-        and active_disagreement.get("phase") == "reason_review"
-    ):
-        return execution
-
     source = active_disagreement or {}
     hypotheses = (challenge_context or {}).get("hypotheses") or {}
     primary = str(source.get("primaryHypothesis") or hypotheses.get("primary") or "").strip()
@@ -9936,44 +10097,22 @@ def _enforce_challenge_reason_execution(
         or (challenge_context or {}).get("proposalSummary")
         or ""
     ).strip()
-    reasonable = merit == "reasonable"
-    model_disagreement = (execution.guidance or {}).get("disagreement") or {}
-    comparison = str(
-        (classification or {}).get("comparison")
-        or model_disagreement.get("coreDisagreement")
-        or execution.assistant_message
-        or ""
-    ).strip()
-    from llm_client import _detailed_disagreement_core
-    comparison = _detailed_disagreement_core(
-        str(user_reason or "").strip(),
-        str(execution.assistant_message or "").strip(),
-        comparison,
-        language,
-    )
-    next_question = (
-        "你是否仍希望沿用我原来提出的办法？请回答是或否。"
-        if language == "zh-CN"
-        else "Do you still want to use my original approach? Please answer yes or no."
-    ) if reasonable else (
-        "你愿意再说明这个理由会怎样改善实际游玩判断吗？"
-        if language == "zh-CN"
-        else "Could you explain how this reason would improve the actual play judgment?"
-    )
+    choice_copy = challenge_choice_card_copy(user_reason, proposal_summary, language)
+    next_question = choice_copy["nextQuestion"]
     disagreement = {
         "status": "active",
         "subject": "ai_revision_challenge",
-        "userPosition": str(user_reason or "").strip()[:1200],
-        "aiPosition": str(execution.assistant_message or "").strip()[:1200],
-        "coreDisagreement": comparison,
+        "userPosition": str(user_reason or "").strip()[:220],
+        "aiPosition": choice_copy["aiPosition"],
+        "coreDisagreement": choice_copy["coreDisagreement"],
         "nextQuestion": next_question,
         "resolution": None,
-        "phase": "choice_pending" if reasonable else "reason_review",
-        "displayCard": not bool(active_disagreement) or reasonable,
+        "phase": "choice_pending",
+        "displayCard": not bool(active_disagreement),
         "primaryHypothesis": primary,
         "secondaryHypothesis": secondary,
         "proposalSummary": proposal_summary,
-        "acceptedReason": str(user_reason or "").strip()[:1200] if reasonable else "",
+        "acceptedReason": str(user_reason or "").strip()[:1200],
         "challengeId": (
             (challenge_context.get("hypotheses") or {}).get("challengeId")
             or challenge_context.get("challengeId")
@@ -9982,6 +10121,7 @@ def _enforce_challenge_reason_execution(
     guidance = dict(execution.guidance or {})
     guidance.update({
         "move": "offer_perspective",
+        "challengeCardSchemaVersion": 2,
         "intentHypothesis": None,
         "intentConfidence": None,
         "followUpQuestion": None,
@@ -9993,12 +10133,13 @@ def _enforce_challenge_reason_execution(
                 or challenge_context.get("challengeId")
             ),
             "status": disagreement["phase"],
-            "interactionMode": "choice" if reasonable else "reason",
+            "interactionMode": "choice",
         },
         "uiCues": [],
     })
     return replace(
         execution,
+        assistant_message=execution.assistant_message,
         proposed_rows=None,
         revision_plan={},
         revision_contract={},
@@ -10126,7 +10267,7 @@ def _sanitize_challenge_execution(
     # Tile symbols such as ``.`` and translated punctuation previously split a
     # hypothesis in the middle.  Build canonical hypotheses from the frozen
     # proposal binding and render the visible copy from the same source.
-    body = _challenge_fallback_body(offer, source_binding, language)
+    body = "请说明你质疑的理由。" if language == "zh-CN" else "Please explain why you challenge this proposal."
     summary = _inline_display_text((offer or {}).get("summary"))
     brief = (
         (source_binding or {}).get("executionBrief")

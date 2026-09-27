@@ -48,6 +48,14 @@ PLAYER_MOVE_BRIEF = {
     "preserve": ["outer_shell", "boxes", "targets", "water", "unrelated_areas"],
     "playObjective": "route_choice",
 }
+PLAYER_MOVE_RIGHT_BRIEF = {
+    **PLAYER_MOVE_BRIEF,
+    "focus": {"row": 5, "column": 6, "radius": 1},
+    "requiredTransitions": [
+        {"row": 5, "column": 5, "from": "p", "to": "."},
+        {"row": 5, "column": 6, "from": ".", "to": "p"},
+    ],
+}
 PLAYER_MOVE_CONTRACT = {
     "schemaVersion": 1,
     "authorizedBrief": "Move the player start left.",
@@ -4288,11 +4296,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(challenged.status_code, 200, challenged.text)
         challenge_turn = challenged.json()["turns"][-1]
         self.assertEqual(challenge_turn["role"], "assistant")
-        self.assertIn("My primary guess", challenge_turn["content"])
-        self.assertIn("Another possibility", challenge_turn["content"])
-        self.assertIn("Please correct me", challenge_turn["content"])
-        self.assertNotIn("change\nreally", challenge_turn["content"])
-        self.assertEqual(challenge_turn["content"].count("\n\n"), 2)
+        self.assertEqual(challenge_turn["content"], "Please explain why you challenge this proposal.")
         self.assertIsNone(challenge_turn["guidance"]["proposalOffer"])
         self.assertIsNone(challenge_turn["guidance"]["disagreement"])
         self.assertEqual(challenged.json()["proposals"], [])
@@ -4691,10 +4695,7 @@ class CoCreationSessionTests(unittest.TestCase):
             )
         self.assertEqual(challenged.status_code, 200, challenged.text)
         challenge_body = challenged.json()["turns"][-1]["content"]
-        self.assertIn("My primary guess", challenge_body)
-        self.assertIn("Another possibility", challenge_body)
-        self.assertIn("tentative readings", challenge_body)
-        self.assertIn("Please correct me", challenge_body)
+        self.assertEqual(challenge_body, "Please explain why you challenge this proposal.")
         challenge_guidance = challenged.json()["turns"][-1]["guidance"]
         self.assertIsNone(challenge_guidance.get("disagreement"))
         self.assertEqual(challenge_guidance["challengeState"]["status"], "awaiting_reason")
@@ -4747,7 +4748,11 @@ class CoCreationSessionTests(unittest.TestCase):
         with patch.object(
             backend,
             "classify_challenge_reason",
-            return_value={"relation": "primary", "merit": "not_yet_reasonable"},
+            return_value={
+                "relation": "primary", "merit": "not_yet_reasonable",
+                "comparison": "I see why the direct opening matters. I am not yet convinced it improves the first choice.",
+                "attemptsUsed": 1,
+            },
         ), patch.object(backend, "generate_chat_reply", return_value=active_execution) as active_mock:
             still_active = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -4758,8 +4763,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             )
         self.assertEqual(still_active.status_code, 200, still_active.text)
-        self.assertIsNotNone(active_mock.call_args.kwargs["stage_context"]["challengeContext"])
-        self.assertEqual(still_active.json()["turns"][-1]["guidance"]["disagreement"]["status"], "active")
+        active_mock.assert_not_called()
+        choice_turn = still_active.json()["turns"][-1]
+        self.assertEqual(choice_turn["guidance"]["disagreement"]["phase"], "choice_pending")
+        self.assertTrue(choice_turn["guidance"]["disagreement"]["displayCard"])
+        self.assertIn("not yet convinced", choice_turn["content"])
 
         resolved = dict(active)
         resolved["status"] = "resolved"
@@ -4777,7 +4785,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Keep the direct opening and sharpen its first commitment",
                     "rationale": "This follows your reason while making the early commitment easier to read.",
-                    "executionBrief": PLAYER_MOVE_BRIEF,
+                    "executionBrief": PLAYER_MOVE_RIGHT_BRIEF,
                 },
                 "disagreement": resolved,
                 "uiCues": [],
@@ -4787,15 +4795,43 @@ class CoCreationSessionTests(unittest.TestCase):
             resolved_response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Keep the direct opening, but make the commitment easier to read.",
+                    "content": "否",
                     "baseVersionId": version_id,
                     "idempotencyKey": "challenge-reason-resolved-001",
+                    "action": "continue_challenge",
+                    "challengeId": challenge_guidance["challengeState"]["challengeId"],
+                    "challengeChoice": "user",
                 },
             )
         self.assertEqual(resolved_response.status_code, 200, resolved_response.text)
         latest = resolved_response.json()["turns"][-1]["guidance"]
         self.assertEqual(latest["disagreement"]["resolution"], "user")
         self.assertIsNotNone(latest["proposalOffer"])
+        self.assertEqual(latest["proposalOffer"]["availableActions"], ["execute_revision"])
+        self.assertEqual(resolved_response.json()["currentVersionId"], version_id)
+        self.assertEqual(resolved_response.json()["proposals"], [])
+        new_card = resolved_response.json()["turns"][-1]
+        forbidden = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Challenge this plan.", "baseVersionId": version_id,
+                "idempotencyKey": "challenge-reason-forbidden",
+                "action": "challenge_revision", "sourceTurnId": new_card["turnId"],
+            },
+        )
+        self.assertEqual(forbidden.status_code, 409, forbidden.text)
+        self.assertEqual(forbidden.json()["code"], "INVALID_CARD_SOURCE")
+        generated = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Execute the bound proposal.", "baseVersionId": version_id,
+                "idempotencyKey": "challenge-reason-generate",
+                "action": "execute_revision", "sourceTurnId": new_card["turnId"],
+            },
+        )
+        self.assertEqual(generated.status_code, 200, generated.text)
+        self.assertEqual(generated.json()["currentVersionId"], version_id)
+        self.assertEqual(len([p for p in generated.json()["proposals"] if p["status"] == "pending"]), 1)
 
     def test_failed_challenge_review_uses_chat_retry_without_duplicate_user_turn(self):
         version_id = self.read_session()["currentVersionId"]
@@ -5078,7 +5114,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409, conflict.text)
         self.assertEqual(conflict.json()["code"], "IDEMPOTENCY_CONFLICT")
 
-    def test_different_challenge_reason_enforces_one_or_two_discussion_cards(self):
+    def test_challenge_reason_enforces_one_concise_choice_card(self):
         execution = LLMExecutionResult(
             "I am not yet persuaded by that reason.",
             1,
@@ -5112,9 +5148,9 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         first = initial.guidance["disagreement"]
         self.assertTrue(first["displayCard"])
-        self.assertIn("visual balance", first["coreDisagreement"])
-        self.assertIn("my proposal focuses", first["coreDisagreement"])
-        self.assertNotEqual(first["coreDisagreement"], execution.assistant_message)
+        self.assertEqual(first["phase"], "choice_pending")
+        self.assertIn("My concern is visual density", first["userPosition"])
+        self.assertIn("original", first["nextQuestion"])
         self.assertEqual(len(backend._displayed_cards(initial.guidance)), 1)
 
         continued = backend._enforce_challenge_reason_execution(
@@ -5139,8 +5175,8 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         final = accepted.guidance["disagreement"]
         self.assertEqual(final["phase"], "choice_pending")
-        self.assertTrue(final["displayCard"])
-        self.assertEqual(len(backend._displayed_cards(accepted.guidance)), 1)
+        self.assertFalse(final["displayCard"])
+        self.assertEqual(len(backend._displayed_cards(accepted.guidance)), 0)
 
         immediately_accepted = backend._enforce_challenge_reason_execution(
             execution,
@@ -5155,6 +5191,15 @@ class CoCreationSessionTests(unittest.TestCase):
             immediately_accepted.guidance["disagreement"]["phase"],
             "choice_pending",
         )
+
+    def test_challenge_analysis_drops_only_invalid_sentence(self):
+        result = backend._salvage_challenge_analysis(
+            "The implementation schema says to accept it. 我理解你想让首步更有判断空间。",
+            SAMPLE_ROWS,
+            None,
+            "zh-CN",
+        )
+        self.assertEqual(result, "我理解你想让首步更有判断空间。")
 
     def test_manual_edit_warning_builds_detailed_comparative_core(self):
         disagreement = llm_client._disagreement_from_warning(
@@ -5460,7 +5505,7 @@ class CoCreationSessionTests(unittest.TestCase):
             ).fetchone()
         self.assertTrue(json.loads(stored["guidance_json"])["disagreement"]["displayCard"])
 
-    def test_choice_pending_yes_runs_a_new_validated_proposal_pipeline(self):
+    def test_choice_pending_yes_without_original_binding_is_rejected(self):
         version_id = self.read_session()["currentVersionId"]
         with repository.connect(immediate=True) as database:
             context = repository.load_design_context(
@@ -5515,21 +5560,178 @@ class CoCreationSessionTests(unittest.TestCase):
                     "idempotencyKey": "choice-new-proposal",
                 },
             )
-        self.assertEqual(response.status_code, 200, response.text)
-        stage_context = generated.call_args.kwargs["stage_context"]
-        self.assertEqual(stage_context["revisionRequestState"], "proposal_requested")
-        self.assertIsNone(stage_context["activeDisagreement"])
-        latest = response.json()["turns"][-1]["guidance"]
-        self.assertEqual(latest["disagreement"]["status"], "resolved")
-        self.assertEqual(latest["disagreement"]["resolution"], "ai")
-        self.assertFalse(latest["disagreement"]["displayCard"])
-        self.assertIsNotNone(latest["proposalOffer"])
-        self.assertEqual(
-            response.json()["turns"][-1]["proposalState"]["status"],
-            "active",
-        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["code"], "CHALLENGE_STALE")
+        generated.assert_not_called()
+        self.assertEqual(response.json().get("proposals"), None)
 
-    def test_choice_pending_continue_challenge_persists_resolution(self):
+    def test_choice_pending_yes_revalidates_challenged_exact_tiles(self):
+        version_id = self.read_session()["currentVersionId"]
+        source = self.offer_bound_revision(
+            PLAYER_MOVE_BRIEF,
+            summary="Move the player start left by one tile",
+            message_key="choice-exact-source",
+        )
+        challenge_execution = LLMExecutionResult(
+            "Tell me what concerns you about these tiles.",
+            1,
+            "choice-exact-challenge",
+            model="mock-model",
+            guidance={"move": "offer_perspective", "proposalOffer": None, "uiCues": []},
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
+            challenged = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "Challenge this plan.",
+                    "baseVersionId": version_id,
+                    "idempotencyKey": "choice-exact-challenge",
+                    "action": "challenge_revision",
+                    "sourceTurnId": source["turnId"],
+                },
+            )
+        self.assertEqual(challenged.status_code, 200, challenged.text)
+        challenge_id = challenged.json()["turns"][-1]["guidance"]["challengeState"]["challengeId"]
+        with repository.connect(immediate=True) as database:
+            challenge_row = database.execute(
+                "SELECT source_proposal_turn_id FROM revision_challenges WHERE session_id = ? AND challenge_id = ?",
+                (self.session_id, challenge_id),
+            ).fetchone()
+            self.assertIsNotNone(challenge_row)
+            self.assertEqual(challenge_row["source_proposal_turn_id"], source["turnId"])
+            context = repository.load_design_context(database, self.session_id, version_id)
+            context["activeDisagreement"] = {
+                "status": "active",
+                "subject": "ai_revision_challenge",
+                "phase": "choice_pending",
+                "challengeId": challenge_id,
+                "proposalSummary": "Move the player start left by one tile",
+                "acceptedReason": "I also want to change the water",
+                "nextQuestion": "Revalidate the original exact tile changes?",
+            }
+            repository.save_design_context(database, version_id, context)
+
+        response = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "是",
+                "baseVersionId": version_id,
+                "idempotencyKey": "choice-exact-yes",
+                "action": "continue_challenge",
+                "challengeId": challenge_id,
+                "challengeChoice": "ai",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        pending = [item for item in response.json()["proposals"] if item["status"] == "pending"]
+        self.assertEqual(len(pending), 1, response.json()["turns"][-1])
+        expected = {(item["row"], item["column"], item["from"], item["to"])
+                    for item in PLAYER_MOVE_BRIEF["requiredTransitions"]}
+        actual = {(item["y"] + 1, item["x"] + 1, item["before"], item["after"])
+                  for item in pending[0]["diff"]}
+        self.assertEqual(actual, expected)
+        self.assertEqual(response.json()["currentVersionId"], version_id)
+        replay = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "是", "baseVersionId": version_id,
+                "idempotencyKey": "choice-exact-yes", "action": "continue_challenge",
+                "challengeId": challenge_id, "challengeChoice": "ai",
+            },
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(len([item for item in replay.json()["proposals"] if item["status"] == "pending"]), 1)
+        stale = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "否", "baseVersionId": version_id,
+                "idempotencyKey": "choice-exact-stale", "action": "continue_challenge",
+                "challengeId": challenge_id, "challengeChoice": "user",
+            },
+        )
+        self.assertEqual(stale.status_code, 409, stale.text)
+
+    def test_choice_pending_no_without_new_verified_card_keeps_map(self):
+        version_id = self.read_session()["currentVersionId"]
+        source = self.offer_bound_revision(
+            PLAYER_MOVE_BRIEF, summary="Move the player start left",
+            message_key="choice-no-failure-source",
+        )
+        challenged = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={
+                "content": "Challenge this plan.", "baseVersionId": version_id,
+                "idempotencyKey": "choice-no-failure-start", "action": "challenge_revision",
+                "sourceTurnId": source["turnId"],
+            },
+        )
+        self.assertEqual(challenged.status_code, 200, challenged.text)
+        challenge_id = challenged.json()["turns"][-1]["guidance"]["challengeState"]["challengeId"]
+        with repository.connect(immediate=True) as database:
+            context = repository.load_design_context(database, self.session_id, version_id)
+            context["activeDisagreement"] = {
+                "status": "active", "subject": "ai_revision_challenge",
+                "phase": "choice_pending", "displayCard": True,
+                "challengeId": challenge_id, "proposalSummary": "Move the player start left",
+                "acceptedReason": "The direct opening needs a different first choice.",
+                "nextQuestion": "Keep the original proposal?",
+            }
+            repository.save_design_context(database, version_id, context)
+        empty = LLMExecutionResult(
+            "I cannot verify a different plan yet.", 1, "choice-no-failure",
+            model="mock-model", guidance={"proposalOffer": None, "uiCues": []},
+        )
+        with patch.object(backend, "generate_chat_reply", return_value=empty):
+            response = self.client.post(
+                f"/api/sessions/{self.session_id}/messages",
+                json={
+                    "content": "否", "baseVersionId": version_id,
+                    "idempotencyKey": "choice-no-failure", "action": "continue_challenge",
+                    "challengeId": challenge_id, "challengeChoice": "user",
+                },
+            )
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(response.json()["code"], "PROPOSAL_SEARCH_EXHAUSTED")
+        session = self.read_session()
+        self.assertEqual(session["currentVersionId"], version_id)
+        self.assertEqual(session["proposals"], [])
+
+    def test_challenge_choice_card_explains_scope_without_placeholder_text(self):
+        execution = LLMExecutionResult(
+            "I prepared a map proposal.", 1, "choice-copy", model="mock-model",
+            guidance={"proposalOffer": None, "uiCues": []},
+        )
+        reviewed = backend._enforce_challenge_reason_execution(
+            execution,
+            {"relation": "different", "merit": "reasonable", "comparison": "I agree " * 100},
+            "墙和水域都需要改",
+            {"proposalSummary": "第4行第4列：地面改为墙", "hypotheses": {"challengeId": "challenge-copy"}},
+            None,
+            "zh-CN",
+        )
+        disagreement = reviewed.guidance["disagreement"]
+        self.assertIn("墙和水域都需要改", disagreement["userPosition"])
+        self.assertIn("原方案", disagreement["nextQuestion"])
+        self.assertNotIn("相关设计指标", disagreement["coreDisagreement"])
+        self.assertNotIn("我整理了一份", reviewed.assistant_message)
+        self.assertEqual(
+            llm_client.repair_legacy_visible_guidance(
+                {"disagreement": disagreement}, "zh-CN"
+            )["disagreement"]["nextQuestion"],
+            disagreement["nextQuestion"],
+        )
+        historical = llm_client.repair_legacy_visible_guidance(
+            {"disagreement": {
+                **disagreement,
+                "coreDisagreement": "I agree " * 100,
+                "aiPosition": "我整理了一份等待你审查的地图提案。",
+            }},
+            "zh-CN",
+        )
+        self.assertIn("逐格核对", historical["disagreement"]["coreDisagreement"])
+        self.assertNotIn("相关设计指标", historical["disagreement"]["coreDisagreement"])
+
+    def test_choice_pending_without_source_cannot_resolve_to_unverified_plan(self):
         version_id = self.read_session()["currentVersionId"]
         challenge_id = "challenge-continue-choice"
         with repository.connect(immediate=True) as database:
@@ -5599,10 +5801,8 @@ class CoCreationSessionTests(unittest.TestCase):
             )
         answer_review.assert_not_called()
 
-        self.assertEqual(response.status_code, 200, response.text)
-        latest = response.json()["turns"][-1]["guidance"]
-        self.assertEqual(latest["disagreement"]["status"], "resolved")
-        self.assertEqual(latest["disagreement"]["resolution"], "user")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["code"], "CHALLENGE_STALE")
         with repository.connect() as database:
             context = repository.load_design_context(
                 database, self.session_id, version_id
@@ -5614,13 +5814,13 @@ class CoCreationSessionTests(unittest.TestCase):
                 """,
                 (self.session_id,),
             ).fetchone()[0]
-        self.assertIsNone(context["activeDisagreement"])
+        self.assertIsNotNone(context["activeDisagreement"])
         choice_question = next(
             item for item in context["openQuestions"]
             if item["id"] == choice_question_id
         )
-        self.assertEqual(choice_question["status"], "answered")
-        self.assertEqual(resolved_events, 1)
+        self.assertEqual(choice_question["status"], "open")
+        self.assertEqual(resolved_events, 0)
 
     def test_active_disagreement_cards_keep_warning_and_four_summaries(self):
         disagreement = {

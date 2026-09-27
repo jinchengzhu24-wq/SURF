@@ -1626,6 +1626,20 @@ def serialize_session(database, session_id):
     def public_turn_content(turn):
         if turn["role"] != "assistant":
             return turn["content"]
+        guidance = load_json(turn["guidance_json"]) or {}
+        disagreement = guidance.get("disagreement") or {}
+        if (
+            isinstance(disagreement, dict)
+            and disagreement.get("subject") == "ai_revision_challenge"
+            and disagreement.get("phase") == "choice_pending"
+            and disagreement.get("status") == "active"
+            and guidance.get("challengeCardSchemaVersion") != 2
+        ):
+            return (
+                "我理解你提出了不同的修改范围。现在先确认采用原方案，还是按你的新方向重新规划；地图还没有改变。"
+                if turn["language"] == "zh-CN"
+                else "I understand that you want a different scope of changes. Please choose the original proposal or a new plan; the map has not changed."
+            )
         content = public_text(turn["content"], turn["language"])
         stage_number = stage_numbers.get(turn["version_id"])
         if (

@@ -483,6 +483,7 @@ def _normalize_disagreement(value):
         result["phase"] = phase
     result["displayCard"] = bool(value.get("displayCard", True))
     for field in (
+        "challengeId",
         "primaryHypothesis",
         "secondaryHypothesis",
         "proposalSummary",

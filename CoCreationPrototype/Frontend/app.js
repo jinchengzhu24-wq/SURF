@@ -1347,7 +1347,7 @@ function renderAssistantBubble(turn, bubble) {
                     ["execute_revision", "draftSuggestedRevision"],
                     ["challenge_revision", "challengeRevision"],
                     ["alternative_revision", "alternativeRevision"]
-                ].forEach(([action, labelKey]) => {
+                ].filter(([action]) => !Array.isArray(offer.availableActions) || offer.availableActions.includes(action)).forEach(([action, labelKey]) => {
                     const disabled = !actionable;
                     revisionCue.appendChild(makeButton(
                         t(labelKey),
@@ -1552,7 +1552,35 @@ function createDisagreementCard(disagreement) {
         item.append(heading, message);
         cue.appendChild(item);
     });
+    if (disagreement.subject === "ai_revision_challenge" && disagreement.phase === "choice_pending") {
+        const actions = document.createElement("div");
+        actions.className = "proposal-actions";
+        const active = activeChallengeComposerState();
+        const enabled = canEditSelected() && !state.busy && active?.status === "choice_pending"
+            && active?.challengeId === disagreement.challengeId;
+        [["ai", state.language === "zh-CN" ? "是" : "Yes"],
+         ["user", state.language === "zh-CN" ? "否" : "No"]].forEach(([choice, label]) => {
+            actions.appendChild(makeButton(label, "secondary-button guidance-cue-button", enabled
+                ? () => sendChallengeChoice(disagreement.challengeId, choice)
+                : null, { disabled: !enabled }));
+        });
+        cue.appendChild(actions);
+    }
     return cue;
+}
+
+function sendChallengeChoice(challengeId, choice) {
+    if (!canEditSelected() || state.busy || !challengeId) return;
+    state.pendingMessage = {
+        content: choice === "ai" ? "是" : "否",
+        baseVersionId: state.session.currentVersionId,
+        idempotencyKey: uniqueId("challenge-choice"),
+        action: "continue_challenge",
+        challengeId,
+        challengeChoice: choice
+    };
+    persistPendingMessage();
+    void submitPendingMessage();
 }
 
 function assistantBodyWithoutCues(content, uiCues, question) {
@@ -2165,6 +2193,17 @@ function renderProposal() {
     card.innerHTML = `
         <div class="proposal-heading"><div><p class="eyebrow">${escapeHtml(t("proposal"))}</p><h3>${escapeHtml(summary || t("proposal"))}</h3></div><span>${proposal.diff.length} ${escapeHtml(t("changedTiles"))}</span></div>
         <p>${escapeHtml(t("proposalValid"))}</p>`;
+    const changes = document.createElement("ul");
+    changes.className = "proposal-plan-detail-list";
+    (proposal.diff || []).forEach(change => {
+        const item = document.createElement("li");
+        item.className = "proposal-plan-detail-item";
+        const row = change.y + 1;
+        const column = change.x + 1;
+        item.textContent = `(${row}, ${column})：${proposalPresentationTileLabel(change.before)} → ${proposalPresentationTileLabel(change.after)}`;
+        changes.appendChild(item);
+    });
+    card.appendChild(changes);
     card.appendChild(createMiniMap(proposal.proposedRows, proposal.diff, "proposal-map"));
     const actions = document.createElement("div");
     actions.className = "proposal-actions";
@@ -4055,6 +4094,7 @@ function readPendingMessage() {
             pending.action === "continue_challenge"
             && typeof pending.challengeId !== "string"
         ) return null;
+        if (pending.challengeChoice !== undefined && !["ai", "user"].includes(pending.challengeChoice)) return null;
         if (pending.baseVersionId !== state.session.currentVersionId) return null;
         localStorage.setItem(currentKey, JSON.stringify(pending));
         localStorage.removeItem(legacyKey);

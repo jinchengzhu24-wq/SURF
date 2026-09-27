@@ -7371,12 +7371,13 @@ def classify_challenge_reason(
     request_id,
     *,
     _deadline=None,
+    simple=False,
 ):
     """Classify one post-challenge reason without map or chat-history context."""
     primary = str((hypotheses or {}).get("primary") or "").strip()
     secondary = str((hypotheses or {}).get("secondary") or "").strip()
     reason = str(user_reason or "").strip()
-    if not primary or not secondary or not reason:
+    if not reason or (not simple and (not primary or not secondary)):
         raise LLMServiceError(
             "MODEL_RESPONSE_INVALID",
             "The challenge reason could not be compared with the two saved hypotheses.",
@@ -7407,9 +7408,20 @@ def classify_challenge_reason(
             0,
             504,
         )
+    simple_instruction = (
+        "Review the designer's reason for challenging the original proposal. "
+        "Return JSON only with relation='different', merit, and comparison. "
+        "merit is reasonable, not_yet_reasonable, or unclear. "
+        "comparison must be one or two concise first-person sentences in the designer's language: "
+        "state whether the reason is persuasive, give the concrete reason, and contrast its priority "
+        "with the original proposal. Do not mention tentative guesses or claim any map change. "
+        "Do not invent map facts.\n\n"
+        f"Proposal summary: {str(proposal_summary or '')[:500]}\n"
+        f"Latest designer reason: {reason[:1200]}"
+    )
     messages = [{
         "role": "system",
-        "content": (
+        "content": simple_instruction if simple else (
             "Classify the designer's latest reason against exactly two earlier tentative guesses. "
             "Return JSON only with relation, merit, and comparison. relation is primary, secondary, "
             "different, or unclear. "
@@ -7453,9 +7465,11 @@ def classify_challenge_reason(
             comparison = _normalize_response_paragraphs(str(payload.get("comparison") or ""))
             if relation not in {"primary", "secondary", "different", "unclear"}:
                 raise ValueError("challenge reason relation is invalid")
+            if simple and relation != "different":
+                relation = "different"
             if merit not in {"reasonable", "not_yet_reasonable", "unclear"}:
                 raise ValueError("challenge reason merit is invalid")
-            if relation != "unclear" and merit != "unclear" and len(comparison) < 40:
+            if relation != "unclear" and merit != "unclear" and len(comparison) < (16 if simple else 40):
                 if attempt < 2 and _remaining_until(deadline) > 1.0:
                     messages.append({
                         "role": "system",
@@ -11706,6 +11720,49 @@ def repair_legacy_visible_text(value, language="en"):
     )
 
 
+def challenge_choice_card_copy(user_reason, proposal_summary, language="en", *, legacy=False):
+    """Explain the actual choice without inventing an AI objection or proposal."""
+    reason = re.sub(r"\s+", " ", str(user_reason or "")).strip().rstrip(".。")[:220]
+    original = re.sub(r"\s+", " ", str(proposal_summary or "")).strip().rstrip(".。")[:220]
+    if language == "zh-CN":
+        if legacy:
+            return {
+                "aiPosition": f"我原先提出的是：{original}。" if original else "我原先提出了另一项局部修改。",
+                "coreDisagreement": (
+                    f"你现在希望：{reason}。原方案是：{original}。"
+                    "两者的修改范围不同；此处还没有改变地图。请先确认采用哪个方向，"
+                    "再逐格核对随后出现的待审查提案。"
+                ),
+                "nextQuestion": "你是否仍选择原方案的方向？回答“是”或“否”；之后请核对待审查提案的具体改动。",
+            }
+        return {
+            "aiPosition": f"我原先提出的是：{original}。" if original else "我原先提出了另一项局部修改。",
+            "coreDisagreement": (
+                f"原方案：{original}。"
+                "保留它会重验原来的格子；不保留则按你的理由另拟方案。两种结果都需你审查后才会保存。"
+            ),
+            "nextQuestion": "是否沿用原方案？“是”保留原方案，“否”按你的理由生成新方案。",
+        }
+    if legacy:
+        return {
+            "aiPosition": f"My original proposal was: {original}." if original else "I proposed a different local change.",
+            "coreDisagreement": (
+                f"You now want: {reason}. The original proposal was: {original}. "
+                "The map has not changed. Choose a direction, then inspect every tile in the pending proposal."
+            ),
+            "nextQuestion": "Do you still choose the original direction? Answer yes or no, then review the pending changes.",
+        }
+    return {
+        "aiPosition": f"My original proposal was: {original}." if original else "I proposed a different local change.",
+        "coreDisagreement": (
+            f"Original proposal: {original}. "
+            "Yes revalidates its original tiles; no prepares a new proposal from your reason. "
+            "Either result requires your review before saving."
+        ),
+        "nextQuestion": "Keep the original proposal? Yes keeps it; no plans a new one from your reason.",
+    }
+
+
 def _visible_chinese_language_issue(value):
     """Return a safe diagnostic when Chinese visible prose still code-switches."""
     text = str(value or "")
@@ -11895,6 +11952,32 @@ def repair_legacy_visible_guidance(guidance, language="en"):
     disagreement = result.get("disagreement")
     if isinstance(disagreement, dict):
         disagreement = dict(disagreement)
+        if (
+            disagreement.get("subject") == "ai_revision_challenge"
+            and disagreement.get("phase") == "choice_pending"
+            and disagreement.get("status") == "active"
+            and disagreement.get("proposalSummary")
+            and (
+                disagreement.get("nextQuestion") != challenge_choice_card_copy(
+                    disagreement.get("userPosition"),
+                    disagreement.get("proposalSummary"),
+                    language,
+                )["nextQuestion"]
+                or (
+                    language == "zh-CN"
+                    and (
+                        _visible_chinese_language_issue(disagreement.get("coreDisagreement"))
+                        or "相关设计指标" in str(disagreement.get("coreDisagreement") or "")
+                    )
+                )
+            )
+        ):
+            disagreement.update(challenge_choice_card_copy(
+                disagreement.get("userPosition"),
+                disagreement.get("proposalSummary"),
+                language,
+                legacy=True,
+            ))
         for field_name in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion"):
             if disagreement.get(field_name) is not None:
                 disagreement[field_name] = repair_legacy_visible_text(

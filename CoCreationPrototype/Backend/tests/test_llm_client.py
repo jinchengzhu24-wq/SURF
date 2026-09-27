@@ -649,6 +649,21 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("comparison", schema["properties"])
         self.assertIn("comparison", schema["required"])
 
+    def test_simple_challenge_review_does_not_use_hidden_guesses(self):
+        client = FakeClient([json.dumps({
+            "relation": "different",
+            "merit": "reasonable",
+            "comparison": "我同意你的理由，因为当前第一步可能过于直接，玩家缺少明确的路线判断。原方案更侧重增加绕行，我们需要在这两种体验之间作出选择。",
+        })])
+        with patch.object(llm_client, "_create_async_client", return_value=client):
+            result = llm_client.classify_challenge_reason(
+                "第一步判断太直接。", {}, "增加局部绕行。", "simple-challenge-review", simple=True,
+            )
+        self.assertEqual(result["merit"], "reasonable")
+        prompt = client.chat.completions.calls[0]["messages"][0]["content"]
+        self.assertNotIn("Primary guess", prompt)
+        self.assertNotIn("Secondary guess", prompt)
+
     def test_challenge_reason_classifier_falls_back_only_for_short_comparison(self):
         payload = json.dumps({
             "relation": "different",
