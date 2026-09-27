@@ -80,3 +80,6 @@ crashlytics-build.properties
 
 # Archived local markdown drafts
 /Old_md/
+
+# Local image assets
+/共创流程图.png
