@@ -262,6 +262,29 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
             "required": ["relation", "merit", "comparison"],
         }
         name = "cocreation_challenge_reason_classification"
+    elif task == "turn_understanding":
+        schema = {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "acts": {"type": "array", "minItems": 1, "maxItems": 3, "items": {
+                    "type": "string", "enum": [
+                        "evaluation", "intent", "idea_request", "proposal_request",
+                        "change_request", "unclear",
+                    ],
+                }},
+                "elements": {"type": "array", "maxItems": 6, "items": {
+                    "type": "string", "enum": [
+                        "water", "internal_walls", "outer_shell", "player",
+                        "boxes", "targets", "unknown",
+                    ],
+                }},
+                "evidenceSpan": {"type": "string"},
+                "directionSufficient": {"type": "boolean"},
+                "mapRelated": {"type": "boolean"},
+            },
+            "required": ["acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated"],
+        }
+        name = "cocreation_turn_understanding"
     elif task == "intent_candidate_review":
         claim_schema = {
             "type": "object",
@@ -1135,6 +1158,31 @@ def build_plain_chat_messages(
     )
     guidance_mode_instruction = _guidance_mode_instruction(guidance_mode)
     action_instruction = _plain_action_instruction(stage_context)
+    understanding = stage_context.get("turnUnderstanding")
+    if isinstance(understanding, dict):
+        acts = set(understanding.get("acts") or [])
+        elements = set(understanding.get("elements") or [])
+        if acts & {"proposal_request", "change_request"} and elements & {
+            "outer_shell", "player", "boxes", "targets",
+        }:
+            action_instruction += (
+                " The latest request includes a protected map component. Explain that AI map "
+                "revisions can change water and internal walls only. Respond to the actual "
+                "design concern using the current Stage; do not create a proposal, silently "
+                "substitute an editable component, or ask for cell coordinates."
+            )
+        elif not acts & {"proposal_request", "change_request"}:
+            action_instruction += (
+                " The latest message is an observation, intention, or request for ideas, "
+                "not authorization for an executable map proposal. Address its likely map "
+                "referent using the current StageSnapshot. Lead with one verified property of "
+                "the referenced element and its visible or playable consequence; do not replace "
+                "that element with a generic inventory of water, boxes, and targets. For an "
+                "outer-shell reference, discuss the actual enclosing contour first and keep "
+                "interior composition distinct. If the referent is uncertain, "
+                "state a tentative interpretation that the designer can correct. Do not "
+                "ask for exact cells, suggest moving protected entities, or claim a map edit."
+            )
     revision_request_state = stage_context.get("revisionRequestState")
     revision_instruction = (
         "The designer asked you to modify the map, but neither this message nor the recent "
@@ -3979,6 +4027,119 @@ def generate_stage_assessment(
         )
 
 
+def classify_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False):
+    """Ask Kimi what the designer referred to and what action they requested.
+
+    This is semantic routing only. The snapshot, proposal authorization, and
+    executable tile transitions remain server-owned.
+    """
+    latest = _latest_role_content(conversation, "user").strip()
+    if not latest:
+        raise ValueError("A user message is required for turn understanding.")
+    api_key, base_url = _llm_credentials()
+    if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
+        raise LLMServiceError(
+            "CONFIGURATION_ERROR", "The configured LLM API key is missing.",
+            request_id, False, 0, 503,
+        )
+    previous_user_wording = [
+        str(item.get("content") or "")[:400]
+        for item in conversation[:-1]
+        if item.get("role") == "user"
+    ][-3:]
+    messages = [
+        {"role": "system", "content": (
+            "Classify the latest designer message as natural language, not by keyword lookup. "
+            "Return only the requested JSON. Acts may overlap: evaluation describes a reaction; "
+            "intent states a desired experience without requesting a map operation; idea_request "
+            "asks for conceptual thoughts; proposal_request asks for a concrete executable plan; "
+            "change_request explicitly asks you to change the map. Do not promote an evaluation "
+            "or intention into a proposal/change request. A request to change an element may be "
+            "ambiguous about how; directionSufficient is true only when the desired effect and "
+            "referent are clear enough to begin proposal discovery. For example, '我想让里面更通透' "
+            "states intent, '里面怎样能更通透' asks for ideas, '里面太堵了' evaluates, "
+            "and '给我一个修改方案' requests a proposal. These illustrate speech acts, not an "
+            "element synonym list. Infer references from ordinary "
+            "wording and context. The canonical elements are water, internal walls, connected "
+            "outer shell, player start, boxes, and target destinations. A comment about the "
+            "map's shape or contour normally refers to its outer shell even without a "
+            "technical label, unless context points to internal composition; retain uncertainty "
+            "in the subsequent reply. An overall appearance "
+            "remark may refer to more than one element; use unknown only when no particular "
+            "element is a defensible primary referent. "
+            "Set mapRelated false for requests clearly about another subject. Copy "
+            "evidenceSpan exactly from the latest user message. Earlier user wording is "
+            "linguistic context only; current map facts come exclusively from Current Stage Snapshot. "
+            "Never infer permission to edit from the map itself."
+        )},
+        {"role": "user", "content": json.dumps({
+            "latestUserMessage": latest,
+            "previousUserWording": previous_user_wording,
+            "forcedProposalButton": bool(forced_proposal),
+            "currentStageSnapshot": snapshot,
+        }, ensure_ascii=False)},
+    ]
+    last_error = None
+    for attempt in range(1, 3):
+        try:
+            response = asyncio.run(asyncio.wait_for(
+                _request_completion(
+                    api_key, base_url, KIMI_MODEL, messages, 350, 15.0,
+                    task="turn_understanding",
+                ),
+                timeout=15.0,
+            ))
+            payload = json.loads(str(response.choices[0].message.content or ""))
+            return _validate_turn_understanding(payload, latest, forced_proposal)
+        except LLMServiceError:
+            raise
+        except Exception as exception:
+            last_error = exception
+    raise LLMServiceError(
+        "MODEL_RESPONSE_INVALID",
+        "Kimi could not reliably classify the designer's latest message. Retry it.",
+        request_id, True, 2, 502,
+    ) from last_error
+
+
+def _validate_turn_understanding(payload, latest, forced_proposal=False):
+    if not isinstance(payload, dict) or set(payload) != {
+        "acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated",
+    }:
+        raise ValueError("Turn understanding has an invalid envelope.")
+    allowed_acts = {
+        "evaluation", "intent", "idea_request", "proposal_request",
+        "change_request", "unclear",
+    }
+    allowed_elements = {
+        "water", "internal_walls", "outer_shell", "player", "boxes",
+        "targets", "unknown",
+    }
+    acts = payload["acts"]
+    elements = payload["elements"]
+    evidence = payload["evidenceSpan"]
+    if (not isinstance(acts, list) or not 1 <= len(acts) <= 3
+            or len(acts) != len(set(acts)) or any(act not in allowed_acts for act in acts)):
+        raise ValueError("Turn understanding has invalid acts.")
+    if (not isinstance(elements, list) or len(elements) > 6
+            or len(elements) != len(set(elements))
+            or any(element not in allowed_elements for element in elements)):
+        raise ValueError("Turn understanding has invalid elements.")
+    if not isinstance(evidence, str) or not evidence.strip() or evidence not in latest:
+        raise ValueError("Turn understanding lacks exact user evidence.")
+    if not isinstance(payload["directionSufficient"], bool) or not isinstance(payload["mapRelated"], bool):
+        raise ValueError("Turn understanding has invalid routing booleans.")
+    if forced_proposal and "proposal_request" not in acts:
+        acts = [*acts[:2], "proposal_request"]
+    return {
+        "acts": acts,
+        "elements": elements,
+        "evidenceSpan": evidence,
+        "directionSufficient": payload["directionSufficient"],
+        "mapRelated": payload["mapRelated"],
+    }
+
+
 def generate_chat_reply(
     conversation,
     rows,
@@ -5440,11 +5601,11 @@ def _build_revision_plan_messages(
         "goal and every unrelaxed hard constraint, incorporate the designer's new supplement, and do not "
         "repeat failed anchors, transitions, operators, or concrete treatments. Every strategy has: effect, focus, operators, "
         "preserve, editBudget, metricGoals, requiredTransitions, anchorEntities, playObjective, and optional displayReason. "
-        "effect is one of open_route, narrow_route, "
-        "adjust_internal_walls, relocate_start, relocate_box, relocate_target, reshape_water, "
-        "change_box_order. focus is null or {row,column,radius}; coordinates are one-based, row "
+        "effect is one of open_route, narrow_route, adjust_internal_walls, reshape_water. "
+        "Player, boxes, targets, and the connected outer shell must stay fixed. "
+        "focus is null or {row,column,radius}; coordinates are one-based, row "
         "1..10, column 1..12, radius 1..3. operators contains one to three distinct values from "
-        "add_wall, remove_wall, move_player, move_box, move_target, add_water, remove_water. "
+        "add_wall, remove_wall, add_water, remove_water. "
         "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
         "walls, unrelated_areas. Never list an operator that edits a preserved component. "
         "Each strategy must include requiredTransitions, anchorEntities (P, B1, B2, T1, T2), and "
@@ -5463,7 +5624,7 @@ def _build_revision_plan_messages(
         "cannot be satisfied. "
         "entity. metricGoals must be an empty list. The server separately derives hard measurable "
         "requirements from explicit designer wording; searchedStates is never a player-experience goal. "
-        "Always preserve outer_shell and unrelated_areas. Choose a concrete focus for a local "
+        "Always preserve outer_shell, player, boxes, targets, and unrelated_areas. Choose a concrete focus for a local "
         "request, select operators that can realize the effect, and use metricGoals when the "
         "designer clearly requests a measurable change. The first strategy is preferred and any "
         "second strategy is a strict alternative, not permission to weaken the request. Do not output analysis, "
@@ -5822,10 +5983,9 @@ def _revision_plan_messages_with_feedback(messages, validation_feedback):
         f"{validation_feedback} Return a fresh RevisionPlan JSON object. Keep the authorized "
         "brief, explicit prohibitions, and preserve-unlisted contract unchanged. Use only these "
         "effect/operator combinations: open_route with remove_wall/remove_water; narrow_route "
-        "with add_wall/add_water; adjust_internal_walls with add_wall/remove_wall; relocate_start "
-        "with move_player; relocate_box with move_box; relocate_target with move_target; "
-        "reshape_water with add_water/remove_water; or change_box_order with move_box, "
-        "move_target, add_wall, or remove_wall. Use only a listed effect and ensure at least one "
+        "with add_wall/add_water; adjust_internal_walls with add_wall/remove_wall; "
+        "or reshape_water with add_water/remove_water. Preserve player, boxes, targets, and "
+        "the outer shell. Use only a listed effect and ensure at least one "
         "operator can realize it. Keep requiredTransitions empty for a qualitative request; include "
         "exact transitions only when the supplied structured execution brief already froze them. "
         "Set playObjective to null or one concise single-line string no longer than 120 characters; "
@@ -5944,6 +6104,16 @@ def _build_legacy_revision_execution_contract(stage_context=None):
 
 
 def _build_revision_execution_contract(plan, authorized_brief, stage_context=None):
+    if (stage_context or {}).get("aiEditableTilesOnly"):
+        allowed = {"add_wall", "remove_wall", "add_water", "remove_water"}
+        for strategy in plan.strategies:
+            if (set(strategy.operators) - allowed
+                    or any(
+                        before not in {"#", ".", "@"}
+                        or after not in {"#", ".", "@"}
+                        for _, _, before, after in strategy.required_transitions
+                    )):
+                raise ValueError("New AI plans may edit water and internal walls only.")
     relocation_effects = {
         "relocate_start",
         "relocate_box",
@@ -8948,7 +9118,8 @@ async def _generate_plain_with_model_fallback(
                         user_position=_latest_role_content(semantic_messages, "user"),
                     )
 
-            if (stage_context or {}).get("revisionRequestState") == "needs_direction":
+            if ((stage_context or {}).get("revisionRequestState") == "needs_direction"
+                    and not (stage_context or {}).get("turnUnderstanding")):
                 latest_user = _latest_role_content(semantic_messages, "user")
                 body = _unclear_revision_reply(language, latest_user)
                 question = None
@@ -8956,6 +9127,14 @@ async def _generate_plain_with_model_fallback(
                 proposal_offer = None
                 ui_cues = []
                 guidance_fallback_used = True
+
+            if ((stage_context or {}).get("turnUnderstanding")
+                    and (stage_context or {}).get("revisionRouting") not in {
+                        "proposal", "proposal_conservative",
+                    }):
+                proposal_offer = None
+                if (stage_context or {}).get("revisionRouting") == "protected_request":
+                    ui_cues = []
 
             body = _normalize_response_paragraphs(body)
 
@@ -9287,6 +9466,11 @@ async def _generate_plain_with_model_fallback(
                 body = "\n\n".join(
                     part for part in (
                         body,
+                        (
+                            "你希望调整这一部分的哪种观感或游玩效果？"
+                            if language == "zh-CN" else
+                            "What visual or play effect would you like this part to have?"
+                        ) if (stage_context or {}).get("turnUnderstanding") else
                         _exact_revision_clarification(language),
                     ) if str(part or "").strip()
                 )
@@ -19187,6 +19371,17 @@ def _classify_revision_request(conversation, stage_context=None):
     if not latest_user_message:
         return "not_request", None
     if _user_explicitly_off_topic(latest_user_message):
+        return "not_request", None
+    understanding = (stage_context or {}).get("turnUnderstanding")
+    if isinstance(understanding, dict):
+        if understanding.get("mapRelated") is False:
+            return "not_request", None
+        acts = set(understanding.get("acts") or [])
+        elements = set(understanding.get("elements") or [])
+        if acts & {"proposal_request", "change_request"}:
+            if elements & {"outer_shell", "player", "boxes", "targets"}:
+                return "not_request", None
+            return "needs_direction", None
         return "not_request", None
     if (stage_context or {}).get("vagueAestheticRevision"):
         # The API routing layer has already evaluated the current user turn

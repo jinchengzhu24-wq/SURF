@@ -273,6 +273,28 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "confused",
         )
 
+    def test_model_understanding_routes_feedback_without_proposals(self):
+        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        for message, acts, elements, expected in (
+            ("我觉得外形不好看", ["evaluation"], ["outer_shell"], "none"),
+            ("里面的隔断看着乱", ["evaluation"], ["internal_walls"], "none"),
+            ("那两块蓝色区域太抢眼", ["evaluation"], ["water"], "none"),
+            ("我想让内部空间更清楚", ["intent"], ["internal_walls"], "none"),
+            ("里面怎么能不那么堵？", ["idea_request"], ["internal_walls"], "none"),
+            ("给我调整水域的方案", ["proposal_request"], ["water"], "needs_clarification"),
+            ("帮我改内部墙", ["change_request"], ["internal_walls"], "needs_clarification"),
+            ("帮我改外壳", ["change_request"], ["outer_shell"], "protected_request"),
+            ("帮我改水域和玩家位置", ["change_request"], ["water", "player"], "protected_request"),
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(
+                    backend._adaptive_revision_routing(
+                        message, {"conflicts": []}, snapshot,
+                        turn_understanding={"acts": acts, "elements": elements},
+                    ),
+                    expected,
+                )
+
     def test_new_proposal_requires_one_answer_and_never_asks_a_fourth_question(self):
         snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
         initial = {

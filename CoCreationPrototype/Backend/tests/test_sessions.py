@@ -90,6 +90,59 @@ PLAYER_MOVE_CONTRACT = {
 
 
 class CoCreationSessionTests(unittest.TestCase):
+    def test_model_routing_keeps_visual_feedback_ordinary_and_protects_shell(self):
+        version_id = self.read_session()["currentVersionId"]
+        reply = LLMExecutionResult(
+            "The current outline feels rigid to me; I read your reaction as visual feedback.",
+            1, "routing-test", model="mock-model",
+            guidance={"move": "offer_perspective", "intentHypothesis": None,
+                      "proposalOffer": None, "uiCues": []},
+        )
+        cases = (
+            ("The outer shape looks awkward", ["evaluation"], False, "none"),
+            ("Make me a proposal to change the outer shell", ["proposal_request"], True,
+             "protected_request"),
+        )
+        for index, (content, acts, forced, expected_route) in enumerate(cases):
+            understanding = {
+                "acts": acts, "elements": ["outer_shell"],
+                "evidenceSpan": content, "directionSufficient": True,
+                "mapRelated": True,
+            }
+            with patch.object(
+                backend, "classify_turn_understanding", return_value=understanding,
+            ), patch.object(backend, "generate_chat_reply", return_value=reply) as generate:
+                response = self.client.post(
+                    f"/api/sessions/{self.session_id}/messages",
+                    json={"content": content, "baseVersionId": version_id,
+                          "idempotencyKey": f"routing-{index}",
+                          "requestProposal": forced},
+                )
+            self.assertEqual(response.status_code, 200, response.text)
+            stage_context = generate.call_args.kwargs["stage_context"]
+            self.assertEqual(stage_context["revisionRouting"], expected_route)
+            self.assertFalse(stage_context.get("proposalDiscovery"))
+            self.assertIsNone(response.json()["turns"][-1]["guidance"]["proposalOffer"])
+
+    @staticmethod
+    def _fake_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False):
+        latest = next(
+            (str(item.get("content") or "") for item in reversed(conversation)
+             if item.get("role") == "user"),
+            "",
+        )
+        state, _ = llm_client.classify_revision_request(
+            [{"role": "user", "content": latest}],
+        )
+        acts = ["change_request"] if state != "not_request" else ["evaluation"]
+        if forced_proposal:
+            acts = ["proposal_request"]
+        return {
+            "acts": acts, "elements": ["unknown"],
+            "evidenceSpan": latest, "directionSufficient": state == "authorized",
+            "mapRelated": True,
+        }
+
     def test_deterministic_intent_conflict_requires_same_scope_and_aspect(self):
         decrease = [{
             "subject": "water", "attribute": "coverage", "direction": "decrease",
@@ -125,6 +178,12 @@ class CoCreationSessionTests(unittest.TestCase):
         cls.temp_directory.cleanup()
 
     def setUp(self):
+        understanding_patch = patch.object(
+            backend, "classify_turn_understanding",
+            side_effect=self._fake_turn_understanding,
+        )
+        understanding_patch.start()
+        self.addCleanup(understanding_patch.stop)
         with repository.connect(immediate=True) as database:
             for table in (
                 "challenge_review_requests",

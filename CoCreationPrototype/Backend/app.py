@@ -55,6 +55,7 @@ from llm_client import (
     classify_challenge_reason,
     challenge_choice_card_copy,
     classify_revision_request,
+    classify_turn_understanding,
     review_intent_feedback,
     review_question_answers,
     rewrite_intent_progress,
@@ -2731,6 +2732,44 @@ def _send_message_locked(
     response,
     access_cookie,
 ):
+    message_started_at = time.monotonic()
+    precomputed_understanding = None
+    if payload.action == "none":
+        with connect() as read_database:
+            read_session = require_active_session(read_database, session_id, access_cookie)
+            already_answered = read_database.execute(
+                """SELECT 1 FROM conversation_turns
+                WHERE session_id = ? AND request_id = ? AND role = 'assistant'""",
+                (session_id, payload.idempotencyKey),
+            ).fetchone()
+            if already_answered is None:
+                require_current_base(read_session, payload.baseVersionId)
+            saved_understanding = read_database.execute(
+                """SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'turn_understanding'
+                  AND json_extract(payload_json, '$.messageKey') = ?
+                ORDER BY id DESC LIMIT 1""",
+                (session_id, payload.idempotencyKey),
+            ).fetchone()
+            if saved_understanding is not None:
+                precomputed_understanding = load_json(saved_understanding["payload_json"])["result"]
+            elif already_answered is None:
+                read_version = get_current_version(read_database, read_session)
+                read_context = build_llm_context(read_database, session_id, read_version)
+                prior_conversation = read_context["conversation"]
+                if not prior_conversation or prior_conversation[-1].get("role") != "user" \
+                        or prior_conversation[-1].get("content") != content:
+                    prior_conversation = [
+                        *prior_conversation, {"role": "user", "content": content},
+                    ]
+                snapshot_for_understanding = read_context["stageContext"]["stageSnapshot"]
+            else:
+                prior_conversation = None
+        if saved_understanding is None and already_answered is None:
+            precomputed_understanding = classify_turn_understanding(
+                prior_conversation, snapshot_for_understanding,
+                request.state.request_id, forced_proposal=payload.requestProposal,
+            )
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         prior_user = database.execute(
@@ -2913,7 +2952,33 @@ def _send_message_locked(
         retrying_failed_message = prior_user is not None
         context = build_llm_context(database, session_id, current)
         language = session["language"]
+        turn_understanding = None
+        if payload.action == "none":
+            saved_understanding = database.execute(
+                """SELECT payload_json FROM audit_events
+                WHERE session_id = ? AND event_type = 'turn_understanding'
+                  AND json_extract(payload_json, '$.messageKey') = ?
+                ORDER BY id DESC LIMIT 1""",
+                (session_id, payload.idempotencyKey),
+            ).fetchone()
+            if saved_understanding is not None:
+                turn_understanding = load_json(saved_understanding["payload_json"])["result"]
+            else:
+                turn_understanding = precomputed_understanding
+                record_event(
+                    database, session_id, "turn_understanding",
+                    {"messageKey": payload.idempotencyKey,
+                     "baseVersionId": payload.baseVersionId,
+                     "result": turn_understanding},
+                    utc_now(),
+                )
+            # A new request is reconstructed from the model's audited speech
+            # act, not from the legacy keyword classifier.
+            context = build_llm_context(database, session_id, current)
         stage_context = context["stageContext"]
+        if turn_understanding is not None:
+            stage_context["turnUnderstanding"] = turn_understanding
+        stage_context["aiEditableTilesOnly"] = payload.action != "execute_revision"
         user_map_claims = analyze_user_map_claims(
             content,
             stage_context.get("stageSnapshot"),
@@ -2925,6 +2990,7 @@ def _send_message_locked(
             user_map_claims,
             stage_context.get("stageSnapshot"),
             proposal_discovery=proposal_discovery,
+            turn_understanding=turn_understanding,
         )
         stage_context["adaptiveProposalCompletion"] = (
             revision_routing == "needs_clarification"
@@ -3585,7 +3651,7 @@ def _send_message_locked(
     )
     message_deadline = (
         challenge_deadline
-        or time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS
+        or message_started_at + LLM_INTERNAL_DEADLINE_SECONDS
     )
     revision_failure = None
     recovery_execution = _verified_recovery_suggestion_execution(
@@ -4949,6 +5015,15 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
             "from": base_rows[row - 1][column - 1],
             "to": operation.get("to"),
         })
+    if (stage_context or {}).get("aiEditableTilesOnly") and any(
+        item["from"] not in {"#", ".", "@"}
+        or item["to"] not in {"#", ".", "@"}
+        for item in transitions
+    ):
+        raise ApiError(
+            502, "REVISION_EXECUTION_INVALID",
+            "A new AI proposal tried to move a protected map entity.",
+        )
     brief = validate_execution_brief({
         "schemaVersion": 1,
         "effect": strategy.get("effect"),
@@ -8116,11 +8191,22 @@ def build_llm_context(database, session_id, version):
         ).fetchall()
         if row["message_key"]
     }
+    turn_understandings = {
+        str(row["message_key"]): load_json(row["payload_json"])["result"]
+        for row in database.execute(
+            """SELECT json_extract(payload_json, '$.messageKey') AS message_key,
+                      payload_json FROM audit_events
+               WHERE session_id = ? AND event_type = 'turn_understanding'""",
+            (session_id,),
+        ).fetchall()
+        if row["message_key"]
+    }
     clarification_question_count = _clarification_question_count(turns)
     proposal_discovery = _proposal_discovery_from_turns(
         turns,
         version["id"],
         proposal_request_keys,
+        turn_understandings,
     )
     accepted_opening = database.execute(
         """
@@ -8603,9 +8689,12 @@ def _latest_substantive_design_direction(turns):
     return ""
 
 
-def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None):
+def _proposal_discovery_from_turns(
+    turns, version_id, proposal_request_keys=None, turn_understandings=None,
+):
     """Rebuild one pending proposal topic from private turn metadata."""
     forced_keys = set(proposal_request_keys or ())
+    reviewed = turn_understandings or {}
     ordered = sorted(turns or [], key=lambda turn: turn["sequence_number"])
     active = None
     conversation_prefix = []
@@ -8617,17 +8706,32 @@ def _proposal_discovery_from_turns(turns, version_id, proposal_request_keys=None
             # cancel/topic-switch wording does not unlock or replace it; only
             # a terminal assistant marker clears the topic below.
             starts_new_topic = active is None
-            revision_state, _ = classify_revision_request(conversation_prefix)
-            direct_revision_request = revision_state in {
-                "needs_direction", "authorized", "authorized_relaxed",
-            }
+            request_key = turn["request_id"] if "request_id" in turn.keys() else None
+            if request_key in reviewed:
+                acts = set(reviewed[request_key].get("acts") or [])
+                protected_request = bool(
+                    set(reviewed[request_key].get("elements") or [])
+                    & {"outer_shell", "player", "boxes", "targets"}
+                )
+                direct_revision_request = reviewed[request_key].get("mapRelated") is not False and bool(acts & {
+                    "proposal_request", "change_request",
+                }) and not protected_request
+            else:
+                protected_request = False
+                # Historic turns predate the Kimi speech-act record.
+                revision_state, _ = classify_revision_request(conversation_prefix)
+                direct_revision_request = revision_state in {
+                    "needs_direction", "authorized", "authorized_relaxed",
+                }
             if (
                 direct_revision_request
-                or (
+                or (not protected_request
+                    and (request_key not in reviewed or reviewed[request_key].get("mapRelated") is not False)
+                    and (
                     turn["request_id"]
                     if "request_id" in turn.keys()
                     else None
-                ) in forced_keys
+                ) in forced_keys)
             ) and starts_new_topic:
                 active = {
                     "topicId": turn["id"],
@@ -8995,12 +9099,27 @@ def _is_vague_aesthetic_revision(content):
     ))
 
 
-def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_discovery=None):
+def _adaptive_revision_routing(
+    content, user_map_claims, snapshot, *, proposal_discovery=None,
+    turn_understanding=None,
+):
     """Choose proposal expansion versus one targeted clarification question."""
     text = str(content or "").strip()
     if not text:
         return "none"
     discovery = proposal_discovery or {}
+    if isinstance(turn_understanding, dict):
+        if turn_understanding.get("mapRelated") is False:
+            return "none"
+        acts = set(turn_understanding.get("acts") or [])
+        elements = set(turn_understanding.get("elements") or [])
+        requested = bool(acts & {"proposal_request", "change_request"})
+        if requested and elements & {"outer_shell", "player", "boxes", "targets"}:
+            return "protected_request"
+        if not requested and not discovery:
+            return "none"
+        if requested and not discovery:
+            return "needs_clarification"
     discovery_status = str(discovery.get("status") or "")
     question_count = int(discovery.get("clarificationQuestionCount") or 0)
     if discovery and _proposal_topic_reset_requested(text):
@@ -9022,7 +9141,7 @@ def _adaptive_revision_routing(content, user_map_claims, snapshot, *, proposal_d
         return "needs_clarification"
     if (user_map_claims or {}).get("conflicts"):
         return "needs_clarification"
-    if _is_vague_aesthetic_revision(text):
+    if turn_understanding is None and _is_vague_aesthetic_revision(text):
         # Evaluate this before proposal-discovery sufficiency: vague aesthetic
         # feedback must not become a concrete proposal merely because the same
         # turn also asks the assistant to make a change.

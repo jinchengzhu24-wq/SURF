@@ -1918,6 +1918,33 @@ class LLMClientTests(unittest.TestCase):
             [{"row": 2, "column": 2, "from": ".", "to": "#"}],
         )
 
+    def test_new_ai_plan_rejects_entity_moves_but_keeps_wall_edits(self):
+        wall = llm_client.parse_revision_plan(json.loads(revision_plan_payload(
+            effect="adjust_internal_walls",
+            operators=["add_wall"],
+            focus={"row": 2, "column": 2, "radius": 1},
+            preserve=["outer_shell", "player", "boxes", "targets", "water"],
+            edit_budget=1,
+            required_transitions=[
+                {"row": 2, "column": 2, "from": ".", "to": "#"},
+            ],
+        )))
+        llm_client._build_revision_execution_contract(
+            wall, "Adjust the internal wall.", {"aiEditableTilesOnly": True},
+        )
+        player = llm_client.parse_revision_plan(json.loads(revision_plan_payload(
+            effect="relocate_start",
+            operators=["move_player"],
+            focus={"row": 5, "column": 5, "radius": 1},
+            preserve=["outer_shell", "boxes", "targets", "water"],
+            edit_budget=2,
+            required_transitions=[],
+        )))
+        with self.assertRaisesRegex(ValueError, "water and internal walls only"):
+            llm_client._build_revision_execution_contract(
+                player, "Move the start.", {"aiEditableTilesOnly": True},
+            )
+
     def test_modifier_contract_rejects_an_extra_operation_beyond_frozen_transitions(self):
         plan = llm_client.parse_revision_plan(json.loads(revision_plan_payload(
             effect="adjust_internal_walls",
@@ -5735,6 +5762,60 @@ class LLMClientTests(unittest.TestCase):
         )
         self.assertEqual(state, "needs_direction")
         self.assertIsNone(brief)
+
+    def test_model_turn_understanding_separates_reference_and_speech_act(self):
+        cases = (
+            ("我觉得外形不好看", ["evaluation"], ["outer_shell"], "not_request"),
+            ("里面的隔断太乱", ["evaluation"], ["internal_walls"], "not_request"),
+            ("我想让两块蓝色区域更协调", ["intent"], ["water"], "not_request"),
+            ("给我一个调整水域的方案", ["proposal_request"], ["water"], "needs_direction"),
+            ("帮我修改内部墙", ["change_request"], ["internal_walls"], "needs_direction"),
+        )
+        for message, acts, elements, expected in cases:
+            with self.subTest(message=message):
+                understanding = llm_client._validate_turn_understanding({
+                    "acts": acts,
+                    "elements": elements,
+                    "evidenceSpan": message,
+                    "directionSufficient": False,
+                    "mapRelated": True,
+                }, message)
+                state, _ = llm_client._classify_revision_request(
+                    [{"role": "user", "content": message}],
+                    {"turnUnderstanding": understanding},
+                )
+                self.assertEqual(state, expected)
+
+    def test_kimi_turn_understanding_uses_current_snapshot_and_exact_evidence(self):
+        message = "那两块蓝色区域看着太抢眼了"
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=json.dumps({
+                "acts": ["evaluation"], "elements": ["water"],
+                "evidenceSpan": "蓝色区域看着太抢眼", "directionSufficient": False,
+                "mapRelated": True,
+            }),
+        ))])
+        snapshot = {"rows": OPERATION_BASE_ROWS, "versionId": "current"}
+        with patch.object(llm_client, "_llm_credentials", return_value=("test-key", "test-url")), \
+                patch.object(llm_client, "_request_completion", new_callable=AsyncMock, return_value=response) as request:
+            result = llm_client.classify_turn_understanding(
+                [{"role": "user", "content": message}], snapshot, "understanding-test",
+            )
+        self.assertEqual(result["elements"], ["water"])
+        prompt = json.loads(request.call_args.args[3][1]["content"])
+        self.assertEqual(prompt["currentStageSnapshot"], snapshot)
+        self.assertEqual(prompt["latestUserMessage"], message)
+
+    def test_protected_element_change_is_not_a_revision_request(self):
+        for element in ("outer_shell", "player", "boxes", "targets"):
+            with self.subTest(element=element):
+                state, _ = llm_client._classify_revision_request(
+                    [{"role": "user", "content": "帮我改这里"}],
+                    {"turnUnderstanding": {
+                        "acts": ["change_request"], "elements": [element],
+                    }},
+                )
+                self.assertEqual(state, "not_request")
 
     def test_explicit_map_proposal_rejects_text_only_result(self):
         text_only = json.dumps({
