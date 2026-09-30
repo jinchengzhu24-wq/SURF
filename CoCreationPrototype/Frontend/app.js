@@ -1349,9 +1349,9 @@ function renderAssistantBubble(turn, bubble) {
                     ["alternative_revision", "alternativeRevision"]
                 ].filter(([action]) => !Array.isArray(offer.availableActions) || offer.availableActions.includes(action)).forEach(([action, labelKey]) => {
                     const disabled = !actionable;
-                    revisionCue.appendChild(makeButton(
+                    const button = makeButton(
                         t(labelKey),
-                        `secondary-button guidance-cue-button${disabled ? " guidance-cue-button-stale" : ""}`,
+                        `secondary-button guidance-cue-button revision-action-button${disabled ? " guidance-cue-button-stale" : ""}`,
                         actionable
                             ? () => sendRevisionCardAction(action, turn, offer)
                             : null,
@@ -1359,7 +1359,9 @@ function renderAssistantBubble(turn, bubble) {
                             disabled,
                             title: actionable ? "" : proposalStateMessage(proposalStatus)
                         }
-                    ));
+                    );
+                    button.dataset.actionable = String(actionable);
+                    revisionCue.appendChild(button);
                 });
             }
             if (!actionable && proposalStatus !== "already_satisfied" && proposalStatus !== "unbound") {
@@ -1555,22 +1557,31 @@ function createDisagreementCard(disagreement) {
     if (disagreement.subject === "ai_revision_challenge" && disagreement.phase === "choice_pending") {
         const actions = document.createElement("div");
         actions.className = "proposal-actions";
-        const active = activeChallengeComposerState();
-        const enabled = canEditSelected() && !state.busy && active?.status === "choice_pending"
-            && active?.challengeId === disagreement.challengeId;
         [["ai", state.language === "zh-CN" ? "是" : "Yes"],
          ["user", state.language === "zh-CN" ? "否" : "No"]].forEach(([choice, label]) => {
-            actions.appendChild(makeButton(label, "secondary-button guidance-cue-button", enabled
-                ? () => sendChallengeChoice(disagreement.challengeId, choice)
-                : null, { disabled: !enabled }));
+            const button = makeButton(
+                label,
+                "secondary-button guidance-cue-button challenge-choice-button",
+                () => sendChallengeChoice(disagreement.challengeId, choice),
+            );
+            button.dataset.challengeId = disagreement.challengeId || "";
+            setButtonDisabled(button, !canUseChallengeChoice(disagreement.challengeId));
+            actions.appendChild(button);
         });
         cue.appendChild(actions);
     }
     return cue;
 }
 
+function canUseChallengeChoice(challengeId) {
+    const active = activeChallengeComposerState();
+    return Boolean(challengeId && canEditSelected() && !state.busy
+        && active?.status === "choice_pending"
+        && active.challengeId === challengeId);
+}
+
 function sendChallengeChoice(challengeId, choice) {
-    if (!canEditSelected() || state.busy || !challengeId) return;
+    if (!canUseChallengeChoice(challengeId)) return;
     state.pendingMessage = {
         content: choice === "ai" ? "是" : "否",
         baseVersionId: state.session.currentVersionId,
@@ -2304,7 +2315,7 @@ function renderMap() {
                     ? formatEntityCoordinate(entityLabel, x, y)
                     : `${t(tileName(tile))} ${formatTileCoordinate(x, y)}`,
             );
-            cell.disabled = !canEditSelected();
+            cell.disabled = !canEditSelected() || state.busy;
             if (version.diff.some(change => change.x === x && change.y === y)) cell.classList.add("changed");
             cell.addEventListener("click", () => editTile(x, y));
             elements.mapGrid.appendChild(cell);
@@ -2336,9 +2347,13 @@ function renderToolbar() {
         button.type = "button";
         button.className = `palette-button ${tileClass(tile)}`;
         if (state.selectedTile === tile) button.classList.add("selected");
-        button.disabled = !canEditSelected();
+        button.disabled = !canEditSelected() || state.busy;
         button.innerHTML = `<span>${escapeHtml(tileLabel(tile) || "×")}</span><small>${escapeHtml(t(tileName(tile)))}</small>`;
-        button.addEventListener("click", () => { state.selectedTile = tile; renderToolbar(); });
+        button.addEventListener("click", () => {
+            if (!canEditSelected() || state.busy) return;
+            state.selectedTile = tile;
+            renderToolbar();
+        });
         elements.mapToolbar.appendChild(button);
     });
 }
@@ -2512,6 +2527,19 @@ function updateControls() {
     document.querySelectorAll(".question-feedback-button").forEach(button => {
         button.disabled = interactionBusy || !editable
             || state.questionFeedbackBusy.has(button.dataset.feedbackKey || "");
+    });
+    document.querySelectorAll(".challenge-choice-button").forEach(button => {
+        setButtonDisabled(button, !canUseChallengeChoice(button.dataset.challengeId));
+    });
+    document.querySelectorAll(".revision-action-button").forEach(button => {
+        setButtonDisabled(button, interactionBusy || !editable || disagreementActive
+            || button.dataset.actionable !== "true");
+    });
+    document.querySelectorAll(".intent-feedback-card button, .proposal-card button").forEach(button => {
+        setButtonDisabled(button, interactionBusy || !editable);
+    });
+    document.querySelectorAll(".tile, .palette-button").forEach(button => {
+        setButtonDisabled(button, interactionBusy || !editable);
     });
     const selectedStageChatBusy = state.chatBusy
         && state.chatBusyVersionId === state.selectedVersionId;
@@ -3671,7 +3699,7 @@ function discardDraft() {
 }
 
 function editTile(x, y) {
-    if (!canEditSelected()) return;
+    if (!canEditSelected() || state.busy) return;
     state.activeCoordinateLink = null;
     const row = [...state.draftRows[y]];
     row[x] = state.selectedTile;
@@ -4162,6 +4190,11 @@ function makeButton(label, className, handler, options = {}) {
     if (options.title) button.title = options.title;
     if (handler && !options.disabled) button.addEventListener("click", handler);
     return button;
+}
+function setButtonDisabled(button, disabled) {
+    button.disabled = disabled;
+    if (disabled) button.setAttribute("aria-disabled", "true");
+    else button.removeAttribute("aria-disabled");
 }
 function buildEntityLabels(rows) {
     const labels = new Map();
