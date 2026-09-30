@@ -8714,7 +8714,7 @@ def _proposal_discovery_from_turns(
                     & {"outer_shell", "player", "boxes", "targets"}
                 )
                 direct_revision_request = reviewed[request_key].get("mapRelated") is not False and bool(acts & {
-                    "proposal_request", "change_request",
+                    "revision_request", "proposal_request", "change_request",
                 }) and not protected_request
             else:
                 protected_request = False
@@ -9113,7 +9113,7 @@ def _adaptive_revision_routing(
             return "none"
         acts = set(turn_understanding.get("acts") or [])
         elements = set(turn_understanding.get("elements") or [])
-        requested = bool(acts & {"proposal_request", "change_request"})
+        requested = bool(acts & {"revision_request", "proposal_request", "change_request"})
         if requested and elements & {"outer_shell", "player", "boxes", "targets"}:
             return "protected_request"
         if not requested and not discovery:

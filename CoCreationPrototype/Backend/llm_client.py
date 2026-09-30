@@ -268,8 +268,8 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
             "properties": {
                 "acts": {"type": "array", "minItems": 1, "maxItems": 3, "items": {
                     "type": "string", "enum": [
-                        "evaluation", "intent", "idea_request", "proposal_request",
-                        "change_request", "unclear",
+                        "evaluation", "intent", "explanation_request", "idea_request",
+                        "revision_request", "unclear",
                     ],
                 }},
                 "elements": {"type": "array", "maxItems": 6, "items": {
@@ -932,7 +932,8 @@ def build_chat_messages(
         "discussion from another Stage happened in the current Stage.\n\n"
         f"Write all new natural-language fields in {response_language}. "
         + (
-            "In Chinese mode, use Chinese natural language throughout; keep only entity IDs, "
+            "In Chinese mode, use Chinese natural language throughout; keep only the visible "
+            "map labels P/B/T, entity IDs, "
             "coordinates, and the label Stage in Latin characters. Do not code-switch into "
             "English design jargon. "
             if response_language == "Simplified Chinese"
@@ -1162,7 +1163,7 @@ def build_plain_chat_messages(
     if isinstance(understanding, dict):
         acts = set(understanding.get("acts") or [])
         elements = set(understanding.get("elements") or [])
-        if acts & {"proposal_request", "change_request"} and elements & {
+        if acts & {"revision_request", "proposal_request", "change_request"} and elements & {
             "outer_shell", "player", "boxes", "targets",
         }:
             action_instruction += (
@@ -1171,11 +1172,14 @@ def build_plain_chat_messages(
                 "design concern using the current Stage; do not create a proposal, silently "
                 "substitute an editable component, or ask for cell coordinates."
             )
-        elif not acts & {"proposal_request", "change_request"}:
+        elif not acts & {"revision_request", "proposal_request", "change_request"}:
             action_instruction += (
-                " The latest message is an observation, intention, or request for ideas, "
+                " The latest message is an observation, intention, explanation question, or request for ideas, "
                 "not authorization for an executable map proposal. Address its likely map "
-                "referent using the current StageSnapshot. Lead with one verified property of "
+                "referent using the current StageSnapshot. If it asks what a map label or element "
+                "means, answer that directly before discussing its current-map role. P labels the "
+                "player, B labels boxes, and T labels targets; numbered IDs identify individual "
+                "boxes and targets. Lead with one verified property of "
                 "the referenced element and its visible or playable consequence; do not replace "
                 "that element with a generic inventory of water, boxes, and targets. For an "
                 "outer-shell reference, discuss the actual enclosing contour first and keep "
@@ -1323,7 +1327,8 @@ def build_plain_chat_messages(
         "notices, and canned service phrasing. Write only the visible "
          f"reply to the designer in {response_language}; "
          + (
-             "Use Chinese natural language throughout in Chinese mode; keep only entity IDs, "
+             "Use Chinese natural language throughout in Chinese mode; keep only visible "
+             "map labels P/B/T, entity IDs, "
              "coordinates, and Stage in Latin characters, and do not use English design jargon. "
              if response_language == "Simplified Chinese"
              else ""
@@ -4051,10 +4056,11 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
         {"role": "system", "content": (
             "Classify the latest designer message as natural language, not by keyword lookup. "
             "Return only the requested JSON. Acts may overlap: evaluation describes a reaction; "
-            "intent states a desired experience without requesting a map operation; idea_request "
-            "asks for conceptual thoughts; proposal_request asks for a concrete executable plan; "
-            "change_request explicitly asks you to change the map. Do not promote an evaluation "
-            "or intention into a proposal/change request. A request to change an element may be "
+            "intent states a desired experience without requesting a map operation; "
+            "explanation_request asks what a map element or label means or does; idea_request "
+            "asks for conceptual design thoughts; revision_request asks for a concrete map plan "
+            "or asks you to change the map. Do not promote an evaluation, explanation question, "
+            "or intention into a revision request. A request to change an element may be "
             "ambiguous about how; directionSufficient is true only when the desired effect and "
             "referent are clear enough to begin proposal discovery. For example, '我想让里面更通透' "
             "states intent, '里面怎样能更通透' asks for ideas, '里面太堵了' evaluates, "
@@ -4067,6 +4073,9 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             "in the subsequent reply. An overall appearance "
             "remark may refer to more than one element; use unknown only when no particular "
             "element is a defensible primary referent. "
+            "The visible map labels P, B, and T refer to the player, boxes, and targets; "
+            "numbered labels identify individual boxes or targets. '那个T是什么' is an "
+            "explanation_request about targets, not a request for design ideas. "
             "Set mapRelated false for requests clearly about another subject. Copy "
             "evidenceSpan exactly from the latest user message. Earlier user wording is "
             "linguistic context only; current map facts come exclusively from Current Stage Snapshot. "
@@ -4108,8 +4117,8 @@ def _validate_turn_understanding(payload, latest, forced_proposal=False):
     }:
         raise ValueError("Turn understanding has an invalid envelope.")
     allowed_acts = {
-        "evaluation", "intent", "idea_request", "proposal_request",
-        "change_request", "unclear",
+        "evaluation", "intent", "explanation_request", "idea_request",
+        "revision_request", "unclear",
     }
     allowed_elements = {
         "water", "internal_walls", "outer_shell", "player", "boxes",
@@ -4129,8 +4138,8 @@ def _validate_turn_understanding(payload, latest, forced_proposal=False):
         raise ValueError("Turn understanding lacks exact user evidence.")
     if not isinstance(payload["directionSufficient"], bool) or not isinstance(payload["mapRelated"], bool):
         raise ValueError("Turn understanding has invalid routing booleans.")
-    if forced_proposal and "proposal_request" not in acts:
-        acts = [*acts[:2], "proposal_request"]
+    if forced_proposal and "revision_request" not in acts:
+        acts = [*acts[:2], "revision_request"]
     return {
         "acts": acts,
         "elements": elements,
@@ -7470,7 +7479,8 @@ def translate_turns(items, target_language, request_id):
                 "only their text values; omit coordinateLinkTexts for items without coordinateLinks."
                 + (
                     " In Simplified Chinese, use Chinese natural language throughout; keep only "
-                    "P, B1/B2, T1/T2, coordinates, and Stage in Latin characters. Never expose "
+                    "the map's visible P/B/T, B1/B2, T1/T2 labels, coordinates, and Stage "
+                    "in Latin characters. Never expose "
                     "English implementation labels or design jargon."
                     if target_language == "zh-CN" else ""
                 )
@@ -10294,6 +10304,15 @@ def _plain_messages_with_validation_feedback(
             "exhaustive solver trace. Do not mention this correction to the designer. End with "
             "a complete conclusion."
         )
+    elif "chinese visible text contains" in feedback_lower:
+        instruction = (
+            "Your previous reply used a Latin term that is not permitted in Chinese visible "
+            f"prose: {feedback_text} Rewrite the complete reply in natural Chinese. "
+            "The map's visible labels P, B, T, B1, B2, T1, T2 and Stage may remain; "
+            "explain a map label directly when the designer asks what it means. "
+            "Translate or paraphrase other English terms, and never expose implementation "
+            "identifiers. Keep the same grounded answer and do not mention this correction."
+        )
     elif "route reasoning" in feedback_lower:
         instruction = (
             "Your previous reply used an over-expanded route trace. Write a fresh reply that "
@@ -11846,8 +11865,13 @@ _VISIBLE_INTERNAL_TERM_REPLACEMENTS = {
 # Chinese co-creation prose may use map entity labels and the product's version
 # label, but implementation identifiers and English design prose must never
 # escape to a participant-facing surface.
-_VISIBLE_CHINESE_LATIN_ALLOWLIST = {"P", "B1", "B2", "T1", "T2", "Stage"}
+_VISIBLE_CHINESE_LATIN_ALLOWLIST = {"P", "B", "T", "B1", "B2", "T1", "T2", "Stage"}
 _VISIBLE_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+_VISIBLE_MAP_SYMBOLS = {"p": "P", "b": "B", "s": "B", "t": "T",
+                        "b1": "B1", "b2": "B2", "t1": "T1", "t2": "T2"}
+_VISIBLE_MAP_SYMBOL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:b1|b2|t1|t2|p|b|s|t)(?![A-Za-z0-9_])"
+)
 
 
 _VISIBLE_CHINESE_DESIGN_TERM_REPLACEMENTS = (
@@ -11884,6 +11908,9 @@ def _sanitize_visible_model_text(value, language="en"):
     if language == "zh-CN":
         for pattern, replacement in _VISIBLE_CHINESE_DESIGN_TERM_REPLACEMENTS:
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        text = _VISIBLE_MAP_SYMBOL_RE.sub(
+            lambda match: _VISIBLE_MAP_SYMBOLS[match.group(0)], text,
+        )
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n[ \t]+", "\n", text)
     return text.strip()
@@ -19378,7 +19405,7 @@ def _classify_revision_request(conversation, stage_context=None):
             return "not_request", None
         acts = set(understanding.get("acts") or [])
         elements = set(understanding.get("elements") or [])
-        if acts & {"proposal_request", "change_request"}:
+        if acts & {"revision_request", "proposal_request", "change_request"}:
             if elements & {"outer_shell", "player", "boxes", "targets"}:
                 return "not_request", None
             return "needs_direction", None

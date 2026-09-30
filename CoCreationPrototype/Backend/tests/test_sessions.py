@@ -100,7 +100,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         cases = (
             ("The outer shape looks awkward", ["evaluation"], False, "none"),
-            ("Make me a proposal to change the outer shell", ["proposal_request"], True,
+            ("Make me a proposal to change the outer shell", ["revision_request"], True,
              "protected_request"),
         )
         for index, (content, acts, forced, expected_route) in enumerate(cases):
@@ -134,9 +134,9 @@ class CoCreationSessionTests(unittest.TestCase):
         state, _ = llm_client.classify_revision_request(
             [{"role": "user", "content": latest}],
         )
-        acts = ["change_request"] if state != "not_request" else ["evaluation"]
+        acts = ["revision_request"] if state != "not_request" else ["evaluation"]
         if forced_proposal:
-            acts = ["proposal_request"]
+            acts = ["revision_request"]
         return {
             "acts": acts, "elements": ["unknown"],
             "evidenceSpan": latest, "directionSufficient": state == "authorized",

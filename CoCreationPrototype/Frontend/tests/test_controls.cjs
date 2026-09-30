@@ -128,3 +128,22 @@ test("map controls lock during a request and recover afterward", () => {
     vm.runInContext("state.session.turns[0].guidance.disagreement.status = 'resolved'; updateControls();", context);
     assert.ok(!revision.disabled && staleRevision.disabled);
 });
+
+test("idempotent message requests keep retry on unreadable 5xx or network failure", async () => {
+    const { context } = loadApp();
+    context.fetch = async () => ({
+        ok: false,
+        status: 502,
+        async json() { throw new SyntaxError("not JSON"); },
+    });
+    const request = () => vm.runInContext(
+        "api('/api/sessions/session/messages', { method: 'POST', body: { idempotencyKey: 'same-key' } })",
+        context,
+    );
+    await assert.rejects(request, error =>
+        error.code === "RETRYABLE_REQUEST_FAILED" && error.retryable === true);
+
+    context.fetch = async () => { throw new TypeError("network interrupted"); };
+    await assert.rejects(request, error =>
+        error.code === "RETRYABLE_REQUEST_FAILED" && error.retryable === true);
+});

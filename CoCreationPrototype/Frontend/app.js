@@ -199,7 +199,8 @@ const translations = {
         error_UPSTREAM_CONNECTION_ERROR: "Kimi is temporarily unreachable. Retry without creating a duplicate message.",
         error_UPSTREAM_SERVER_ERROR: "Kimi temporarily could not complete the response. Retry without creating a duplicate message.",
         error_MODEL_EMPTY_RESPONSE: "The latest model attempt returned blank content, and no earlier attempt produced a valid result. Retry without creating a duplicate.",
-        error_MODEL_RESPONSE_INVALID: "Kimi did not produce a reliably grounded reply after three attempts. Retry without creating a duplicate message.",
+        error_MODEL_RESPONSE_INVALID: "Kimi did not produce a reply that passed validation after three attempts. Retry without creating a duplicate message.",
+        error_RETRYABLE_REQUEST_FAILED: "The request was interrupted or the server returned an unreadable error. Retry the same message without creating a duplicate.",
         error_MODEL_LOW_QUALITY_RESPONSE: "Kimi did not produce a sufficiently complete reply after three attempts. Retry without creating a duplicate message.",
         error_INVALID_MESSAGE_ACTION: "That card action is invalid. Refresh and try again.",
         error_INVALID_CARD_SOURCE: "That revision card no longer belongs to the current Stage. Refresh and choose the current card.",
@@ -655,7 +656,8 @@ const chineseApiErrors = {
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
     UPSTREAM_SERVER_ERROR: "Kimi 服务暂时未能完成本次回复，可使用原消息安全重试，不会产生重复记录。",
     MODEL_EMPTY_RESPONSE: "最后一次模型尝试返回了空白内容，且此前尝试也未产生有效结果；可使用原消息安全重试，不会产生重复记录。",
-    MODEL_RESPONSE_INVALID: "Kimi 连续三次未能生成通过当前 Stage 事实校验的回复；可使用原消息安全重试，不会产生重复记录。",
+    MODEL_RESPONSE_INVALID: "Kimi 连续三次未能生成通过回复校验的内容；可使用原消息安全重试，不会产生重复记录。",
+    RETRYABLE_REQUEST_FAILED: "请求中断或服务器返回了无法读取的错误；可用原消息安全重试，不会产生重复记录。",
     MODEL_LOW_QUALITY_RESPONSE: "Kimi 连续三次未能生成足够完整的回复；可使用原消息安全重试，不会产生重复记录。",
     CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。",
@@ -3846,6 +3848,9 @@ async function withBusy(action, onError = null) {
 
 async function api(path, options = {}) {
     const request = { method: options.method || "GET", credentials: "include", headers: {} };
+    const idempotentWrite = request.method !== "GET"
+        && typeof options.body?.idempotencyKey === "string"
+        && Boolean(options.body.idempotencyKey);
     const controller = options.timeoutMs ? new AbortController() : null;
     const timeoutId = controller
         ? window.setTimeout(() => controller.abort(), options.timeoutMs)
@@ -3870,6 +3875,12 @@ async function api(path, options = {}) {
             timeoutError.retryable = true;
             throw timeoutError;
         }
+        if (idempotentWrite) {
+            const retryError = new Error(t("errorGeneric"));
+            retryError.code = "RETRYABLE_REQUEST_FAILED";
+            retryError.retryable = true;
+            throw retryError;
+        }
         throw error;
     } finally {
         if (timeoutId !== null) window.clearTimeout(timeoutId);
@@ -3878,9 +3889,11 @@ async function api(path, options = {}) {
     try { payload = await response.json(); } catch (error) { payload = {}; }
     if (!response.ok) {
         const apiError = new Error(payload.message || t("errorGeneric"));
-        apiError.code = payload.code || "REQUEST_FAILED";
+        const retryableHttpError = idempotentWrite && response.status >= 500 && !payload.code;
+        apiError.code = payload.code || (retryableHttpError ? "RETRYABLE_REQUEST_FAILED" : "REQUEST_FAILED");
         apiError.details = payload.details || null;
-        apiError.retryable = isLevelValidationError(apiError) ? false : Boolean(payload.retryable);
+        apiError.retryable = isLevelValidationError(apiError) ? false
+            : retryableHttpError || Boolean(payload.retryable);
         throw apiError;
     }
     return payload;

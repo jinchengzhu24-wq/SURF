@@ -1190,6 +1190,38 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("B2", result[0])
         self.assertIn("Stage 2", result[0])
 
+    def test_chinese_visible_output_keeps_map_labels_and_normalizes_tile_symbols(self):
+        payload = {
+            "assistantMessage": "T 是目标点，B 是箱子，P 是玩家；底层的 t、s、p 对应这些标记。",
+            "guidance": {"move": "offer_perspective", "intentHypothesis": None,
+                         "intentConfidence": None, "followUpQuestion": None,
+                         "proposalOffer": None, "uiCues": []},
+            "assessment": None, "proposedRows": None, "modificationSummary": "",
+        }
+
+        message = llm_client.validate_chat_response(payload, language="zh-CN")[0]
+
+        self.assertIn("T 是目标点", message)
+        self.assertIn("底层的 T、B、P", message)
+        self.assertNotIn("相关设计指标", llm_client.repair_legacy_visible_text(message, "zh-CN"))
+
+    def test_chinese_visible_output_still_rejects_unrelated_english(self):
+        for word in ("water", "AI", "routeComplexityScore"):
+            with self.subTest(word=word):
+                self.assertIsNotNone(llm_client._visible_chinese_language_issue(
+                    f"这个 {word} 要重新评价。"
+                ))
+
+    def test_language_retry_feedback_is_not_treated_as_spatial_error(self):
+        messages = [{"role": "user", "content": "那个T是什么"}]
+        corrected = llm_client._plain_messages_with_validation_feedback(
+            messages, "Chinese visible text contains English term: t",
+            validation_mode="ordinary_chat",
+        )
+        self.assertIn("natural Chinese", corrected[0]["content"])
+        self.assertIn("P, B, T", corrected[0]["content"])
+        self.assertNotIn("spatial claim", corrected[0]["content"])
+
     def test_legacy_chinese_display_replaces_unknown_identifier(self):
         result = llm_client.repair_legacy_visible_text(
             "routeComplexityScore 让路线更难直接判断。",
@@ -5767,9 +5799,15 @@ class LLMClientTests(unittest.TestCase):
         cases = (
             ("我觉得外形不好看", ["evaluation"], ["outer_shell"], "not_request"),
             ("里面的隔断太乱", ["evaluation"], ["internal_walls"], "not_request"),
+            ("我觉得那两块蓝色区域太挤", ["evaluation"], ["water"], "not_request"),
             ("我想让两块蓝色区域更协调", ["intent"], ["water"], "not_request"),
-            ("给我一个调整水域的方案", ["proposal_request"], ["water"], "needs_direction"),
-            ("帮我修改内部墙", ["change_request"], ["internal_walls"], "needs_direction"),
+            ("那个T是什么", ["explanation_request"], ["targets"], "not_request"),
+            ("那两块蓝色区域有什么作用", ["explanation_request"], ["water"], "not_request"),
+            ("水域怎样布置更有意思", ["idea_request"], ["water"], "not_request"),
+            ("里面怎样能更通透", ["idea_request"], ["internal_walls"], "not_request"),
+            ("给我一个调整水域的方案", ["revision_request"], ["water"], "needs_direction"),
+            ("帮我修改那两块蓝色区域", ["revision_request"], ["water"], "needs_direction"),
+            ("帮我修改内部墙", ["revision_request"], ["internal_walls"], "needs_direction"),
         )
         for message, acts, elements, expected in cases:
             with self.subTest(message=message):
@@ -5812,10 +5850,21 @@ class LLMClientTests(unittest.TestCase):
                 state, _ = llm_client._classify_revision_request(
                     [{"role": "user", "content": "帮我改这里"}],
                     {"turnUnderstanding": {
-                        "acts": ["change_request"], "elements": [element],
+                        "acts": ["revision_request"], "elements": [element],
                     }},
                 )
                 self.assertEqual(state, "not_request")
+
+    def test_historical_request_acts_keep_routing_without_rewriting_audit(self):
+        for old_act in ("proposal_request", "change_request"):
+            with self.subTest(old_act=old_act):
+                state, _ = llm_client._classify_revision_request(
+                    [{"role": "user", "content": "帮我调整水域"}],
+                    {"turnUnderstanding": {
+                        "acts": [old_act], "elements": ["water"],
+                    }},
+                )
+                self.assertEqual(state, "needs_direction")
 
     def test_explicit_map_proposal_rejects_text_only_result(self):
         text_only = json.dumps({
