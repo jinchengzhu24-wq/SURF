@@ -209,6 +209,7 @@ def _deterministic_conflict_explanation(conflict_pair, language):
         f"Both govern the same {attribute} of {subject} but require opposite changes, so they cannot both guide this decision. "
         "I will not choose between them; please keep one of the two cards below."
     )
+from design_requirements import protected_change_requested, tradeoff_message
 from revision_workflow import (
     SemanticConstraintError,
     validate_semantic_constraints,
@@ -2763,12 +2764,14 @@ def _send_message_locked(
                         *prior_conversation, {"role": "user", "content": content},
                     ]
                 snapshot_for_understanding = read_context["stageContext"]["stageSnapshot"]
+                proposal_context_for_understanding = read_context["stageContext"].get("proposalDiscovery") or {}
             else:
                 prior_conversation = None
         if saved_understanding is None and already_answered is None:
             precomputed_understanding = classify_turn_understanding(
                 prior_conversation, snapshot_for_understanding,
                 request.state.request_id, forced_proposal=payload.requestProposal,
+                proposal_context={key: proposal_context_for_understanding.get(key) for key in ("topicId", "initialRequest", "questions", "answers", "lastQuestionText")},
             )
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
@@ -2976,6 +2979,8 @@ def _send_message_locked(
             # act, not from the legacy keyword classifier.
             context = build_llm_context(database, session_id, current)
         stage_context = context["stageContext"]
+        stage_context["requirementPolicyVersion"] = 1
+        stage_context["requirementUserTurns"] = [{"id": user_turn_id, "content": content}]
         if turn_understanding is not None:
             stage_context["turnUnderstanding"] = turn_understanding
         stage_context["aiEditableTilesOnly"] = payload.action != "execute_revision"
@@ -3634,6 +3639,27 @@ def _send_message_locked(
         context["stageContext"]["answeredQuestionIds"]
     )
     context["stageContext"]["revisionRequestState"] = revision_state
+    # Resolve evidence IDs from canonical memory/cards; never promote assistant
+    # summaries or inferred hypotheses to the requirement compiler.
+    evidence_context = context["stageContext"]
+    source_workflow = (evidence_context.get("sourceProposalOffer") or {}).get("revisionWorkflow") or {}
+    source_record = source_workflow.get("requirementRecord") or {}
+    source_ids = {x["sourceTurnId"] for x in source_record.get("requirements") or []}
+    source_ids.update(x["sourceTurnId"] for x in source_record.get("exactTransitions") or [])
+    projection = evidence_context.get("revisionDesignContext") or {}
+    for memory in (projection.get("activeGoals") or []) + (projection.get("activeConstraints") or []):
+        if memory.get("sourceTurnId"):
+            source_ids.add(memory["sourceTurnId"])
+    with connect() as evidence_database:
+        prior_sources = evidence_database.execute(
+            "SELECT id, content FROM conversation_turns WHERE session_id = ? AND role = 'user' ORDER BY sequence_number",
+            (session_id,),
+        ).fetchall()
+    prior_sources = [{"id": row["id"], "content": row["content"]} for row in prior_sources if row["id"] in source_ids]
+    current_sources = (evidence_context.get("proposalDiscovery") or {}).get("userTurns") or evidence_context.get("requirementUserTurns") or []
+    evidence_context["requirementUserTurns"] = list({x["id"]: x for x in [*prior_sources, *current_sources]}.values())
+    if payload.action in REVISION_CARD_ACTIONS and not source_record:
+        evidence_context.pop("requirementPolicyVersion", None)
     proposal_branch = bool(
         payload.action in REVISION_CARD_ACTIONS
         or payload.requestProposal
@@ -3691,6 +3717,13 @@ def _send_message_locked(
         )
     elif recovery_execution is not None:
         execution = recovery_execution
+    elif context["stageContext"].get("revisionRouting") == "protected_request":
+        execution = LLMExecutionResult(
+            ("这部分涉及箱子、玩家、目标或外壳的数量或位置，它们在当前修改流程中固定，不能执行这部分修改。已保存的地图和此前讨论仍保留；可以继续尝试调整水域和内部墙体。"
+                if language == "zh-CN" else "This asks to change fixed boxes, player, targets, or the outer shell. I cannot perform that part. The saved map and prior discussion are retained; water and internal walls remain editable."),
+            0, request.state.request_id, model="server-permission-guard",
+            guidance={"proposalOffer": None, "disagreement": None, "followUpQuestion": None, "uiCues": []},
+        )
     elif revision_state == "relaxation_confirmed":
         execution = _relaxed_revision_suggestion_execution(
             context["stageContext"],
@@ -3747,6 +3780,7 @@ def _send_message_locked(
             )
         except LLMServiceError as exception:
             revision_failure = exception
+            exception.requirement_policy_version = context["stageContext"].get("requirementPolicyVersion")
             proposal_retryable_failure = bool(
                 proposal_branch and exception.retryable
             )
@@ -4521,7 +4555,7 @@ def _send_message_locked(
                             "workflow": revision_workflow,
                             "constraintResults": semantic_results,
                             "mode": revision_workflow.get("mode"),
-                            "candidateAccepted": execution.proposed_rows is not None,
+                            "candidateAccepted": bool(execution.proposed_rows is not None or (execution.proposal_diagnostics or {}).get("candidateFrozen")),
                         },
                         utc_now(),
                     )
@@ -5069,6 +5103,20 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
     )
     if revision_workflow:
         revision_workflow["status"] = "proposed"
+    if isinstance(revision_workflow.get("requirementRecord"), dict):
+        from llm_client import validate_frozen_requirements
+        try:
+            outcomes = validate_frozen_requirements(base_rows, validation.rows, revision_workflow,
+                (stage_context or {}).get("validation") or validate_and_solve(base_rows), validation,
+                (stage_context or {}).get("entityBindings"))
+        except SemanticConstraintError as exception:
+            raise ApiError(422, "SEMANTIC_POSTCONDITION_FAILED", "The candidate violated a fixed requirement or reversed a design direction.") from exception
+        revision_workflow["goalOutcomes"] = outcomes
+        explanation = tradeoff_message(revision_workflow["requirementRecord"], outcomes, language)
+        body += "\n\n" + explanation if explanation else ""
+        rationale = explanation or rationale
+        if presentation is not None:
+            presentation["reason"] = explanation or presentation["reason"]
     guidance.update({
         "move": "offer_revision",
         "followUpQuestion": None,
@@ -5099,6 +5147,7 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
         proposed_rows=None,
         modification_summary="",
         guidance=guidance,
+        revision_contract={**(execution.revision_contract or {}), "revisionWorkflow": revision_workflow},
         proposal_diagnostics=diagnostics,
     )
 
@@ -5711,6 +5760,18 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
         else:
             recovery_lines.append("No fully verified minimal adjustment was found yet, so these directions are not labeled as verified suggestions.")
         warning = "\n".join(recovery_lines)
+    typed_record = (revision_contract.get("revisionWorkflow") or {}).get("requirementRecord")
+    if isinstance(typed_record, dict) or getattr(exception, "requirement_policy_version", None) == 1:
+        descriptions = {
+            "REQUIREMENT_PERMISSION_CONFLICT": ("这部分明确要求与固定实体或允许修改的范围冲突，我不能执行。", "An explicit requirement conflicts with fixed entities or editing permissions."),
+            "SEMANTIC_CONSTRAINT_NOT_MET": ("本次候选没有通过固定要求或目标方向检查。", "The candidates failed fixed requirements or direction checks."),
+            "CANDIDATE_UNSOLVABLE": ("本次候选没有通过可解性验证。", "The candidates failed solvability validation."),
+            "REVISION_CONTRACT_CONFLICT": ("生成的操作计划与当前地图或执行规则不一致。", "The generated operation plans conflict with the current map or execution rules."),
+            "EXACT_TRANSITION_INFEASIBLE": ("本次没有找到满足指定格子变化的有效候选。", "No valid candidate matched the specified tile changes."),
+        }
+        reason = descriptions.get(code, ("在本次有限搜索中，没有找到通过全部检查的修改。", "The bounded search found no change passing every check."))[0 if language == "zh-CN" else 1]
+        message = (("我尝试了这次修改，但" + reason + " 当前地图没有改变，也没有生成紫色方案卡。你的明确目标和本主题的回答仍保留；这次失败不能证明这些目标永远无法实现。")
+            if language == "zh-CN" else (reason + " The current map is unchanged and no purple card was created. The goals and answers are retained; this attempt does not prove the goals impossible."))
     return LLMExecutionResult(
         assistant_message=message,
         attempts_used=getattr(exception, "attempts_used", 0),
@@ -5724,7 +5785,7 @@ def _classified_proposal_failure_execution(*, language, request_id, exception):
             "followUpQuestion": None,
             "proposalOffer": None,
             "disagreement": None,
-            "uiCues": [{"type": "warning", "text": warning}],
+            "uiCues": ([] if isinstance(typed_record, dict) or getattr(exception, "requirement_policy_version", None) == 1 else [{"type": "warning", "text": warning}]),
         },
         revision_plan=getattr(exception, "revision_plan", {}) or {},
         revision_contract=getattr(exception, "revision_contract", {}) or {},
@@ -6133,6 +6194,10 @@ def decide_proposal(
                         validation.rows,
                         revision_workflow,
                     )
+                    from llm_client import validate_frozen_requirements
+                    requirement_outcomes = validate_frozen_requirements(current_rows, validation.rows,
+                        revision_workflow, load_json(current["validation_json"]), validation,
+                        load_entity_bindings(database, session_id, current["id"]))
                 except SemanticConstraintError as exception:
                     raise ApiError(
                         422,
@@ -6171,12 +6236,21 @@ def decide_proposal(
                     proposal["assistant_turn_id"],
                     proposal_id,
                 )
+                for requirement in (revision_workflow.get("requirementRecord") or {}).get("requirements") or []:
+                    if requirement["strength"] == "preference":
+                        continue
+                    field, collection = ("constraint", "designConstraints") if requirement["strength"] == "invariant" else ("goal", "userGoals")
+                    if not any(item.get("id") == requirement["requirementId"] for item in child_context[collection]):
+                        child_context[collection].append({"id": requirement["requirementId"], field: requirement["statement"],
+                            "authority": "explicit", "status": "active", "sourceStageId": current["id"],
+                            "sourceTurnId": requirement["sourceTurnId"], "confidence": 1.0})
                 save_design_context(database, new_version_id, child_context)
                 execution_outcome = {
                     "revisionWorkflowId": revision_workflow.get("revisionWorkflowId"),
                     "sourceProposalTurnId": proposal["assistant_turn_id"],
                     "actualTransitions": actual_transitions,
                     "constraintResults": constraint_results,
+                    "goalOutcomes": requirement_outcomes,
                     "softEvidence": [],
                     "validation": validation.as_dict(),
                     "beforeFingerprint": map_fingerprint(current_rows),
@@ -8201,9 +8275,14 @@ def build_llm_context(database, session_id, version):
         ).fetchall()
         if row["message_key"]
     }
-    clarification_question_count = _clarification_question_count(turns)
+    proposal_turns = database.execute(
+        """SELECT id, role, content, request_id, sequence_number, guidance_json
+        FROM conversation_turns WHERE session_id = ? AND version_id = ?
+        ORDER BY sequence_number""", (session_id, version["id"]),
+    ).fetchall()
+    clarification_question_count = _clarification_question_count(proposal_turns)
     proposal_discovery = _proposal_discovery_from_turns(
-        turns,
+        proposal_turns,
         version["id"],
         proposal_request_keys,
         turn_understandings,
@@ -8710,8 +8789,7 @@ def _proposal_discovery_from_turns(
             if request_key in reviewed:
                 acts = set(reviewed[request_key].get("acts") or [])
                 protected_request = bool(
-                    set(reviewed[request_key].get("elements") or [])
-                    & {"outer_shell", "player", "boxes", "targets"}
+                    protected_change_requested(reviewed[request_key], active is not None)
                 )
                 direct_revision_request = reviewed[request_key].get("mapRelated") is not False and bool(acts & {
                     "revision_request", "proposal_request", "change_request",
@@ -8740,6 +8818,8 @@ def _proposal_discovery_from_turns(
                     "sourceSequence": turn["sequence_number"],
                     "versionId": version_id,
                     "userEvidence": [content],
+                    "userTurns": [{"id": turn["id"], "content": content}],
+                    "questions": [],
                     "answers": [],
                     "supplements": [],
                     "clarificationQuestionCount": 0,
@@ -8749,13 +8829,21 @@ def _proposal_discovery_from_turns(
                 }
             elif active is not None:
                 active["userEvidence"].append(content)
+                active["userTurns"].append({"id": turn["id"], "content": content})
                 unanswered_key = active.get("lastQuestionKey")
                 answered_keys = {
                     item.get("questionKey")
                     for item in active.get("answers") or []
                     if isinstance(item, dict)
                 }
-                if unanswered_key and unanswered_key not in answered_keys:
+                unanswered_questions = [q for q in active["questions"] if not q.get("answerTurnId")]
+                if unanswered_questions:
+                    for question in unanswered_questions:
+                        question["answerTurnId"] = turn["id"]
+                        active["answers"].append({"questionId": question["id"],
+                            "questionKey": question["key"], "questionText": question["text"],
+                            "answerText": content, "answerTurnId": turn["id"]})
+                elif unanswered_key and unanswered_key not in answered_keys:
                     active["answers"].append({
                         "questionKey": unanswered_key,
                         "questionText": active.get("lastQuestionText") or "",
@@ -8783,17 +8871,28 @@ def _proposal_discovery_from_turns(
         except (TypeError, ValueError, json.JSONDecodeError):
             guidance = {}
         marker = guidance.get("proposalDiscovery")
-        if not isinstance(marker, dict) or marker.get("topicId") != active["topicId"]:
+        if isinstance(marker, dict) and marker.get("topicId") != active["topicId"]:
             continue
+        marker = marker if isinstance(marker, dict) else {}
+        visible_questions = _visible_proposal_questions(content)
+        for index, question_text in enumerate(visible_questions):
+            question_id = f"{turn['id']}:{index + 1}"
+            if not any(q["id"] == question_id for q in active["questions"]):
+                active["questions"].append({"id": question_id, "turnId": turn["id"],
+                    "key": marker.get("clarificationQuestionKey") or _infer_legacy_clarification_question_key(question_text),
+                    "text": question_text})
+        active["observedQuestionCount"] = len(active["questions"])
         active["clarificationQuestionCount"] = max(
             active["clarificationQuestionCount"],
             int(marker.get("clarificationQuestionCount") or 0),
+            min(3, active["observedQuestionCount"]),
         )
         asked_keys = marker.get("askedQuestionKeys")
         if not isinstance(asked_keys, list):
             asked_keys = []
         question_key = str(
-            marker.get("clarificationQuestionKey")
+            (active["questions"][-1]["key"] if visible_questions else None)
+            or marker.get("clarificationQuestionKey")
             or marker.get("lastQuestionKey")
             or ""
         ).strip()
@@ -8807,6 +8906,8 @@ def _proposal_discovery_from_turns(
             active["lastQuestionText"] = str(
                 marker.get("clarificationQuestionText") or content
             ).strip()
+            if visible_questions:
+                active["lastQuestionText"] = visible_questions[-1]
         marker_status = marker.get("status") or active["status"]
         if isinstance(marker.get("failureEnvelope"), dict):
             active["failureEnvelope"] = marker.get("failureEnvelope")
@@ -8823,8 +8924,8 @@ def _proposal_discovery_from_turns(
         active["status"] = marker_status
     if active is None:
         return None
-    active["userEvidence"] = [item for item in active["userEvidence"] if item][-8:]
-    active["brief"] = "\n".join(active["userEvidence"])[-2400:]
+    active["userEvidence"] = [item for item in active["userEvidence"] if item]
+    active["brief"] = "\n".join(active["userEvidence"])
     return active
 
 
@@ -9000,6 +9101,18 @@ def _proposal_clarification_spec(discovery, snapshot, language):
         ),
     }
     question = fallback_questions.get(question_key, question)
+    plain_questions = {
+        "mechanism": ("你更想让玩家多换几次箱子来处理，还是推着同一个箱子走更远一些？" if chinese else
+            "Would you prefer more switching between boxes, or longer pushing of one box?"),
+        "binding": ("你更想先调整哪个箱子周围？没有偏好的话，我可以根据可行性来选择。" if chinese else
+            "Which box would you prefer to focus on first? I can choose if you have no preference."),
+        "preserve": ("这次调整中，你更希望保留当前玩法的哪一点？" if chinese else
+            "Which part of the current play would you prefer to retain?"),
+    }
+    question = plain_questions.get(question_key, question)
+    if question_key == "binding":
+        question = ("没有特别偏好的话，我可以根据可行性选择。你更想先调整哪个箱子周围？" if chinese else
+            "I can choose a feasible focus if you have no preference. Which box would you prefer to focus on first?")
 
     return {
         "questionKey": question_key,
@@ -9015,7 +9128,7 @@ def _proposal_clarification_spec(discovery, snapshot, language):
             ),
             "mechanism": "clarify the local play mechanism that should create the requested effect",
             "binding": "clarify which existing entity or local area should carry the change",
-            "preserve": "clarify which current play quality must remain unchanged",
+            "preserve": "ask which current play quality the designer would prefer to retain without a new strict requirement",
         }.get(question_key, "clarify one remaining implementation detail"),
         "allowedEntityLabels": (
             [
@@ -9114,7 +9227,7 @@ def _adaptive_revision_routing(
         acts = set(turn_understanding.get("acts") or [])
         elements = set(turn_understanding.get("elements") or [])
         requested = bool(acts & {"revision_request", "proposal_request", "change_request"})
-        if requested and elements & {"outer_shell", "player", "boxes", "targets"}:
+        if requested and protected_change_requested(turn_understanding, bool(discovery)):
             return "protected_request"
         if not requested and not discovery:
             return "none"
@@ -9135,8 +9248,10 @@ def _adaptive_revision_routing(
             if _proposal_discovery_has_unique_anchor(discovery, snapshot)
             else "proposal_conservative"
         )
-    # Every newly requested proposal must include at least one designer answer,
-    # even when its initial direction is already concrete enough to execute.
+    if isinstance(turn_understanding, dict) and isinstance(turn_understanding.get("changes"), list) and turn_understanding.get("directionSufficient"):
+        if not (user_map_claims or {}).get("conflicts"):
+            return "proposal" if _proposal_discovery_has_unique_anchor(discovery, snapshot) else "proposal_conservative"
+    # Legacy understanding records did not validate operation attributes.
     if discovery and discovery_status == "clarifying" and question_count == 0:
         return "needs_clarification"
     if (user_map_claims or {}).get("conflicts"):
@@ -9148,6 +9263,8 @@ def _adaptive_revision_routing(
         return "needs_clarification"
 
     if discovery and discovery.get("status") == "clarifying":
+        if isinstance(turn_understanding, dict) and turn_understanding.get("directionSufficient") and discovery.get("answers"):
+            return "proposal" if _proposal_discovery_has_unique_anchor(discovery, snapshot) else "proposal_conservative"
         if _proposal_discovery_is_sufficient(discovery, snapshot):
             return "proposal"
         return "needs_clarification"
@@ -10714,6 +10831,10 @@ def _mark_new_discussion_guidance(execution, stage_context):
     return replace(execution, guidance=guidance)
 
 
+def _visible_proposal_questions(message):
+    return [sentence.strip() for sentence in re.split(r"(?<=[.!?。！？])\s*", str(message or "").strip()) if sentence.strip().endswith(("?", "？"))]
+
+
 def _limit_proposal_discovery_questions(message):
     """A bounded proposal topic may ask one question per assistant turn."""
     sentences = re.split(r"(?<=[.!?。！？])\s*", str(message or "").strip())
@@ -10769,7 +10890,8 @@ def _mark_proposal_discovery_guidance(execution, stage_context):
     body = execution.assistant_message
     if routing in {"proposal", "proposal_conservative"}:
         offer = guidance.get("proposalOffer")
-        marker["hasValidatedCandidate"] = execution.proposed_rows is not None
+        marker["hasValidatedCandidate"] = bool(execution.proposed_rows is not None or
+            (execution.revision_plan and isinstance(offer, dict) and offer.get("executionBrief")))
         marker["status"] = (
             "proposal_ready"
             if execution.proposed_rows is not None
@@ -10857,16 +10979,36 @@ def _mark_proposal_discovery_guidance(execution, stage_context):
             })
             execution = replace(execution, proposal_diagnostics=diagnostics)
         else:
-            body, asked_question = _limit_proposal_discovery_questions(body)
-            if asked_question:
-                marker["clarificationQuestionCount"] = min(
-                    3, marker["clarificationQuestionCount"] + 1
-                )
+            # The shared final boundary below counts all visible questions.
+            pass
     elif routing == "proposal_blocked":
         marker["status"] = "revision_needed"
     elif routing == "proposal_cancelled":
         marker["status"] = "cancelled"
     failure_envelope = (execution.proposal_diagnostics or {}).get("failureEnvelope")
+    # Count final visible questions, not target dimensions or route names.
+    # This final boundary also strips questions produced by a bypass branch.
+    count_before = int(discovery.get("clarificationQuestionCount") or 0)
+    questions = _visible_proposal_questions(body)
+    if routing != "needs_clarification" or count_before >= 3:
+        body = _without_model_questions(body)
+        questions = []
+    elif len(questions) > 3 - count_before:
+        remaining_questions = 3 - count_before
+        sentences = []
+        for sentence in re.split(r"(?<=[.!?。！？])\s*", str(body)):
+            if sentence.rstrip().endswith(("?", "？")):
+                if remaining_questions <= 0:
+                    continue
+                remaining_questions -= 1
+            sentences.append(sentence)
+        body = " ".join(sentences)
+        questions = _visible_proposal_questions(body)
+    marker["clarificationQuestionCount"] = min(3, count_before + len(questions))
+    marker["clarificationCountBefore"] = count_before
+    marker["clarificationCountAfter"] = marker["clarificationQuestionCount"]
+    marker["questionTexts"] = questions
+    guidance["followUpQuestion"] = None
     if marker.get("status") == "revision_needed" and isinstance(failure_envelope, dict):
         marker["failureEnvelope"] = failure_envelope
         marker["canSupplement"] = True

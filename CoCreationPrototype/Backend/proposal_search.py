@@ -707,7 +707,10 @@ def search_revision_plan(
     diagnostics["elapsedMs"] = int((time.monotonic() - search_started_at) * 1000)
     if not verified:
         raise ProposalSearchExhausted(diagnostics)
-    selected = min(verified, key=lambda candidate: candidate.selection_key)
+    candidate_rank = getattr(proposal_validator, "candidate_rank", None)
+    selected = min(verified, key=lambda candidate: (
+        (*(-x for x in candidate_rank(candidate.rows)), candidate.changed_cells, candidate.strategy_index, candidate.rows)
+        if candidate_rank is not None else candidate.selection_key))
     score = {
         "hardRequirementsSatisfied": True,
         "metricMatches": selected.metric_matches,

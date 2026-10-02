@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from design_requirements import evaluate_requirements, METRICS
 
 
 WORKFLOW_SCHEMA_VERSION = 2
@@ -195,14 +196,19 @@ def build_revision_workflow(authorized_brief, stage_context=None):
     digest = hashlib.sha256(
         (base_version_id + "\n" + brief + "\n" + "|".join(source_turn_ids)).encode("utf-8")
     ).hexdigest()[:24]
-    constraints = compile_semantic_constraints(brief)
+    record = context.get("requirementRecord")
+    if context.get("requirementPolicyVersion") == 1 and not isinstance(record, dict):
+        raise ValueError("New proposals require an evidence-validated requirement record.")
+    # Text compilation is retained only for legacy callers and frozen V2
+    # compatibility. Every new public proposal uses the typed record.
+    constraints = [] if isinstance(record, dict) else compile_semantic_constraints(brief)
     minimum = max(
         [1] + [
             int(item.get("minimumChangedCells") or 1)
             for item in constraints if item.get("kind") == "change_scope"
         ]
     )
-    return {
+    workflow = {
         "schemaVersion": WORKFLOW_SCHEMA_VERSION,
         "revisionWorkflowId": "rw-" + digest,
         "baseVersionId": base_version_id,
@@ -216,6 +222,10 @@ def build_revision_workflow(authorized_brief, stage_context=None):
         "sourceTurnIds": source_turn_ids,
         "mode": modification_v2_mode(bool(context.get("demoMode"))),
     }
+    if isinstance(record, dict):
+        workflow["requirementPolicyVersion"] = 1
+        workflow["requirementRecord"] = record
+    return workflow
 
 
 def _positions(rows, component):
@@ -243,6 +253,10 @@ def _minimum_distance(left, right):
 
 
 def evaluate_semantic_constraints(base_rows, candidate_rows, workflow):
+    record = (workflow or {}).get("requirementRecord")
+    if isinstance(record, dict):
+        map_record = {**record, "requirements": [x for x in record.get("requirements") or [] if x["property"] not in METRICS | {"distance", "timing"}]}
+        return evaluate_requirements(base_rows, candidate_rows, map_record)
     constraints = list((workflow or {}).get("semanticConstraints") or [])
     changed = [
         (r + 1, c + 1)
@@ -320,7 +334,7 @@ def evaluate_semantic_constraints(base_rows, candidate_rows, workflow):
 
 def validate_semantic_constraints(base_rows, candidate_rows, workflow):
     results = evaluate_semantic_constraints(base_rows, candidate_rows, workflow)
-    if (workflow or {}).get("mode") == "enforce" and any(
+    if ((workflow or {}).get("mode") == "enforce" or (workflow or {}).get("requirementPolicyVersion") == 1) and any(
         item.get("passed") is False for item in results
     ):
         raise SemanticConstraintError(results)

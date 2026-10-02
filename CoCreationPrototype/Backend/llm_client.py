@@ -36,6 +36,10 @@ from level_validation import (
 )
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
+from design_requirements import (
+    requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
+    goal_rank, tradeoff_message, protected_change_requested,
+)
 from revision_workflow import (
     SemanticConstraintError,
     build_revision_workflow,
@@ -262,6 +266,14 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
             "required": ["relation", "merit", "comparison"],
         }
         name = "cocreation_challenge_reason_classification"
+    elif task == "revision_requirements":
+        schema = requirement_response_schema()
+        name = "cocreation_revision_requirements"
+    elif task == "revision_requirement_review":
+        schema = {"type": "object", "additionalProperties": False,
+            "properties": {"accepted": {"type": "boolean"}, "issues": {"type": "array", "items": {"type": "string"}}},
+            "required": ["accepted", "issues"]}
+        name = "cocreation_revision_requirement_review"
     elif task == "turn_understanding":
         schema = {
             "type": "object", "additionalProperties": False,
@@ -281,8 +293,16 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
                 "evidenceSpan": {"type": "string"},
                 "directionSufficient": {"type": "boolean"},
                 "mapRelated": {"type": "boolean"},
+                "changes": {"type": "array", "items": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "component": {"type": "string", "enum": ["water", "internal_walls", "outer_shell", "player", "boxes", "targets", "gameplay", "unknown"]},
+                        "operation": {"type": "string", "enum": ["change", "preserve", "mention"]},
+                        "property": {"type": "string", "enum": ["count", "position", "shape", "layout", "route", "push_order", "switching", "rhythm", "appearance", "unknown"]},
+                    }, "required": ["component", "property", "operation"],
+                }},
             },
-            "required": ["acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated"],
+            "required": ["acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated", "changes"],
         }
         name = "cocreation_turn_understanding"
     elif task == "intent_candidate_review":
@@ -1163,9 +1183,7 @@ def build_plain_chat_messages(
     if isinstance(understanding, dict):
         acts = set(understanding.get("acts") or [])
         elements = set(understanding.get("elements") or [])
-        if acts & {"revision_request", "proposal_request", "change_request"} and elements & {
-            "outer_shell", "player", "boxes", "targets",
-        }:
+        if acts & {"revision_request", "proposal_request", "change_request"} and protected_change_requested(understanding, bool(stage_context.get("proposalDiscovery"))):
             action_instruction += (
                 " The latest request includes a protected map component. Explain that AI map "
                 "revisions can change water and internal walls only. Respond to the actual "
@@ -1656,6 +1674,12 @@ def _compact_kimi_plain_prompt(
                 "This is a bounded proposal-clarification turn. You own the natural wording: "
                 "write a warm first-person design response and exactly one useful clarification "
                 "question. Do not use a stock acknowledgement or repeat the user's words as a report."
+                " Use plain everyday preference choices (e.g. switching boxes at the start or after "
+                "some pushing). Never use strategic necessity/efficiency temptation jargon. "
+                "Check options against current permissions, explicit prohibitions and snapshot facts; "
+                "omit conflicting options. Effects without deterministic proof are tentative attempts, "
+                "not guarantees. Do not request coordinates, fixed push counts, or new strict locks "
+                "to fill an optional detail. An unspecified object may be selected in the final plan."
             ),
             (
                 "Return JSON only with exactly two string fields: "
@@ -4032,7 +4056,7 @@ def generate_stage_assessment(
         )
 
 
-def classify_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False):
+def classify_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False, proposal_context=None):
     """Ask Kimi what the designer referred to and what action they requested.
 
     This is semantic routing only. The snapshot, proposal authorization, and
@@ -4080,12 +4104,21 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             "evidenceSpan exactly from the latest user message. Earlier user wording is "
             "linguistic context only; current map facts come exclusively from Current Stage Snapshot. "
             "Never infer permission to edit from the map itself."
+            " Separate mentioned entities from requested changes. Return changes as component/property/operation records. "
+            "operation=change requests an actual change; operation=preserve is a prohibition or lock; "
+            "operation=mention only references an entity. A request not to move B1 is preserve, not change. "
+            "Increasing switching between boxes changes gameplay/switching, NOT boxes/count or boxes/position. "
+            "Interrupting B1's consecutive pushes changes gameplay/push_order, NOT boxes/position. "
+            "Only explicit moves/additions/removals of an entity change its protected count/position. "
+            "Bind short answers to the active proposal question before classifying them; an answer to a "
+            "proposal preference question continues the existing topic and is not a new edit command."
         )},
         {"role": "user", "content": json.dumps({
             "latestUserMessage": latest,
             "previousUserWording": previous_user_wording,
             "forcedProposalButton": bool(forced_proposal),
             "currentStageSnapshot": snapshot,
+            "proposalContext": proposal_context or {},
         }, ensure_ascii=False)},
     ]
     last_error = None
@@ -4112,9 +4145,9 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
 
 
 def _validate_turn_understanding(payload, latest, forced_proposal=False):
-    if not isinstance(payload, dict) or set(payload) != {
+    if not isinstance(payload, dict) or set(payload) not in ({
         "acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated",
-    }:
+    }, {"acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated", "changes"}):
         raise ValueError("Turn understanding has an invalid envelope.")
     allowed_acts = {
         "evaluation", "intent", "explanation_request", "idea_request",
@@ -4140,13 +4173,25 @@ def _validate_turn_understanding(payload, latest, forced_proposal=False):
         raise ValueError("Turn understanding has invalid routing booleans.")
     if forced_proposal and "revision_request" not in acts:
         acts = [*acts[:2], "revision_request"]
-    return {
+    result = {
         "acts": acts,
         "elements": elements,
         "evidenceSpan": evidence,
         "directionSufficient": payload["directionSufficient"],
         "mapRelated": payload["mapRelated"],
     }
+    if "changes" in payload:
+        changes = payload["changes"]
+        allowed_properties = {"count", "position", "shape", "layout", "route", "push_order", "switching", "rhythm", "appearance", "unknown"}
+        if not isinstance(changes, list) or any(
+            not isinstance(x, dict) or set(x) not in ({"component", "property"}, {"component", "property", "operation"})
+            or x.get("operation", "change") not in {"change", "preserve", "mention"}
+            or x["component"] not in allowed_elements | {"gameplay"}
+            or x["property"] not in allowed_properties for x in changes
+        ):
+            raise ValueError("Invalid requested change attributes.")
+        result["changes"] = changes
+    return result
 
 
 def generate_chat_reply(
@@ -4290,7 +4335,7 @@ def generate_chat_reply(
     if proposal_request and _deadline is None:
         deadline = _request_deadline(
             request_started_at,
-            budget_seconds=PROPOSAL_INTERNAL_DEADLINE_SECONDS,
+            budget_seconds=(116.0 if effective_stage_context.get("requirementPolicyVersion") == 1 else PROPOSAL_INTERNAL_DEADLINE_SECONDS),
         )
 
     if revision_state == "authorized_relaxed":
@@ -4437,8 +4482,101 @@ class HardObjectiveError(ValueError):
         super().__init__(message)
 
 
+def _review_proposal_requirements(api_key, base_url, stage_context, request_id, deadline):
+    """Compile one topic's designer language, never assistant map assertions."""
+    discovery = stage_context.get("proposalDiscovery") or {}
+    turns = stage_context.get("requirementUserTurns") or discovery.get("userTurns") or []
+    if not turns:
+        raise LLMServiceError("REQUIREMENT_EVIDENCE_MISSING", "The proposal has no traceable designer evidence.", request_id, True, 0, 502)
+    snapshot = stage_context.get("stageSnapshot") or {}
+    messages = [{"role": "system", "content": (
+        "Interpret this single authorized proposal topic into the supplied JSON schema. "
+        "Every requirement must use an exact evidenceSpan and sourceTurnId from a designer turn. "
+        "Question text is linguistic context only, never evidence of a user requirement or current map fact. "
+        "The current StageSnapshot is the only map authority. Ignore 'I do not know', 'either is fine' "
+        "and other noncommittal answers without discarding earlier clear directions. "
+        "Distinguish entity counts, entity positions, gameplay switching, push order, route length and timing. "
+        "'Increase switching between boxes' is gameplay/boxAlternations/increase, never box/count. "
+        "'Make the player spend longer' is gameplay/experience/seek, never player/count. "
+        "'Interrupt B1 early' is gameplay/timing/early with B1 as the explicit entity. "
+        "An AI-proposed preference selected by the designer stays a preference or negotiable goal, "
+        "not a new prohibition, fixed number, coordinate or mandatory route dependency. "
+        "Clearly expressed directional goals are strength=goal, even if described as must; they may be "
+        "partly achieved or deferred, but never reversed. Use invariant only for explicit prohibitions, "
+        "fixed counts, unchanged positions/distribution, or explicitly fixed edit scope. "
+        "Numeric values must come from user evidence, not B1/T2 labels; null means no number was stated. "
+        "unit=delta means an explicitly stated change amount; absolute means an explicitly fixed value. "
+        "Do not invent numeric thresholds. priorityEvidenceSpan is empty unless the user explicitly "
+        "prioritized that goal; focused=true only for the current clearly named focus. "
+        "Preserve all clear still-active directions. A later explicit correction can replace an earlier "
+        "direction for the same property; an unclear reply cannot supersede it. "
+        "Unspecified entities may be chosen from current snapshot labels within the water/internal-wall "
+        "editing scope. Record those choices only in automaticBindings, never as explicit requirements "
+        "or confirmed design memory. Never replace a designer's explicit entity. "
+        "statements must be short, understandable, and in the response language; avoid new map claims. "
+        "Do not infer stronger requirements from assistant explanations or unconfirmed DesignContext hypotheses."
+        " exactTransitions is empty unless the designer explicitly specified the exact coordinates and tile "
+        "change. Never extract exact changes or coordinates from question text."
+    )}, {"role": "user", "content": json.dumps({
+        "designerTurns": turns, "answeredQuestions": discovery.get("answers") or [],
+        "currentStageSnapshot": snapshot, "responseLanguage": stage_context.get("responseLanguage", "en"),
+        "editableComponents": ["water", "internal_walls"],
+    }, ensure_ascii=False)}]
+    last_issue = ""
+    for attempt in range(1, 3):
+        remaining = _remaining_until(deadline)
+        if remaining < 1:
+            break
+        try:
+            response = asyncio.run(asyncio.wait_for(_request_completion(
+                api_key, base_url, KIMI_MODEL, messages, 3200, min(20.0, remaining),
+                task="revision_requirements",
+            ), timeout=min(20.0, remaining)))
+            payload = json.loads(str(response.choices[0].message.content or ""))
+            record = validate_requirement_record(payload, turns, snapshot)
+            review_messages = [{"role": "system", "content": (
+                "Independently verify this interpretation against exact designer evidence. Return JSON "
+                "accepted and issues. Reject misread attributes, directions, units, invented priorities, "
+                "invented exact transitions, missing prohibitions, or missing still-active goals. Entity "
+                "mentions are not entity changes. Questions provide linguistic context only; a selected "
+                "preference never confirms assistant-invented numerical/coordinate/mandatory dependency "
+                "requirements. Do not judge feasibility here. Only explicit prohibitions/fixed values "
+                "are invariants; clear directional wishes are negotiable goals. Automatic bindings can "
+                "fill an unspecified goal but cannot replace an explicit binding. A short answer binds "
+                "to its supplied question. Reject 'early' interpreted as a fixed push count."
+            )}, {"role": "user", "content": json.dumps({"designerTurns": turns,
+                "answeredQuestions": discovery.get("answers") or [], "interpretation": record}, ensure_ascii=False)}]
+            remaining = _remaining_until(deadline)
+            reviewed = asyncio.run(asyncio.wait_for(_request_completion(
+                api_key, base_url, KIMI_MODEL, review_messages, 800, min(12.0, remaining),
+                task="revision_requirement_review"), timeout=min(12.0, remaining)))
+            verdict = json.loads(str(reviewed.choices[0].message.content or ""))
+            if not isinstance(verdict, dict) or set(verdict) != {"accepted", "issues"} or verdict["accepted"] is not True or verdict["issues"] != []:
+                raise ValueError("Independent evidence review rejected the interpretation: " + str(verdict.get("issues") if isinstance(verdict, dict) else verdict)[:400])
+            record["topicId"] = discovery.get("topicId")
+            record["evidenceSignature"] = hashlib.sha256(json.dumps(turns, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            return record
+        except LLMServiceError:
+            raise
+        except Exception as exception:
+            last_issue = str(exception)[:600]
+            messages[0]["content"] += "\nRepair the typed interpretation without changing the designer meaning: " + last_issue
+    raise LLMServiceError("REQUIREMENT_INTERPRETATION_INVALID", "The design requirements could not be interpreted reliably. Retry this message.", request_id, True, attempt, 502)
+
+
 def _proposal_objective_policy(conversation, stage_context):
     """Derive metric authority from designer text; model metrics are never hard by default."""
+    record = (stage_context or {}).get("requirementRecord")
+    if isinstance(record, dict):
+        requirements = record.get("requirements") or []
+        classes = {"boxAlternations": "box_dependency", "dependency": "box_dependency", "minimumPushes": "longer_transport", "solutionPushes": "longer_transport", "solutionSteps": "planning_depth", "appearance": "space_route_choice"}
+        goal = next((x for x in requirements if x["strength"] != "invariant" and x["focused"]), None)
+        goal = goal or next((x for x in requirements if x["property"] in classes), {})
+        return {"schemaVersion": 2, "hardMetricGoals": [],
+            "softObjectiveClass": classes.get(goal.get("property"), "general"),
+            "targetEntities": sorted({e for x in requirements for e in x["entities"]}),
+            "requiresMechanismEvidence": False, "requirementPolicyVersion": 1,
+            "exactTransitions": record.get("exactTransitions") or []}
     user_text = " ".join(
         str(item.get("content") or "")
         for item in (conversation or [])[-12:]
@@ -4533,6 +4671,8 @@ def _apply_objective_policy_to_plan(plan, policy, preserved_components=None):
         replace(
             strategy,
             metric_goals=hard_goals,
+            required_transitions=(tuple((x["row"], x["column"], x["from"], x["to"]) for x in policy["exactTransitions"])
+                if policy.get("exactTransitions") else strategy.required_transitions),
             preserve=frozenset(strategy.preserve).union(preserved_components or ()),
         )
         for strategy in plan.strategies
@@ -4540,7 +4680,7 @@ def _apply_objective_policy_to_plan(plan, policy, preserved_components=None):
 
 
 def _proposal_route_features(rows, validation, entity_bindings=None):
-    metrics = validation.as_dict() if hasattr(validation, "as_dict") else {}
+    metrics = validation.as_dict() if hasattr(validation, "as_dict") else dict(validation or {})
     evidence = _proposal_clarification_route_evidence(
         rows,
         metrics,
@@ -4560,6 +4700,12 @@ def _proposal_route_features(rows, validation, entity_bindings=None):
         "pushesByBox": evidence.get("pushesByBox") or {},
         "routeMode": evidence.get("mode"),
         "solution": metrics.get("solution") or "",
+        "longestPushRun": max([0] + [int(x.get("pushes") or 0) for x in push_order]),
+        "firstRuns": {label: next(int(x.get("pushes") or 0) for x in push_order if x.get("box") == label)
+            for label in {x.get("box") for x in push_order}},
+        "interruptions": {label: sum(x.get("box") == label for x in push_order) > 1
+            for label in {x.get("box") for x in push_order}},
+        "entityPositions": {str(x.get("id") or x.get("label") or "").upper(): (x.get("row"), x.get("column")) for x in (entity_bindings or {}).get("entities") or [] if x.get("row") is not None and x.get("column") is not None},
     }
 
 
@@ -4706,11 +4852,37 @@ def _objective_validating_proposal_validator(
             revision_workflow or {},
         )
         evidence["semanticConstraintResults"] = semantic_results
+        record = (revision_workflow or {}).get("requirementRecord")
+        if isinstance(record, dict):
+            outcomes = evaluate_requirements(base_rows, candidate_rows, record, baseline_features, features)
+            evidence["goalOutcomes"] = outcomes
+            evidence["goalRank"] = goal_rank(outcomes)
+            if any(not x["passed"] for x in outcomes):
+                raise SemanticConstraintError(outcomes)
+            if not evidence["routeAffected"] and any(x["component"] == "gameplay" for x in record.get("requirements") or []):
+                raise ObjectiveEvidenceError({**evidence, "missing": ["route_relevant_change_required"]})
         if policy.get("requiresMechanismEvidence") and not evidence["passed"]:
             raise ObjectiveEvidenceError(evidence)
         return validation
 
+    if isinstance((revision_workflow or {}).get("requirementRecord"), dict):
+        validate.candidate_rank = lambda candidate_rows: tuple((evidence_by_fingerprint.get(map_fingerprint(candidate_rows)) or {}).get("goalRank") or ())
     return validate
+
+
+def validate_frozen_requirements(base_rows, candidate_rows, workflow, baseline_validation, candidate_validation, entity_bindings):
+    record = (workflow or {}).get("requirementRecord")
+    if not isinstance(record, dict):
+        return []
+    outcomes = evaluate_requirements(base_rows, candidate_rows, record,
+        _proposal_route_features(base_rows, baseline_validation, entity_bindings),
+        _proposal_route_features(candidate_rows, candidate_validation, entity_bindings))
+    promised = {x["requirementId"]: x for x in (workflow or {}).get("goalOutcomes") or []}
+    failures = [x for x in outcomes if not x["passed"] or (
+        promised.get(x["requirementId"], {}).get("status") == "fulfilled" and x["status"] != "fulfilled")]
+    if failures:
+        raise SemanticConstraintError(failures)
+    return outcomes
 
 
 def _attempt_semantic_revision_replan(
@@ -4857,8 +5029,19 @@ def _generate_revision_search_proposal_sync(
 ):
     started_at = time.monotonic()
     deadline = deadline or _request_deadline(started_at)
-    objective_policy = _proposal_objective_policy(conversation, stage_context)
     stage_context = dict(stage_context or {})
+    plan_phase_seconds = PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS
+    plan_primary_seconds = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
+    if stage_context.get("requirementPolicyVersion") == 1:
+        plan_phase_seconds, plan_primary_seconds = 50.0, 35.0
+        stage_context["requirementRecord"] = _review_proposal_requirements(api_key, base_url, stage_context, request_id, deadline)
+        issues = preflight_requirements(rows, stage_context["requirementRecord"])
+        if issues:
+            error = LLMServiceError("REQUIREMENT_PERMISSION_CONFLICT", "Verified requirements conflict with fixed editing permissions.", request_id, False, 0, 422)
+            error.revision_contract = {"revisionWorkflow": {"requirementRecord": stage_context["requirementRecord"]}}
+            error.proposal_diagnostics = {"category": "requirement_preflight_conflict", "rejectionRecords": issues}
+            raise error
+    objective_policy = _proposal_objective_policy(conversation, stage_context)
     stage_context["objectivePolicy"] = objective_policy
     excluded_candidate_fingerprints = {
         str(stage_context.get("excludedProposalCandidateFingerprint") or "").strip()
@@ -4909,11 +5092,12 @@ def _generate_revision_search_proposal_sync(
                     started_at=started_at,
                     deadline=min(
                         deadline,
-                        started_at + PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+                        time.monotonic() + plan_phase_seconds,
                     ),
+                    first_attempt_timeout=plan_primary_seconds,
                 ),
                 timeout=min(
-                    PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+                    plan_phase_seconds,
                     _remaining_until(deadline),
                 ),
             )
@@ -5400,6 +5584,14 @@ def _generate_revision_search_proposal_sync(
     diagnostics["contractPreflightFailures"] = contract_preflight_failures
     diagnostics["modifierAttempts"] = operation_result.attempts_used
     diagnostics["revisionContract"] = revision_contract
+    record = (revision_contract.get("revisionWorkflow") or {}).get("requirementRecord")
+    if isinstance(record, dict):
+        outcomes = (selected_evidence or {}).get("goalOutcomes") or []
+        diagnostics["goalOutcomes"] = outcomes
+        diagnostics["automaticBindings"] = record.get("automaticBindings") or []
+        revision_contract["revisionWorkflow"]["goalOutcomes"] = outcomes
+        operation_result = replace(operation_result, assistant_message="\n\n".join(
+            x for x in (operation_result.assistant_message, tradeoff_message(record, outcomes, language)) if x))
     _log_llm_event(
         "llm_request_completed",
         requestId=request_id,
@@ -5664,6 +5856,18 @@ def _build_revision_plan_messages(
         ""
         f"Authorized direction (no chat transcript): {revision_brief!r}"
     )
+    record = stage_context.get("requirementRecord")
+    if isinstance(record, dict):
+        system_prompt = system_prompt.replace("second strategy is a strict alternative, not permission to weaken the request.", "second strategy may prioritize a feasible subset of goals without reversing any direction.")
+        system_prompt += (
+            " The typed requirement record below is the authoritative interpretation. Immutable requirements "
+            "must all hold. Clear directional goals may be partly achieved or deferred if necessary; "
+            "never reverse their direction. Try the user's explicitly prioritized goals first, then current "
+            "focus, then maximize other goals. Do not claim that every goal is achieved. "
+            "An explicit entity binding cannot be replaced. Use automaticBindings only for unspecified focus. "
+            "Do not assert a necessary dependency from one solver route or claim player time will increase."
+        )
+        user_prompt += "\nAuthoritative typed requirement record: " + json.dumps(record, ensure_ascii=False)
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -5714,6 +5918,11 @@ def _movement_requirement_from_text(value):
 
 
 def _authorized_preserved_components(conversation, stage_context):
+    record = (stage_context or {}).get("requirementRecord")
+    if isinstance(record, dict):
+        aliases = {"wall": "walls", "box": "boxes", "target": "targets"}
+        return frozenset(aliases.get(x["component"], x["component"]) for x in record.get("requirements") or []
+            if x["strength"] == "invariant" and x["property"] == "positions")
     messages = list(conversation or [])
     # Preservation is a designer-owned hard constraint.  An authorized brief can
     # be distilled from an assistant proposal, so it must never be treated as a
@@ -6176,6 +6385,10 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
     if source_workflow:
         revision_workflow = dict(source_workflow)
         revision_workflow["status"] = "authorized"
+        if (stage_context or {}).get("requirementPolicyVersion") == 1 and (stage_context or {}).get("explicitAction") != "execute_revision":
+            revision_workflow["requirementRecord"] = stage_context["requirementRecord"]
+            revision_workflow["requirementPolicyVersion"] = 1
+            revision_workflow.pop("goalOutcomes", None)
     elif (stage_context or {}).get("explicitAction") in {
         "execute_revision", "challenge_revision", "alternative_revision",
     }:
@@ -6309,6 +6522,11 @@ def _modifier_contract_view(revision_contract):
         "semanticConstraints": list(
             (revision_contract.get("revisionWorkflow") or {}).get("semanticConstraints") or []
         ),
+        "requirements": [
+            {key: item[key] for key in ("requirementId", "component", "property", "relation", "strength", "entities", "value", "unit", "focused")}
+            for item in ((revision_contract.get("revisionWorkflow") or {}).get("requirementRecord") or {}).get("requirements") or []
+        ],
+        "automaticBindings": ((revision_contract.get("revisionWorkflow") or {}).get("requirementRecord") or {}).get("automaticBindings") or [],
     }
 
 
@@ -6762,11 +6980,12 @@ def _select_operation_candidate(
                 if isinstance(value, int) and value > 0
             ]
             valid.append((
-                (
+                (tuple(evidence["goalRank"]) + (-changed_cells, -strategy_index, tuple(rows))) if "goalRank" in evidence else (
                     int(bool(evidence.get("passed", True))),
                     len(positive_deltas),
                     sum(positive_deltas),
                     -changed_cells,
+                    -strategy_index,
                     tuple(rows),
                 ),
                 rows,
@@ -14569,6 +14788,8 @@ def _parse_proposal_clarification_payload(content, language, stage_context):
         issue = "The clarification question must end with a question mark."
     elif _proposal_clarification_forbidden_detail(question):
         issue = "The clarification question asks for or asserts forbidden map details."
+    elif re.search(r"策略性必须|效率性诱惑|必然|保证|guarantee|strategic necessity|efficiency temptation", question, re.I):
+        issue = "Use plain preference wording; do not offer an unverified mandatory effect."
     elif not _proposal_clarification_allowed_labels(question, stage_context):
         issue = "The clarification question uses an entity label not supplied by the server."
     else:
@@ -19406,7 +19627,7 @@ def _classify_revision_request(conversation, stage_context=None):
         acts = set(understanding.get("acts") or [])
         elements = set(understanding.get("elements") or [])
         if acts & {"revision_request", "proposal_request", "change_request"}:
-            if elements & {"outer_shell", "player", "boxes", "targets"}:
+            if protected_change_requested(understanding, bool((stage_context or {}).get("proposalDiscovery"))):
                 return "not_request", None
             return "needs_direction", None
         return "not_request", None

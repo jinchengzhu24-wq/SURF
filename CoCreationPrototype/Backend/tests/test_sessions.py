@@ -119,13 +119,18 @@ class CoCreationSessionTests(unittest.TestCase):
                           "requestProposal": forced},
                 )
             self.assertEqual(response.status_code, 200, response.text)
-            stage_context = generate.call_args.kwargs["stage_context"]
-            self.assertEqual(stage_context["revisionRouting"], expected_route)
-            self.assertFalse(stage_context.get("proposalDiscovery"))
+            if expected_route == "protected_request":
+                generate.assert_not_called()
+                self.assertIn("fixed", response.json()["turns"][-1]["content"])
+                self.assertEqual(response.json()["turns"][-1]["guidance"]["uiCues"], [])
+            else:
+                stage_context = generate.call_args.kwargs["stage_context"]
+                self.assertEqual(stage_context["revisionRouting"], expected_route)
+                self.assertFalse(stage_context.get("proposalDiscovery"))
             self.assertIsNone(response.json()["turns"][-1]["guidance"]["proposalOffer"])
 
     @staticmethod
-    def _fake_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False):
+    def _fake_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False, proposal_context=None):
         latest = next(
             (str(item.get("content") or "") for item in reversed(conversation)
              if item.get("role") == "user"),
@@ -166,6 +171,47 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertIsNone(backend._deterministic_intent_conflict(visual, gameplay))
         right = [dict(increase[0], scope="右侧", scopeType="region", scopeText="右侧")]
         self.assertIsNone(backend._deterministic_intent_conflict(right, decrease))
+
+    def test_screenshot_topic_persists_beyond_recent_context_and_retry(self):
+        version_id = self.read_session()["currentVersionId"]
+        request_texts = ["给我一个方案想想怎么让玩家花费更多时间", "增加箱子之间的切换频率来制造碎片化思考", "策略性必须", "打断B1的连续推动"]
+        with repository.connect(immediate=True) as database:
+            session = repository.get_session(database, self.session_id)
+            topic_id = None
+            for index, content in enumerate(request_texts):
+                turn_id = backend.insert_turn(database, session, "user", content, version_id, f"shot-u{index}", None)
+                if topic_id is None:
+                    topic_id = turn_id
+                    backend.record_event(database, self.session_id, "proposal_request_requested", {"messageKey": "shot-u0", "turnId": topic_id, "baseVersionId": version_id}, backend.utc_now())
+                backend.record_event(database, self.session_id, "turn_understanding", {"messageKey": f"shot-u{index}", "result": {
+                    "acts": ["revision_request"], "elements": ["boxes"] if index in {1, 3} else ["unknown"],
+                    "evidenceSpan": content, "directionSufficient": False, "mapRelated": True}}, backend.utc_now())
+                if index < 3:
+                    question = f"Preference {index + 1}?"
+                    execution = LLMExecutionResult(question, 0, f"shot-a{index}", guidance={"proposalDiscovery": {
+                        "topicId": topic_id, "status": "clarifying", "clarificationQuestionCount": [1, 1, 2][index]}, "uiCues": []})
+                    backend.insert_turn(database, session, "assistant", question, version_id, f"shot-a{index}", execution)
+            for index in range(30):
+                execution = LLMExecutionResult("A saved design observation.", 0, f"later{index}", guidance={"uiCues": []})
+                backend.insert_turn(database, session, "assistant", execution.assistant_message, version_id, f"later{index}", execution)
+        with repository.connect() as database:
+            current = backend.get_current_version(database, repository.get_session(database, self.session_id))
+            context = backend.build_llm_context(database, self.session_id, current)
+        discovery = context["stageContext"]["proposalDiscovery"]
+        self.assertEqual(discovery["topicId"], topic_id)
+        self.assertEqual(discovery["clarificationQuestionCount"], 3)
+        self.assertEqual(discovery["userTurns"][0]["content"], request_texts[0])
+        failure = LLMServiceError("PROPOSAL_SEARCH_EXHAUSTED", "No candidate", "shot-last", False, 2, 422)
+        payload = {"content": "早期吧", "baseVersionId": version_id, "idempotencyKey": "shot-last"}
+        with patch.object(backend, "generate_chat_reply", side_effect=failure) as generate:
+            first = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+            second = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        generate.assert_called_once()
+        self.assertIn(generate.call_args.kwargs["stage_context"]["revisionRouting"], {"proposal", "proposal_conservative"})
+        self.assertEqual(first.json()["currentVersionId"], version_id)
+        self.assertEqual(backend._visible_proposal_questions(first.json()["turns"][-1]["content"]), [])
 
     @classmethod
     def setUpClass(cls):
@@ -2727,12 +2773,12 @@ class CoCreationSessionTests(unittest.TestCase):
             ]
             self.assertEqual([turn["role"] for turn in matching], ["user", "assistant"])
             warning_turn = matching[-1]
-            self.assertEqual(warning_turn["guidance"]["uiCues"][0]["type"], "warning")
-            self.assertIn("three answers are retained", warning_turn["guidance"]["uiCues"][0]["text"])
+            self.assertEqual(warning_turn["guidance"]["uiCues"], [])
+            self.assertIn("goals and answers are retained", warning_turn["content"])
             self.assertIsNone(warning_turn["guidance"]["proposalOffer"])
             self.assertIsNone(warning_turn["guidance"].get("relaxationOffer"))
-            self.assertIn("no solvable change", warning_turn["content"].lower())
-            self.assertIn("no purple proposal card", warning_turn["content"].lower())
+            self.assertIn("no change passing every check", warning_turn["content"].lower())
+            self.assertIn("no purple card", warning_turn["content"].lower())
             self.assertEqual(failed_generation.json()["proposals"], [])
             self.assertTrue(failed_generation.json()["proposalFlowState"]["active"])
             self.assertEqual(
