@@ -735,6 +735,8 @@ async def attach_request_id(request: Request, call_next):
         else uuid.uuid4().hex
     )
     request.state.request_id = request_id
+    request.state.llm_started_at = time.monotonic()
+    request.state.llm_deadline = request.state.llm_started_at + LLM_INTERNAL_DEADLINE_SECONDS
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     if request.url.path in {"/", "/index.html", "/cocreation/", "/cocreation/index.html"}:
@@ -770,6 +772,8 @@ async def handle_llm_service_error(request: Request, exception: LLMServiceError)
     code = str(exception.code or "")
     if code.startswith("REVISION_PLAN"):
         task, failure_stage, maximum = "revision_plan", "schema", 2
+    elif code.startswith("REQUIREMENT_"):
+        task, failure_stage, maximum = "revision_requirements", "evidence", 2
     elif code in {
         "PROPOSAL_SEARCH_EXHAUSTED", "DETERMINISTIC_SEARCH_EXHAUSTED",
         "CANDIDATE_UNSOLVABLE", "SEMANTIC_CONSTRAINT_NOT_MET",
@@ -792,6 +796,9 @@ async def handle_llm_service_error(request: Request, exception: LLMServiceError)
             "maximumAttempts": maximum,
             "retryable": exception.retryable,
             "safeReason": exception.safe_message,
+            "committed": False,
+            "recoveryState": "retry_pending" if exception.retryable else "revision_needed",
+            **getattr(exception, "details", {}),
         },
     )
     response.headers["X-LLM-Attempts-Used"] = str(exception.attempts_used)
@@ -1368,14 +1375,19 @@ def translate_session_turns(
             return serialize_session(database, session["id"])
 
     first_error = None
+    translation_deadline = request.state.llm_deadline
+    completed_turn_ids = []
+    failed_turn_ids = []
     for source in pending:
         try:
             execution = translate_turns(
-                [source], language, f"{request.state.request_id}:{source['turnId']}"
+                [source], language, f"{request.state.request_id}:{source['turnId']}",
+                _deadline=translation_deadline,
             )
             translated = execution.translations[0]
         except LLMServiceError as exception:
             first_error = first_error or exception
+            failed_turn_ids.append(source["turnId"])
             continue
         with connect(immediate=True) as database:
             session = require_active_session(database, session_id, access_cookie)
@@ -1413,9 +1425,13 @@ def translate_session_turns(
                 utc_now(),
             )
 
+        completed_turn_ids.append(source["turnId"])
     if first_error is not None:
         # Completed turns remain committed. A retry asks only for still-missing
         # turns, so one malformed translation can no longer erase its siblings.
+        first_error.details = {"task": "translation", "failureStage": "translation_validation",
+            "completedTurnIds": completed_turn_ids, "pendingTurnIds": failed_turn_ids,
+            "committed": bool(completed_turn_ids), "maximumAttempts": 2, "recoveryState": "retry_pending"}
         raise first_error
 
     with connect(immediate=True) as database:
@@ -1671,15 +1687,23 @@ def assess_version(
         synchronize_manual_edit_review_nodes(session_id, version_id)
         return existing_session_payload
 
-    execution = generate_stage_assessment(
-        context["conversation"],
-        context["rows"],
-        session_language,
-        context["validation"],
-        context["playSummary"],
-        request.state.request_id,
-        stage_context=context["stageContext"],
-    )
+    try:
+        execution = generate_stage_assessment(
+            context["conversation"], context["rows"], session_language,
+            context["validation"], context["playSummary"], request.state.request_id,
+            stage_context=context["stageContext"], _deadline=request.state.llm_deadline,
+        )
+    except LLMServiceError as exception:
+        with connect(immediate=True) as database:
+            require_active_session(database, session_id, access_cookie)
+            record_event(database, session_id, "reply_generation_failed", {
+                "messageKey": payload.idempotencyKey, "baseVersionId": version_id,
+                "task": "manual_edit_review" if version["source"] == "human_edit" else "stage_opening",
+                "code": exception.code, "attemptsUsed": exception.attempts_used,
+                "reliableBodyDelivered": False, "fullQualityPassed": False,
+                "requestId": request.state.request_id,
+            }, utc_now())
+        raise
     execution = _mark_new_discussion_guidance(execution, context["stageContext"])
     execution = _mark_initial_human_edit_disagreement_card(
         execution, context["stageContext"]
@@ -1725,6 +1749,7 @@ def assess_version(
                 ],
                 session_language,
                 request.state.request_id,
+                _deadline=min(time.monotonic() + 10.0, request.state.llm_deadline - 20.0),
             )
         except (LLMServiceError, TypeError, ValueError, KeyError):
             manual_progress_rewrite = {
@@ -1797,6 +1822,8 @@ def assess_version(
                 execution.guidance,
                 "stage_assessment",
             )
+            _record_reply_outcome(database, session_id, payload.idempotencyKey, version_id,
+                execution, "manual_edit_review" if version["source"] == "human_edit" else "stage_opening")
             if version["source"] == "human_edit":
                 record_event(
                     database,
@@ -2415,6 +2442,7 @@ def submit_intent_feedback(
                 evidence_summary,
                 session["language"],
                 request.state.request_id,
+                _deadline=request.state.llm_deadline,
             )
         display_rewrite = {
             "detailedText": None,
@@ -2429,6 +2457,7 @@ def submit_intent_feedback(
                     evidence_summary,
                     session["language"],
                     request.state.request_id,
+                    _deadline=min(time.monotonic() + 10.0, request.state.llm_deadline - 20.0),
                 )
             except (LLMServiceError, TypeError, ValueError, KeyError) as exception:
                 display_rewrite["failureCode"] = (
@@ -2733,7 +2762,7 @@ def _send_message_locked(
     response,
     access_cookie,
 ):
-    message_started_at = time.monotonic()
+    message_started_at = getattr(request.state, "llm_started_at", time.monotonic())
     precomputed_understanding = None
     if payload.action == "none":
         with connect() as read_database:
@@ -2772,6 +2801,7 @@ def _send_message_locked(
                 prior_conversation, snapshot_for_understanding,
                 request.state.request_id, forced_proposal=payload.requestProposal,
                 proposal_context={key: proposal_context_for_understanding.get(key) for key in ("topicId", "initialRequest", "questions", "answers", "lastQuestionText")},
+                _deadline=message_started_at + LLM_INTERNAL_DEADLINE_SECONDS,
             )
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
@@ -3178,7 +3208,8 @@ def _send_message_locked(
     if deterministic_challenge_choice is not None:
         with connect() as challenge_database:
             challenge_row = challenge_database.execute(
-                """SELECT source.version_id, source.proposal_binding_json
+                """SELECT source.id, source.version_id, source.proposal_binding_json,
+                          source.guidance_json, source.request_id, challenge.current_reason_turn_id
                 FROM revision_challenges AS challenge
                 JOIN conversation_turns AS source ON source.id = challenge.source_proposal_turn_id
                 WHERE challenge.session_id = ? AND challenge.challenge_id = ?
@@ -3193,6 +3224,19 @@ def _send_message_locked(
             or not (binding.get("executionBrief") or {}).get("requiredTransitions")
         ):
             raise ApiError(409, "CHALLENGE_STALE", "The challenged proposal is no longer available on this Stage.")
+        stage_context["sourceProposalOffer"] = (
+            load_json(challenge_row["guidance_json"]) or {}
+        ).get("proposalOffer") or {}
+        stage_context["requirementSourceCardId"] = challenge_row["id"]
+        stage_context["requirementReasonTurnId"] = challenge_row["current_reason_turn_id"]
+        stage_context["requirementDecisionEvidence"] = {
+            "sourceTurnId": user_turn_id, "choice": deterministic_challenge_choice,
+            "reasonTurnId": challenge_row["current_reason_turn_id"],
+        }
+        if deterministic_challenge_choice == "user":
+            excluded_rows = _rows_after_frozen_proposal(context["rows"], binding.get("executionBrief"))
+            if excluded_rows is not None:
+                stage_context["excludedProposalCandidateFingerprint"] = map_fingerprint(excluded_rows)
     question_answer_review = {"answeredQuestionIds": [], "results": []}
     if (
         payload.action in {"none", "continue_challenge"}
@@ -3213,17 +3257,23 @@ def _send_message_locked(
             and item.get("sourceKind") in {"visible_output", "legacy"}
         ]
         if visible_open_questions:
+            optional_started = time.monotonic()
             try:
                 question_answer_review = review_question_answers(
                     visible_open_questions,
                     content,
                     language,
                     request.state.request_id,
+                    _deadline=min(message_started_at + 10.0,
+                        message_started_at + LLM_INTERNAL_DEADLINE_SECONDS - 20.0),
                 )
             except LLMServiceError:
                 # Answer classification is display memory enrichment. A model
                 # failure must never consume or block the designer's message.
                 question_answer_review = {"answeredQuestionIds": [], "results": []}
+
+            finally:
+                stage_context["_optionalRepairSpent"] = time.monotonic() - optional_started
 
     stage_context["answeredQuestionIds"] = list(
         question_answer_review.get("answeredQuestionIds") or []
@@ -3336,7 +3386,7 @@ def _send_message_locked(
                         """,
                         (user_turn_id, now, challenge_id, session_id),
                     )
-                challenge_deadline = time.monotonic() + LLM_INTERNAL_DEADLINE_SECONDS
+                challenge_deadline = message_started_at + LLM_INTERNAL_DEADLINE_SECONDS
                 try:
                     challenge_reason_classification = classify_challenge_reason(
                         content,
@@ -3347,6 +3397,10 @@ def _send_message_locked(
                         request.state.request_id,
                         _deadline=challenge_deadline,
                         simple=True,
+                        stage_snapshot=stage_context.get("stageSnapshot"),
+                        comparison_validator=lambda comparison: _salvage_challenge_analysis(
+                            comparison, context["rows"], stage_context.get("entityBindings"), language,
+                        ),
                     )
                 except LLMServiceError as exception:
                     # Keep the already-persisted user reason exactly once. The
@@ -3646,18 +3700,43 @@ def _send_message_locked(
     source_record = source_workflow.get("requirementRecord") or {}
     source_ids = {x["sourceTurnId"] for x in source_record.get("requirements") or []}
     source_ids.update(x["sourceTurnId"] for x in source_record.get("exactTransitions") or [])
+    source_ids.update(x for x in (
+        evidence_context.get("requirementSourceCardId"),
+        evidence_context.get("requirementReasonTurnId"), payload.sourceTurnId,
+    ) if x)
     projection = evidence_context.get("revisionDesignContext") or {}
     for memory in (projection.get("activeGoals") or []) + (projection.get("activeConstraints") or []):
         if memory.get("sourceTurnId"):
             source_ids.add(memory["sourceTurnId"])
     with connect() as evidence_database:
         prior_sources = evidence_database.execute(
-            "SELECT id, content FROM conversation_turns WHERE session_id = ? AND role = 'user' ORDER BY sequence_number",
+            "SELECT id, content, role, request_id, version_id FROM conversation_turns WHERE session_id = ? ORDER BY sequence_number",
             (session_id,),
         ).fetchall()
-    prior_sources = [{"id": row["id"], "content": row["content"]} for row in prior_sources if row["id"] in source_ids]
+    evidence_by_id = {row["id"]: row for row in prior_sources}
+    # Historical memory sometimes cites the assistant that answered the user.
+    # Resolve only its exact request pairing; never infer from assistant prose.
+    paired_keys = {
+        (evidence_by_id[source_id]["request_id"], evidence_by_id[source_id]["version_id"])
+        for source_id in source_ids if source_id in evidence_by_id
+        and evidence_by_id[source_id]["role"] == "assistant"
+        and evidence_by_id[source_id]["request_id"]
+    }
+    prior_sources = [{"id": row["id"], "content": row["content"]} for row in prior_sources
+        if row["role"] == "user" and (row["id"] in source_ids
+        or (row["request_id"], row["version_id"]) in paired_keys)]
     current_sources = (evidence_context.get("proposalDiscovery") or {}).get("userTurns") or evidence_context.get("requirementUserTurns") or []
+    if challenge_choice_resolution is not None:
+        current_sources = [item for item in current_sources if item["id"] != user_turn_id]
     evidence_context["requirementUserTurns"] = list({x["id"]: x for x in [*prior_sources, *current_sources]}.values())
+    with connect() as evidence_database:
+        cached_reviews = evidence_database.execute(
+            """SELECT payload_json FROM audit_events WHERE session_id = ?
+               AND event_type = 'requirements_verified' AND json_extract(payload_json, '$.baseVersionId') = ?
+               ORDER BY created_at DESC LIMIT 8""", (session_id, payload.baseVersionId),
+        ).fetchall()
+    evidence_context["verifiedRequirementCache"] = [load_json(row["payload_json"]) for row in cached_reviews]
+    evidence_context["_reliabilityState"] = {}
     if payload.action in REVISION_CARD_ACTIONS and not source_record:
         evidence_context.pop("requirementPolicyVersion", None)
     proposal_branch = bool(
@@ -3779,6 +3858,7 @@ def _send_message_locked(
                 _deadline=message_deadline,
             )
         except LLMServiceError as exception:
+            _persist_verified_requirements(session_id, payload.baseVersionId, context["stageContext"])
             revision_failure = exception
             exception.requirement_policy_version = context["stageContext"].get("requirementPolicyVersion")
             proposal_retryable_failure = bool(
@@ -3845,6 +3925,8 @@ def _send_message_locked(
                                 "code": exception.code,
                                 "attemptsUsed": exception.attempts_used,
                                 "retryingExistingUserTurn": retrying_failed_message,
+                                "modelGenerationSucceeded": bool((context["stageContext"].get("_reliabilityState") or {}).get("modelGenerationSucceeded")),
+                                "proposalRequested": revision_state == "proposal_requested" or payload.action in {"execute_revision", "alternative_revision"} or bool(challenge_choice_resolution),
                             },
                             utc_now(),
                         )
@@ -3887,6 +3969,12 @@ def _send_message_locked(
                         },
                         utc_now(),
                     )
+    _persist_verified_requirements(session_id, payload.baseVersionId, context["stageContext"])
+    proposal_recovery = bool((execution.proposal_diagnostics or {}).get("verifiedFailureAnalysis"))
+    if proposal_recovery and challenge_choice_resolution is not None:
+        # No validated replacement exists yet. Keep the canonical choice
+        # pending and display the reliable analysis without another blue card.
+        challenge_choice_resolution = None
     if payload.action == "challenge_revision":
         execution = _sanitize_challenge_execution(
             execution,
@@ -3927,7 +4015,7 @@ def _send_message_locked(
                 revision_operations=[],
                 proposal_diagnostics={},
             )
-    if payload.action == "alternative_revision":
+    if payload.action == "alternative_revision" and not proposal_recovery:
         execution = _ensure_alternative_revision_execution(
             execution,
             source_offer,
@@ -4317,6 +4405,9 @@ def _send_message_locked(
                 payload.idempotencyKey,
                 execution,
             )
+            _record_reply_outcome(database, session_id, payload.idempotencyKey,
+                payload.baseVersionId, execution, "message",
+                proposal_requested=revision_state == "proposal_requested" or payload.action in {"execute_revision", "alternative_revision"} or bool(challenge_choice_resolution) or proposal_recovery or bool((execution.guidance or {}).get("proposalOffer")))
 
             if payload.action == "challenge_revision":
                 hypotheses = (execution.proposal_diagnostics or {}).get(
@@ -4748,6 +4839,45 @@ def _send_message_locked(
 
     synchronize_turn_with_online_match(session_id, payload.idempotencyKey)
     return session_payload
+
+
+def _record_reply_outcome(database, session_id, message_key, version_id, execution, task, proposal_requested=False):
+    diagnostics = execution.proposal_diagnostics or {}
+    snapshot_fallback = str(execution.model or "").endswith("safe-opening")
+    deterministic = (diagnostics.get("source") == "deterministic_contract"
+        or (not snapshot_fallback and execution.model != "kimi-k2.6"))
+    record_event(database, session_id, "reply_delivery_outcome", {
+        "messageKey": message_key, "baseVersionId": version_id, "task": task,
+        "modelGenerationSucceeded": not snapshot_fallback and not deterministic,
+        "reliableBodyDelivered": bool(execution.assistant_message),
+        "fullQualityPassed": not snapshot_fallback and not deterministic and diagnostics.get("fullQualityPassed", not diagnostics.get("groundingSentencesDropped")),
+        "verifiedProposal": bool((execution.guidance or {}).get("proposalOffer")) or execution.proposed_rows is not None,
+        "proposalRequested": proposal_requested,
+        "snapshotFallback": snapshot_fallback, "deterministicReceipt": deterministic,
+        "attemptsUsed": execution.attempts_used, "latencyMs": execution.latency_ms,
+        "componentChecks": diagnostics.get("componentChecks") or [],
+        "failureCode": diagnostics.get("failureCode"),
+        "proposalStatus": diagnostics.get("proposalStatus"),
+    }, utc_now())
+
+
+def _persist_verified_requirements(session_id, version_id, stage_context):
+    verified = (stage_context.get("_reliabilityState") or {}).get("verifiedRequirements")
+    if not verified:
+        return
+    with connect(immediate=True) as database:
+        session = get_session(database, session_id)
+        if session is None or session["current_version_id"] != version_id:
+            return
+        existing = database.execute(
+            """SELECT 1 FROM audit_events WHERE session_id = ? AND event_type = 'requirements_verified'
+               AND json_extract(payload_json, '$.cacheKey') = ? LIMIT 1""",
+            (session_id, verified["cacheKey"]),
+        ).fetchone()
+        if existing is None:
+            record_event(database, session_id, "requirements_verified", {
+                "baseVersionId": version_id, **verified,
+            }, utc_now())
 
 
 def _retry_exhausted_execution(language, exception):
@@ -6058,6 +6188,7 @@ def decide_proposal(
     session_id: str,
     proposal_id: str,
     payload: ProposalDecisionRequest,
+    request: Request,
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
@@ -6372,6 +6503,7 @@ def decide_proposal(
                 decision_rewrite["evidence"],
                 decision_rewrite_language,
                 "decision-" + payload.idempotencyKey,
+                _deadline=min(time.monotonic() + 10.0, request.state.llm_deadline - 20.0),
             )
         except (LLMServiceError, TypeError, ValueError, KeyError):
             rewritten = {

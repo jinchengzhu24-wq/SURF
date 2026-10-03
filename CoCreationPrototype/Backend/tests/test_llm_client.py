@@ -664,26 +664,17 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("Primary guess", prompt)
         self.assertNotIn("Secondary guess", prompt)
 
-    def test_challenge_reason_classifier_falls_back_only_for_short_comparison(self):
-        payload = json.dumps({
-            "relation": "different",
-            "merit": "reasonable",
-            "comparison": "Too short.",
-        })
+    def test_challenge_reason_classifier_requires_substantive_kimi_comparison(self):
+        payload = json.dumps({"relation": "different", "merit": "reasonable", "comparison": "Too short."})
         client = FakeClient([payload, payload])
-
         with patch.object(llm_client, "_create_async_client", return_value=client):
-            result = llm_client.classify_challenge_reason(
-                "Only changing one water tile is too little.",
-                {"primary": "The mechanism may be too weak.", "secondary": "Preservation may be at risk."},
-                "Change one water tile near the late B1 route.",
-                "challenge-short-comparison-test",
-            )
-
-        self.assertEqual(result["relation"], "different")
-        self.assertEqual(result["merit"], "reasonable")
-        self.assertGreaterEqual(len(result["comparison"]), 40)
-        self.assertEqual(result["attemptsUsed"], 2)
+            with self.assertRaises(llm_client.LLMServiceError) as failed:
+                llm_client.classify_challenge_reason(
+                    "Only changing one water tile is too little.",
+                    {"primary": "The mechanism may be too weak.", "secondary": "Preservation may be at risk."},
+                    "Change one water tile near the late B1 route.", "challenge-short-comparison-test")
+        self.assertEqual(failed.exception.attempts_used, 2)
+        self.assertEqual(len(client.chat.completions.calls), 2)
 
     def test_proposal_body_playable_support_executes_its_complete_validator(self):
         self.assertTrue(llm_client._proposal_body_has_playable_support(
@@ -3674,7 +3665,7 @@ class LLMClientTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result.attempts_used, 1)
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(len(client.chat.completions.calls), 3)
         self.assertIsNone(
             llm_client._intent_hypothesis_detail_issue(
                 result.guidance["intentHypothesis"], "en"
@@ -8101,14 +8092,8 @@ class LLMClientTests(unittest.TestCase):
             }]
         }
 
-        translated = llm_client.validate_translation_response(
-            payload,
-            [source],
-            target_language="en",
-        )
-
-        self.assertEqual(translated[0]["body"], "I will continue from the current saved Stage.")
-        self.assertNotIn("99", translated[0]["body"])
+        with self.assertRaisesRegex(ValueError, "No reliable translated body"):
+            llm_client.validate_translation_response(payload, [source], target_language="en")
 
     def test_translation_preserves_hidden_disagreement_workflow_state(self):
         source = {
@@ -8171,7 +8156,7 @@ class LLMClientTests(unittest.TestCase):
             llm_client._intent_semantic_binding_issue(generic, source, "zh-CN"),
         )
 
-    def test_chat_retries_when_model_card_loses_explicit_layout_density_meaning(self):
+    def test_chat_uses_reviewed_card_without_regenerating_valid_body(self):
         generic_body = (
             "你对当前地图的感受值得认真保留，因为它直接指出了你认为设计呈现不合适的部分。"
             "我会把视觉印象、空间组织和实际游玩体验分开看，避免过早把其中一种解释成你的最终目标。"
@@ -8217,7 +8202,7 @@ class LLMClientTests(unittest.TestCase):
                 }],
             )
 
-        self.assertEqual(len(client.chat.completions.calls), 2)
+        self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertIn("地图布局", result.guidance["intentHypothesis"])
         self.assertIn("拥挤", result.guidance["intentHypothesis"])
 

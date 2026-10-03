@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import httpx
 import sqlite3
 import sys
@@ -130,7 +131,7 @@ class CoCreationSessionTests(unittest.TestCase):
             self.assertIsNone(response.json()["turns"][-1]["guidance"]["proposalOffer"])
 
     @staticmethod
-    def _fake_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False, proposal_context=None):
+    def _fake_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False, proposal_context=None, _deadline=None):
         latest = next(
             (str(item.get("content") or "") for item in reversed(conversation)
              if item.get("role") == "user"),
@@ -4092,6 +4093,71 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertLessEqual(session["remainingSeconds"], 1200)
         self.assertGreater(session["remainingSeconds"], 1190)
 
+    def test_translation_partial_commit_retries_only_failed_turn_with_shared_deadline(self):
+        version_id = self.read_session()["currentVersionId"]
+        with backend.connect(immediate=True) as database:
+            session = backend.get_session(database, self.session_id)
+            turn_ids = [backend.insert_turn(database, session, "assistant", "I would inspect the first pushing position.",
+                version_id, "partial-source-" + str(index), LLMExecutionResult(
+                    "I would inspect the first pushing position.", 1, "partial-source-" + str(index),
+                    model="mock-model", guidance={"move": "offer_perspective", "uiCues": []})) for index in range(2)]
+        deadlines = []
+        def translate(sources, language, request_id, *, _deadline):
+            deadlines.append(_deadline)
+            source = sources[0]
+            if source["turnId"] == turn_ids[1]:
+                raise LLMServiceError("MODEL_RESPONSE_INVALID", "Bad translation.", request_id, True, 2, 502)
+            return TranslationExecutionResult([{
+                "turnId": source["turnId"], "body": "我会先检查第一次推动需要的站位。", "followUpQuestion": None,
+                "intentHypothesis": None, "proposalOfferSummary": None, "proposalOfferRationale": None,
+                "uiCueTexts": [], "proposalSummary": None}], 1, request_id, model="mock-model", latency_ms=1)
+        with patch.object(backend, "translate_turns", side_effect=translate) as mocked:
+            response = self.client.post(f"/api/sessions/{self.session_id}/translations/zh-CN", json={"turnIds": turn_ids})
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(deadlines[0], deadlines[1])
+        self.assertTrue(response.json()["details"]["committed"])
+        self.assertEqual(response.json()["details"]["pendingTurnIds"], [turn_ids[1]])
+        session = self.read_session()
+        translated = {turn["turnId"]: turn for turn in session["turns"]}
+        self.assertIn("zh-CN", translated[turn_ids[0]]["translations"])
+        self.assertNotIn("zh-CN", translated[turn_ids[1]]["translations"])
+        with patch.object(backend, "translate_turns", side_effect=translate) as retry:
+            self.client.post(f"/api/sessions/{self.session_id}/translations/zh-CN", json={"turnIds": turn_ids})
+        self.assertEqual(retry.call_count, 1)
+        self.assertEqual(retry.call_args.args[0][0]["turnId"], turn_ids[1])
+
+    def test_failed_manual_review_keeps_stage_then_atomically_recovers_two_turns(self):
+        parent_id = self.read_session()["currentVersionId"]
+        saved = self.client.post(f"/api/sessions/{self.session_id}/versions", json={
+            "baseVersionId": parent_id, "rows": EDITED_ROWS, "summary": "Moved the player start.",
+            "idempotencyKey": "manual-review-recovery-save"})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        version_id = saved.json()["currentVersionId"]
+        turns_before = len(saved.json()["turns"])
+        request = {"idempotencyKey": "manual-review-recovery-pair"}
+        with patch.object(backend, "generate_stage_assessment", side_effect=LLMServiceError(
+            "MODEL_RESPONSE_INVALID", "The comparison could not be validated.", "r", True, 2, 502)):
+            failed = self.client.post(f"/api/sessions/{self.session_id}/versions/{version_id}/assessments", json=request)
+        self.assertEqual(failed.status_code, 502, failed.text)
+        self.assertEqual(self.read_session()["currentVersionId"], version_id)
+        self.assertEqual(len(self.read_session()["turns"]), turns_before)
+        execution = LLMExecutionResult("The saved Stage remains solvable.", 2, "recovered-pair", model="mock-model",
+            assessment={"solutionSummary": "A route exists.", "difficultyOpinion": "The start position changed.",
+                "features": [], "suggestions": [], "satisfactionQuestion": None},
+            guidance={"move": "observe_stage", "uiCues": []})
+        execution = replace(execution, secondary_execution=LLMExecutionResult(
+            "The verified edit moves the player's start. No confirmed design conflict is established.", 2,
+            "recovered-pair-review", model="mock-model", guidance={"move": "offer_perspective", "uiCues": []}))
+        with patch.object(backend, "generate_stage_assessment", return_value=execution) as generate:
+            recovered = self.client.post(f"/api/sessions/{self.session_id}/versions/{version_id}/assessments", json=request)
+            repeated = self.client.post(f"/api/sessions/{self.session_id}/versions/{version_id}/assessments", json=request)
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(len(repeated.json()["turns"]), turns_before + 2)
+        self.assertEqual(len(repeated.json()["versions"]), len(saved.json()["versions"]))
+        self.assertEqual(generate.call_count, 1)
+
     def test_assistant_translation_is_cached_without_changing_original_turn(self):
         version_id = self.read_session()["currentVersionId"]
         opening = LLMExecutionResult(
@@ -5773,6 +5839,13 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(challenged.status_code, 200, challenged.text)
         challenge_id = challenged.json()["turns"][-1]["guidance"]["challengeState"]["challengeId"]
         with repository.connect(immediate=True) as database:
+            database.execute("UPDATE conversation_turns SET content = ? WHERE session_id = ? AND request_id = ? AND role = 'user'",
+                ("Increase switching between boxes.", self.session_id, "choice-no-failure-source"))
+            session = repository.get_session(database, self.session_id)
+            reason_id = backend.insert_turn(database, session, "user", "The direct opening needs a different first choice.",
+                version_id, "choice-no-reason", None)
+            database.execute("UPDATE revision_challenges SET current_reason_turn_id = ? WHERE session_id = ? AND challenge_id = ?",
+                (reason_id, self.session_id, challenge_id))
             context = repository.load_design_context(database, self.session_id, version_id)
             context["activeDisagreement"] = {
                 "status": "active", "subject": "ai_revision_challenge",
@@ -5786,7 +5859,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "I cannot verify a different plan yet.", 1, "choice-no-failure",
             model="mock-model", guidance={"proposalOffer": None, "uiCues": []},
         )
-        with patch.object(backend, "generate_chat_reply", return_value=empty):
+        with patch.object(backend, "generate_chat_reply", return_value=empty) as generate:
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5795,11 +5868,31 @@ class CoCreationSessionTests(unittest.TestCase):
                     "challengeId": challenge_id, "challengeChoice": "user",
                 },
             )
+        evidence = generate.call_args.kwargs["stage_context"]
+        texts = [turn["content"] for turn in evidence["requirementUserTurns"]]
+        self.assertIn("Increase switching between boxes.", texts)
+        self.assertIn("The direct opening needs a different first choice.", texts)
+        self.assertNotIn("否", texts)
+        self.assertTrue(evidence["excludedProposalCandidateFingerprint"])
         self.assertEqual(response.status_code, 502, response.text)
         self.assertEqual(response.json()["code"], "PROPOSAL_SEARCH_EXHAUSTED")
         session = self.read_session()
         self.assertEqual(session["currentVersionId"], version_id)
         self.assertEqual(session["proposals"], [])
+
+        recovered = LLMExecutionResult(
+            "I have not found a verified replacement. I would revisit the first route relationship while preserving your switching goal.",
+            1, "choice-no-recovered", model="mock-model", guidance={"proposalOffer": None, "uiCues": []},
+            proposal_diagnostics={"verifiedFailureAnalysis": True, "proposalStatus": "revision_needed"})
+        with patch.object(backend, "generate_chat_reply", return_value=recovered):
+            reply = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
+                "content": "否", "baseVersionId": version_id, "idempotencyKey": "choice-no-failure",
+                "action": "continue_challenge", "challengeId": challenge_id, "challengeChoice": "user"})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(reply.json()["currentVersionId"], version_id)
+        self.assertEqual(reply.json()["turns"][-1]["guidance"]["challengeState"]["status"], "choice_pending")
+        self.assertFalse(reply.json()["turns"][-1]["guidance"]["disagreement"]["displayCard"])
+        self.assertEqual(len([turn for turn in reply.json()["turns"] if turn["role"] == "user" and turn["requestId"] == "choice-no-failure"]), 1)
 
     def test_challenge_choice_card_explains_scope_without_placeholder_text(self):
         execution = LLMExecutionResult(

@@ -147,3 +147,86 @@ test("idempotent message requests keep retry on unreadable 5xx or network failur
     await assert.rejects(request, error =>
         error.code === "RETRYABLE_REQUEST_FAILED" && error.retryable === true);
 });
+
+test("unreadable or incomplete 2xx is never an empty successful message", async () => {
+    const { context } = loadApp();
+    vm.runInContext("state.pendingMessage = { content: 'keep this', idempotencyKey: 'same-key' };", context);
+    for (const payload of [null, {}, { sessionId: "session" }, [], { turns: [] }]) {
+        context.fetch = async () => ({ ok: true, status: 200, async json() { return payload; } });
+        await assert.rejects(() => vm.runInContext(
+            "api('/api/sessions/session/messages', { method: 'POST', body: { idempotencyKey: 'same-key' } })", context),
+        error => error.code === "INVALID_RESPONSE" && error.retryable);
+    }
+    context.fetch = async () => ({ ok: true, status: 200, async json() { throw new SyntaxError("truncated"); } });
+    await assert.rejects(() => vm.runInContext(
+        "api('/api/sessions/session/messages', { method: 'POST', body: { idempotencyKey: 'same-key' } })", context),
+    error => error.code === "INVALID_RESPONSE" && error.retryable);
+    assert.equal(vm.runInContext("state.pendingMessage.content", context), "keep this");
+});
+
+test("timeout remains active while reading response body", async () => {
+    const { context } = loadApp();
+    let abortTimer;
+    let cleared = 0;
+    context.AbortController = AbortController;
+    context.window.setTimeout = callback => { abortTimer = callback; return 1; };
+    context.window.clearTimeout = () => { cleared += 1; };
+    context.fetch = async (_path, request) => ({ ok: true, status: 200,
+        json: () => new Promise((_resolve, reject) => request.signal.addEventListener("abort", () => {
+            const error = new Error("body interrupted"); error.name = "AbortError"; reject(error);
+        })) });
+    const result = vm.runInContext(
+        "api('/api/sessions/session/messages', { method: 'POST', body: { idempotencyKey: 'same-key' }, timeoutMs: 10 })", context);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(cleared, 0);
+    abortTimer();
+    await assert.rejects(result, error => error.code === "CLIENT_TIMEOUT" && error.retryable);
+    assert.equal(cleared, 1);
+});
+
+test("known endpoints validate their own response contracts", async () => {
+    const { context } = loadApp();
+    const session = { sessionId: "session", status: "active", currentVersionId: "v1", versions: [], turns: [] };
+    const cases = [
+        ["/api/sessions/session/messages", session],
+        ["/api/sessions/session/questions/q/feedback", { outcome: "ignored", session }],
+        ["/api/sessions/session/intent-hypotheses/i/feedback", { outcome: "compatible", session }],
+        ["/api/sessions/session/versions/v1/play-attempts", { attemptId: "attempt", playUrl: "/play" }],
+    ];
+    for (const [path, payload] of cases) {
+        context.fetch = async () => ({ ok: true, status: 200, async json() { return payload; } });
+        context.path = path;
+        assert.ok(await vm.runInContext("api(path)", context));
+    }
+});
+
+test("manual save retry uses the captured rows, base Stage and idempotency key", async () => {
+    const { context } = loadApp();
+    const bodies = [];
+    context.recordBody = body => bodies.push(JSON.parse(JSON.stringify(body)));
+    vm.runInContext(`
+        let retryOperation;
+        withBusy = async action => { retryOperation = action; try { await action(); } catch (_) {} };
+        api = async (_path, options) => { recordBody(options.body); throw { code: 'UPSTREAM_TIMEOUT', retryable: true }; };
+        renderMap = () => {}; render = () => {};
+        state.dirty = true; state.draftRows = ['............'];
+    `, context);
+    await vm.runInContext("saveManualStage()", context);
+    vm.runInContext("state.draftRows = ['############']; state.session.currentVersionId = 'v2';", context);
+    await assert.rejects(() => vm.runInContext("retryOperation()", context));
+    assert.equal(bodies.length, 2);
+    assert.deepEqual(bodies[0], bodies[1]);
+    assert.equal(bodies[1].baseVersionId, "v1");
+});
+
+test("diagnostic error details retain the server request ID and phase", async () => {
+    const { context } = loadApp();
+    context.fetch = async () => ({ ok: false, status: 502,
+        headers: { get: name => name === "X-Request-ID" ? "diagnostic-id" : "application/json" },
+        async json() { return { code: "REQUIREMENT_INTERPRETATION_INVALID", retryable: true,
+            details: { task: "revision_requirements", failureStage: "evidence" } }; } });
+    await assert.rejects(() => vm.runInContext(
+        "api('/api/sessions/session/messages', { method: 'POST', body: { idempotencyKey: 'same-key' } })", context),
+    error => error.details.requestId === "diagnostic-id" && error.details.failureStage === "evidence"
+        && error.details.httpStatus === 502);
+});

@@ -36,9 +36,11 @@ from level_validation import (
 )
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
+from reply_reliability import ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key
 from design_requirements import (
     requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
     goal_rank, tradeoff_message, protected_change_requested,
+    validate_requirement_components,
 )
 from revision_workflow import (
     SemanticConstraintError,
@@ -156,6 +158,10 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
     the model to infer the wire shape from the much larger design rules.
     """
     task = str(task or "chat")
+    if task == "proposal_failure_analysis":
+        return {"type": "json_schema", "json_schema": {"name": "cocreation_proposal_failure_analysis",
+            "strict": True, "schema": {"type": "object", "additionalProperties": False,
+                "properties": {"body": {"type": "string"}}, "required": ["body"]}}}
     if task in {
         "manual_edit_assessment_pair_conflict",
         "manual_edit_assessment_pair_no_conflict",
@@ -271,7 +277,14 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
         name = "cocreation_revision_requirements"
     elif task == "revision_requirement_review":
         schema = {"type": "object", "additionalProperties": False,
-            "properties": {"accepted": {"type": "boolean"}, "issues": {"type": "array", "items": {"type": "string"}}},
+            "properties": {"accepted": {"type": "boolean"}, "issues": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False,
+                "properties": {"requirementIds": {"type": "array", "items": {"type": "string"}},
+                    "kind": {"type": "string", "enum": ["evidence", "meaning", "coverage", "conflict"]},
+                    "evidenceSpans": {"type": "array", "items": {"type": "string"}},
+                    "repairInstruction": {"type": "string"}},
+                "required": ["requirementIds", "kind", "evidenceSpans", "repairInstruction"],
+            }}},
             "required": ["accepted", "issues"]}
         name = "cocreation_revision_requirement_review"
     elif task == "turn_understanding":
@@ -361,7 +374,7 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
             ],
         }
         name = "cocreation_intent_candidate_review"
-    elif task == "intent_component_repair":
+    elif task in {"intent_component_repair", "intent_body_repair", "intent_card_repair"}:
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -377,6 +390,12 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
             },
             "required": ["bodyParagraphs", "cardSentences"],
         }
+        if task == "intent_body_repair":
+            schema["properties"].pop("cardSentences")
+            schema["required"] = ["bodyParagraphs"]
+        elif task == "intent_card_repair":
+            schema["properties"].pop("bodyParagraphs")
+            schema["required"] = ["cardSentences"]
         name = "cocreation_intent_component_repair"
     elif task == "intent_feedback_review":
         schema = {
@@ -2729,9 +2748,17 @@ def _strip_invalid_stage_grounding_sentences(
     )
     kept = []
     removed = []
+    missing_premise = False
     for sentence in sentences:
         sentence = sentence.strip()
         if not sentence:
+            continue
+        if missing_premise and re.match(
+            r"^(?:因此|所以|因而|由此|这样|这就|这也|这意味着|基于上述|据此|"
+            r"therefore\b|thus\b|hence\b|consequently\b|as a result\b|this (?:means|makes|would)|that (?:means|makes))",
+            sentence, flags=re.IGNORECASE,
+        ):
+            removed.append({"text": sentence, "reason": "Its map premise was rejected."})
             continue
         try:
             _validate_map_grounding_texts(
@@ -2742,8 +2769,10 @@ def _strip_invalid_stage_grounding_sentences(
             )
         except ValueError as exception:
             removed.append({"text": sentence, "reason": str(exception)[:300]})
+            missing_premise = True
             continue
         kept.append(sentence)
+        missing_premise = False
 
     if not removed:
         return str(text or "").strip(), removed
@@ -3546,6 +3575,7 @@ def _validate_manual_edit_pair_payload(
     attempts_used,
     model,
     latency_ms,
+    _component_state=None,
 ):
     if not isinstance(payload, dict) or set(payload) != {
         "openingMessage", "assessment", "reviewMessage", "conflict"
@@ -3591,6 +3621,8 @@ def _validate_manual_edit_pair_payload(
         "uiCues": [],
         "coordinateLinks": [],
     })
+    if _component_state is not None:
+        _component_state.update({"openingMessage": payload["openingMessage"], "assessment": payload["assessment"]})
 
     review_message = _sanitize_visible_model_text(
         _normalize_single_level_language(
@@ -3603,6 +3635,11 @@ def _validate_manual_edit_pair_payload(
         raise ValueError("The manual-edit review is too short.")
     if review_message.count("?") + review_message.count("\uFF1F"):
         raise ValueError("The manual-edit review body must remain declarative.")
+    _assert_no_unsupported_manual_edit_intent([review_message], evidence)
+    _validate_map_grounding_texts([review_message], rows, entity_bindings=(stage_context or {}).get("entityBindings"))
+    _assert_visible_output_language(language, review_message)
+    if _component_state is not None:
+        _component_state["reviewMessage"] = payload["reviewMessage"]
 
     disagreement = None
     cited_evidence_ids = []
@@ -3723,6 +3760,7 @@ def _generate_manual_edit_assessment_pair(
     play_summary,
     request_id,
     stage_context,
+    _deadline=None,
 ):
     api_key, base_url = _llm_credentials()
     if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
@@ -3734,7 +3772,7 @@ def _generate_manual_edit_assessment_pair(
         stage_context, solver_metrics, play_summary, language
     )
     started_at = time.monotonic()
-    deadline = _request_deadline(started_at)
+    deadline = _deadline or _request_deadline(started_at)
     conflict_decision = _classify_manual_edit_conflict(
         evidence,
         language,
@@ -3799,6 +3837,7 @@ def _generate_manual_edit_assessment_pair(
         ),
     }]
     last_error = None
+    locked_components = {}
     for attempt in range(1, 3):
         raw_content = None
         remaining = _remaining_until(deadline)
@@ -3834,12 +3873,14 @@ def _generate_manual_edit_assessment_pair(
             if str(getattr(choice, "finish_reason", "") or "") == "length":
                 raise ValueError("The manual-edit assessment pair reached its output limit.")
             raw_content = str(choice.message.content or "")
-            payload = json.loads(raw_content)
+            payload = parse_json_object(raw_content)
+            payload.update(locked_components)
             latency_ms = int((time.monotonic() - started_at) * 1000)
             result = _validate_manual_edit_pair_payload(
                 payload, rows, language, solver_metrics, stage_context, evidence,
                 conflict_decision,
                 request_id, attempt, KIMI_MODEL, latency_ms,
+                _component_state=locked_components,
             )
             _log_llm_event(
                 "llm_request_completed",
@@ -3851,6 +3892,8 @@ def _generate_manual_edit_assessment_pair(
                 latencyMs=latency_ms,
                 frozenVerdict=conflict_decision.get("verdict"),
                 discussionCard=bool(result.secondary_execution.guidance.get("disagreement")),
+                reliableBodyDelivered=True,
+                componentChecks=[ComponentCheck(name, "preserved").diagnostic() for name in locked_components],
             )
             return result
         except asyncio.TimeoutError as exception:
@@ -3909,7 +3952,9 @@ def _generate_manual_edit_assessment_pair(
                     {
                         "role": "user",
                         "content": (
-                            "Your review failed server validation: "
+                            "Preserve these already validated components exactly: "
+                            + json.dumps(locked_components, ensure_ascii=False) + ". "
+                            "Repair only rejected components. Your review failed server validation: "
                             f"{exception}. Keep the frozen conflict decision unchanged and return "
                             "a corrected complete JSON object."
                         ),
@@ -3932,6 +3977,7 @@ def generate_stage_assessment(
     play_summary,
     request_id,
     stage_context=None,
+    _deadline=None,
 ):
     if _is_human_edit_stage_opening(True, stage_context):
         return _generate_manual_edit_assessment_pair(
@@ -3942,8 +3988,9 @@ def generate_stage_assessment(
             play_summary,
             request_id,
             stage_context or {},
+            _deadline=_deadline,
         )
-    deadline = _request_deadline()
+    deadline = _deadline or _request_deadline()
     try:
         return generate_chat_reply(
             conversation,
@@ -4056,7 +4103,7 @@ def generate_stage_assessment(
         )
 
 
-def classify_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False, proposal_context=None):
+def classify_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False, proposal_context=None, _deadline=None):
     """Ask Kimi what the designer referred to and what action they requested.
 
     This is semantic routing only. The snapshot, proposal authorization, and
@@ -4124,14 +4171,17 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     last_error = None
     for attempt in range(1, 3):
         try:
+            timeout = min(15.0, _remaining_until(_deadline)) if _deadline is not None else 15.0
+            if timeout <= 0:
+                raise asyncio.TimeoutError()
             response = asyncio.run(asyncio.wait_for(
                 _request_completion(
-                    api_key, base_url, KIMI_MODEL, messages, 350, 15.0,
+                    api_key, base_url, KIMI_MODEL, messages, 350, timeout,
                     task="turn_understanding",
                 ),
-                timeout=15.0,
+                timeout=timeout,
             ))
-            payload = json.loads(str(response.choices[0].message.content or ""))
+            payload = parse_json_object(response.choices[0].message.content)
             return _validate_turn_understanding(payload, latest, forced_proposal)
         except LLMServiceError:
             raise
@@ -4370,18 +4420,21 @@ def generate_chat_reply(
         )
 
     if proposal_request:
-        return _generate_revision_search_proposal_sync(
-            api_key=api_key,
-            base_url=base_url,
-            conversation=conversation,
-            rows=rows,
-            request_id=request_id,
-            language=language,
-            proposal_validator=proposal_validator,
-            stage_context=effective_stage_context,
-            baseline_metrics=solver_metrics,
-            deadline=deadline,
-        )
+        reserve = 12.0 if effective_stage_context.get("requirementPolicyVersion") == 1 and _remaining_until(deadline) > 32 else 0.0
+        try:
+            return _generate_revision_search_proposal_sync(
+                api_key=api_key, base_url=base_url, conversation=conversation, rows=rows,
+                request_id=request_id, language=language, proposal_validator=proposal_validator,
+                stage_context=effective_stage_context, baseline_metrics=solver_metrics,
+                deadline=deadline - reserve,
+            )
+        except LLMServiceError as error:
+            recovery = _generate_verified_proposal_failure_analysis(
+                api_key, base_url, effective_stage_context, rows, language, request_id, deadline, error,
+            )
+            if recovery is None:
+                raise
+            return recovery
 
     messages = build_chat_messages(
         conversation,
@@ -4489,6 +4542,26 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
     if not turns:
         raise LLMServiceError("REQUIREMENT_EVIDENCE_MISSING", "The proposal has no traceable designer evidence.", request_id, True, 0, 502)
     snapshot = stage_context.get("stageSnapshot") or {}
+    cache_key = requirement_cache_key(stage_context, turns)
+    for cached in stage_context.get("verifiedRequirementCache") or []:
+        if cached.get("cacheKey") != cache_key:
+            continue
+        candidate = cached.get("record") or {}
+        fields = requirement_response_schema()["properties"]["requirements"]["items"]["required"]
+        try:
+            restored = validate_requirement_record({
+                "requirements": [{key: item[key] for key in fields} for item in candidate.get("requirements") or []],
+                "automaticBindings": [{"entity": item["entity"], "reason": item["reason"]} for item in candidate.get("automaticBindings") or []],
+                "exactTransitions": candidate.get("exactTransitions") or [],
+            }, turns, snapshot)
+        except (ValueError, TypeError, KeyError):
+            continue
+        restored.update({"topicId": candidate.get("topicId"), "evidenceSignature": cache_key})
+        _log_llm_event("requirements_reused", requestId=request_id, task="revision_requirements", cacheKey=cache_key)
+        stage_context.setdefault("_reliabilityState", {})["verifiedRequirements"] = {
+            "cacheKey": cache_key, "record": restored,
+        }
+        return restored
     messages = [{"role": "system", "content": (
         "Interpret this single authorized proposal topic into the supplied JSON schema. "
         "Every requirement must use an exact evidenceSpan and sourceTurnId from a designer turn. "
@@ -4523,6 +4596,8 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         "editableComponents": ["water", "internal_walls"],
     }, ensure_ascii=False)}]
     last_issue = ""
+    locked = {}
+    attempt = 0
     for attempt in range(1, 3):
         remaining = _remaining_until(deadline)
         if remaining < 1:
@@ -4532,11 +4607,23 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 api_key, base_url, KIMI_MODEL, messages, 3200, min(20.0, remaining),
                 task="revision_requirements",
             ), timeout=min(20.0, remaining)))
-            payload = json.loads(str(response.choices[0].message.content or ""))
+            if getattr(response.choices[0], "finish_reason", None) == "length":
+                raise ValueError("Requirements JSON was truncated.")
+            payload = parse_json_object(response.choices[0].message.content)
+            valid_items, component_issues = validate_requirement_components(payload, turns, snapshot)
+            if component_issues:
+                locked = {item["requirementId"]: raw for item, raw in valid_items}
+                raise ValueError(json.dumps(component_issues, ensure_ascii=False))
             record = validate_requirement_record(payload, turns, snapshot)
+            raw_by_id = {item["requirementId"]: raw for item, raw in valid_items}
+            if any(raw_by_id.get(identity) != raw for identity, raw in locked.items()):
+                raise ValueError("A local repair changed a locked, previously valid requirement.")
             review_messages = [{"role": "system", "content": (
                 "Independently verify this interpretation against exact designer evidence. Return JSON "
-                "accepted and issues. Reject misread attributes, directions, units, invented priorities, "
+                "accepted and structured issues. Each issue has requirementIds, kind (evidence/meaning/coverage/conflict), "
+                "exact evidenceSpans from designerTurns, and repairInstruction. Use IDs from the interpretation; "
+                "coverage issues can have an empty ID list. Identify all related conflicting requirements. "
+                "Reject misread attributes, directions, units, invented priorities, "
                 "invented exact transitions, missing prohibitions, or missing still-active goals. Entity "
                 "mentions are not entity changes. Questions provide linguistic context only; a selected "
                 "preference never confirms assistant-invented numerical/coordinate/mandatory dependency "
@@ -4550,18 +4637,104 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             reviewed = asyncio.run(asyncio.wait_for(_request_completion(
                 api_key, base_url, KIMI_MODEL, review_messages, 800, min(12.0, remaining),
                 task="revision_requirement_review"), timeout=min(12.0, remaining)))
-            verdict = json.loads(str(reviewed.choices[0].message.content or ""))
-            if not isinstance(verdict, dict) or set(verdict) != {"accepted", "issues"} or verdict["accepted"] is not True or verdict["issues"] != []:
-                raise ValueError("Independent evidence review rejected the interpretation: " + str(verdict.get("issues") if isinstance(verdict, dict) else verdict)[:400])
+            verdict = parse_json_object(reviewed.choices[0].message.content)
+            if set(verdict) != {"accepted", "issues"} or not isinstance(verdict["accepted"], bool) or not isinstance(verdict["issues"], list):
+                raise ValueError("Invalid independent evidence review envelope.")
+            if verdict["accepted"] is not True or verdict["issues"]:
+                rejected = set()
+                for issue in verdict["issues"]:
+                    if not isinstance(issue, dict) or set(issue) != {"requirementIds", "kind", "evidenceSpans", "repairInstruction"}:
+                        # Older providers/tests can return string issues. Repair
+                        # conservatively without treating their scopes as trusted.
+                        raise ValueError("Independent review rejected interpretation: " + str(verdict["issues"])[:600])
+                    if issue["kind"] not in {"evidence", "meaning", "coverage", "conflict"} or not isinstance(issue["requirementIds"], list):
+                        raise ValueError("Invalid requirement review issue.")
+                    if not set(issue["requirementIds"]).issubset(raw_by_id):
+                        raise ValueError("Requirement review cites unknown IDs.")
+                    spans = issue["evidenceSpans"]
+                    if not isinstance(spans, list) or not spans or any(not isinstance(span, str) or not span or not any(span in turn["content"] for turn in turns) for span in spans):
+                        raise ValueError("Requirement review issue lacks exact designer evidence.")
+                    if not isinstance(issue["repairInstruction"], str) or not issue["repairInstruction"].strip():
+                        raise ValueError("Requirement review issue lacks a repair instruction.")
+                    rejected.update(issue["requirementIds"])
+                related = {(item["component"], item["property"]) for item in record["requirements"] if item["requirementId"] in rejected}
+                locked = {item["requirementId"]: raw_by_id[item["requirementId"]] for item in record["requirements"]
+                    if item["requirementId"] not in rejected and (item["component"], item["property"]) not in related}
+                raise ValueError("Independent evidence review: " + json.dumps(verdict["issues"], ensure_ascii=False))
             record["topicId"] = discovery.get("topicId")
-            record["evidenceSignature"] = hashlib.sha256(json.dumps(turns, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+            record["evidenceSignature"] = cache_key
+            stage_context.setdefault("_reliabilityState", {})["verifiedRequirements"] = {
+                "cacheKey": cache_key, "record": record,
+            }
+            _log_llm_event("requirements_verified", requestId=request_id, task="revision_requirements",
+                attempt=attempt, requirementCount=len(record["requirements"]), cacheKey=cache_key)
             return record
         except LLMServiceError:
             raise
         except Exception as exception:
             last_issue = str(exception)[:600]
-            messages[0]["content"] += "\nRepair the typed interpretation without changing the designer meaning: " + last_issue
+            _log_llm_event("llm_component_rejected", requestId=request_id, task="revision_requirements",
+                attempt=attempt, component="requirements", failureCode="REQUIREMENT_INTERPRETATION_INVALID", issues=last_issue)
+            messages.append({"role": "user", "content": json.dumps({
+                "repairIssue": last_issue, "lockedRequirements": list(locked.values()),
+                "instruction": "Return the complete envelope, preserve locked items exactly, repair rejected and related items and recheck all designer evidence for missing requirements.",
+            }, ensure_ascii=False)})
     raise LLMServiceError("REQUIREMENT_INTERPRETATION_INVALID", "The design requirements could not be interpreted reliably. Retry this message.", request_id, True, attempt, 502)
+
+
+def _generate_verified_proposal_failure_analysis(api_key, base_url, context, rows, language, request_id, deadline, failure):
+    verified = (context.get("_reliabilityState") or {}).get("verifiedRequirements")
+    recoverable = {"PROPOSAL_SEARCH_EXHAUSTED", "DETERMINISTIC_SEARCH_EXHAUSTED", "CANDIDATE_UNSOLVABLE",
+        "CANDIDATE_DUPLICATED", "SEMANTIC_CONSTRAINT_NOT_MET", "SOFT_OBJECTIVE_EVIDENCE_MISSING", "HARD_OBJECTIVE_NOT_MET"}
+    if not verified or failure.code not in recoverable or _remaining_until(deadline) < 3.0:
+        return None
+    prompt = [{"role": "system", "content": (
+        "Return JSON with body only, in " + ("Simplified Chinese" if language == "zh-CN" else "English") + ". "
+        "Write substantive first-person design analysis of this unsuccessful proposal search. "
+        "Respond to the verified designer requirements, explain only the supplied verified failure, "
+        "and suggest a conceptual next direction without inventing a cause or new hard requirement. "
+        "No candidate passed: do not claim a proposal exists, a goal was achieved or any map was changed. "
+        "Do not expose internal fields, add cards, or promise an unverified mechanism. "
+        "The supplied StageSnapshot is the only current map authority."
+    )}, {"role": "user", "content": json.dumps({
+        "designerTurns": context.get("requirementUserTurns") or [],
+        "requirements": verified["record"], "failureCode": failure.code,
+        "verifiedFailure": failure.safe_message, "currentStageSnapshot": context.get("stageSnapshot"),
+    }, ensure_ascii=False)}]
+    started = time.monotonic()
+    try:
+        timeout = min(12.0, _remaining_until(deadline))
+        response = asyncio.run(asyncio.wait_for(_request_completion(
+            api_key, base_url, KIMI_MODEL, prompt, 700, timeout, task="proposal_failure_analysis"), timeout=timeout))
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            raise ValueError("Failure analysis was truncated.")
+        payload = parse_json_object(choice.message.content)
+        if set(payload) != {"body"} or not isinstance(payload["body"], str):
+            raise ValueError("Failure analysis envelope is invalid.")
+        body = _sanitize_visible_model_text(payload["body"], language)
+        body, _ = _strip_invalid_grounding_sentences(body, rows, entity_bindings=context.get("entityBindings"))
+        if len(body) < (40 if language == "zh-CN" else 100) or re.search(
+            r"我(?:已经|已|刚刚)(?:修改|保存|应用)|已(?:成功)?(?:应用|保存)|I (?:have |already )(?:applied|changed|saved)", body, re.I):
+            raise ValueError("No substantive, truthful failure analysis remained.")
+        _assert_visible_output_language(language, body)
+        marker = {**(context.get("proposalDiscovery") or {}), "status": "revision_needed", "failureCode": failure.code,
+            "topicId": (context.get("proposalDiscovery") or {}).get("topicId"),
+            "clarificationQuestionCount": (context.get("proposalDiscovery") or {}).get("clarificationQuestionCount", 0)}
+        _log_llm_event("llm_request_completed", requestId=request_id, task="proposal_failure_analysis",
+            outcome="success", modelGenerationSucceeded=True, reliableBodyDelivered=True,
+            fullQualityPassed=False, verifiedProposal=False, failureCode=failure.code)
+        return LLMExecutionResult(body, failure.attempts_used, request_id, model=KIMI_MODEL,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            guidance={"move": "offer_perspective", "proposalOffer": None, "intentHypothesis": None,
+                "disagreement": None, "followUpQuestion": None, "uiCues": [], "coordinateLinks": [],
+                "proposalDiscovery": marker},
+            proposal_diagnostics={"verifiedFailureAnalysis": True, "proposalStatus": "revision_needed",
+                "failureCode": failure.code, "reliableBodyDelivered": True, "fullQualityPassed": False})
+    except (LLMServiceError, ValueError, TypeError, KeyError, asyncio.TimeoutError):
+        _log_llm_event("llm_component_rejected", requestId=request_id, task="proposal_failure_analysis",
+            component="body", failureCode="RECOVERY_FAILED")
+        return None
 
 
 def _proposal_objective_policy(conversation, stage_context):
@@ -5072,9 +5245,9 @@ def _generate_revision_search_proposal_sync(
         task="revision_plan",
         primaryModel=models[0],
         fallbackModel=None,
-        timeoutSeconds=PROPOSAL_REQUEST_TIMEOUT_SECONDS,
-        internalDeadlineSeconds=PROPOSAL_INTERNAL_DEADLINE_SECONDS,
-        revisionPlanPhaseSeconds=PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
+        timeoutSeconds=(BACKEND_REQUEST_TIMEOUT_SECONDS if stage_context.get("requirementPolicyVersion") == 1 else PROPOSAL_REQUEST_TIMEOUT_SECONDS),
+        internalDeadlineSeconds=round(_remaining_until(deadline), 3),
+        revisionPlanPhaseSeconds=min(PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, _remaining_until(deadline)),
         revisionPlanTokenLimit=PROPOSAL_PLAN_MAX_COMPLETION_TOKENS,
         operationAttemptSeconds=PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS,
         deterministicSearchSeconds=PROPOSAL_SEARCH_DEADLINE_SECONDS,
@@ -7649,7 +7822,7 @@ def _generate_plain_chat_sync(
         ) from exception
 
 
-def translate_turns(items, target_language, request_id):
+def translate_turns(items, target_language, request_id, *, _deadline=None):
     api_key, base_url = _llm_credentials()
 
     if not api_key or api_key in {
@@ -7713,7 +7886,7 @@ def translate_turns(items, target_language, request_id):
     models = _unified_model_attempts(CHAT_MAX_ATTEMPTS)
 
     started_at = time.monotonic()
-    deadline = _request_deadline(started_at)
+    deadline = _deadline or _request_deadline(started_at)
     _log_llm_event(
         "llm_request_started",
         requestId=request_id,
@@ -7771,8 +7944,10 @@ def classify_challenge_reason(
     *,
     _deadline=None,
     simple=False,
+    comparison_validator=None,
+    stage_snapshot=None,
 ):
-    """Classify one post-challenge reason without map or chat-history context."""
+    """Review semantics and current-map prose in the same two-attempt budget."""
     primary = str((hypotheses or {}).get("primary") or "").strip()
     secondary = str((hypotheses or {}).get("secondary") or "").strip()
     reason = str(user_reason or "").strip()
@@ -7838,6 +8013,12 @@ def classify_challenge_reason(
         ),
     }]
     last_exception = None
+    if stage_snapshot is not None:
+        messages[0]["content"] += (
+            "\nOnly this current StageSnapshot is map evidence. The cited proposal describes a "
+            "proposed change, never a current map fact:\n"
+            + json.dumps(stage_snapshot, ensure_ascii=False)
+        )
     attempts_used = 0
     for attempt in range(1, 3):
         remaining = _remaining_until(deadline)
@@ -7852,13 +8033,13 @@ def classify_challenge_reason(
                     base_url,
                     KIMI_MODEL,
                     messages,
-                    180,
+                    640,
                     attempt_timeout,
                     task="challenge_reason_classification",
                 ),
                 timeout=attempt_timeout,
             ))
-            payload = json.loads(str(response.choices[0].message.content or ""))
+            payload = parse_json_object(response.choices[0].message.content)
             relation = payload.get("relation")
             merit = payload.get("merit")
             comparison = _normalize_response_paragraphs(str(payload.get("comparison") or ""))
@@ -7878,14 +8059,11 @@ def classify_challenge_reason(
                         ),
                     })
                     continue
-                comparison = _challenge_comparison_fallback(
-                    reason,
-                    primary,
-                    secondary,
-                    proposal_summary,
-                    relation,
-                    merit,
-                )
+                raise ValueError("No substantive Kimi comparison was returned.")
+            if comparison_validator is not None:
+                comparison = comparison_validator(comparison)
+                if not comparison:
+                    raise ValueError("MAP_GROUNDING_INVALID: no reliable comparison remained.")
             return {
                 "relation": relation,
                 "merit": merit,
@@ -7894,7 +8072,14 @@ def classify_challenge_reason(
             }
         except (asyncio.TimeoutError, LLMServiceError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exception:
             last_exception = exception
+            _log_llm_event("llm_component_rejected", requestId=request_id,
+                task="challenge_review", attempt=attempt, component="comparison",
+                failureCode="MAP_GROUNDING_INVALID" if "MAP_GROUNDING_INVALID" in str(exception) else "MODEL_RESPONSE_INVALID")
             if attempt < 2 and _remaining_until(deadline) > 1.0:
+                messages.append({"role": "system", "content": (
+                    "Repair the failed comparison against the current snapshot while preserving the "
+                    "designer's reason. Return the complete JSON contract. Issue: " + str(exception)[:400]
+                )})
                 continue
             break
     if isinstance(last_exception, LLMServiceError):
@@ -8049,7 +8234,7 @@ def review_intent_feedback(
             choice = response.choices[0]
             if str(getattr(choice, "finish_reason", "") or "") == "length":
                 raise ValueError("The intent review reached its output limit.")
-            payload = json.loads(str(choice.message.content or ""))
+            payload = parse_json_object(choice.message.content)
             if set(payload) != {
                 "verdict",
                 "explanation",
@@ -8205,7 +8390,7 @@ def review_question_answers(questions, user_reply, language, request_id, *, _dea
                 ),
                 timeout=timeout_seconds,
             ))
-            payload = json.loads(str(response.choices[0].message.content or ""))
+            payload = parse_json_object(response.choices[0].message.content)
             if set(payload) != {"results"} or not isinstance(payload["results"], list):
                 raise ValueError("Question review has an invalid envelope.")
             expected = {item["questionId"] for item in safe_questions}
@@ -8297,7 +8482,7 @@ def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, reque
                 ),
                 timeout=timeout_seconds,
             ))
-            payload = json.loads(str(response.choices[0].message.content or ""))
+            payload = parse_json_object(response.choices[0].message.content)
             if set(payload) != {"detailedText", "summaryText"}:
                 raise ValueError("Progress rewrite has unexpected fields.")
             summary = _normalize_response_paragraphs(
@@ -8375,6 +8560,7 @@ async def _translate_with_model_fallback(
 ):
     last_error = None
     validation_feedback = None
+    locked_translations = {}
     deadline = deadline or _request_deadline(started_at)
 
     max_attempts = len(models)
@@ -8428,7 +8614,11 @@ async def _translate_with_model_fallback(
             if not content.strip():
                 raise EmptyModelResponse("The model returned an empty response.")
 
-            payload = json.loads(content)
+            payload = parse_json_object(content)
+            for translated in payload.get("translations") or []:
+                if isinstance(translated, dict):
+                    translated.update(locked_translations.get(translated.get("turnId"), {}))
+            locked_translations.update(_lock_valid_translation_fields(payload, items, target_language))
             translations = validate_translation_response(
                 payload,
                 items,
@@ -8469,6 +8659,10 @@ async def _translate_with_model_fallback(
 
             if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
                 validation_feedback = failure_reason
+                messages = list(messages) + [{"role": "user", "content": json.dumps({
+                    "lockedTranslationFields": locked_translations,
+                    "instruction": "Preserve these verified fields exactly; repair only other fields and return the complete translations envelope.",
+                }, ensure_ascii=False)}]
 
         failure_fields = {
             "requestId": request_id,
@@ -8495,7 +8689,7 @@ async def _translate_with_model_fallback(
         if attempt < max_attempts and not _retry_budget_available(
             deadline,
             request_id=request_id,
-            task=task,
+            task="translation",
             attempt=attempt,
             max_attempts=max_attempts,
             response_mode="json_object",
@@ -8571,8 +8765,9 @@ async def _review_intent_candidate_async(
         "reference_only, bodyValid checks only that the prose directly answers the user and has no "
         "dangling introduction, option-list fragment, workflow talk, or unfinished paragraph; do not "
         "require Stage evidence, two effects, or an uncertainty boundary. Only for candidate, bodyValid "
-        "also requires verified Stage evidence, two distinct possible effects, one genuine uncertainty "
-        "boundary, and no repetition of the card. "
+        "also checks semantic agreement with the evidence-bound claims. Stage facts are verified by the "
+        "server. Sentence counts, depth, two effects, uncertainty phrasing and repetition are quality "
+        "issues only: report them in issues without setting bodyValid=false. "
         "relation is none without a candidate or active inclination, otherwise compatible, conflict, "
         "or unclear. conflict must cite exact active IDs and explain in 2-4 first-person sentences in "
         f"{response_language} why the new and old directions cannot both guide the same decision; never "
@@ -8598,7 +8793,7 @@ async def _review_intent_candidate_async(
     choice = response.choices[0]
     if str(getattr(choice, "finish_reason", "") or "") == "length":
         raise ValueError("The intent candidate review reached its output limit.")
-    payload = json.loads(str(choice.message.content or ""))
+    payload = parse_json_object(choice.message.content)
     expected = {
         "classification", "claims", "cardText", "cardTextValid", "bodyValid", "relation",
         "conflictingHypothesisIds", "explanation", "issues", "reviewedActiveClaims",
@@ -8712,6 +8907,8 @@ async def _repair_intent_components_async(
     """Repair only rejected intent presentation components under locked semantics."""
     if not repair_body and not repair_card:
         return body, card_text
+    repair_task = ("intent_component_repair" if repair_body and repair_card
+        else "intent_body_repair" if repair_body else "intent_card_repair")
     response_language = "Simplified Chinese" if language == "zh-CN" else "English"
     messages = [{"role": "system", "content": (
         "You repair presentation components for a Sokoban tentative-intent reply. Return JSON only. "
@@ -8732,6 +8929,7 @@ async def _repair_intent_components_async(
         "CURRENT CARD:\n" + str(card_text or "")[:1200] + "\n\n"
         "REVIEW ISSUES:\n" + json.dumps(list(issues or [])[:8], ensure_ascii=False)
     )}]
+    messages[0]["content"] += "\nReturn ONLY the fields of components marked REPAIR."
     remaining = _remaining_until(deadline)
     if remaining <= 0:
         raise asyncio.TimeoutError()
@@ -8739,63 +8937,69 @@ async def _repair_intent_components_async(
         _request_completion(
             api_key, base_url, KIMI_MODEL, messages,
             INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS,
-            min(30.0, remaining), task="intent_component_repair",
+            min(30.0, remaining), task=repair_task,
         ),
         timeout=min(30.0, remaining),
     )
     choice = response.choices[0]
     if str(getattr(choice, "finish_reason", "") or "") == "length":
         raise ValueError("The intent component repair reached its output limit.")
-    payload = json.loads(str(choice.message.content or ""))
-    if not isinstance(payload, dict) or set(payload) != {"bodyParagraphs", "cardSentences"}:
+    payload = parse_json_object(choice.message.content)
+    required = ({"bodyParagraphs"} if repair_body else set()) | ({"cardSentences"} if repair_card else set())
+    if not required.issubset(payload) or set(payload) - {"bodyParagraphs", "cardSentences"}:
         raise ValueError("Intent component repair contains unexpected or missing fields.")
-    body_paragraphs = payload.get("bodyParagraphs")
-    if not isinstance(body_paragraphs, list) or not 1 <= len(body_paragraphs) <= 3:
-        raise ValueError("Intent body repair must return one to three paragraph items.")
-    body_paragraphs = [
-        re.sub(r"\s+", " ", str(item or "")).strip()
-        for item in body_paragraphs
-    ]
-    if any(not item for item in body_paragraphs):
-        raise ValueError("Intent body repair returned an empty paragraph item.")
-    body_sentence_end = "。" if language == "zh-CN" else "."
-    normalized_body_paragraphs = []
-    for paragraph in body_paragraphs:
-        if paragraph.endswith((",", "，", ";", "；")):
-            paragraph = paragraph[:-1].rstrip() + body_sentence_end
-        elif not re.search(r"[.!?。！？:]$", paragraph):
-            paragraph += body_sentence_end
-        normalized_body_paragraphs.append(paragraph)
-    repaired_body = "\n\n".join(normalized_body_paragraphs)
-    card_sentences = payload.get("cardSentences")
-    if not isinstance(card_sentences, list) or not 2 <= len(card_sentences) <= 4:
-        raise ValueError("Intent card repair must return two to four sentence items.")
-    card_sentences = [
-        re.sub(r"\s+", " ", str(item or "")).strip()
-        for item in card_sentences
-    ]
-    if any(not item for item in card_sentences):
-        raise ValueError("Intent card repair returned an empty sentence item.")
-    sentence_end = "。" if language == "zh-CN" else "."
-    internal_separator = "，" if language == "zh-CN" else "; "
-    card_sentences = [
-        re.sub(r"[.!?;。！？；]+(?=\s*\S)", internal_separator, item)
-        for item in card_sentences
-    ]
-    card_sentences = [
-        item if re.search(r"[.!?;。！？；]$", item) else item + sentence_end
-        for item in card_sentences
-    ]
-    repaired_card = (("" if language == "zh-CN" else " ").join(card_sentences))[:1000]
-    repaired_card_issue = _intent_hypothesis_detail_issue(repaired_card, language)
-    if repaired_card_issue == "intentHypothesis must remain explicitly tentative":
-        tentative_prefix = (
-            "我目前的暂定理解是，"
-            if language == "zh-CN"
-            else "My current tentative reading is that "
-        )
-        repaired_card = tentative_prefix + repaired_card
+    repaired_body = body
+    if repair_body:
+        body_paragraphs = payload.get("bodyParagraphs")
+        if not isinstance(body_paragraphs, list) or not 1 <= len(body_paragraphs) <= 3:
+            raise ValueError("Intent body repair must return one to three paragraph items.")
+        body_paragraphs = [
+            re.sub(r"\s+", " ", str(item or "")).strip()
+            for item in body_paragraphs
+        ]
+        if any(not item for item in body_paragraphs):
+            raise ValueError("Intent body repair returned an empty paragraph item.")
+        body_sentence_end = "。" if language == "zh-CN" else "."
+        normalized_body_paragraphs = []
+        for paragraph in body_paragraphs:
+            if paragraph.endswith((",", "，", ";", "；")):
+                paragraph = paragraph[:-1].rstrip() + body_sentence_end
+            elif not re.search(r"[.!?。！？:]$", paragraph):
+                paragraph += body_sentence_end
+            normalized_body_paragraphs.append(paragraph)
+        repaired_body = "\n\n".join(normalized_body_paragraphs)
+    repaired_card = card_text
+    repaired_card_issue = None
+    if repair_card:
+        card_sentences = payload.get("cardSentences")
+        if not isinstance(card_sentences, list) or not 2 <= len(card_sentences) <= 4:
+            raise ValueError("Intent card repair must return two to four sentence items.")
+        card_sentences = [
+            re.sub(r"\s+", " ", str(item or "")).strip()
+            for item in card_sentences
+        ]
+        if any(not item for item in card_sentences):
+            raise ValueError("Intent card repair returned an empty sentence item.")
+        sentence_end = "。" if language == "zh-CN" else "."
+        internal_separator = "，" if language == "zh-CN" else "; "
+        card_sentences = [
+            re.sub(r"[.!?;。！？；]+(?=\s*\S)", internal_separator, item)
+            for item in card_sentences
+        ]
+        card_sentences = [
+            item if re.search(r"[.!?;。！？；]$", item) else item + sentence_end
+            for item in card_sentences
+        ]
+        repaired_card = (("" if language == "zh-CN" else " ").join(card_sentences))[:1000]
         repaired_card_issue = _intent_hypothesis_detail_issue(repaired_card, language)
+        if repaired_card_issue == "intentHypothesis must remain explicitly tentative":
+            tentative_prefix = (
+                "我目前的暂定理解是，"
+                if language == "zh-CN"
+                else "My current tentative reading is that "
+            )
+            repaired_card = tentative_prefix + repaired_card
+            repaired_card_issue = _intent_hypothesis_detail_issue(repaired_card, language)
     result_body = repaired_body if repair_body else body
     result_card = repaired_card if repair_card else card_text
     if repair_body and not result_body:
@@ -8806,6 +9010,74 @@ async def _repair_intent_components_async(
             + repaired_card_issue
         )
     return result_body, result_card
+
+
+async def _review_ordinary_intent_with_recovery(*, optional_budget, component_checks, **kwargs):
+    optional = kwargs["decision"].get("classification") != "candidate" and not kwargs["active_inclinations"]
+    started = time.monotonic()
+    try:
+        if optional:
+            timeout = optional_budget.timeout()
+            if timeout <= 0:
+                raise asyncio.TimeoutError()
+            kwargs["deadline"] = min(kwargs["deadline"], started + timeout)
+        result = await _review_intent_candidate_async(**kwargs)
+        if result["classification"] != "candidate" and not result["bodyValid"]:
+            if result.get("issues"):
+                # A specific relevance or semantic defect is still mandatory;
+                # only an unexplained intent-specific score is advisory.
+                raise LowQualityModelResponse("The ordinary body did not answer the designer reliably: " + str(result["issues"])[:500])
+            # An intent-specific score does not invalidate an ordinary answer
+            # once the reviewer determines that no intent card belongs here.
+            component_checks.append(ComponentCheck("body", "preserved", "INTENT_SCORE_NOT_APPLICABLE"))
+        return result
+    except (LLMServiceError, asyncio.TimeoutError, ValueError, TypeError, KeyError) as error:
+        body = kwargs["body"]
+        if not optional or isinstance(error, LowQualityModelResponse) or len(body.strip()) < (35 if kwargs["language"] == "zh-CN" else 100):
+            raise
+        component_checks.append(ComponentCheck("intent_discovery", "omitted", "OPTIONAL_REVIEW_FAILED"))
+        return {"classification": "none", "claims": [], "cardText": "", "cardTextValid": True,
+            "bodyValid": True, "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
+            "issues": [], "reviewedActiveClaims": [], "reviewVersion": INTENT_REVIEW_VERSION,
+            "omitted": True}
+    finally:
+        if optional:
+            optional_budget.record(started)
+
+
+async def _repair_reviewed_intent_presentation(
+    *, repair_body, repair_card, body, card_text, deadline, optional_budget,
+    card_required, component_checks, rows=None, entity_bindings=None, **kwargs,
+):
+    if repair_body:
+        body, _ = await _repair_intent_components_async(
+            body=body, card_text=card_text, repair_body=True, repair_card=False,
+            deadline=deadline, **kwargs,
+        )
+        component_checks.append(ComponentCheck("body", "repaired", repairable=True))
+    if not repair_card:
+        return body, card_text
+    timeout = _remaining_until(deadline) if card_required else optional_budget.timeout()
+    started = time.monotonic()
+    try:
+        if timeout <= 0:
+            raise asyncio.TimeoutError()
+        _, card_text = await _repair_intent_components_async(
+            body=body, card_text=card_text, repair_body=False, repair_card=True,
+            deadline=min(deadline, started + timeout), **kwargs,
+        )
+        if rows:
+            _validate_map_grounding_texts([card_text], rows, entity_bindings=entity_bindings)
+        component_checks.append(ComponentCheck("intent_card", "repaired", repairable=True))
+        return body, card_text
+    except (ValueError, TypeError, KeyError, LLMServiceError, asyncio.TimeoutError):
+        if card_required:
+            raise
+        component_checks.append(ComponentCheck("intent_card", "omitted", "OPTIONAL_PRESENTATION_FAILED"))
+        return body, ""
+    finally:
+        if not card_required:
+            optional_budget.record(started)
 
 
 async def _generate_plain_with_model_fallback(
@@ -8833,6 +9105,9 @@ async def _generate_plain_with_model_fallback(
     last_error = None
     validation_feedback = None
     deadline = deadline or _request_deadline(started_at)
+    optional_budget = OptionalRepairBudget(deadline)
+    optional_budget.spent = float((stage_context or {}).get("_optionalRepairSpent") or 0.0)
+    component_checks = []
     # The model receives only the current user turn plus the authoritative
     # StageSnapshot.  Deterministic card/memory helpers may still use the
     # server-owned semantic conversation (never as map facts) so a prior
@@ -8882,6 +9157,7 @@ async def _generate_plain_with_model_fallback(
         response_fields = _empty_response_diagnostics()
         grounding_dropped_count = 0
         clarification_fallback_used = False
+        snapshot_fallback_used = False
         _log_llm_event(
             "llm_attempt_started",
             requestId=request_id,
@@ -9078,6 +9354,7 @@ async def _generate_plain_with_model_fallback(
                         ],
                     )
                 if not visible_content:
+                    snapshot_fallback_used = True
                     visible_content = _server_snapshot_fallback_message(
                         rows,
                         language,
@@ -9132,6 +9409,7 @@ async def _generate_plain_with_model_fallback(
                         "No reliable model prose remained after current-map cleanup."
                     )
                 clarification_fallback_used = clarification_active
+                snapshot_fallback_used = stage_opening and not clarification_active
                 visible_content = (
                     _proposal_clarification_fallback_message(language, stage_context)
                     if clarification_active
@@ -9366,6 +9644,8 @@ async def _generate_plain_with_model_fallback(
                     ui_cues = []
 
             body = _normalize_response_paragraphs(body)
+            if stage_context is not None and body:
+                stage_context.setdefault("_reliabilityState", {})["modelGenerationSucceeded"] = True
 
             guidance = {
                 "move": _plain_guidance_move(
@@ -9465,7 +9745,9 @@ async def _generate_plain_with_model_fallback(
                     )
                     if item.get("status") == "confirmed"
                 ]
-                intent_review = await _review_intent_candidate_async(
+                intent_review = await _review_ordinary_intent_with_recovery(
+                    optional_budget=optional_budget,
+                    component_checks=component_checks,
                     api_key=api_key,
                     base_url=base_url,
                     user_text=latest_user_text,
@@ -9476,6 +9758,8 @@ async def _generate_plain_with_model_fallback(
                     request_id=request_id,
                     deadline=deadline,
                 )
+                if intent_review.get("issues"):
+                    component_checks.append(ComponentCheck("intent_presentation", "preserved", "QUALITY_REVIEW_ISSUES"))
                 core_fields = (
                     "subjectType", "attributeType", "direction", "degree", "aspect",
                     "scopeType", "scopeText", "evidenceSpan",
@@ -9531,18 +9815,26 @@ async def _generate_plain_with_model_fallback(
                         "intent body does not preserve the unresolved design boundary",
                         "Chinese intent body is too brief",
                         "English intent body is too brief",
+                        "intent body contains an option or fragment list",
+                        "intent body repeats the intent card",
                     }:
+                        component_checks.append(ComponentCheck("body", "preserved", "PRESENTATION_QUALITY"))
                         pre_repair_body_issue = None
                     repair_body = bool(
                         not intent_review["bodyValid"]
-                        or claims_changed
                         or pre_repair_body_issue
                     )
                     repair_card = bool(
                         _intent_hypothesis_detail_issue(selected_card, language)
                     )
+                    try:
+                        _assert_visible_output_language(language, selected_card)
+                        _validate_map_grounding_texts([selected_card], rows,
+                            entity_bindings=(stage_context or {}).get("entityBindings"))
+                    except ValueError:
+                        repair_card = True
                     if repair_body or repair_card:
-                        body, selected_card = await _repair_intent_components_async(
+                        body, selected_card = await _repair_reviewed_intent_presentation(
                             api_key=api_key,
                             base_url=base_url,
                             user_text=latest_user_text,
@@ -9560,6 +9852,11 @@ async def _generate_plain_with_model_fallback(
                             language=language,
                             request_id=request_id,
                             deadline=deadline,
+                            optional_budget=optional_budget,
+                            card_required=intent_review["relation"] == "conflict",
+                            component_checks=component_checks,
+                            rows=rows,
+                            entity_bindings=(stage_context or {}).get("entityBindings"),
                         )
                         if repair_body and rows:
                             body, removed_repair_grounding = _strip_invalid_grounding_sentences(
@@ -9581,6 +9878,8 @@ async def _generate_plain_with_model_fallback(
                             "intent body does not preserve the unresolved design boundary",
                             "Chinese intent body is too brief",
                             "English intent body is too brief",
+                            "intent body contains an option or fragment list",
+                            "intent body repeats the intent card",
                         }:
                             body, selected_card = await _repair_intent_components_async(
                                 api_key=api_key,
@@ -9608,14 +9907,21 @@ async def _generate_plain_with_model_fallback(
                                 raise LowQualityModelResponse(
                                     "No reliable second-pass intent prose remained after map-grounding cleanup."
                                 )
-                    intent_decision = {
-                        "classification": "candidate",
-                        "claims": intent_review["claims"],
-                        "cardText": selected_card,
-                    }
-                    draft_classification = "candidate"
-                    guidance["intentHypothesis"] = selected_card
-                    guidance["intentConfidence"] = "medium"
+                    if selected_card:
+                        intent_decision = {"classification": "candidate",
+                            "claims": intent_review["claims"], "cardText": selected_card}
+                        draft_classification = "candidate"
+                        guidance["intentHypothesis"] = selected_card
+                        guidance["intentConfidence"] = "medium"
+                    else:
+                        # Omitted optional presentation never creates a hidden
+                        # inclination, confirmation, or conflict decision.
+                        intent_decision = {"classification": "none", "claims": [], "cardText": ""}
+                        intent_review = {**intent_review, "classification": "none", "claims": [],
+                            "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
+                            "reviewedActiveClaims": []}
+                        guidance["intentHypothesis"] = None
+                        guidance["intentConfidence"] = None
                 reviewed_claims = []
                 for claim in intent_review.get("claims") or []:
                     reviewed_claims.append({
@@ -9655,6 +9961,8 @@ async def _generate_plain_with_model_fallback(
                     "intent body does not preserve the unresolved design boundary",
                     "Chinese intent body is too brief",
                     "English intent body is too brief",
+                    "intent body contains an option or fragment list",
+                    "intent body repeats the intent card",
                 }:
                     # The independent semantic review (or focused repair) owns
                     # these qualitative judgments. Keyword/length heuristics
@@ -9846,7 +10154,7 @@ async def _generate_plain_with_model_fallback(
                 modification_summary="",
                 attempts_used=attempt,
                 request_id=request_id,
-                model=model,
+                model="kimi-k2.6-safe-opening" if snapshot_fallback_used else model,
                 latency_ms=latency_ms,
                 guidance=guidance,
                 proposal_diagnostics=(
@@ -9887,6 +10195,8 @@ async def _generate_plain_with_model_fallback(
                     else {
                         "visibleBodySource": visible_body_source,
                         "groundingSentencesDropped": total_grounding_dropped_count,
+                        "componentChecks": [check.diagnostic() for check in component_checks],
+                        "fullQualityPassed": all(check.status == "repaired" for check in component_checks) and not total_grounding_dropped_count,
                     }
                     if ordinary_discussion
                     else {}
@@ -9897,6 +10207,10 @@ async def _generate_plain_with_model_fallback(
                 requestId=request_id,
                 task=task,
                 outcome="success",
+                modelGenerationSucceeded=True,
+                reliableBodyDelivered=True,
+                fullQualityPassed=all(check.status == "repaired" for check in component_checks) and not total_grounding_dropped_count,
+                componentChecks=[check.diagnostic() for check in component_checks],
                 model=model,
                 attemptsUsed=attempt,
                 latencyMs=latency_ms,
@@ -10642,6 +10956,31 @@ def _safe_validation_reason(exception):
     return None
 
 
+def _lock_valid_translation_fields(payload, source_items, target_language):
+    sources = {item["turnId"]: item for item in source_items}
+    locked = {}
+    for translated in payload.get("translations") or []:
+        if not isinstance(translated, dict) or translated.get("turnId") not in sources:
+            continue
+        source = sources[translated["turnId"]]
+        fields = {}
+        for name in ("body", "followUpQuestion", "intentHypothesis", "proposalOfferSummary",
+                     "proposalOfferRationale", "proposalSummary", "proposalPresentationReason"):
+            if name not in translated or name not in source:
+                continue
+            try:
+                value = _validate_translated_text(translated[name], source[name], name, allow_empty=name == "body")
+                if name == "body" and source[name] and not value:
+                    continue
+                _assert_visible_output_language(target_language, value or "")
+                _validate_map_grounding_texts([value], source.get("stageRows"), entity_bindings=source.get("entityBindings"))
+                fields[name] = value
+            except (ValueError, TypeError):
+                continue
+        locked[translated["turnId"]] = fields
+    return locked
+
+
 def validate_translation_response(payload, source_items, target_language="en"):
     if not isinstance(payload, dict) or set(payload) != {"translations"}:
         raise ValueError("Translation output must contain only translations.")
@@ -10699,11 +11038,7 @@ def validate_translation_response(payload, source_items, target_language="en"):
             entity_bindings=source.get("entityBindings"),
         )
         if not normalized["body"] and source.get("body"):
-            normalized["body"] = (
-                "\u6211\u4f1a\u4ee5\u5f53\u524d\u4fdd\u5b58\u7684 Stage \u4e3a\u51c6\u7ee7\u7eed\u5206\u6790\u3002"
-                if target_language == "zh-CN"
-                else "I will continue from the current saved Stage."
-            )
+            raise ValueError("No reliable translated body remains; preserve the source turn.")
 
         translated_text_fields = [
             "followUpQuestion",

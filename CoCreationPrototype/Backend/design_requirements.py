@@ -141,6 +141,24 @@ def validate_requirement_record(payload, user_turns, snapshot):
         "automaticBindings": [{"entity": x["entity"].upper(), "reason": x["reason"][:300], "authority": "proposal_assumption"} for x in bindings]}
 
 
+def validate_requirement_components(payload, user_turns, snapshot):
+    """Locate rejected items without silently dropping them from the final record."""
+    if not isinstance(payload, dict) or set(payload) != {"requirements", "automaticBindings", "exactTransitions"}:
+        return [], [{"kind": "envelope", "requirementIds": [], "repairInstruction": "Invalid requirements envelope."}]
+    if not isinstance(payload["requirements"], list) or len(payload["requirements"]) > 48:
+        return [], [{"kind": "envelope", "requirementIds": [], "repairInstruction": "Invalid requirements collection."}]
+    valid, issues = [], []
+    for index, raw in enumerate(payload["requirements"]):
+        try:
+            item = validate_requirement_record({"requirements": [raw], "automaticBindings": [],
+                "exactTransitions": []}, user_turns, snapshot)["requirements"][0]
+            valid.append((item, raw))
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            issues.append({"kind": "evidence", "requirementIds": [], "itemIndex": index,
+                "repairInstruction": str(error)[:400]})
+    return valid, issues
+
+
 def positions(rows, component):
     return {(r + 1, c + 1) for r, row in enumerate(rows) for c, tile in enumerate(row) if tile in TILES.get(component, set())}
 

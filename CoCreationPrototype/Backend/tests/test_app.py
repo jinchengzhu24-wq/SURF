@@ -955,7 +955,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("map-understanding-20260930", index_response.text)
+        self.assertIn("reply-reliability-20261003", index_response.text)
         self.assertIn("sendChallengeChoice", js_response.text)
         self.assertIn("offer.availableActions.includes(action)", js_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
@@ -1000,7 +1000,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertNotIn("assessmentSolution", js_response.text)
         self.assertNotIn("assessmentDifficulty", js_response.text)
         self.assertIn('language: "zh-CN"', js_response.text)
-        self.assertIn('apiError.details = payload.details || null;', js_response.text)
+        self.assertIn('apiError.details = payload?.details || null;', js_response.text)
         self.assertIn('validationFailed', js_response.text)
         self.assertIn("DRAFT_REGENERATION_PROTOCOL_VERSION = 5", js_response.text)
         self.assertNotIn("LEGACY_DRAFT_REGENERATION_PROTOCOL_VERSION", js_response.text)
@@ -1028,7 +1028,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("elements.proposalRequestButton.disabled = (", js_response.text)
         self.assertIn("disagreementActive || proposalLocked", js_response.text)
         self.assertIn('return latestStatus === "active";', js_response.text)
-        self.assertIn("state.session.proposalFlowState = latest.proposalFlowState", js_response.text)
+        self.assertIn("state.session = latest", js_response.text)
         self.assertNotIn("async function requestProposal()", js_response.text)
         self.assertIn('requestProposal: state.proposalMode', js_response.text)
         self.assertIn("createIntentConflictChoiceCue", js_response.text)
@@ -1149,8 +1149,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('chatWaitingPrimary', js_response.text)
         self.assertIn('chatWaitingFallback', js_response.text)
         self.assertIn('LLM_REQUEST_TIMEOUT_MS = 120000', js_response.text)
-        self.assertIn('MESSAGE_REQUEST_TIMEOUT_MS = 320000', js_response.text)
-        self.assertIn('PROPOSAL_DISPLAY_LIMIT_SECONDS = 300', js_response.text)
+        self.assertIn('MESSAGE_REQUEST_TIMEOUT_MS = 125000', js_response.text)
+        self.assertIn('PROPOSAL_DISPLAY_LIMIT_SECONDS = 120', js_response.text)
         self.assertIn('elapsedSeconds < LLM_PRIMARY_WAIT_SECONDS', js_response.text)
         self.assertIn('elapsedSeconds} / ${PROPOSAL_DISPLAY_LIMIT_SECONDS}', js_response.text)
         self.assertIn('timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS', js_response.text)
@@ -1163,7 +1163,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('const selectedHistoricalStage = state.selectedVersionId !== state.session.currentVersionId;', js_response.text)
         self.assertIn('!selectedHistoricalStage && !expired && (state.dirty || pending)', js_response.text)
         self.assertIn('const targetVersionId = state.selectedVersionId;', js_response.text)
-        self.assertIn('rows: deadlineExpired() && targetIsCurrent ? state.draftRows : null', js_response.text)
+        self.assertIn('rows: deadlineExpired() && targetIsCurrent ? state.draftRows.map(row => row) : null', js_response.text)
         self.assertIn('chatBusyVersionId: ""', js_response.text)
         self.assertIn('state.chatBusyVersionId = pending.baseVersionId;', js_response.text)
         self.assertIn(
@@ -1497,6 +1497,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                     "maximumAttempts": 3,
                     "retryable": True,
                     "safeReason": "DeepSeek did not respond before the timeout.",
+                    "committed": False,
+                    "recoveryState": "retry_pending",
                 },
             },
         )

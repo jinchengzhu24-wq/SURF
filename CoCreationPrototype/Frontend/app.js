@@ -2,8 +2,8 @@
 
 const MAX_MESSAGE_LENGTH = 2000;
 const LLM_REQUEST_TIMEOUT_MS = 120000;
-const MESSAGE_REQUEST_TIMEOUT_MS = 320000;
-const PROPOSAL_DISPLAY_LIMIT_SECONDS = 300;
+const MESSAGE_REQUEST_TIMEOUT_MS = 125000;
+const PROPOSAL_DISPLAY_LIMIT_SECONDS = 120;
 const LLM_PRIMARY_WAIT_SECONDS = 70;
 const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
 const API_PREFIX = window.location.pathname.startsWith("/cocreation")
@@ -673,6 +673,26 @@ const chineseApiErrors = {
     SEMANTIC_POSTCONDITION_FAILED: "已审查方案未通过执行后语义校验，因此未应用。",
     EXECUTION_REPLAY_MISMATCH: "实际差异与已审查紫卡不一致，因此未应用。"
 };
+
+Object.assign(chineseApiErrors, {
+    INVALID_RESPONSE: "服务器响应不完整或无法读取，可重试原操作。",
+    REQUIREMENT_INTERPRETATION_INVALID: "尚未可靠理解你的设计要求，可使用原消息重试。",
+    REQUIREMENT_EVIDENCE_MISSING: "这项方案的原始要求证据暂时无法恢复，可重试原消息。",
+    REQUIREMENT_PERMISSION_CONFLICT: "明确要求与当前允许的修改范围冲突，需要调整方案方向。",
+    CHALLENGE_REVIEW_FAILED: "尚未可靠完成质疑理由的评审，可使用原消息重试。",
+    DETERMINISTIC_SEARCH_EXHAUSTED: "尚未找到通过验证的方案，当前地图未改变。",
+    CANDIDATE_DUPLICATED: "候选仍重复原方案，尚未形成经过验证的替代方案。",
+    CANDIDATE_UNSOLVABLE: "候选未通过可解性验证，当前地图未改变。"
+});
+Object.assign(translations.en, {
+    error_INVALID_RESPONSE: "The server response was incomplete or unreadable. Retry the original operation.",
+    error_REQUIREMENT_INTERPRETATION_INVALID: "The design requirements could not be understood reliably. Retry the original message.",
+    error_REQUIREMENT_EVIDENCE_MISSING: "The original requirement evidence could not be restored. Retry the original message.",
+    error_REQUIREMENT_PERMISSION_CONFLICT: "Explicit requirements conflict with the allowed editing scope. Adjust the direction.",
+    error_DETERMINISTIC_SEARCH_EXHAUSTED: "No verified proposal was found. The map was not changed.",
+    error_CANDIDATE_DUPLICATED: "The candidates repeated the original proposal. No verified alternative was produced.",
+    error_CANDIDATE_UNSOLVABLE: "The candidates did not pass solvability validation. The map was not changed."
+});
 
 const LEVEL_VALIDATION_ERROR_CODES = new Set([
     "INVALID_LEVEL",
@@ -2751,7 +2771,7 @@ async function submitPendingMessage() {
                 // Keep the original proposal-state error visible if the refresh
                 // itself cannot complete.
             }
-        } else if (error?.retryable && (pending.action || "none") === "none") {
+        } else if (error?.retryable) {
             // A direct-language modification can start a server-owned proposal
             // flow before Kimi returns. Refresh only that authority state so a
             // retryable failure still shows the Proposal toggle as locked,
@@ -2760,7 +2780,8 @@ async function submitPendingMessage() {
                 const latest = await api(
                     `/api/sessions/${encodeURIComponent(state.sessionId)}`
                 );
-                state.session.proposalFlowState = latest.proposalFlowState;
+                state.session = latest;
+                render();
             } catch (_proposalStateRefreshError) {
                 // The original retryable error remains the useful action.
             }
@@ -2784,18 +2805,16 @@ async function submitPendingMessage() {
 
 async function saveManualStage() {
     if (!state.dirty) return;
+    const saveBody = { rows: state.draftRows.map(row => row),
+        baseVersionId: state.session.currentVersionId, idempotencyKey: uniqueId("manual"),
+        summary: state.language === "zh-CN" ? "设计者保存的地图修改" : "Designer-saved map edit" };
     await withBusy(async () => {
         state.validationError = null;
         renderMap();
         try {
             state.session = await api(`/api/sessions/${state.sessionId}/versions`, {
                 method: "POST",
-                body: {
-                    rows: state.draftRows,
-                    baseVersionId: state.session.currentVersionId,
-                    idempotencyKey: uniqueId("manual"),
-                    summary: state.language === "zh-CN" ? "设计者保存的地图修改" : "Designer-saved map edit"
-                }
+                body: saveBody
             });
             clearUnsavedMapDraft();
             selectVersion(state.session.currentVersionId, false);
@@ -2813,10 +2832,11 @@ async function saveManualStage() {
 
 async function restoreSelectedStage() {
     const version = selectedVersion();
+    const restoreBody = { baseVersionId: state.session.currentVersionId, idempotencyKey: uniqueId("restore") };
     await withBusy(async () => {
         state.session = await api(`/api/sessions/${state.sessionId}/versions/${version.versionId}/restore`, {
             method: "POST",
-            body: { baseVersionId: state.session.currentVersionId, idempotencyKey: uniqueId("restore") }
+            body: restoreBody
         });
         clearUnsavedMapDraft();
         selectVersion(state.session.currentVersionId, false);
@@ -2826,10 +2846,12 @@ async function restoreSelectedStage() {
 }
 
 async function decideProposal(proposal, decision) {
+    const decisionBody = { decision, baseVersionId: state.session.currentVersionId,
+        idempotencyKey: uniqueId(decision), reason: "" };
     await withBusy(async () => {
         state.session = await api(`/api/sessions/${state.sessionId}/proposals/${proposal.proposalId}/decision`, {
             method: "POST",
-            body: { decision, baseVersionId: state.session.currentVersionId, idempotencyKey: uniqueId(decision), reason: "" }
+            body: decisionBody
         });
         selectVersion(state.session.currentVersionId, false);
         render();
@@ -2844,12 +2866,13 @@ async function playSelectedStage() {
     if (state.dirty) return showNotice(t("errorDirtyPlay"));
     if (currentPendingProposal()) return showNotice(t("errorPendingPlay"));
     const version = selectedVersion();
+    const playKey = uniqueId("play");
     await withBusy(async () => {
         localStorage.setItem(selectedStageKey(), version.versionId);
         localStorage.setItem(composerKey(), elements.messageInput.value);
         const payload = await api(`/api/sessions/${state.sessionId}/versions/${version.versionId}/play-attempts`, {
             method: "POST",
-            body: { idempotencyKey: uniqueId("play") }
+            body: { idempotencyKey: playKey }
         });
 
         if (!state.session.demoMode) {
@@ -3060,14 +3083,12 @@ async function finalizeSession() {
     elements.finalizeModal.hidden = true;
     const targetVersionId = state.selectedVersionId;
     const targetIsCurrent = targetVersionId === state.session.currentVersionId;
+    const finalizeBody = { baseVersionId: targetVersionId, idempotencyKey: uniqueId("finalize"),
+        rows: deadlineExpired() && targetIsCurrent ? state.draftRows.map(row => row) : null };
     await withBusy(async () => {
         state.session = await api(`/api/sessions/${state.sessionId}/finalize`, {
             method: "POST",
-            body: {
-                baseVersionId: targetVersionId,
-                idempotencyKey: uniqueId("finalize"),
-                rows: deadlineExpired() && targetIsCurrent ? state.draftRows : null
-            }
+            body: finalizeBody
         });
         clearUnsavedMapDraft();
         render();
@@ -3079,10 +3100,11 @@ async function submitIntention(event) {
     event.preventDefault();
     const content = elements.intentionInput.value.trim();
     if (!content) return showNotice(t("errorIntentRequired"));
+    const intentionKey = uniqueId("intention");
     await withBusy(async () => {
         state.session = await api(`/api/sessions/${state.sessionId}/intention`, {
             method: "POST",
-            body: { content, idempotencyKey: uniqueId("intention") }
+            body: { content, idempotencyKey: intentionKey }
         });
         clearUnsavedMapDraft();
         render();
@@ -3567,8 +3589,20 @@ async function translateVisibleBatch(batch, targetLanguage) {
             state.translationFailures.delete(`${turnId}:${targetLanguage}`);
         });
     } catch (error) {
+        let remaining = error.details?.pendingTurnIds || turnIds;
+        try {
+            const latest = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
+            const byId = new Map(latest.turns.map(turn => [turn.turnId, turn]));
+            state.session.turns = state.session.turns.map(turn => {
+                const updated = byId.get(turn.turnId);
+                return updated ? { ...turn, translations: updated.translations } : turn;
+            });
+            remaining = remaining.filter(turnId => !byId.get(turnId)?.translations?.[targetLanguage]);
+        } catch (_refreshError) { /* Keep source text and the original retry target. */ }
         turnIds.forEach(turnId => {
-            state.translationFailures.add(`${turnId}:${targetLanguage}`);
+            const key = `${turnId}:${targetLanguage}`;
+            if (remaining.includes(turnId)) state.translationFailures.add(key);
+            else state.translationFailures.delete(key);
         });
         if (state.translationRetryTimerId === null) {
             state.translationRetryTimerId = window.setTimeout(() => {
@@ -3841,62 +3875,96 @@ async function withBusy(action, onError = null) {
     try { await action(); }
     catch (error) {
         if (onError) onError();
+        if (error?.retryable && state.sessionId) {
+            try {
+                state.session = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}`);
+                render();
+            } catch (_refreshError) { /* Preserve the original operation error. */ }
+        }
         showError(error, () => withBusy(action, onError));
     }
     finally { state.busy = false; updateControls(); }
 }
 
+function validApiPayload(path, payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+    const sessionValid = session => Boolean(session && typeof session.sessionId === "string"
+        && typeof session.status === "string" && Array.isArray(session.versions)
+        && Array.isArray(session.turns) && Object.hasOwn(session, "currentVersionId"));
+    if (/\/(?:questions|intent-hypotheses)\/[^/]+\/feedback$/.test(path)) {
+        return typeof payload.outcome === "string" && sessionValid(payload.session);
+    }
+    if (/\/play-attempts$/.test(path)) {
+        return typeof payload.attemptId === "string" && typeof payload.playUrl === "string";
+    }
+    if (path === "/api/demo-sessions" || /\/browser-access$/.test(path)) {
+        return typeof payload.sessionId === "string" && Boolean(payload.sessionId);
+    }
+    if (/^\/api\/sessions\/[^/]+(?:\/|$)/.test(path)) return sessionValid(payload);
+    return Object.keys(payload).length > 0;
+}
+
 async function api(path, options = {}) {
     const request = { method: options.method || "GET", credentials: "include", headers: {} };
     const idempotentWrite = request.method !== "GET"
-        && typeof options.body?.idempotencyKey === "string"
-        && Boolean(options.body.idempotencyKey);
+        && typeof options.body?.idempotencyKey === "string" && Boolean(options.body.idempotencyKey);
+    const safeRetry = idempotentWrite || request.method === "GET"
+        || /\/translations\/(?:en|zh-CN)$/.test(path) || /\/language$/.test(path);
     const controller = options.timeoutMs ? new AbortController() : null;
-    const timeoutId = controller
-        ? window.setTimeout(() => controller.abort(), options.timeoutMs)
-        : null;
-
+    const timeoutId = controller ? window.setTimeout(() => controller.abort(), options.timeoutMs) : null;
     if (controller) request.signal = controller.signal;
     if (options.body !== undefined) {
         request.headers["Content-Type"] = "application/json";
         request.body = JSON.stringify(options.body);
     }
     let response;
-
+    let phase = "transport";
     try {
-        const requestPath = path.startsWith("/api/")
-            ? API_PREFIX + path
-            : path;
-        response = await fetch(requestPath, request);
-    } catch (error) {
-        if (error?.name === "AbortError") {
-            const timeoutError = new Error(t("error_CLIENT_TIMEOUT"));
-            timeoutError.code = "CLIENT_TIMEOUT";
-            timeoutError.retryable = true;
-            throw timeoutError;
+        response = await fetch(path.startsWith("/api/") ? API_PREFIX + path : path, request);
+        phase = "response_body";
+        let payload;
+        try { payload = await response.json(); }
+        catch (error) {
+            if (error?.name === "AbortError" || controller?.signal.aborted) throw error;
+            const unreadable = new Error(t("errorGeneric"));
+            unreadable.code = response.ok ? "INVALID_RESPONSE" : "RETRYABLE_REQUEST_FAILED";
+            unreadable.retryable = safeRetry && (response.ok || response.status >= 500);
+            throw unreadable;
         }
-        if (idempotentWrite) {
+        if (!response.ok) {
+            const apiError = new Error(payload?.message || t("errorGeneric"));
+            const retryableHttpError = safeRetry && response.status >= 500 && !payload?.code;
+            apiError.code = payload?.code || (retryableHttpError ? "RETRYABLE_REQUEST_FAILED" : "REQUEST_FAILED");
+            apiError.details = payload?.details || null;
+            apiError.retryable = isLevelValidationError(apiError) ? false
+                : retryableHttpError || Boolean(payload?.retryable);
+            throw apiError;
+        }
+        if (!validApiPayload(path, payload)) {
+            const invalid = new Error(t("errorGeneric"));
+            invalid.code = "INVALID_RESPONSE";
+            invalid.retryable = safeRetry;
+            throw invalid;
+        }
+        return payload;
+    } catch (error) {
+        if (error?.name === "AbortError" || controller?.signal.aborted) {
+            error = new Error(t("error_CLIENT_TIMEOUT"));
+            error.code = "CLIENT_TIMEOUT";
+            error.retryable = safeRetry;
+        } else if (!error?.code && safeRetry) {
             const retryError = new Error(t("errorGeneric"));
             retryError.code = "RETRYABLE_REQUEST_FAILED";
             retryError.retryable = true;
-            throw retryError;
+            error = retryError;
         }
+        error.details = { ...(error.details || {}), httpStatus: response?.status,
+            requestId: response?.headers?.get?.("X-Request-ID") || error.details?.requestId,
+            contentType: response?.headers?.get?.("Content-Type"), failureStage: error.details?.failureStage || phase };
         throw error;
     } finally {
         if (timeoutId !== null) window.clearTimeout(timeoutId);
     }
-    let payload = {};
-    try { payload = await response.json(); } catch (error) { payload = {}; }
-    if (!response.ok) {
-        const apiError = new Error(payload.message || t("errorGeneric"));
-        const retryableHttpError = idempotentWrite && response.status >= 500 && !payload.code;
-        apiError.code = payload.code || (retryableHttpError ? "RETRYABLE_REQUEST_FAILED" : "REQUEST_FAILED");
-        apiError.details = payload.details || null;
-        apiError.retryable = isLevelValidationError(apiError) ? false
-            : retryableHttpError || Boolean(payload.retryable);
-        throw apiError;
-    }
-    return payload;
 }
 
 function showError(error, retryAction) {

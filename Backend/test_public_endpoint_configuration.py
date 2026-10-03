@@ -83,7 +83,7 @@ class PublicEndpointConfigurationTests(unittest.TestCase):
         self.assertIn("LegacyPublicHost", source)
         self.assertIn("NormalizeProductionScheme", source)
 
-    def test_frontend_release_keys_are_kept_in_sync(self):
+    def test_frontend_asset_release_can_change_without_changing_host_protocol(self):
         cocreation_index = (
             REPOSITORY_ROOT
             / "CoCreationPrototype"
@@ -98,7 +98,12 @@ class PublicEndpointConfigurationTests(unittest.TestCase):
             / "index.html"
         ).read_text(encoding="utf-8")
 
-        self.assertIn(RELEASE_KEY, cocreation_index)
+        # 8010-only releases have their own cache key and require no WebGL
+        # rebuild. The formal host protocol still has to agree at both ends.
+        cocreation_script = (REPOSITORY_ROOT / "CoCreationPrototype" / "Frontend" / "app.js").read_text(encoding="utf-8")
+        self.assertRegex(cocreation_index, r'app\.js\?v=[a-z0-9-]+')
+        self.assertIn("DRAFT_REGENERATION_PROTOCOL_VERSION = 5", cocreation_script)
+        self.assertIn("draftRegenerationProtocolVersion = 5", webgl_template)
         self.assertIn(RELEASE_KEY, webgl_template)
 
     def test_nginx_preserves_cloudflare_https_and_redirects_insecure_requests(self):
