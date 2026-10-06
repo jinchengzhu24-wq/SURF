@@ -146,6 +146,8 @@ Unity 的集成接口只有在会话完成后返回最终 rows 和用户最终�
 
 流程覆盖、验收命令、指标口径及 8010 单独部署步骤见 [回复可靠性说明](CoCreationPrototype/REPLY_RELIABILITY.md)。生产成功率须根据部署后的真实记录衡量，不从固定模型测试推算。
 
+2026-10-06 增加只读问题分类/恢复/耗时报告及 [24 个合成入口语义评测案例](CoCreationPrototype/Backend/evaluations/README.md)。评测和前后比较独立运行，真实模型采样须显式启用 `--live`，不创建线上会话或写研究数据库；现有用户流程与 Agent 提示词保持一致。
+
 ## 8010 API 分类
 
 8010 API 按功能分为以下几类，具体请求模型和校验以 `CoCreationPrototype/Backend/app.py` 为准：

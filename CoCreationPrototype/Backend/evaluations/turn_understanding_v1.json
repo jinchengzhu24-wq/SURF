@@ -1,0 +1,762 @@
+{
+  "schemaVersion": 1,
+  "target": "turn_understanding",
+  "description": "24个合成案例，只测生产入口的表达行为、对象与修改属性理解。预期值与人工说明不进入模型上下文。",
+  "stages": {
+    "eval_stage_1": {
+      "stageNumber": 1,
+      "rows": [
+        "############",
+        "#..........#",
+        "#..p.......#",
+        "#..s..t....#",
+        "#..........#",
+        "#..s..t....#",
+        "#..........#",
+        "#..@@......#",
+        "#..........#",
+        "############"
+      ]
+    },
+    "eval_stage_2": {
+      "stageNumber": 2,
+      "rows": [
+        "############",
+        "#..........#",
+        "#..p.......#",
+        "#...s.t....#",
+        "#..........#",
+        "#..s..t....#",
+        "#..........#",
+        "#..@@......#",
+        "#..........#",
+        "############"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "zh_crowded",
+      "label": "模糊视觉评价",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "这里看起来太挤了。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "evaluation"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_contour",
+      "label": "轮廓评价",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "这个地图的外形有点奇怪。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "evaluation"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "outer_shell"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_water_reaction",
+      "label": "水域评价",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "这片水看起来有点多。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "evaluation"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "water"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_open_intent",
+      "label": "明确意图不授权修改",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "我想让内部墙之间的空间更通透。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "intent"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "internal_walls"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_open_ideas",
+      "label": "询问设计思路",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "内部墙怎样安排会更通透？"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "idea_request"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "internal_walls"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_target_label",
+      "label": "解释地图标签",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "那个T是什么？"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "explanation_request"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "targets"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_box_label",
+      "label": "英文标签解释",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "What does B1 mean on this map?"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "explanation_request"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "boxes"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_water_ideas",
+      "label": "英文思路询问",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "What are some ideas for making the water layout clearer?"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "idea_request"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "water"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_vague_change",
+      "label": "模糊直接修改",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "帮我改一下地图。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "directionSufficient": false,
+        "mapRelated": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_water_remove",
+      "label": "明确水域数量修改",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Please remove two water tiles."
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "water"
+        ],
+        "mapRelated": true,
+        "directionSufficient": true,
+        "changesAll": [
+          {
+            "component": "water",
+            "property": "count",
+            "operation": "change"
+          }
+        ],
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_box_switching",
+      "label": "箱子交替不等于移动箱子",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Give me a revision plan that makes the player switch between boxes more often."
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "changesAll": [
+          {
+            "component": "gameplay",
+            "property": "switching",
+            "operation": "change"
+          }
+        ]
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_preserve_boxes",
+      "label": "保留固定实体",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "请减少水域，但不要移动任何箱子。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "water",
+          "boxes"
+        ],
+        "mapRelated": true,
+        "changesAll": [
+          {
+            "component": "boxes",
+            "property": "position",
+            "operation": "preserve"
+          }
+        ],
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_move_target",
+      "label": "识别受保护目标修改请求",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Please move T1 one tile to the left."
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "targets"
+        ],
+        "mapRelated": true,
+        "changesAll": [
+          {
+            "component": "targets",
+            "property": "position",
+            "operation": "change"
+          }
+        ]
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_move_player",
+      "label": "识别受保护起点修改请求",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "请把玩家起点向右移动一格。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "player"
+        ],
+        "mapRelated": true,
+        "changesAll": [
+          {
+            "component": "player",
+            "property": "position",
+            "operation": "change"
+          }
+        ]
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_button_evaluation",
+      "label": "Proposal按钮与普通评价区分",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "这里看起来太挤了。"
+          }
+        ],
+        "forcedProposal": true
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_button_intent",
+      "label": "Proposal按钮保留原文",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "I want a clearer arrangement of internal walls."
+          }
+        ],
+        "forcedProposal": true
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "internal_walls"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_short_side",
+      "label": "短回答绑定已有主题",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "请给我一个减少水域的修改方案。"
+          },
+          {
+            "role": "assistant",
+            "content": "你想先调整哪一侧的水域？"
+          },
+          {
+            "role": "user",
+            "content": "右边。"
+          }
+        ],
+        "proposalContext": {
+          "topicId": "synthetic-water-topic",
+          "initialRequest": "请给我一个减少水域的修改方案。",
+          "questions": [
+            "你想先调整哪一侧的水域？"
+          ],
+          "answers": [],
+          "lastQuestionText": "你想先调整哪一侧的水域？"
+        }
+      },
+      "expected": {
+        "actsAny": [
+          "intent",
+          "revision_request"
+        ],
+        "elementsAll": [
+          "water"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_short_preserve",
+      "label": "保留偏好短回答",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "请调整内部墙的分布。"
+          },
+          {
+            "role": "assistant",
+            "content": "当前水域要保留还是减少？"
+          },
+          {
+            "role": "user",
+            "content": "保留。"
+          }
+        ],
+        "proposalContext": {
+          "topicId": "synthetic-wall-topic",
+          "initialRequest": "请调整内部墙的分布。",
+          "questions": [
+            "当前水域要保留还是减少？"
+          ],
+          "answers": [],
+          "lastQuestionText": "当前水域要保留还是减少？"
+        }
+      },
+      "expected": {
+        "actsAny": [
+          "intent",
+          "revision_request"
+        ],
+        "elementsAll": [
+          "water"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_short_count",
+      "label": "英文数量短回答",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Give me a plan for the water layout."
+          },
+          {
+            "role": "assistant",
+            "content": "Should the map have fewer or more water tiles?"
+          },
+          {
+            "role": "user",
+            "content": "Fewer."
+          }
+        ],
+        "proposalContext": {
+          "topicId": "synthetic-en-water-topic",
+          "initialRequest": "Give me a plan for the water layout.",
+          "questions": [
+            "Should the map have fewer or more water tiles?"
+          ],
+          "answers": [],
+          "lastQuestionText": "Should the map have fewer or more water tiles?"
+        }
+      },
+      "expected": {
+        "actsAny": [
+          "intent",
+          "revision_request"
+        ],
+        "elementsAll": [
+          "water"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_stage_switch",
+      "label": "切换版本后的实体讨论",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_2",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "之前B1在第四行第四列。"
+          },
+          {
+            "role": "assistant",
+            "content": "之前B1在第四行第四列。"
+          },
+          {
+            "role": "user",
+            "content": "现在B1的位置是什么？"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "explanation_request"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "boxes"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_wrong_coordinate",
+      "label": "错误坐标仍属于地图问答",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Is B1 at row 99, column 99?"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "explanation_request"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "boxes"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_dissatisfaction",
+      "label": "不满意不自动授权修改",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "这个改法没有解决我担心的路线问题。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "evaluation"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_off_topic",
+      "label": "英文非地图话题",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "What is the capital of France?"
+          }
+        ]
+      },
+      "expected": {
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "mapRelated": false,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "zh_change_mind",
+      "label": "用户改变方向",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "我希望水域多一些。"
+          },
+          {
+            "role": "user",
+            "content": "我改主意了，我希望水域少一些。"
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "intent"
+        ],
+        "actsForbidden": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "water"
+        ],
+        "mapRelated": true,
+        "forbidProtectedChange": true
+      },
+      "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    }
+  ]
+}
