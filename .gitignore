@@ -74,12 +74,8 @@ crashlytics-build.properties
 
 # Local documentation
 /SERVER.md
-/LLM_ERRORS.md
-/Routing.md
-/Response.md
-
-# Archived local markdown drafts
-/Old_md/
+/Nodes.md
+/Draft_question.md
 
 # Local image assets
 /共创流程图.png
