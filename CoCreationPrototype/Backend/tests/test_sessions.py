@@ -91,6 +91,83 @@ PLAYER_MOVE_CONTRACT = {
 
 
 class CoCreationSessionTests(unittest.TestCase):
+    def test_proposal_semantics_bind_focus_and_persist_real_turn_ids_on_http_retry(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        def item(statement, source="latest", **extra):
+            return {"statement": statement, "sourceTurnId": source, "evidenceSpan": statement, **extra}
+        def response(payload):
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",
+                message=SimpleNamespace(content=json.dumps(payload)))])
+        version_id = self.read_session()["currentVersionId"]
+        initial = "Please make the water and interior walls visually orderly."
+        answer = "Around the first destination"
+        record = {"aspect": "visual", "goals": [item(initial)],
+            "editScope": [item(initial, component=x) for x in ("water", "internal_walls")],
+            "focus": [], "preserve": [], "sufficient": False, "nextQuestionDimension": "binding"}
+        first = {"acts": ["revision_request"], "elements": ["water", "internal_walls"],
+            "evidenceSpan": initial, "directionSufficient": True, "mapRelated": True,
+            "changes": [{"component": x, "property": "layout", "operation": "change", "evidenceSpan": initial}
+                for x in ("water", "internal_walls")], "proposalUnderstanding": record}
+        clarify = LLMExecutionResult("I would try repeating the boundary rhythm. Which area should carry it?", 1, "test",
+            proposal_diagnostics={"clarificationQuestion": "Which area should carry it?"})
+        call = AsyncMock(return_value=response(first))
+        with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
+                patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
+                patch.object(llm_client, "_request_completion", call), \
+                patch.object(backend, "generate_chat_reply", return_value=clarify):
+            saved = self.client.post(f"/api/sessions/{self.session_id}/messages", json={"content": initial,
+                "baseVersionId": version_id, "idempotencyKey": "semantic-start", "requestProposal": True})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        user_id = next(x["turnId"] for x in saved.json()["turns"] if x["role"] == "user" and x["content"] == initial)
+        record = {**record, "goals": [item(initial, user_id)],
+            "editScope": [item(initial, user_id, component=x) for x in ("water", "internal_walls")],
+            "focus": [item(answer, entities=["T1"])], "sufficient": True, "nextQuestionDimension": "none"}
+        wrong = {"acts": ["revision_request"], "elements": ["targets"], "evidenceSpan": answer,
+            "directionSufficient": True, "mapRelated": True,
+            "changes": [{"component": "targets", "property": "position", "operation": "change", "evidenceSpan": answer}],
+            "proposalUnderstanding": record}
+        corrected = {**wrong, "acts": ["intent"], "changes": [{**wrong["changes"][0], "operation": "mention"}]}
+        payload = {"content": answer, "baseVersionId": version_id, "idempotencyKey": "semantic-answer"}
+        rejected = {"accepted": False, "issues": ["Unclear whether this is a focus or a move"], "understanding": wrong}
+        failed_call = AsyncMock(side_effect=[response(wrong), response(rejected)] * 2)
+        with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
+                patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
+                patch.object(llm_client, "_request_completion", failed_call), \
+                patch.object(backend, "generate_chat_reply") as forbidden_generate:
+            failed = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+        self.assertEqual(failed.status_code, 502, failed.text)
+        forbidden_generate.assert_not_called()
+        self.assertEqual(len(self.read_session()["turns"]), len(saved.json()["turns"]))
+        with repository.connect() as database:
+            session = database.execute("SELECT * FROM design_sessions WHERE id=?", (self.session_id,)).fetchone()
+            current = repository.get_current_version(database, session)
+            pending = backend.build_llm_context(database, self.session_id, current)["stageContext"]["proposalDiscovery"]
+            self.assertEqual(pending["clarificationQuestionCount"], 1)
+            self.assertEqual(pending["initialRequest"], initial)
+        call = AsyncMock(side_effect=[response(wrong), response({"accepted": True, "issues": [], "understanding": corrected})])
+        plan_reply = LLMExecutionResult("I would frame that area with the editable water/wall boundary.", 1, "test")
+        with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
+                patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
+                patch.object(llm_client, "_request_completion", call), \
+                patch.object(backend, "review_question_answers", return_value={"answeredQuestionIds": [], "results": []}), \
+                patch.object(backend, "generate_chat_reply", return_value=plan_reply) as generate:
+            planned = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+            retry = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+        self.assertEqual(planned.status_code, 200, planned.text)
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(call.await_count, 2)
+        self.assertEqual(generate.call_count, 1)
+        context = generate.call_args.kwargs["stage_context"]
+        self.assertIn(context["revisionRouting"], {"proposal", "proposal_conservative"})
+        focus = context["proposalDiscovery"]["understanding"]["focus"][0]
+        self.assertNotEqual(focus["sourceTurnId"], "latest")
+        self.assertEqual(planned.json()["currentVersionId"], version_id)
+        self.assertEqual(len(planned.json()["turns"]), len(retry.json()["turns"]))
+        with repository.connect() as database:
+            audit = database.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='proposal_understanding_reviewed'", (self.session_id,)).fetchone()
+            self.assertTrue(json.loads(audit["payload_json"])["corrected"])
+
     def test_model_routing_keeps_visual_feedback_ordinary_and_protects_shell(self):
         version_id = self.read_session()["currentVersionId"]
         reply = LLMExecutionResult(
@@ -110,6 +187,10 @@ class CoCreationSessionTests(unittest.TestCase):
                 "evidenceSpan": content, "directionSufficient": True,
                 "mapRelated": True,
             }
+            if expected_route == "protected_request":
+                understanding["changes"] = [{"component": "outer_shell", "property": "shape",
+                    "operation": "change", "evidenceSpan": content}]
+                understanding["criticalReview"] = {"verified": True, "reason": "protected_change"}
             with patch.object(
                 backend, "classify_turn_understanding", return_value=understanding,
             ), patch.object(backend, "generate_chat_reply", return_value=reply) as generate:
@@ -122,7 +203,8 @@ class CoCreationSessionTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             if expected_route == "protected_request":
                 generate.assert_not_called()
-                self.assertIn("fixed", response.json()["turns"][-1]["content"])
+                self.assertIn("outer shell", response.json()["turns"][-1]["content"])
+                self.assertNotIn("boxes", response.json()["turns"][-1]["content"])
                 self.assertEqual(response.json()["turns"][-1]["guidance"]["uiCues"], [])
             else:
                 stage_context = generate.call_args.kwargs["stage_context"]

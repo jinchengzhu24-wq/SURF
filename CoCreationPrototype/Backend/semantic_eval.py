@@ -18,7 +18,8 @@ DEFAULT_SUITE = Path(__file__).with_name("evaluations") / "turn_understanding_v1
 ACTS = {"evaluation", "intent", "explanation_request", "idea_request", "revision_request", "unclear"}
 ELEMENTS = {"water", "internal_walls", "outer_shell", "player", "boxes", "targets", "unknown"}
 INPUT_KEYS = {"stage", "conversation", "forcedProposal", "proposalContext"}
-EXPECTATION_KEYS = {"actsAll", "actsAny", "actsForbidden", "elementsAll", "mapRelated", "directionSufficient", "changesAll", "forbidProtectedChange"}
+EXPECTATION_KEYS = {"actsAll", "actsAny", "actsForbidden", "elementsAll", "mapRelated", "directionSufficient", "changesAll", "forbidProtectedChange",
+    "topicAspect", "editScopeAll", "editScopeForbidden", "focusEntitiesAll", "preserveEmpty"}
 
 
 def suite_hash(suite):
@@ -62,6 +63,13 @@ def load_suite(path=DEFAULT_SUITE):
         for key in ("mapRelated", "directionSufficient", "forbidProtectedChange"):
             if key in expected and not isinstance(expected[key], bool):
                 raise ValueError(f"Invalid boolean expectation in {identity}.")
+        if "topicAspect" in expected and expected["topicAspect"] not in {"visual", "gameplay", "mixed", "unspecified"}:
+            raise ValueError(f"Invalid topic aspect in {identity}.")
+        for key in ("editScopeAll", "editScopeForbidden"):
+            if not set(expected.get(key) or []).issubset(ELEMENTS | {"gameplay"}):
+                raise ValueError(f"Invalid edit scope in {identity}.")
+        if "preserveEmpty" in expected and type(expected["preserveEmpty"]) is not bool:
+            raise ValueError(f"Invalid preservation expectation in {identity}.")
     if not identities:
         raise ValueError("An evaluation suite cannot be empty.")
     return suite
@@ -110,6 +118,19 @@ def check_result(case, result):
         and change.get("operation", "change") == "change" for change in changes
     ):
         failures.append("invented_protected_change")
+    topic = value.get("proposalUnderstanding") or {}
+    if "topicAspect" in expected and topic.get("aspect") != expected["topicAspect"]:
+        failures.append("wrong_topic_aspect")
+    scope = {x.get("component") for x in topic.get("editScope") or [] if isinstance(x, dict)}
+    if not set(expected.get("editScopeAll") or []).issubset(scope):
+        failures.append("missing_requested_edit_scope")
+    if scope.intersection(expected.get("editScopeForbidden") or []):
+        failures.append("invented_edit_scope")
+    focus = {entity for x in topic.get("focus") or [] if isinstance(x, dict) for entity in x.get("entities") or []}
+    if not set(expected.get("focusEntitiesAll") or []).issubset(focus):
+        failures.append("missing_spatial_focus")
+    if "preserveEmpty" in expected and (not topic or bool(topic.get("preserve")) == expected["preserveEmpty"]):
+        failures.append("wrong_preservation_evidence")
     return failures
 
 

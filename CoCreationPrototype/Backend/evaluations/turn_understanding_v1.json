@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "target": "turn_understanding",
-  "description": "24个合成案例，只测生产入口的表达行为、对象与修改属性理解。预期值与人工说明不进入模型上下文。",
+  "description": "36 synthetic cases: speech acts, edit scope, spatial focus, short-answer binding and protected-edit controls. Expectations never enter model input.",
   "stages": {
     "eval_stage_1": {
       "stageNumber": 1,
@@ -512,7 +512,13 @@
             "你想先调整哪一侧的水域？"
           ],
           "answers": [],
-          "lastQuestionText": "你想先调整哪一侧的水域？"
+          "lastQuestionText": "你想先调整哪一侧的水域？",
+          "userTurns": [
+            {
+              "id": "synthetic-u1",
+              "content": "请给我一个减少水域的修改方案。"
+            }
+          ]
         }
       },
       "expected": {
@@ -555,7 +561,13 @@
             "当前水域要保留还是减少？"
           ],
           "answers": [],
-          "lastQuestionText": "当前水域要保留还是减少？"
+          "lastQuestionText": "当前水域要保留还是减少？",
+          "userTurns": [
+            {
+              "id": "synthetic-u1",
+              "content": "请调整内部墙的分布。"
+            }
+          ]
         }
       },
       "expected": {
@@ -598,7 +610,13 @@
             "Should the map have fewer or more water tiles?"
           ],
           "answers": [],
-          "lastQuestionText": "Should the map have fewer or more water tiles?"
+          "lastQuestionText": "Should the map have fewer or more water tiles?",
+          "userTurns": [
+            {
+              "id": "synthetic-u1",
+              "content": "Give me a plan for the water layout."
+            }
+          ]
         }
       },
       "expected": {
@@ -757,6 +775,650 @@
         "forbidProtectedChange": true
       },
       "reviewNotes": "入口理解评测；完整正文、卡片、地图执行和分歧状态另由现有流程回归及人工复核。"
+    },
+    {
+      "id": "en_visual_target_focus",
+      "label": "en_visual_target_focus",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Give me a plan for a visually orderly water and internal-wall layout."
+          },
+          {
+            "role": "assistant",
+            "content": "Which local area should frame the composition?"
+          },
+          {
+            "role": "user",
+            "content": "The area around T1."
+          }
+        ],
+        "proposalContext": {
+          "topicId": "en_visual_target_focus-topic",
+          "initialRequest": "Give me a plan for a visually orderly water and internal-wall layout.",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "Give me a plan for a visually orderly water and internal-wall layout."
+            }
+          ],
+          "questions": [
+            "Which local area should frame the composition?"
+          ],
+          "answers": [],
+          "lastQuestionText": "Which local area should frame the composition?"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": true,
+        "topicAspect": "visual",
+        "elementsAll": [
+          "targets"
+        ],
+        "editScopeAll": [
+          "water",
+          "internal_walls"
+        ],
+        "focusEntitiesAll": [
+          "T1"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "en_visual_box_focus",
+      "label": "en_visual_box_focus",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Please make the water arrangement look more balanced."
+          },
+          {
+            "role": "assistant",
+            "content": "Which local area should carry that arrangement?"
+          },
+          {
+            "role": "user",
+            "content": "Near B2."
+          }
+        ],
+        "proposalContext": {
+          "topicId": "en_visual_box_focus-topic",
+          "initialRequest": "Please make the water arrangement look more balanced.",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "Please make the water arrangement look more balanced."
+            }
+          ],
+          "questions": [
+            "Which local area should carry that arrangement?"
+          ],
+          "answers": [],
+          "lastQuestionText": "Which local area should carry that arrangement?"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": true,
+        "topicAspect": "visual",
+        "elementsAll": [
+          "boxes"
+        ],
+        "editScopeAll": [
+          "water"
+        ],
+        "focusEntitiesAll": [
+          "B2"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "en_player_entrance_focus",
+      "label": "en_player_entrance_focus",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Give me a plan to arrange internal walls more clearly."
+          },
+          {
+            "role": "assistant",
+            "content": "Which area should the wall pattern focus on?"
+          },
+          {
+            "role": "user",
+            "content": "Around the player entrance."
+          }
+        ],
+        "proposalContext": {
+          "topicId": "en_player_entrance_focus-topic",
+          "initialRequest": "Give me a plan to arrange internal walls more clearly.",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "Give me a plan to arrange internal walls more clearly."
+            }
+          ],
+          "questions": [
+            "Which area should the wall pattern focus on?"
+          ],
+          "answers": [],
+          "lastQuestionText": "Which area should the wall pattern focus on?"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": true,
+        "elementsAll": [
+          "player"
+        ],
+        "editScopeAll": [
+          "internal_walls"
+        ],
+        "focusEntitiesAll": [
+          "P"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "en_shell_reference",
+      "label": "en_shell_reference",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Please create visual rhythm using water and internal walls."
+          },
+          {
+            "role": "assistant",
+            "content": "Where should this rhythm be concentrated?"
+          },
+          {
+            "role": "user",
+            "content": "Just inside the enclosing boundary."
+          }
+        ],
+        "proposalContext": {
+          "topicId": "en_shell_reference-topic",
+          "initialRequest": "Please create visual rhythm using water and internal walls.",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "Please create visual rhythm using water and internal walls."
+            }
+          ],
+          "questions": [
+            "Where should this rhythm be concentrated?"
+          ],
+          "answers": [],
+          "lastQuestionText": "Where should this rhythm be concentrated?"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": true,
+        "topicAspect": "visual",
+        "elementsAll": [
+          "outer_shell"
+        ],
+        "editScopeAll": [
+          "water",
+          "internal_walls"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "zh_visual_target_focus",
+      "label": "zh_visual_target_focus",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "请给我一个让水和内部墙排布更有秩序的方案。"
+          },
+          {
+            "role": "assistant",
+            "content": "你更希望先聚焦哪个局部区域？"
+          },
+          {
+            "role": "user",
+            "content": "T2周围。"
+          }
+        ],
+        "proposalContext": {
+          "topicId": "zh_visual_target_focus-topic",
+          "initialRequest": "请给我一个让水和内部墙排布更有秩序的方案。",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "请给我一个让水和内部墙排布更有秩序的方案。"
+            }
+          ],
+          "questions": [
+            "你更希望先聚焦哪个局部区域？"
+          ],
+          "answers": [],
+          "lastQuestionText": "你更希望先聚焦哪个局部区域？"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": true,
+        "topicAspect": "visual",
+        "elementsAll": [
+          "targets"
+        ],
+        "editScopeAll": [
+          "water",
+          "internal_walls"
+        ],
+        "focusEntitiesAll": [
+          "T2"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "zh_visual_box_focus",
+      "label": "zh_visual_box_focus",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "帮我调整水域，让视觉疏密更平衡。"
+          },
+          {
+            "role": "assistant",
+            "content": "先围绕哪个局部调整？"
+          },
+          {
+            "role": "user",
+            "content": "第一个箱子周围。"
+          }
+        ],
+        "proposalContext": {
+          "topicId": "zh_visual_box_focus-topic",
+          "initialRequest": "帮我调整水域，让视觉疏密更平衡。",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "帮我调整水域，让视觉疏密更平衡。"
+            }
+          ],
+          "questions": [
+            "先围绕哪个局部调整？"
+          ],
+          "answers": [],
+          "lastQuestionText": "先围绕哪个局部调整？"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": true,
+        "topicAspect": "visual",
+        "elementsAll": [
+          "boxes"
+        ],
+        "editScopeAll": [
+          "water"
+        ],
+        "focusEntitiesAll": [
+          "B1"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "zh_visual_entry_focus",
+      "label": "zh_visual_entry_focus",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "请调整内部墙体的构图。"
+          },
+          {
+            "role": "assistant",
+            "content": "你希望先改哪一片区域？"
+          },
+          {
+            "role": "user",
+            "content": "玩家出发的那一带。"
+          }
+        ],
+        "proposalContext": {
+          "topicId": "zh_visual_entry_focus-topic",
+          "initialRequest": "请调整内部墙体的构图。",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "请调整内部墙体的构图。"
+            }
+          ],
+          "questions": [
+            "你希望先改哪一片区域？"
+          ],
+          "answers": [],
+          "lastQuestionText": "你希望先改哪一片区域？"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": true,
+        "topicAspect": "visual",
+        "elementsAll": [
+          "player"
+        ],
+        "editScopeAll": [
+          "internal_walls"
+        ],
+        "focusEntitiesAll": [
+          "P"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "en_witness_not_preservation",
+      "label": "en_witness_not_preservation",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Give me a plan for a more attractive map composition."
+          },
+          {
+            "role": "assistant",
+            "content": "A solver witness has 27 moves. Which editable materials should carry the visual change?"
+          },
+          {
+            "role": "user",
+            "content": "Water and internal walls."
+          }
+        ],
+        "proposalContext": {
+          "topicId": "en_witness_not_preservation-topic",
+          "initialRequest": "Give me a plan for a more attractive map composition.",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "Give me a plan for a more attractive map composition."
+            }
+          ],
+          "questions": [
+            "A solver witness has 27 moves. Which editable materials should carry the visual change?"
+          ],
+          "answers": [],
+          "lastQuestionText": "A solver witness has 27 moves. Which editable materials should carry the visual change?"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": true,
+        "topicAspect": "visual",
+        "editScopeAll": [
+          "water",
+          "internal_walls"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "en_preserve_box_reference",
+      "label": "en_preserve_box_reference",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Please reshape the water around the first crate."
+          },
+          {
+            "role": "assistant",
+            "content": "What must stay unchanged?"
+          },
+          {
+            "role": "user",
+            "content": "Keep B1 where it is."
+          }
+        ],
+        "proposalContext": {
+          "topicId": "en_preserve_box_reference-topic",
+          "initialRequest": "Please reshape the water around the first crate.",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "Please reshape the water around the first crate."
+            }
+          ],
+          "questions": [
+            "What must stay unchanged?"
+          ],
+          "answers": [],
+          "lastQuestionText": "What must stay unchanged?"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets"
+        ],
+        "preserveEmpty": false,
+        "elementsAll": [
+          "boxes"
+        ],
+        "editScopeAll": [
+          "water"
+        ],
+        "changesAll": [
+          {
+            "component": "boxes",
+            "property": "position",
+            "operation": "preserve"
+          }
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "en_explicit_scope_correction",
+      "label": "en_explicit_scope_correction",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Give me a plan for more orderly water and internal walls."
+          },
+          {
+            "role": "assistant",
+            "content": "Which materials should the plan use?"
+          },
+          {
+            "role": "user",
+            "content": "Actually change only water; leave the interior walls as they are."
+          }
+        ],
+        "proposalContext": {
+          "topicId": "en_explicit_scope_correction-topic",
+          "initialRequest": "Give me a plan for more orderly water and internal walls.",
+          "userTurns": [
+            {
+              "id": "u1",
+              "content": "Give me a plan for more orderly water and internal walls."
+            }
+          ],
+          "questions": [
+            "Which materials should the plan use?"
+          ],
+          "answers": [],
+          "lastQuestionText": "Which materials should the plan use?"
+        }
+      },
+      "expected": {
+        "mapRelated": true,
+        "forbidProtectedChange": true,
+        "editScopeForbidden": [
+          "outer_shell",
+          "player",
+          "boxes",
+          "targets",
+          "internal_walls"
+        ],
+        "preserveEmpty": false,
+        "topicAspect": "visual",
+        "editScopeAll": [
+          "water"
+        ]
+      },
+      "reviewNotes": "Synthetic reference-versus-edit case; expected labels never enter model input. No real participant data."
+    },
+    {
+      "id": "en_real_target_move",
+      "label": "en_real_target_move",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Please move T1 to another position."
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "targets"
+        ],
+        "mapRelated": true,
+        "changesAll": [
+          {
+            "component": "targets",
+            "property": "position",
+            "operation": "change"
+          }
+        ]
+      },
+      "reviewNotes": "Positive protected-edit control; references must not weaken genuine protected entity restrictions."
+    },
+    {
+      "id": "en_real_box_removal",
+      "label": "en_real_box_removal",
+      "origin": "synthetic",
+      "input": {
+        "stage": "eval_stage_1",
+        "conversation": [
+          {
+            "role": "user",
+            "content": "Please remove one box from the map."
+          }
+        ]
+      },
+      "expected": {
+        "actsAll": [
+          "revision_request"
+        ],
+        "elementsAll": [
+          "boxes"
+        ],
+        "mapRelated": true,
+        "changesAll": [
+          {
+            "component": "boxes",
+            "property": "count",
+            "operation": "change"
+          }
+        ]
+      },
+      "reviewNotes": "Positive protected-edit control; references must not weaken genuine protected entity restrictions."
     }
   ]
 }

@@ -52,11 +52,12 @@ def requirement_cache_key(stage_context, turns):
         "snapshot": stage_context.get("stageSnapshot"),
         "turns": turns,
         "answers": (stage_context.get("proposalDiscovery") or {}).get("answers") or [],
+        "proposalUnderstanding": (stage_context.get("proposalDiscovery") or {}).get("understanding") or {},
         "decisions": (stage_context.get("revisionDesignContext") or {}).get("confirmedDecisions") or [],
         "projection": stage_context.get("revisionDesignContext") or {},
         "responseLanguage": stage_context.get("responseLanguage", "en"),
         "resolution": stage_context.get("requirementDecisionEvidence"),
         "policyVersion": stage_context.get("requirementPolicyVersion"),
-        "promptVersion": "requirements-component-review-2",
+        "promptVersion": "requirements-component-review-3-proposal-semantics",
     }
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()

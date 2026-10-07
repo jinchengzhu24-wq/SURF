@@ -210,6 +210,7 @@ def _deterministic_conflict_explanation(conflict_pair, language):
         "I will not choose between them; please keep one of the two cards below."
     )
 from design_requirements import protected_change_requested, tradeoff_message
+from proposal_understanding import bind_latest, protected_request_message, validate_topic, designer_sources, reusable_understanding
 from revision_workflow import (
     SemanticConstraintError,
     validate_semantic_constraints,
@@ -2781,6 +2782,11 @@ def _send_message_locked(
                 ORDER BY id DESC LIMIT 1""",
                 (session_id, payload.idempotencyKey),
             ).fetchone()
+            if (saved_understanding is not None and already_answered is None
+                    and not reusable_understanding(load_json(saved_understanding["payload_json"])["result"], payload.baseVersionId)):
+                # An unfinished historic request must be interpreted again;
+                # old annotations cannot authorize a new permission refusal.
+                saved_understanding = None
             if saved_understanding is not None:
                 precomputed_understanding = load_json(saved_understanding["payload_json"])["result"]
             elif already_answered is None:
@@ -2800,7 +2806,9 @@ def _send_message_locked(
             precomputed_understanding = classify_turn_understanding(
                 prior_conversation, snapshot_for_understanding,
                 request.state.request_id, forced_proposal=payload.requestProposal,
-                proposal_context={key: proposal_context_for_understanding.get(key) for key in ("topicId", "initialRequest", "questions", "answers", "lastQuestionText")},
+                proposal_context={key: proposal_context_for_understanding.get(key) for key in (
+                    "topicId", "initialRequest", "questions", "answers", "lastQuestionText", "userTurns", "understanding"
+                )} if proposal_context_for_understanding else {},
                 _deadline=message_started_at + LLM_INTERNAL_DEADLINE_SECONDS,
             )
     with connect(immediate=True) as database:
@@ -2994,10 +3002,10 @@ def _send_message_locked(
                 ORDER BY id DESC LIMIT 1""",
                 (session_id, payload.idempotencyKey),
             ).fetchone()
-            if saved_understanding is not None:
+            if saved_understanding is not None and reusable_understanding(load_json(saved_understanding["payload_json"])["result"], payload.baseVersionId):
                 turn_understanding = load_json(saved_understanding["payload_json"])["result"]
             else:
-                turn_understanding = precomputed_understanding
+                turn_understanding = bind_latest(precomputed_understanding, user_turn_id, payload.baseVersionId)
                 record_event(
                     database, session_id, "turn_understanding",
                     {"messageKey": payload.idempotencyKey,
@@ -3005,6 +3013,11 @@ def _send_message_locked(
                      "result": turn_understanding},
                     utc_now(),
                 )
+                if turn_understanding.get("criticalReview"):
+                    record_event(database, session_id, "proposal_understanding_reviewed", {
+                        "messageKey": payload.idempotencyKey, "baseVersionId": payload.baseVersionId,
+                        **turn_understanding["criticalReview"],
+                    }, utc_now())
             # A new request is reconstructed from the model's audited speech
             # act, not from the legacy keyword classifier.
             context = build_llm_context(database, session_id, current)
@@ -3797,9 +3810,12 @@ def _send_message_locked(
     elif recovery_execution is not None:
         execution = recovery_execution
     elif context["stageContext"].get("revisionRouting") == "protected_request":
+        try:
+            permission_message = protected_request_message(turn_understanding, language)
+        except ValueError as exception:
+            raise ApiError(502, "MODEL_RESPONSE_INVALID", "The requested edit could not be reliably verified. Retry this message.", retryable=True) from exception
         execution = LLMExecutionResult(
-            ("这部分涉及箱子、玩家、目标或外壳的数量或位置，它们在当前修改流程中固定，不能执行这部分修改。已保存的地图和此前讨论仍保留；可以继续尝试调整水域和内部墙体。"
-                if language == "zh-CN" else "This asks to change fixed boxes, player, targets, or the outer shell. I cannot perform that part. The saved map and prior discussion are retained; water and internal walls remain editable."),
+            permission_message,
             0, request.state.request_id, model="server-permission-guard",
             guidance={"proposalOffer": None, "disagreement": None, "followUpQuestion": None, "uiCues": []},
         )
@@ -8746,6 +8762,11 @@ def build_llm_context(database, session_id, version):
         stage_number=version["stage_number"],
         entity_bindings=entity_bindings,
     )
+    if proposal_discovery and proposal_discovery.get("understanding"):
+        try:
+            validate_topic(proposal_discovery["understanding"], designer_sources(proposal_discovery), stage_snapshot)
+        except ValueError:
+            proposal_discovery.pop("understanding", None)
 
     if accepted_opening is not None and not any(
         turn["content"] == _verified_proposal_message(session["language"])
@@ -8994,6 +9015,19 @@ def _proposal_discovery_from_turns(
                     # user wording is usable as a supplement; it does not need
                     # to resemble a fresh imperative design command.
                     active["status"] = "revision_needed"
+            if active is not None and request_key in reviewed:
+                interpretation = reviewed[request_key].get("proposalUnderstanding")
+                if (isinstance(interpretation, dict)
+                        and reviewed[request_key].get("semanticPolicyVersion") == 1
+                        and reviewed[request_key].get("versionId") == version_id):
+                    # Only user evidence from this topic/Stage may become its
+                    # current interpretation; historical prose stays untouched.
+                    try:
+                        active["understanding"] = validate_topic(
+                            interpretation, designer_sources(active), None,
+                        )
+                    except ValueError:
+                        pass
             continue
         conversation_prefix.append({"role": turn["role"], "content": content})
         if active is None or turn["role"] != "assistant":
@@ -9092,10 +9126,52 @@ def _infer_legacy_clarification_question_key(content):
     return "legacy_question"
 
 
+def _semantic_proposal_clarification_spec(discovery, snapshot, language):
+    interpretation = discovery["understanding"]
+    if interpretation["sufficient"]:
+        return None
+    key = interpretation["nextQuestionDimension"]
+    count = min(3, int(discovery.get("clarificationQuestionCount") or 0))
+    if count >= 3:
+        return None
+    asked = list(discovery.get("askedQuestionKeys") or [])
+    # A semantic dimension may be revisited for a genuine clarification, but
+    # every visible question still consumes the shared three-question budget.
+    question_key = key if key not in asked else f"{key}:{count + 1}"
+    chinese = language == "zh-CN"
+    questions = {
+        "visual_direction": ("你更希望这份布局呈现怎样的视觉秩序？", "What kind of visual organization would you like this layout to have?"),
+        "experience_goal": ("你最希望这项调整带来怎样的体验变化？", "What experience would you most like this change to create?"),
+        "edit_scope": ("你希望通过调整水域、内部墙体，还是两者的排布来尝试这个方向？", "Would you like to explore this through water, internal walls, or their arrangement together?"),
+        "mechanism": ("你希望哪种局部玩法变化来体现这个方向？", "What local play change should express this direction?"),
+        "binding": ("你希望先围绕哪个局部区域调整？没有偏好的话，我可以按可行性选择。", "Which local area would you like to focus on? I can choose by feasibility if you have no preference."),
+        "preserve": ("这次调整中，你希望保留当前设计的哪一点？", "What part of the current design would you like to retain?"),
+    }
+    intents = {
+        "visual_direction": "clarify visual organization, balance, repetition or spacing without assuming symmetry or gameplay changes",
+        "experience_goal": "clarify the designer's desired experience without inventing a gameplay priority",
+        "edit_scope": "clarify which editable components carry the change; distinguish them from spatial references",
+        "mechanism": "clarify the explicitly requested gameplay effect without inventing quantities or locks",
+        "binding": "clarify a spatial focus only, never permission to move the referenced entity; focus is optional",
+        "preserve": "clarify an existing design preference without demanding a new hard constraint",
+    }
+    return {"questionKey": question_key, "semanticDimension": key, "questionIntent": intents[key],
+        "fallbackQuestion": questions[key][0 if chinese else 1],
+        "fallbackAcknowledgement": "我会沿着你已经表达的方向继续考虑局部调整。" if chinese else "I will continue exploring local changes along the direction you expressed.",
+        "allowedEntityLabels": [str(x["id"]) for x in (snapshot or {}).get("entities") or [] if x.get("id")],
+        "countBefore": count, "askedQuestionKeys": asked,
+        "topicContinued": len(discovery.get("userTurns") or []) > 1,
+        "understanding": interpretation, "semanticPolicyVersion": 1}
+
+
 def _proposal_clarification_spec(discovery, snapshot, language):
     """Choose one server-owned question for an active proposal topic."""
     if not discovery or discovery.get("status") != "clarifying":
         return None
+
+    understanding = discovery.get("understanding")
+    if understanding:
+        return _semantic_proposal_clarification_spec(discovery, snapshot, language)
 
     evidence = "\n".join(discovery.get("userEvidence") or []).strip()
     lowered = evidence.casefold()
@@ -9363,6 +9439,14 @@ def _adaptive_revision_routing(
             return "protected_request"
         if not requested and not discovery:
             return "none"
+        interpretation = discovery.get("understanding") or turn_understanding.get("proposalUnderstanding")
+        if interpretation:
+            if discovery and _proposal_topic_reset_requested(text):
+                return "proposal_cancelled"
+            if (interpretation.get("sufficient") or int(discovery.get("clarificationQuestionCount") or 0) >= 3
+                    or discovery.get("status") in {"revision_needed", "retry_pending", "planning"}):
+                return "proposal" if _proposal_discovery_has_unique_anchor(discovery, snapshot) else "proposal_conservative"
+            return "needs_clarification"
         if requested and not discovery:
             return "needs_clarification"
     discovery_status = str(discovery.get("status") or "")

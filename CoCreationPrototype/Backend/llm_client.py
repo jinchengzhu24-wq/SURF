@@ -37,6 +37,9 @@ from level_validation import (
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
 from reply_reliability import ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key
+from proposal_understanding import (
+    turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
+)
 from design_requirements import (
     requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
     goal_rank, tradeoff_message, protected_change_requested,
@@ -127,7 +130,7 @@ CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
 PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV = (
     "COCREATION_PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT"
 )
-PROMPT_VERSION = "cocreation-v58-server-owned-review-evidence"
+PROMPT_VERSION = "cocreation-v59-evidence-bound-proposal-semantics"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -158,6 +161,13 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
     the model to infer the wire shape from the much larger design rules.
     """
     task = str(task or "chat")
+    if task == "proposal_clarification_review":
+        schema = {"type": "object", "additionalProperties": False, "properties": {
+            "bodyIssues": {"type": "array", "items": {"type": "string"}},
+            "questionIssue": {"type": ["string", "null"]}},
+            "required": ["bodyIssues", "questionIssue"]}
+        return {"type": "json_schema", "json_schema": {
+            "name": "cocreation_proposal_clarification_review", "strict": True, "schema": schema}}
     if task == "proposal_failure_analysis":
         return {"type": "json_schema", "json_schema": {"name": "cocreation_proposal_failure_analysis",
             "strict": True, "schema": {"type": "object", "additionalProperties": False,
@@ -287,37 +297,15 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
             }}},
             "required": ["accepted", "issues"]}
         name = "cocreation_revision_requirement_review"
-    elif task == "turn_understanding":
-        schema = {
-            "type": "object", "additionalProperties": False,
-            "properties": {
-                "acts": {"type": "array", "minItems": 1, "maxItems": 3, "items": {
-                    "type": "string", "enum": [
-                        "evaluation", "intent", "explanation_request", "idea_request",
-                        "revision_request", "unclear",
-                    ],
-                }},
-                "elements": {"type": "array", "maxItems": 6, "items": {
-                    "type": "string", "enum": [
-                        "water", "internal_walls", "outer_shell", "player",
-                        "boxes", "targets", "unknown",
-                    ],
-                }},
-                "evidenceSpan": {"type": "string"},
-                "directionSufficient": {"type": "boolean"},
-                "mapRelated": {"type": "boolean"},
-                "changes": {"type": "array", "items": {
-                    "type": "object", "additionalProperties": False,
-                    "properties": {
-                        "component": {"type": "string", "enum": ["water", "internal_walls", "outer_shell", "player", "boxes", "targets", "gameplay", "unknown"]},
-                        "operation": {"type": "string", "enum": ["change", "preserve", "mention"]},
-                        "property": {"type": "string", "enum": ["count", "position", "shape", "layout", "route", "push_order", "switching", "rhythm", "appearance", "unknown"]},
-                    }, "required": ["component", "property", "operation"],
-                }},
-            },
-            "required": ["acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated", "changes"],
-        }
+    elif task in {"turn_understanding", "turn_understanding_review"}:
+        schema = turn_schema()
         name = "cocreation_turn_understanding"
+        if task == "turn_understanding_review":
+            schema = {"type": "object", "additionalProperties": False,
+                "properties": {"understanding": schema, "accepted": {"type": "boolean"},
+                    "issues": {"type": "array", "items": {"type": "string"}}},
+                "required": ["understanding", "accepted", "issues"]}
+            name = "cocreation_turn_understanding_review"
     elif task == "intent_candidate_review":
         claim_schema = {
             "type": "object",
@@ -1693,12 +1681,22 @@ def _compact_kimi_plain_prompt(
                 "This is a bounded proposal-clarification turn. You own the natural wording: "
                 "write a warm first-person design response and exactly one useful clarification "
                 "question. Do not use a stock acknowledgement or repeat the user's words as a report."
-                " Use plain everyday preference choices (e.g. switching boxes at the start or after "
-                "some pushing). Never use strategic necessity/efficiency temptation jargon. "
+                " Use plain everyday preference choices relevant to this topic. Only an explicitly "
+                "gameplay-oriented topic should discuss switching boxes or transport. Visual goals "
+                "may discuss spacing, repetition, contour, balance and readability without assuming symmetry. "
+                "Never use strategic necessity/efficiency temptation jargon. "
                 "Check options against current permissions, explicit prohibitions and snapshot facts; "
                 "omit conflicting options. Effects without deterministic proof are tentative attempts, "
                 "not guarantees. Do not request coordinates, fixed push counts, or new strict locks "
                 "to fill an optional detail. An unspecified object may be selected in the final plan."
+            ),
+            (
+                "Keep the speaker roles clear: the designer owns their goals ('你希望…' / 'You want…'); "
+                "you own observations and suggestions ('我觉得…', '我建议…', 'I would try…'). Never turn "
+                "the designer's wish into your own '我想…' goal. First-person suggestions remain welcome. "
+                "Never invent a lock, numerical threshold, fixed solution length or preserved route from "
+                "a solver witness. State suggestions as optional, not established user requirements. "
+                "An entity/region can be a spatial focus without being an editable object."
             ),
             (
                 "Return JSON only with exactly two string fields: "
@@ -1723,8 +1721,8 @@ def _compact_kimi_plain_prompt(
             (
                 "You may discuss design effects, push transport, judgment cost, local mechanisms, "
                 "the allowed entity labels and the private authoritative route-analysis context below. "
-                "Use that evidence to explain how two or three relevant design directions could affect "
-                "push order, dependency, recovery or backtracking cost, and player judgment. Treat it as "
+                "For gameplay goals use that evidence to explain relevant play consequences. For visual "
+                "goals explain concrete organization/spacing choices; do not substitute transport or difficulty. Treat it as "
                 "one verified solution witness, never as the unique solution or a direct difficulty measure. "
                 "You may internally replay the supplied rows and verified solution trace to compare the options. "
                 "Do not state or infer coordinates, positions, adjacency, route endpoints, tile states, "
@@ -1738,9 +1736,14 @@ def _compact_kimi_plain_prompt(
                 "Describe hypothetical changes conditionally; only later deterministic validation may call them solvable."
             ),
             f"Target question dimension: {target_key}. Intent: {question_intent}.",
+            "Current permissions: only water and internal walls may change. Boxes, targets, player start "
+            "and the connected outer shell must stay fixed. Referencing them never grants permission to move them.",
+            "Evidence-bound topic understanding (goals, requested edit scope, spatial focus and explicit locks; "
+            "no assistant suggestion is confirmed intent): " + json.dumps(discovery.get("understanding") or {}, ensure_ascii=False),
+            f"Current Stage Snapshot (only map authority; inspect composition without reproducing coordinates or rows): {map_facts}",
             f"Allowed exact entity labels (labels only, never positions): {json.dumps(allowed_labels, ensure_ascii=False)}.",
             f"Private authoritative route-analysis context (reason from it, never reproduce its rows, coordinates, or trace): {json.dumps(route_evidence, ensure_ascii=False, separators=(',', ':'))}.",
-            f"Confirmed user evidence for this one proposal topic:\n{topic_brief}",
+            f"User wording for this one proposal topic (not every phrase is a confirmed constraint):\n{topic_brief}",
             "Make the question feel like a natural next step; it may be open-ended and need not be a binary choice.",
         ])
     opening = (
@@ -4158,7 +4161,22 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             "Interrupting B1's consecutive pushes changes gameplay/push_order, NOT boxes/position. "
             "Only explicit moves/additions/removals of an entity change its protected count/position. "
             "Bind short answers to the active proposal question before classifying them; an answer to a "
-            "proposal preference question continues the existing topic and is not a new edit command."
+            "proposal preference question continues the existing topic and is not a new edit command. "
+            "Each changes item needs its own exact evidenceSpan from the latest message. "
+            "For an active topic, proposal button, or concrete revision request, return proposalUnderstanding; "
+            "otherwise return null. Reconstruct the COMPLETE topic from designerTurns, bound questions/answers "
+            "and the previous understanding. Keep goals, editScope, focus and preserve separate. Each item has "
+            "statement, sourceTurnId and exact designer evidenceSpan. editScope also has component; focus also "
+            "has entities (current labels, or [] for a region). 'latest' identifies the latest designer turn. "
+            "A water/wall layout request around T1/T2 edits water/internal_walls and focuses on targets; "
+            "it does NOT move targets. Do not replace earlier scope when a short answer supplies a focus. "
+            "Only a clear designer correction changes earlier goals/scope/locks. Assistant suggestions, "
+            "numbers in questions, solution witness counts and inferred intent are NOT designer constraints. "
+            "An aesthetic goal need not change push order or increase transport: aspect=visual; ask about "
+            "visual_direction, edit_scope or binding only if truly missing. Gameplay goals may use mechanism. "
+            "Select nextQuestionDimension semantically, not by keyword presence. If a safe plan can be "
+            "attempted with current goals and editable scope, set sufficient=true and dimension=none; "
+            "unspecified implementation details/focus can be selected by feasibility. Do not force three questions."
         )},
         {"role": "user", "content": json.dumps({
             "latestUserMessage": latest,
@@ -4166,6 +4184,10 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             "forcedProposalButton": bool(forced_proposal),
             "currentStageSnapshot": snapshot,
             "proposalContext": proposal_context or {},
+            "designerTurns": [{"id": key, "content": value}
+                for key, value in designer_sources(proposal_context, latest).items()],
+            "editableComponents": ["water", "internal_walls"],
+            "protectedComponents": ["outer_shell", "player", "boxes", "targets"],
         }, ensure_ascii=False)},
     ]
     last_error = None
@@ -4176,17 +4198,74 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 raise asyncio.TimeoutError()
             response = asyncio.run(asyncio.wait_for(
                 _request_completion(
-                    api_key, base_url, KIMI_MODEL, messages, 350, timeout,
+                    api_key, base_url, KIMI_MODEL, messages, 1800, timeout,
                     task="turn_understanding",
                 ),
                 timeout=timeout,
             ))
+            if str(getattr(response.choices[0], "finish_reason", "")) == "length":
+                raise ValueError("Turn understanding was truncated.")
             payload = parse_json_object(response.choices[0].message.content)
-            return _validate_turn_understanding(payload, latest, forced_proposal)
+            if set(payload) & {"semanticPolicyVersion", "criticalReview", "versionId", "evidenceSignature"}:
+                raise ValueError("A model cannot author server review metadata.")
+            candidate = _validate_turn_understanding(payload, latest, forced_proposal)
+            _validate_proposal_interpretation(candidate, latest, snapshot, proposal_context, forced_proposal)
+            review_reason = critical_review_reason(candidate, proposal_context)
+            if review_reason:
+                review_started = time.monotonic()
+                remaining = min(12.0, _remaining_until(_deadline)) if _deadline is not None else 12.0
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                review_messages = [{"role": "system", "content": (
+                    "Independently check the candidate understanding against designer evidence and its bound "
+                    "question. Return accepted=true with a corrected understanding only if every conclusion is "
+                    "reliable; otherwise accepted=false and issues. A region/focus is not an entity move. "
+                    "Preserve earlier edit scope unless the latest designer clearly corrects it. Distinguish "
+                    "mention/preserve/change; protected position/count/layout/shape edits require an actual "
+                    "designer request, not a label or assistant option. Each change needs exact latest-user "
+                    "evidence; topic items need exact evidence and IDs from designerTurns. Check coverage of "
+                    "all active goals and locks, numerical inventions, visual versus gameplay meaning, and "
+                    "short-answer binding. Assistant claims and solver counts cannot create user requirements. "
+                    "Current map facts use only Current Stage Snapshot. Do not judge feasibility here."
+                )}, {"role": "user", "content": json.dumps({
+                    "source": json.loads(messages[1]["content"]), "candidate": candidate,
+                    "reviewReason": review_reason,
+                }, ensure_ascii=False)}]
+                reviewed = asyncio.run(asyncio.wait_for(_request_completion(
+                    api_key, base_url, KIMI_MODEL, review_messages, 2000, remaining,
+                    task="turn_understanding_review"), timeout=remaining))
+                if str(getattr(reviewed.choices[0], "finish_reason", "")) == "length":
+                    raise ValueError("Turn understanding review was truncated.")
+                verdict = parse_json_object(reviewed.choices[0].message.content)
+                if (set(verdict) != {"accepted", "issues", "understanding"}
+                        or verdict["accepted"] is not True or verdict["issues"] != []):
+                    raise ValueError("Independent proposal understanding review did not verify the request.")
+                if set(verdict["understanding"]) & {"semanticPolicyVersion", "criticalReview", "versionId", "evidenceSignature"}:
+                    raise ValueError("A model cannot author server review metadata.")
+                corrected = _validate_turn_understanding(verdict["understanding"], latest, forced_proposal)
+                _validate_proposal_interpretation(corrected, latest, snapshot, proposal_context, forced_proposal)
+                if any(not x.get("evidenceSpan") for x in corrected.get("changes") or []):
+                    raise ValueError("Reviewed changes lack individual designer evidence.")
+                corrected["criticalReview"] = {"verified": True, "reason": review_reason,
+                    "corrected": corrected != candidate, "attempt": attempt,
+                    "latencyMs": int((time.monotonic() - review_started) * 1000),
+                    "initialChanges": candidate.get("changes") or []}
+                candidate = corrected
+                _log_llm_event("proposal_understanding_reviewed", requestId=request_id,
+                    reason=review_reason, corrected=candidate["criticalReview"]["corrected"], attempt=attempt)
+            candidate["semanticPolicyVersion"] = 1
+            candidate["evidenceSignature"] = topic_signature(snapshot, proposal_context, latest)
+            return candidate
         except LLMServiceError:
             raise
         except Exception as exception:
             last_error = exception
+            _log_llm_event("proposal_understanding_rejected", requestId=request_id,
+                attempt=attempt, reason=str(exception)[:300])
+            messages.append({"role": "user", "content": (
+                "Repair the interpretation with the same original evidence and topic. "
+                + str(exception)[:400]
+            )})
     raise LLMServiceError(
         "MODEL_RESPONSE_INVALID",
         "Kimi could not reliably classify the designer's latest message. Retry it.",
@@ -4194,8 +4273,19 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     ) from last_error
 
 
+def _validate_proposal_interpretation(candidate, latest, snapshot, context, forced):
+    topic = candidate.get("proposalUnderstanding")
+    required = bool(context or forced or "revision_request" in candidate.get("acts", []))
+    if topic is None:
+        if required:
+            raise ValueError("An authorized proposal topic needs an evidence-bound interpretation.")
+        return
+    candidate["proposalUnderstanding"] = validate_topic(topic, designer_sources(context, latest), snapshot)
+
+
 def _validate_turn_understanding(payload, latest, forced_proposal=False):
-    if not isinstance(payload, dict) or set(payload) not in ({
+    metadata = {"proposalUnderstanding", "semanticPolicyVersion", "evidenceSignature", "criticalReview", "versionId"}
+    if not isinstance(payload, dict) or set(payload) - metadata not in ({
         "acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated",
     }, {"acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated", "changes"}):
         raise ValueError("Turn understanding has an invalid envelope.")
@@ -4230,16 +4320,20 @@ def _validate_turn_understanding(payload, latest, forced_proposal=False):
         "directionSufficient": payload["directionSufficient"],
         "mapRelated": payload["mapRelated"],
     }
+    result.update({key: payload[key] for key in metadata if key in payload})
     if "changes" in payload:
         changes = payload["changes"]
         allowed_properties = {"count", "position", "shape", "layout", "route", "push_order", "switching", "rhythm", "appearance", "unknown"}
         if not isinstance(changes, list) or any(
-            not isinstance(x, dict) or set(x) not in ({"component", "property"}, {"component", "property", "operation"})
+            not isinstance(x, dict) or set(x) not in ({"component", "property"}, {"component", "property", "operation"}, {"component", "property", "operation", "evidenceSpan"})
             or x.get("operation", "change") not in {"change", "preserve", "mention"}
             or x["component"] not in allowed_elements | {"gameplay"}
             or x["property"] not in allowed_properties for x in changes
         ):
             raise ValueError("Invalid requested change attributes.")
+        if any("evidenceSpan" in x and (not isinstance(x["evidenceSpan"], str)
+                or not x["evidenceSpan"].strip() or x["evidenceSpan"] not in latest) for x in changes):
+            raise ValueError("A requested change lacks exact latest-user evidence.")
         result["changes"] = changes
     return result
 
@@ -4588,12 +4682,17 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         "or confirmed design memory. Never replace a designer's explicit entity. "
         "statements must be short, understandable, and in the response language; avoid new map claims. "
         "Do not infer stronger requirements from assistant explanations or unconfirmed DesignContext hypotheses."
+        " Use the topic understanding to distinguish goals, edit scope, spatial focus and preservation. "
+        "Recheck it against original designerTurns: it is a candidate interpretation, not extra evidence. "
+        "A focus around an entity does not request relocating it. Visual composition is a valid goal "
+        "without additional transport or gameplay objectives. "
         " exactTransitions is empty unless the designer explicitly specified the exact coordinates and tile "
         "change. Never extract exact changes or coordinates from question text."
     )}, {"role": "user", "content": json.dumps({
         "designerTurns": turns, "answeredQuestions": discovery.get("answers") or [],
         "currentStageSnapshot": snapshot, "responseLanguage": stage_context.get("responseLanguage", "en"),
         "editableComponents": ["water", "internal_walls"],
+        "proposalUnderstanding": discovery.get("understanding") or {},
     }, ensure_ascii=False)}]
     last_issue = ""
     locked = {}
@@ -4632,7 +4731,8 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 "fill an unspecified goal but cannot replace an explicit binding. A short answer binds "
                 "to its supplied question. Reject 'early' interpreted as a fixed push count."
             )}, {"role": "user", "content": json.dumps({"designerTurns": turns,
-                "answeredQuestions": discovery.get("answers") or [], "interpretation": record}, ensure_ascii=False)}]
+                "answeredQuestions": discovery.get("answers") or [], "interpretation": record,
+                "proposalUnderstanding": discovery.get("understanding") or {}}, ensure_ascii=False)}]
             remaining = _remaining_until(deadline)
             reviewed = asyncio.run(asyncio.wait_for(_request_completion(
                 api_key, base_url, KIMI_MODEL, review_messages, 800, min(12.0, remaining),
@@ -4742,13 +4842,14 @@ def _proposal_objective_policy(conversation, stage_context):
     record = (stage_context or {}).get("requirementRecord")
     if isinstance(record, dict):
         requirements = record.get("requirements") or []
-        classes = {"boxAlternations": "box_dependency", "dependency": "box_dependency", "minimumPushes": "longer_transport", "solutionPushes": "longer_transport", "solutionSteps": "planning_depth", "appearance": "space_route_choice"}
+        classes = {"boxAlternations": "box_dependency", "dependency": "box_dependency", "minimumPushes": "longer_transport", "solutionPushes": "longer_transport", "solutionSteps": "planning_depth", "appearance": "visual_composition"}
         goal = next((x for x in requirements if x["strength"] != "invariant" and x["focused"]), None)
         goal = goal or next((x for x in requirements if x["property"] in classes), {})
         return {"schemaVersion": 2, "hardMetricGoals": [],
             "softObjectiveClass": classes.get(goal.get("property"), "general"),
             "targetEntities": sorted({e for x in requirements for e in x["entities"]}),
             "requiresMechanismEvidence": False, "requirementPolicyVersion": 1,
+            "designAspect": ((stage_context.get("proposalDiscovery") or {}).get("understanding") or {}).get("aspect", "unspecified"),
             "exactTransitions": record.get("exactTransitions") or []}
     user_text = " ".join(
         str(item.get("content") or "")
@@ -4979,6 +5080,9 @@ def _objective_mechanism_evidence(
         )
         passed = route_affected and structural_change
         missing = [] if passed else ["route_relevant_space_change"]
+    elif objective == "visual_composition":
+        # Structural/solver validation is not an aesthetic quality score.
+        passed, missing = False, ["visual_quality_not_machine_verified"]
     return {
         "passed": bool(passed),
         "objectiveClass": objective,
@@ -5130,7 +5234,7 @@ def _attempt_semantic_revision_replan(
     workflow = contract.get("revisionWorkflow") or {}
     if workflow and objective_policy.get("softObjectiveClass") not in {None, "general"}:
         workflow["softObjectives"] = [{
-            "kind": "route_mechanism",
+            "kind": "visual_preference" if objective_policy.get("softObjectiveClass") == "visual_composition" else "route_mechanism",
             "statement": str(objective_policy.get("softObjectiveClass"))[:600],
         }]
     operation_messages = _build_map_operation_messages(
@@ -5406,7 +5510,7 @@ def _generate_revision_search_proposal_sync(
         workflow = revision_contract.get("revisionWorkflow") or {}
         if workflow and objective_policy.get("softObjectiveClass") not in {None, "general"}:
             workflow["softObjectives"] = [{
-                "kind": "route_mechanism",
+                "kind": "visual_preference" if objective_policy.get("softObjectiveClass") == "visual_composition" else "route_mechanism",
                 "statement": str(objective_policy.get("softObjectiveClass"))[:600],
             }]
     except ValueError as exception:
@@ -5895,6 +5999,7 @@ def _preflight_revision_strategies(
     for index, strategy in enumerate(plan.strategies, start=1):
         partial = RevisionPlan((strategy,))
         try:
+            validate_plan_scope(partial, ((stage_context or {}).get("proposalDiscovery") or {}).get("understanding"))
             validate_revision_plan_against_map(
                 rows,
                 partial,
@@ -5990,7 +6095,9 @@ def _build_revision_plan_messages(
         "modifier can explore concrete cells inside focus and the allowed operators. Never invent a "
         "hard coordinate binding from a qualitative experience goal. " + conservative_binding_rule + " "
         "When possible, set displayReason to a short, natural participant-facing explanation in the response language: say why this strategy "
-        "fits the designer's request and what play benefit it should create. Do not put coordinates, internal field names, metric identifiers, "
+        "fits the designer's request and what visual or play benefit it should create. Visual goals need not "
+        "change push order or transport length; fixed entity anchors can frame water/wall composition. "
+        "Do not claim aesthetic success from solvability. Do not put coordinates, internal field names, metric identifiers, "
         "or implementation vocabulary in displayReason. This presentation field is optional and must not replace any execution field. "
         "focus must contain every required transition. editBudget is an integer 1..12; a single "
         "structural tile change may use budget 1, while moving a player, box, or target requires "
@@ -6495,6 +6602,7 @@ def _build_legacy_revision_execution_contract(stage_context=None):
 
 
 def _build_revision_execution_contract(plan, authorized_brief, stage_context=None):
+    validate_plan_scope(plan, ((stage_context or {}).get("proposalDiscovery") or {}).get("understanding"))
     if (stage_context or {}).get("aiEditableTilesOnly"):
         allowed = {"add_wall", "remove_wall", "add_water", "remove_water"}
         for strategy in plan.strategies:
@@ -6633,7 +6741,9 @@ def _build_map_operation_messages(
         "optional or compensating edits. Never replace a required remove_wall with a box/player "
         "move. "
         "The server objectivePolicy distinguishes hard metrics from a soft play objective. Hard "
-        "metricGoals must be met. For a soft objective, create candidates whose changed area affects "
+        "metricGoals must be met. For visual_composition, create coherent local spacing, repetition, "
+        "boundary or balance changes within the contract; a gameplay-route change is not required. "
+        "The solver validates playability, never subjective aesthetic success. For a gameplay soft objective, create candidates whose changed area affects "
         "the verified route and changes the relevant push order, alternation, transport, or detour "
         "mechanism; do not add irrelevant cells merely to change a metric. "
         "A moved player, box, or target requires paired operations that clear the old cell and place "
@@ -9123,6 +9233,7 @@ async def _generate_plain_with_model_fallback(
         and proposal_clarification.get("questionKey")
     )
     clarification_body_candidate = ""
+    clarification_semantic_review_failed = False
     total_grounding_dropped_count = 0
     intent_repair_map_facts = json.dumps(
         _stage_snapshot_for_prompt(rows, stage_context),
@@ -9228,6 +9339,17 @@ async def _generate_plain_with_model_fallback(
                     language,
                     stage_context,
                 )
+                if ((proposal_clarification or {}).get("semanticPolicyVersion") == 1
+                        and _clarification_needs_semantic_review(parsed_body, clarification_question)):
+                    clarification_semantic_review_failed = True
+                    parsed_body, reviewed_question_issue = await _review_proposal_clarification(
+                        api_key, base_url, parsed_body, clarification_question, stage_context,
+                        request_id, deadline,
+                    )
+                    clarification_question_issue = reviewed_question_issue or clarification_question_issue
+                    if not parsed_body:
+                        raise ValueError("No reliable proposal clarification body remains after semantic review.")
+                    clarification_semantic_review_failed = False
                 grounding_dropped_count += clarification_body_dropped
                 total_grounding_dropped_count += clarification_body_dropped
                 if parsed_body:
@@ -10370,7 +10492,7 @@ async def _generate_plain_with_model_fallback(
                 stage_context=stage_context,
                 solver_metrics=solver_metrics,
             )
-        if ordinary_discussion or human_edit_engagement_required:
+        if ordinary_discussion or human_edit_engagement_required or clarification_semantic_review_failed:
             raise last_error
         if _is_length_failure(last_error, validation_feedback):
             fallback_message = (
@@ -15101,6 +15223,58 @@ def _clean_proposal_clarification_body(body, stage_context):
     return separator.join(kept).strip(), dropped
 
 
+def _clarification_needs_semantic_review(body, question):
+    """Risk triggers select a semantic review, never infer intent or reject prose."""
+    text = re.sub(r"(?<![A-Za-z0-9])(?:B\d+|T\d+|P)(?![A-Za-z0-9])", "", body + "\n" + question, flags=re.I)
+    if re.search(r"\d|我(?:想|希望|要|打算)|\bI (?:want|hope|aim|intend)\b|必须|保持|不变|锁定|保留|\b(?:must|exactly|preserve|unchanged|keep)\b", text, re.I):
+        return True
+    if re.search(r"你(?:希望|想要|要求|决定)|\byou (?:want|wish|require|decided)\b", body, re.I):
+        return True
+    return bool(re.search(r"(?:移动|挪|增加|删除|减少|move|relocat|add|remov|reduc).{0,24}(?:箱子|目标|玩家|外壳|box|target|player|shell)", text, re.I))
+
+
+async def _review_proposal_clarification(api_key, base_url, body, question, stage_context, request_id, deadline):
+    discovery = stage_context.get("proposalDiscovery") or {}
+    specification = stage_context.get("proposalClarification") or {}
+    messages = [{"role": "system", "content": (
+        "Review the actual body and question, not just annotations. Return bodyIssues as exact complete "
+        "sentences from body that must be dropped, and questionIssue as null or a repair instruction. "
+        "Check speaker attribution: the designer owns their wish; AI can express its own tentative "
+        "suggestion/opinion, but cannot claim the designer's goal as its own. Reject invented user locks, "
+        "numeric requirements, fixed solution lengths, edit scope, and guaranteed effects. Witness counts "
+        "may be observations, never new preservation constraints. Only exact designer evidence establishes "
+        "requirements. Water/internal walls are editable; player/boxes/targets/outer shell are fixed. "
+        "Spatial references do not authorize entity edits. Visual goals need not increase transport or "
+        "change gameplay. Preserve reliable sentences and personal opinions; do not rewrite them, reject "
+        "a response for length/style, or require a stock opening. Questions may offer valid optional choices. "
+        "Do not put assistant suggestions into designer memory."
+    )}, {"role": "user", "content": json.dumps({
+        "body": body, "question": question, "designerTurns": discovery.get("userTurns") or [],
+        "answeredQuestions": discovery.get("answers") or [], "understanding": discovery.get("understanding") or {},
+        "questionIntent": specification.get("questionIntent"),
+        "currentStageSnapshot": stage_context.get("stageSnapshot") or {},
+        "verifiedRouteWitness": specification.get("routeEvidence") or {},
+    }, ensure_ascii=False)}]
+    remaining = min(10.0, _remaining_until(deadline))
+    if remaining <= 0:
+        raise asyncio.TimeoutError()
+    response = await asyncio.wait_for(_request_completion(api_key, base_url, KIMI_MODEL,
+        messages, 1000, remaining, task="proposal_clarification_review"), timeout=remaining)
+    if str(getattr(response.choices[0], "finish_reason", "")) == "length":
+        raise ValueError("Proposal clarification review was truncated.")
+    verdict = parse_json_object(response.choices[0].message.content)
+    sentences = _content_block_sentences(body)
+    if (set(verdict) != {"bodyIssues", "questionIssue"} or not isinstance(verdict["bodyIssues"], list)
+            or any(not isinstance(x, str) or x not in sentences for x in verdict["bodyIssues"])
+            or verdict["questionIssue"] is not None and (not isinstance(verdict["questionIssue"], str) or not verdict["questionIssue"].strip())):
+        raise ValueError("Proposal clarification review lacks exact component evidence.")
+    for sentence in dict.fromkeys(verdict["bodyIssues"]):
+        body = body.replace(sentence, "")
+    _log_llm_event("proposal_clarification_semantics_reviewed", requestId=request_id,
+        droppedSentenceCount=len(verdict["bodyIssues"]), questionAccepted=verdict["questionIssue"] is None)
+    return body.strip(), verdict["questionIssue"] or ""
+
+
 def _parse_proposal_clarification_payload(content, language, stage_context):
     """Parse Kimi's private body/question envelope and validate only the question."""
     try:
@@ -15128,10 +15302,9 @@ def _parse_proposal_clarification_payload(content, language, stage_context):
     elif not _proposal_clarification_allowed_labels(question, stage_context):
         issue = "The clarification question uses an entity label not supplied by the server."
     else:
-        key = ((stage_context or {}).get("proposalClarification") or {}).get(
-            "questionKey"
-        )
-        if not _proposal_clarification_dimension_matches(question, key):
+        specification = (stage_context or {}).get("proposalClarification") or {}
+        key = specification.get("questionKey")
+        if specification.get("semanticPolicyVersion") != 1 and not _proposal_clarification_dimension_matches(question, key):
             issue = f"The clarification question does not address the target dimension {key}."
     return body, question if not issue else "", issue, dropped
 

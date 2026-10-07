@@ -28,8 +28,8 @@ class SemanticEvaluationTests(unittest.TestCase):
         return {"suiteHash": evaluation.suite_hash(self.suite), "repeats": repeats, "runs": runs}
 
     def test_fixed_suite_has_unique_synthetic_cases_and_two_valid_maps(self):
-        self.assertEqual(len(self.suite["cases"]), 24)
-        self.assertEqual(len({case["id"] for case in self.suite["cases"]}), 24)
+        self.assertEqual(len(self.suite["cases"]), 36)
+        self.assertEqual(len({case["id"] for case in self.suite["cases"]}), 36)
         self.assertEqual({case["origin"] for case in self.suite["cases"]}, {"synthetic"})
 
     def test_expected_values_and_review_instructions_never_enter_model_input(self):
@@ -63,8 +63,8 @@ class SemanticEvaluationTests(unittest.TestCase):
     def test_missing_captures_are_failures_not_removed_from_denominator(self):
         report = evaluation.score(self.suite, self.captures([{"caseId": "zh_crowded", "repeat": 1, "result": self.result()}]))
         self.assertEqual(report["passed"], 1)
-        self.assertEqual(report["total"], 24)
-        self.assertEqual(report["missing"], 23)
+        self.assertEqual(report["total"], 36)
+        self.assertEqual(report["missing"], 35)
 
     def test_repeat_instability_and_regression_are_visible(self):
         baseline = self.captures([{"caseId": "zh_crowded", "repeat": i, "result": self.result()} for i in (1, 2)], 2)

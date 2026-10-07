@@ -2388,7 +2388,8 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("internally replay", prompt)
         self.assertIn("one verified solution witness", prompt)
         self.assertNotIn("你希望先围绕哪个箱子", prompt)
-        self.assertNotIn("Current Stage Snapshot", prompt)
+        self.assertEqual(prompt.count("Current Stage Snapshot"), 1)
+        self.assertIn("only map authority", prompt)
 
     def test_proposal_clarification_compact_experiment_is_independent_and_opt_in(self):
         conversation = [{"role": "user", "content": "Make the transport longer."}]
