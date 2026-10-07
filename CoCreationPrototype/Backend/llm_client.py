@@ -44,6 +44,7 @@ from design_requirements import (
     requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
     goal_rank, tradeoff_message, protected_change_requested,
     validate_requirement_components,
+    requirement_model_view, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, INTERPRETATION_VERSION,
 )
 from revision_workflow import (
     SemanticConstraintError,
@@ -130,7 +131,7 @@ CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
 PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV = (
     "COCREATION_PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT"
 )
-PROMPT_VERSION = "cocreation-v59-evidence-bound-proposal-semantics"
+PROMPT_VERSION = "cocreation-v60-stable-requirements-compensating-edits"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -4641,22 +4642,27 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         if cached.get("cacheKey") != cache_key:
             continue
         candidate = cached.get("record") or {}
-        fields = requirement_response_schema()["properties"]["requirements"]["items"]["required"]
         try:
-            restored = validate_requirement_record({
-                "requirements": [{key: item[key] for key in fields} for item in candidate.get("requirements") or []],
-                "automaticBindings": [{"entity": item["entity"], "reason": item["reason"]} for item in candidate.get("automaticBindings") or []],
-                "exactTransitions": candidate.get("exactTransitions") or [],
-            }, turns, snapshot)
+            restored = validate_requirement_record(requirement_model_view(candidate), turns, snapshot)
         except (ValueError, TypeError, KeyError):
             continue
-        restored.update({"topicId": candidate.get("topicId"), "evidenceSignature": cache_key})
+        restored.update({"topicId": candidate.get("topicId"), "evidenceSignature": cache_key,
+                         "interpretationVersion": INTERPRETATION_VERSION})
         _log_llm_event("requirements_reused", requestId=request_id, task="revision_requirements", cacheKey=cache_key)
         stage_context.setdefault("_reliabilityState", {})["verifiedRequirements"] = {
             "cacheKey": cache_key, "record": restored,
         }
         return restored
-    messages = [{"role": "system", "content": (
+    inherited = []
+    sources = {item["id"]: item["content"] for item in turns}
+    for cached in stage_context.get("verifiedRequirementCache") or []:
+        prior = cached.get("record") or {}
+        if cached.get("baseVersionId") != snapshot.get("versionId") or prior.get("interpretationVersion") != INTERPRETATION_VERSION:
+            continue
+        for raw in requirement_model_view(prior)["requirements"]:
+            if raw.get("evidenceSpan") and raw["evidenceSpan"] in sources.get(raw.get("sourceTurnId"), "") and raw not in inherited:
+                inherited.append(raw)
+    messages = [{"role": "system", "content": REQUIREMENT_SEMANTICS + " " + (
         "Interpret this single authorized proposal topic into the supplied JSON schema. "
         "Every requirement must use an exact evidenceSpan and sourceTurnId from a designer turn. "
         "Question text is linguistic context only, never evidence of a user requirement or current map fact. "
@@ -4693,14 +4699,20 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         "currentStageSnapshot": snapshot, "responseLanguage": stage_context.get("responseLanguage", "en"),
         "editableComponents": ["water", "internal_walls"],
         "proposalUnderstanding": discovery.get("understanding") or {},
+        "inheritedVerifiedRequirements": inherited,
+        "requirementDefinitions": REQUIREMENT_DEFINITIONS,
+        "inheritanceRule": "Retain unchanged verified meanings. Only exact later designer correction may supersede related items; recheck complete coverage, including inherited items, against all supplied evidence.",
     }, ensure_ascii=False)}]
     last_issue = ""
+    failure_details = {"task": "revision_requirements", "failureStage": "compilation", "failureKind": "timeout"}
     locked = {}
     attempt = 0
     for attempt in range(1, 3):
         remaining = _remaining_until(deadline)
         if remaining < 1:
             break
+        phase = "compilation"
+        repair_issues = []
         try:
             response = asyncio.run(asyncio.wait_for(_request_completion(
                 api_key, base_url, KIMI_MODEL, messages, 3200, min(20.0, remaining),
@@ -4711,13 +4723,14 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             payload = parse_json_object(response.choices[0].message.content)
             valid_items, component_issues = validate_requirement_components(payload, turns, snapshot)
             if component_issues:
+                repair_issues = component_issues
                 locked = {item["requirementId"]: raw for item, raw in valid_items}
                 raise ValueError(json.dumps(component_issues, ensure_ascii=False))
             record = validate_requirement_record(payload, turns, snapshot)
             raw_by_id = {item["requirementId"]: raw for item, raw in valid_items}
             if any(raw_by_id.get(identity) != raw for identity, raw in locked.items()):
                 raise ValueError("A local repair changed a locked, previously valid requirement.")
-            review_messages = [{"role": "system", "content": (
+            review_messages = [{"role": "system", "content": REQUIREMENT_SEMANTICS + " " + (
                 "Independently verify this interpretation against exact designer evidence. Return JSON "
                 "accepted and structured issues. Each issue has requirementIds, kind (evidence/meaning/coverage/conflict), "
                 "exact evidenceSpans from designerTurns, and repairInstruction. Use IDs from the interpretation; "
@@ -4733,14 +4746,26 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             )}, {"role": "user", "content": json.dumps({"designerTurns": turns,
                 "answeredQuestions": discovery.get("answers") or [], "interpretation": record,
                 "proposalUnderstanding": discovery.get("understanding") or {}}, ensure_ascii=False)}]
+            review_messages[1]["content"] = json.dumps({
+                **json.loads(review_messages[1]["content"]),
+                "inheritedVerifiedRequirements": inherited,
+                "requirementDefinitions": REQUIREMENT_DEFINITIONS,
+                "inheritanceRule": "Reject loss or reinterpretation of unchanged verified goals. Allow replacement only for exact later designer correction; qualitative appearance is not a numeric distribution claim.",
+            }, ensure_ascii=False)
             remaining = _remaining_until(deadline)
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            phase = "review"
             reviewed = asyncio.run(asyncio.wait_for(_request_completion(
-                api_key, base_url, KIMI_MODEL, review_messages, 800, min(12.0, remaining),
+                api_key, base_url, KIMI_MODEL, review_messages, 1600, min(12.0, remaining),
                 task="revision_requirement_review"), timeout=min(12.0, remaining)))
+            if getattr(reviewed.choices[0], "finish_reason", None) == "length":
+                raise ValueError("Independent requirements review JSON was truncated.")
             verdict = parse_json_object(reviewed.choices[0].message.content)
             if set(verdict) != {"accepted", "issues"} or not isinstance(verdict["accepted"], bool) or not isinstance(verdict["issues"], list):
                 raise ValueError("Invalid independent evidence review envelope.")
             if verdict["accepted"] is not True or verdict["issues"]:
+                repair_issues = verdict["issues"]
                 rejected = set()
                 for issue in verdict["issues"]:
                     if not isinstance(issue, dict) or set(issue) != {"requirementIds", "kind", "evidenceSpans", "repairInstruction"}:
@@ -4760,9 +4785,10 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 related = {(item["component"], item["property"]) for item in record["requirements"] if item["requirementId"] in rejected}
                 locked = {item["requirementId"]: raw_by_id[item["requirementId"]] for item in record["requirements"]
                     if item["requirementId"] not in rejected and (item["component"], item["property"]) not in related}
-                raise ValueError("Independent evidence review: " + json.dumps(verdict["issues"], ensure_ascii=False))
+                raise ValueError("Independent evidence review rejected requirements.")
             record["topicId"] = discovery.get("topicId")
             record["evidenceSignature"] = cache_key
+            record["interpretationVersion"] = INTERPRETATION_VERSION
             stage_context.setdefault("_reliabilityState", {})["verifiedRequirements"] = {
                 "cacheKey": cache_key, "record": record,
             }
@@ -4771,15 +4797,26 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             return record
         except LLMServiceError:
             raise
-        except Exception as exception:
-            last_issue = str(exception)[:600]
+        except (APIConnectionError, APIStatusError) as exception:
+            error = classify_exception(exception, request_id, attempt)
+            error.details = {"task": "revision_requirements", "failureStage": "upstream", "failureKind": "upstream"}
+            raise error from exception
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError, asyncio.TimeoutError) as exception:
+            failure_kind = "timeout" if isinstance(exception, asyncio.TimeoutError) else "truncated_json" if "truncated" in str(exception) else "invalid_json" if isinstance(exception, json.JSONDecodeError) else "interpretation"
+            last_issue = str(exception) or "Requirements phase exceeded its time limit."
+            failure_details = {"task": "revision_requirements", "failureStage": phase,
+                               "failureKind": failure_kind}
             _log_llm_event("llm_component_rejected", requestId=request_id, task="revision_requirements",
-                attempt=attempt, component="requirements", failureCode="REQUIREMENT_INTERPRETATION_INVALID", issues=last_issue)
+                attempt=attempt, component="requirements", failureCode="REQUIREMENT_INTERPRETATION_INVALID",
+                issues=last_issue[:600], **{key: value for key, value in failure_details.items() if key != "task"})
             messages.append({"role": "user", "content": json.dumps({
-                "repairIssue": last_issue, "lockedRequirements": list(locked.values()),
+                "repairIssue": last_issue, "structuredIssues": repair_issues,
+                "failureDetails": failure_details, "lockedRequirements": list(locked.values()),
                 "instruction": "Return the complete envelope, preserve locked items exactly, repair rejected and related items and recheck all designer evidence for missing requirements.",
             }, ensure_ascii=False)})
-    raise LLMServiceError("REQUIREMENT_INTERPRETATION_INVALID", "The design requirements could not be interpreted reliably. Retry this message.", request_id, True, attempt, 502)
+    error = LLMServiceError("REQUIREMENT_INTERPRETATION_INVALID", "The design requirements could not be interpreted reliably. Retry this message.", request_id, True, attempt, 502)
+    error.details = failure_details
+    raise error
 
 
 def _generate_verified_proposal_failure_analysis(api_key, base_url, context, rows, language, request_id, deadline, failure):
@@ -4850,7 +4887,9 @@ def _proposal_objective_policy(conversation, stage_context):
             "targetEntities": sorted({e for x in requirements for e in x["entities"]}),
             "requiresMechanismEvidence": False, "requirementPolicyVersion": 1,
             "designAspect": ((stage_context.get("proposalDiscovery") or {}).get("understanding") or {}).get("aspect", "unspecified"),
-            "exactTransitions": record.get("exactTransitions") or []}
+            "exactTransitions": record.get("exactTransitions") or [],
+            "editableRequestedComponents": [x["component"] for x in ((stage_context.get("proposalDiscovery") or {}).get("understanding") or {}).get("editScope") or []],
+            "requirements": requirements}
     user_text = " ".join(
         str(item.get("content") or "")
         for item in (conversation or [])[-12:]
@@ -4941,7 +4980,7 @@ def _apply_objective_policy_to_plan(plan, policy, preserved_components=None):
     )
     # Metric directions emitted by Kimi are hypotheses. Only server-derived,
     # explicit user requirements are allowed to reject an otherwise valid map.
-    return replace(plan, strategies=tuple(
+    plan = replace(plan, strategies=tuple(
         replace(
             strategy,
             metric_goals=hard_goals,
@@ -4951,6 +4990,38 @@ def _apply_objective_policy_to_plan(plan, policy, preserved_components=None):
         )
         for strategy in plan.strategies
     ))
+    if policy.get("requirementPolicyVersion") != 1:
+        return plan
+    aliases = {"water": "water", "wall": "internal_walls"}
+    requested = set(policy.get("editableRequestedComponents") or [])
+    if not requested:
+        requested = {aliases[x["component"]] for x in policy.get("requirements") or [] if x["component"] in aliases}
+    strategies = []
+    for strategy in plan.strategies:
+        if strategy.required_transitions:
+            strategies.append(strategy)
+            continue
+        preserve = set(strategy.preserve)
+        operators = list(strategy.operators)
+        for component, public_component in aliases.items():
+            preserve_name = "walls" if component == "wall" else "water"
+            if public_component not in requested or preserve_name in set(preserved_components or ()):
+                continue
+            # Model-suggested preservation is not a designer prohibition.
+            preserve.discard(preserve_name)
+            removal_forbidden = any(
+                x["component"] == component and x["property"] == "count"
+                and x["strength"] == "invariant" and x.get("scope") == "original_cells"
+                and x["relation"] in {"preserve", "equal"} and x["value"] is None
+                for x in policy.get("requirements") or [])
+            if removal_forbidden:
+                operators = [operator for operator in operators if operator != "remove_" + component]
+            if any(x["component"] == component and x["property"] == "count" and x["relation"] == "increase"
+                   and x.get("scope", "all") == "all" for x in policy.get("requirements") or []):
+                if not removal_forbidden and "add_" + component in operators and "remove_" + component not in operators:
+                    operators.append("remove_" + component)
+        strategies.append(replace(strategy, operators=tuple(operators), preserve=frozenset(preserve)))
+    return replace(plan, strategies=tuple(strategies))
 
 
 def _proposal_route_features(rows, validation, entity_bindings=None):
@@ -5136,8 +5207,6 @@ def _objective_validating_proposal_validator(
             evidence["goalRank"] = goal_rank(outcomes)
             if any(not x["passed"] for x in outcomes):
                 raise SemanticConstraintError(outcomes)
-            if not evidence["routeAffected"] and any(x["component"] == "gameplay" for x in record.get("requirements") or []):
-                raise ObjectiveEvidenceError({**evidence, "missing": ["route_relevant_change_required"]})
         if policy.get("requiresMechanismEvidence") and not evidence["passed"]:
             raise ObjectiveEvidenceError(evidence)
         return validation
@@ -6083,7 +6152,7 @@ def _build_revision_plan_messages(
         "effect is one of open_route, narrow_route, adjust_internal_walls, reshape_water. "
         "Player, boxes, targets, and the connected outer shell must stay fixed. "
         "focus is null or {row,column,radius}; coordinates are one-based, row "
-        "1..10, column 1..12, radius 1..3. operators contains one to three distinct values from "
+        "1..10, column 1..12, radius 1..3. operators contains one to four distinct values from "
         "add_wall, remove_wall, add_water, remove_water. "
         "preserve contains distinct values from outer_shell, player, boxes, targets, water, "
         "walls, unrelated_areas. Never list an operator that edits a preserved component. "
@@ -6097,6 +6166,9 @@ def _build_revision_plan_messages(
         "When possible, set displayReason to a short, natural participant-facing explanation in the response language: say why this strategy "
         "fits the designer's request and what visual or play benefit it should create. Visual goals need not "
         "change push order or transport length; fixed entity anchors can frame water/wall composition. "
+        "For a count increase, allow adding and removing that same authorized component to rearrange obstacles, "
+        "unless the designer prohibited removal or fixed their positions. Preserve only designer-established "
+        "restrictions; do not freeze an old route, obstacle total, or unspecified cells. "
         "Do not claim aesthetic success from solvability. Do not put coordinates, internal field names, metric identifiers, "
         "or implementation vocabulary in displayReason. This presentation field is optional and must not replace any execution field. "
         "focus must contain every required transition. editBudget is an integer 1..12; a single "
@@ -6743,8 +6815,8 @@ def _build_map_operation_messages(
         "The server objectivePolicy distinguishes hard metrics from a soft play objective. Hard "
         "metricGoals must be met. For visual_composition, create coherent local spacing, repetition, "
         "boundary or balance changes within the contract; a gameplay-route change is not required. "
-        "The solver validates playability, never subjective aesthetic success. For a gameplay soft objective, create candidates whose changed area affects "
-        "the verified route and changes the relevant push order, alternation, transport, or detour "
+        "The solver validates playability, never subjective aesthetic success. Net increases may remove old tiles and add more elsewhere within the contract. Goals may be partial or unchanged, never reversed. For a gameplay soft objective, try to create candidates whose changed area affects "
+        "a route and changes the relevant push order, alternation, transport, or detour "
         "mechanism; do not add irrelevant cells merely to change a metric. "
         "A moved player, box, or target requires paired operations that clear the old cell and place "
         "the entity on a current floor cell. Return JSON only with exactly this shape: "
@@ -6806,7 +6878,7 @@ def _modifier_contract_view(revision_contract):
             (revision_contract.get("revisionWorkflow") or {}).get("semanticConstraints") or []
         ),
         "requirements": [
-            {key: item[key] for key in ("requirementId", "component", "property", "relation", "strength", "entities", "value", "unit", "focused")}
+            {key: item[key] for key in ("requirementId", "component", "property", "relation", "strength", "entities", "value", "unit", "focused", "scope") if key in item}
             for item in ((revision_contract.get("revisionWorkflow") or {}).get("requirementRecord") or {}).get("requirements") or []
         ],
         "automaticBindings": ((revision_contract.get("revisionWorkflow") or {}).get("requirementRecord") or {}).get("automaticBindings") or [],
@@ -7447,7 +7519,7 @@ def _deterministic_exact_revision(
         operator_by_transition[(item["from"], item["to"])]
         for item in transitions
     ))
-    if len(operators) > 3:
+    if len(operators) > 4:
         raise LLMServiceError(
             "PROPOSAL_SEARCH_EXHAUSTED",
             "The frozen transition contract is too broad for one local proposal.",
@@ -7470,9 +7542,6 @@ def _deterministic_exact_revision(
     if effect is None:
         effect = effect_by_operator[operators[0]]
     focus = brief.get("focus")
-    if focus is None:
-        first = transitions[0]
-        focus = {"row": first["row"], "column": first["column"], "radius": 1}
     entity_operator = any(operator.startswith("move_") for operator in operators)
     edit_budget = max(len(transitions), 2 if entity_operator else 1)
     plan = parse_revision_plan({

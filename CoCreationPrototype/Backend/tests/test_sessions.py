@@ -91,6 +91,144 @@ PLAYER_MOVE_CONTRACT = {
 
 
 class CoCreationSessionTests(unittest.TestCase):
+
+    def test_visual_challenge_no_replans_original_water_and_freezes_before_acceptance(self):
+        from types import SimpleNamespace
+        version_id = self.read_session()["currentVersionId"]
+        base = list(SAMPLE_ROWS)
+        base[2] = "#.......@@.#"
+        with repository.connect(immediate=True) as database:
+            database.execute("UPDATE level_versions SET rows_json = ?, validation_json = ?, entity_bindings_json = ? WHERE id = ?",
+                (repository.dump_json(base), repository.dump_json(backend.validate_and_solve(base).as_dict()),
+                 repository.dump_json(backend.build_entity_bindings(base)), version_id))
+        initial = "我觉得这样不好看，让水面分散一些，帮我改一下"
+        reason = "你只是增加了水域，原来的水域也得减少一些"
+        replanning = False
+        model_inputs = []
+        def complete(payload):
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",
+                message=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False)))])
+        async def model(*args, **kwargs):
+            task = kwargs["task"]
+            data = json.loads(args[3][1]["content"]) if task.startswith("revision_requirement") else {}
+            model_inputs.append((task, data))
+            if task == "revision_requirements":
+                sources = data["designerTurns"]
+                visual = next(item for item in sources if item["content"] == initial)
+                def item(source, prop, relation, **extra):
+                    return {"component": "water", "property": prop, "relation": relation, "strength": "goal",
+                        "entities": [], "value": None, "unit": "none", "priorityEvidenceSpan": "", "focused": True,
+                        "sourceTurnId": source["id"], "evidenceSpan": source["content"], "statement": source["content"], **extra}
+                items = [item(visual, "appearance", "seek")]
+                if replanning:
+                    correction = next(item for item in sources if item["content"] == reason)
+                    items.append(item(correction, "count", "decrease", scope="original_cells"))
+                return complete({"requirements": items, "automaticBindings": [], "exactTransitions": []})
+            if task == "revision_requirement_review":
+                return complete({"accepted": True, "issues": []})
+            if task == "revision_plan":
+                return complete({"strategies": [{"effect": "reshape_water", "focus": None,
+                    "operators": ["add_water", "remove_water"], "preserve": ["outer_shell", "player", "boxes", "targets", "walls", "unrelated_areas"],
+                    "editBudget": 3, "metricGoals": [], "requiredTransitions": [], "anchorEntities": [], "playObjective": "visual composition"}]})
+            if task == "operation_candidates":
+                operations = [{"row": 2, "column": 2, "from": ".", "to": "@"}]
+                if replanning:
+                    operations += [{"row": 3, "column": 9, "from": "@", "to": "."},
+                        {"row": 2, "column": 3, "from": ".", "to": "@"}]
+                return complete({"candidates": [{"strategyIndex": 1, "operations": operations}]})
+            raise AssertionError("Unexpected live model task: " + task)
+        real_generate = backend.generate_chat_reply
+        def generate(conversation, rows, request_id, **kwargs):
+            if kwargs["stage_context"].get("deterministicExactExecution"):
+                return real_generate(conversation, rows, request_id, **kwargs)
+            return llm_client._generate_revision_search_proposal_sync(api_key="offline", base_url="offline",
+                conversation=conversation, rows=rows, request_id=request_id, language=kwargs["language"],
+                proposal_validator=kwargs["proposal_validator"], stage_context=kwargs["stage_context"],
+                baseline_metrics=kwargs["solver_metrics"], deadline=kwargs["_deadline"])
+        def send(payload):
+            return self.client.post(f"/api/sessions/{self.session_id}/messages",
+                json={"baseVersionId": version_id, **payload})
+        with patch.object(llm_client, "_request_completion", side_effect=model), patch.object(backend, "generate_chat_reply", side_effect=generate):
+            evidence = {"statement": initial, "sourceTurnId": "latest", "evidenceSpan": initial}
+            understanding = {"acts": ["revision_request"], "elements": ["water"], "evidenceSpan": initial,
+                "directionSufficient": True, "mapRelated": True,
+                "changes": [{"component": "water", "operation": "change", "property": "layout", "evidenceSpan": initial}],
+                "proposalUnderstanding": {"aspect": "visual", "goals": [evidence],
+                    "editScope": [{**evidence, "component": "water"}], "focus": [], "preserve": [],
+                    "sufficient": True, "nextQuestionDimension": "none"}}
+            with patch.object(backend, "classify_turn_understanding", return_value=understanding):
+                offered = send({"content": initial, "idempotencyKey": "visual-offer", "requestProposal": True})
+            self.assertEqual(offered.status_code, 200, offered.text)
+            source = offered.json()["turns"][-1]
+            challenged = send({"content": "质疑这个方案", "idempotencyKey": "visual-challenge",
+                "action": "challenge_revision", "sourceTurnId": source["turnId"]})
+            self.assertEqual(challenged.status_code, 200, challenged.text)
+            challenge_id = challenged.json()["turns"][-1]["guidance"]["challengeState"]["challengeId"]
+            with patch.object(backend, "classify_challenge_reason", return_value={"relation": "different",
+                    "merit": "reasonable", "comparison": "I understand that the original water tiles should also be reduced.", "attemptsUsed": 1}):
+                reviewed = send({"content": reason, "idempotencyKey": "visual-reason"})
+            self.assertEqual(reviewed.status_code, 200, reviewed.text)
+            replanning = True
+            choice = {"content": "否", "idempotencyKey": "visual-no", "action": "continue_challenge",
+                "challengeId": challenge_id, "challengeChoice": "user"}
+            replaced = send(choice)
+            self.assertEqual(replaced.status_code, 200, replaced.text)
+            replacement = replaced.json()["turns"][-1]
+            with repository.connect() as database:
+                binding = database.execute("SELECT proposal_binding_json FROM conversation_turns WHERE id = ?",
+                    (replacement["turnId"],)).fetchone()
+            brief = repository.load_json(binding["proposal_binding_json"])["executionBrief"]
+            self.assertEqual(len(brief["requiredTransitions"]), 3)
+            self.assertTrue(any(item["from"] == "@" and item["to"] == "." for item in brief["requiredTransitions"]))
+            self.assertEqual(len(replaced.json()["versions"]), 1)
+            calls = len(model_inputs)
+            retry = send(choice)
+            self.assertEqual(retry.status_code, 200, retry.text)
+            self.assertEqual(len(model_inputs), calls)
+            self.assertEqual(sum(turn["requestId"] == "visual-no" and turn["role"] == "user" for turn in retry.json()["turns"]), 1)
+            review = [data for task, data in model_inputs if task == "revision_requirement_review"][-1]
+            self.assertEqual(review["inheritedVerifiedRequirements"][0]["property"], "appearance")
+            pending = send({"content": "执行这个方案", "idempotencyKey": "visual-execute",
+                "action": "execute_revision", "sourceTurnId": replacement["turnId"]})
+            self.assertEqual(pending.status_code, 200, pending.text)
+            self.assertEqual(len(pending.json()["versions"]), 1)
+            proposal_id = next(item["proposalId"] for item in pending.json()["proposals"] if item["status"] == "pending")
+            accepted = self.client.post(f"/api/sessions/{self.session_id}/proposals/{proposal_id}/decision",
+                json={"decision": "accept", "baseVersionId": version_id, "idempotencyKey": "visual-accept", "reason": ""})
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            final = accepted.json()
+            self.assertEqual(len(final["versions"]), 2)
+            final_rows = final["versions"][-1]["rows"]
+            self.assertEqual(sum(row.count("@") for row in final_rows), 3)
+            self.assertEqual(final_rows[2][8], ".")
+            self.assertEqual(final["versions"][0]["rows"], base)
+
+    def test_last_message_failure_is_safe_stage_bound_and_cleared_after_retry(self):
+        version_id = self.read_session()["currentVersionId"]
+        error = LLMServiceError("REQUIREMENT_INTERPRETATION_INVALID", "private provider prose", "failure-request", True, 2, 502)
+        error.details = {"task": "revision_requirements", "failureStage": "review", "failureKind": "truncated_json"}
+        payload = {"content": "请帮我减少原来的水域", "baseVersionId": version_id, "idempotencyKey": "diagnostic-message"}
+        with patch.object(backend, "generate_chat_reply", side_effect=error):
+            failed = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+        self.assertEqual(failed.status_code, 502, failed.text)
+        session = self.read_session()
+        diagnostic = session["lastMessageFailure"]
+        self.assertEqual(diagnostic["messageKey"], payload["idempotencyKey"])
+        self.assertEqual(diagnostic["details"]["failureKind"], "truncated_json")
+        self.assertEqual(diagnostic["requestId"], "failure-request")
+        self.assertNotIn("private provider prose", json.dumps(diagnostic))
+        with repository.connect(immediate=True) as database:
+            repository.record_event(database, self.session_id, "message_generation_failed",
+                {"baseVersionId": "other-stage", "messageKey": payload["idempotencyKey"], "code": "WRONG"}, backend.utc_now())
+        self.assertEqual(self.read_session()["lastMessageFailure"]["code"], error.code)
+        reply = LLMExecutionResult("I have not found a verified replacement; the original direction remains available.",
+            1, "recovered", model="mock-model", guidance={"proposalOffer": None, "uiCues": []},
+            proposal_diagnostics={"verifiedFailureAnalysis": True, "proposalStatus": "revision_needed"})
+        with patch.object(backend, "generate_chat_reply", return_value=reply):
+            retried = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertIsNone(retried.json()["lastMessageFailure"])
+
     def test_proposal_semantics_bind_focus_and_persist_real_turn_ids_on_http_retry(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock

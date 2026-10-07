@@ -8,6 +8,23 @@ import json
 
 
 POLICY_VERSION = 1
+INTERPRETATION_VERSION = 2
+REQUIREMENT_SEMANTICS = (
+    "Use the same definitions for compilation, review and execution. "
+    "count measures occupied tiles; scope=all compares total component counts, "
+    "scope=original_cells compares only the component cells in the current immutable Stage. "
+    "Use original_cells only when the designer explicitly refers to existing/original tiles. "
+    "An explicit prohibition on removing existing tiles uses invariant count/preserve, "
+    "scope=original_cells, value=null and unit=none; additional tiles remain allowed. "
+    "Removing original water does not imply reducing total water or preserving its total. "
+    "distribution is only the numeric row-plus-column extent, not aesthetic dispersion. "
+    "Qualitative dispersion, neatness, balance and composition use appearance/seek, "
+    "value=null and unit=none, with the original designer statement and evidence. "
+    "Appearance is not machine-verified; do not invent count, distance or route requirements. "
+    "Explicit numeric directions use increase/decrease; partial or unchanged goals are allowed, "
+    "opposite directions are rejected. Fixed counts/positions and exact transitions remain binding. "
+    "Do not derive design priorities from assistant opinions."
+)
 COMPONENTS = {"water", "wall", "player", "box", "target", "gameplay"}
 PROPERTIES = {
     "count", "positions", "distribution", "distance", "change_scope",
@@ -17,6 +34,37 @@ PROPERTIES = {
 RELATIONS = {"increase", "decrease", "equal", "preserve", "relocate", "nearer", "farther", "early", "later", "seek", "avoid"}
 TILES = {"water": {"@"}, "wall": {"#"}, "player": {"p", "+"}, "box": {"s", "*"}, "target": {"t", "+", "*"}}
 METRICS = {"solutionSteps", "minimumPushes", "solutionPushes", "boxAlternations", "longestPushRun"}
+PROPERTY_RELATIONS = {
+    **{prop: {"increase", "decrease", "equal", "preserve"}
+       for prop in METRICS | {"count", "distribution", "change_scope"}},
+    "distance": {"nearer", "farther", "equal", "preserve"},
+    "appearance": {"seek", "avoid"},
+}
+REQUIREMENT_DEFINITIONS = {
+    "properties": {
+        "count": "Occupied component cells; original_cells counts retained cells from the immutable Stage, not new cells.",
+        "positions": "The set of current component positions.",
+        "distribution": "Numeric row extent plus column extent, not qualitative dispersion or beauty.",
+        "distance": "Minimum Manhattan distance from component cells to the first explicitly bound fixed entity.",
+        "change_scope": "Number of changed map cells, not component count.",
+        "solutionSteps": "Steps in the verified solver witness, not all solutions or human play time.",
+        "solutionPushes": "Pushes in the verified solver witness.",
+        "minimumPushes": "Independently verified minimum pushes; unavailable metrics cannot be claimed verified.",
+        "boxAlternations": "Switches between boxes in the verified witness.",
+        "longestPushRun": "Longest consecutive push run for one box in the verified witness.",
+        "timing": "First push run and interruption evidence for an explicitly bound box.",
+        "dependency": "Requested gameplay dependency; general dependency claims remain unverified.",
+        "experience": "Qualitative play experience; human duration and difficulty remain unverified.",
+        "appearance": "Qualitative composition goal; value=null, unit=none, always aesthetically unverified.",
+    },
+    "allowedRelations": {prop: sorted(PROPERTY_RELATIONS.get(prop, RELATIONS)) for prop in PROPERTIES},
+    "mapProperties": ["count", "positions", "distribution", "distance"],
+    "mapComponents": sorted(COMPONENTS - {"gameplay"}),
+    "invariants": "Only count/positions/distribution with equal/preserve, or an explicit numeric change_scope.",
+    "units": "absolute=fixed value, delta=explicit change amount, none=no stated number; never derive numbers from entity labels.",
+    "scope": "all by default; original_cells only for count on water/wall. The server binds original cells.",
+    "evidence": "Exact designer Turn and evidenceSpan for each item; exact designer evidence for priority and every numeric value. No assistant hypotheses as requirements.",
+}
 
 
 def requirement_response_schema():
@@ -33,10 +81,11 @@ def requirement_response_schema():
         "sourceTurnId": {"type": "string"},
         "evidenceSpan": {"type": "string"},
         "statement": {"type": "string"},
+        "scope": {"type": "string", "enum": ["all", "original_cells"]},
     }
     return {"type": "object", "additionalProperties": False, "properties": {
         "requirements": {"type": "array", "items": {"type": "object", "additionalProperties": False,
-            "properties": properties, "required": list(properties)}},
+            "properties": properties, "required": [key for key in properties if key != "scope"]}},
         "automaticBindings": {"type": "array", "items": {"type": "object", "additionalProperties": False,
             "properties": {"entity": {"type": "string"}, "reason": {"type": "string"}},
             "required": ["entity", "reason"]}},
@@ -60,9 +109,14 @@ def validate_requirement_record(payload, user_turns, snapshot):
     requirements, seen = [], set()
     fields = set(requirement_response_schema()["properties"]["requirements"]["items"]["required"])
     for raw in raw_requirements:
-        if not isinstance(raw, dict) or set(raw) != fields:
+        if not isinstance(raw, dict) or not fields.issubset(raw) or set(raw) - fields - {"scope"}:
             raise ValueError("Invalid typed requirement.")
         item = dict(raw)
+        scope = item.get("scope", "all")
+        if scope not in {"all", "original_cells"}:
+            raise ValueError("Invalid requirement scope.")
+        if scope == "original_cells" and (item["property"] != "count" or item["component"] not in {"water", "wall"}):
+            raise ValueError("Original-cell scope is only supported for editable component counts.")
         source = sources.get(item["sourceTurnId"])
         span = item["evidenceSpan"]
         if source is None or not isinstance(span, str) or not span.strip() or span not in source:
@@ -102,13 +156,17 @@ def validate_requirement_record(payload, user_turns, snapshot):
             raise ValueError("A directional goal cannot become an immutable constraint.")
         if prop in {"count", "positions", "distribution", "distance"} and item["component"] == "gameplay":
             raise ValueError("Map attribute needs an actual map component.")
-        if prop in METRICS and relation not in {"increase", "decrease", "equal", "preserve"}:
+        if prop in METRICS and relation not in PROPERTY_RELATIONS[prop]:
             raise ValueError("Metric direction is invalid.")
-        if prop in {"count", "distribution", "change_scope"} and relation not in {"increase", "decrease", "equal", "preserve"}:
+        if prop in {"count", "distribution", "change_scope"} and relation not in PROPERTY_RELATIONS[prop]:
             raise ValueError("Numeric map attribute needs a numeric relation.")
-        if prop == "distance" and relation not in {"nearer", "farther", "equal", "preserve"}:
+        if prop == "distance" and relation not in PROPERTY_RELATIONS[prop]:
             raise ValueError("Distance needs a distance relation.")
+        if prop == "appearance" and (relation not in PROPERTY_RELATIONS[prop] or value is not None or item["unit"] != "none"):
+            raise ValueError("Qualitative appearance uses seek/avoid without numeric units or values.")
         identity = json.dumps({key: item[key] for key in ("component", "property", "relation", "entities", "value", "unit", "strength")}, sort_keys=True)
+        if scope != "all":
+            identity += "|scope=" + scope
         if identity in seen:
             continue
         seen.add(identity)
@@ -159,6 +217,18 @@ def validate_requirement_components(payload, user_turns, snapshot):
     return valid, issues
 
 
+def requirement_model_view(record):
+    """Remove server fields without losing optional scope on replay/review."""
+    fields = requirement_response_schema()["properties"]["requirements"]["items"]["properties"]
+    return {
+        "requirements": [{key: item[key] for key in fields if key in item}
+                         for item in (record or {}).get("requirements") or []],
+        "automaticBindings": [{"entity": item["entity"], "reason": item["reason"]}
+                              for item in (record or {}).get("automaticBindings") or []],
+        "exactTransitions": (record or {}).get("exactTransitions") or [],
+    }
+
+
 def positions(rows, component):
     return {(r + 1, c + 1) for r, row in enumerate(rows) for c, tile in enumerate(row) if tile in TILES.get(component, set())}
 
@@ -172,7 +242,8 @@ def evaluate_requirements(base_rows, candidate_rows, record, before_features=Non
         before, after = positions(base_rows, item["component"]), positions(candidate_rows, item["component"])
         value_before = value_after = None
         if prop == "count":
-            value_before, value_after = len(before), len(after)
+            value_before = len(before)
+            value_after = len(before & after) if item.get("scope") == "original_cells" else len(after)
         elif prop in METRICS:
             value_before, value_after = before_features.get(prop), after_features.get(prop)
         elif prop == "change_scope":
@@ -257,7 +328,7 @@ def preflight_requirements(rows, record):
     """Reject actual fixed-rule conflicts before spending the search budget."""
     issues, locks, transitions = [], {}, {}
     for item in (record or {}).get("requirements") or []:
-        key = (item["component"], item["property"], tuple(item["entities"]))
+        key = (item["component"], item["property"], tuple(item["entities"]), item.get("scope", "all"))
         if item["strength"] == "invariant":
             if key in locks and (locks[key]["value"], locks[key]["relation"]) != (item["value"], item["relation"]):
                 issues.append({"requirementId": item["requirementId"], "reason": "conflicting_fixed_requirements"})
@@ -277,7 +348,7 @@ def preflight_requirements(rows, record):
         transitions[point] = item["to"]
         for component, tiles in TILES.items():
             if item["from"] in tiles or item["to"] in tiles:
-                lock = locks.get((component, "positions", ()))
+                lock = locks.get((component, "positions", (), "all"))
                 if lock:
                     issues.append({"requirementId": lock["requirementId"], "reason": "exact_transition_conflicts_with_preservation"})
     return issues

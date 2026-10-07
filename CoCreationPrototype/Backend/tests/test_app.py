@@ -955,7 +955,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("reply-reliability-20261003", index_response.text)
+        self.assertIn("revision-flow-20261007", index_response.text)
         self.assertIn("sendChallengeChoice", js_response.text)
         self.assertIn("offer.availableActions.includes(action)", js_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
@@ -1492,6 +1492,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 "details": {
                     "task": "chat",
                     "failureStage": "upstream",
+                    "failureKind": "upstream",
                     "failureCode": "UPSTREAM_TIMEOUT",
                     "attemptsUsed": 2,
                     "maximumAttempts": 3,

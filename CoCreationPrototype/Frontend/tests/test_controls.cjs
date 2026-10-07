@@ -4,7 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-function loadApp() {
+function loadApp({ keepSubmit = false } = {}) {
     const created = [];
     function element(tagName = "div") {
         const attributes = new Map();
@@ -69,7 +69,7 @@ function loadApp() {
             }]
         };
         persistPendingMessage = () => {};
-        submitPendingMessage = async () => {};
+        ${keepSubmit ? "" : "submitPendingMessage = async () => {};"}
     `, context);
     return { context, created };
 }
@@ -229,4 +229,69 @@ test("diagnostic error details retain the server request ID and phase", async ()
         "api('/api/sessions/session/messages', { method: 'POST', body: { idempotencyKey: 'same-key' } })", context),
     error => error.details.requestId === "diagnostic-id" && error.details.failureStage === "evidence"
         && error.details.httpStatus === 502);
+});
+
+test("unreadable response recovers only the matching current request diagnostic", () => {
+    const { context } = loadApp();
+    const result = vm.runInContext(`
+        const unreadable = Object.assign(new Error('generic'), { code: 'RETRYABLE_REQUEST_FAILED',
+            retryable: true, details: { httpStatus: 502 } });
+        const pending = { idempotencyKey: 'original-key', baseVersionId: 'stage' };
+        const latest = { lastMessageFailure: { messageKey: 'original-key', baseVersionId: 'stage',
+            code: 'REQUIREMENT_INTERPRETATION_INVALID', retryable: true, committed: false,
+            requestId: 'server-id', details: { failureStage: 'review', failureKind: 'truncated_json' } } };
+        const recovered = recoverMessageFailure(unreadable, latest, pending);
+        [recovered.code, recovered.retryable, recovered.details.requestId,
+            recovered.details.failureKind, recovered.details.httpStatus];
+    `, context);
+    assert.deepEqual(Array.from(result), ['REQUIREMENT_INTERPRETATION_INVALID', true, 'server-id', 'truncated_json', 502]);
+    for (const changes of [{ messageKey: 'other' }, { baseVersionId: 'history' }, { committed: true }]) {
+        context.changes = changes;
+        assert.equal(vm.runInContext(
+            "recoverMessageFailure(unreadable, { lastMessageFailure: { ...latest.lastMessageFailure, ...changes } }, pending) === unreadable", context), true);
+    }
+    assert.equal(vm.runInContext(
+        "recoverMessageFailure({ code: 'INVALID_CARD_SOURCE' }, latest, pending).code", context), 'INVALID_CARD_SOURCE');
+});
+
+test("message refresh recovers a diagnostic without changing retry input, then clears it on success", async () => {
+    for (const committed of [false, true]) {
+        const { context } = loadApp({ keepSubmit: true });
+        context.committedOnRefresh = committed;
+        vm.runInContext(`
+            startChatTimer = stopChatTimer = hideNotice = renderChatRequestStatus = updateControls = render = updateCharacterCount = () => {};
+            state.pendingMessage = { content: "否", baseVersionId: "v1", idempotencyKey: "same-key",
+                requestProposal: true, action: "continue_challenge", challengeId: "challenge-1", challengeChoice: "user" };
+            elements.messageInput.value = "否";
+            var capturedRetry = JSON.stringify(state.pendingMessage);
+            var apiCalls = [];
+            api = async (path, options = {}) => {
+                apiCalls.push({ path, body: options.body && JSON.stringify(options.body) });
+                if (apiCalls.length === 1) {
+                    const error = new Error("Unreadable HTTP error");
+                    error.code = "RETRYABLE_REQUEST_FAILED";
+                    error.retryable = true;
+                    throw error;
+                }
+                const success = apiCalls.length > 2 || committedOnRefresh;
+                return { ...state.session, turns: success ? [{ role: "assistant", versionId: "v1", requestId: "same-key" }] : [],
+                    lastMessageFailure: success ? null : { messageKey: "same-key", baseVersionId: "v1",
+                        code: "REQUIREMENT_INTERPRETATION_INVALID", retryable: true, committed: false,
+                        requestId: "server-request", details: { failureStage: "review", failureKind: "truncated_json" } } };
+            };
+        `, context);
+        await vm.runInContext("submitPendingMessage()", context);
+        if (!committed) {
+            assert.equal(vm.runInContext("state.chatError.code", context), "REQUIREMENT_INTERPRETATION_INVALID");
+            assert.equal(vm.runInContext("state.chatError.details.failureKind", context), "truncated_json");
+            assert.equal(vm.runInContext("JSON.stringify(state.pendingMessage) === capturedRetry", context), true);
+            assert.equal(vm.runInContext("elements.messageInput.value", context), "否");
+            await vm.runInContext("retryPendingMessage()", context);
+            assert.equal(vm.runInContext("apiCalls[2].body === capturedRetry", context), true);
+        }
+        assert.equal(vm.runInContext("state.pendingMessage", context), null);
+        assert.equal(vm.runInContext("state.chatError", context), null);
+        assert.equal(vm.runInContext("state.chatStatus", context), "idle");
+        assert.equal(vm.runInContext("state.busy", context), false);
+    }
 });

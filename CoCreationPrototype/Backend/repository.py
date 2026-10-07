@@ -1360,6 +1360,32 @@ def record_event(database, session_id, event_type, payload, created_at):
     )
 
 
+def _last_message_failure(database, session, turns):
+    """Current request diagnostics only; never expose audit prose or stale failures."""
+    version_id = session["current_version_id"]
+    user = next((row for row in reversed(turns) if row["role"] == "user" and row["version_id"] == version_id), None)
+    if user is None or not user["request_id"]:
+        return None
+    key = user["request_id"]
+    if any(row["role"] == "assistant" and row["version_id"] == version_id and row["request_id"] == key for row in turns):
+        return None
+    row = database.execute("""SELECT payload_json FROM audit_events
+        WHERE session_id = ? AND event_type = 'message_generation_failed'
+          AND json_extract(payload_json, '$.baseVersionId') = ?
+          AND json_extract(payload_json, '$.messageKey') = ? ORDER BY id DESC LIMIT 1""",
+        (session["id"], version_id, key)).fetchone()
+    if row is None:
+        return None
+    payload = load_json(row["payload_json"]) or {}
+    details = payload.get("details") or {}
+    return {"messageKey": key, "baseVersionId": version_id, "code": payload.get("code"),
+            "requestId": payload.get("requestId"), "retryable": bool(payload.get("retryable", True)),
+            "committed": False,
+            "details": {name: details[name] for name in (
+                "task", "failureStage", "failureKind", "failureCode", "attemptsUsed", "maximumAttempts", "recoveryState"
+            ) if name in details}}
+
+
 def serialize_session(database, session_id):
     session = get_session(database, session_id)
 
@@ -2420,6 +2446,7 @@ def serialize_session(database, session_id):
         "matchId": session["match_id"],
         "playerNumber": session["player_number"],
         "currentVersionId": session["current_version_id"],
+        "lastMessageFailure": _last_message_failure(database, session, turns),
         "finalVersionId": session["final_version_id"],
         "createdAt": session["created_at"],
         "updatedAt": session["updated_at"],

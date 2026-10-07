@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from itertools import combinations
 
 from level_validation import build_map_facts, minimum_pushes
 
@@ -196,6 +197,9 @@ class SearchState:
                 # seal a water tile as a wall does not have to expose an
                 # invalid intermediate floor map to the search.
                 operators.update({"remove_water", "add_wall"})
+            elif primitive.operator.startswith("compensate_"):
+                component = primitive.operator.removeprefix("compensate_")
+                operators.update({"remove_" + component, "add_" + component})
             else:
                 operators.add(primitive.operator)
         return frozenset(operators)
@@ -257,7 +261,7 @@ def _parse_strategy(payload, index):
     operators = payload["operators"]
     if (
         not isinstance(operators, list)
-        or not 1 <= len(operators) <= 3
+        or not 1 <= len(operators) <= 4
         or len(set(operators)) != len(operators)
         or any(operator not in OPERATORS for operator in operators)
     ):
@@ -855,7 +859,25 @@ def _generate_primitives(
         len(item.changes),
         _primitive_key(item),
     ))
-    return primitives
+    if strategy.required_transitions or strategy.edit_budget < 3 or movement_requirement:
+        return primitives
+    grouped = []
+    for component in ("water", "wall"):
+        preserved = set(preserved_components or ()) | set(strategy.preserve)
+        if _operator_changes_preserved_component("remove_" + component, preserved):
+            continue
+        removals = [item for item in primitives if item.operator == "remove_" + component][:4]
+        additions = [item for item in primitives if item.operator == "add_" + component][:6]
+        for removal, pair in ((removal, pair) for removal in removals for pair in combinations(additions, 2)):
+            group = (removal, *pair)
+            grouped.append(Primitive("compensate_" + component,
+                tuple(change for item in group for change in item.changes),
+                all(item.preserves_solution for item in group), sum(item.distance for item in group)))
+            if sum(item.operator == "compensate_" + component for item in grouped) >= 4:
+                break
+    # Reserve a few slots for atomic net additions so single-tile beams do not
+    # crowd out opening an old passage while obstructing another area.
+    return grouped + primitives
 
 
 def _anchor_positions(rows, anchor_entities, entity_bindings=None):
@@ -962,7 +984,9 @@ def _select_beam(states):
         tuple(_primitive_key(item) for item in state.primitives),
         state.rows,
     ))
-    return ordered[:BEAM_WIDTH]
+    compound = [state for state in ordered if any(
+        item.operator.startswith("compensate_") for item in state.primitives)][:4]
+    return compound + [state for state in ordered if state not in compound][:BEAM_WIDTH - len(compound)]
 
 
 def _evaluate_state(

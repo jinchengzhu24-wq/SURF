@@ -2781,6 +2781,19 @@ async function submitPendingMessage() {
                     `/api/sessions/${encodeURIComponent(state.sessionId)}`
                 );
                 state.session = latest;
+                error = recoverMessageFailure(error, latest, pending);
+                if (latest.turns?.some(turn => turn.role === "assistant" && turn.versionId === pending.baseVersionId
+                    && turn.requestId === pending.idempotencyKey)) {
+                    clearPendingMessage();
+                    setProposalMode(false);
+                    elements.messageInput.value = "";
+                    localStorage.removeItem(composerKey());
+                    state.chatStatus = "idle";
+                    state.chatError = null;
+                    updateCharacterCount();
+                    render();
+                    return;
+                }
                 render();
             } catch (_proposalStateRefreshError) {
                 // The original retryable error remains the useful action.
@@ -3965,6 +3978,20 @@ async function api(path, options = {}) {
     } finally {
         if (timeoutId !== null) window.clearTimeout(timeoutId);
     }
+}
+
+function recoverMessageFailure(error, session, pending) {
+    if (!["RETRYABLE_REQUEST_FAILED", "INVALID_RESPONSE", "CLIENT_TIMEOUT"].includes(error?.code)) return error;
+    const failure = session?.lastMessageFailure;
+    if (!failure || failure.messageKey !== pending?.idempotencyKey
+        || failure.baseVersionId !== pending?.baseVersionId || failure.committed !== false
+        || typeof failure.code !== "string" || !failure.code) return error;
+    const recovered = new Error(error.message);
+    recovered.code = failure.code;
+    recovered.retryable = Boolean(failure.retryable);
+    recovered.details = { ...(error.details || {}), ...(failure.details || {}),
+        requestId: failure.requestId || error.details?.requestId, committed: false };
+    return recovered;
 }
 
 function showError(error, retryAction) {

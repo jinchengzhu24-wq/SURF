@@ -768,8 +768,7 @@ async def handle_api_error(request: Request, exception: ApiError):
     )
 
 
-@app.exception_handler(LLMServiceError)
-async def handle_llm_service_error(request: Request, exception: LLMServiceError):
+def _llm_failure_details(exception):
     code = str(exception.code or "")
     if code.startswith("REVISION_PLAN"):
         task, failure_stage, maximum = "revision_plan", "schema", 2
@@ -783,15 +782,21 @@ async def handle_llm_service_error(request: Request, exception: LLMServiceError)
         task, failure_stage, maximum = "deterministic_search", "semantic_contract", 2
     else:
         task, failure_stage, maximum = "chat", "upstream", 3
-    response = error_response(
-        exception.status_code,
-        exception.code,
-        exception.safe_message,
-        exception.request_id,
-        exception.retryable,
-        {
+    failure_kind = "upstream"
+    if code.startswith("REQUIREMENT_"):
+        failure_kind = "constraint_conflict" if code == "REQUIREMENT_PERMISSION_CONFLICT" else "understanding"
+    elif code.startswith("REVISION_PLAN"):
+        failure_kind = "understanding"
+    elif code == "CANDIDATE_UNSOLVABLE":
+        failure_stage, failure_kind = "solvability", "candidate_unsolvable"
+    elif code in {"PROPOSAL_SEARCH_EXHAUSTED", "DETERMINISTIC_SEARCH_EXHAUSTED"} or "BUDGET" in code:
+        failure_stage, failure_kind = "search", "search_incomplete"
+    elif code in {"SEMANTIC_CONSTRAINT_NOT_MET", "HARD_OBJECTIVE_NOT_MET"}:
+        failure_kind = "constraint_conflict"
+    return {
             "task": task,
             "failureStage": failure_stage,
+            "failureKind": failure_kind,
             "failureCode": code,
             "attemptsUsed": exception.attempts_used,
             "maximumAttempts": maximum,
@@ -800,8 +805,13 @@ async def handle_llm_service_error(request: Request, exception: LLMServiceError)
             "committed": False,
             "recoveryState": "retry_pending" if exception.retryable else "revision_needed",
             **getattr(exception, "details", {}),
-        },
-    )
+        }
+
+
+@app.exception_handler(LLMServiceError)
+async def handle_llm_service_error(request: Request, exception: LLMServiceError):
+    response = error_response(exception.status_code, exception.code, exception.safe_message,
+                              exception.request_id, exception.retryable, _llm_failure_details(exception))
     response.headers["X-LLM-Attempts-Used"] = str(exception.attempts_used)
     return response
 
@@ -3940,6 +3950,9 @@ def _send_message_locked(
                                 "messageKey": payload.idempotencyKey,
                                 "code": exception.code,
                                 "attemptsUsed": exception.attempts_used,
+                                "requestId": exception.request_id,
+                                "retryable": exception.retryable,
+                                "details": _llm_failure_details(exception),
                                 "retryingExistingUserTurn": retrying_failed_message,
                                 "modelGenerationSucceeded": bool((context["stageContext"].get("_reliabilityState") or {}).get("modelGenerationSucceeded")),
                                 "proposalRequested": revision_state == "proposal_requested" or payload.action in {"execute_revision", "alternative_revision"} or bool(challenge_choice_resolution),
