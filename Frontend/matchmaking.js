@@ -336,9 +336,6 @@ function buildTimelineStages(match) {
 }
 
 function flowStageLabel(event) {
-    if (event.eventType === "stage") {
-        return "Stage " + value(event.stageNumber) + " \u00b7 " + (event.source === "ai" ? "AI" : "Manual");
-    }
     const labels = {
         draft: "Draft",
         first_stage: "First Stage",
@@ -348,7 +345,7 @@ function flowStageLabel(event) {
         message: "Message"
     };
     if (event.eventType === "stage") {
-        return "Stage " + value(event.stageNumber) + " · " + (event.source === "ai" ? "AI" : "Manual");
+        return "Stage " + value(event.stageNumber) + " · " + (event.source === "restored" ? "Restored" : event.source === "ai" ? "AI" : "Manual");
     }
     if (event.eventType === "node") return dashboardNodeLabel(event.nodeType);
     return labels[event.eventType] || titleCase(event.eventType || "Flow event");
@@ -382,7 +379,14 @@ function dashboardNodeStatus(status) {
         resolved: "Resolved",
         confirmed: "Confirmed",
         cancelled: "Cancelled",
-        reviewed: "Reviewed"
+        reviewed: "Reviewed",
+        acknowledged: "Responded · proposal block released",
+        manual_reedit: "Ended through a new manual edit",
+        original_selected: "Original proposal selected",
+        replacement_selected: "New plan from the player's reason selected",
+        awaiting_reason: "Awaiting challenge reason",
+        review_pending: "Reason review pending retry",
+        revised: "Revised intention"
     };
     const normalized = clean(status);
     return labels[normalized] || titleCase(normalized.replace(/_/g, " ") || "In progress");
@@ -666,7 +670,11 @@ function appendFlowStageDetails(match, record) {
         stage: "Stage change"
     };
     const section = createSection(titles[record.eventType] || "Stage map");
-    if (record.source) section.appendChild(textNode("p", "Source: " + (record.source === "ai" ? "AI-assisted" : "Manual")));
+    if (record.source) section.appendChild(textNode("p", "Source: " + (record.source === "restored" ? "Restored" : record.source === "ai" ? "AI-assisted" : "Manual")));
+    if (record.source === "restored") {
+        section.appendChild(textNode("p", "Restored from Stage " + value(record.restoredFromStageNumber)
+            + " · replaced Stage " + value(record.replacedStageNumber)));
+    }
     if (record.initialDraftMethod) {
         section.appendChild(textNode("p", "Initial draft: " + formatMode(record.initialDraftMethod)));
     }

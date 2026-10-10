@@ -1334,7 +1334,15 @@ def change_language(
             raise ApiError(409, "SESSION_LOCKED", "This co-creation session is no longer editable.")
         if session["language_locked_at"] is not None:
             if session["language"] == payload.language:
-                return serialize_session(database, session["id"])
+                result = serialize_session(database, session["id"])
+                first = database.execute(
+                    "SELECT id FROM level_versions WHERE session_id = ? AND stage_number = 1 AND source = 'initial'",
+                    (session_id,),
+                ).fetchone()
+                database.commit()
+                if first is not None:
+                    synchronize_version_with_online_match(session_id, first["id"], "first_stage")
+                return result
             raise ApiError(
                 409,
                 "LANGUAGE_LOCKED",
@@ -1520,6 +1528,7 @@ def create_manual_version(
                     "resolution": "user",
                     "displayCard": False,
                     "resolutionMode": "manual_reedit",
+                    "resultVersionId": version_id,
                 }
                 _record_disagreement_event(
                     database,
@@ -1549,6 +1558,11 @@ def create_manual_version(
         session_payload = serialize_session(database, session_id)
 
     synchronize_version_with_online_match(session_id, version_id, "stage")
+    with connect() as database:
+        saved_version = get_version(database, session_id, version_id)
+        parent_id = saved_version["parent_version_id"]
+    if parent_id:
+        synchronize_manual_edit_review_nodes(session_id, parent_id)
     return session_payload
 
 
@@ -1564,14 +1578,28 @@ def restore_version(
         session = require_active_session(database, session_id, access_cookie)
         existing_decision = database.execute(
             """
-            SELECT id FROM designer_decisions
+            SELECT id, version_id, decision_type FROM designer_decisions
             WHERE session_id = ? AND idempotency_key = ?
             """,
             (session_id, payload.idempotencyKey),
         ).fetchone()
 
         if existing_decision is not None:
-            return serialize_session(database, session_id)
+            if existing_decision["decision_type"] != "restore":
+                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The request key belongs to another decision.")
+            restored = get_version(database, session_id, existing_decision["version_id"])
+            if restored["parent_version_id"] != version_id:
+                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The request key belongs to another restored Stage.")
+            event = database.execute(
+                "SELECT payload_json FROM audit_events WHERE session_id = ? AND event_type = 'stage_restored' AND json_extract(payload_json, '$.versionId') = ?",
+                (session_id, restored["id"]),
+            ).fetchone()
+            if event and load_json(event["payload_json"])["baseVersionId"] != payload.baseVersionId:
+                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The request key belongs to another restore request.")
+            result = serialize_session(database, session_id)
+            database.commit()
+            synchronize_version_with_online_match(session_id, restored["id"], "stage")
+            return result
 
         require_current_base(session, payload.baseVersionId)
         source = get_version(database, session_id, version_id)
@@ -1612,7 +1640,17 @@ def restore_version(
                 "replacedVersionId": current["id"],
             },
         )
-        return serialize_session(database, session_id)
+        record_event(database, session_id, "stage_restored", {
+            "versionId": new_version_id,
+            "restoredFromVersionId": source["id"],
+            "restoredFromStageNumber": source["stage_number"],
+            "replacedVersionId": current["id"],
+            "replacedStageNumber": current["stage_number"],
+            "baseVersionId": payload.baseVersionId,
+        }, utc_now())
+        result = serialize_session(database, session_id)
+    synchronize_version_with_online_match(session_id, new_version_id, "stage")
+    return result
 
 
 @app.post("/api/sessions/{session_id}/versions/{version_id}/assessments")
@@ -2543,6 +2581,7 @@ def submit_intent_feedback(
                         "hypothesisId": hypothesis_id,
                         "versionId": payload.baseVersionId,
                         "outcome": "applied",
+                        "reviewedStatement": display_statement or statement,
                         "evidenceId": evidence_id,
                         "supersedesHypothesisIds": [],
                     },
@@ -2669,6 +2708,17 @@ def _route_message_to_active_challenge(session_id, payload, content, access_cook
         return payload
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
+        answered = database.execute(
+            "SELECT guidance_json FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'assistant'",
+            (session_id, payload.idempotencyKey),
+        ).fetchone()
+        if answered is not None:
+            prior_state = (load_json(answered["guidance_json"]) or {}).get("challengeState") or {}
+            if prior_state.get("challengeId"):
+                if payload.challengeId and payload.challengeId != prior_state["challengeId"]:
+                    raise ApiError(409, "CHALLENGE_STALE", "The retry belongs to another challenge.")
+                return payload.model_copy(update={"action": "continue_challenge", "challengeId": prior_state["challengeId"]})
+            return payload
         require_current_base(session, payload.baseVersionId)
         challenge = database.execute(
             """
@@ -2734,14 +2784,24 @@ def send_message(
     _validate_message_action_payload(payload)
 
     with message_request_lock(session_id, payload.idempotencyKey):
-        return _send_message_locked(
-            session_id,
-            payload,
-            content,
-            request,
-            response,
-            access_cookie,
-        )
+        try:
+            return _send_message_locked(
+                session_id, payload, content, request, response, access_cookie,
+            )
+        except (ApiError, LLMServiceError) as error:
+            # Publishing a failed request must never bypass browser authentication
+            # or mutate records for a conflicting idempotency key.
+            projection = _record_dashboard_failed_request(session_id, payload, content, access_cookie, error)
+            if projection is not None:
+                try:
+                    kind, identifier = projection
+                    if kind == "player_challenge":
+                        synchronize_dashboard_player_challenge(session_id, identifier)
+                    else:
+                        synchronize_manual_edit_review_nodes(session_id, identifier)
+                except ApiError:
+                    pass  # Preserve the original retryable request error.
+            raise
 
 
 @app.post("/api/sessions/{session_id}/challenge-reviews/{review_id}/retry")
@@ -2763,6 +2823,43 @@ def retry_challenge_review(
         "CHALLENGE_REVIEW_RETRY_RETIRED",
         "This dedicated retry endpoint has been retired. Retry the original chat message instead.",
     )
+
+
+def _record_dashboard_failed_request(session_id, payload, content, access_cookie, error):
+    if not error.retryable:
+        return None
+    with connect(immediate=True) as database:
+        try:
+            require_browser_session(database, session_id, access_cookie)
+        except ApiError:
+            return None
+        user = database.execute(
+            "SELECT * FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'user'",
+            (session_id, payload.idempotencyKey),
+        ).fetchone()
+        assistant = database.execute(
+            "SELECT id FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'assistant'",
+            (session_id, payload.idempotencyKey),
+        ).fetchone()
+        if user is None or assistant is not None or user["content"] != content or user["version_id"] != payload.baseVersionId:
+            return None
+        event = {"messageKey": payload.idempotencyKey, "code": error.code,
+                 "versionId": payload.baseVersionId, "userTurnId": user["id"]}
+        if payload.action == "continue_challenge" and payload.challengeId:
+            challenge = database.execute(
+                "SELECT challenge_id FROM revision_challenges WHERE session_id = ? AND challenge_id = ? AND base_version_id = ?",
+                (session_id, payload.challengeId, payload.baseVersionId),
+            ).fetchone()
+            if challenge is None:
+                return None
+            event["challengeId"] = payload.challengeId
+            record_event(database, session_id, "dashboard_challenge_request_failed", event, utc_now())
+            return "player_challenge", payload.challengeId
+        context = load_design_context(database, session_id, payload.baseVersionId) or {}
+        if (context.get("activeDisagreement") or {}).get("subject") == "human_edit":
+            record_event(database, session_id, "dashboard_human_edit_request_failed", event, utc_now())
+            return "llm_challenge", payload.baseVersionId
+    return None
 
 
 def _send_message_locked(
@@ -6705,6 +6802,11 @@ def finalize_session(
 ):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
     deadline_stage_version_id = None
+    request_signature = {
+        "baseVersionId": payload.baseVersionId,
+        "rowsHash": hashlib.sha256(dump_json(payload.rows).encode("utf-8")).hexdigest()
+        if payload.rows is not None else None,
+    }
     with connect(immediate=True) as database:
         session = require_browser_session(database, session_id, access_cookie)
         existing = database.execute(
@@ -6790,6 +6892,12 @@ def finalize_session(
                 "",
                 payload.idempotencyKey,
             )
+            record_event(database, session_id, "finalization_request_committed", {
+                "idempotencyKey": payload.idempotencyKey,
+                "request": request_signature,
+                "finalVersionId": final_version_id,
+                "deadlineStageVersionId": deadline_stage_version_id,
+            }, now)
             if deadline_expired:
                 record_event(database, session_id, "deadline_finalized", {"versionId": final_version_id}, now)
         else:
@@ -6804,7 +6912,20 @@ def finalize_session(
                 or session["final_version_id"]
                 or payload.baseVersionId
             )
-            if final_version_id != payload.baseVersionId:
+            committed = database.execute(
+                """SELECT payload_json FROM audit_events WHERE session_id = ?
+                   AND event_type = 'finalization_request_committed'
+                   AND json_extract(payload_json, '$.idempotencyKey') = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (session_id, payload.idempotencyKey),
+            ).fetchone()
+            committed_payload = load_json(committed["payload_json"]) if committed else None
+            if committed_payload is not None:
+                if committed_payload.get("request") != request_signature:
+                    raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The finalization key belongs to a different request.")
+                final_version_id = committed_payload["finalVersionId"]
+                deadline_stage_version_id = committed_payload.get("deadlineStageVersionId")
+            elif final_version_id != payload.baseVersionId:
                 raise ApiError(
                     409,
                     "IDEMPOTENCY_CONFLICT",
@@ -7077,6 +7198,12 @@ def _dashboard_node_entry(entry_id, kind, text, occurred_at, *, label="", langua
 
 def _dashboard_turn_kind(guidance, challenge_turn_ids):
     guidance = guidance or {}
+    challenge_state = guidance.get("challengeState") or {}
+    challenge_id = str(challenge_state.get("challengeId") or "").strip()
+    if challenge_id:
+        return "player_challenge", "player-challenge:" + challenge_id, None
+    if (guidance.get("disagreement") or {}).get("subject") == "human_edit":
+        return "llm_challenge", "", None
     marker = guidance.get("dashboardNode") or {}
     review = guidance.get("_intentReviewState") or {}
     hypothesis_id = str(
@@ -7111,6 +7238,8 @@ def _dashboard_node_status(node_type, guidance, challenge_status=""):
         count = int(marker.get("clarificationQuestionCount") or 0)
         if status == "clarifying" and count in {1, 2, 3}:
             return f"clarifying_{count}"
+        if guidance.get("proposalOffer"):
+            return "proposal_ready"
         return status if re.fullmatch(r"[a-z_]{2,64}", status) else "in_progress"
     if node_type in {"intent", "intent_conflict"}:
         state = guidance.get("_intentReviewState") or {}
@@ -7129,7 +7258,7 @@ def _dashboard_node_status(node_type, guidance, challenge_status=""):
     return "in_progress"
 
 
-def _dashboard_entries_for_turns(database, session_id, assistant_rows):
+def _dashboard_entries_for_turns(database, session_id, assistant_rows, *, card_types=None):
     entries = []
     for assistant in assistant_rows:
         request_id = assistant["request_id"]
@@ -7158,17 +7287,204 @@ def _dashboard_entries_for_turns(database, session_id, assistant_rows):
             language=assistant["language"],
         ))
         for index, card in enumerate(_displayed_cards(load_json(assistant["guidance_json"]))):
-            if card.get("type") == "discussion":
+            if card_types is not None and card.get("type") not in card_types:
                 continue
+            card_text = card.get("text")
+            if card.get("type") == "discussion":
+                disagreement = card.get("disagreement") or {}
+                card_text = "\n".join(str(disagreement.get(field) or "") for field in (
+                    "userPosition", "coreDisagreement", "nextQuestion",
+                )).strip() or card_text
             entries.append(_dashboard_node_entry(
                 f"card:{assistant['id']}:{index}",
                 "card",
-                card.get("text"),
+                card_text,
                 assistant["created_at"],
                 label="Card",
                 language=assistant["language"],
             ))
     return [entry for entry in entries if entry["text"]]
+
+
+def _dashboard_challenge_proposal_origin(database, session_id, turn):
+    """Bind a post-choice proposal and its execution to a distinct research node."""
+    guidance = load_json(turn["guidance_json"]) or {}
+    state = guidance.get("challengeState") or {}
+    if state.get("status") == "resolved" and state.get("challengeId"):
+        candidate = database.execute(
+            "SELECT id FROM change_proposals WHERE session_id = ? AND assistant_turn_id = ?",
+            (session_id, turn["id"]),
+        ).fetchone()
+        return turn if guidance.get("proposalOffer") or candidate else None
+    action = database.execute(
+        """SELECT payload_json FROM audit_events WHERE session_id = ?
+           AND event_type = 'revision_execution_requested'
+           AND json_extract(payload_json, '$.messageKey') = ?
+           ORDER BY id DESC LIMIT 1""", (session_id, turn["request_id"]),
+    ).fetchone()
+    if action is None:
+        return None
+    source_id = (load_json(action["payload_json"]) or {}).get("sourceTurnId")
+    source = database.execute(
+        "SELECT * FROM conversation_turns WHERE session_id = ? AND id = ?",
+        (session_id, source_id),
+    ).fetchone()
+    state = (load_json(source["guidance_json"]) or {}).get("challengeState") or {} if source else {}
+    if state.get("status") == "resolved" and state.get("challengeId"):
+        return source
+    return None
+
+
+def _dashboard_append_proposal_results(database, session, node, turns):
+    for turn in turns:
+        proposals = database.execute(
+            "SELECT * FROM change_proposals WHERE session_id = ? AND assistant_turn_id = ? ORDER BY created_at, id",
+            (session["id"], turn["id"]),
+        ).fetchall()
+        for proposal in proposals:
+            node["nodeEntries"].append(_dashboard_node_entry(
+                "proposal-verified:" + proposal["id"], "map_diff",
+                dump_json({"diff": load_json(proposal["diff_json"]) or [],
+                           "validation": load_json(proposal["validation_json"]) or {}}),
+                proposal["created_at"], label="Verified proposal result",
+            ))
+            node["nodeStatus"] = proposal["status"]
+            decision = database.execute(
+                "SELECT * FROM designer_decisions WHERE session_id = ? AND proposal_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                (session["id"], proposal["id"]),
+            ).fetchone()
+            if decision is None:
+                continue
+            accepted = decision["decision_type"] == "accept"
+            action = "Accepted candidate map" if accepted else "Rejected proposal"
+            if accepted and decision["version_id"]:
+                version = get_version(database, session["id"], decision["version_id"])
+                action += f" · saved as Stage {version['stage_number']}"
+            node["nodeEntries"].append(_dashboard_node_entry(
+                "proposal-action:" + proposal["id"], "player_action", action,
+                decision["created_at"], label="Player action",
+            ))
+            if decision["reason"]:
+                node["nodeEntries"].append(_dashboard_node_entry(
+                    "proposal-reason:" + proposal["id"], "player_message", decision["reason"],
+                    decision["created_at"], label="Player", language=session["language"],
+                ))
+            node["nodeStatus"] = "accepted" if accepted else "rejected"
+    node["nodeEntries"] = node["nodeEntries"][-96:]
+
+
+def synchronize_dashboard_player_challenge(session_id, challenge_id):
+    """Project the whole challenge, including persisted reasons without a reply."""
+    with connect() as database:
+        session = get_session(database, session_id)
+        if session is None or bool(session["demo_mode"]):
+            return
+        challenge = database.execute(
+            "SELECT * FROM revision_challenges WHERE session_id = ? AND challenge_id = ?",
+            (session_id, challenge_id),
+        ).fetchone()
+        if challenge is None:
+            return
+        source = database.execute(
+            "SELECT * FROM conversation_turns WHERE session_id = ? AND id = ?",
+            (session_id, challenge["source_proposal_turn_id"]),
+        ).fetchone()
+        parent = _dashboard_node_projection_for_turn(database, session, source["request_id"]) if source else None
+        rows = database.execute(
+            "SELECT * FROM conversation_turns WHERE session_id = ? AND version_id = ? AND role = 'assistant' ORDER BY sequence_number",
+            (session_id, challenge["base_version_id"]),
+        ).fetchall()
+        turns = [row for row in rows if row["id"] == challenge["challenge_turn_id"] or
+                 ((load_json(row["guidance_json"]) or {}).get("challengeState") or {}).get("challengeId") == challenge_id]
+        entries = _dashboard_entries_for_turns(database, session_id, turns, card_types={"discussion"})
+        entries.insert(0, _dashboard_node_entry(
+            "challenge-action:" + challenge_id, "player_action", "Challenge this plan",
+            challenge["created_at"], label="Player action",
+        ))
+        summary = ((load_json(source["guidance_json"]) or {}).get("proposalOffer") or {}).get("summary") if source else None
+        if summary:
+            entries.insert(1, _dashboard_node_entry(
+                "challenge-source:" + challenge_id, "status", summary,
+                challenge["created_at"], label="Challenged proposal", language=session["language"],
+            ))
+        continued = database.execute(
+            """SELECT payload_json FROM audit_events WHERE session_id = ?
+               AND event_type = 'challenge_continued'
+               AND json_extract(payload_json, '$.challengeId') = ? ORDER BY id""",
+            (session_id, challenge_id),
+        ).fetchall()
+        entry_ids = {entry["entryId"] for entry in entries}
+        for event in continued:
+            message_key = load_json(event["payload_json"])["messageKey"]
+            user = database.execute(
+                "SELECT * FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'user'",
+                (session_id, message_key),
+            ).fetchone()
+            if user is not None and "player:" + user["id"] not in entry_ids:
+                reviewed = database.execute(
+                    "SELECT review_id FROM challenge_reason_reviews WHERE session_id = ? AND challenge_id = ? AND source_user_turn_id = ?",
+                    (session_id, challenge_id, user["id"]),
+                ).fetchone()
+                failed = database.execute(
+                    """SELECT id FROM audit_events WHERE session_id = ?
+                       AND event_type = 'dashboard_challenge_request_failed'
+                       AND json_extract(payload_json, '$.messageKey') = ?""",
+                    (session_id, message_key),
+                ).fetchone()
+                if reviewed is None and failed is None:
+                    continue
+                entries.append(_dashboard_node_entry(
+                    "player:" + user["id"], "player_message", user["content"], user["created_at"],
+                    label="Player", language=user["language"],
+                ))
+                entry_ids.add("player:" + user["id"])
+        status = _dashboard_node_status("player_challenge", {}, challenge["status"])
+        if challenge["status"] == "awaiting_reason":
+            status = "awaiting_reason"
+        elif challenge["status"] == "review_pending":
+            status = "review_pending"
+        if challenge["status"] == "resolved":
+            resolution = next((
+                (load_json(row["guidance_json"]) or {}).get("disagreement") or {}
+                for row in reversed(turns)
+                if ((load_json(row["guidance_json"]) or {}).get("challengeState") or {}).get("status") == "resolved"
+            ), {})
+            choice = resolution.get("resolution")
+            status = {"ai": "original_selected", "user": "replacement_selected"}.get(choice, "resolved")
+            if turns and choice in {"ai", "user"}:
+                entries.append(_dashboard_node_entry(
+                    "challenge-choice:" + challenge_id, "player_action",
+                    "Selected the original frozen proposal" if choice == "ai" else "Selected a new plan from the player's reason",
+                    turns[-1]["created_at"], label="Player choice",
+                ))
+        failures = database.execute(
+            """SELECT payload_json, created_at FROM audit_events WHERE session_id = ?
+               AND event_type = 'dashboard_challenge_request_failed'
+               AND json_extract(payload_json, '$.challengeId') = ? ORDER BY id""",
+            (session_id, challenge_id),
+        ).fetchall()
+        for failure in failures:
+            data = load_json(failure["payload_json"])
+            if challenge["status"] == "resolved":
+                continue
+            # Successful retries replace this pending symptom with their real reply.
+            if database.execute(
+                "SELECT id FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'assistant'",
+                (session_id, data["messageKey"]),
+            ).fetchone() is None:
+                entries.append(_dashboard_node_entry(
+                    "challenge-failure:" + data["messageKey"], "status",
+                    "Request pending retry; no successful plan recorded (" + data["code"] + ").",
+                    failure["created_at"], label="Pending request",
+                ))
+        version = get_version(database, session_id, challenge["base_version_id"])
+        node = {
+            "nodeId": "player-challenge:" + challenge_id, "nodeType": "player_challenge",
+            "nodeStatus": status, "nodeParentId": parent["nodeId"] if parent else None,
+            "versionId": version["id"], "stageNumber": version["stage_number"],
+            "nodeEntries": list({entry["entryId"]: entry for entry in entries}.values())[-96:],
+        }
+    _synchronize_dashboard_node(session, node)
 
 
 def _dashboard_node_projection_for_turn(database, session, request_id):
@@ -7186,10 +7502,9 @@ def _dashboard_node_projection_for_turn(database, session, request_id):
         SELECT * FROM conversation_turns
         WHERE session_id = ? AND role = 'assistant' AND version_id = ?
           AND id NOT IN (SELECT assistant_turn_id FROM llm_assessments)
-          AND sequence_number <= ?
         ORDER BY sequence_number
         """,
-        (session["id"], assistant["version_id"], assistant["sequence_number"]),
+        (session["id"], assistant["version_id"]),
     ).fetchall()
     challenge_rows = database.execute(
         """
@@ -7205,6 +7520,13 @@ def _dashboard_node_projection_for_turn(database, session, request_id):
         node_type, node_id, parent_id = _dashboard_turn_kind(
             guidance, challenge_by_turn
         )
+        origin = _dashboard_challenge_proposal_origin(database, session["id"], row)
+        if origin is not None:
+            origin_guidance = load_json(origin["guidance_json"]) or {}
+            origin_challenge_id = origin_guidance["challengeState"]["challengeId"]
+            node_type = "proposal"
+            node_id = "proposal:challenge:" + origin_challenge_id
+            parent_id = "player-challenge:" + origin_challenge_id
         challenge = challenge_by_turn.get(row["id"])
         if challenge is not None:
             node_type = "player_challenge"
@@ -7221,13 +7543,18 @@ def _dashboard_node_projection_for_turn(database, session, request_id):
     current = next(item for item in classified if item[0]["id"] == assistant["id"])
     row, guidance, node_type, node_id, parent_id = current
     if node_type == "discussion":
-        index = len(classified) - 1
+        current_index = next(i for i, item in enumerate(classified) if item[0]["id"] == assistant["id"])
+        index = current_index
         while index > 0 and classified[index - 1][2] == "discussion":
             index -= 1
-        selected = classified[index:]
+        end = current_index + 1
+        while end < len(classified) and classified[end][2] == "discussion":
+            end += 1
+        selected = classified[index:end]
         node_id = "discussion:" + selected[0][0]["id"]
     else:
         selected = [item for item in classified if item[3] == node_id]
+    guidance = selected[-1][1]
     challenge_status = ""
     if node_type == "player_challenge":
         challenge_id = node_id.removeprefix("player-challenge:")
@@ -7251,7 +7578,7 @@ def _dashboard_node_projection_for_turn(database, session, request_id):
             ))
     if not entries:
         return None
-    return {
+    node = {
         "nodeId": node_id,
         "nodeType": node_type,
         "nodeStatus": _dashboard_node_status(node_type, guidance, challenge_status),
@@ -7260,6 +7587,9 @@ def _dashboard_node_projection_for_turn(database, session, request_id):
         "stageNumber": version["stage_number"] if version is not None else None,
         "nodeEntries": entries[-96:],
     }
+    if node_type == "proposal":
+        _dashboard_append_proposal_results(database, session, node, [item[0] for item in selected])
+    return node
 
 
 def synchronize_dashboard_node_for_turn(session_id, request_id):
@@ -7268,17 +7598,25 @@ def synchronize_dashboard_node_for_turn(session_id, request_id):
         if session is None or bool(session["demo_mode"]):
             return
         node = _dashboard_node_projection_for_turn(database, session, request_id)
+        turn = database.execute(
+            "SELECT * FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'assistant'",
+            (session_id, request_id),
+        ).fetchone()
+        guidance = (load_json(turn["guidance_json"]) or {}) if turn else {}
+        challenge_id = (guidance.get("challengeState") or {}).get("challengeId")
+        if not challenge_id and turn is not None:
+            origin = _dashboard_challenge_proposal_origin(database, session_id, turn)
+            if origin is not None:
+                challenge_id = (load_json(origin["guidance_json"])["challengeState"]["challengeId"])
+        hypothesis_id = (guidance.get("dashboardNode") or {}).get("intentHypothesisId") or guidance.get("_intentHypothesisId")
     if node is None:
         return
-    fingerprint = hashlib.sha256(
-        dump_json(node).encode("utf-8")
-    ).hexdigest()[:24]
-    event = {
-        "eventId": f"node:{node['nodeId']}:{fingerprint}",
-        "eventType": "node",
-        **node,
-    }
-    synchronize_cocreation_event_with_online_match(session, event)
+    if challenge_id:
+        synchronize_dashboard_player_challenge(session_id, challenge_id)
+    if hypothesis_id:
+        synchronize_dashboard_intent_node(session_id, hypothesis_id)
+    elif node["nodeType"] not in {"player_challenge", "llm_challenge"}:
+        _synchronize_dashboard_node(session, node)
     if node.get("versionId"):
         synchronize_manual_edit_review_nodes(session_id, node["versionId"])
 
@@ -7344,7 +7682,7 @@ def synchronize_manual_edit_review_nodes(session_id, version_id):
             label="Verified map change",
             language="",
         ))
-        entries.extend(_dashboard_entries_for_turns(database, session_id, turns))
+        entries.extend(_dashboard_entries_for_turns(database, session_id, turns, card_types=set()))
         entries = [entry for entry in entries if entry["text"]]
         if not entries:
             return
@@ -7357,67 +7695,91 @@ def synchronize_manual_edit_review_nodes(session_id, version_id):
             "stageNumber": version["stage_number"],
             "nodeEntries": entries[-96:],
         }
-        disagreement = payload.get("disagreement") or {}
-        context = load_design_context(database, session_id, version_id) or {}
-        active = context.get("activeDisagreement") or {}
-        if active.get("id") and active.get("id") == disagreement.get("id"):
-            disagreement = active
-        if isinstance(disagreement, dict) and disagreement.get("id"):
-            resolved_row = database.execute(
-                """
-                SELECT payload_json FROM audit_events
-                WHERE session_id = ? AND event_type = 'disagreement_resolved'
-                  AND json_extract(payload_json, '$.disagreement.id') = ?
-                ORDER BY id DESC LIMIT 1
-                """,
-                (session_id, disagreement["id"]),
-            ).fetchone()
-            if resolved_row is not None:
-                resolved = (load_json(resolved_row["payload_json"]) or {}).get(
-                    "disagreement"
-                ) or {}
-                if resolved:
-                    disagreement = resolved
+        initial_disagreement = payload.get("disagreement") or {}
         challenge_node = None
-        if isinstance(disagreement, dict) and disagreement.get("id"):
-            challenge_text = (
-                disagreement.get("coreDisagreement")
-                or disagreement.get("nextQuestion")
-                or ""
-            )
-            evidence = disagreement.get("evidence") or disagreement.get("evidenceIds") or []
-            challenge_entries = []
-            if challenge_text:
+        if initial_disagreement.get("subject") == "human_edit":
+            challenge_id = "human-edit:" + version_id
+            challenge_entries = [_dashboard_node_entry(
+                "llm-challenge-card:" + challenge_id, "card",
+                "\n".join(str(initial_disagreement.get(field) or "") for field in (
+                    "userPosition", "coreDisagreement", "nextQuestion",
+                )).strip(), event_row["created_at"], label="LET'S DISCUSS",
+                language=session["language"],
+            )]
+            events = database.execute(
+                """SELECT payload_json, created_at FROM audit_events WHERE session_id = ?
+                   AND event_type IN ('disagreement_started', 'disagreement_updated',
+                                      'disagreement_acknowledged', 'disagreement_resolved')
+                   AND json_extract(payload_json, '$.versionId') = ?
+                   AND json_extract(payload_json, '$.subject') = 'human_edit'
+                   ORDER BY id""", (session_id, version_id),
+            ).fetchall()
+            latest = initial_disagreement
+            followups = []
+            seen_turn_ids = set(turn_ids)
+            for event in events:
+                data = load_json(event["payload_json"]) or {}
+                latest = data.get("disagreement") or latest
+                turn_id = data.get("turnId")
+                if turn_id and turn_id not in seen_turn_ids:
+                    turn = database.execute(
+                        "SELECT * FROM conversation_turns WHERE session_id = ? AND id = ? AND role = 'assistant' AND version_id = ?",
+                        (session_id, turn_id, version_id),
+                    ).fetchone()
+                    if turn is not None:
+                        followups.append(turn)
+                        seen_turn_ids.add(turn_id)
+            challenge_entries.extend(_dashboard_entries_for_turns(
+                database, session_id, followups, card_types=set(),
+            ))
+            failures = database.execute(
+                """SELECT payload_json, created_at FROM audit_events WHERE session_id = ?
+                   AND event_type = 'dashboard_human_edit_request_failed'
+                   AND json_extract(payload_json, '$.versionId') = ? ORDER BY id""",
+                (session_id, version_id),
+            ).fetchall()
+            for failure in failures:
+                data = load_json(failure["payload_json"])
+                if database.execute(
+                    "SELECT id FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'assistant'",
+                    (session_id, data["messageKey"]),
+                ).fetchone() is not None:
+                    continue
+                user = database.execute(
+                    "SELECT * FROM conversation_turns WHERE session_id = ? AND id = ? AND role = 'user'",
+                    (session_id, data["userTurnId"]),
+                ).fetchone()
+                if user is not None:
+                    challenge_entries.extend([
+                        _dashboard_node_entry("player:" + user["id"], "player_message", user["content"],
+                                              user["created_at"], label="Player", language=user["language"]),
+                        _dashboard_node_entry("llm-challenge-failure:" + data["messageKey"], "status",
+                                              "No assistant reply was saved for this message (" + data["code"] + ").",
+                                              failure["created_at"], label="Reply pending retry"),
+                    ])
+            status = {"active": "in_progress", "acknowledged": "acknowledged",
+                      "resolved": "resolved"}.get(latest.get("status"), "in_progress")
+            if latest.get("resolutionMode") == "manual_reedit":
+                status = "manual_reedit"
+                result_version = get_version(database, session_id, latest.get("resultVersionId"))
+                if result_version is not None:
+                    challenge_entries.append(_dashboard_node_entry(
+                        "llm-challenge-result:" + challenge_id, "player_action",
+                        f"Saved a new manual edit as Stage {result_version['stage_number']} ({result_version['id']}).",
+                        result_version["created_at"], label="New Stage",
+                    ))
+            if latest.get("status") == "acknowledged":
                 challenge_entries.append(_dashboard_node_entry(
-                    "llm-challenge:" + str(disagreement["id"]),
-                    "llm_message",
-                    challenge_text,
-                    event_row["created_at"],
-                    label="LLM Challenge",
-                    language=session["language"],
+                    "llm-challenge-status:" + challenge_id, "status",
+                    "The designer responded; the proposal block was released. No agreement or map save is implied.",
+                    events[-1]["created_at"] if events else event_row["created_at"], label="Discussion status",
                 ))
-            if evidence:
-                challenge_entries.append(_dashboard_node_entry(
-                    "llm-challenge-evidence:" + str(disagreement["id"]),
-                    "status",
-                    dump_json(evidence),
-                    event_row["created_at"],
-                    label="Evidence",
-                    language="",
-                ))
-            if challenge_entries:
-                challenge_node = {
-                    "nodeId": "llm-challenge:" + str(disagreement["id"]),
-                    "nodeType": "llm_challenge",
-                    "nodeStatus": (
-                        "resolved" if disagreement.get("status") == "resolved"
-                        else "in_progress"
-                    ),
-                    "nodeParentId": manual_node_id,
-                    "versionId": version_id,
-                    "stageNumber": version["stage_number"],
-                    "nodeEntries": challenge_entries,
-                }
+            challenge_node = {
+                "nodeId": "llm-challenge:" + challenge_id, "nodeType": "llm_challenge",
+                "nodeStatus": status, "nodeParentId": manual_node_id,
+                "versionId": version_id, "stageNumber": version["stage_number"],
+                "nodeEntries": list({entry["entryId"]: entry for entry in challenge_entries if entry["text"]}.values())[-96:],
+            }
     _synchronize_dashboard_node(session, manual_node)
     if challenge_node is not None:
         _synchronize_dashboard_node(session, challenge_node)
@@ -7434,8 +7796,9 @@ def synchronize_dashboard_intent_node(session_id, hypothesis_id):
             "SELECT * FROM conversation_turns WHERE session_id = ? AND role = 'assistant' ORDER BY sequence_number",
             (session_id,),
         ).fetchall():
-            marker = (load_json(row["guidance_json"]) or {}).get("dashboardNode") or {}
-            if marker.get("intentHypothesisId") == hypothesis_id:
+            guidance = load_json(row["guidance_json"]) or {}
+            marker = guidance.get("dashboardNode") or {}
+            if (marker.get("intentHypothesisId") or guidance.get("_intentHypothesisId")) == hypothesis_id:
                 source = row
         if source is None:
             return
@@ -7443,63 +7806,68 @@ def synchronize_dashboard_intent_node(session_id, hypothesis_id):
         if node is None:
             return
         feedback = database.execute(
-            """
-            SELECT payload_json, created_at FROM audit_events
-            WHERE session_id = ? AND event_type IN (
-              'intent_hypothesis_feedback_applied', 'intent_hypothesis_feedback_pending'
-            )
-            ORDER BY id DESC
-            """,
-            (session_id,),
+            """SELECT id, payload_json, created_at FROM audit_events
+               WHERE session_id = ? AND event_type IN (
+                 'intent_hypothesis_feedback_applied', 'intent_hypothesis_feedback_pending')
+               ORDER BY id""", (session_id,),
         ).fetchall()
-        event = next((
-            (load_json(row["payload_json"]) or {}, row["created_at"])
-            for row in feedback
-            if (load_json(row["payload_json"]) or {}).get("hypothesisId") == hypothesis_id
-        ), None)
-        if event is not None:
-            payload, occurred_at = event
-            outcome = str(payload.get("outcome") or "").strip()
-            action_labels = {
-                "applied": "Confirmed tentative intention",
-                "rejected": "Rejected tentative intention",
-                "kept_new": "Kept new intention",
-                "kept_existing": "Kept existing intention",
-                "conflict": "Intent conflict requires a choice",
-                "unclear": "Intent needs revision",
+        context = load_design_context(database, session_id, source["version_id"]) or {}
+        for event in feedback:
+            payload = load_json(event["payload_json"]) or {}
+            if payload.get("hypothesisId") != hypothesis_id:
+                continue
+            occurred_at = event["created_at"]
+            request_data = payload.get("request") or {}
+            action = request_data.get("action")
+            outcome = str(payload.get("outcome") or "")
+            event_key = str(payload.get("idempotencyKey") or event["id"])
+            candidate = request_data.get("candidateText")
+            if candidate:
+                node["nodeEntries"].append(_dashboard_node_entry(
+                    "intent-input:" + event_key, "player_message", candidate, occurred_at,
+                    label="Player revision", language=session["language"],
+                ))
+            labels = {
+                "applied": "Revised tentative intention" if action == "revise" else "Confirmed tentative intention",
+                "rejected": "Rejected tentative intention", "kept_new": "Kept new intention",
+                "kept_existing": "Kept existing intention", "conflict": "Intent conflict requires a choice",
+                "unclear": "Intent revision pending review",
             }
             node["nodeEntries"].append(_dashboard_node_entry(
-                "intent-action:" + hypothesis_id + ":" + outcome,
-                "player_action",
-                action_labels.get(outcome, "Updated tentative intention"),
-                occurred_at,
-                label="Player action",
-                language="",
+                "intent-action:" + event_key, "player_action",
+                labels.get(outcome, "Updated tentative intention"), occurred_at, label="Player action",
             ))
             node["nodeStatus"] = {
-                "applied": "confirmed", "rejected": "rejected",
-                "kept_new": "resolved", "kept_existing": "resolved",
+                "applied": "revised" if action == "revise" else "confirmed",
+                "rejected": "rejected", "kept_new": "resolved", "kept_existing": "resolved",
                 "conflict": "awaiting_player_choice", "unclear": "awaiting_player_choice",
             }.get(outcome, node["nodeStatus"])
+            statement = payload.get("reviewedStatement")
+            if statement:
+                node["nodeEntries"].append(_dashboard_node_entry(
+                    "intent-statement:" + event_key, "status", statement, occurred_at,
+                    label="Reviewed intention", language=session["language"],
+                ))
+            if outcome in {"conflict", "unclear"} and payload.get("explanation"):
+                node["nodeEntries"].append(_dashboard_node_entry(
+                    "intent-review:" + event_key, "llm_message", payload["explanation"], occurred_at,
+                    label="Review", language=session["language"],
+                ))
             if node["nodeType"] == "intent_conflict":
-                context = load_design_context(database, session_id, source["version_id"]) or {}
-                related = [item for item in context.get("intentHypotheses", [])
-                           if item.get("id") in {hypothesis_id, payload.get("existingHypothesisId")}]
-                for item in related:
+                for item in context.get("intentHypotheses", []):
+                    if item.get("id") not in {hypothesis_id, payload.get("existingHypothesisId")}:
+                        continue
                     node["nodeEntries"].append(_dashboard_node_entry(
-                        "intent-statement:" + str(item.get("id")),
-                        "status",
-                        str(item.get("statement") or ""),
-                        occurred_at,
-                        label="Intention",
-                        language=session["language"],
+                        "intent-conflict-statement:" + str(item.get("id")), "status",
+                        item.get("displayStatement") or item.get("statement") or "", occurred_at,
+                        label="Intention", language=session["language"],
                     ))
         node["nodeEntries"] = node["nodeEntries"][-96:]
     _synchronize_dashboard_node(session, node)
 
 
 def synchronize_dashboard_proposal_node(session_id, proposal_id):
-    """Project a proposal decision and its verified candidate result."""
+    """Publish the same canonical proposal projection used by message retries."""
     with connect() as database:
         session = get_session(database, session_id)
         proposal = database.execute(
@@ -7509,52 +7877,12 @@ def synchronize_dashboard_proposal_node(session_id, proposal_id):
         if session is None or proposal is None or bool(session["demo_mode"]):
             return
         source = database.execute(
-            "SELECT * FROM conversation_turns WHERE id = ?",
-            (proposal["assistant_turn_id"],),
+            "SELECT * FROM conversation_turns WHERE session_id = ? AND id = ?",
+            (session_id, proposal["assistant_turn_id"]),
         ).fetchone()
-        if source is None:
-            return
-        node = _dashboard_node_projection_for_turn(database, session, source["request_id"])
-        if node is None:
-            return
-        decision = database.execute(
-            "SELECT * FROM designer_decisions WHERE proposal_id = ? ORDER BY id DESC LIMIT 1",
-            (proposal_id,),
-        ).fetchone()
-        node["nodeEntries"].append(_dashboard_node_entry(
-            "proposal-verified:" + proposal_id,
-            "map_diff",
-            dump_json({
-                "diff": load_json(proposal["diff_json"]) or {},
-                "validation": load_json(proposal["validation_json"]) or {},
-            }),
-            proposal["created_at"],
-            label="Verified proposal result",
-            language="",
-        ))
-        if decision is not None:
-            accepted = decision["decision_type"] == "accept"
-            node["nodeEntries"].append(_dashboard_node_entry(
-                "proposal-action:" + proposal_id,
-                "player_action",
-                "Accepted candidate map" if accepted else "Rejected proposal",
-                decision["created_at"],
-                label="Player action",
-                language="",
-            ))
-            reason = str(decision["reason"] or "").strip()
-            if reason:
-                node["nodeEntries"].append(_dashboard_node_entry(
-                    "proposal-reason:" + proposal_id,
-                    "player_message",
-                    reason,
-                    decision["created_at"],
-                    label="Player",
-                    language=session["language"],
-                ))
-            node["nodeStatus"] = "accepted" if accepted else "rejected"
-        node["nodeEntries"] = node["nodeEntries"][-96:]
-    _synchronize_dashboard_node(session, node)
+        node = _dashboard_node_projection_for_turn(database, session, source["request_id"]) if source else None
+    if node is not None:
+        _synchronize_dashboard_node(session, node)
 
 
 def synchronize_version_with_online_match(session_id, version_id, event_type):
@@ -7566,7 +7894,7 @@ def synchronize_version_with_online_match(session_id, version_id, event_type):
         if bool(session["demo_mode"]):
             return
         source = version["source"]
-        if event_type == "stage" and source not in {"human_edit", "llm_accepted"}:
+        if event_type == "stage" and source not in {"human_edit", "llm_accepted", "restored"}:
             return
         if event_type == "first_stage" and (
             source != "initial" or version["stage_number"] != 1
@@ -7581,7 +7909,21 @@ def synchronize_version_with_online_match(session_id, version_id, event_type):
             "diff": load_json(version["diff_json"]),
         }
         if event_type == "stage":
-            event["source"] = "manual" if source == "human_edit" else "ai"
+            event["source"] = {"human_edit": "manual", "llm_accepted": "ai", "restored": "restored"}[source]
+            if source == "restored":
+                restoration = database.execute(
+                    """SELECT payload_json FROM audit_events WHERE session_id = ?
+                       AND event_type = 'stage_restored'
+                       AND json_extract(payload_json, '$.versionId') = ?
+                       ORDER BY id DESC LIMIT 1""", (session_id, version_id),
+                ).fetchone()
+                if restoration is None:
+                    return
+                metadata = load_json(restoration["payload_json"])
+                event.update({key: metadata[key] for key in (
+                    "restoredFromVersionId", "restoredFromStageNumber",
+                    "replacedVersionId", "replacedStageNumber",
+                )})
         elif event_type == "first_stage":
             event["initialDraftMethod"] = session["initial_draft_method"]
         elif event_type == "final":

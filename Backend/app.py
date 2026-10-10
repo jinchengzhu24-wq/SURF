@@ -232,6 +232,10 @@ class OnlineCoCreationFlowEventRequest(BaseModel):
     nodeStatus: str | None = ""
     nodeParentId: str | None = ""
     nodeEntries: list[dict] | None = None
+    restoredFromVersionId: str | None = None
+    restoredFromStageNumber: int | None = None
+    replacedVersionId: str | None = None
+    replacedStageNumber: int | None = None
 
 
 class OnlineResultRequest(BaseModel):
@@ -485,9 +489,21 @@ def build_cocreation_flow_event(room, payload):
             event["coCreationDurationSeconds"] = round(duration, 2)
         if event_type == "stage":
             source = str(payload.source or "").strip()
-            if source not in {"manual", "ai"}:
+            if source not in {"manual", "ai", "restored"}:
                 raise HTTPException(status_code=400, detail="Invalid Stage source")
             event["source"] = source
+            if source == "restored":
+                for id_field, number_field in (
+                    ("restoredFromVersionId", "restoredFromStageNumber"),
+                    ("replacedVersionId", "replacedStageNumber"),
+                ):
+                    stage_number = getattr(payload, number_field)
+                    if stage_number is None or stage_number < 1:
+                        raise HTTPException(status_code=400, detail="Incomplete restored Stage")
+                    event[id_field] = normalize_cocreation_sync_id(
+                        getattr(payload, id_field), id_field,
+                    )
+                    event[number_field] = stage_number
         elif event_type == "first_stage":
             initial_draft_method = str(payload.initialDraftMethod or "").strip()
             if int(payload.stageNumber) != 1 or not re.fullmatch(
@@ -3454,6 +3470,8 @@ def build_matchmaking_records_payload(
                             "coCreationDurationSeconds", "opponentRestartCount",
                             "nodeId", "nodeType", "nodeStatus", "nodeParentId",
                             "nodeEntries", "nodeUpdatedAt",
+                            "restoredFromVersionId", "restoredFromStageNumber",
+                            "replacedVersionId", "replacedStageNumber",
                         }
                     })
             safe_flow_events.sort(

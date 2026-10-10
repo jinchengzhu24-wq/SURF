@@ -71,6 +71,7 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 - 8010 正式 Unity 会话在用户点击“进入共创流程”、最新 Draft 被原子固化为 Stage 1 后才启动服务端 deadline，当前为 20 分钟。浏览首版 Draft、刷新页面和重新生成均不计时。到期后聊天、编辑、保存、恢复、试玩和提案锁定，只保留最终 Stage 提交；提交时可将当前可解的本地草稿原子保存为最终 `human_edit` Stage。
 - 直接访问 `/cocreation/` 创建的是独立演示会话，不启动 deadline、不同步 8000，也不写入正式匹配记录。
 - `/game/` 页脚 `DATA DASHBOARD` 在游戏页完成密码验证后才打开 `/frontend/`。WebGL 房间码使用模板中的静态浏览器输入：生成码只读可选中复制，加入码可粘贴并归一化为六位字母数字；没有 `COPY CODE` 按钮。Dashboard 保留完整 Match/Study Session ID，显示前八位并支持复制完整值、按两位玩家的完整或短 Study Session ID 搜索。
+- 8000 新研究记录按实际交互归组：人工编辑的两条观察/比较消息进入 `Manual Edit Review`，有证据的分歧及回应进入 `LLM Challenge`；`acknowledged` 只表示已回应并解除提案阻塞，直接重新编辑保存则关联新 Stage。`Player Challenge` 保留原提案、理由、分析、一次是/否选择卡和最终方向；其后提案独立关联，接受/拒绝候选地图不覆盖 Challenge 的方向选择。Intent 修订保留原卡、用户修订原话和审核后表述；恢复 Stage 显示恢复来源及被替代 Stage。首次 Stage、恢复和 Final 的同步重试复用已提交版本，节点重试投影最新持久化状态。仅作用于新记录与正常重试，不回填历史研究数据。
 
 ## 服务器运行与部署
 

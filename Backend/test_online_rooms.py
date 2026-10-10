@@ -760,6 +760,31 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertEqual(record["players"][0]["coCreationFlow"][1]["source"], "manual")
         self.assertEqual(record["players"][1]["coCreationFlow"][1]["cards"][0]["type"], "discussion")
 
+    def test_restored_stage_references_survive_dashboard_and_retry(self):
+        host = self.create_room()
+        self.assertEqual(self.submit_first_stage(host["matchId"]).status_code, 200)
+        endpoint = "/online/rooms/" + host["matchId"] + "/cocreation-events"
+        event = {
+            "eventId": "stage:restored-version", "eventType": "stage",
+            "sessionId": "session-host", "playerNumber": 1,
+            "versionId": "restored-version", "stageNumber": 3, "source": "restored",
+            "rows": SOLVABLE_ROWS_A, "diff": [],
+            "restoredFromVersionId": "stage-one", "restoredFromStageNumber": 1,
+            "replacedVersionId": "stage-two", "replacedStageNumber": 2,
+        }
+        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
+            headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
+            first = self.client.post(endpoint, json=event, headers=headers)
+            retry = self.client.post(endpoint, json=event, headers=headers)
+            invalid = self.client.post(endpoint, json={**event, "eventId": "stage:bad-restoration", "replacedStageNumber": None}, headers=headers)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertFalse(retry.json()["recorded"])
+        self.assertEqual(invalid.status_code, 400)
+        match = self.client.get("/matchmaking-records-data").json()["matches"][0]
+        restored = next(item for item in match["players"][0]["coCreationFlow"] if item.get("source") == "restored")
+        for field in ("restoredFromVersionId", "restoredFromStageNumber", "replacedVersionId", "replacedStageNumber"):
+            self.assertEqual(restored[field], event[field])
+
     def test_dashboard_node_snapshots_are_validated_and_aggregated(self):
         host = self.create_room()
         self.assertEqual(self.submit_first_stage(host["matchId"]).status_code, 200)

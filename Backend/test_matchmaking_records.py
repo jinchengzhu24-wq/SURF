@@ -92,7 +92,7 @@ class MatchmakingRecordTests(unittest.TestCase):
             script,
         )
         self.assertNotIn('formatShortDate(match.updatedAt)', script)
-        self.assertIn('match-created-date-20260915-1', index)
+        self.assertIn('research-nodes-20261010-1', index)
 
     @staticmethod
     def headers(player):

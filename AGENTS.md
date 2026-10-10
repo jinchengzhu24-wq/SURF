@@ -67,6 +67,8 @@ Keep these documents consistent with confirmed revisions and implementation. A d
 
 ## Reply Reliability, Reporting, and Evaluation
 
+- 8000 研究记录及 Dashboard 修改默认只针对修改后新生成的正确记录和正常幂等重试。除非用户明确要求，不新增历史研究记录兼容层，不执行历史回填或批量修正，也不反复询问是否兼容历史研究记录。保留原始研究数据及已有协议、幂等和明确规定的兼容行为。
+
 - Reliable body and full presentation quality are separate. Optional intent cards, memory patches, links, and question reviews must not discard an independently valid body. Required evidence, disagreement/intent-conflict state, authorization, map facts, contracts, and solving continue to block their corresponding conclusions/actions. Ordinary chat without reliable Kimi prose returns the retryable error without an assistant turn; no Stage-opening fallback.
 - Current requests share the HTTP entry's 116-second internal deadline inside the 120-second backend budget. Ordinary prose has at most three attempts; requirements compilation/review and challenge reason review each retain two attempts. Optional work shares at most 10 seconds total and reserves 20 seconds. Do not reset the deadline inside subtasks/recovery, or use legacy 300-second proposal constants for current requests.
 - Lock valid requirements while locally repairing failed items, then re-review complete coverage. Cache only fully verified requirements; key by exact StageSnapshot, user sources/content, answers, decisions, DesignContext projection, language, and policy/prompt versions. A correctly understood but infeasible proposal may deliver validated Kimi failure analysis without a purple card or map change; unreliable understanding, permission failure, and upstream failure do not authorize that recovery.
