@@ -12,6 +12,7 @@ from openai import APIStatusError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import llm_client as llm
+from patch_fixtures import patch_fixture
 import test_llm_client as llm_tests
 from conversation_evidence import build_dialogue_evidence, with_latest
 from level_validation import build_stage_snapshot
@@ -80,8 +81,11 @@ class DialogueEvidenceTests(unittest.TestCase):
             {"id": "u1", "role": "user", "content": "不好看"}], "v1"), latest)}
         wrong = visual_topic()
         wrong["goals"][0]["sourceTurnId"] = "unknown"
-        request = AsyncMock(side_effect=[completion(interpretation(latest, wrong)),
-                                        completion({"proposalUnderstanding": visual_topic()})])
+        async def request_value(*args, **kwargs):
+            if kwargs["task"] == "turn_understanding":
+                return completion(interpretation(latest, wrong))
+            return completion(patch_fixture(args[3][-1]["content"], {"understanding": {"proposalUnderstanding": visual_topic()}}))
+        request = AsyncMock(side_effect=request_value)
         with patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), patch.object(llm, "_request_completion", request):
             result = llm.classify_turn_understanding([{"role": "user", "content": latest}], self.snapshot, "r", proposal_context=context)
         self.assertEqual(result["acts"], ["revision_request"])

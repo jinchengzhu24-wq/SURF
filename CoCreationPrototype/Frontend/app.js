@@ -4117,6 +4117,11 @@ function showError(error, retryAction) {
 }
 
 function localizedErrorMessage(error) {
+    if (error?.details?.failureStage === "context_binding") {
+        return state.language === "zh-CN"
+            ? "对话或交互状态已经更新，请根据当前对话重新发送请求。地图未因这次请求改变。"
+            : "The dialogue or interaction state changed. Send a request based on the current dialogue. This request did not change the map.";
+    }
     if (error?.code === "PENDING_MESSAGE") return t("chatRetryPending");
     if (error?.code === "PROPOSAL_PRECONDITION_FAILED") {
         const reason = error.details?.reason;
@@ -4129,16 +4134,29 @@ function localizedErrorMessage(error) {
     const localized = state.language === "zh-CN"
         ? chineseApiErrors[error?.code]
         : translations.en[`error_${error?.code}`];
-    const message = localized
+    const componentMessage = error?.details?.failureStage === "clarification_review"
+        ? (state.language === "zh-CN"
+            ? "方案澄清的复核未完成，可使用原消息安全重试。"
+            : "The proposal clarification review could not be verified. Retry the original message safely.")
+        : null;
+    const message = componentMessage || localized
         || (state.language === "zh-CN" ? t("errorGeneric") : error?.message)
         || t("errorGeneric");
     const attemptsUsed = Number(error?.details?.attemptsUsed);
     const maximumAttempts = Number(error?.details?.maximumAttempts);
     const attemptSuffix = Number.isInteger(attemptsUsed) && Number.isInteger(maximumAttempts)
+        && maximumAttempts > 0 && attemptsUsed >= 0 && attemptsUsed <= maximumAttempts
+        && error?.details?.maximumAttempts != null && error?.details?.attemptsUsed != null
         ? ` (${attemptsUsed}/${maximumAttempts})`
         : "";
+    const repairUsed = error?.details?.repairAttemptsUsed;
+    const repairMaximum = error?.details?.maximumRepairAttempts;
+    const repairSuffix = Number.isInteger(repairUsed) && Number.isInteger(repairMaximum)
+        && repairMaximum > 0 && repairUsed >= 0 && repairUsed <= repairMaximum
+        ? ` · ${state.language === "zh-CN" ? "局部修复" : "Component repair"} ${repairUsed}/${repairMaximum}`
+        : "";
     const details = formatValidationDetails(error);
-    return details ? `${message}${attemptSuffix} ${details}` : `${message}${attemptSuffix}`;
+    return details ? `${message}${attemptSuffix}${repairSuffix} ${details}` : `${message}${attemptSuffix}${repairSuffix}`;
 }
 
 function isLevelValidationError(error) {

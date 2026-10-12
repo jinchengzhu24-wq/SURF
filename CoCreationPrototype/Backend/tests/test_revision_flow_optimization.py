@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import llm_client as llm
+from patch_fixtures import patch_fixture
 from design_requirements import (
     INTERPRETATION_VERSION, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, evaluate_requirements,
     requirement_model_view, validate_requirement_record,
@@ -259,11 +260,12 @@ class RevisionFlowOptimizationTests(unittest.TestCase):
         calls = []
         async def request(*args, **kwargs):
             calls.append(args[3])
-            return completion(next(responses))
+            value = next(responses)
+            return completion(patch_fixture(args[3][-1]["content"], value) if kwargs["task"].endswith("_patch") else value)
         context = {"stageSnapshot": self.snapshot, "requirementUserTurns": self.sources}
         with patch.object(llm, "_request_completion", side_effect=request):
             llm._review_proposal_requirements("offline", "offline", context, "request", time.monotonic() + 116)
-        self.assertEqual(json.loads(calls[2][-1]["content"])["structuredIssues"], [issue])
+        self.assertEqual(json.loads(calls[2][-3]["content"])["structuredIssues"], [issue])
         async def timeout(*args, **kwargs):
             raise asyncio.TimeoutError()
         with patch.object(llm, "_request_completion", side_effect=timeout), self.assertRaises(llm.LLMServiceError) as caught:

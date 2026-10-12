@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app as backend
 import llm_client as llm
+from patch_fixtures import patch_fixture
 from level_validation import build_entity_bindings, build_stage_snapshot
 from proposal_search import Focus, RevisionPlan, RevisionStrategy
 from proposal_understanding import (
@@ -251,7 +252,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
         bad = "我想在保持27步的前提下强化秩序美感。"
         good = "我觉得重复的边界可以形成视觉呼应。"
         context = {"proposalDiscovery": self.context, "proposalClarification": {"questionIntent": "visual composition"}}
-        call = AsyncMock(return_value=response({"bodyIssues": [bad], "questionIssue": None}))
+        call = AsyncMock(return_value=response({"bodyIssues": ["sentence-1"], "questionIssue": None}))
         with patch.object(llm, "_request_completion", call):
             body, issue = asyncio.run(llm._review_proposal_clarification("offline", "offline", bad + good,
                 "你更希望聚焦哪个区域？", context, "offline", time.monotonic() + 116))
@@ -260,7 +261,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
 
     def test_semantic_review_cannot_rewrite_unrelated_text_or_return_missing_evidence(self):
         call = AsyncMock(return_value=response({"bodyIssues": ["not in body"], "questionIssue": None}))
-        with patch.object(llm, "_request_completion", call), self.assertRaises(ValueError):
+        with patch.object(llm, "_request_completion", call), self.assertRaises(llm.LLMServiceError):
             asyncio.run(llm._review_proposal_clarification("offline", "offline", "I would try repetition.",
                 "Which area?", {"proposalDiscovery": self.context}, "offline", time.monotonic() + 116))
 
@@ -295,8 +296,12 @@ class ProposalUnderstandingTests(unittest.TestCase):
         spec = backend._proposal_clarification_spec(discovery, self.snapshot, "en")
         first = {"body": "I would keep the current objects fixed and try repeated water edges.", "question": "Which local area should frame it?"}
         second = {"body": "", "question": "Which local area should carry the water pattern?"}
-        call = AsyncMock(side_effect=[response(first), response(second)])
-        review = AsyncMock(return_value=(first["body"], "Repair the question only."))
+        async def request(*args, **kwargs):
+            if kwargs["task"] == "proposal_clarification":
+                return response(first)
+            return response(patch_fixture(args[3][-1]["content"], second))
+        call = AsyncMock(side_effect=request)
+        review = AsyncMock(side_effect=[(first["body"], "Repair the question only."), ("", "")])
         with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
                 patch.object(llm, "_request_completion", call), patch.object(llm, "_review_proposal_clarification", review):
             result = llm.generate_chat_reply([{"role": "user", "content": "Water and interior walls"}], ROWS,

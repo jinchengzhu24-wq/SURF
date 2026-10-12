@@ -568,6 +568,53 @@ class CoCreationSessionTests(unittest.TestCase):
     def tearDown(self):
         self.client.close()
 
+    def test_newer_user_evidence_keeps_body_but_does_not_commit_old_optional_updates(self):
+        def reply(*args, **kwargs):
+            with repository.connect(immediate=True) as database:
+                session = repository.get_session(database, self.session_id)
+                backend.insert_turn(database, session, "user", "Keep the current water unchanged.",
+                                    session["current_version_id"], "later-user-evidence", None)
+            return LLMExecutionResult(assistant_message="I can discuss the visual balance with you.",
+                model="kimi-k2.6", request_id="bound-request", attempts_used=1,
+                guidance={"move": "offer_perspective", "intentHypothesis": None, "intentConfidence": None,
+                          "proposalOffer": None, "followUpQuestion": "Which area should we discuss next?", "uiCues": []})
+        session = self.client.get(f"/api/sessions/{self.session_id}").json()
+        version = session["currentVersionId"]
+        with patch.object(backend, "generate_chat_reply", side_effect=reply):
+            response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
+                "content": "Discuss the map", "baseVersionId": version, "idempotencyKey": "bound-original"})
+        self.assertEqual(response.status_code, 200, response.text)
+        delivered = response.json()
+        self.assertEqual(delivered["currentVersionId"], version)
+        original_reply = next(turn for turn in delivered["turns"] if turn["role"] == "assistant" and turn["requestId"] == "bound-original")
+        self.assertEqual(original_reply["content"], "I can discuss the visual balance with you.")
+        self.assertIsNone(original_reply["guidance"].get("followUpQuestion"))
+        with patch.object(backend, "generate_chat_reply") as repeated:
+            retry = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
+                "content": "Discuss the map", "baseVersionId": version, "idempotencyKey": "bound-original"})
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(repeated.call_count, 0)
+        self.assertEqual(sum(turn["requestId"] == "bound-original" for turn in retry.json()["turns"]), 2)
+
+    def test_new_http_receipt_before_turn_keeps_canonical_state(self):
+        def reply(*args, **kwargs):
+            with repository.connect(immediate=True) as database:
+                session = repository.get_session(database, self.session_id)
+                repository.record_event(database, self.session_id, "interaction_message_guard", {
+                    "guardId": "later-http-receipt", "versionId": session["current_version_id"],
+                    "messageKey": "incoming-message", "status": "started"}, backend.utc_now())
+            return LLMExecutionResult(assistant_message="I would compare the water and the walking space.",
+                model="kimi-k2.6", request_id="receipt-request", attempts_used=1,
+                guidance={"move": "offer_perspective", "intentHypothesis": None, "intentConfidence": None,
+                          "proposalOffer": None, "followUpQuestion": "Which area matters?", "uiCues": []})
+        version = self.client.get(f"/api/sessions/{self.session_id}").json()["currentVersionId"]
+        with patch.object(backend, "generate_chat_reply", side_effect=reply):
+            response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
+                "content": "Discuss the map", "baseVersionId": version, "idempotencyKey": "receipt-original"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["currentVersionId"], version)
+        self.assertIsNone(response.json()["turns"][-1]["guidance"].get("followUpQuestion"))
+
     def create_and_open_session(self, creation_key="unity_test_001"):
         response = self.client.post(
             "/api/sessions",

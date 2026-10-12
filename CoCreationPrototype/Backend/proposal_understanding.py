@@ -10,6 +10,7 @@ from conversation_evidence import CONTEXT_VERSION, user_sources, evidence_signat
 
 
 POLICY_VERSION = 1
+MEANING_REVIEW_VERSION = "meaning-preservation-2"
 EDITABLE = {"water", "internal_walls"}
 PROTECTED = {"outer_shell", "player", "boxes", "targets"}
 COMPONENTS = EDITABLE | PROTECTED | {"gameplay", "unknown"}
@@ -141,11 +142,19 @@ def critical_review_reason(understanding, context):
         return "protected_edit_scope"
     if old_scope and new_scope != old_scope:
         return "edit_scope_changed"
+    old_scope_meanings = {(x["component"], x["sourceTurnId"], x["evidenceSpan"], x["statement"])
+                         for x in previous.get("editScope") or []}
+    new_scope_meanings = {(x["component"], x["sourceTurnId"], x["evidenceSpan"], x["statement"])
+                         for x in proposed.get("editScope") or []}
+    if old_scope_meanings and old_scope_meanings != new_scope_meanings:
+        return "edit_scope_meaning_changed"
     for key in ("goals", "preserve"):
-        old_evidence = {(x["sourceTurnId"], x["evidenceSpan"]) for x in previous.get(key) or []}
-        new_evidence = {(x["sourceTurnId"], x["evidenceSpan"]) for x in proposed.get(key) or []}
+        old_evidence = {(x["sourceTurnId"], x["evidenceSpan"], x["statement"]) for x in previous.get(key) or []}
+        new_evidence = {(x["sourceTurnId"], x["evidenceSpan"], x["statement"]) for x in proposed.get(key) or []}
         if not old_evidence.issubset(new_evidence):
             return "goal_or_preservation_changed"
+        if key == "preserve" and new_evidence - old_evidence:
+            return "new_preservation_requirement"
     # Legacy topics have no authoritative interpretation; reconstruct and review
     # before using their old annotations as a new permission decision.
     if (context or {}).get("topicId") and not previous:
@@ -175,7 +184,8 @@ def reusable_understanding(result, version_id):
             or not isinstance(result.get("evidenceSignature"), str) or len(result["evidenceSignature"]) != 64):
         return False
     reason = critical_review_reason(result, None)
-    return reason is None or (result.get("criticalReview") or {}).get("verified") is True
+    review = result.get("criticalReview") or {}
+    return reason is None or (review.get("verified") is True and review.get("policyVersion") == MEANING_REVIEW_VERSION)
 
 
 def validate_plan_scope(plan, topic):
@@ -195,6 +205,7 @@ def topic_signature(snapshot, context, latest):
         "understanding": (context or {}).get("understanding"), "latest": latest,
         "policyVersion": POLICY_VERSION}
     data["contextVersion"] = CONTEXT_VERSION
+    data["meaningReviewVersion"] = MEANING_REVIEW_VERSION
     data["dialogueSignature"] = evidence_signature((context or {}).get("dialogueEvidence"))
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 

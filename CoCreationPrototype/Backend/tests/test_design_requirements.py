@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app as backend
 import llm_client
+from patch_fixtures import patch_fixture
 from design_requirements import (
     evaluate_requirements, goal_rank, preflight_requirements, protected_change_requested,
     tradeoff_message, validate_requirement_record,
@@ -184,16 +185,19 @@ class DesignRequirementsTests(unittest.TestCase):
 
     def test_independent_review_repairs_semantic_misread(self):
         payload = {"requirements": [requirement()], "automaticBindings": [], "exactTransitions": []}
-        returns = [response(payload), response({"accepted": False, "issues": ["attribute misread"]}),
-            response(payload), response({"accepted": True, "issues": []})]
+        record = self.record(requirement())
+        issue = {"requirementIds": [record["requirements"][0]["requirementId"]], "kind": "meaning",
+                 "evidenceSpans": [SOURCES[1]["content"]], "repairInstruction": "Correct the switching interpretation."}
+        returns = [payload, {"accepted": False, "issues": [issue]}, payload, {"accepted": True, "issues": []}]
         tasks = []
         async def stub(*args, **kwargs):
             tasks.append(kwargs["task"])
-            return returns.pop(0)
+            value = returns.pop(0)
+            return response(patch_fixture(args[3][-1]["content"], value) if kwargs["task"].endswith("_patch") else value)
         with patch.object(llm_client, "_request_completion", side_effect=stub):
             record = llm_client._review_proposal_requirements("offline", "offline", {"stageSnapshot": self.snapshot,
                 "proposalDiscovery": {"topicId": "u1", "userTurns": SOURCES, "answers": []}}, "request", time.monotonic() + 116)
-        self.assertEqual(tasks, ["revision_requirements", "revision_requirement_review"] * 2)
+        self.assertEqual(tasks, ["revision_requirements", "revision_requirement_review", "revision_requirements_patch", "revision_requirement_review"])
         self.assertEqual(record["topicId"], "u1")
 
     def test_unreliable_interpretation_is_retryable_not_user_conflict(self):

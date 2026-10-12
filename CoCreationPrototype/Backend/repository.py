@@ -1382,7 +1382,8 @@ def _last_message_failure(database, session, turns):
             "requestId": payload.get("requestId"), "retryable": bool(payload.get("retryable", True)),
             "committed": False,
             "details": {name: details[name] for name in (
-                "task", "failureStage", "failureKind", "failureCode", "attemptsUsed", "maximumAttempts", "recoveryState"
+                "task", "failureStage", "failureKind", "failureCode", "attemptsUsed", "maximumAttempts", "recoveryState",
+                "component", "repairAttemptsUsed", "maximumRepairAttempts"
             ) if name in details}}
 
 

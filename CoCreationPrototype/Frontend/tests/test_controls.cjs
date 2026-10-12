@@ -419,6 +419,24 @@ test("classification diagnostics show actual attempts without claiming three bod
     }
 });
 
+test("review diagnostics separate component repair from generation and do not invent missing counts", () => {
+    const { context } = loadApp();
+    for (const language of ["en", "zh-CN"]) {
+        const message = vm.runInContext(`state.language = '${language}'; localizedErrorMessage({
+            code: 'MODEL_RESPONSE_INVALID', details: { failureStage: 'clarification_review',
+                attemptsUsed: 1, maximumAttempts: 2, repairAttemptsUsed: 1, maximumRepairAttempts: 1 }
+        })`, context);
+        assert.match(message, /1\/2/);
+        assert.match(message, /1\/1/);
+        assert.match(message, language === "en" ? /clarification review/ : /澄清的复核/);
+        assert.doesNotMatch(message, /2\/3/);
+        const unknown = vm.runInContext("localizedErrorMessage({ code: 'MODEL_RESPONSE_INVALID', details: { attemptsUsed: 2 } })", context);
+        assert.doesNotMatch(unknown, /\(\d+\/\d+\)/);
+        const invalid = vm.runInContext("localizedErrorMessage({ code: 'MODEL_RESPONSE_INVALID', details: { attemptsUsed: 3, maximumAttempts: 2 } })", context);
+        assert.doesNotMatch(invalid, /3\/2/);
+    }
+});
+
 test("message refresh recovers a diagnostic without changing retry input, then clears it on success", async () => {
     for (const committed of [false, true]) {
         const { context } = loadApp({ keepSubmit: true });

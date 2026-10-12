@@ -955,7 +955,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("state-recovery-20261012", index_response.text)
+        self.assertIn("minimal-evidence-repair-20261012", index_response.text)
         self.assertIn("sendChallengeChoice", js_response.text)
         self.assertIn("offer.availableActions.includes(action)", js_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
@@ -1495,7 +1495,6 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                     "failureKind": "upstream",
                     "failureCode": "UPSTREAM_TIMEOUT",
                     "attemptsUsed": 2,
-                    "maximumAttempts": 3,
                     "retryable": True,
                     "safeReason": "DeepSeek did not respond before the timeout.",
                     "committed": False,

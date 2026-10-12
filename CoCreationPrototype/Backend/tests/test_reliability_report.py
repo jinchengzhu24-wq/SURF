@@ -60,6 +60,17 @@ class ReliabilityReportTests(unittest.TestCase):
         self.assertEqual(report["topIssues"][0]["category"], "component_quality")
         self.assertEqual(report["afterRetries"]["reliableBodyDelivered"]["passed"], 1)
 
+    def test_component_repair_and_review_issues_render_without_upstream_attribution(self):
+        report = summarize([
+            event("review", kind="message_generation_failed", code="MODEL_RESPONSE_INVALID",
+                  details={"failureKind": "review_validation", "component": "clarification_review"}),
+            event("patch", kind="message_generation_failed", code="PATCH_EVIDENCE_INVALID"),
+        ])
+        self.assertEqual({group["category"] for group in report["failureGroups"]},
+                         {"component_review_validation", "component_repair"})
+        self.assertIn("组件复核技术故障", render_text(report))
+        self.assertIn("局部补丁", render_text(report))
+
     def test_missing_model_flags_are_unknown_and_fallbacks_are_separate(self):
         report = summarize([event(reliableBodyDelivered=True), event("fallback", snapshotFallback=True, reliableBodyDelivered=True)])
         metric = report["afterRetries"]["modelGenerationSucceeded"]

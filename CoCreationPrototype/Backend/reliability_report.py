@@ -24,12 +24,18 @@ CATEGORY_LABELS = {
     "state_or_delivery": "版本、幂等或交付状态问题",
     "configuration": "服务配置问题",
     "component_quality": "辅助组件或表达质量问题",
+    "component_review_validation": "组件复核技术故障（不代表模型理解错误）",
+    "component_repair": "局部补丁格式、边界或依据验证失败",
     "unknown": "记录不足，原因未确定",
 }
 
 
-def failure_category(code):
+def failure_category(code, details=None):
+    if (details or {}).get("failureKind") == "review_validation":
+        return "component_review_validation"
     code = str(code or "").upper()
+    if code.startswith("PATCH_"):
+        return "component_repair"
     if "SESSION_" in code or "COCREATION_EXPIRED" in code or code in {"STATE_UNVERIFIED", "CONCURRENT_CHANGE"}:
         return "state_or_delivery"
     if "TIMEOUT" in code or "DEADLINE" in code:
@@ -99,7 +105,7 @@ def summarize(events, example_limit=3):
         bucket["records"].append(sample)
         code = payload.get("failureCode") or payload.get("code")
         if not success or code:
-            bucket["issues"].add((failure_category(code), str(code or "UNKNOWN")))
+            bucket["issues"].add((failure_category(code, payload.get("details")), str(code or "UNKNOWN")))
         for component in payload.get("componentChecks") or []:
             if isinstance(component, dict) and (component.get("status") in {"omitted", "rejected", "failed"}
                     or (component.get("status") == "preserved" and component.get("code"))):

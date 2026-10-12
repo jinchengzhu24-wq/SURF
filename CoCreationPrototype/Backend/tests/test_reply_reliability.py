@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import llm_client as llm
+from patch_fixtures import patch_fixture
 from design_requirements import validate_requirement_record, validate_requirement_components
 from level_validation import build_stage_snapshot
 from reply_reliability import OptionalRepairBudget, parse_json_object, requirement_cache_key
@@ -57,7 +58,7 @@ class ReplyReliabilityTests(unittest.TestCase):
 
     def repair(self, payload, *, body=True, card=False):
         async def request(*args, **kwargs):
-            return completion(payload)
+            return completion(patch_fixture(args[3][-1]["content"], payload))
         with patch.object(llm, "_request_completion", side_effect=request) as mocked:
             result = asyncio.run(llm._repair_intent_components_async(api_key="fake", base_url="fake",
                 user_text="Make the route clearer.", body="Verified body.", card_text="Verified card.",
@@ -70,14 +71,14 @@ class ReplyReliabilityTests(unittest.TestCase):
                         {"bodyParagraphs": ["The route choice affects planning."], "cardSentences": []}):
             result, mocked = self.repair(payload)
             self.assertEqual(result[1], "Verified card.")
-            self.assertEqual(mocked.call_args.kwargs["task"], "intent_body_repair")
+            self.assertEqual(mocked.call_args.kwargs["task"], "intent_body_repair_patch")
 
     def test_card_repair_does_not_require_or_validate_body(self):
         card = ["For now, I understand that you may prefer a clearer route choice.",
                 "This interpretation remains tentative and you can correct me."]
         result, mocked = self.repair({"cardSentences": card, "bodyParagraphs": []}, body=False, card=True)
         self.assertEqual(result[0], "Verified body.")
-        self.assertEqual(mocked.call_args.kwargs["task"], "intent_card_repair")
+        self.assertEqual(mocked.call_args.kwargs["task"], "intent_card_repair_patch")
 
     def test_failed_optional_card_keeps_verified_body(self):
         checks = []
@@ -117,12 +118,14 @@ class ReplyReliabilityTests(unittest.TestCase):
             "evidenceSpans": [TURNS[1]["content"]], "repairInstruction": "Restore the expressed direction."}]},
             {**initial, "requirements": [requirement(), requirement(1)]}, {"accepted": True, "issues": []}])
         async def request(*args, **kwargs):
-            return completion(next(responses))
+            value = next(responses)
+            return completion(patch_fixture(args[3][-1]["content"], value) if kwargs["task"].endswith("_patch") else value)
         with patch.object(llm, "_request_completion", side_effect=request) as mocked:
             result = llm._review_proposal_requirements("fake", "fake", self.context, "r", time.monotonic() + 100)
         self.assertEqual(len(result["requirements"]), 2)
         repair = json.loads(mocked.call_args_list[2].args[3][-1]["content"])
-        self.assertEqual(repair["lockedRequirements"], [requirement()])
+        self.assertEqual(repair["frozenCandidate"]["requirements"][0], requirement())
+        self.assertNotIn("requirement-1", repair["targets"])
         self.assertEqual(mocked.call_count, 4)
 
     def test_verified_requirements_reuse_exact_cache_and_invalidate_changes(self):

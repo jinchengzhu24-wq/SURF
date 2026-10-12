@@ -791,8 +791,10 @@ def _llm_failure_details(exception):
     }:
         task, failure_stage, maximum = "deterministic_search", "semantic_contract", 2
     else:
-        task, failure_stage, maximum = "chat", "upstream", 3
+        task, failure_stage, maximum = "chat", "upstream", None
     failure_kind = "upstream"
+    if code in {"MODEL_RESPONSE_INVALID", "MODEL_LOW_QUALITY_RESPONSE", "MODEL_EMPTY_RESPONSE"}:
+        failure_stage, failure_kind = "response_validation", "model_validation"
     if code.startswith("REQUIREMENT_"):
         failure_kind = "constraint_conflict" if code == "REQUIREMENT_PERMISSION_CONFLICT" else "understanding"
     elif code.startswith("REVISION_PLAN"):
@@ -809,7 +811,7 @@ def _llm_failure_details(exception):
             "failureKind": failure_kind,
             "failureCode": code,
             "attemptsUsed": exception.attempts_used,
-            "maximumAttempts": maximum,
+            **({"maximumAttempts": maximum} if maximum is not None else {}),
             "retryable": exception.retryable,
             "safeReason": exception.safe_message,
             "committed": False,
@@ -2860,6 +2862,7 @@ def send_message(
                          "status": "started", "leaseUntil": iso_time(datetime.now(timezone.utc) + timedelta(seconds=120))}
                 record_event(database, session_id, "interaction_message_guard", guard, utc_now())
         delivered_payload = None
+        request.state.interaction_guard_id = guard.get("guardId") if guard else None
         try:
             delivered_payload = _send_message_locked(
                 session_id, payload, content, request, response, access_cookie,
@@ -4182,8 +4185,8 @@ def _send_message_locked(
                                 "retryable": exception.retryable,
                                 "details": _llm_failure_details(exception),
                                 "retryingExistingUserTurn": retrying_failed_message,
-                                "modelGenerationSucceeded": bool((context["stageContext"].get("_reliabilityState") or {}).get("modelGenerationSucceeded")),
-                                "proposalRequested": revision_state == "proposal_requested" or payload.action in {"execute_revision", "alternative_revision"} or bool(challenge_choice_resolution),
+                                "modelGenerationSucceeded": (context["stageContext"].get("_reliabilityState") or {}).get("modelGenerationSucceeded"),
+                                "proposalRequested": payload.requestProposal or revision_state == "proposal_requested" or payload.action in {"execute_revision", "alternative_revision"} or bool(challenge_choice_resolution),
                             },
                             utc_now(),
                         )
@@ -4539,6 +4542,38 @@ def _send_message_locked(
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, payload.baseVersionId)
         current = get_current_version(database, session)
+        captured_binding = context.get("commitBinding")
+        current_binding = _message_commit_binding(database, session_id, payload.baseVersionId)
+        source_sequence = database.execute("SELECT sequence_number FROM conversation_turns WHERE id = ? AND session_id = ?",
+                                           (user_turn_id, session_id)).fetchone()
+        guard_id = getattr(request.state, "interaction_guard_id", None)
+        guard_receipt = database.execute("""SELECT id FROM audit_events WHERE session_id = ? AND event_type = 'interaction_message_guard'
+            AND json_extract(payload_json, '$.guardId') = ? AND json_extract(payload_json, '$.status') = 'started' ORDER BY id LIMIT 1""",
+            (session_id, guard_id)).fetchone() if guard_id else None
+        superseded = bool(source_sequence and source_sequence["sequence_number"] != current_binding["latestUserSequence"])
+        newer_receipt = bool(guard_receipt and guard_receipt["id"] != current_binding["latestMessageReceipt"])
+        if captured_binding and (captured_binding != current_binding or superseded or newer_receipt):
+            if (execution.proposed_rows is not None or (execution.guidance or {}).get("proposalOffer")
+                    or payload.action != "none"):
+                raise ApiError(409, "PROPOSAL_STALE", "The dialogue evidence or interaction state changed. Send a request based on the current dialogue.",
+                               retryable=False, details={"failureStage": "context_binding", "failureKind": "state_or_evidence_change"})
+            # Immutable map prose can remain useful, but old optional metadata
+            # and old state signals cannot overwrite a newer user/state change.
+            body = _strip_unverified_state_claims(execution.assistant_message)
+            if not body.strip():
+                raise ApiError(502, "MODEL_RESPONSE_INVALID", "No reliable answer remains after the context changed. Retry the original message.", retryable=True)
+            canonical_active = load_design_context(database, session_id, payload.baseVersionId).get("activeDisagreement")
+            safe_guidance = {"move": "offer_perspective", "intentHypothesis": None, "intentConfidence": None,
+                             "proposalOffer": None, "followUpQuestion": None, "uiCues": [],
+                             "disagreement": None}
+            design_context_guidance = dict(safe_guidance)
+            allow_progress = False
+            question_answer_review = {"results": [], "answeredQuestionIds": []}
+            state_transition_deferred = bool(canonical_active and canonical_active.get("subject") == "human_edit"
+                                             and canonical_active.get("status") == "active")
+            execution = replace(execution, assistant_message=body, guidance=safe_guidance,
+                proposal_diagnostics={**(execution.proposal_diagnostics or {}), "fullQualityPassed": False,
+                    "componentChecks": [{"component": "context_binding", "status": "preserved", "code": "CONCURRENT_CHANGE"}]})
         requested_disagreement = design_context_guidance.get("disagreement")
         initial_disagreement = context["stageContext"].get("activeDisagreement")
         if initial_disagreement and initial_disagreement.get("subject") == "human_edit":
@@ -4692,7 +4727,7 @@ def _send_message_locked(
             )
             _record_reply_outcome(database, session_id, payload.idempotencyKey,
                 payload.baseVersionId, execution, "message",
-                proposal_requested=revision_state == "proposal_requested" or payload.action in {"execute_revision", "alternative_revision"} or bool(challenge_choice_resolution) or proposal_recovery or bool((execution.guidance or {}).get("proposalOffer")))
+                proposal_requested=payload.requestProposal or revision_state == "proposal_requested" or payload.action in {"execute_revision", "alternative_revision"} or bool(challenge_choice_resolution) or proposal_recovery or bool((execution.guidance or {}).get("proposalOffer")))
 
             if payload.action == "challenge_revision":
                 hypotheses = (execution.proposal_diagnostics or {}).get(
@@ -5558,6 +5593,13 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
         "candidateFrozen": True,
         "mechanismEvidence": mechanism,
         "verifiedValidation": validation.as_dict(),
+        "componentChecks": [
+            {"component": "operations", "status": "verified", "dependencies": ["contract"]},
+            {"component": "validation", "status": "verified", "dependencies": ["operations", "requirements"]},
+            {"component": "brief", "status": "verified", "dependencies": ["validation"]},
+            {"component": "presentation", "status": "verified", "dependencies": ["brief"],
+             "source": "server_verified_diff"},
+        ],
     })
     return replace(
         execution,
@@ -8905,6 +8947,15 @@ def _progress_context(database, session_id, version, design_context, latest_user
     }
 
 
+def _message_commit_binding(database, session_id, version_id):
+    """Server-only receipt/evidence/state binding; never placed in LLM context."""
+    version = get_version(database, session_id, version_id)
+    return {**component_recovery.state_stamp(database, session_id, version_id),
+        "designContextSignature": component_recovery.signature(load_design_context(database, session_id, version_id)),
+        "mapSignature": component_recovery.signature({"rows": load_json(version["rows_json"]),
+            "bindings": load_entity_bindings(database, session_id, version_id)})}
+
+
 def build_llm_context(database, session_id, version):
     session = database.execute(
         "SELECT initial_draft_method, language, demo_mode FROM design_sessions WHERE id = ?",
@@ -9313,6 +9364,7 @@ def build_llm_context(database, session_id, version):
         "rows": current_rows,
         "validation": load_json(version["validation_json"]),
         "conversation": conversation,
+        "commitBinding": _message_commit_binding(database, session_id, version["id"]),
         "stageContext": {
             "dialogueEvidence": build_dialogue_evidence(
                 [dict(turn) for turn in proposal_turns if turn["id"] not in superseded_assessment_turn_ids],

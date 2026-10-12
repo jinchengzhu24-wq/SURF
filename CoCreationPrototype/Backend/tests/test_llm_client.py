@@ -19,6 +19,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import llm_client
+from patch_fixtures import patch_fixture
 from level_validation import build_entity_bindings, validate_and_solve
 
 
@@ -150,8 +151,10 @@ class FakeCompletions:
         schema_name = (((kwargs.get("response_format") or {}).get("json_schema") or {}).get("name"))
         if schema_name != "cocreation_intent_candidate_review":
             self.calls.append(kwargs)
-        if schema_name == "cocreation_intent_component_repair":
-            prompt = str((kwargs.get("messages") or [{}])[-1].get("content") or "")
+        patch_spec = (json.loads(kwargs["messages"][-1]["content"])
+                      if schema_name == "cocreation_component_patch" else None)
+        if schema_name == "cocreation_intent_component_repair" or patch_spec and patch_spec["componentId"] == "intent_presentation":
+            prompt = "\n\n".join(str(message.get("content") or "") for message in kwargs.get("messages") or [])
             body_match = re.search(r"CURRENT BODY:\n(.*?)\n\nCURRENT CARD:", prompt, re.DOTALL)
             card_match = re.search(r"CURRENT CARD:\n(.*?)\n\nREVIEW ISSUES:", prompt, re.DOTALL)
             claims_match = re.search(r"LOCKED CLAIMS:\n(.*?)\n\nAUTHORITATIVE", prompt, re.DOTALL)
@@ -188,10 +191,9 @@ class FakeCompletions:
                 card_sentences = [card, "This remains correctable."]
             return SimpleNamespace(choices=[SimpleNamespace(
                 finish_reason="stop",
-                message=SimpleNamespace(content=json.dumps({
-                    "bodyParagraphs": body_paragraphs[:3],
-                    "cardSentences": card_sentences[:4],
-                }, ensure_ascii=False)),
+                message=SimpleNamespace(content=json.dumps(
+                    patch_fixture(patch_spec, {"bodyParagraphs": body_paragraphs[:3], "cardSentences": card_sentences[:4]})
+                    if patch_spec else {"bodyParagraphs": body_paragraphs[:3], "cardSentences": card_sentences[:4]}, ensure_ascii=False)),
             )])
         if schema_name == "cocreation_intent_candidate_review":
             prompt = str((kwargs.get("messages") or [{}])[-1].get("content") or "")
@@ -237,6 +239,11 @@ class FakeCompletions:
 
         if hasattr(outcome, "choices"):
             return outcome
+        if patch_spec and isinstance(outcome, str):
+            expected = json.loads(outcome)
+            if patch_spec["componentId"] == "understanding":
+                expected = {"understanding": expected}
+            outcome = json.dumps(patch_fixture(patch_spec, expected), ensure_ascii=False)
 
         if isinstance(outcome, str) and outcome.strip() and schema_name is None and "INTENT_DECISION:" not in outcome:
             latest_user = next((
@@ -1227,7 +1234,7 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertNotIn("routeComplexityScore", result)
-        self.assertIn("相关设计指标", result)
+        self.assertEqual(result, "")
 
     def test_stage_assessment_schema_owns_opening_move(self):
         schema = llm_client._structured_response_format("stage_assessment")
@@ -2357,13 +2364,14 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertNotIn("以当前保存的 Stage 为准", result.assistant_message)
         self.assertNotIn("第9行第9列", result.assistant_message)
-        self.assertIn("增加实际推箱次数", result.assistant_message)
+        self.assertEqual(result.assistant_message, "你希望先围绕 B1 还是 B2 增加运输长度？")
+        self.assertNotIn("增加实际推箱次数", result.assistant_message)
         self.assertEqual(len(client.chat.completions.calls), 1)
         self.assertEqual(
             result.proposal_diagnostics["clarificationRecoveryMode"],
-            "body_recovered",
+            "kimi_complete",
         )
-        self.assertEqual(result.proposal_diagnostics["clarificationAuthor"], "mixed")
+        self.assertEqual(result.proposal_diagnostics["clarificationAuthor"], "kimi")
 
     def test_proposal_clarification_prompt_forbids_coordinates_and_model_questions(self):
         messages = llm_client.build_plain_chat_messages(

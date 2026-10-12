@@ -38,10 +38,11 @@ from level_validation import (
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
 from reply_reliability import ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key
+from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
 from conversation_evidence import CONTEXT_VERSION
 from proposal_understanding import (
     turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
-    engagement_schema, validate_engagement,
+    engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
 )
 from design_requirements import (
     requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
@@ -165,6 +166,8 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
     the model to infer the wire shape from the much larger design rules.
     """
     task = str(task or "chat")
+    if task.endswith("_patch"):
+        return patch_response_format()
     if task == "proposal_clarification_review":
         schema = {"type": "object", "additionalProperties": False, "properties": {
             "bodyIssues": {"type": "array", "items": {"type": "string"}},
@@ -966,9 +969,9 @@ def build_chat_messages(
         "discussion from another Stage happened in the current Stage.\n\n"
         f"Write all new natural-language fields in {response_language}. "
         + (
-            "In Chinese mode, use Chinese natural language throughout; keep only the visible "
+            "In Chinese mode, use natural Chinese. Preserve names and minor natural English; keep the visible "
             "map labels P/B/T, entity IDs, "
-            "coordinates, and the label Stage in Latin characters. Do not code-switch into "
+            "coordinates, and the label Stage in Latin characters. Do not expose internal fields or rely on "
             "English design jargon. "
             if response_language == "Simplified Chinese"
             else ""
@@ -1358,9 +1361,9 @@ def build_plain_chat_messages(
         "notices, and canned service phrasing. Write only the visible "
          f"reply to the designer in {response_language}; "
          + (
-             "Use Chinese natural language throughout in Chinese mode; keep only visible "
+             "Use natural Chinese; preserve names and minor natural English alongside visible "
              "map labels P/B/T, entity IDs, "
-             "coordinates, and Stage in Latin characters, and do not use English design jargon. "
+             "coordinates, and Stage in Latin characters; preserve names and minor natural English, but never expose internal fields. "
              if response_language == "Simplified Chinese"
              else ""
          )
@@ -4161,6 +4164,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     executable tile transitions remain server-owned.
     """
     latest = _latest_role_content(conversation, "user").strip()
+    _deadline = _deadline or _request_deadline(time.monotonic())
     if not latest:
         raise ValueError("A user message is required for turn understanding.")
     api_key, base_url = _llm_credentials()
@@ -4257,21 +4261,34 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     )
     last_error = None
     locked_base = None
+    repair_request = None
+    payload = {}
+    review_repair_request = None
+    verdict = {}
     for attempt in range(1, 3):
         try:
+            phase = "understanding"
             timeout = min(15.0, _remaining_until(_deadline)) if _deadline is not None else 15.0
             if timeout <= 0:
                 raise asyncio.TimeoutError()
-            response = asyncio.run(asyncio.wait_for(
-                _request_completion(
-                    api_key, base_url, KIMI_MODEL, messages, 1800, timeout,
-                    task="turn_understanding",
-                ),
-                timeout=timeout,
-            ))
-            if str(getattr(response.choices[0], "finish_reason", "")) == "length":
-                raise ValueError("Turn understanding was truncated.")
-            payload = parse_json_object(response.choices[0].message.content)
+            if review_repair_request is not None:
+                pass  # Preserve the original understanding; repair its reviewer only.
+            elif repair_request is not None:
+                merged = asyncio.run(_request_component_patch(api_key, base_url, repair_request,
+                    messages, request_id, _deadline or (time.monotonic() + timeout),
+                    "turn_understanding", max_tokens=1800, timeout_limit=timeout))
+                payload = merged["understanding"]
+            else:
+                response = asyncio.run(asyncio.wait_for(
+                    _request_completion(
+                        api_key, base_url, KIMI_MODEL, messages, 1800, timeout,
+                        task="turn_understanding",
+                    ),
+                    timeout=timeout,
+                ))
+                if str(getattr(response.choices[0], "finish_reason", "")) == "length":
+                    raise ValueError("Turn understanding was truncated.")
+                payload = parse_json_object(response.choices[0].message.content)
             if set(payload) & {"semanticPolicyVersion", "criticalReview", "versionId", "evidenceSignature"}:
                 raise ValueError("A model cannot author server review metadata.")
             candidate = ({**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding")}
@@ -4287,6 +4304,8 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             _validate_proposal_interpretation(candidate, latest, snapshot, proposal_context, forced_proposal)
             review_reason = critical_review_reason(candidate, proposal_context)
             if review_reason:
+                phase = "understanding_review"
+                verdict = {}
                 review_started = time.monotonic()
                 remaining = min(12.0, _remaining_until(_deadline)) if _deadline is not None else 12.0
                 if remaining <= 0:
@@ -4306,12 +4325,17 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     "source": json.loads(messages[1]["content"]), "candidate": candidate,
                     "reviewReason": review_reason,
                 }, ensure_ascii=False)}]
-                reviewed = asyncio.run(asyncio.wait_for(_request_completion(
-                    api_key, base_url, KIMI_MODEL, review_messages, 2000, remaining,
-                    task="turn_understanding_review"), timeout=remaining))
-                if str(getattr(reviewed.choices[0], "finish_reason", "")) == "length":
-                    raise ValueError("Turn understanding review was truncated.")
-                verdict = parse_json_object(reviewed.choices[0].message.content)
+                if review_repair_request is not None:
+                    verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request,
+                        review_messages, request_id, _deadline or (time.monotonic() + remaining),
+                        "turn_understanding_review", max_tokens=2000, timeout_limit=remaining))
+                else:
+                    reviewed = asyncio.run(asyncio.wait_for(_request_completion(
+                        api_key, base_url, KIMI_MODEL, review_messages, 2000, remaining,
+                        task="turn_understanding_review"), timeout=remaining))
+                    if str(getattr(reviewed.choices[0], "finish_reason", "")) == "length":
+                        raise ValueError("Turn understanding review was truncated.")
+                    verdict = parse_json_object(reviewed.choices[0].message.content)
                 if (set(verdict) != {"accepted", "issues", "understanding"}
                         or verdict["accepted"] is not True or verdict["issues"] != []):
                     raise ValueError("Independent proposal understanding review did not verify the request.")
@@ -4326,6 +4350,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 if candidate.get("humanEditEngagement"):
                     corrected["humanEditEngagement"] = candidate["humanEditEngagement"]
                 corrected["criticalReview"] = {"verified": True, "reason": review_reason,
+                    "policyVersion": MEANING_REVIEW_VERSION,
                     "corrected": corrected != candidate, "attempt": attempt,
                     "latencyMs": int((time.monotonic() - review_started) * 1000),
                     "initialChanges": candidate.get("changes") or []}
@@ -4342,17 +4367,35 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             last_error = exception
             _log_llm_event("proposal_understanding_rejected", requestId=request_id,
                 attempt=attempt, reason=str(exception)[:300])
+            frozen = {**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding")} if locked_base else payload
+            targets = ([Target("proposalUnderstanding", ("understanding", "proposalUnderstanding"), (dict, type(None)))]
+                       if locked_base is not None else [Target("understanding", ("understanding",), (dict,))])
+            repair_request = PatchRequest("understanding", {"understanding": frozen}, targets,
+                {"snapshot": snapshot, **{f"user:{key}": content for key, content in designer_sources(proposal_context, latest).items()}})
+            review_repair_request = None
+            if phase == "understanding_review":
+                parts, missing = {}, []
+                for field, kinds in (("accepted", (bool,)), ("issues", (list,)), ("understanding", (dict,))):
+                    value = verdict.get(field) if isinstance(verdict, dict) else None
+                    if type(value) in kinds and (field != "issues" or all(isinstance(item, str) for item in value)):
+                        parts[field] = value
+                    else:
+                        missing.append(Target(field, (field,), kinds))
+                if missing:
+                    review_repair_request = PatchRequest("understanding_review", parts, missing,
+                        {"review_source": json.loads(review_messages[1]["content"])})
             messages.append({"role": "user", "content": (
                 ("Repair only proposalUnderstanding. Validated speech acts, changes and latest evidence "
                  "are locked: " + json.dumps(locked_base, ensure_ascii=False) + ". "
                  if locked_base is not None else "Repair the failed understanding with the same original evidence and topic. ")
                 + str(exception)[:400]
             )})
-    raise LLMServiceError(
-        "MODEL_RESPONSE_INVALID",
-        "Kimi could not reliably classify the designer's latest message. Retry it.",
-        request_id, True, 2, 502,
-    ) from last_error
+    error = LLMServiceError("MODEL_RESPONSE_INVALID",
+        "Kimi could not reliably classify the designer's latest message. Retry it.", request_id, True, 2, 502)
+    error.details = {"task": "turn_understanding", "failureStage": phase,
+                     "failureKind": "review_validation" if review_repair_request is not None else "understanding",
+                     "maximumAttempts": 2}
+    raise error from last_error
 
 
 def _validate_proposal_interpretation(candidate, latest, snapshot, context, forced):
@@ -4790,6 +4833,10 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
     last_issue = ""
     failure_details = {"task": "revision_requirements", "failureStage": "compilation", "failureKind": "timeout"}
     locked = {}
+    repair_request = None
+    review_repair_request = None
+    verdict = {}
+    payload = {}
     attempt = 0
     for attempt in range(1, 3):
         remaining = _remaining_until(deadline)
@@ -4798,13 +4845,21 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         phase = "compilation"
         repair_issues = []
         try:
-            response = asyncio.run(asyncio.wait_for(_request_completion(
-                api_key, base_url, KIMI_MODEL, messages, 3200, min(20.0, remaining),
-                task="revision_requirements",
-            ), timeout=min(20.0, remaining)))
-            if getattr(response.choices[0], "finish_reason", None) == "length":
-                raise ValueError("Requirements JSON was truncated.")
-            payload = parse_json_object(response.choices[0].message.content)
+            if review_repair_request is not None:
+                pass  # Reuse the complete compiled candidate; repair only its reviewer.
+            elif repair_request is not None:
+                patched = asyncio.run(_request_component_patch(api_key, base_url, repair_request,
+                    messages, request_id, deadline, "revision_requirements", max_tokens=3200))
+                payload = {key: patched[key] for key in ("requirements", "automaticBindings", "exactTransitions")}
+                payload["requirements"] += patched.get("additionalRequirements", [])
+            else:
+                response = asyncio.run(asyncio.wait_for(_request_completion(
+                    api_key, base_url, KIMI_MODEL, messages, 3200, min(20.0, remaining),
+                    task="revision_requirements",
+                ), timeout=min(20.0, remaining)))
+                if getattr(response.choices[0], "finish_reason", None) == "length":
+                    raise ValueError("Requirements JSON was truncated.")
+                payload = parse_json_object(response.choices[0].message.content)
             valid_items, component_issues = validate_requirement_components(payload, turns, snapshot)
             if component_issues:
                 repair_issues = component_issues
@@ -4840,12 +4895,18 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             if remaining <= 0:
                 raise asyncio.TimeoutError()
             phase = "review"
-            reviewed = asyncio.run(asyncio.wait_for(_request_completion(
-                api_key, base_url, KIMI_MODEL, review_messages, 1600, min(12.0, remaining),
-                task="revision_requirement_review"), timeout=min(12.0, remaining)))
-            if getattr(reviewed.choices[0], "finish_reason", None) == "length":
-                raise ValueError("Independent requirements review JSON was truncated.")
-            verdict = parse_json_object(reviewed.choices[0].message.content)
+            verdict = {}
+            if review_repair_request is not None:
+                verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request,
+                    review_messages, request_id, deadline, "revision_requirement_review", max_tokens=1600,
+                    timeout_limit=min(12.0, remaining)))
+            else:
+                reviewed = asyncio.run(asyncio.wait_for(_request_completion(
+                    api_key, base_url, KIMI_MODEL, review_messages, 1600, min(12.0, remaining),
+                    task="revision_requirement_review"), timeout=min(12.0, remaining)))
+                if getattr(reviewed.choices[0], "finish_reason", None) == "length":
+                    raise ValueError("Independent requirements review JSON was truncated.")
+                verdict = parse_json_object(reviewed.choices[0].message.content)
             if set(verdict) != {"accepted", "issues"} or not isinstance(verdict["accepted"], bool) or not isinstance(verdict["issues"], list):
                 raise ValueError("Invalid independent evidence review envelope.")
             if verdict["accepted"] is not True or verdict["issues"]:
@@ -4886,7 +4947,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             error.details = {"task": "revision_requirements", "failureStage": "upstream", "failureKind": "upstream"}
             raise error from exception
         except (ValueError, TypeError, KeyError, IndexError, AttributeError, asyncio.TimeoutError) as exception:
-            failure_kind = "timeout" if isinstance(exception, asyncio.TimeoutError) else "truncated_json" if "truncated" in str(exception) else "invalid_json" if isinstance(exception, json.JSONDecodeError) else "interpretation"
+            failure_kind = "timeout" if isinstance(exception, asyncio.TimeoutError) else "truncated_json" if "truncated" in str(exception).lower() else "invalid_json" if isinstance(exception, json.JSONDecodeError) else "interpretation"
             last_issue = str(exception) or "Requirements phase exceeded its time limit."
             failure_details = {"task": "revision_requirements", "failureStage": phase,
                                "failureKind": failure_kind}
@@ -4896,11 +4957,72 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             messages.append({"role": "user", "content": json.dumps({
                 "repairIssue": last_issue, "structuredIssues": repair_issues,
                 "failureDetails": failure_details, "lockedRequirements": list(locked.values()),
-                "instruction": "Return the complete envelope, preserve locked items exactly, repair rejected and related items and recheck all designer evidence for missing requirements.",
+                "instruction": "Repair only the server-listed targets. Locked requirements must remain unchanged. Recheck complete coverage after merging.",
             }, ensure_ascii=False)})
+            review_repair_request = None
+            if phase == "review":
+                reviewed_parts, technical_fields = _requirement_review_components(verdict, record, turns)
+                if technical_fields:
+                    review_repair_request = PatchRequest("requirement_review", reviewed_parts,
+                        [Target(field, (field,), (bool,) if field == "accepted" else (list,)) for field in technical_fields],
+                        {"compiled_requirements": record, "snapshot": snapshot,
+                         **{f"user:{turn['id']}": turn for turn in turns}})
+            if review_repair_request is not None and failure_details["failureKind"] == "interpretation":
+                failure_details["failureKind"] = "review_validation"
+            if review_repair_request is None:
+                repair_request = _requirements_patch_request(payload, locked, turns, snapshot)
     error = LLMServiceError("REQUIREMENT_INTERPRETATION_INVALID", "The design requirements could not be interpreted reliably. Retry this message.", request_id, True, attempt, 502)
     error.details = failure_details
     raise error
+
+
+def _requirement_review_components(verdict, record, turns):
+    verdict = verdict if isinstance(verdict, dict) else {}
+    valid, failed = {}, []
+    if type(verdict.get("accepted")) is bool:
+        valid["accepted"] = verdict["accepted"]
+    else:
+        failed.append("accepted")
+    issues = verdict.get("issues")
+    ids = {item["requirementId"] for item in record["requirements"]}
+    try:
+        if not isinstance(issues, list):
+            raise ValueError()
+        for issue in issues:
+            if not isinstance(issue, dict) or set(issue) != {"requirementIds", "kind", "evidenceSpans", "repairInstruction"}:
+                raise ValueError()
+            if (not isinstance(issue["requirementIds"], list) or not all(isinstance(item, str) and item in ids for item in issue["requirementIds"])
+                    or issue["kind"] not in {"evidence", "meaning", "coverage", "conflict"}
+                    or not isinstance(issue["evidenceSpans"], list) or not issue["evidenceSpans"]
+                    or any(not isinstance(span, str) or not span or not any(span in turn["content"] for turn in turns) for span in issue["evidenceSpans"])
+                    or not isinstance(issue["repairInstruction"], str) or not issue["repairInstruction"].strip()):
+                raise ValueError()
+        valid["issues"] = issues
+    except (ValueError, TypeError, KeyError):
+        failed.append("issues")
+    return valid, failed
+
+
+def _requirements_patch_request(payload, locked, turns, snapshot):
+    candidate = {key: payload.get(key) for key in ("requirements", "automaticBindings", "exactTransitions")}
+    targets = []
+    raw_items = candidate.get("requirements")
+    if not isinstance(raw_items, list):
+        targets.append(Target("requirements", ("requirements",), (list,)))
+    else:
+        for index, raw in enumerate(raw_items):
+            if raw not in locked.values():
+                targets.append(Target(f"requirement-{index + 1}", ("requirements", index), (dict,)))
+        candidate["additionalRequirements"] = []
+        targets.append(Target("additionalRequirements", ("additionalRequirements",), (list,)))
+    for key in ("automaticBindings", "exactTransitions"):
+        try:
+            validate_requirement_record({"requirements": [], "automaticBindings": candidate["automaticBindings"] if key == "automaticBindings" else [],
+                "exactTransitions": candidate["exactTransitions"] if key == "exactTransitions" else []}, turns, snapshot)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            targets.append(Target(key, (key,), (list,)))
+    return PatchRequest("requirements", candidate, targets,
+        {"snapshot": snapshot, **{f"user:{turn['id']}": turn for turn in turns}})
 
 
 def _generate_verified_proposal_failure_analysis(api_key, base_url, context, rows, language, request_id, deadline, failure):
@@ -6481,6 +6603,32 @@ def _preserved_components_prompt(components):
     )
 
 
+def _revision_plan_patch_request(payload, messages):
+    payload = payload if isinstance(payload, dict) else {}
+    candidate = {"strategies": payload.get("strategies")}
+    strategies = candidate["strategies"]
+    targets = []
+    required_types = {"effect": (str,), "focus": (dict, type(None)), "operators": (list,),
+                      "preserve": (list,), "editBudget": (int,), "metricGoals": (list,)}
+    if not isinstance(strategies, list) or not 1 <= len(strategies) <= 3:
+        targets.append(Target("strategies", ("strategies",), (list,)))
+    else:
+        for index, strategy in enumerate(strategies):
+            try:
+                parse_revision_plan({"strategies": [strategy]})
+            except (ValueError, TypeError, KeyError):
+                missing = [field for field in required_types if isinstance(strategy, dict) and field not in strategy]
+                if missing:
+                    targets.extend(Target(f"strategy-{index + 1}.{field}", ("strategies", index, field), required_types[field])
+                                   for field in missing)
+                else:
+                    targets.append(Target(f"strategy-{index + 1}", ("strategies", index), (dict,)))
+    if not targets:
+        # An envelope defect is not permission to rewrite valid strategies.
+        raise PatchError("PLAN_ENVELOPE_INVALID")
+    return PatchRequest("plan", candidate, targets, {"planning_contract": messages})
+
+
 async def _compile_revision_plan(
     *,
     api_key,
@@ -6498,6 +6646,8 @@ async def _compile_revision_plan(
     attempt_failures = []
     validation_feedback = initial_validation_feedback
     first_failure_code = None
+    repair_request = None
+    raw_plan = {}
     deadline = deadline or min(
         _request_deadline(started_at),
         started_at + PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS,
@@ -6528,6 +6678,12 @@ async def _compile_revision_plan(
             responseMode="revision_plan",
         )
         try:
+            if repair_request is not None:
+                raw_plan = await _request_component_patch(api_key, base_url, repair_request,
+                    _revision_plan_messages_with_feedback(messages, validation_feedback), request_id,
+                    deadline, "revision_plan", PROPOSAL_PLAN_MAX_TOKENS, attempt_timeout)
+                plan = parse_revision_plan(raw_plan)
+                return plan, attempt, model
             response = await asyncio.wait_for(
                 _request_completion(
                     api_key,
@@ -6547,7 +6703,8 @@ async def _compile_revision_plan(
             content = str(choice.message.content or "")
             if not content.strip():
                 raise EmptyModelResponse("The model returned an empty response.")
-            plan = parse_revision_plan(json.loads(content))
+            raw_plan = parse_json_object(content)
+            plan = parse_revision_plan(raw_plan)
             return plan, attempt, model
         except asyncio.TimeoutError:
             failure_reason = None
@@ -6565,6 +6722,11 @@ async def _compile_revision_plan(
             if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
                 last_error.safe_message = failure_reason[:1200]
                 validation_feedback = failure_reason[:1200]
+                try:
+                    repair_request = _revision_plan_patch_request(raw_plan, messages)
+                except PatchError:
+                    last_error.details = {"task": "revision_plan", "failureStage": "envelope", "component": "plan"}
+                    break
         if attempt == 1:
             first_failure_code = last_error.code
         fields = {
@@ -6591,6 +6753,8 @@ async def _compile_revision_plan(
             "completionTokens": response_fields.get("completionTokens"),
             "validationReason": failure_reason,
         })
+        last_error.details = {"task": "revision_plan", "failureStage": "revision_plan", "component": "plan",
+                              "maximumAttempts": max_attempts, **getattr(last_error, "details", {})}
         last_error.proposal_diagnostics = {
             "failureStage": "revision_plan",
             "attemptFailures": attempt_failures,
@@ -6969,6 +7133,33 @@ def _modifier_contract_view(revision_contract):
     }
 
 
+def _operation_patch_request(payload, contract, rows):
+    payload = payload if isinstance(payload, dict) else {}
+    candidate = {"candidates": payload.get("candidates")}
+    targets = []
+    candidates = candidate["candidates"]
+    if not isinstance(candidates, list) or not 1 <= len(candidates) <= PROPOSAL_CANDIDATE_LIMIT:
+        targets.append(Target("candidates", ("candidates",), (list,)))
+    else:
+        for index, item in enumerate(candidates):
+            if not isinstance(item, dict):
+                targets.append(Target(f"candidate-{index + 1}", ("candidates", index), (dict,)))
+                continue
+            strategy = item.get("strategyIndex")
+            if type(strategy) is not int or not 1 <= strategy <= len(contract.get("strategies") or []):
+                targets.append(Target(f"candidate-{index + 1}.strategyIndex", ("candidates", index, "strategyIndex"), (int,)))
+            operations = item.get("operations")
+            missing = []
+            if isinstance(operations, list):
+                for op_index, operation in enumerate(operations):
+                    if isinstance(operation, dict) and type(operation.get("row")) is int and type(operation.get("column")) is int and "to" not in operation:
+                        missing.append(Target(f"candidate-{index + 1}.operation-{op_index + 1}.to",
+                            ("candidates", index, "operations", op_index, "to"), (str,)))
+            targets.extend(missing or [Target(f"candidate-{index + 1}.operations", ("candidates", index, "operations"), (list,))])
+    return PatchRequest("operations", candidate, targets,
+                        {"execution_contract": contract, "snapshot": build_stage_snapshot(rows)})
+
+
 async def _generate_map_operation_candidates(
     *,
     api_key,
@@ -6987,6 +7178,8 @@ async def _generate_map_operation_candidates(
     excluded_map_fingerprints=None,
 ):
     last_error = None
+    repair_request = None
+    payload = {}
     validation_feedback = None
     attempted_candidate_count = 0
     rejected_operation_signatures = set()
@@ -7020,23 +7213,29 @@ async def _generate_map_operation_candidates(
                 messages,
                 validation_feedback,
             )
-            response = await asyncio.wait_for(
-                _request_completion(
-                    api_key,
-                    base_url,
-                    model,
-                    attempt_messages,
-                    PROPOSAL_OPERATION_MAX_TOKENS,
-                    attempt_timeout,
-                    task="operation_candidates",
-                ),
-                timeout=attempt_timeout,
-            )
-            choice = response.choices[0]
-            if str(getattr(choice, "finish_reason", "") or "") == "length":
-                raise ValueError("The operation-candidate output reached its token limit.")
-            response_fields = _response_diagnostics(response, choice)
-            content = str(choice.message.content or "")
+            if repair_request is not None:
+                payload = await _request_component_patch(api_key, base_url, repair_request,
+                    attempt_messages, request_id, deadline, "operation_candidates",
+                    PROPOSAL_OPERATION_MAX_TOKENS, attempt_timeout)
+                content = json.dumps(payload, ensure_ascii=False)
+            else:
+                response = await asyncio.wait_for(
+                    _request_completion(
+                        api_key,
+                        base_url,
+                        model,
+                        attempt_messages,
+                        PROPOSAL_OPERATION_MAX_TOKENS,
+                        attempt_timeout,
+                        task="operation_candidates",
+                    ),
+                    timeout=attempt_timeout,
+                )
+                choice = response.choices[0]
+                if str(getattr(choice, "finish_reason", "") or "") == "length":
+                    raise ValueError("The operation-candidate output reached its token limit.")
+                response_fields = _response_diagnostics(response, choice)
+                content = str(choice.message.content or "")
             if not content.strip():
                 raise EmptyModelResponse("The model returned an empty response.")
             payload = json.loads(content)
@@ -7127,6 +7326,7 @@ async def _generate_map_operation_candidates(
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )[:1200]
+                repair_request = _operation_patch_request(payload, revision_contract, base_rows)
         failure_fields = {
             "requestId": request_id,
             "task": "map_proposal",
@@ -7550,6 +7750,7 @@ def execute_revision_operations(base_rows, operations, revision_contract, strate
         raise ValueError(
             "modifier operations must contain only row, column, and to, with optional from"
         )
+    operations = restore_operation_sources(operations, base_rows)
     strategies = (revision_contract or {}).get("strategies") or []
     if (
         isinstance(strategy_index, bool)
@@ -8133,10 +8334,10 @@ def translate_turns(items, target_language, request_id, *, _deadline=None):
                 "coordinateLinks, return coordinateLinkTexts in the same order and translate "
                 "only their text values; omit coordinateLinkTexts for items without coordinateLinks."
                 + (
-                    " In Simplified Chinese, use Chinese natural language throughout; keep only "
+                    " In Simplified Chinese, use natural Chinese, preserve names and minor natural English alongside "
                     "the map's visible P/B/T, B1/B2, T1/T2 labels, coordinates, and Stage "
                     "in Latin characters. Never expose "
-                    "English implementation labels or design jargon."
+                    "implementation fields. Do not reject or replace names and minor natural English."
                     if target_language == "zh-CN" else ""
                 )
             ),
@@ -8809,6 +9010,71 @@ def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, reque
     )
 
 
+def _translation_patch_request(payload, items, target_language, locked):
+    raw = payload.get("translations") if isinstance(payload, dict) else []
+    raw_by_id = {item.get("turnId"): item for item in raw or [] if isinstance(item, dict)} if isinstance(raw, list) else {}
+    candidate = {"translations": []}
+    targets = []
+    scalar_fields = ("body", "followUpQuestion", "intentHypothesis", "proposalOfferSummary",
+                     "proposalOfferRationale", "proposalSummary", "proposalPresentationReason")
+
+    def restore_text(source_text, value, path, field):
+        if source_text is None:
+            return None
+        try:
+            checked = _validate_translated_text(value, source_text, field, allow_empty=field.endswith(".body"))
+            if source_text and not checked:
+                raise ValueError("Empty translated body")
+            _assert_visible_output_language(target_language, checked)
+            _validate_map_grounding_texts([checked], source.get("stageRows"), entity_bindings=source.get("entityBindings"))
+            return checked
+        except (ValueError, TypeError):
+            targets.append(Target(field, path, (str,)))
+            return value
+
+    for index, source in enumerate(items):
+        raw_item = raw_by_id.get(source["turnId"], {})
+        prefix = f"turn-{source['turnId']}"
+        translated = {"turnId": source["turnId"]}
+        verified = locked.get(source["turnId"], {})
+        for field in scalar_fields:
+            if field not in source:
+                continue
+            translated[field] = (verified[field] if field in verified else restore_text(source[field], raw_item.get(field),
+                ("translations", index, field), prefix + "." + field))
+        for field, source_texts in (("uiCueTexts", source.get("uiCueTexts") or []),
+                                  ("coordinateLinkTexts", [link["text"] for link in source.get("coordinateLinks") or []])):
+            if field == "coordinateLinkTexts" and not source_texts:
+                continue
+            raw_texts = raw_item.get(field)
+            translated[field] = []
+            for text_index, source_text in enumerate(source_texts):
+                value = raw_texts[text_index] if isinstance(raw_texts, list) and text_index < len(raw_texts) else None
+                if field == "coordinateLinkTexts" and (not isinstance(value, str) or value not in (translated.get("body") or "")):
+                    value = None
+                translated[field].append(restore_text(source_text, value,
+                    ("translations", index, field, text_index), f"{prefix}.{field}.{text_index}"))
+        if "disagreement" in source:
+            source_disagreement = source.get("disagreement")
+            if source_disagreement is None:
+                translated["disagreement"] = None
+            else:
+                # All state and hidden metadata is copied from the source, never translated by a model.
+                translated["disagreement"] = dict(source_disagreement)
+                raw_disagreement = raw_item.get("disagreement") or {}
+                raw_disagreement = raw_disagreement if isinstance(raw_disagreement, dict) else {}
+                for field in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion"):
+                    translated["disagreement"][field] = restore_text(source_disagreement.get(field), raw_disagreement.get(field),
+                        ("translations", index, "disagreement", field), f"{prefix}.disagreement.{field}")
+        candidate["translations"].append(translated)
+    if not targets:
+        return None, candidate
+    # Translator sources never contain snapshot internals, even on a repair.
+    evidence = {f"turn:{item['turnId']}": {key: value for key, value in item.items()
+                if key not in {"stageRows", "entityBindings", "guidance"}} for item in items}
+    return PatchRequest("translation", candidate, targets, evidence), candidate
+
+
 async def _translate_with_model_fallback(
     *,
     api_key,
@@ -8824,6 +9090,8 @@ async def _translate_with_model_fallback(
     last_error = None
     validation_feedback = None
     locked_translations = {}
+    repair_request = None
+    payload = {}
     deadline = deadline or _request_deadline(started_at)
 
     max_attempts = len(models)
@@ -8850,34 +9118,38 @@ async def _translate_with_model_fallback(
         )
 
         try:
-            response = await asyncio.wait_for(
-                _request_completion(
-                    api_key,
-                    base_url,
-                    model,
-                    _messages_with_validation_feedback(
-                        messages,
-                        validation_feedback,
-                        "translation",
+            if repair_request is not None:
+                payload = await _request_component_patch(api_key, base_url, repair_request,
+                    messages, request_id, deadline, "translation", TRANSLATION_MAX_TOKENS, attempt_timeout)
+            else:
+                response = await asyncio.wait_for(
+                    _request_completion(
+                        api_key,
+                        base_url,
+                        model,
+                        _messages_with_validation_feedback(
+                            messages,
+                            validation_feedback,
+                            "translation",
+                        ),
+                        TRANSLATION_MAX_TOKENS,
+                        attempt_timeout,
+                        task="translation",
                     ),
-                    TRANSLATION_MAX_TOKENS,
-                    attempt_timeout,
-                    task="translation",
-                ),
-                timeout=attempt_timeout,
-            )
-            choice = response.choices[0]
-            response_fields = _response_diagnostics(response, choice)
+                    timeout=attempt_timeout,
+                )
+                choice = response.choices[0]
+                response_fields = _response_diagnostics(response, choice)
 
-            if str(getattr(choice, "finish_reason", "") or "") == "length":
-                raise ValueError("The model output reached its token limit.")
+                if str(getattr(choice, "finish_reason", "") or "") == "length":
+                    raise ValueError("The model output reached its token limit.")
 
-            content = str(choice.message.content or "")
+                content = str(choice.message.content or "")
 
-            if not content.strip():
-                raise EmptyModelResponse("The model returned an empty response.")
+                if not content.strip():
+                    raise EmptyModelResponse("The model returned an empty response.")
 
-            payload = parse_json_object(content)
+                payload = parse_json_object(content)
             for translated in payload.get("translations") or []:
                 if isinstance(translated, dict):
                     translated.update(locked_translations.get(translated.get("turnId"), {}))
@@ -8924,8 +9196,13 @@ async def _translate_with_model_fallback(
                 validation_feedback = failure_reason
                 messages = list(messages) + [{"role": "user", "content": json.dumps({
                     "lockedTranslationFields": locked_translations,
-                    "instruction": "Preserve these verified fields exactly; repair only other fields and return the complete translations envelope.",
+                    "instruction": "Preserve verified fields exactly; return only patches for listed failed translation fields.",
                 }, ensure_ascii=False)}]
+                repair_request, recovered = _translation_patch_request(payload, items, target_language, locked_translations)
+                if repair_request is None:
+                    translations = validate_translation_response(recovered, items, target_language)
+                    return TranslationExecutionResult(translations=translations, attempts_used=attempt,
+                        request_id=request_id, model=model, latency_ms=int((time.monotonic() - started_at) * 1000))
 
         failure_fields = {
             "requestId": request_id,
@@ -9196,21 +9473,13 @@ async def _repair_intent_components_async(
     remaining = _remaining_until(deadline)
     if remaining <= 0:
         raise asyncio.TimeoutError()
-    response = await asyncio.wait_for(
-        _request_completion(
-            api_key, base_url, KIMI_MODEL, messages,
-            INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS,
-            min(30.0, remaining), task=repair_task,
-        ),
-        timeout=min(30.0, remaining),
-    )
-    choice = response.choices[0]
-    if str(getattr(choice, "finish_reason", "") or "") == "length":
-        raise ValueError("The intent component repair reached its output limit.")
-    payload = parse_json_object(choice.message.content)
     required = ({"bodyParagraphs"} if repair_body else set()) | ({"cardSentences"} if repair_card else set())
-    if not required.issubset(payload) or set(payload) - {"bodyParagraphs", "cardSentences"}:
-        raise ValueError("Intent component repair contains unexpected or missing fields.")
+    candidate = {"bodyParagraphs": str(body or "").split("\n\n"), "cardSentences": [card_text]}
+    patch = PatchRequest("intent_presentation", candidate,
+        [Target(field, (field,), (list,)) for field in sorted(required)],
+        {"user_evidence": {"text": user_text, "lockedClaims": claims}, "snapshot": map_facts})
+    payload = await _request_component_patch(api_key, base_url, patch, messages, request_id, deadline,
+        repair_task, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, min(30.0, remaining))
     repaired_body = body
     if repair_body:
         body_paragraphs = payload.get("bodyParagraphs")
@@ -9466,6 +9735,7 @@ async def _generate_plain_with_model_fallback(
         and proposal_clarification.get("questionKey")
     )
     clarification_body_candidate = ""
+    clarification_repair_request = None
     clarification_semantic_review_failed = False
     total_grounding_dropped_count = 0
     intent_repair_map_facts = json.dumps(
@@ -9533,34 +9803,39 @@ async def _generate_plain_with_model_fallback(
                     "\nThe body is already verified and locked. Repair only the question for the same "
                     "topic/dimension; do not invent new goals or alternatives. Return body unchanged: "
                     + clarification_body_candidate)
-            response = await asyncio.wait_for(
-                _request_completion(
-                    api_key,
-                    base_url,
-                    model,
-                    attempt_messages,
-                    PLAIN_CHAT_MAX_TOKENS,
-                    attempt_timeout,
-                    structured=clarification_active,
-                    task=(
-                        "proposal_clarification"
-                        if clarification_active
-                        else "stage_assessment_fallback" if stage_opening else "plain_chat"
+            if clarification_repair_request is not None:
+                envelope = await _request_component_patch(api_key, base_url, clarification_repair_request,
+                    attempt_messages, request_id, deadline, "proposal_clarification", PLAIN_CHAT_MAX_TOKENS, attempt_timeout)
+                content = json.dumps(envelope, ensure_ascii=False)
+            else:
+                response = await asyncio.wait_for(
+                    _request_completion(
+                        api_key,
+                        base_url,
+                        model,
+                        attempt_messages,
+                        PLAIN_CHAT_MAX_TOKENS,
+                        attempt_timeout,
+                        structured=clarification_active,
+                        task=(
+                            "proposal_clarification"
+                            if clarification_active
+                            else "stage_assessment_fallback" if stage_opening else "plain_chat"
+                        ),
                     ),
-                ),
-                timeout=attempt_timeout,
-            )
-            choice = response.choices[0]
-            response_fields = _response_diagnostics(response, choice)
-            if str(getattr(choice, "finish_reason", "") or "") == "length":
-                raise ValueError("The model output reached its token limit.")
-            content = str(choice.message.content or "")
+                    timeout=attempt_timeout,
+                )
+                choice = response.choices[0]
+                response_fields = _response_diagnostics(response, choice)
+                if str(getattr(choice, "finish_reason", "") or "") == "length":
+                    raise ValueError("The model output reached its token limit.")
+                content = str(choice.message.content or "")
 
-            if not content.strip():
-                raise EmptyModelResponse("The model returned an empty response.")
+                if not content.strip():
+                    raise EmptyModelResponse("The model returned an empty response.")
 
-            if len(content.strip()) > CHAT_RESPONSE_HARD_LENGTH:
-                raise ValueError("The model response exceeded the transport safety limit.")
+                if len(content.strip()) > CHAT_RESPONSE_HARD_LENGTH:
+                    raise ValueError("The model response exceeded the transport safety limit.")
 
             clarification_question = ""
             clarification_question_issue = ""
@@ -9592,19 +9867,25 @@ async def _generate_plain_with_model_fallback(
                         and _clarification_needs_semantic_review(
                             "" if clarification_body_candidate else parsed_body, clarification_question)):
                     clarification_semantic_review_failed = True
-                    parsed_body, reviewed_question_issue = await _review_proposal_clarification(
-                        api_key, base_url, parsed_body, clarification_question, stage_context,
-                        request_id, deadline,
+                    reviewed_body, reviewed_question_issue = await _review_proposal_clarification(
+                        api_key, base_url, "" if clarification_body_candidate else parsed_body,
+                        clarification_question, stage_context, request_id, deadline,
                     )
+                    if not clarification_body_candidate:
+                        parsed_body = reviewed_body
                     clarification_question_issue = reviewed_question_issue or clarification_question_issue
-                    if not parsed_body:
-                        raise ValueError("No reliable proposal clarification body remains after semantic review.")
                     clarification_semantic_review_failed = False
                 grounding_dropped_count += clarification_body_dropped
                 total_grounding_dropped_count += clarification_body_dropped
                 if parsed_body:
                     clarification_body_candidate = parsed_body
                 if clarification_question_issue and attempt < max_attempts:
+                    clarification_repair_request = PatchRequest("clarification_question",
+                        {"body": parsed_body, "question": clarification_question},
+                        [Target("question", ("question",), (str,))],
+                        {"snapshot": (stage_context or {}).get("stageSnapshot"),
+                         "proposal_topic": (stage_context or {}).get("proposalDiscovery"),
+                         "question_specification": proposal_clarification})
                     raise ValueError(clarification_question_issue)
                 if clarification_question_issue:
                     clarification_question = _proposal_clarification_fallback_question(
@@ -9614,11 +9895,10 @@ async def _generate_plain_with_model_fallback(
                     clarification_fallback_reason = clarification_question_issue
                 content = parsed_body or clarification_body_candidate
                 if not content:
-                    content = _proposal_clarification_fallback_message(
-                        language,
-                        stage_context,
-                    )
-                    clarification_fallback_used = True
+                    if clarification_question and not clarification_question_issue:
+                        content = clarification_question
+                    else:
+                        raise LowQualityModelResponse("No independently reliable Kimi clarification remains.")
                 clarification_author = (
                     "server_fallback"
                     if clarification_fallback_used and clarification_question_issue
@@ -9679,7 +9959,8 @@ async def _generate_plain_with_model_fallback(
             if clarification_active:
                 # The proposal topic and its one next question are server-owned.
                 # Model questions and metadata cannot advance or redirect it.
-                visible_content = _questionless_body(visible_content)
+                visible_content = _questionless_body(visible_content) or (
+                    clarification_question if not clarification_question_issue else "")
                 intent_hypothesis = None
                 proposal_offer = None
                 ui_cues = []
@@ -9776,7 +10057,7 @@ async def _generate_plain_with_model_fallback(
             if not ordinary_discussion:
                 visible_content = _strip_unreferenced_current_map_claims(visible_content)
             if not visible_content:
-                if ordinary_discussion:
+                if ordinary_discussion or clarification_active:
                     raise LowQualityModelResponse(
                         "No reliable model prose remained after current-map cleanup."
                     )
@@ -9918,17 +10199,8 @@ async def _generate_plain_with_model_fallback(
                 body = _questionless_body(body)
                 question = clarification_question
                 pure_low_quality = False
-                if not body:
-                    clarification_fallback_used = True
-                    body = _proposal_clarification_fallback_message(
-                        language,
-                        stage_context,
-                    )
-                    clarification_author = (
-                        "server_fallback"
-                        if clarification_question_issue
-                        else "mixed"
-                    )
+                if not body and clarification_question_issue:
+                    raise LowQualityModelResponse("No reliable Kimi body remains for a replacement question.")
                 # Proposal clarification is visible conversation prose, never
                 # a discussion card. Keep the private field only in diagnostics
                 # so the server can count the question it actually displayed.
@@ -10550,6 +10822,8 @@ async def _generate_plain_with_model_fallback(
             )
             latency_ms = int((time.monotonic() - started_at) * 1000)
             opening_body = body
+            guidance = _isolate_optional_language_components(guidance, language,
+                required_question=clarification_active or bool(guidance.get("disagreement")))
             if stage_opening and _is_human_edit_stage_opening(True, stage_context):
                 opening_body = _compact_human_edit_opening_inventory(body, language)
             assistant_message = _compose_assistant_message(
@@ -10750,6 +11024,14 @@ async def _generate_plain_with_model_fallback(
             **failure_fields,
         )
 
+        last_error.attempts_used = attempt
+        last_error.details = {"maximumAttempts": max_attempts,
+                              **getattr(last_error, "details", {})}
+        if getattr(last_error, "details", {}).get("component") == "clarification_review":
+            # The failed reviewer already used its corrective slot. Regenerating
+            # the body cannot repair that technical component.
+            break
+
         if attempt >= max_attempts or not _plain_fallback_allowed(last_error):
             break
 
@@ -10802,7 +11084,7 @@ async def _generate_plain_with_model_fallback(
                 stage_context=stage_context,
                 solver_metrics=solver_metrics,
             )
-        if ordinary_discussion or human_edit_engagement_required or clarification_semantic_review_failed:
+        if ordinary_discussion or clarification_active or human_edit_engagement_required or clarification_semantic_review_failed:
             raise last_error
         if _is_length_failure(last_error, validation_feedback):
             fallback_message = (
@@ -11724,7 +12006,7 @@ def _canonicalize_stage_assessment_payload(payload, stage_context=None):
 def _content_block_sentences(value):
     return [
         sentence.strip()
-        for sentence in re.split(r"(?<=[.!?\u3002\uff01\uff1f])\s*|[\r\n]+", str(value or ""))
+        for sentence in re.split(r"(?<=[!?\u3002\uff01\uff1f])\s*|(?<=\.)(?!\d)\s*|[\r\n]+", str(value or ""))
         if sentence.strip()
     ]
 
@@ -12611,6 +12893,8 @@ def validate_chat_response(
         _normalize_single_level_language(modification_summary.strip()),
         language,
     )[:1000]
+    guidance = _isolate_optional_language_components(guidance, language,
+        required_question=bool(guidance.get("disagreement")) or guidance.get("move") == "clarify_intent")
     _assert_visible_output_language(
         language,
         assistant_message,
@@ -12841,7 +13125,9 @@ _VISIBLE_INTERNAL_TERM_REPLACEMENTS = {
 # Chinese co-creation prose may use map entity labels and the product's version
 # label, but implementation identifiers and English design prose must never
 # escape to a participant-facing surface.
-_VISIBLE_CHINESE_LATIN_ALLOWLIST = {"P", "B", "T", "B1", "B2", "T1", "T2", "Stage"}
+_VISIBLE_CHINESE_LATIN_ALLOWLIST = {"P", "B", "T", "B1", "B2", "T1", "T2", "Stage",
+                                    "AI", "Kimi", "DeepSeek", "Moonshot", "Sokoban", "OpenAI", "ChatGPT",
+                                    "WebGL", "FastAPI", "JavaScript", "TypeScript", "iPhone"}
 _VISIBLE_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 _VISIBLE_MAP_SYMBOLS = {"p": "P", "b": "B", "s": "B", "t": "T",
                         "b1": "B1", "b2": "B2", "t1": "T1", "t2": "T2"}
@@ -12897,14 +13183,24 @@ def repair_legacy_visible_text(value, language="en"):
     text = _sanitize_visible_model_text(value, language)
     if language != "zh-CN":
         return text
-    return _VISIBLE_LATIN_TOKEN_RE.sub(
-        lambda match: (
-            match.group(0)
-            if match.group(0) in _VISIBLE_CHINESE_LATIN_ALLOWLIST
-            else "相关设计指标"
-        ),
-        text,
-    )
+    # No model calls and no database writes. Preserve natural language, names
+    # and minor code-switching; an unknown implementation identifier has no
+    # safe semantic translation, so hide only its sentence, never invent one.
+    paragraphs = []
+    for paragraph in str(text or "").split("\n\n"):
+        if not any(_visible_internal_identifier(token) for token in _VISIBLE_LATIN_TOKEN_RE.findall(paragraph)):
+            paragraphs.append(paragraph)
+            continue
+        kept = [sentence for sentence in _content_block_sentences(paragraph)
+                if not any(_visible_internal_identifier(token) for token in _VISIBLE_LATIN_TOKEN_RE.findall(sentence))]
+        if kept:
+            paragraphs.append("".join(kept))
+    return "\n\n".join(paragraphs)
+
+
+def _visible_internal_identifier(token):
+    return token not in _VISIBLE_CHINESE_LATIN_ALLOWLIST and bool(
+        "_" in token or re.search(r"[a-z][A-Z]|[A-Z][a-z]+[A-Z]", token))
 
 
 def challenge_choice_card_copy(user_reason, proposal_summary, language="en", *, legacy=False):
@@ -12961,8 +13257,7 @@ def _visible_chinese_language_issue(value):
     ]
     if not tokens:
         return None
-    internal = next((token for token in tokens
-                     if "_" in token or re.search(r"[a-z][A-Z]|[A-Z][a-z]+[A-Z]", token)), None)
+    internal = next((token for token in tokens if _visible_internal_identifier(token)), None)
     chinese_chars = len(re.findall(r"[\u3400-\u9fff]", text))
     if internal is None and len(tokens) <= 6 and chinese_chars >= len("".join(tokens)):
         return None
@@ -13020,6 +13315,29 @@ def _assert_visible_output_language(language, *values, guidance=None, assessment
                 ),
             )
             raise ValueError(issue)
+
+
+def _isolate_optional_language_components(guidance, language, *, required_question=False):
+    """Optional display failures cannot revoke a reliable body or required state."""
+    result = _sanitize_visible_guidance(guidance, language)
+    if language != "zh-CN":
+        return result
+    conflict = ((result.get("_intentCandidateReview") or {}).get("relation") == "conflict")
+    if not conflict and _visible_chinese_language_issue(result.get("intentHypothesis")):
+        result["intentHypothesis"] = None
+        result["intentConfidence"] = None
+        for field in ("_intentDecision", "_intentSemanticClaims", "_intentCandidateReview"):
+            result.pop(field, None)
+        _log_llm_event("llm_component_omitted", component="intent_card", failureCode="VISIBLE_LANGUAGE_INVALID")
+    if not required_question and _visible_chinese_language_issue(result.get("followUpQuestion")):
+        result["followUpQuestion"] = None
+    required_cues = result.get("move") == "challenge_tradeoff" or bool(result.get("disagreement"))
+    if not required_cues:
+        result["uiCues"] = [cue for cue in result.get("uiCues") or []
+                            if not _visible_chinese_language_issue(cue.get("text"))]
+    result["coordinateLinks"] = [link for link in result.get("coordinateLinks") or []
+                                 if not _visible_chinese_language_issue(link.get("text"))]
+    return result
 
 
 def _sanitize_visible_guidance(guidance, language="en"):
@@ -15534,12 +15852,61 @@ def _clarification_needs_semantic_review(body, question):
     return bool(re.search(r"(?:移动|挪|增加|删除|减少|move|relocat|add|remov|reduc).{0,24}(?:箱子|目标|玩家|外壳|box|target|player|shell)", text, re.I))
 
 
+async def _request_component_patch(api_key, base_url, patch_request, messages, request_id,
+                                   deadline, task, max_tokens=1600, timeout_limit=20.0):
+    """Use one existing corrective slot, never open a new retry loop."""
+    remaining = min(timeout_limit, _remaining_until(deadline))
+    if remaining <= 0:
+        raise asyncio.TimeoutError()
+    patch_messages = [dict(message) for message in messages]
+    patch_messages.append({"role": "system", "content": (
+        "This corrective attempt returns ONLY the component patch schema; it supersedes earlier full-envelope output instructions. "
+        "All original evidence, semantic scope, permissions and map rules still apply. Frozen candidate text is not new designer evidence. "
+        "Preserve locked content exactly. A patch is only a candidate repair, never proof, consent or a committed action.")})
+    patch_messages.append({"role": "user", "content": json.dumps(patch_request.prompt(), ensure_ascii=False)})
+    response = await asyncio.wait_for(_request_completion(
+        api_key, base_url, KIMI_MODEL, patch_messages, max_tokens, remaining,
+        task=task + "_patch"), timeout=remaining)
+    if not getattr(response, "choices", None):
+        raise PatchError("PATCH_EMPTY_RESPONSE")
+    choice = response.choices[0]
+    if str(getattr(choice, "finish_reason", "")) == "length":
+        raise PatchError("PATCH_TRUNCATED")
+    merged = patch_request.merge(parse_json_object(choice.message.content))
+    _log_llm_event("llm_component_patched", requestId=request_id, component=patch_request.component,
+                   fields=list(patch_request.targets), patchVersion=PATCH_VERSION,
+                   invalidatedComponents=dependent_components(patch_request.component))
+    return merged
+
+
+def _clarification_review_components(verdict, sentence_ids):
+    """Return valid components and technical defects, never reinterpret meaning."""
+    valid, issues = {}, []
+    if not isinstance(verdict, dict):
+        return valid, ["bodyIssues", "questionIssue"]
+    body_issues = verdict.get("bodyIssues")
+    if (isinstance(body_issues, list) and all(isinstance(item, str) and item in sentence_ids for item in body_issues)):
+        valid["bodyIssues"] = list(dict.fromkeys(body_issues))
+    else:
+        issues.append("bodyIssues")
+    if "questionIssue" in verdict and (verdict["questionIssue"] is None or
+            isinstance(verdict["questionIssue"], str) and verdict["questionIssue"].strip()):
+        valid["questionIssue"] = verdict["questionIssue"]
+    else:
+        issues.append("questionIssue")
+    if set(verdict) - {"bodyIssues", "questionIssue"}:
+        # Extra model fields are discarded, never treated as authority.
+        issues = list(dict.fromkeys(issues))
+    return valid, issues
+
+
 async def _review_proposal_clarification(api_key, base_url, body, question, stage_context, request_id, deadline):
     discovery = stage_context.get("proposalDiscovery") or {}
     specification = stage_context.get("proposalClarification") or {}
     messages = [{"role": "system", "content": (
-        "Review the actual body and question, not just annotations. Return bodyIssues as exact complete "
-        "sentences from body that must be dropped, and questionIssue as null or a repair instruction. "
+        "Review the actual body and question, not just annotations. Return bodyIssues as IDs from "
+        "bodySentences for sentences that must be dropped, and questionIssue as null or a repair instruction. "
+        "Never quote, paraphrase or invent a sentence ID. "
         "Check speaker attribution: the designer owns their wish; AI can express its own tentative "
         "suggestion/opinion, but cannot claim the designer's goal as its own. Reject invented user locks, "
         "numeric requirements, fixed solution lengths, edit scope, and guaranteed effects. Witness counts "
@@ -15550,27 +15917,53 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
         "a response for length/style, or require a stock opening. Questions may offer valid optional choices. "
         "Do not put assistant suggestions into designer memory."
     )}, {"role": "user", "content": json.dumps({
-        "body": body, "question": question, "designerTurns": discovery.get("userTurns") or [],
+        "body": body, "bodySentences": [{"id": f"sentence-{i}", "text": sentence}
+            for i, sentence in enumerate(_content_block_sentences(body), 1)],
+        "question": question, "designerTurns": discovery.get("userTurns") or [],
         "answeredQuestions": discovery.get("answers") or [], "understanding": discovery.get("understanding") or {},
         "questionIntent": specification.get("questionIntent"),
         "currentStageSnapshot": stage_context.get("stageSnapshot") or {},
         "verifiedRouteWitness": specification.get("routeEvidence") or {},
     }, ensure_ascii=False)}]
-    remaining = min(10.0, _remaining_until(deadline))
+    review_deadline = min(deadline, time.monotonic() + 10.0)
+    remaining = min(6.0, _remaining_until(review_deadline))
     if remaining <= 0:
         raise asyncio.TimeoutError()
-    response = await asyncio.wait_for(_request_completion(api_key, base_url, KIMI_MODEL,
-        messages, 1000, remaining, task="proposal_clarification_review"), timeout=remaining)
-    if str(getattr(response.choices[0], "finish_reason", "")) == "length":
-        raise ValueError("Proposal clarification review was truncated.")
-    verdict = parse_json_object(response.choices[0].message.content)
+    try:
+        response = await asyncio.wait_for(_request_completion(api_key, base_url, KIMI_MODEL,
+            messages, 1000, remaining, task="proposal_clarification_review"), timeout=remaining)
+    except asyncio.TimeoutError:
+        response = None
     sentences = _content_block_sentences(body)
-    if (set(verdict) != {"bodyIssues", "questionIssue"} or not isinstance(verdict["bodyIssues"], list)
-            or any(not isinstance(x, str) or x not in sentences for x in verdict["bodyIssues"])
-            or verdict["questionIssue"] is not None and (not isinstance(verdict["questionIssue"], str) or not verdict["questionIssue"].strip())):
-        raise ValueError("Proposal clarification review lacks exact component evidence.")
-    for sentence in dict.fromkeys(verdict["bodyIssues"]):
-        body = body.replace(sentence, "")
+    sentence_ids = {f"sentence-{i}": sentence for i, sentence in enumerate(sentences, 1)}
+    try:
+        verdict = parse_json_object(response.choices[0].message.content)
+        if str(getattr(response.choices[0], "finish_reason", "")) == "length":
+            verdict = {}
+    except (ValueError, TypeError, IndexError, AttributeError):
+        verdict = {}
+    valid, issues = _clarification_review_components(verdict, sentence_ids)
+    if issues:
+        patch = PatchRequest("clarification_review", valid,
+            [Target(field, (field,), (list,) if field == "bodyIssues" else (str, type(None))) for field in issues],
+            {"review_source": json.loads(messages[1]["content"])})
+        try:
+            verdict = await _request_component_patch(api_key, base_url, patch, messages, request_id,
+                review_deadline, "proposal_clarification_review", max_tokens=1000, timeout_limit=4.0)
+            valid, issues = _clarification_review_components(verdict, sentence_ids)
+            if issues:
+                raise PatchError("CLARIFICATION_REVIEW_REFERENCE_INVALID")
+        except (ValueError, TypeError, KeyError, asyncio.TimeoutError) as error:
+            failure = LLMServiceError("MODEL_RESPONSE_INVALID", "The clarification review could not be verified. Retry the original message.",
+                                      request_id, True, 0, 502)
+            failure.details = {"task": "proposal_clarification", "failureStage": "clarification_review",
+                "failureKind": "review_validation", "component": "clarification_review",
+                "repairAttemptsUsed": 1, "maximumRepairAttempts": 1}
+            raise failure from error
+    verdict = valid
+    rejected_ids = set(verdict["bodyIssues"])
+    for identity in rejected_ids:
+        body = body.replace(sentence_ids[identity], "", 1)
     _log_llm_event("proposal_clarification_semantics_reviewed", requestId=request_id,
         droppedSentenceCount=len(verdict["bodyIssues"]), questionAccepted=verdict["questionIssue"] is None)
     return body.strip(), verdict["questionIssue"] or ""
@@ -15582,11 +15975,11 @@ def _parse_proposal_clarification_payload(content, language, stage_context):
         payload = json.loads(str(content or ""))
     except (TypeError, ValueError, json.JSONDecodeError):
         return "", "", "The clarification response must be valid JSON.", 0
-    if not isinstance(payload, dict) or not {"body", "question"}.issubset(payload):
+    if not isinstance(payload, dict) or "question" not in payload:
         return "", "", "The clarification response must contain only body and question.", 0
-    raw_body = payload.get("body")
+    raw_body = payload.get("body") if isinstance(payload.get("body"), str) else ""
     raw_question = payload.get("question")
-    if not isinstance(raw_body, str) or not isinstance(raw_question, str):
+    if not isinstance(raw_question, str):
         return "", "", "The clarification body and question must be strings.", 0
     body = _sanitize_visible_model_text(raw_body.strip(), language)
     question = _sanitize_visible_model_text(raw_question.strip(), language)
