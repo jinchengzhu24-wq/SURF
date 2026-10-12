@@ -484,6 +484,7 @@ def _normalize_disagreement(value):
     result["displayCard"] = bool(value.get("displayCard", True))
     for field in (
         "challengeId",
+        "disagreementId",
         "primaryHypothesis",
         "secondaryHypothesis",
         "proposalSummary",

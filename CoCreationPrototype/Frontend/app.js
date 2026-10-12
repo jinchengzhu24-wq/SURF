@@ -14,6 +14,8 @@ const DRAFT_REGENERATION_POLL_MS = 1000;
 const DRAFT_REGENERATION_API_TIMEOUT_MS = 8000;
 const DRAFT_REGENERATION_POLL_TIMEOUT_MS = 5000;
 const DRAFT_REGENERATION_PROTOCOL_VERSION = 5;
+const COMPONENT_RECOVERY_TIMEOUT_MS = 12000;
+const componentRecovery = { timer: null, busy: false, scheduled: "", dispatched: new Set(), paused: new Set() };
 const UNITY_ORIGINS = Array.from(new Set([
     window.location.origin,
     "https://sokobanaidemo.top",
@@ -199,9 +201,9 @@ const translations = {
         error_UPSTREAM_CONNECTION_ERROR: "Kimi is temporarily unreachable. Retry without creating a duplicate message.",
         error_UPSTREAM_SERVER_ERROR: "Kimi temporarily could not complete the response. Retry without creating a duplicate message.",
         error_MODEL_EMPTY_RESPONSE: "The latest model attempt returned blank content, and no earlier attempt produced a valid result. Retry without creating a duplicate.",
-        error_MODEL_RESPONSE_INVALID: "Kimi did not produce a reply that passed validation after three attempts. Retry without creating a duplicate message.",
+        error_MODEL_RESPONSE_INVALID: "Kimi could not reliably verify this request or reply. Retry without creating a duplicate message.",
         error_RETRYABLE_REQUEST_FAILED: "The request was interrupted or the server returned an unreadable error. Retry the same message without creating a duplicate.",
-        error_MODEL_LOW_QUALITY_RESPONSE: "Kimi did not produce a sufficiently complete reply after three attempts. Retry without creating a duplicate message.",
+        error_MODEL_LOW_QUALITY_RESPONSE: "Kimi did not produce a reliable reply within this request's budget. Retry without creating a duplicate message.",
         error_INVALID_MESSAGE_ACTION: "That card action is invalid. Refresh and try again.",
         error_INVALID_CARD_SOURCE: "That revision card no longer belongs to the current Stage. Refresh and choose the current card.",
         error_PROPOSAL_STALE: "This proposal is based on an older Stage or map snapshot and is no longer active.",
@@ -656,9 +658,9 @@ const chineseApiErrors = {
     UPSTREAM_CONNECTION_ERROR: "暂时无法连接 LLM 服务，请稍后重试。",
     UPSTREAM_SERVER_ERROR: "Kimi 服务暂时未能完成本次回复，可使用原消息安全重试，不会产生重复记录。",
     MODEL_EMPTY_RESPONSE: "最后一次模型尝试返回了空白内容，且此前尝试也未产生有效结果；可使用原消息安全重试，不会产生重复记录。",
-    MODEL_RESPONSE_INVALID: "Kimi 连续三次未能生成通过回复校验的内容；可使用原消息安全重试，不会产生重复记录。",
+    MODEL_RESPONSE_INVALID: "Kimi 尚未可靠核实这次请求或回复；可使用原消息安全重试，不会产生重复记录。",
     RETRYABLE_REQUEST_FAILED: "请求中断或服务器返回了无法读取的错误；可用原消息安全重试，不会产生重复记录。",
-    MODEL_LOW_QUALITY_RESPONSE: "Kimi 连续三次未能生成足够完整的回复；可使用原消息安全重试，不会产生重复记录。",
+    MODEL_LOW_QUALITY_RESPONSE: "Kimi 未能在本次请求预算内生成可靠回复；可使用原消息安全重试，不会产生重复记录。",
     CLIENT_TIMEOUT: "助手未能在浏览器安全时限内完成。可直接重试，且不会产生重复消息。",
     CONFIGURATION_ERROR: "服务器尚未正确配置 LLM 服务。",
     INVALID_MESSAGE_ACTION: "卡片操作无效，请刷新后重试。",
@@ -780,7 +782,10 @@ window.addEventListener("resize", () => {
 window.addEventListener("online", resumeDraftRegenerationPolling);
 document.addEventListener("visibilitychange", () => {
     if (!document.hidden) resumeDraftRegenerationPolling();
+    if (!document.hidden) componentRecovery.paused.clear();
+    scheduleComponentRecovery();
 });
+window.addEventListener("pagehide", cancelComponentRecoveryTimer);
 
 applyTranslations();
 initialize();
@@ -929,6 +934,7 @@ function render() {
     renderChatRequestStatus();
     renderTranslationStatus();
     updateControls();
+    scheduleComponentRecovery();
 }
 
 function renderStages() {
@@ -1450,6 +1456,11 @@ function proposalStateMessage(status) {
 }
 
 function selectedStageHasActiveDisagreement() {
+    const canonical = state.session?.interactionState;
+    if (state.selectedVersionId === state.session?.currentVersionId
+        && canonical?.versionId === state.selectedVersionId) {
+        return Boolean(canonical.proposalBlocked);
+    }
     let latestStatus = null;
     selectedStageTurns().forEach(turn => {
         if (turn.role !== "assistant") return;
@@ -2813,6 +2824,7 @@ async function submitPendingMessage() {
         state.chatBusyVersionId = "";
         renderChatRequestStatus();
         updateControls();
+        scheduleComponentRecovery();
     }
 }
 
@@ -3917,6 +3929,111 @@ function validApiPayload(path, payload) {
     return Object.keys(payload).length > 0;
 }
 
+function cancelComponentRecoveryTimer() {
+    if (componentRecovery.timer !== null) window.clearTimeout(componentRecovery.timer);
+    componentRecovery.timer = null;
+    componentRecovery.scheduled = "";
+}
+
+function recoveryPageEligible() {
+    return !document.hidden && state.session?.status === "active" && !deadlineExpired()
+        && state.selectedVersionId === state.session?.currentVersionId;
+}
+
+function scheduleComponentRecovery() {
+    if (!recoveryPageEligible()) {
+        cancelComponentRecoveryTimer();
+        return;
+    }
+    if (componentRecovery.busy) return;
+    if (state.busy || state.chatBusy) return cancelComponentRecoveryTimer();
+    const task = (state.session?.interactionState?.recoveries || []).find(item =>
+        ["pending", "retry_pending", "claimed", "waiting_message"].includes(item.status)
+        && !componentRecovery.paused.has(item.recoveryId)
+        && item.baseVersionId === state.session.currentVersionId
+        && (["claimed", "waiting_message"].includes(item.status) || !componentRecovery.dispatched.has(item.nextAttemptKey)));
+    if (!task) return cancelComponentRecoveryTimer();
+    const scheduled = `${state.sessionId}:${task.recoveryId}:${task.status}:${task.nextAttemptKey}`;
+    if (componentRecovery.scheduled === scheduled) return;
+    cancelComponentRecoveryTimer();
+    componentRecovery.scheduled = scheduled;
+    const delay = task.status === "claimed"
+        ? Math.max(1000, Date.parse(task.leaseUntil || "") - Date.now() + 250)
+        : task.status === "waiting_message" ? 1000
+        : task.attemptsUsed > 0 ? 3000 : 1000;
+    componentRecovery.timer = window.setTimeout(() => {
+        componentRecovery.timer = null;
+        componentRecovery.scheduled = "";
+        void recoverComponent(task);
+    }, Math.min(15500, Number.isFinite(delay) ? delay : 15000));
+}
+
+function mergeRecoverySession(session, captured) {
+    if (!recoveryPageEligible() || state.sessionId !== captured.sessionId
+        || state.selectedVersionId !== captured.selectedVersionId
+        || state.session.currentVersionId !== captured.versionId
+        || session.sessionId !== captured.sessionId || session.currentVersionId !== captured.versionId) return false;
+    const lastSequence = value => Math.max(0, ...(value.turns || []).map(turn => turn.sequence || 0));
+    if (lastSequence(session) < lastSequence(state.session)
+        || (session.interactionState?.revision || 0) < (state.session.interactionState?.revision || 0)
+        || (session.updatedAt && state.session.updatedAt && session.updatedAt < state.session.updatedAt)) return false;
+    // Session data is separate from composer, captured retries, selection and local map draft.
+    state.session = session;
+    render();
+    return true;
+}
+
+function retainNewerInteractionState(session) {
+    const current = state.session;
+    if (!session?.interactionState || session.sessionId !== current?.sessionId
+        || session.currentVersionId !== current.currentVersionId
+        || session.interactionState.revision >= (current.interactionState?.revision || 0)) return session;
+    const liveTurns = new Map((current.turns || []).map(turn => [turn.turnId, turn]));
+    return { ...session, interactionState: current.interactionState,
+        turns: (session.turns || []).map(turn => {
+            const live = liveTurns.get(turn.turnId);
+            return live ? { ...turn, proposalState: live.proposalState } : turn;
+        }) };
+}
+
+async function recoverComponent(task) {
+    if (componentRecovery.busy || state.busy || state.chatBusy || !recoveryPageEligible()
+        || task.baseVersionId !== state.session.currentVersionId) return;
+    componentRecovery.busy = true;
+    const captured = { sessionId: state.sessionId, selectedVersionId: state.selectedVersionId,
+        versionId: state.session.currentVersionId };
+    try {
+        let session;
+        if (["claimed", "waiting_message"].includes(task.status)) {
+            // A different tab or interrupted request may own the lease. GET never runs a model.
+            session = await api(`/api/sessions/${captured.sessionId}`, { timeoutMs: COMPONENT_RECOVERY_TIMEOUT_MS });
+        } else {
+            if (componentRecovery.dispatched.has(task.nextAttemptKey)) return;
+            componentRecovery.dispatched.add(task.nextAttemptKey);
+            session = await api(`/api/sessions/${captured.sessionId}/component-recoveries/${task.recoveryId}/retry`, {
+                method: "POST", timeoutMs: COMPONENT_RECOVERY_TIMEOUT_MS,
+                body: { baseVersionId: task.baseVersionId, idempotencyKey: task.nextAttemptKey }
+            });
+        }
+        const merged = mergeRecoverySession(session, captured);
+        if (!merged && state.sessionId === captured.sessionId
+            && state.session?.currentVersionId === captured.versionId && !recoveryPageEligible()) {
+            // Hidden/history views defer UI delivery. Replay the same server key
+            // on return; it cannot spend a second model attempt.
+            componentRecovery.dispatched.delete(task.nextAttemptKey);
+        }
+    } catch (_) {
+        // Confirm a server commit without turning auxiliary failure into a chat error.
+        try {
+            const session = await api(`/api/sessions/${captured.sessionId}`, { timeoutMs: COMPONENT_RECOVERY_TIMEOUT_MS });
+            mergeRecoverySession(session, captured);
+        } catch (_) { componentRecovery.paused.add(task.recoveryId); }
+    } finally {
+        componentRecovery.busy = false;
+        scheduleComponentRecovery();
+    }
+}
+
 async function api(path, options = {}) {
     const request = { method: options.method || "GET", credentials: "include", headers: {} };
     const idempotentWrite = request.method !== "GET"
@@ -3959,7 +4076,8 @@ async function api(path, options = {}) {
             invalid.retryable = safeRetry;
             throw invalid;
         }
-        return payload;
+        return typeof payload.sessionId === "string" && Array.isArray(payload.turns)
+            ? retainNewerInteractionState(payload) : payload;
     } catch (error) {
         if (error?.name === "AbortError" || controller?.signal.aborted) {
             error = new Error(t("error_CLIENT_TIMEOUT"));

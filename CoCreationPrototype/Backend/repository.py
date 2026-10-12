@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
+from component_recovery import interaction_state
 
 from design_context import (
     add_confirmed_decision,
@@ -1363,20 +1364,19 @@ def record_event(database, session_id, event_type, payload, created_at):
 def _last_message_failure(database, session, turns):
     """Current request diagnostics only; never expose audit prose or stale failures."""
     version_id = session["current_version_id"]
-    user = next((row for row in reversed(turns) if row["role"] == "user" and row["version_id"] == version_id), None)
-    if user is None or not user["request_id"]:
-        return None
-    key = user["request_id"]
-    if any(row["role"] == "assistant" and row["version_id"] == version_id and row["request_id"] == key for row in turns):
-        return None
-    row = database.execute("""SELECT payload_json FROM audit_events
+    row = database.execute("""SELECT payload_json, created_at FROM audit_events
         WHERE session_id = ? AND event_type = 'message_generation_failed'
           AND json_extract(payload_json, '$.baseVersionId') = ?
-          AND json_extract(payload_json, '$.messageKey') = ? ORDER BY id DESC LIMIT 1""",
-        (session["id"], version_id, key)).fetchone()
+        ORDER BY id DESC LIMIT 1""", (session["id"], version_id)).fetchone()
     if row is None:
         return None
     payload = load_json(row["payload_json"]) or {}
+    key = payload.get("messageKey")
+    current_turns = [turn for turn in turns if turn["version_id"] == version_id]
+    if not key or any(turn["role"] == "assistant" and turn["request_id"] == key for turn in current_turns):
+        return None
+    if current_turns and max(turn["created_at"] for turn in current_turns) > row["created_at"]:
+        return None
     details = payload.get("details") or {}
     return {"messageKey": key, "baseVersionId": version_id, "code": payload.get("code"),
             "requestId": payload.get("requestId"), "retryable": bool(payload.get("retryable", True)),
@@ -2447,6 +2447,7 @@ def serialize_session(database, session_id):
         "playerNumber": session["player_number"],
         "currentVersionId": session["current_version_id"],
         "lastMessageFailure": _last_message_failure(database, session, turns),
+        "interactionState": interaction_state(database, session),
         "finalVersionId": session["final_version_id"],
         "createdAt": session["created_at"],
         "updatedAt": session["updated_at"],

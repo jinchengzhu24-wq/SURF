@@ -46,6 +46,8 @@ from level_validation import (
     validate_and_solve,
 )
 from demo_level_generator import generate_demo_level
+from conversation_evidence import build_dialogue_evidence, with_latest
+import component_recovery
 from llm_client import (
     LLMExecutionResult,
     LLMServiceError,
@@ -56,6 +58,9 @@ from llm_client import (
     challenge_choice_card_copy,
     classify_revision_request,
     classify_turn_understanding,
+    recover_human_edit_engagement,
+    _dialogue_background_prompt,
+    _strip_unverified_state_claims,
     review_intent_feedback,
     review_question_answers,
     rewrite_intent_progress,
@@ -658,6 +663,11 @@ class MessageRequest(StrictModel):
 
 
 class ChallengeReviewRetryRequest(StrictModel):
+    baseVersionId: str
+    idempotencyKey: str
+
+
+class ComponentRecoveryRequest(StrictModel):
     baseVersionId: str
     idempotencyKey: str
 
@@ -1319,6 +1329,60 @@ def read_session(
         session = _expire_draft_regeneration(database, session)
         expire_interrupted_attempts(database, session_id)
         return serialize_session(database, session["id"])
+
+
+@app.post("/api/sessions/{session_id}/component-recoveries/{recovery_id}/retry")
+def retry_component_recovery(
+    session_id: str, recovery_id: str, payload: ComponentRecoveryRequest, request: Request,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
+):
+    _validate_identifier(recovery_id, "recoveryId")
+    _validate_identifier(payload.idempotencyKey, "idempotencyKey")
+    deadline = request.state.llm_started_at + 10.0
+    source_error = None
+    with connect(immediate=True) as database:
+        session = require_browser_session(database, session_id, access_cookie)
+        try:
+            task = component_recovery.claim(database, session, recovery_id, payload.baseVersionId, payload.idempotencyKey)
+        except ValueError as error:
+            raise ApiError(409, str(error), "This state recovery source or key is invalid.") from error
+        if task is None:
+            return serialize_session(database, session_id)
+        try:
+            source = component_recovery.replay_sources(database, session_id, task)
+            context = build_llm_context(database, session_id, get_current_version(database, session))
+            snapshot = context["stageContext"]["stageSnapshot"]
+            # Only the original question/background survives the assistant role projection.
+            original_background = _dialogue_background_prompt({"stageSnapshot": snapshot, "dialogueEvidence": {
+                "turns": [{"id": task.get("sourceAssistantTurnId"), "role": "assistant",
+                           "content": source.pop("boundAssistantMessage")}],
+            }})
+            subsequent = source.pop("subsequentTurns")
+            source.update({"boundQuestionBackground": original_background,
+                           "subsequentUserMessages": [item for item in subsequent if item["role"] == "user"],
+                           "discussionBackground": _dialogue_background_prompt(context["stageContext"]),
+                           "activeDisagreement": context["stageContext"].get("activeDisagreement"),
+                           "currentStageSnapshot": snapshot})
+        except ValueError as error:
+            source_error = str(error)
+            component_recovery.record(database, session_id, task, "expired", failureCode=source_error)
+    if source_error:
+        with connect() as database:
+            return serialize_session(database, session_id)
+    decision, failure_code = None, None
+    try:
+        decision = recover_human_edit_engagement(source, request.state.request_id, deadline)
+        # Enforce the source even for an injected/alternate model implementation.
+        from proposal_understanding import validate_engagement
+        decision = validate_engagement(decision, source["originalUserMessage"])
+        if time.monotonic() >= deadline:
+            failure_code = "RECOVERY_TIMEOUT"
+    except (LLMServiceError, ValueError, TypeError, KeyError, IndexError, TimeoutError, httpx.HTTPError) as error:
+        failure_code = getattr(error, "code", None) or "STATE_UNVERIFIED"
+    with connect(immediate=True) as database:
+        session = require_browser_session(database, session_id, access_cookie)
+        component_recovery.finish(database, session, task, decision, failure_code)
+        return serialize_session(database, session_id)
 
 
 @app.patch("/api/sessions/{session_id}/language")
@@ -2784,10 +2848,23 @@ def send_message(
     _validate_message_action_payload(payload)
 
     with message_request_lock(session_id, payload.idempotencyKey):
+        guard = None
+        with connect(immediate=True) as database:
+            guard_session = require_browser_session(database, session_id, access_cookie)
+            active = load_design_context(database, session_id, payload.baseVersionId).get("activeDisagreement") or {}
+            answered = database.execute("SELECT 1 FROM conversation_turns WHERE session_id=? AND request_id=? AND role='assistant'",
+                                        (session_id, payload.idempotencyKey)).fetchone()
+            if (not answered and guard_session["current_version_id"] == payload.baseVersionId
+                    and active.get("subject") == "human_edit" and active.get("status") == "active"):
+                guard = {"guardId": uuid.uuid4().hex, "versionId": payload.baseVersionId, "messageKey": payload.idempotencyKey,
+                         "status": "started", "leaseUntil": iso_time(datetime.now(timezone.utc) + timedelta(seconds=120))}
+                record_event(database, session_id, "interaction_message_guard", guard, utc_now())
+        delivered_payload = None
         try:
-            return _send_message_locked(
+            delivered_payload = _send_message_locked(
                 session_id, payload, content, request, response, access_cookie,
             )
+            return delivered_payload
         except (ApiError, LLMServiceError) as error:
             # Publishing a failed request must never bypass browser authentication
             # or mutate records for a conflicting idempotency key.
@@ -2802,6 +2879,13 @@ def send_message(
                 except ApiError:
                     pass  # Preserve the original retryable request error.
             raise
+        finally:
+            if guard:
+                with connect(immediate=True) as database:
+                    record_event(database, session_id, "interaction_message_guard", {**guard, "status": "finished"}, utc_now())
+                    if delivered_payload is not None:
+                        delivered_payload["interactionState"] = component_recovery.interaction_state(
+                            database, get_session(database, session_id))
 
 
 @app.post("/api/sessions/{session_id}/challenge-reviews/{review_id}/retry")
@@ -2875,6 +2959,23 @@ def _send_message_locked(
     if payload.action == "none":
         with connect() as read_database:
             read_session = require_active_session(read_database, session_id, access_cookie)
+            request_signature = hashlib.sha256(dump_json({
+                "content": content, "baseVersionId": payload.baseVersionId,
+                "requestProposal": payload.requestProposal, "action": payload.action,
+                "sourceTurnId": payload.sourceTurnId,
+            }).encode("utf-8")).hexdigest()
+            prior_failure = read_database.execute(
+                "SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='message_generation_failed' "
+                "AND json_extract(payload_json, '$.messageKey')=? ORDER BY id DESC LIMIT 1",
+                (session_id, payload.idempotencyKey)).fetchone()
+            previous_signature = (load_json(prior_failure["payload_json"]) or {}).get("requestSignature") if prior_failure else None
+            if previous_signature and previous_signature != request_signature:
+                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The failed message key belongs to a different request.")
+            read_user = read_database.execute(
+                "SELECT content, version_id FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'user'",
+                (session_id, payload.idempotencyKey)).fetchone()
+            if read_user is not None and (read_user["content"] != content or read_user["version_id"] != payload.baseVersionId):
+                raise ApiError(409, "IDEMPOTENCY_CONFLICT", "The message key was already used for different content or Stage.")
             already_answered = read_database.execute(
                 """SELECT 1 FROM conversation_turns
                 WHERE session_id = ? AND request_id = ? AND role = 'assistant'""",
@@ -2910,14 +3011,41 @@ def _send_message_locked(
             else:
                 prior_conversation = None
         if saved_understanding is None and already_answered is None:
-            precomputed_understanding = classify_turn_understanding(
-                prior_conversation, snapshot_for_understanding,
-                request.state.request_id, forced_proposal=payload.requestProposal,
-                proposal_context={key: proposal_context_for_understanding.get(key) for key in (
-                    "topicId", "initialRequest", "questions", "answers", "lastQuestionText", "userTurns", "understanding"
-                )} if proposal_context_for_understanding else {},
-                _deadline=message_started_at + LLM_INTERNAL_DEADLINE_SECONDS,
-            )
+            interpretation_context = {key: proposal_context_for_understanding.get(key) for key in (
+                "topicId", "initialRequest", "questions", "answers", "lastQuestionText", "userTurns", "understanding"
+            )} if proposal_context_for_understanding else {}
+            interpretation_context["dialogueEvidence"] = with_latest(
+                read_context["stageContext"].get("dialogueEvidence"), content)
+            interpretation_context["activeDisagreement"] = read_context["stageContext"].get("activeDisagreement")
+            try:
+                precomputed_understanding = classify_turn_understanding(
+                    prior_conversation, snapshot_for_understanding,
+                    request.state.request_id, forced_proposal=payload.requestProposal,
+                    proposal_context=interpretation_context,
+                    _deadline=message_started_at + LLM_INTERNAL_DEADLINE_SECONDS,
+                )
+            except LLMServiceError as error:
+                with connect(immediate=True) as database:
+                    require_active_session(database, session_id, access_cookie)
+                    record_event(database, session_id, "message_generation_failed", {
+                        "messageKey": payload.idempotencyKey, "baseVersionId": payload.baseVersionId,
+                        "requestId": request.state.request_id, "code": error.code,
+                        "retryable": error.retryable, "attemptsUsed": error.attempts_used,
+                        "proposalRequested": payload.requestProposal,
+                        "requestSignature": request_signature,
+                        "details": {**_llm_failure_details(error), "task": "turn_understanding",
+                                    "failureStage": "understanding", "maximumAttempts": 2},
+                    }, utc_now())
+                # A failed interpretation cannot authorize a proposal or a state
+                # transition. Ordinary input can still receive reliable Kimi prose.
+                if payload.requestProposal or error.code != "MODEL_RESPONSE_INVALID":
+                    raise
+                precomputed_understanding = {
+                    "acts": ["unclear"], "elements": [], "evidenceSpan": content,
+                    "directionSufficient": False, "mapRelated": True, "changes": [],
+                    "proposalUnderstanding": None, "conversationOnly": True,
+                    "semanticPolicyVersion": 1,
+                }
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         prior_user = database.execute(
@@ -3133,6 +3261,9 @@ def _send_message_locked(
         stage_context["requirementUserTurns"] = [{"id": user_turn_id, "content": content}]
         if turn_understanding is not None:
             stage_context["turnUnderstanding"] = turn_understanding
+            stage_context["conversationOnly"] = bool(turn_understanding.get("conversationOnly"))
+            if stage_context["conversationOnly"]:
+                allow_progress = False
         stage_context["aiEditableTilesOnly"] = payload.action != "execute_revision"
         user_map_claims = analyze_user_map_claims(
             content,
@@ -4242,6 +4373,15 @@ def _send_message_locked(
         context["stageContext"],
     )
     execution_guidance = dict(execution.guidance or {})
+    if context["stageContext"].get("conversationOnly"):
+        active = context["stageContext"].get("activeDisagreement")
+        execution_guidance = {"move": "offer_perspective", "intentHypothesis": None,
+                              "intentConfidence": None, "proposalOffer": None, "uiCues": [],
+                              "coordinateLinks": execution_guidance.get("coordinateLinks") or [],
+                              "proposalDiscovery": execution_guidance.get("proposalDiscovery"),
+                              "disagreement": {**active, "displayCard": False} if active else None}
+        execution = replace(execution, guidance=execution_guidance, proposed_rows=None,
+                            revision_plan={}, revision_contract={}, revision_operations=[], proposal_binding={})
     active_disagreement_card = (
         isinstance(execution_guidance.get("disagreement"), dict)
         and execution_guidance["disagreement"].get("status") == "active"
@@ -4387,6 +4527,7 @@ def _send_message_locked(
     )
     # The semantic patch is consumed by the server and never becomes a new
     # visible card or frontend protocol field.
+    state_transition_deferred = bool((execution.guidance or {}).get("_stateTransitionDeferred"))
     design_context_guidance = _design_context_guidance(execution.guidance)
     execution = replace(
         execution,
@@ -4398,6 +4539,24 @@ def _send_message_locked(
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, payload.baseVersionId)
         current = get_current_version(database, session)
+        requested_disagreement = design_context_guidance.get("disagreement")
+        initial_disagreement = context["stageContext"].get("activeDisagreement")
+        if initial_disagreement and initial_disagreement.get("subject") == "human_edit":
+            current_disagreement = load_design_context(database, session_id, payload.baseVersionId).get("activeDisagreement")
+            if component_recovery.signature(initial_disagreement) != component_recovery.signature(current_disagreement):
+                # A concurrent state transition cannot be overwritten by this older reply.
+                design_context_guidance.pop("disagreement", None)
+                guidance = dict(execution.guidance or {})
+                guidance.pop("disagreement", None)
+                execution = replace(execution, guidance=guidance,
+                                    assistant_message=_strip_unverified_state_claims(execution.assistant_message))
+                state_transition_deferred = False
+                if not execution.assistant_message.strip():
+                    raise ApiError(502, "MODEL_RESPONSE_INVALID", "No reliable answer remains after the state changed. Retry the message.", retryable=True)
+        if isinstance(requested_disagreement, dict) and requested_disagreement.get("subject") == "human_edit":
+            identity = component_recovery.disagreement_identity(database, session_id, payload.baseVersionId, initial_disagreement)
+            if identity or not initial_disagreement or initial_disagreement.get("subject") != "human_edit":
+                requested_disagreement["disagreementId"] = identity or uuid.uuid4().hex
         if design_context_guidance.get("intentHypothesis"):
             pending_conflict = _active_intent_conflict_choice(
                 database,
@@ -4960,6 +5119,9 @@ def _send_message_locked(
                     "proposalDiscovery"
                 ),
             )
+            if state_transition_deferred:
+                component_recovery.enqueue(database, session_id, payload.baseVersionId,
+                                           user_turn_id, assistant_turn_id, payload.idempotencyKey)
 
         session_payload = serialize_session(database, session_id)
 
@@ -9140,11 +9302,11 @@ def build_llm_context(database, session_id, version):
     # The latest turn normally mirrors it, but hidden discussion cards and
     # compatibility reads must remain active even when no visible card exists.
     durable_disagreement = design_context.get("activeDisagreement")
-    if (
-        recent_guidance["activeDisagreement"] is None
-        and isinstance(durable_disagreement, dict)
-        and durable_disagreement.get("status") == "active"
-    ):
+    if version["design_context_json"]:
+        # A delayed acknowledgement intentionally leaves old Turn guidance
+        # untouched. It must not resurrect a cleared canonical disagreement.
+        recent_guidance["activeDisagreement"] = durable_disagreement
+    elif isinstance(durable_disagreement, dict) and durable_disagreement.get("status") == "active":
         recent_guidance["activeDisagreement"] = durable_disagreement
 
     return {
@@ -9152,6 +9314,9 @@ def build_llm_context(database, session_id, version):
         "validation": load_json(version["validation_json"]),
         "conversation": conversation,
         "stageContext": {
+            "dialogueEvidence": build_dialogue_evidence(
+                [dict(turn) for turn in proposal_turns if turn["id"] not in superseded_assessment_turn_ids],
+                version["id"], proposal_discovery),
             "versionId": version["id"],
             "stageNumber": version["stage_number"],
             "source": version["source"],
@@ -9284,6 +9449,7 @@ def _proposal_discovery_from_turns(
     reviewed = turn_understandings or {}
     ordered = sorted(turns or [], key=lambda turn: turn["sequence_number"])
     active = None
+    source_turns = {turn["id"]: turn for turn in ordered if turn["role"] == "user"}
     conversation_prefix = []
     for turn in ordered:
         content = str(turn["content"] or "").strip()
@@ -9335,6 +9501,17 @@ def _proposal_discovery_from_turns(
                     "lastQuestionKey": None,
                     "status": "clarifying",
                 }
+                # A new topic may refer to an earlier evaluation. Pin only
+                # actual user sources cited by the verified interpretation.
+                interpretation = (reviewed.get(request_key) or {}).get("proposalUnderstanding") or {}
+                cited = {item.get("sourceTurnId") for key in ("goals", "editScope", "focus", "preserve")
+                         for item in interpretation.get(key) or []}
+                for source in sorted((source_turns[source_id] for source_id in cited if source_id in source_turns),
+                                     key=lambda source: source["sequence_number"], reverse=True):
+                    source_id = source["id"]
+                    if source is not None and source["sequence_number"] < turn["sequence_number"]:
+                        active["userTurns"].insert(0, {"id": source_id, "content": source["content"]})
+                        active["userEvidence"].insert(0, source["content"])
             elif active is not None:
                 active["userEvidence"].append(content)
                 active["userTurns"].append({"id": turn["id"], "content": content})
@@ -9784,6 +9961,8 @@ def _adaptive_revision_routing(
     if not text:
         return "none"
     discovery = proposal_discovery or {}
+    if (turn_understanding or {}).get("conversationOnly"):
+        return "none"
     if isinstance(turn_understanding, dict):
         if turn_understanding.get("mapRelated") is False:
             return "none"
@@ -11459,6 +11638,24 @@ def _mark_proposal_discovery_guidance(execution, stage_context):
         "lastQuestionKey": discovery.get("lastQuestionKey"),
     }
     body = execution.assistant_message
+    if (stage_context or {}).get("conversationOnly"):
+        # A conversational recovery cannot end or restart an authorized topic.
+        marker["status"] = discovery.get("status") or "clarifying"
+        marker["failureEnvelope"] = discovery.get("failureEnvelope")
+        remaining = max(0, 3 - marker["clarificationQuestionCount"])
+        sentences = []
+        for sentence in re.split(r"(?<=[.!?。！？])\s*", body):
+            if sentence.rstrip().endswith(("?", "？")):
+                if remaining <= 0:
+                    continue
+                remaining -= 1
+                marker["clarificationQuestionCount"] += 1
+            sentences.append(sentence)
+        body = " ".join(sentences).strip()
+        if not body:
+            raise ApiError(502, "MODEL_RESPONSE_INVALID", "No reliable reply remains within the topic question budget.", retryable=True)
+        guidance["proposalDiscovery"] = marker
+        return replace(execution, assistant_message=body, guidance=guidance)
     if routing in {"proposal", "proposal_conservative"}:
         offer = guidance.get("proposalOffer")
         marker["hasValidatedCandidate"] = bool(execution.proposed_rows is not None or
@@ -11594,6 +11791,13 @@ def _record_disagreement_event(database, session_id, version_id, turn_id, guidan
     status = disagreement.get("status")
     if status not in {"active", "acknowledged", "resolved"}:
         return
+    if disagreement.get("subject") == "human_edit":
+        active = load_design_context(database, session_id, version_id).get("activeDisagreement")
+        identity = component_recovery.disagreement_identity(database, session_id, version_id, active)
+        # IDs are owned by the server. Unidentifiable legacy state is not upgraded
+        # into a new recovery target simply because another ordinary reply arrived.
+        if identity or not active or active.get("subject") != "human_edit":
+            disagreement["disagreementId"] = identity or disagreement.get("disagreementId") or uuid.uuid4().hex
     previous = database.execute(
         """
         SELECT event_type FROM audit_events
@@ -11608,7 +11812,7 @@ def _record_disagreement_event(database, session_id, version_id, turn_id, guidan
     if status == "active":
         event_type = (
             "disagreement_updated"
-            if previous is not None and previous["event_type"] != "disagreement_resolved"
+            if previous is not None and previous["event_type"] not in {"disagreement_resolved", "disagreement_acknowledged"}
             else "disagreement_started"
         )
     elif status == "acknowledged":
@@ -11673,6 +11877,7 @@ def _public_guidance(guidance):
     result.pop("_intentDecision", None)
     result.pop("_intentCandidateReview", None)
     result.pop("_humanEditEngagement", None)
+    result.pop("_stateTransitionDeferred", None)
     result.pop("manualEditReview", None)
     offer = result.get("proposalOffer")
     if isinstance(offer, dict) and (

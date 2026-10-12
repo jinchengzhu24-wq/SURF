@@ -415,7 +415,7 @@ class LLMClientTests(unittest.TestCase):
         )
         disagreement_json = json.dumps(acknowledged, separators=(",", ":"))
         engagement_json = json.dumps(
-            {"decision": "acknowledged", "evidenceSpan": "ok, lets talk"},
+            {"decision": "engage", "evidenceSpan": "ok, lets talk"},
             separators=(",", ":"),
         )
         missing_contract = (
@@ -428,7 +428,7 @@ class LLMClientTests(unittest.TestCase):
             f"HUMAN_EDIT_ENGAGEMENT: {engagement_json}</GUIDANCE>"
         )
         result, client = self.execute(
-            [missing_contract, corrected],
+            [missing_contract, engagement_json],
             rows=OPERATION_BASE_ROWS,
             conversation=[{"role": "user", "content": "ok, lets talk"}],
             stage_context={
@@ -436,15 +436,16 @@ class LLMClientTests(unittest.TestCase):
                 "discussionCardMode": "disagreement_only",
             },
         )
-        self.assertEqual(result.attempts_used, 2)
+        self.assertEqual(result.attempts_used, 1)
         self.assertEqual(result.guidance["disagreement"]["status"], "acknowledged")
         self.assertEqual(
             result.guidance["_humanEditEngagement"],
-            {"decision": "acknowledged", "evidenceSpan": "ok, lets talk"},
+            {"decision": "engage", "evidenceSpan": "ok, lets talk"},
         )
-        self.assertIn("HUMAN_EDIT_ENGAGEMENT", client.chat.completions.calls[1]["messages"][0]["content"])
+        self.assertIn("source designer", client.chat.completions.calls[1]["messages"][0]["content"])
+        self.assertIn("I understand that you want to continue the discussion.", result.assistant_message)
 
-    def test_human_edit_engagement_failure_never_restores_old_active_state(self):
+    def test_human_edit_engagement_failure_preserves_body_and_original_active_state(self):
         active = {
             "status": "active",
             "subject": "human_edit",
@@ -456,8 +457,7 @@ class LLMClientTests(unittest.TestCase):
             "displayCard": False,
         }
         invalid = "I understand that you want to continue talking, but I omitted the required contract."
-        with self.assertRaises(llm_client.LLMServiceError) as raised:
-            self.execute(
+        result, client = self.execute(
                 [invalid, invalid],
                 rows=OPERATION_BASE_ROWS,
                 conversation=[{"role": "user", "content": "ok, lets talk"}],
@@ -466,7 +466,12 @@ class LLMClientTests(unittest.TestCase):
                     "discussionCardMode": "disagreement_only",
                 },
             )
-        self.assertEqual(raised.exception.code, "MODEL_RESPONSE_INVALID")
+        self.assertEqual(result.attempts_used, 1)
+        self.assertEqual(result.guidance["disagreement"]["status"], "active")
+        self.assertFalse(result.guidance["disagreement"]["displayCard"])
+        self.assertTrue(result.guidance["_stateTransitionDeferred"])
+        self.assertIn("continue talking", result.assistant_message)
+        self.assertIsNone(result.guidance["proposalOffer"])
 
     def test_review_false_positive_candidate_is_removed_without_regeneration(self):
         claim = {
@@ -1196,12 +1201,14 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("底层的 T、B、P", message)
         self.assertNotIn("相关设计指标", llm_client.repair_legacy_visible_text(message, "zh-CN"))
 
-    def test_chinese_visible_output_still_rejects_unrelated_english(self):
-        for word in ("water", "AI", "routeComplexityScore"):
+    def test_chinese_visible_output_allows_minor_code_switching_but_rejects_internal_identifiers(self):
+        for word in ("water", "AI"):
             with self.subTest(word=word):
-                self.assertIsNotNone(llm_client._visible_chinese_language_issue(
+                self.assertIsNone(llm_client._visible_chinese_language_issue(
                     f"这个 {word} 要重新评价。"
                 ))
+        self.assertIsNotNone(llm_client._visible_chinese_language_issue("这个 routeComplexityScore 要重新评价。"))
+        self.assertIsNotNone(llm_client._visible_chinese_language_issue("This response is entirely in English."))
 
     def test_language_retry_feedback_is_not_treated_as_spatial_error(self):
         messages = [{"role": "user", "content": "那个T是什么"}]
@@ -2383,7 +2390,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("exactly one useful clarification question", prompt)
         self.assertIn("Do not state or infer coordinates", prompt)
         self.assertIn("Target question dimension: binding", prompt)
-        self.assertIn("five to eight declarative sentences", prompt)
+        self.assertIn("without fixed paragraph or sentence counts", prompt)
         self.assertIn("Private authoritative route-analysis context", prompt)
         self.assertIn("internally replay", prompt)
         self.assertIn("one verified solution witness", prompt)
@@ -2424,7 +2431,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(disabled, old_switch_only)
         self.assertEqual(enabled, both_switches)
-        self.assertIn("two paragraphs and five to eight declarative sentences", disabled)
+        self.assertIn("without fixed paragraph or sentence counts", disabled)
         self.assertNotIn("State each design judgment once", disabled)
         self.assertIn("usually two to four declarative sentences", enabled)
         self.assertIn("without a fixed paragraph count or a hard sentence limit", enabled)
@@ -3189,11 +3196,11 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "MODEL_LOW_QUALITY_RESPONSE")
         self.assertEqual(raised.exception.attempts_used, 3)
 
-    def test_multiple_questions_are_removed_when_declarative_body_exists(self):
+    def test_multiple_conversation_questions_are_preserved_with_declarative_body(self):
         reply = "The route currently has a direct opening. What should stay? What should change?"
         result, _ = self.execute([reply])
 
-        self.assertEqual(result.assistant_message, "The route currently has a direct opening.")
+        self.assertEqual(result.assistant_message, reply)
         self.assertIsNone(result.guidance["followUpQuestion"])
 
     def test_redundant_question_is_removed_after_an_explicit_direction(self):
@@ -3417,7 +3424,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIsNone(result.guidance["disagreement"])
         self.assertIsNone(result.guidance["followUpQuestion"])
-        self.assertNotIn("Which first push should carry the route judgment?", result.assistant_message)
+        self.assertIn("Which first push should carry the route judgment?", result.assistant_message)
 
     def test_clear_first_person_evaluation_gets_an_intent_card_when_model_omits_one(self):
         client = FakeClient([DETAILED_INTENT_BODY_ZH])
@@ -3666,7 +3673,7 @@ class LLMClientTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result.attempts_used, 1)
-        self.assertEqual(len(client.chat.completions.calls), 3)
+        self.assertEqual(len(client.chat.completions.calls), 2)
         self.assertIsNone(
             llm_client._intent_hypothesis_detail_issue(
                 result.guidance["intentHypothesis"], "en"
@@ -3698,7 +3705,7 @@ class LLMClientTests(unittest.TestCase):
             "另一种可能的效果是原本由水域强制形成的。"
         )
         self.assertEqual(
-            llm_client._intent_body_detail_issue(
+            llm_client._intent_body_presentation_issue(
                 body,
                 "zh-CN",
                 "我目前理解为水域覆盖偏多，可能需要减少。这个理解仍可纠正。",
@@ -3713,7 +3720,7 @@ class LLMClientTests(unittest.TestCase):
             "which boundary matters more. The inclination below remains tentative until confirmation."
         )
         self.assertEqual(
-            llm_client._intent_body_detail_issue(
+            llm_client._intent_body_presentation_issue(
                 padded,
                 "en",
                 "For now, I understand that you may prefer less water coverage.",
@@ -4137,8 +4144,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotEqual(result.guidance["move"], "offer_revision")
         self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertIsNone(result.guidance["proposalOffer"])
-        self.assertNotIn("？", result.assistant_message)
-        self.assertNotIn("吗", result.assistant_message)
+        self.assertNotIn("改好了", result.assistant_message)
 
     def test_invalid_stage_json_falls_back_to_server_snapshot_opening(self):
         client = FakeClient([

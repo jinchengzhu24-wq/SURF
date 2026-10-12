@@ -13,6 +13,7 @@ from pathlib import Path
 EVENT_TYPES = (
     "message_generation_failed", "reply_generation_failed",
     "challenge_reason_review_pending", "reply_delivery_outcome",
+    "component_recovery",
 )
 CATEGORY_LABELS = {
     "upstream_timeout": "请求时间预算或模型/网络超时",
@@ -29,7 +30,7 @@ CATEGORY_LABELS = {
 
 def failure_category(code):
     code = str(code or "").upper()
-    if "SESSION_" in code or "COCREATION_EXPIRED" in code:
+    if "SESSION_" in code or "COCREATION_EXPIRED" in code or code in {"STATE_UNVERIFIED", "CONCURRENT_CHANGE"}:
         return "state_or_delivery"
     if "TIMEOUT" in code or "DEADLINE" in code:
         return "upstream_timeout"
@@ -74,7 +75,13 @@ def _latencies(samples):
 def summarize(events, example_limit=3):
     requests = {}
     skipped = Counter()
+    recoveries = {}
     for event in events:
+        if event.get("eventType") == "component_recovery":
+            payload = event.get("payload") or {}
+            if payload.get("recoveryId"):
+                recoveries[(event.get("sessionId"), payload["recoveryId"])] = payload
+            continue
         if event.get("eventType") not in EVENT_TYPES:
             continue
         payload = event.get("payload")
@@ -94,7 +101,8 @@ def summarize(events, example_limit=3):
         if not success or code:
             bucket["issues"].add((failure_category(code), str(code or "UNKNOWN")))
         for component in payload.get("componentChecks") or []:
-            if isinstance(component, dict) and component.get("status") in {"omitted", "rejected", "failed"}:
+            if isinstance(component, dict) and (component.get("status") in {"omitted", "rejected", "failed"}
+                    or (component.get("status") == "preserved" and component.get("code"))):
                 component_code = str(component.get("code") or "UNSPECIFIED_COMPONENT_ISSUE")
                 bucket["issues"].add((failure_category(component_code), component_code))
 
@@ -138,6 +146,10 @@ def summarize(events, example_limit=3):
     verified = sum(bool(item["last"].get("verifiedProposal")) for item in proposals)
     return {
         "logicalRequests": len(requests),
+        "stateRecoveries": {"tasks": len(recoveries),
+            "attemptsUsed": sum(item.get("attemptsUsed", 0) for item in recoveries.values()),
+            "byStatus": dict(Counter(item.get("status", "unknown") for item in recoveries.values())),
+            "scope": "auxiliary state replay; excluded from body request counts and success rates"},
         "retriedRequests": sum(len(item["records"]) > 1 for item in requests.values()),
         "recordedOutcomes": sum(len(item["records"]) for item in requests.values()),
         "firstAttempt": counts(first), "afterRetries": counts(last),
@@ -190,6 +202,8 @@ def render_text(report):
         f"验证提案：{report['verifiedProposalRate']['passed']}/{report['verifiedProposalRate']['total']}",
         f"已记录生成耗时 P50/P95（毫秒）：{report['latency']['p50Ms']}/{report['latency']['p95Ms']}；缺失 {report['latency']['missing']}",
         "优先检查的三类问题（按最终未交付正文数排序）："]
+    recovery = report.get("stateRecoveries") or {}
+    lines.insert(1, f"必要状态补齐：{recovery.get('tasks', 0)} 项；尝试 {recovery.get('attemptsUsed', 0)} 次；状态 {recovery.get('byStatus', {})}（不计入正文成功率）")
     for item in report["topIssues"]:
         lines.append(f"- {item['label']}：涉及 {item['affectedRequests']}；最终无正文 {item['withoutBodyAtEnd']}；最终有正文 {item['bodyDeliveredAfterIssue']}；交付未知 {item['bodyUnknownAtEnd']}；代码 {','.join(item['codes'])}")
     if not report["topIssues"]:

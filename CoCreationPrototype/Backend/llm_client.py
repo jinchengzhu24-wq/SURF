@@ -30,6 +30,7 @@ from level_validation import (
     TILE_LEGEND,
     build_map_facts,
     build_stage_snapshot,
+    analyze_user_map_claims,
     minimum_pushes,
     summarize_verified_diff,
     validate_and_solve,
@@ -37,8 +38,10 @@ from level_validation import (
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
 from reply_reliability import ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key
+from conversation_evidence import CONTEXT_VERSION
 from proposal_understanding import (
     turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
+    engagement_schema, validate_engagement,
 )
 from design_requirements import (
     requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
@@ -131,7 +134,7 @@ CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
 PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV = (
     "COCREATION_PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT"
 )
-PROMPT_VERSION = "cocreation-v60-stable-requirements-compensating-edits"
+PROMPT_VERSION = "cocreation-v62-human-edit-state-replay"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -298,6 +301,9 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
             }}},
             "required": ["accepted", "issues"]}
         name = "cocreation_revision_requirement_review"
+    elif task in {"human_edit_engagement_repair", "human_edit_engagement_recovery"}:
+        schema = engagement_schema()
+        name = "cocreation_human_edit_engagement_repair"
     elif task in {"turn_understanding", "turn_understanding_review"}:
         schema = turn_schema()
         name = "cocreation_turn_understanding"
@@ -1253,7 +1259,7 @@ def build_plain_chat_messages(
             "as one final line using exactly this compact form:\n"
             "<GUIDANCE>INTENT_DECISION: {JSON} || DISCUSS: ... || WARNING: ... || MANUAL_EDIT: ... || INTENT: ... || "
             "PROPOSAL_SUMMARY: ... || PROPOSAL_RATIONALE: ... || EXECUTION_BRIEF: {JSON} || DISAGREEMENT: {JSON} || "
-            "HUMAN_EDIT_ENGAGEMENT: {JSON} || COORDINATE_LINKS: [{JSON}, ...] || DESIGN_CONTEXT_PATCH: {JSON}</GUIDANCE>\n"
+            "COORDINATE_LINKS: [{JSON}, ...] || DESIGN_CONTEXT_PATCH: {JSON}</GUIDANCE>\n"
             "DESIGN_CONTEXT_PATCH.openQuestions may include status open or resolved. A resolved "
             "question must include evidenceText copied exactly from the latest user message; "
             "the server ignores unsupported or unproven resolutions. Goals and constraints may "
@@ -1320,11 +1326,10 @@ def build_plain_chat_messages(
             "retain_current, which ends without a proposal. Status acknowledged is reserved for an "
             "existing human_edit disagreement when the designer explicitly agrees to keep discussing, "
             "explain, adjust, or re-edit; it has a null resolution, creates no proposal in that reply, "
-            "and does not mean either design position won. While a human_edit disagreement is active, "
-            "HUMAN_EDIT_ENGAGEMENT is mandatory and contains exactly decision and evidenceSpan. decision "
-            "must be active or acknowledged and must equal DISAGREEMENT.status; evidenceSpan must copy an "
-            "exact, non-empty contiguous substring from the latest designer message that supports that "
-            "classification. Do not copy assistant prose or infer evidence that the designer did not write. "
+            "and does not mean either design position won. During an active human_edit disagreement, "
+            "engagement is classified by the structured understanding task, and the server owns state. "
+            "Do not emit HUMAN_EDIT_ENGAGEMENT or DISAGREEMENT status for that existing disagreement. "
+            "Never claim consensus, accepted edits, or permission merely from willingness to discuss. "
             "Use a clarification cue when the designer's direction is too unclear to turn into a "
             "single safely bound proposal; it must ask for the missing map decision without "
             "silently hiding the response. Use MANUAL_EDIT alone when the designer's direction is too unclear to turn into a "
@@ -1444,6 +1449,15 @@ def build_plain_chat_messages(
         validation_mode=validation_mode,
         compact_experiment=compact_experiment,
     )
+    system_prompt += _dialogue_background_prompt(stage_context)
+    if stage_context.get("conversationOnly"):
+        system_prompt += (
+            "\nThe semantic routing is unverified. Give a cautious conceptual answer or a specific "
+            "clarifying question. Do not output cards, intention claims, state transitions, or map edits."
+        )
+        topic = stage_context.get("proposalDiscovery") or {}
+        if topic and int(topic.get("clarificationQuestionCount") or 0) >= 3:
+            system_prompt += " The active topic has exhausted its question budget. Answer without asking another question."
     return [
         {"role": "system", "content": system_prompt},
         *_current_user_prompt_messages(conversation),
@@ -1706,8 +1720,8 @@ def _compact_kimi_plain_prompt(
                     "Keep the body concise, usually two to four declarative sentences, without "
                     "a fixed paragraph count or a hard sentence limit. The body must contain no question. "
                     if compact_clarification
-                    else "The body must contain two paragraphs and five to eight declarative sentences "
-                    "in total, with no question. "
+                    else "Use enough concise explanation to address the designer, without fixed paragraph "
+                    "or sentence counts. The clarification question belongs in its separate field. "
                 )
                 + "The question field must contain exactly "
                 "one question and must address the target dimension below."
@@ -2221,6 +2235,8 @@ def _prompt_stage_context(rows, stage_context):
     # the raw snapshots here would duplicate it and would also expose the
     # transient direct-evidence fields reserved for intent candidate review.
     context.pop("designContext", None)
+    context.pop("dialogueEvidence", None)
+    context.pop("_verifiedHumanEditEngagement", None)
     context.pop("revisionDesignContext", None)
     context.pop("evaluatorDesignContext", None)
 
@@ -2292,6 +2308,37 @@ def _current_user_prompt_messages(conversation):
         None,
     )
     return [latest] if latest is not None else []
+
+
+def _dialogue_background_prompt(stage_context):
+    """Discuss prior wording without replaying historical map claims as facts."""
+    evidence = (stage_context or {}).get("dialogueEvidence") or {}
+    records = []
+    for turn in evidence.get("turns", []):
+        text = str(turn.get("content") or "")
+        if turn.get("role") == "assistant":
+            text = text.split("<GUIDANCE>", 1)[0]
+            text = _strip_unreferenced_current_map_claims(text)
+            # Spatial history is deliberately omitted, including true old facts.
+            # Retain only conceptual suggestions/questions and personal reactions.
+            text = " ".join(sentence for sentence in _content_block_sentences(text)
+                            if not re.search(r"[（(]\s*\d+\s*[,，]\s*\d+\s*[)）]|第\s*\d+\s*[行列]|\b(?:push|move|route|path)\b|路线|路径|推到|位于|相邻|"
+                                             r"\b(?:water|wall|floor|player|box|crate|target)\s+(?:is|are|occupies|sits)\b|"
+                                             r"(?:水域|墙|箱子|目标|玩家|地板).{0,8}(?:在|占据).{0,10}(?:左|右|上|下|旁|角|区域)", sentence, re.I))
+        else:
+            # User wording is linguistic evidence, never a second map authority.
+            claims = analyze_user_map_claims(text, (stage_context or {}).get("stageSnapshot"))
+            for conflict in claims.get("conflicts") or []:
+                text = text.replace(str(conflict.get("sourceText") or ""), "")
+        if text.strip():
+            records.append({"sourceTurnId": turn["id"], "role": turn["role"], "wording": text})
+    if not records:
+        return ""
+    return "\n\nDiscussion background (linguistic context only, NOT current map facts or new authorization):\n" + json.dumps(records, ensure_ascii=False) + (
+        "\nUse this to resolve references and continue the conversation. Assistant suggestions are not "
+        "designer goals. Historical user wording may explain a goal; new permission/state decisions "
+        "require the latest user evidence. Current map facts come only from Current Stage Snapshot."
+    )
 
 
 def _design_context_prompt(stage_context, role="chat"):
@@ -4184,14 +4231,32 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             "previousUserWording": previous_user_wording,
             "forcedProposalButton": bool(forced_proposal),
             "currentStageSnapshot": snapshot,
-            "proposalContext": proposal_context or {},
+            "proposalContext": {key: value for key, value in (proposal_context or {}).items()
+                                if key != "dialogueEvidence"},
             "designerTurns": [{"id": key, "content": value}
                 for key, value in designer_sources(proposal_context, latest).items()],
             "editableComponents": ["water", "internal_walls"],
             "protectedComponents": ["outer_shell", "player", "boxes", "targets"],
         }, ensure_ascii=False)},
     ]
+    messages[0]["content"] += (
+        " Historical designerTurns are available even before a proposal topic starts. Cite their real "
+        "IDs when carrying forward a goal; do not attribute earlier words to latest. Historical "
+        "evaluations are background, not permission. Keep new changes evidence in the latest message. "
+        "For ordinary questions/evaluations/ideas without an active topic, proposalUnderstanding must be null."
+    )
+    messages[0]["content"] += _dialogue_background_prompt({
+        "dialogueEvidence": (proposal_context or {}).get("dialogueEvidence"), "stageSnapshot": snapshot})
+    active_human_edit = ((proposal_context or {}).get("activeDisagreement") or {}).get("subject") == "human_edit"
+    messages[0]["content"] += (
+        " Return humanEditEngagement=null unless there is an active human-edit disagreement. Otherwise "
+        "judge this component once: engage only for explicit willingness to discuss/explain/adjust/re-edit, "
+        "unchanged for unrelated/negative wording, unclear for genuine ambiguity. Short answers require "
+        "the exact bound assistant question from discussion background. Engage needs an exact latest-user "
+        "evidenceSpan. Other decisions may use an empty span. This is never consensus or map permission."
+    )
     last_error = None
+    locked_base = None
     for attempt in range(1, 3):
         try:
             timeout = min(15.0, _remaining_until(_deadline)) if _deadline is not None else 15.0
@@ -4209,7 +4274,16 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             payload = parse_json_object(response.choices[0].message.content)
             if set(payload) & {"semanticPolicyVersion", "criticalReview", "versionId", "evidenceSignature"}:
                 raise ValueError("A model cannot author server review metadata.")
-            candidate = _validate_turn_understanding(payload, latest, forced_proposal)
+            candidate = ({**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding")}
+                         if locked_base is not None else _validate_turn_understanding(payload, latest, forced_proposal))
+            if active_human_edit and not (locked_base or {}).get("humanEditEngagement"):
+                try:
+                    candidate["humanEditEngagement"] = validate_engagement(payload.get("humanEditEngagement"), latest)
+                except ValueError:
+                    candidate.pop("humanEditEngagement", None)
+            elif not active_human_edit:
+                candidate.pop("humanEditEngagement", None)
+            locked_base = {key: value for key, value in candidate.items() if key != "proposalUnderstanding"}
             _validate_proposal_interpretation(candidate, latest, snapshot, proposal_context, forced_proposal)
             review_reason = critical_review_reason(candidate, proposal_context)
             if review_reason:
@@ -4247,6 +4321,10 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 _validate_proposal_interpretation(corrected, latest, snapshot, proposal_context, forced_proposal)
                 if any(not x.get("evidenceSpan") for x in corrected.get("changes") or []):
                     raise ValueError("Reviewed changes lack individual designer evidence.")
+                # Permission review must not reinterpret an independently validated state signal.
+                corrected.pop("humanEditEngagement", None)
+                if candidate.get("humanEditEngagement"):
+                    corrected["humanEditEngagement"] = candidate["humanEditEngagement"]
                 corrected["criticalReview"] = {"verified": True, "reason": review_reason,
                     "corrected": corrected != candidate, "attempt": attempt,
                     "latencyMs": int((time.monotonic() - review_started) * 1000),
@@ -4255,6 +4333,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 _log_llm_event("proposal_understanding_reviewed", requestId=request_id,
                     reason=review_reason, corrected=candidate["criticalReview"]["corrected"], attempt=attempt)
             candidate["semanticPolicyVersion"] = 1
+            candidate["dialogueContextVersion"] = CONTEXT_VERSION
             candidate["evidenceSignature"] = topic_signature(snapshot, proposal_context, latest)
             return candidate
         except LLMServiceError:
@@ -4264,7 +4343,9 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             _log_llm_event("proposal_understanding_rejected", requestId=request_id,
                 attempt=attempt, reason=str(exception)[:300])
             messages.append({"role": "user", "content": (
-                "Repair the interpretation with the same original evidence and topic. "
+                ("Repair only proposalUnderstanding. Validated speech acts, changes and latest evidence "
+                 "are locked: " + json.dumps(locked_base, ensure_ascii=False) + ". "
+                 if locked_base is not None else "Repair the failed understanding with the same original evidence and topic. ")
                 + str(exception)[:400]
             )})
     raise LLMServiceError(
@@ -4276,7 +4357,10 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
 
 def _validate_proposal_interpretation(candidate, latest, snapshot, context, forced):
     topic = candidate.get("proposalUnderstanding")
-    required = bool(context or forced or "revision_request" in candidate.get("acts", []))
+    required = bool((context or {}).get("topicId") or forced or "revision_request" in candidate.get("acts", []))
+    if not required:
+        candidate["proposalUnderstanding"] = None
+        return
     if topic is None:
         if required:
             raise ValueError("An authorized proposal topic needs an evidence-bound interpretation.")
@@ -4285,7 +4369,7 @@ def _validate_proposal_interpretation(candidate, latest, snapshot, context, forc
 
 
 def _validate_turn_understanding(payload, latest, forced_proposal=False):
-    metadata = {"proposalUnderstanding", "semanticPolicyVersion", "evidenceSignature", "criticalReview", "versionId"}
+    metadata = {"proposalUnderstanding", "humanEditEngagement", "semanticPolicyVersion", "evidenceSignature", "criticalReview", "versionId"}
     if not isinstance(payload, dict) or set(payload) - metadata not in ({
         "acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated",
     }, {"acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated", "changes"}):
@@ -8906,7 +8990,7 @@ async def _translate_with_model_fallback(
 
 async def _review_intent_candidate_async(
     *, api_key, base_url, user_text, body, decision, active_inclinations,
-    language, request_id, deadline,
+    language, request_id, deadline, discussion_background="",
 ):
     """Independently review card presence, semantics, prose, and conflicts."""
     active = []
@@ -8958,6 +9042,7 @@ async def _review_intent_candidate_async(
         "DRAFT INTENT DECISION:\n" + json.dumps(decision, ensure_ascii=False, separators=(",", ":")) + "\n\n"
         "ACTIVE CONFIRMED INTENTIONS:\n" + json.dumps(active[:12], ensure_ascii=False, separators=(",", ":"))
     )}]
+    messages[0]["content"] += discussion_background
     remaining = _remaining_until(deadline)
     if remaining <= 0:
         raise asyncio.TimeoutError()
@@ -9081,7 +9166,7 @@ async def _review_intent_candidate_async(
 
 async def _repair_intent_components_async(
     *, api_key, base_url, user_text, body, card_text, claims, issues,
-    repair_body, repair_card, map_facts, language, request_id, deadline,
+    repair_body, repair_card, map_facts, language, request_id, deadline, discussion_background="",
 ):
     """Repair only rejected intent presentation components under locked semantics."""
     if not repair_body and not repair_card:
@@ -9093,10 +9178,9 @@ async def _repair_intent_components_async(
         "You repair presentation components for a Sokoban tentative-intent reply. Return JSON only. "
         "The LOCKED CLAIMS and exact user evidence are authoritative and must not be changed, expanded, "
         "or assigned a new gameplay purpose. Preserve every component not marked REPAIR. If BODY is marked, "
-        "write substantive medium-depth analysis grounded only in the Stage facts, with two distinct possible "
-        "effects and one honest uncertainty boundary; return it as one to three complete bodyParagraphs and do "
-        "not repeat the card. If CARD is marked, write two to "
-        "four complete, tentative, explicitly correctable sentences that preserve all locked claims. Return "
+        "repair the specified semantic defect using the Stage facts and discussion background; return "
+        "complete bodyParagraphs without forcing length, two effects, or a stock structure. "
+        "If CARD is marked, write concise, tentative, explicitly correctable sentences preserving locked claims. Return "
         "those sentences as separate cardSentences array items, including their closing punctuation. Do not "
         "mention this workflow, offer options, or leave a dangling clause. Write in " + response_language + ".\n\n"
         "CURRENT USER TEXT:\n" + str(user_text or "")[:2000] + "\n\n"
@@ -9108,7 +9192,7 @@ async def _repair_intent_components_async(
         "CURRENT CARD:\n" + str(card_text or "")[:1200] + "\n\n"
         "REVIEW ISSUES:\n" + json.dumps(list(issues or [])[:8], ensure_ascii=False)
     )}]
-    messages[0]["content"] += "\nReturn ONLY the fields of components marked REPAIR."
+    messages[0]["content"] += discussion_background + "\nReturn ONLY the fields of components marked REPAIR."
     remaining = _remaining_until(deadline)
     if remaining <= 0:
         raise asyncio.TimeoutError()
@@ -9130,8 +9214,8 @@ async def _repair_intent_components_async(
     repaired_body = body
     if repair_body:
         body_paragraphs = payload.get("bodyParagraphs")
-        if not isinstance(body_paragraphs, list) or not 1 <= len(body_paragraphs) <= 3:
-            raise ValueError("Intent body repair must return one to three paragraph items.")
+        if not isinstance(body_paragraphs, list) or not body_paragraphs:
+            raise ValueError("Intent body repair must return non-empty paragraph items.")
         body_paragraphs = [
             re.sub(r"\s+", " ", str(item or "")).strip()
             for item in body_paragraphs
@@ -9151,8 +9235,8 @@ async def _repair_intent_components_async(
     repaired_card_issue = None
     if repair_card:
         card_sentences = payload.get("cardSentences")
-        if not isinstance(card_sentences, list) or not 2 <= len(card_sentences) <= 4:
-            raise ValueError("Intent card repair must return two to four sentence items.")
+        if not isinstance(card_sentences, list) or not card_sentences:
+            raise ValueError("Intent card repair must return non-empty sentence items.")
         card_sentences = [
             re.sub(r"\s+", " ", str(item or "")).strip()
             for item in card_sentences
@@ -9192,7 +9276,9 @@ async def _repair_intent_components_async(
 
 
 async def _review_ordinary_intent_with_recovery(*, optional_budget, component_checks, **kwargs):
-    optional = kwargs["decision"].get("classification") != "candidate" and not kwargs["active_inclinations"]
+    # Discovering a new inclination is optional even when memory already exists.
+    # Only a verified defect in the visible answer justifies blocking its delivery.
+    optional = True
     started = time.monotonic()
     try:
         if optional:
@@ -9210,9 +9296,10 @@ async def _review_ordinary_intent_with_recovery(*, optional_budget, component_ch
             # once the reviewer determines that no intent card belongs here.
             component_checks.append(ComponentCheck("body", "preserved", "INTENT_SCORE_NOT_APPLICABLE"))
         return result
-    except (LLMServiceError, asyncio.TimeoutError, ValueError, TypeError, KeyError) as error:
+    except (LLMServiceError, APIConnectionError, APIStatusError, asyncio.TimeoutError,
+            ValueError, TypeError, KeyError, IndexError) as error:
         body = kwargs["body"]
-        if not optional or isinstance(error, LowQualityModelResponse) or len(body.strip()) < (35 if kwargs["language"] == "zh-CN" else 100):
+        if isinstance(error, LowQualityModelResponse) or not body.strip():
             raise
         component_checks.append(ComponentCheck("intent_discovery", "omitted", "OPTIONAL_REVIEW_FAILED"))
         return {"classification": "none", "claims": [], "cardText": "", "cardTextValid": True,
@@ -9222,6 +9309,82 @@ async def _review_ordinary_intent_with_recovery(*, optional_budget, component_ch
     finally:
         if optional:
             optional_budget.record(started)
+
+
+def _engagement_source(latest_user, stage_context):
+    return {"latestUserMessage": latest_user,
+            "activeDisagreement": (stage_context or {}).get("activeDisagreement"),
+            "discussionBackground": _dialogue_background_prompt(stage_context),
+            "currentStageSnapshot": (stage_context or {}).get("stageSnapshot")}
+
+
+async def _request_engagement_decision(source, api_key, base_url, timeout, task):
+    response = await asyncio.wait_for(_request_completion(
+        api_key, base_url, KIMI_MODEL, [
+            {"role": "system", "content": (
+                "Judge only human-edit discussion engagement. Return JSON decision engage/unchanged/unclear "
+                "and evidenceSpan. Engage means the source designer explicitly agrees to discuss, explain, "
+                "adjust or re-edit, not consensus, map acceptance or permission. Bind short answers to the "
+                "original assistant question, whose suggestions are not designer consent. Use unchanged for "
+                "unrelated/negative wording, unclear for genuine ambiguity. Engage needs an exact substring "
+                "of latestUserMessage/originalUserMessage. Empty evidence is allowed otherwise. In delayed "
+                "replay also check every subsequent USER message: a withdrawal, correction or replacement "
+                "invalidates earlier engagement. Only original source consent may engage, not later consent. "
+                "Map evidence uses only currentStageSnapshot. Never repair ambiguity into agreement.")},
+            {"role": "user", "content": json.dumps(source, ensure_ascii=False)},
+        ], 250, timeout, task=task), timeout=timeout)
+    if str(getattr(response.choices[0], "finish_reason", "")) == "length":
+        raise ValueError("Engagement decision was truncated.")
+    return validate_engagement(parse_json_object(response.choices[0].message.content),
+                               source.get("latestUserMessage", source.get("originalUserMessage", "")))
+
+
+def recover_human_edit_engagement(source, request_id, deadline):
+    api_key, base_url = _llm_credentials()
+    if not api_key or api_key in {"your_kimi_api_key_here", "your_llm_api_key_here"}:
+        raise LLMServiceError("CONFIGURATION_ERROR", "LLM is unavailable.", request_id, True, 0, 503)
+    timeout = min(8.0, max(0.0, deadline - time.monotonic() - 2.0))
+    if timeout <= 0:
+        raise TimeoutError("Recovery deadline exceeded.")
+    try:
+        return asyncio.run(_request_engagement_decision(source, api_key, base_url, timeout,
+                                                       "human_edit_engagement_recovery"))
+    except (APIConnectionError, APIStatusError) as error:
+        raise LLMServiceError("UPSTREAM_ERROR", "State review is unavailable.", request_id, True, 1, 502) from error
+
+
+async def _repair_human_edit_engagement(content, latest_user, stage_context, disagreement,
+                                       optional_budget, component_checks, api_key, base_url, request_id):
+    """Repair only one state signal, with the same bound conversational evidence."""
+    started = time.monotonic()
+    active = {**((stage_context or {}).get("activeDisagreement") or {}), "displayCard": False}
+    try:
+        timeout = optional_budget.timeout()
+        if timeout <= 0:
+            raise asyncio.TimeoutError()
+        repaired = await _request_engagement_decision(_engagement_source(latest_user, stage_context),
+                                                      api_key, base_url, timeout, "human_edit_engagement_repair")
+        candidate = {**active, "status": "acknowledged" if repaired["decision"] == "engage" else "active",
+                     "resolution": None}
+        component_checks.append(ComponentCheck("human_edit_engagement", "repaired"))
+        return candidate, repaired, False
+    except (ValueError, TypeError, KeyError, IndexError, LLMServiceError,
+            APIConnectionError, APIStatusError, asyncio.TimeoutError):
+        component_checks.append(ComponentCheck("human_edit_engagement", "preserved", "STATE_UNVERIFIED"))
+        return active, None, True
+    finally:
+        optional_budget.record(started)
+
+
+def _strip_unverified_state_claims(body):
+    """Drop asserted state success when the corresponding transition failed."""
+    return " ".join(sentence for sentence in _content_block_sentences(body)
+                    if not re.search(r"(?:分歧|冲突).{0,10}(?:已经|已|现已)(?:解除|解决|结束)|"
+                                     r"(?:已经|已)(?:确认|接受|选定|撤回).{0,15}(?:方案|立场|倾向)|"
+                                     r"(?:disagreement|conflict) (?:is|has been) (?:resolved|cleared)|"
+                                     r"(?:I have|we have|you have) (?:accepted|confirmed|chosen)|"
+                                     r"(?:现在|已经|现已|已).{0,8}(?:可以|能够|允许|解锁).{0,10}(?:执行|应用|批准).{0,8}(?:方案|修改)|"
+                                     r"\b(?:now|already)\b.{0,15}\b(?:execute|apply|approved|unlocked)\b", sentence, re.I))
 
 
 async def _repair_reviewed_intent_presentation(
@@ -9249,7 +9412,8 @@ async def _repair_reviewed_intent_presentation(
             _validate_map_grounding_texts([card_text], rows, entity_bindings=entity_bindings)
         component_checks.append(ComponentCheck("intent_card", "repaired", repairable=True))
         return body, card_text
-    except (ValueError, TypeError, KeyError, LLMServiceError, asyncio.TimeoutError):
+    except (ValueError, TypeError, KeyError, IndexError, LLMServiceError,
+            APIConnectionError, APIStatusError, asyncio.TimeoutError):
         if card_required:
             raise
         component_checks.append(ComponentCheck("intent_card", "omitted", "OPTIONAL_PRESENTATION_FAILED"))
@@ -9358,10 +9522,17 @@ async def _generate_plain_with_model_fallback(
                 stage_context=stage_context,
                 coordinate_free_recovery=(
                     ordinary_discussion
+                    and not clarification_active
                     and attempt == max_attempts
                     and not _active_human_edit_disagreement(stage_context)
                 ),
             )
+            if clarification_active and clarification_body_candidate:
+                attempt_messages = [dict(message) for message in attempt_messages]
+                attempt_messages[0]["content"] += (
+                    "\nThe body is already verified and locked. Repair only the question for the same "
+                    "topic/dimension; do not invent new goals or alternatives. Return body unchanged: "
+                    + clarification_body_candidate)
             response = await asyncio.wait_for(
                 _request_completion(
                     api_key,
@@ -9398,6 +9569,15 @@ async def _generate_plain_with_model_fallback(
             clarification_author = None
             clarification_fallback_reason = None
             if clarification_active:
+                if clarification_body_candidate:
+                    # The previous body passed grounding/semantic review. Repair
+                    # the question independently; never replace a locked body.
+                    try:
+                        envelope = parse_json_object(content)
+                        envelope["body"] = clarification_body_candidate
+                        content = json.dumps(envelope, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        pass
                 (
                     parsed_body,
                     clarification_question,
@@ -9409,7 +9589,8 @@ async def _generate_plain_with_model_fallback(
                     stage_context,
                 )
                 if ((proposal_clarification or {}).get("semanticPolicyVersion") == 1
-                        and _clarification_needs_semantic_review(parsed_body, clarification_question)):
+                        and _clarification_needs_semantic_review(
+                            "" if clarification_body_candidate else parsed_body, clarification_question)):
                     clarification_semantic_review_failed = True
                     parsed_body, reviewed_question_issue = await _review_proposal_clarification(
                         api_key, base_url, parsed_body, clarification_question, stage_context,
@@ -9465,7 +9646,7 @@ async def _generate_plain_with_model_fallback(
                 stage_context,
                 stage_opening,
                 rows=rows,
-                strict_metadata=validation_mode not in {"ordinary_chat", "route_discussion"},
+                strict_metadata=False,
             )
             latest_user_text = _latest_role_content(semantic_messages, "user")
             try:
@@ -9558,7 +9739,7 @@ async def _generate_plain_with_model_fallback(
                     stage_opening,
                     stage_context,
                 )
-            if rows and validation_mode in {"ordinary_chat", "route_discussion"}:
+            if rows and not stage_opening:
                 visible_content, removed_grounding = _strip_invalid_grounding_sentences(
                     visible_content,
                     rows,
@@ -9638,12 +9819,34 @@ async def _generate_plain_with_model_fallback(
                 language,
                 stage_context,
             )
-            human_edit_engagement = _extract_plain_human_edit_engagement(
-                content,
-                _latest_role_content(semantic_messages, "user"),
-                stage_context,
-                disagreement,
-            )
+            state_transition_deferred = False
+            human_edit_engagement = None
+            if human_edit_engagement_required:
+                # Ignore prose-authored status: only the structured signal owns this transition.
+                disagreement = {**(stage_context["activeDisagreement"]), "displayCard": False}
+                signal = stage_context.get("_verifiedHumanEditEngagement") or (stage_context.get("turnUnderstanding") or {}).get("humanEditEngagement")
+                try:
+                    if stage_context.get("conversationOnly"):
+                        raise ValueError("Understanding is unverified.")
+                    human_edit_engagement = validate_engagement(signal, latest_user_text)
+                    disagreement.update(status="acknowledged" if signal["decision"] == "engage" else "active",
+                                        resolution=None)
+                    component_checks.append(ComponentCheck("human_edit_engagement", "passed"))
+                except ValueError:
+                    if stage_context.get("conversationOnly"):
+                        state_transition_deferred = True
+                        component_checks.append(ComponentCheck("human_edit_engagement", "preserved", "STATE_UNVERIFIED"))
+                    else:
+                        disagreement, human_edit_engagement, state_transition_deferred = await _repair_human_edit_engagement(
+                            content, latest_user_text, stage_context, disagreement, optional_budget,
+                            component_checks, api_key, base_url, request_id)
+                        if human_edit_engagement is not None:
+                            stage_context["_verifiedHumanEditEngagement"] = human_edit_engagement
+                if state_transition_deferred:
+                    visible_content = _strip_unverified_state_claims(visible_content)
+                    intent_hypothesis, proposal_offer, ui_cues = None, None, []
+            if human_edit_engagement_required:
+                visible_content = _strip_unverified_state_claims(visible_content)
             proposal_binding_downgraded = False
             intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = (
                 _apply_deterministic_guidance_fallback(
@@ -9738,9 +9941,7 @@ async def _generate_plain_with_model_fallback(
                 question = discussion_focus
 
             if pure_low_quality:
-                raise LowQualityModelResponse(
-                    "The model returned only a low-information question."
-                )
+                raise LowQualityModelResponse("The model returned only a generic question without a useful response.")
 
             if question and _question_repeats_recent_judgment(question, semantic_messages):
                 question = None
@@ -9858,6 +10059,10 @@ async def _generate_plain_with_model_fallback(
             }
             if human_edit_engagement is not None:
                 guidance["_humanEditEngagement"] = human_edit_engagement
+            if state_transition_deferred:
+                guidance["_stateTransitionDeferred"] = True
+                guidance.pop("designContextPatch", None)
+                design_context_patch = None
             guidance = _sanitize_visible_guidance(guidance, language)
             if design_context_patch is not None:
                 guidance["designContextPatch"] = design_context_patch
@@ -9888,8 +10093,13 @@ async def _generate_plain_with_model_fallback(
                 guidance_mode=guidance_mode,
             )
             body = _deduplicate_assistant_body(body)
+            if guidance.get("intentHypothesis"):
+                presentation_issue = _intent_body_presentation_issue(body, language, guidance["intentHypothesis"])
+                if presentation_issue:
+                    component_checks.append(ComponentCheck("body", "preserved", "PRESENTATION_QUALITY"))
             ordinary_branch = bool(
                 not stage_opening
+                and not (stage_context or {}).get("conversationOnly")
                 and not clarification_active
                 and not (stage_context or {}).get("answeredVisibleQuestion")
                 and not _is_proposal_conversation_branch(stage_context)
@@ -9897,11 +10107,17 @@ async def _generate_plain_with_model_fallback(
                 and guidance.get("proposalOffer") is None
             )
             if ordinary_branch:
-                body = _questionless_body(body)
+                if not body and visible_content_had_question and not pure_low_quality:
+                    body = visible_content
+                # Questions are normal conversation, including a concise
+                # clarification without a declarative preamble.
+                if question:
+                    body = "\n\n".join(part for part in (body, question) if part)
+                    question = None
                 guidance["followUpQuestion"] = None
                 if not body:
                     raise LowQualityModelResponse(
-                        "An ordinary non-proposal reply cannot contain only questions."
+                        "An ordinary reply has no reliable visible content."
                     )
                 # Natural-language intent understanding belongs to Kimi. Any
                 # card manufactured or removed by the legacy keyword helpers
@@ -9948,6 +10164,7 @@ async def _generate_plain_with_model_fallback(
                     language=language,
                     request_id=request_id,
                     deadline=deadline,
+                    discussion_background=_dialogue_background_prompt(stage_context),
                 )
                 if intent_review.get("issues"):
                     component_checks.append(ComponentCheck("intent_presentation", "preserved", "QUALITY_REVIEW_ISSUES"))
@@ -9967,8 +10184,12 @@ async def _generate_plain_with_model_fallback(
                     not draft_decision_missing
                     and intent_review["classification"] != draft_classification
                 )
-                if intent_review["relation"] == "unclear":
-                    raise ValueError("The relation to confirmed intent remains unclear.")
+                relation_unverified = intent_review["relation"] == "unclear"
+                if relation_unverified and intent_review["bodyValid"]:
+                    component_checks.append(ComponentCheck("intent_card", "omitted", "RELATION_UNCLEAR"))
+                    intent_review = {**intent_review, "classification": "none", "claims": [], "cardText": "",
+                                     "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
+                                     "reviewedActiveClaims": []}
 
                 if intent_review["classification"] != "candidate":
                     # Reviewer classification is authoritative for card
@@ -10048,6 +10269,7 @@ async def _generate_plain_with_model_fallback(
                             component_checks=component_checks,
                             rows=rows,
                             entity_bindings=(stage_context or {}).get("entityBindings"),
+                            discussion_background=_dialogue_background_prompt(stage_context),
                         )
                         if repair_body and rows:
                             body, removed_repair_grounding = _strip_invalid_grounding_sentences(
@@ -10098,6 +10320,11 @@ async def _generate_plain_with_model_fallback(
                                 raise LowQualityModelResponse(
                                     "No reliable second-pass intent prose remained after map-grounding cleanup."
                                 )
+                    if relation_unverified:
+                        selected_card = ""
+                        intent_review = {**intent_review, "classification": "none", "claims": [],
+                                         "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
+                                         "reviewedActiveClaims": []}
                     if selected_card:
                         intent_decision = {"classification": "candidate",
                             "claims": intent_review["claims"], "cardText": selected_card}
@@ -10264,7 +10491,7 @@ async def _generate_plain_with_model_fallback(
                     guidance["followUpQuestion"] = repaired["followUpQuestion"]
                     guidance["uiCues"] = repaired["uiCues"]
                 guidance_fallback_used = True
-            if validation_mode in {"ordinary_chat", "route_discussion"}:
+            if not stage_opening:
                 _validate_map_grounding_texts(
                     [body],
                     rows,
@@ -10295,6 +10522,20 @@ async def _generate_plain_with_model_fallback(
                     entity_bindings=(stage_context or {}).get("entityBindings"),
                 )
             evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
+            if human_edit_engagement_required:
+                # Preserve the independently checked server state component.
+                guidance["disagreement"] = disagreement
+            if (stage_context or {}).get("conversationOnly"):
+                body = _strip_unverified_state_claims(body)
+                guidance.update({"intentHypothesis": None, "intentConfidence": None,
+                                 "proposalOffer": None, "uiCues": [], "followUpQuestion": None})
+                for field in ("designContextPatch", "_intentDecision", "_intentSemanticClaims", "_intentCandidateReview", "_humanEditEngagement"):
+                    guidance.pop(field, None)
+                active = (stage_context or {}).get("activeDisagreement")
+                guidance["disagreement"] = {**active, "displayCard": False} if active else None
+                guidance["_stateTransitionDeferred"] = True
+            if not body.strip():
+                raise LowQualityModelResponse("No reliable visible answer remains.")
             if evidence_signature and guidance["uiCues"]:
                 guidance["evidenceSignature"] = evidence_signature
             assessment = (
@@ -10387,7 +10628,7 @@ async def _generate_plain_with_model_fallback(
                         "visibleBodySource": visible_body_source,
                         "groundingSentencesDropped": total_grounding_dropped_count,
                         "componentChecks": [check.diagnostic() for check in component_checks],
-                        "fullQualityPassed": all(check.status == "repaired" for check in component_checks) and not total_grounding_dropped_count,
+                        "fullQualityPassed": all(check.status in {"passed", "repaired"} for check in component_checks) and not total_grounding_dropped_count,
                     }
                     if ordinary_discussion
                     else {}
@@ -10400,7 +10641,7 @@ async def _generate_plain_with_model_fallback(
                 outcome="success",
                 modelGenerationSucceeded=True,
                 reliableBodyDelivered=True,
-                fullQualityPassed=all(check.status == "repaired" for check in component_checks) and not total_grounding_dropped_count,
+                fullQualityPassed=all(check.status in {"passed", "repaired"} for check in component_checks) and not total_grounding_dropped_count,
                 componentChecks=[check.diagnostic() for check in component_checks],
                 model=model,
                 attemptsUsed=attempt,
@@ -11050,12 +11291,11 @@ def _plain_messages_with_validation_feedback(
         or "human-edit engagement" in feedback_lower
     ):
         instruction = (
-            "Your previous reply for this active human-edit disagreement failed the required engagement "
-            f"contract: {feedback_text} Write a fresh complete visible reply and trailing GUIDANCE block. "
-            "Include DISAGREEMENT plus HUMAN_EDIT_ENGAGEMENT with exactly decision and evidenceSpan. "
-            "Use acknowledged only for explicit willingness to discuss, explain, adjust, modify, or re-edit; "
-            "otherwise use active. The two status values must match, resolution must be null, and evidenceSpan "
-            "must copy an exact non-empty substring from the latest designer message. Do not mention this repair."
+            "The previous human-edit discussion reply has an invalid state-dependent claim. "
+            f"Repair the affected prose only: {feedback_text}. State is owned by structured "
+            "understanding, so do not emit DISAGREEMENT or HUMAN_EDIT_ENGAGEMENT here. "
+            "Do not claim consensus, accepted edits, or permission from willingness to discuss."
+
         )
     elif "REVISION_ADVICE" in validation_feedback or "proposalOffer" in validation_feedback:
         instruction = (
@@ -12502,26 +12742,17 @@ def _question_is_specific_and_vivid(question, language="en"):
         r"^(?:你)?怎么看[？?]?$",
         r"^(?:这样|这)(?:可以|行|好吗|合适吗)[？?]?$",
         r"^(?:what do you think|does (?:this|that) (?:direction )?(?:work|seem good)|"
-        r"is (?:this|that) (?:okay|ok|good|feasible))[?]?$",
+        r"is (?:this|that) (?:direction )?(?:okay|ok|good|feasible))[?]?$",
+        r"^(?:would you like|do you want) (?:a different|another|a) (?:direction|idea|option)[?]?$",
     )
 
     if any(re.match(pattern, text, re.IGNORECASE) for pattern in generic_patterns):
         return False
 
-    if language == "zh-CN" or re.search(r"[\u3400-\u9fff]", text):
-        anchors = ("水", "箱", "目标", "墙", "通道", "路线", "入口", "出口", "角落", "边缘", "水边")
-        moments = ("推", "绕", "进入", "经过", "贴着", "到达", "转向", "第一次", "当", "卡住", "退回")
-        judgments = ("选择", "顺序", "辨认", "理解", "注意", "判断", "读懂", "可读", "退路", "预期", "意识", "感到")
-    else:
-        anchors = ("water", "box", "crate", "target", "wall", "corridor", "route", "entrance", "corner", "edge")
-        moments = ("push", "move", "enter", "pass", "along", "reach", "turn", "first", "when", "stuck", "return")
-        judgments = ("choice", "order", "read", "notice", "judge", "understand", "clarity", "recognize", "expect", "realize")
-
-    return (
-        any(word in text for word in anchors)
-        and any(word in text for word in moments)
-        and any(word in text for word in judgments)
-    )
+    # A useful clarification need not contain a map anchor, movement verb,
+    # and judgment keyword simultaneously. Only the stock generic questions
+    # above are discarded; semantic relevance belongs to Kimi's review.
+    return True
 
 
 def _question_repeats_recent_judgment(question, messages):
@@ -12730,7 +12961,12 @@ def _visible_chinese_language_issue(value):
     ]
     if not tokens:
         return None
-    token = tokens[0]
+    internal = next((token for token in tokens
+                     if "_" in token or re.search(r"[a-z][A-Z]|[A-Z][a-z]+[A-Z]", token)), None)
+    chinese_chars = len(re.findall(r"[\u3400-\u9fff]", text))
+    if internal is None and len(tokens) <= 6 and chinese_chars >= len("".join(tokens)):
+        return None
+    token = internal or tokens[0]
     kind = "implementation identifier" if (
         "_" in token or re.search(r"[a-z][A-Z]|[A-Z][a-z]+[A-Z]", token)
     ) else "English term"
@@ -12751,7 +12987,7 @@ def _visible_guidance_texts(guidance):
             yield presentation.get("summary")
             yield presentation.get("rationale")
     disagreement = guidance.get("disagreement") or {}
-    if isinstance(disagreement, dict):
+    if isinstance(disagreement, dict) and disagreement.get("displayCard", True) is not False:
         for field_name in ("userPosition", "aiPosition", "coreDisagreement", "nextQuestion"):
             yield disagreement.get(field_name)
     for cue in guidance.get("uiCues") or []:
@@ -13629,7 +13865,7 @@ def _validate_intent_decision(payload, user_text):
     ]
     card_text = _normalize_response_paragraphs(str(payload.get("cardText") or ""))[:1000]
     if classification == "candidate":
-        if not normalized or len(card_text) < 12:
+        if not normalized or not card_text:
             raise ValueError("A candidate intentDecision requires claims and cardText.")
     elif normalized or card_text:
         raise ValueError("A non-candidate intentDecision must have empty claims and cardText.")
@@ -13713,7 +13949,7 @@ def _extract_plain_human_edit_engagement(
     stage_context,
     disagreement,
 ):
-    """Require Kimi's human-edit engagement decision and exact user evidence."""
+    """Legacy marker parser retained for explicit compatibility checks only."""
     if not _active_human_edit_disagreement(stage_context):
         return None
     marker = re.search(
@@ -14587,17 +14823,13 @@ def _plain_action_instruction(stage_context):
         and active.get("subject") == "human_edit"
     ):
         return (
-            "CARD STATE: an evidence-backed human-edit disagreement is already active and its single "
-            "entry card has already been shown. In the same DISAGREEMENT object, return status "
-            "acknowledged with subject human_edit and resolution null only when the latest designer "
-            "message explicitly shows willingness to continue discussing, explain the choice, adjust "
-            "the design, modify it, or re-edit it. Acknowledged only releases the interaction block; it "
-            "does not accept either position, form consensus, or authorize a proposal. For a negative, "
-            "unrelated, or ambiguous reply, keep status active. Keep the visible response in ordinary "
-            "prose and do not output a proposal. Also return mandatory HUMAN_EDIT_ENGAGEMENT with exactly "
-            "decision and evidenceSpan: decision must match DISAGREEMENT.status, and evidenceSpan must be "
-            "an exact non-empty substring of the latest designer message supporting the classification. "
-            "The server owns displayCard and will not show another card for this disagreement."
+            "CARD STATE: an evidence-backed human-edit disagreement is already active. Its entry card "
+            "has already been shown. The server owns its state using structured turn understanding. "
+            "Do not emit DISAGREEMENT or HUMAN_EDIT_ENGAGEMENT for this existing disagreement. "
+            "Use ordinary prose, with no proposal or repeated card. Willingness to discuss only releases "
+            "the interaction block: it never accepts either position, creates consensus or authorizes edits. "
+            "Do not claim the disagreement is resolved or an operation is now authorized."
+
         )
     if context.get("activeDisagreement"):
         return (
@@ -15350,7 +15582,7 @@ def _parse_proposal_clarification_payload(content, language, stage_context):
         payload = json.loads(str(content or ""))
     except (TypeError, ValueError, json.JSONDecodeError):
         return "", "", "The clarification response must be valid JSON.", 0
-    if not isinstance(payload, dict) or set(payload) != {"body", "question"}:
+    if not isinstance(payload, dict) or not {"body", "question"}.issubset(payload):
         return "", "", "The clarification response must contain only body and question.", 0
     raw_body = payload.get("body")
     raw_question = payload.get("question")
@@ -16177,9 +16409,8 @@ def _guidance_mode_instruction(guidance_mode):
         return (
             "Deterministic routing found an unresolved design disagreement. Use the four-field "
             "DISAGREEMENT object to summarize the user's position, your current position, the "
-            "core disagreement, and the next question. For an existing human_edit disagreement, "
-            "use acknowledged with null resolution when the latest message explicitly accepts further "
-            "discussion, explanation, adjustment, modification, or re-editing; otherwise keep it active. "
+            "core disagreement, and the next question, except for an existing human_edit disagreement: "
+            "that state is owned by structured understanding; do not emit state fields for it. "
             "For every other subject, keep status active until the latest user reason genuinely resolves "
             "the issue. Do not output a proposalOffer while active or acknowledged; "
             "ordinary questions without a real disagreement stay in assistantMessage."
@@ -18017,11 +18248,10 @@ def _build_task_instructions(assessment_only, stage_context=None):
         active_disagreement = context.get("activeDisagreement") or {}
         if active_disagreement.get("subject") == "human_edit":
             action_instruction = (
-                "An evidence-backed human-edit disagreement is active. Use the same response to judge the "
-                "designer's latest message: return acknowledged with resolution null only when they explicitly "
-                "show willingness to continue discussing, explain, adjust, modify, or re-edit; negative, "
-                "unrelated, and ambiguous replies remain active. Acknowledged is interaction consent only, "
-                "not a design resolution. Do not output a purple proposal in this reply."
+                "An evidence-backed human-edit disagreement is active. Structured understanding owns "
+                "engagement; do not classify or emit disagreement status in prose or metadata here. "
+                "Willingness to discuss is interaction consent only, not a design resolution or edit "
+                "authorization. Use ordinary prose without a purple proposal or repeated card."
             )
         else:
             action_instruction = (
@@ -19692,8 +19922,6 @@ def _intent_hypothesis_detail_issue(value, language):
         re.IGNORECASE,
     ):
         return "intentHypothesis turns behavioral evidence into certainty"
-    if sentence_count < 2 or sentence_count > 4:
-        return "intentHypothesis must contain two to four sentences"
     if chinese:
         tentative = re.search(
             r"(?:\u6682\u65f6|\u542c\u8d77\u6765|\u6211\u8bfb\u5230|\u6211\u7406\u89e3|\u76ee\u524d|\u53ef\u80fd|\u50cf\u662f)",
@@ -19711,6 +19939,11 @@ def _intent_hypothesis_detail_issue(value, language):
 
 
 def _intent_body_detail_issue(value, language, hypothesis=None):
+    # Presentation heuristics are diagnostics, not evidence of semantic failure.
+    return None
+
+
+def _intent_body_presentation_issue(value, language, hypothesis=None):
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     chinese = language == "zh-CN" or bool(re.search(r"[\u3400-\u9fff]", text))
     if re.search(
@@ -20184,6 +20417,8 @@ def _clean_optional_text(value, field_name):
 
 
 def _classify_revision_request(conversation, stage_context=None):
+    if (stage_context or {}).get("conversationOnly"):
+        return "not_request", None
     latest_user_message = next(
         (
             str(message.get("content") or "").strip().casefold()

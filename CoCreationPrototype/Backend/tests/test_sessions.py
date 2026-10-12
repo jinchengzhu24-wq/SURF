@@ -92,6 +92,99 @@ PLAYER_MOVE_CONTRACT = {
 
 class CoCreationSessionTests(unittest.TestCase):
 
+    def test_unverified_ordinary_understanding_delivers_conversation_once_without_actions(self):
+        version_id = self.read_session()["currentVersionId"]
+        payload = {"content": "那你觉得可以怎么改", "baseVersionId": version_id, "idempotencyKey": "continuity-failure"}
+        error = LLMServiceError("MODEL_RESPONSE_INVALID", "private model prose", "understanding-failure", True, 2, 502)
+        reply = LLMExecutionResult("I would first compare visual balance and playable rhythm.", 1, "conversation-recovery",
+                                   guidance={"proposalOffer": None, "uiCues": []})
+        with patch.object(backend, "classify_turn_understanding", side_effect=error) as classify, \
+                patch.object(backend, "generate_chat_reply", return_value=reply) as generate:
+            first = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+            retry = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertTrue(generate.call_args.kwargs["stage_context"]["conversationOnly"])
+        self.assertEqual(generate.call_args.kwargs["stage_context"]["revisionRouting"], "none")
+        self.assertEqual(generate.call_count, 1)
+        self.assertEqual(classify.call_count, 1)
+        self.assertEqual(first.json()["turns"], retry.json()["turns"])
+        self.assertEqual(first.json()["currentVersionId"], version_id)
+        self.assertIsNone(first.json()["lastMessageFailure"])
+        self.assertIsNone(first.json()["turns"][-1]["guidance"]["proposalOffer"])
+
+    def test_pre_turn_understanding_failure_is_visible_without_storing_prose(self):
+        version_id = self.read_session()["currentVersionId"]
+        payload = {"content": "请给我方案", "baseVersionId": version_id,
+                   "idempotencyKey": "pre-turn-failure", "requestProposal": True}
+        error = LLMServiceError("MODEL_RESPONSE_INVALID", "private provider prose", "classification-request", True, 2, 502)
+        before = self.read_session()["turns"]
+        with patch.object(backend, "classify_turn_understanding", side_effect=error):
+            response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+        self.assertEqual(response.status_code, 502)
+        session = self.read_session()
+        self.assertEqual(session["turns"], before)
+        self.assertEqual(session["lastMessageFailure"]["messageKey"], payload["idempotencyKey"])
+        self.assertEqual(session["lastMessageFailure"]["details"]["task"], "turn_understanding")
+        self.assertNotIn("private provider prose", json.dumps(session["lastMessageFailure"]))
+        with patch.object(backend, "classify_turn_understanding") as forbidden:
+            conflict = self.client.post(f"/api/sessions/{self.session_id}/messages", json={**payload, "content": "different"})
+        self.assertEqual(conflict.status_code, 409)
+        forbidden.assert_not_called()
+
+    def test_unverified_human_edit_engagement_commits_body_and_keeps_proposal_block(self):
+        from types import SimpleNamespace
+        version_id = self.read_session()["currentVersionId"]
+        disagreement = {"status": "active", "subject": "human_edit", "userPosition": "Keep the denser region.",
+                        "aiPosition": "Preserve more recovery space.", "coreDisagreement": "Which direction should lead?",
+                        "nextQuestion": "Would you like to discuss it?", "resolution": None, "displayCard": False}
+        with repository.connect(immediate=True) as database:
+            context = repository.load_design_context(database, self.session_id, version_id)
+            context["activeDisagreement"] = disagreement
+            repository.save_design_context(database, version_id, context)
+        async def model(*args, **kwargs):
+            text = ('The disagreement is resolved. I would compare visual balance and recovery space.'
+                    if kwargs["task"] == "plain_chat" else '{"bad":true}')
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=text))])
+        payload = {"content": "Please explain the comparison.", "baseVersionId": version_id, "idempotencyKey": "state-deferred"}
+        with patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
+                patch.object(llm_client, "_request_completion", side_effect=model):
+            response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        turn = response.json()["turns"][-1]
+        self.assertIn("visual balance", turn["content"])
+        self.assertNotIn("resolved", turn["content"])
+        self.assertIsNone(turn["guidance"]["proposalOffer"])
+        self.assertFalse(turn["guidance"]["disagreement"]["displayCard"])
+        self.assertNotIn("_stateTransitionDeferred", turn["guidance"])
+        with repository.connect() as database:
+            context = repository.load_design_context(database, self.session_id, version_id)
+        self.assertEqual(context["activeDisagreement"]["status"], "active")
+        self.assertEqual(context["confirmedDecisions"], [])
+        self.assertEqual(response.json()["currentVersionId"], version_id)
+
+    def test_new_topic_pins_real_preceding_evaluation_and_preserves_initial_request(self):
+        version_id = self.read_session()["currentVersionId"]
+        with repository.connect(immediate=True) as database:
+            session = database.execute("SELECT * FROM design_sessions WHERE id=?", (self.session_id,)).fetchone()
+            older = backend.insert_turn(database, session, "user", "不好看", version_id, "prior-evaluation", None)
+        latest = "那你觉得可以怎么改"
+        source = {"statement": "改善外观", "sourceTurnId": older, "evidenceSpan": "不好看"}
+        understood = {"acts": ["revision_request"], "elements": ["unknown"], "evidenceSpan": latest,
+                      "directionSufficient": False, "mapRelated": True, "changes": [], "semanticPolicyVersion": 1,
+                      "proposalUnderstanding": {"aspect": "visual", "goals": [source], "editScope": [], "focus": [],
+                                               "preserve": [], "sufficient": False, "nextQuestionDimension": "edit_scope"}}
+        reply = LLMExecutionResult("Would you like to focus on water or interior walls?", 1, "r", guidance={"proposalOffer": None, "uiCues": []})
+        with patch.object(backend, "classify_turn_understanding", return_value=understood), \
+                patch.object(backend, "generate_chat_reply", return_value=reply) as generate:
+            response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
+                "content": latest, "baseVersionId": version_id, "idempotencyKey": "referential-proposal"})
+        self.assertEqual(response.status_code, 200, response.text)
+        discovery = generate.call_args.kwargs["stage_context"]["proposalDiscovery"]
+        self.assertEqual(discovery["initialRequest"], latest)
+        self.assertIn({"id": older, "content": "不好看"}, discovery["userTurns"])
+        self.assertEqual(discovery["understanding"]["goals"][0]["sourceTurnId"], older)
+
     def test_visual_challenge_no_replans_original_water_and_freezes_before_acceptance(self):
         from types import SimpleNamespace
         version_id = self.read_session()["currentVersionId"]
@@ -266,7 +359,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "changes": [{"component": "targets", "property": "position", "operation": "change", "evidenceSpan": answer}],
             "proposalUnderstanding": record}
         corrected = {**wrong, "acts": ["intent"], "changes": [{**wrong["changes"][0], "operation": "mention"}]}
-        payload = {"content": answer, "baseVersionId": version_id, "idempotencyKey": "semantic-answer"}
+        payload = {"content": answer, "baseVersionId": version_id, "idempotencyKey": "semantic-answer", "requestProposal": True}
         rejected = {"accepted": False, "issues": ["Unclear whether this is a focus or a move"], "understanding": wrong}
         failed_call = AsyncMock(side_effect=[response(wrong), response(rejected)] * 2)
         with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \

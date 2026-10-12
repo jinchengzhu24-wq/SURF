@@ -74,6 +74,160 @@ function loadApp({ keepSubmit = false } = {}) {
     return { context, created };
 }
 
+test("current controls use canonical disagreement state while history retains its marker", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.interactionState = { versionId: "v1", revision: 10, proposalBlocked: false };
+        state.session.turns.push({ role: "assistant", versionId: "history", guidance: { disagreement: { status: "active" } } });
+    `, context);
+    assert.equal(vm.runInContext("selectedStageHasActiveDisagreement()", context), false);
+    assert.equal(vm.runInContext("state.session.turns[0].guidance.disagreement.status", context), "active");
+    vm.runInContext("state.selectedVersionId = 'history'", context);
+    assert.equal(vm.runInContext("selectedStageHasActiveDisagreement()", context), true);
+});
+
+test("automatic recovery schedules one stable key and pauses while sending or hidden", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        const recoveryTimers = [];
+        const cancelledRecoveryTimers = [];
+        window.setTimeout = (callback, delay) => { recoveryTimers.push({ callback, delay }); return recoveryTimers.length; };
+        window.clearTimeout = id => cancelledRecoveryTimers.push(id);
+        state.session.interactionState = { versionId: "v1", revision: 1, recoveries: [{
+            recoveryId: "r", baseVersionId: "v1", status: "pending", attemptsUsed: 0, nextAttemptKey: "r-1"
+        }] };
+        scheduleComponentRecovery(); scheduleComponentRecovery();
+    `, context);
+    assert.equal(vm.runInContext("recoveryTimers.length", context), 1);
+    assert.equal(vm.runInContext("recoveryTimers[0].delay", context), 1000);
+    vm.runInContext("state.chatBusy = true; scheduleComponentRecovery()", context);
+    assert.equal(vm.runInContext("componentRecovery.timer", context), null);
+    vm.runInContext("state.chatBusy = false; document.hidden = true; scheduleComponentRecovery()", context);
+    assert.equal(vm.runInContext("recoveryTimers.length", context), 1);
+    vm.runInContext(`
+        document.hidden = false;
+        state.session.interactionState.recoveries[0].status = "retry_pending";
+        state.session.interactionState.recoveries[0].attemptsUsed = 1;
+        state.session.interactionState.recoveries[0].nextAttemptKey = "r-2";
+        scheduleComponentRecovery();
+    `, context);
+    assert.equal(vm.runInContext("recoveryTimers[1].delay", context), 3000);
+});
+
+test("recovery merges canonical state without altering composer, map draft, selection or retry", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.sessionId = "session";
+        state.session.turns[0].sequence = 2;
+        state.session.interactionState = { versionId: "v1", revision: 10, proposalBlocked: true, recoveries: [] };
+        state.draftRows = ["unsaved"];
+        state.dirty = true;
+        state.proposalMode = true;
+        state.pendingMessage = { idempotencyKey: "original-key", content: "retry text" };
+        elements.messageInput.value = "new text";
+        render = () => {};
+        const capturedRecovery = { sessionId: "session", selectedVersionId: "v1", versionId: "v1" };
+        const recoveredSession = { ...state.session, interactionState: { versionId: "v1", revision: 11, proposalBlocked: false, recoveries: [] } };
+    `, context);
+    assert.equal(vm.runInContext("mergeRecoverySession(recoveredSession, capturedRecovery)", context), true);
+    assert.equal(vm.runInContext("selectedStageHasActiveDisagreement()", context), false);
+    assert.equal(vm.runInContext("elements.messageInput.value", context), "new text");
+    assert.equal(vm.runInContext("state.draftRows[0]", context), "unsaved");
+    assert.equal(vm.runInContext("state.dirty && state.proposalMode", context), true);
+    assert.equal(vm.runInContext("state.pendingMessage.idempotencyKey", context), "original-key");
+    assert.equal(vm.runInContext("state.selectedVersionId", context), "v1");
+});
+
+test("late recovery cannot overwrite newer turns, state or another selected Stage", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.sessionId = "session";
+        state.session.turns[0].sequence = 5;
+        state.session.interactionState = { versionId: "v1", revision: 12, proposalBlocked: true, recoveries: [] };
+        render = () => {};
+        const capturedRecovery = { sessionId: "session", selectedVersionId: "v1", versionId: "v1" };
+        const oldRecovery = { ...state.session, interactionState: { versionId: "v1", revision: 11, proposalBlocked: false, recoveries: [] } };
+    `, context);
+    assert.equal(vm.runInContext("mergeRecoverySession(oldRecovery, capturedRecovery)", context), false);
+    vm.runInContext("oldRecovery.interactionState.revision = 13; oldRecovery.turns = [{sequence: 4}]", context);
+    assert.equal(vm.runInContext("mergeRecoverySession(oldRecovery, capturedRecovery)", context), false);
+    vm.runInContext("state.selectedVersionId = 'history'; oldRecovery.turns = [{sequence: 6}]", context);
+    assert.equal(vm.runInContext("mergeRecoverySession(oldRecovery, capturedRecovery)", context), false);
+    assert.equal(vm.runInContext("state.session.interactionState.proposalBlocked", context), true);
+});
+
+test("state replay uses separate POST and keeps chat usable without duplicate calls", async () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.sessionId = "session";
+        state.session.interactionState = { versionId: "v1", revision: 10, recoveries: [] };
+        state.draftRows = ["unsaved"];
+        state.dirty = true;
+        elements.messageInput.value = "typing";
+        const replayCalls = [];
+        render = () => {};
+        scheduleComponentRecovery = () => {};
+        api = async (path, options) => {
+            replayCalls.push({ path, options });
+            return { ...state.session, interactionState: { versionId: "v1", revision: 11, proposalBlocked: false, recoveries: [] } };
+        };
+        const replayTask = { recoveryId: "r", baseVersionId: "v1", status: "pending", nextAttemptKey: "r-1" };
+    `, context);
+    await vm.runInContext("recoverComponent(replayTask)", context);
+    await vm.runInContext("recoverComponent(replayTask)", context);
+    assert.equal(vm.runInContext("replayCalls.length", context), 1);
+    assert.equal(vm.runInContext("replayCalls[0].options.body.idempotencyKey", context), "r-1");
+    assert.equal(vm.runInContext("replayCalls[0].options.timeoutMs", context), 12000);
+    assert.match(vm.runInContext("replayCalls[0].path", context), /component-recoveries\/r\/retry$/);
+    assert.equal(vm.runInContext("state.busy || state.chatBusy", context), false);
+    assert.equal(vm.runInContext("elements.messageInput.value", context), "typing");
+    assert.equal(vm.runInContext("state.draftRows[0]", context), "unsaved");
+});
+
+test("claimed recovery refreshes without a model POST and old normal responses retain newer authority", async () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.sessionId = "session";
+        state.session.interactionState = { versionId: "v1", revision: 12, proposalBlocked: false, recoveries: [] };
+        state.session.turns[0].proposalState = { actionable: true };
+        const claimRefreshCalls = [];
+        render = () => {}; scheduleComponentRecovery = () => {};
+        api = async (path, options) => { claimRefreshCalls.push({path, options}); return state.session; };
+        const olderNormalResponse = { ...state.session, turns: [{turnId: state.session.turns[0].turnId, proposalState: { actionable: false }}],
+            interactionState: {versionId: "v1", revision: 11, proposalBlocked: true} };
+    `, context);
+    await vm.runInContext("recoverComponent({recoveryId: 'r', baseVersionId: 'v1', status: 'claimed'})", context);
+    assert.equal(vm.runInContext("claimRefreshCalls.length", context), 1);
+    assert.equal(vm.runInContext("claimRefreshCalls[0].options.method", context), undefined);
+    assert.equal(vm.runInContext("retainNewerInteractionState(olderNormalResponse).interactionState.proposalBlocked", context), false);
+    assert.equal(vm.runInContext("retainNewerInteractionState(olderNormalResponse).turns[0].proposalState.actionable", context), true);
+});
+
+test("a reply arriving while hidden can replay its same key on return without losing the composer", async () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.sessionId = "session";
+        state.session.interactionState = { versionId: "v1", revision: 10, recoveries: [] };
+        elements.messageInput.value = "typing";
+        render = () => {}; scheduleComponentRecovery = () => {};
+        const hiddenCalls = [];
+        api = async (path, options) => {
+            hiddenCalls.push(options.body.idempotencyKey);
+            if (hiddenCalls.length === 1) document.hidden = true;
+            return { ...state.session, interactionState: { versionId: "v1", revision: 11, proposalBlocked: false, recoveries: [] } };
+        };
+        const hiddenTask = { recoveryId: "r", baseVersionId: "v1", status: "pending", nextAttemptKey: "r-1" };
+    `, context);
+    await vm.runInContext("recoverComponent(hiddenTask)", context);
+    assert.equal(vm.runInContext("state.session.interactionState.revision", context), 10);
+    vm.runInContext("document.hidden = false", context);
+    await vm.runInContext("recoverComponent(hiddenTask)", context);
+    assert.equal(vm.runInContext("hiddenCalls.length", context), 2);
+    assert.equal(vm.runInContext("hiddenCalls.every(key => key === 'r-1')", context), true);
+    assert.equal(vm.runInContext("state.session.interactionState.revision", context), 11);
+    assert.equal(vm.runInContext("elements.messageInput.value", context), "typing");
+});
+
 test("choice buttons recover after a reply is rendered while busy", () => {
     const { context, created } = loadApp();
     vm.runInContext("state.busy = true; createDisagreementCard({ subject: 'ai_revision_challenge', phase: 'choice_pending', challengeId: 'challenge-1' });", context);
@@ -252,6 +406,17 @@ test("unreadable response recovers only the matching current request diagnostic"
     }
     assert.equal(vm.runInContext(
         "recoverMessageFailure({ code: 'INVALID_CARD_SOURCE' }, latest, pending).code", context), 'INVALID_CARD_SOURCE');
+});
+
+test("classification diagnostics show actual attempts without claiming three body attempts", () => {
+    const { context } = loadApp();
+    for (const language of ["en", "zh-CN"]) {
+        const message = vm.runInContext(`state.language = '${language}'; localizedErrorMessage({
+            code: 'MODEL_RESPONSE_INVALID', details: { task: 'turn_understanding', attemptsUsed: 2, maximumAttempts: 2 }
+        })`, context);
+        assert.match(message, /2\/2/);
+        assert.doesNotMatch(message, /three|三次/);
+    }
 });
 
 test("message refresh recovers a diagnostic without changing retry input, then clears it on success", async () => {

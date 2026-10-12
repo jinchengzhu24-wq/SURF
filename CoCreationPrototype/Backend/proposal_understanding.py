@@ -6,6 +6,7 @@ This module validates provenance and supplies the same record to every phase.
 import copy
 import hashlib
 import json
+from conversation_evidence import CONTEXT_VERSION, user_sources, evidence_signature
 
 
 POLICY_VERSION = 1
@@ -55,13 +56,33 @@ def turn_schema():
         "changes": {"type": "array", "items": {"type": "object", "additionalProperties": False,
             "properties": change_properties, "required": list(change_properties)}},
         "proposalUnderstanding": {"anyOf": [topic_schema(), {"type": "null"}]},
+        "humanEditEngagement": {"anyOf": [engagement_schema(), {"type": "null"}]},
     }
     return {"type": "object", "additionalProperties": False, "properties": properties,
         "required": list(properties)}
 
 
+def engagement_schema():
+    return {"type": "object", "additionalProperties": False,
+            "properties": {"decision": {"type": "string", "enum": ["engage", "unchanged", "unclear"]},
+                           "evidenceSpan": {"type": "string"}},
+            "required": ["decision", "evidenceSpan"]}
+
+
+def validate_engagement(value, latest):
+    if not isinstance(value, dict) or set(value) != {"decision", "evidenceSpan"}:
+        raise ValueError("Invalid human-edit engagement component.")
+    decision, span = value["decision"], value["evidenceSpan"]
+    if decision not in {"engage", "unchanged", "unclear"} or not isinstance(span, str):
+        raise ValueError("Invalid human-edit engagement decision.")
+    if (decision == "engage" and not span.strip()) or (span and span not in latest):
+        raise ValueError("Engagement needs exact current-user evidence.")
+    return {"decision": decision, "evidenceSpan": span}
+
+
 def designer_sources(context, latest=None):
-    sources = {str(x["id"]): str(x["content"]) for x in (context or {}).get("userTurns") or []}
+    sources = user_sources((context or {}).get("dialogueEvidence"))
+    sources.update({str(x["id"]): str(x["content"]) for x in (context or {}).get("userTurns") or []})
     if latest is not None:
         # The HTTP caller binds this temporary ID to the inserted Turn atomically.
         sources["latest"] = latest
@@ -127,7 +148,7 @@ def critical_review_reason(understanding, context):
             return "goal_or_preservation_changed"
     # Legacy topics have no authoritative interpretation; reconstruct and review
     # before using their old annotations as a new permission decision.
-    if context and not previous:
+    if (context or {}).get("topicId") and not previous:
         return "legacy_topic_reconstruction"
     return None
 
@@ -142,12 +163,14 @@ def bind_latest(understanding, turn_id, version_id):
                     item["sourceTurnId"] = turn_id
         result["proposalUnderstanding"] = topic
     result["semanticPolicyVersion"] = POLICY_VERSION
+    result["dialogueContextVersion"] = CONTEXT_VERSION
     result["versionId"] = version_id
     return result
 
 
 def reusable_understanding(result, version_id):
     if (not isinstance(result, dict) or result.get("semanticPolicyVersion") != POLICY_VERSION
+            or result.get("dialogueContextVersion") != CONTEXT_VERSION
             or result.get("versionId") != version_id
             or not isinstance(result.get("evidenceSignature"), str) or len(result["evidenceSignature"]) != 64):
         return False
@@ -171,6 +194,8 @@ def topic_signature(snapshot, context, latest):
         "questions": (context or {}).get("questions") or [], "answers": (context or {}).get("answers") or [],
         "understanding": (context or {}).get("understanding"), "latest": latest,
         "policyVersion": POLICY_VERSION}
+    data["contextVersion"] = CONTEXT_VERSION
+    data["dialogueSignature"] = evidence_signature((context or {}).get("dialogueEvidence"))
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 

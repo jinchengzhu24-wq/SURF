@@ -58,6 +58,6 @@ def requirement_cache_key(stage_context, turns):
         "responseLanguage": stage_context.get("responseLanguage", "en"),
         "resolution": stage_context.get("requirementDecisionEvidence"),
         "policyVersion": stage_context.get("requirementPolicyVersion"),
-        "promptVersion": "requirements-component-review-4-visual-and-original-scope",
+        "promptVersion": "requirements-component-review-5-dialogue-evidence",
     }
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
