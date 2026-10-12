@@ -8,6 +8,7 @@
         window.FRONTEND_ASSET_BASE = window.location.protocol === "file:"
             ? "."
             : (window.location.pathname.startsWith("/frontend/") ? "." : "/frontend");
+        document.write('<link rel="icon" type="image/png" href="' + window.FRONTEND_ASSET_BASE + '/favicon.png?v=fox-df2f6509133d">');
         document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/styles.css?v=dashboard-20260827-2">');
     </script>
 </head>

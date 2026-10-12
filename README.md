@@ -21,6 +21,8 @@
 
 `Library/`、`Temp/`、`Logs/`、Unity 工程文件和 `WebGLBuild/` 是生成结果；凭据、数据库、研究日志和评测运行结果不提交到 Git。
 
+三个线上入口使用相同的狐狸 PNG favicon：游戏模板资源为 `Assets/WebGLTemplates/SokobanPixel/TemplateData/favicon.png`，Dashboard 为 `Frontend/favicon.png`，共创工作台为 `CoCreationPrototype/Frontend/favicon.png`。三个入口 HTML 各声明一个 `image/png` 图标，并使用内容哈希版本参数避免旧图标缓存；Dashboard 复用现有资源基路径以兼容入口别名。Unity 已选择 `PROJECT:SokobanPixel`，后续构建会将模板声明和图标输出到 `WebGLBuild/index.html`、`WebGLBuild/TemplateData/favicon.png`。仅更换 favicon 时，可同步修改现有构建的这两个静态文件，无需重新构建游戏；发布三个入口对应的 HTML 和 PNG 即可，无需改 Nginx 或重启 Python 服务。替换图标时保持三份 PNG 一致，并同步更新各 HTML 的 favicon 版本参数。
+
 ## Agent 分工与运行保障
 
 | Agent | 服务 / 模型 | 输入与输出边界 |
