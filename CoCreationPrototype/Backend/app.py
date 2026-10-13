@@ -49,6 +49,8 @@ from demo_level_generator import generate_demo_level
 from conversation_evidence import build_dialogue_evidence, with_latest
 import component_recovery
 from reply_reliability import CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, ReplyTrace, trace_reply, failure_reason
+from proposal_diagnostics import (ProposalDiagnostic, CURRENT_PROPOSAL_DIAGNOSTIC, proposal_phase, trace_proposal)
+from llm_client import validate_ai_edit_diff
 from llm_client import (
     LLMExecutionResult,
     LLMServiceError,
@@ -784,15 +786,15 @@ async def handle_api_error(request: Request, exception: ApiError):
 def _llm_failure_details(exception):
     code = str(exception.code or "")
     if code.startswith("REVISION_PLAN"):
-        task, failure_stage, maximum = "revision_plan", "schema", 2
+        task, failure_stage, maximum = "revision_plan", "schema", None
     elif code.startswith("REQUIREMENT_"):
-        task, failure_stage, maximum = "revision_requirements", "evidence", 2
+        task, failure_stage, maximum = "revision_requirements", "evidence", None
     elif code in {
         "PROPOSAL_SEARCH_EXHAUSTED", "DETERMINISTIC_SEARCH_EXHAUSTED",
         "CANDIDATE_UNSOLVABLE", "SEMANTIC_CONSTRAINT_NOT_MET",
         "SOFT_OBJECTIVE_EVIDENCE_MISSING", "HARD_OBJECTIVE_NOT_MET",
     }:
-        task, failure_stage, maximum = "deterministic_search", "semantic_contract", 2
+        task, failure_stage, maximum = "deterministic_search", "semantic_contract", None
     else:
         task, failure_stage, maximum = "chat", "upstream", None
     failure_kind = "upstream"
@@ -2955,14 +2957,26 @@ def _record_dashboard_failed_request(session_id, payload, content, access_cookie
 def _send_message_locked(session_id, payload, content, request, response, access_cookie):
     trace = ReplyTrace(request.state.request_id, payload.idempotencyKey, payload.baseVersionId, _log_llm_event)
     token = CURRENT_REPLY_TRACE.set(trace)
+    proposal_trace = ProposalDiagnostic(trace.identity, _log_llm_event)
+    proposal_token = CURRENT_PROPOSAL_DIAGNOSTIC.set(proposal_trace)
     trace.record("routing", "started")
     try:
         result = _send_message_locked_impl(session_id, payload, content, request, response, access_cookie)
+        proposal_trace.outcome = "passed"
+        proposal_trace.final_failure = None
         trace.record("http_response", "prepared")
         return result
     except (ApiError, LLMServiceError) as error:
+        proposal_trace.outcome = "failed"
+        proposal_trace.error((getattr(error, "details", {}) or {}).get("failureStage", "request_preflight"), "request", error)
         trace.record("request", "failed", failure_reason(error))
-        error.details = {**(getattr(error, "details", {}) or {}), "replyPipeline": trace.diagnostic()}
+        error.details = {**(getattr(error, "details", {}) or {}), "replyPipeline": trace.diagnostic(),
+                         "proposalDiagnostic": proposal_trace.snapshot()}
+        raise
+    except Exception as error:
+        proposal_trace.outcome = "failed"
+        committing = any(step["stage"] == "commit" and step["status"] == "started" for step in trace.steps)
+        proposal_trace.error("commit" if committing else "request", "commit" if committing else "request", error)
         raise
     finally:
         # One append-only diagnostic record per HTTP attempt, including failures
@@ -2976,10 +2990,12 @@ def _send_message_locked(session_id, payload, content, request, response, access
                     observed = database.execute("SELECT 1 FROM audit_events WHERE session_id=? AND event_type='message_generation_failed' "
                         "AND json_extract(payload_json,'$.messageKey')=? LIMIT 1", (session_id, payload.idempotencyKey)).fetchone()
                 if observed:
-                    record_event(database, session_id, "reply_pipeline_diagnostic", trace.diagnostic(), utc_now())
+                    record_event(database, session_id, "reply_pipeline_diagnostic",
+                        {**trace.diagnostic(), "proposalDiagnostic": proposal_trace.snapshot()}, utc_now())
         except (ApiError, sqlite3.Error):
             pass
         CURRENT_REPLY_TRACE.reset(token)
+        CURRENT_PROPOSAL_DIAGNOSTIC.reset(proposal_token)
 
 
 def _send_message_locked_impl(
@@ -3000,6 +3016,7 @@ def _send_message_locked_impl(
                 "requestProposal": payload.requestProposal, "action": payload.action,
                 "sourceTurnId": payload.sourceTurnId,
             }).encode("utf-8")).hexdigest()
+            trace_proposal("request_binding", "binding", "passed", bindingSignature=request_signature, sourceTurnId=payload.sourceTurnId)
             prior_failure = read_database.execute(
                 "SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='message_generation_failed' "
                 "AND json_extract(payload_json, '$.messageKey')=? ORDER BY id DESC LIMIT 1",
@@ -3301,7 +3318,7 @@ def _send_message_locked_impl(
             stage_context["conversationOnly"] = bool(turn_understanding.get("conversationOnly"))
             if stage_context["conversationOnly"]:
                 allow_progress = False
-        stage_context["aiEditableTilesOnly"] = payload.action != "execute_revision"
+        stage_context["aiEditableTilesOnly"] = True
         user_map_claims = analyze_user_map_claims(
             content,
             stage_context.get("stageSnapshot"),
@@ -4587,6 +4604,7 @@ def _send_message_locked_impl(
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
     trace_reply("commit", "started")
+    trace_proposal("commit", "commit", "started")
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, payload.baseVersionId)
@@ -5208,6 +5226,7 @@ def _send_message_locked_impl(
                 component_recovery.enqueue(database, session_id, payload.baseVersionId,
                                            user_turn_id, assistant_turn_id, payload.idempotencyKey)
 
+        trace_proposal("commit", "commit", "passed")
         trace_reply("commit", "passed", assistantTurnId=assistant_turn_id,
                     cardPresent=bool((execution.guidance or {}).get("intentHypothesis")),
                     answeredCount=len(question_answer_review.get("answeredQuestionIds") or []))
@@ -5536,6 +5555,7 @@ def _verified_offer_presentation_v2(
     }
 
 
+@proposal_phase('freeze', 'brief')
 def _materialize_verified_automatic_offer(execution, base_rows, language, stage_context):
     """Freeze a validated semantic candidate into the existing exact purple-card binding."""
     _execute_revision_candidate_or_api_error(base_rows, execution)
@@ -6580,6 +6600,37 @@ def decide_proposal(
     request: Request,
     access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME),
 ):
+    identity = {"requestId": request.state.request_id, "messageKey": payload.idempotencyKey,
+                "baseVersionId": payload.baseVersionId, "proposalId": proposal_id, "task": "proposal_decision"}
+    diagnostic = ProposalDiagnostic(identity, _log_llm_event)
+    token = CURRENT_PROPOSAL_DIAGNOSTIC.set(diagnostic)
+    try:
+        result = _decide_proposal_impl(session_id, proposal_id, payload, request, access_cookie)
+        diagnostic.outcome = "passed"
+        diagnostic.final_failure = None
+        trace_proposal("acceptance_commit", "commit", "passed")
+        return result
+    except (ApiError, LLMServiceError) as error:
+        diagnostic.outcome = "failed"
+        diagnostic.error("acceptance", "proposal", error)
+        error.details = {**(getattr(error, "details", {}) or {}), "proposalDiagnostic": diagnostic.snapshot()}
+        raise
+    finally:
+        try:
+            with connect(immediate=True) as database:
+                require_browser_session(database, session_id, access_cookie)
+                exists = database.execute("SELECT 1 FROM change_proposals WHERE session_id=? AND id=?",
+                    (session_id, proposal_id)).fetchone()
+                if exists:
+                    record_event(database, session_id, "reply_pipeline_diagnostic",
+                        {**identity, "proposalDiagnostic": diagnostic.snapshot()}, utc_now())
+        except (ApiError, sqlite3.Error):
+            pass
+        CURRENT_PROPOSAL_DIAGNOSTIC.reset(token)
+
+
+@proposal_phase("acceptance", "proposal")
+def _decide_proposal_impl(session_id, proposal_id, payload, request, access_cookie):
     _validate_identifier(payload.idempotencyKey, "idempotencyKey")
     decision_rewrite = None
     decision_rewrite_language = "zh-CN"
@@ -10576,6 +10627,7 @@ def _require_offer_action(offer, action):
         raise ApiError(409, "INVALID_CARD_SOURCE", "This revision card does not allow that action.")
 
 
+@proposal_phase('card_source', 'binding')
 def _source_revision_offer(database, session_id, version_id, source_turn_id):
     source = database.execute(
         """
@@ -10621,6 +10673,7 @@ def _source_revision_offer(database, session_id, version_id, source_turn_id):
     return source, offer
 
 
+@proposal_phase('proposal_preflight', 'permissions')
 def _preflight_proposal(
     database,
     session_id,
@@ -12045,6 +12098,7 @@ def _proposal_tile_label(tile, language):
     return labels["zh-CN" if language == "zh-CN" else "en"].get(tile, tile)
 
 
+@proposal_phase('proposal_presentation', 'presentation')
 def _proposal_presentation_for_binding(
     binding,
     language="en",
@@ -12148,6 +12202,7 @@ def _proposal_presentation_for_binding(
     return presentation
 
 
+@proposal_phase('freeze_binding', 'brief')
 def _proposal_binding_for_offer(offer, version_id, rows, entity_bindings=None):
     """Normalize and bind a proposal to the exact saved Stage it was generated from."""
     if not isinstance(offer, dict) or not str(offer.get("summary") or "").strip():
@@ -12874,7 +12929,13 @@ def _solve_or_api_error(rows):
         raise ApiError(400, error.code, str(error), details=error.details) from error
 
 
+@proposal_phase("structure_and_solve", "candidate")
 def _validate_changed_proposal(base_rows, proposed_rows):
+    try:
+        validate_ai_edit_diff(base_rows, proposed_rows)
+    except ValueError as error:
+        raise LevelValidationError("PROTECTED_EDIT", "AI revisions may edit water and internal walls only.",
+            details=getattr(error, "details", {})) from error
     validation = validate_and_solve(proposed_rows)
 
     if not describe_diff(base_rows, validation.rows):
@@ -12886,6 +12947,7 @@ def _validate_changed_proposal(base_rows, proposed_rows):
     return validation
 
 
+@proposal_phase('structure_and_solve', 'candidate')
 def _solve_changed_proposal_or_api_error(base_rows, proposed_rows):
     try:
         return _validate_changed_proposal(base_rows, proposed_rows)
@@ -12893,6 +12955,7 @@ def _solve_changed_proposal_or_api_error(base_rows, proposed_rows):
         raise ApiError(400, error.code, str(error), details=error.details) from error
 
 
+@proposal_phase('execution_replay', 'execution')
 def _execute_revision_candidate_or_api_error(base_rows, execution):
     """Re-apply the modifier output before a proposal can enter persistence."""
     contract = execution.revision_contract or {}

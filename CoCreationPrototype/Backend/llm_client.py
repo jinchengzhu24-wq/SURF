@@ -46,7 +46,10 @@ from conversation_evidence import CONTEXT_VERSION
 from proposal_understanding import (
     turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
     engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
+    understanding_patch_request,
 )
+from proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
+    CURRENT_PROPOSAL_DIAGNOSTIC, ProposalValidationError)
 from design_requirements import (
     requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
     goal_rank, tradeoff_message, protected_change_requested,
@@ -138,7 +141,7 @@ CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
 PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV = (
     "COCREATION_PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT"
 )
-PROMPT_VERSION = "cocreation-v62-human-edit-state-replay"
+PROMPT_VERSION = "cocreation-v63-proposal-evidence-diagnostics"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -1204,6 +1207,10 @@ def build_plain_chat_messages(
     )
     guidance_mode_instruction = _guidance_mode_instruction(guidance_mode)
     action_instruction = _plain_action_instruction(stage_context)
+    action_instruction += (" Platform editing permissions apply to all suggestions, hypothetical options and questions: "
+        "only water and internal walls may be rearranged. Never offer relocating boxes, targets, player start "
+        "or the outer shell as a design option. Normal Sokoban pushes during play are allowed to discuss. "
+        "Judge the designer's meaning semantically; no unnamed element implies permission to relocate a protected entity.")
     understanding = stage_context.get("turnUnderstanding")
     if isinstance(understanding, dict):
         acts = set(understanding.get("acts") or [])
@@ -4181,6 +4188,7 @@ def generate_stage_assessment(
         )
 
 
+@proposal_phase("understanding", "understanding", revalidates="understanding")
 def classify_turn_understanding(conversation, snapshot, request_id, *, forced_proposal=False, proposal_context=None, _deadline=None):
     """Ask Kimi what the designer referred to and what action they requested.
 
@@ -4229,7 +4237,13 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             "Set mapRelated false for requests clearly about another subject. Copy "
             "evidenceSpan exactly from the latest user message. Earlier user wording is "
             "linguistic context only; current map facts come exclusively from Current Stage Snapshot. "
-            "Never infer permission to edit from the map itself."
+            "Never infer permission to edit from the map itself. "
+            "Platform permissions are fixed: only water and internal walls may be edited. "
+            "Judge whether an unnamed layout request concerns editable composition from its actual meaning and context. "
+            "Do not infer a box/target/player/shell relocation from vague elements or an earlier assistant option. "
+            "If no editable object was explicitly selected, editScope may be empty and a feasible implementation "
+            "may choose only water/internal walls as proposal assumptions. Do not claim that the designer named them. "
+            "Platform protection belongs to server rules, not evidence-bound user preserve items."
             " Separate mentioned entities from requested changes. Return changes as component/property/operation records. "
             "operation=change requests an actual change; operation=preserve is a prohibition or lock; "
             "operation=mention only references an entity. A request not to move B1 is preserve, not change. "
@@ -4329,6 +4343,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             review_reason = critical_review_reason(candidate, proposal_context)
             if review_reason:
                 phase = "understanding_review"
+                trace_proposal(phase, "understanding_review", "started", attempt=attempt)
                 verdict = {}
                 review_started = time.monotonic()
                 remaining = min(12.0, _remaining_until(_deadline)) if _deadline is not None else 12.0
@@ -4360,9 +4375,15 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     if str(getattr(reviewed.choices[0], "finish_reason", "")) == "length":
                         raise ValueError("Turn understanding review was truncated.")
                     verdict = parse_json_object(reviewed.choices[0].message.content)
-                if (set(verdict) != {"accepted", "issues", "understanding"}
-                        or verdict["accepted"] is not True or verdict["issues"] != []):
-                    raise ValueError("Independent proposal understanding review did not verify the request.")
+                if (not isinstance(verdict, dict) or set(verdict) != {"accepted", "issues", "understanding"}
+                        or type(verdict.get("accepted")) is not bool or not isinstance(verdict.get("issues"), list)
+                        or any(not isinstance(item, str) for item in verdict.get("issues", []))
+                        or not isinstance(verdict.get("understanding"), dict)):
+                    raise ProposalValidationError([{"fieldPath": "criticalReview", "reasonCode": "REVIEW_COMPONENT_INVALID", "sourceKind": "unknown"}],
+                        message="Independent proposal understanding review has invalid components.")
+                if verdict["accepted"] is not True or verdict["issues"]:
+                    raise ProposalValidationError([{"fieldPath": "criticalReview", "reasonCode": "SEMANTIC_REVIEW_REJECTED", "sourceKind": "unknown"}],
+                        message="Independent proposal understanding review did not verify the request.")
                 if set(verdict["understanding"]) & {"semanticPolicyVersion", "criticalReview", "versionId", "evidenceSignature"}:
                     raise ValueError("A model cannot author server review metadata.")
                 corrected = _validate_turn_understanding(verdict["understanding"], latest, forced_proposal)
@@ -4379,6 +4400,9 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     "latencyMs": int((time.monotonic() - review_started) * 1000),
                     "initialChanges": candidate.get("changes") or []}
                 candidate = corrected
+                if review_repair_request is not None:
+                    trace_repair("understanding_review", "revalidated")
+                trace_proposal(phase, "understanding_review", "passed", attempt=attempt)
                 _log_llm_event("proposal_understanding_reviewed", requestId=request_id,
                     reason=review_reason, corrected=candidate["criticalReview"]["corrected"], attempt=attempt)
             candidate["semanticPolicyVersion"] = 1
@@ -4389,13 +4413,27 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             raise
         except Exception as exception:
             last_error = exception
+            diagnostic = CURRENT_PROPOSAL_DIAGNOSTIC.get()
+            if (getattr(exception, "details", {}) or {}).get("proposalDiagnostic") and diagnostic is not None:
+                diagnostic.error(phase, "understanding", exception)
+            else:
+                trace_proposal(phase, "understanding_review" if phase == "understanding_review" else "understanding",
+                    "revalidation_failed" if repair_request is not None else "rejected", reason_code(exception),
+                    attempt=attempt, issues=safe_issues(exception), issuesTruncated=getattr(exception, "issues_truncated", False), issueCount=getattr(exception, "issue_count", None))
             _log_llm_event("proposal_understanding_rejected", requestId=request_id,
-                attempt=attempt, reason=str(exception)[:300])
+                attempt=attempt, reason=reason_code(exception), issues=safe_issues(exception),
+                issuesTruncated=getattr(exception, "issues_truncated", False), issueCount=getattr(exception, "issue_count", None))
+            if reason_code(exception) == "SEMANTIC_REVIEW_REJECTED":
+                trace_proposal(phase, "understanding_review", "not_repairable", "SEMANTIC_REVIEW_REJECTED", attempt=attempt)
+                break
             frozen = {**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding")} if locked_base else payload
-            targets = ([Target("proposalUnderstanding", ("understanding", "proposalUnderstanding"), (dict, type(None)))]
-                       if locked_base is not None else [Target("understanding", ("understanding",), (dict,))])
-            repair_request = PatchRequest("understanding", {"understanding": frozen}, targets,
-                {"snapshot": snapshot, **{f"user:{key}": content for key, content in designer_sources(proposal_context, latest).items()}})
+            sources = designer_sources(proposal_context, latest)
+            if locked_base is not None:
+                repair_request = understanding_patch_request(frozen, exception, sources, snapshot)
+            else:
+                repair_request = PatchRequest("understanding", {"understanding": frozen},
+                    [Target("understanding", ("understanding",), (dict,))],
+                    {"snapshot": snapshot, **{f"user:{key}": content for key, content in sources.items()}})
             review_repair_request = None
             if phase == "understanding_review":
                 parts, missing = {}, []
@@ -4408,17 +4446,32 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 if missing:
                     review_repair_request = PatchRequest("understanding_review", parts, missing,
                         {"review_source": json.loads(review_messages[1]["content"])})
+                elif isinstance(exception, ProposalValidationError) and any(
+                        issue["fieldPath"].startswith("proposalUnderstanding") for issue in exception.issues):
+                    scoped = understanding_patch_request(verdict["understanding"], exception, sources, snapshot)
+                    review_repair_request = PatchRequest("understanding_review", verdict, list(scoped.targets.values()),
+                        {"review_source": json.loads(review_messages[1]["content"]), **scoped.evidence})
+            trace_repair("understanding_review" if review_repair_request is not None else "understanding",
+                         "proposed" if attempt < 2 else "exhausted")
             messages.append({"role": "user", "content": (
-                ("Repair only proposalUnderstanding. Validated speech acts, changes and latest evidence "
+                ("Repair only the server-listed failed fields. Validated speech acts, changes and latest evidence "
                  "are locked: " + json.dumps(locked_base, ensure_ascii=False) + ". "
                  if locked_base is not None else "Repair the failed understanding with the same original evidence and topic. ")
-                + str(exception)[:400]
+                + json.dumps({"issues": safe_issues(exception), "reasonCode": reason_code(exception),
+                    "designerTurns": [{"id": key, "content": value} for key, value in sources.items()],
+                    "sourceIdRule": "sourceTurnId must be a designerTurns.id (latest or a real Turn ID). "
+                        "evidenceRefs use external user:<id> keys only; never copy these keys into sourceTurnId. "
+                        "Do not invent a source, rewrite a quote or drop a goal/lock to pass validation."}, ensure_ascii=False)
             )})
     error = LLMServiceError("MODEL_RESPONSE_INVALID",
-        "Kimi could not reliably classify the designer's latest message. Retry it.", request_id, True, 2, 502)
+        "Kimi could not reliably classify the designer's latest message. Retry it.", request_id, True, attempt, 502)
     error.details = {"task": "turn_understanding", "failureStage": phase,
-                     "failureKind": "review_validation" if review_repair_request is not None else "understanding",
+                     "failureKind": "semantic_rejection" if reason_code(last_error) == "SEMANTIC_REVIEW_REJECTED" else
+                         "review_validation" if review_repair_request is not None else "understanding",
                      "maximumAttempts": 2}
+    diagnostic = CURRENT_PROPOSAL_DIAGNOSTIC.get()
+    if diagnostic is not None:
+        error.details["proposalDiagnostic"] = diagnostic.snapshot()
     raise error from last_error
 
 
@@ -4432,7 +4485,8 @@ def _validate_proposal_interpretation(candidate, latest, snapshot, context, forc
         if required:
             raise ValueError("An authorized proposal topic needs an evidence-bound interpretation.")
         return
-    candidate["proposalUnderstanding"] = validate_topic(topic, designer_sources(context, latest), snapshot)
+    roles = {turn["id"]: turn["role"] for turn in ((context or {}).get("dialogueEvidence") or {}).get("turns", [])}
+    candidate["proposalUnderstanding"] = validate_topic(topic, designer_sources(context, latest), snapshot, roles)
 
 
 def _validate_turn_understanding(payload, latest, forced_proposal=False):
@@ -4781,6 +4835,7 @@ class HardObjectiveError(ValueError):
         super().__init__(message)
 
 
+@proposal_phase('requirements', 'requirements', revalidates='requirements')
 def _review_proposal_requirements(api_key, base_url, stage_context, request_id, deadline):
     """Compile one topic's designer language, never assistant map assertions."""
     discovery = stage_context.get("proposalDiscovery") or {}
@@ -4919,6 +4974,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             if remaining <= 0:
                 raise asyncio.TimeoutError()
             phase = "review"
+            trace_proposal("requirements_review", "requirement_review", "started", attempt=attempt)
             verdict = {}
             if review_repair_request is not None:
                 verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request,
@@ -4955,6 +5011,8 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 locked = {item["requirementId"]: raw_by_id[item["requirementId"]] for item in record["requirements"]
                     if item["requirementId"] not in rejected and (item["component"], item["property"]) not in related}
                 raise ValueError("Independent evidence review rejected requirements.")
+            if review_repair_request is not None:
+                trace_repair("requirement_review", "revalidated")
             record["topicId"] = discovery.get("topicId")
             record["evidenceSignature"] = cache_key
             record["interpretationVersion"] = INTERPRETATION_VERSION
@@ -4963,6 +5021,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             }
             _log_llm_event("requirements_verified", requestId=request_id, task="revision_requirements",
                 attempt=attempt, requirementCount=len(record["requirements"]), cacheKey=cache_key)
+            trace_proposal("requirements_review", "requirement_review", "passed", attempt=attempt)
             return record
         except LLMServiceError:
             raise
@@ -4978,6 +5037,11 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             _log_llm_event("llm_component_rejected", requestId=request_id, task="revision_requirements",
                 attempt=attempt, component="requirements", failureCode="REQUIREMENT_INTERPRETATION_INVALID",
                 issues=last_issue[:600], **{key: value for key, value in failure_details.items() if key != "task"})
+            trace_proposal("requirements_review" if phase == "review" else "requirements", "requirements",
+                "revalidation_failed" if repair_request is not None or review_repair_request is not None else "rejected",
+                reason_code(exception), attempt=attempt)
+            if attempt >= 2:
+                trace_repair("requirements", "exhausted")
             messages.append({"role": "user", "content": json.dumps({
                 "repairIssue": last_issue, "structuredIssues": repair_issues,
                 "failureDetails": failure_details, "lockedRequirements": list(locked.values()),
@@ -5409,6 +5473,7 @@ def _objective_validating_proposal_validator(
         entity_bindings,
     )
 
+    @proposal_phase("structure_and_solve", "candidate")
     def validate(candidate_rows):
         validation = (
             proposal_validator(candidate_rows)
@@ -5446,6 +5511,7 @@ def _objective_validating_proposal_validator(
     return validate
 
 
+@proposal_phase('requirement_postcondition', 'requirements')
 def validate_frozen_requirements(base_rows, candidate_rows, workflow, baseline_validation, candidate_validation, entity_bindings):
     record = (workflow or {}).get("requirementRecord")
     if not isinstance(record, dict):
@@ -5590,6 +5656,7 @@ def _attempt_semantic_revision_replan(
     return replace(result, proposal_diagnostics=diagnostics), plan, contract, plan_attempts
 
 
+@proposal_phase('proposal_generation', 'proposal')
 def _generate_revision_search_proposal_sync(
     *,
     api_key,
@@ -6653,6 +6720,7 @@ def _revision_plan_patch_request(payload, messages):
     return PatchRequest("plan", candidate, targets, {"planning_contract": messages})
 
 
+@proposal_phase('plan', 'plan')
 async def _compile_revision_plan(
     *,
     api_key,
@@ -6768,6 +6836,10 @@ async def _compile_revision_plan(
         }
         if failure_reason:
             fields["validationReason"] = failure_reason
+        trace_proposal("plan", "plan", "revalidation_failed" if repair_request is not None else "rejected",
+            reason_code(last_error), attempt=attempt, maximumAttempts=max_attempts)
+        if attempt >= max_attempts:
+            trace_repair("plan", "exhausted")
         _log_llm_event("llm_attempt_failed", **fields)
         attempt_failures.append({
             "attempt": attempt,
@@ -6945,6 +7017,7 @@ def _build_legacy_revision_execution_contract(stage_context=None):
     }
 
 
+@proposal_phase('contract', 'contract', revalidates='plan')
 def _build_revision_execution_contract(plan, authorized_brief, stage_context=None):
     validate_plan_scope(plan, ((stage_context or {}).get("proposalDiscovery") or {}).get("understanding"))
     if (stage_context or {}).get("aiEditableTilesOnly"):
@@ -6956,7 +7029,8 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
                         or after not in {"#", ".", "@"}
                         for _, _, before, after in strategy.required_transitions
                     )):
-                raise ValueError("New AI plans may edit water and internal walls only.")
+                raise ProposalValidationError([{"fieldPath": "strategies", "reasonCode": "PROTECTED_EDIT", "sourceKind": "server"}],
+                    message="New AI plans may edit water and internal walls only.")
     relocation_effects = {
         "relocate_start",
         "relocate_box",
@@ -7044,6 +7118,7 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
         "strategies": strategies,
         "explicitlyRelaxedByDesigner": bool((stage_context or {}).get("revisionRelaxed")),
         "revisionWorkflow": revision_workflow,
+        "aiEditableTilesOnly": bool((stage_context or {}).get("aiEditableTilesOnly")),
     }
     for strategy in contract["strategies"]:
         if strategy["minimumChangedCells"] > strategy["maximumChangedCells"]:
@@ -7090,11 +7165,12 @@ def _build_map_operation_messages(
         "The solver validates playability, never subjective aesthetic success. Net increases may remove old tiles and add more elsewhere within the contract. Goals may be partial or unchanged, never reversed. For a gameplay soft objective, try to create candidates whose changed area affects "
         "a route and changes the relevant push order, alternation, transport, or detour "
         "mechanism; do not add irrelevant cells merely to change a metric. "
-        "A moved player, box, or target requires paired operations that clear the old cell and place "
-        "the entity on a current floor cell. Return JSON only with exactly this shape: "
+        "Only water and internal walls may change. Player, boxes, targets and outer shell stay fixed, "
+        "even if a supplied strategy claims otherwise. Return JSON only with exactly this shape: "
         "{\"candidates\":[{\"strategyIndex\":1,\"operations\":[{\"row\":5,"
         "\"column\":6,\"from\":\".\",\"to\":\"#\"}]}]}. Each operations array contains one to 24 unique "
-        "cells. Allowed destination tiles are space, #, ., @, p, s, and t; space edits are forbidden. "
+        "cells. Allowed destination tiles are #, . and @ only. Never overwrite a player, box, target, "
+        "void or connected outer-shell cell. "
         f"Natural-language reasoning is internal; any unavoidable text must use {response_language}."
     )
     user_prompt = (
@@ -7184,6 +7260,7 @@ def _operation_patch_request(payload, contract, rows):
                         {"execution_contract": contract, "snapshot": build_stage_snapshot(rows)})
 
 
+@proposal_phase('operation_candidates', 'operations')
 async def _generate_map_operation_candidates(
     *,
     api_key,
@@ -7366,6 +7443,10 @@ async def _generate_map_operation_candidates(
         }
         if failure_reason:
             failure_fields["validationReason"] = failure_reason[:1200]
+        trace_proposal("operation_candidates", "operations", "rejected", reason_code(last_error),
+            attempt=attempt, maximumAttempts=len(attempted_models))
+        if attempt >= len(attempted_models):
+            trace_repair("operations", "exhausted")
         _log_llm_event("llm_attempt_failed", **failure_fields)
         if not last_error.retryable:
             raise last_error
@@ -7415,6 +7496,7 @@ async def _generate_map_operation_candidates(
     raise last_error
 
 
+@proposal_phase("search", "deterministic_search")
 def _deterministic_revision_fallback(
     *,
     rows,
@@ -7543,6 +7625,7 @@ def _operation_messages_with_feedback(messages, validation_feedback):
     return corrected
 
 
+@proposal_phase('candidate_validation', 'candidate', revalidates='operations')
 def _select_operation_candidate(
     payload,
     base_rows,
@@ -7657,6 +7740,8 @@ def _select_operation_candidate(
             ))
         except Exception as exception:
             reason = _safe_validation_reason(exception)
+            trace_proposal("candidate_validation", "candidate", "rejected", reason_code(exception),
+                attempt=index, issues=safe_issues(exception))
             failures.append(f"candidate {index}: {reason}")
             metric_detail = {}
             if isinstance(exception, HardObjectiveError):
@@ -7761,6 +7846,7 @@ def _candidate_strategy_index(payload, candidate_index):
     return candidate.get("strategyIndex") if isinstance(candidate, dict) else None
 
 
+@proposal_phase('execution_replay', 'execution')
 def execute_revision_operations(base_rows, operations, revision_contract, strategy_index):
     """Apply one modifier-agent candidate under the immutable execution contract."""
     if not isinstance(operations, list) or any(
@@ -7788,6 +7874,8 @@ def execute_revision_operations(base_rows, operations, revision_contract, strate
         operations,
         strategy_contract=strategy,
     )
+    if (revision_contract or {}).get("aiEditableTilesOnly"):
+        validate_ai_edit_diff(base_rows, rows)
     changed_cells = _changed_cell_count(base_rows, rows)
     minimum = int(strategy.get("minimumChangedCells") or 0)
     maximum = int(strategy.get("maximumChangedCells") or REVISION_MAX_CHANGED_CELLS)
@@ -7798,6 +7886,20 @@ def execute_revision_operations(base_rows, operations, revision_contract, strate
     return rows
 
 
+@proposal_phase("permission_validation", "permissions")
+def validate_ai_edit_diff(base_rows, candidate_rows):
+    """Fixed platform policy, independent of any model-authored permission."""
+    if len(base_rows) != len(candidate_rows) or any(len(a) != len(b) for a, b in zip(base_rows, candidate_rows)):
+        raise ProposalValidationError([{"fieldPath": "candidate", "reasonCode": "MAP_SHAPE_CHANGED", "sourceKind": "server"}])
+    shell = _connected_outer_shell(base_rows)
+    for y, (before_row, after_row) in enumerate(zip(base_rows, candidate_rows)):
+        for x, (before, after) in enumerate(zip(before_row, after_row)):
+            if before != after and (before not in {"#", ".", "@"} or after not in {"#", ".", "@"} or (x, y) in shell):
+                raise ProposalValidationError([{"fieldPath": "candidate", "reasonCode": "PROTECTED_EDIT", "sourceKind": "server"}],
+                    message="AI revisions may edit water and internal walls only.")
+
+
+@proposal_phase('execution_replay', 'execution')
 def _deterministic_exact_revision(
     rows,
     execution_brief,
@@ -8424,6 +8526,7 @@ def translate_turns(items, target_language, request_id, *, _deadline=None):
         ) from exception
 
 
+@proposal_phase('challenge_review', 'challenge_review')
 def classify_challenge_reason(
     user_reason,
     hypotheses,
@@ -9309,6 +9412,8 @@ async def _review_intent_candidate_async(
             "Independently review ONLY the changed BODY against exact user evidence and LOCKED CLAIMS. "
             "Return JSON bodyValid and concise issues. Reject irrelevant prose, invented user purposes, "
             "claim contradictions or unfinished prose; length, sentence count and stylistic depth are advisory. "
+            "Reject design suggestions to relocate/reconfigure boxes, targets, player start or outer shell; "
+            "only water/internal walls may be edited. Normal pushing during play is not a design edit. "
             "Map facts are checked by the server. Do not generate or reclassify intent, a card, question progress, "
             "permission or state. The locked semantic result remains authoritative.")},
             {"role": "user", "content": json.dumps({"userEvidence": user_text, "body": body,
@@ -9566,6 +9671,8 @@ async def _repair_intent_components_async(
             raise asyncio.TimeoutError()
         messages = [{"role": "system", "content": (
             "Repair ONLY the rejected body, preserving locked claims and exact user evidence. "
+            "Only water/internal walls may be edited; never propose rearranging boxes/targets/player/shell. "
+            "Normal Sokoban pushes during play may be discussed. "
             "Return JSON with only bodyParagraphs, a non-empty array of complete paragraphs. "
             "Fix the specified relevance or semantic defect; add no user purpose, authorization, "
             "state success or map changes. Use the supplied Stage facts only. Keep concise natural prose "
@@ -9646,7 +9753,7 @@ async def _review_ordinary_intent_with_recovery(*, optional_budget, component_ch
                 raise asyncio.TimeoutError()
             kwargs["deadline"] = min(kwargs["deadline"], started + timeout)
         result = await _review_intent_candidate_async(**kwargs)
-        if result["classification"] == "candidate" and not result["bodyValid"]:
+        if not result["bodyValid"] and (result["classification"] == "candidate" or result.get("issues")):
             state["lockedIntentReview"] = copy.deepcopy(result)
             state["bodyReviewRequired"] = True
         if not optional and not result["bodyValid"]:
@@ -12067,12 +12174,22 @@ async def _request_completion(*args, **kwargs):
     task = kwargs.get("task") or "unspecified"
     stage = "body_generation" if task == "plain_chat" else "model_" + task
     trace_reply(stage, "started", modelCalls=1)
+    proposal_tasks = {"turn_understanding", "turn_understanding_review", "proposal_clarification", "proposal_clarification_review",
+        "revision_requirements", "revision_requirement_review", "revision_plan", "map_operations", "map_proposal",
+        "challenge_reason", "challenge_reason_classification", "proposal_failure_analysis"}
+    proposal_task = task.removesuffix("_patch") in proposal_tasks
+    if proposal_task:
+        trace_proposal("model_generation", task, "started")
     try:
         result = await _request_completion_impl(*args, **kwargs)
         trace_reply(stage, "passed")
+        if proposal_task:
+            trace_proposal("model_generation", task, "passed")
         return result
     except BaseException as error:
         trace_reply(stage, "failed", failure_reason(error))
+        if proposal_task:
+            trace_proposal("model_generation", task, "failed", reason_code(error))
         raise
 
 
@@ -15042,6 +15159,7 @@ def _distill_proposal_offer(proposal_offer, visible_content, previous_content, l
     )
 
 
+@proposal_phase('freeze', 'brief')
 def _attach_execution_brief(offer, execution_brief):
     if offer is None or execution_brief is None:
         return offer
@@ -16021,9 +16139,13 @@ def _clarification_needs_semantic_review(body, question):
     return bool(re.search(r"(?:移动|挪|增加|删除|减少|move|relocat|add|remov|reduc).{0,24}(?:箱子|目标|玩家|外壳|box|target|player|shell)", text, re.I))
 
 
+@proposal_phase("component_repair", "patch")
 async def _request_component_patch(api_key, base_url, patch_request, messages, request_id,
                                    deadline, task, max_tokens=1600, timeout_limit=20.0):
     """Use one existing corrective slot, never open a new retry loop."""
+    diagnostic = CURRENT_PROPOSAL_DIAGNOSTIC.get()
+    if diagnostic is None or patch_request.component not in diagnostic.pending_repairs:
+        trace_repair(patch_request.component, "proposed")
     remaining = min(timeout_limit, _remaining_until(deadline))
     if remaining <= 0:
         raise asyncio.TimeoutError()
@@ -16042,6 +16164,7 @@ async def _request_component_patch(api_key, base_url, patch_request, messages, r
     if str(getattr(choice, "finish_reason", "")) == "length":
         raise PatchError("PATCH_TRUNCATED")
     merged = patch_request.merge(parse_json_object(choice.message.content))
+    trace_repair(patch_request.component, "merged")
     _log_llm_event("llm_component_patched", requestId=request_id, component=patch_request.component,
                    fields=list(patch_request.targets), patchVersion=PATCH_VERSION,
                    invalidatedComponents=dependent_components(patch_request.component))
@@ -16069,11 +16192,14 @@ def _clarification_review_components(verdict, sentence_ids):
     return valid, issues
 
 
+@proposal_phase('clarification_review', 'clarification_review', revalidates='clarification_review')
 async def _review_proposal_clarification(api_key, base_url, body, question, stage_context, request_id, deadline):
     discovery = stage_context.get("proposalDiscovery") or {}
     specification = stage_context.get("proposalClarification") or {}
     messages = [{"role": "system", "content": (
-        "Review the actual body and question, not just annotations. Return bodyIssues as IDs from "
+        "Review the actual body and question, not just annotations. Reject design options/questions moving "
+        "boxes, targets, player start or shell: only water/internal walls may change. Gameplay pushes are distinct. "
+        "Return bodyIssues as IDs from "
         "bodySentences for sentences that must be dropped, and questionIssue as null or a repair instruction. "
         "Never quote, paraphrase or invent a sentence ID. "
         "Check speaker attribution: the designer owns their wish; AI can express its own tentative "
@@ -16138,6 +16264,7 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
     return body.strip(), verdict["questionIssue"] or ""
 
 
+@proposal_phase('clarification', 'clarification')
 def _parse_proposal_clarification_payload(content, language, stage_context):
     """Parse Kimi's private body/question envelope and validate only the question."""
     try:
@@ -19066,6 +19193,7 @@ def _validate_revision_plan_payload(value, rows=None, entity_bindings=None):
     return _validate_execution_brief(brief, rows, entity_bindings)
 
 
+@proposal_phase('execution_brief_validation', 'brief')
 def _validate_execution_brief(value, rows=None, entity_bindings=None):
     """Validate the hidden, machine-facing part of a conceptual revision card."""
     if not isinstance(value, dict):

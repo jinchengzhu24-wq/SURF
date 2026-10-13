@@ -90,7 +90,113 @@ PLAYER_MOVE_CONTRACT = {
 }
 
 
+# Current successful AI-flow fixtures edit only water. Entity relocation fixtures
+# above remain available for explicit permission-rejection and historical-read tests.
+WATER_EDITED_ROWS = list(SAMPLE_ROWS)
+WATER_EDITED_ROWS[1] = "#@@........#"
+WATER_RESHAPE_OPERATIONS = [{"row": 2, "column": 2, "to": "@"}, {"row": 2, "column": 3, "to": "@"}]
+WATER_RESHAPE_BRIEF = {
+    "schemaVersion": 1, "effect": "reshape_water", "anchors": ["P"],
+    "focus": {"row": 2, "column": 3, "radius": 1},
+    "requiredTransitions": [{"row": 2, "column": 2, "from": ".", "to": "@"},
+                            {"row": 2, "column": 3, "from": ".", "to": "@"}],
+    "allowedOperators": ["add_water"], "preserve": ["outer_shell", "player", "boxes", "targets", "unrelated_areas"],
+    "playObjective": "spatial_balance",
+}
+WATER_RIGHT_BRIEF = {**WATER_RESHAPE_BRIEF, "focus": {"row": 2, "column": 4, "radius": 1},
+    "requiredTransitions": [{"row": 2, "column": 4, "from": ".", "to": "@"},
+                            {"row": 2, "column": 5, "from": ".", "to": "@"}]}
+WATER_RESHAPE_CONTRACT = {
+    "schemaVersion": 1, "authorizedBrief": "Adjust the water distribution.", "aiEditableTilesOnly": True,
+    "revisionPlan": {"strategies": [{"effect": "reshape_water", "focus": None, "operators": ["add_water"],
+        "preserve": ["outer_shell", "player", "boxes", "targets", "unrelated_areas"], "editBudget": 2,
+        "metricGoals": [], "requiredTransitions": WATER_RESHAPE_BRIEF["requiredTransitions"],
+        "anchorEntities": ["P"], "playObjective": "spatial_balance"}]},
+    "strategies": [{"strategyIndex": 1, "effect": "reshape_water", "focus": None, "allowedOperators": ["add_water"],
+        "preserve": ["outer_shell", "player", "boxes", "targets", "unrelated_areas"],
+        "minimumChangedCells": 2, "maximumChangedCells": 2, "metricGoals": [],
+        "requiredTransitions": WATER_RESHAPE_BRIEF["requiredTransitions"], "anchorEntities": ["P"],
+        "playObjective": "spatial_balance"}], "explicitlyRelaxedByDesigner": False,
+}
+
+
+WATER_RIGHT_ROWS = list(SAMPLE_ROWS)
+WATER_RIGHT_ROWS[1] = "#..@@......#"
+WATER_RIGHT_OPERATIONS = [{"row": 2, "column": 4, "to": "@"}, {"row": 2, "column": 5, "to": "@"}]
+WATER_RIGHT_CONTRACT = json.loads(json.dumps(WATER_RESHAPE_CONTRACT))
+WATER_RIGHT_CONTRACT["strategies"][0]["requiredTransitions"] = WATER_RIGHT_BRIEF["requiredTransitions"]
+WATER_RIGHT_CONTRACT["revisionPlan"]["strategies"][0]["requiredTransitions"] = WATER_RIGHT_BRIEF["requiredTransitions"]
+
+
 class CoCreationSessionTests(unittest.TestCase):
+
+    def test_proposal_entry_failure_and_original_key_retry_have_exact_private_safe_diagnostics(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from patch_fixtures import patch_fixture
+        version_id = self.read_session()["currentVersionId"]
+        content = "怎么把右边的元素分散一下"
+        meaning = {"aspect": "visual", "goals": [{"statement": "分散右侧元素", "sourceTurnId": "missing",
+            "evidenceSpan": "右边的元素分散一下"}], "editScope": [], "focus": [], "preserve": [],
+            "sufficient": False, "nextQuestionDimension": "edit_scope"}
+        candidate = {"acts": ["revision_request"], "elements": ["unknown"], "evidenceSpan": content,
+            "mapRelated": True, "directionSufficient": False, "changes": [], "proposalUnderstanding": meaning}
+        async def model(*args, **kwargs):
+            value = candidate if kwargs["task"] == "turn_understanding" else patch_fixture(args[3][-1]["content"],
+                {"understanding": candidate})
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",
+                message=SimpleNamespace(content=json.dumps(value, ensure_ascii=False)))])
+        payload = {"content": content, "baseVersionId": version_id, "requestProposal": True,
+                   "idempotencyKey": "proposal-diagnostic-retry"}
+        before = self.read_session()["turns"]
+        with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
+                patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
+                patch.object(llm_client, "_request_completion", AsyncMock(side_effect=model)) as calls:
+            for _ in range(2):
+                response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+                self.assertEqual(response.status_code, 502, response.text)
+                diagnostic = response.json()["details"]["proposalDiagnostic"]
+                self.assertEqual(diagnostic["finalFailure"]["issues"][0]["fieldPath"], "proposalUnderstanding.goals[0].sourceTurnId")
+                self.assertNotIn(content, json.dumps(diagnostic, ensure_ascii=False))
+            self.assertEqual(calls.await_count, 4)
+        session = self.read_session()
+        self.assertEqual(session["currentVersionId"], version_id)
+        self.assertEqual(session["turns"], before)
+        self.assertEqual(session["lastMessageFailure"]["messageKey"], payload["idempotencyKey"])
+        with repository.connect() as database:
+            records = database.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='reply_pipeline_diagnostic'",
+                (self.session_id,)).fetchall()
+        failures = [repository.load_json(row["payload_json"]) for row in records
+            if repository.load_json(row["payload_json"]).get("messageKey") == payload["idempotencyKey"]]
+        self.assertEqual(len(failures), 2)
+        self.assertNotEqual(failures[0]["requestId"], failures[1]["requestId"])
+        self.assertEqual(failures[0]["proposalDiagnostic"]["firstFailure"]["reasonCode"], "SOURCE_NOT_FOUND")
+
+    def test_acceptance_rechecks_platform_permissions_and_audits_without_creating_stage(self):
+        version_id = self.read_session()["currentVersionId"]
+        offer = self.offer_bound_revision(WATER_RESHAPE_BRIEF, summary="Adjust water distribution", message_key="permission-offer")
+        with patch.object(llm_client, "_create_async_client", side_effect=AssertionError("No Kimi for frozen execution")):
+            executed = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
+                "content": "Execute this water plan", "baseVersionId": version_id, "idempotencyKey": "permission-execute",
+                "action": "execute_revision", "sourceTurnId": offer["turnId"]})
+        self.assertEqual(executed.status_code, 200, executed.text)
+        proposal = executed.json()["proposals"][0]
+        with repository.connect(immediate=True) as database:
+            database.execute("UPDATE change_proposals SET proposed_rows_json=? WHERE id=?",
+                (repository.dump_json(EDITED_ROWS), proposal["proposalId"]))
+        response = self.client.post(f"/api/sessions/{self.session_id}/proposals/{proposal['proposalId']}/decision", json={
+            "decision": "accept", "baseVersionId": version_id, "idempotencyKey": "permission-accept"})
+        self.assertEqual(response.status_code, 400, response.text)
+        diagnostic = response.json()["details"]["proposalDiagnostic"]
+        self.assertEqual(diagnostic["finalFailure"]["reasonCode"], "PROTECTED_EDIT")
+        self.assertEqual(diagnostic["finalFailure"]["stage"], "permission_validation")
+        self.assertEqual(self.read_session()["currentVersionId"], version_id)
+        self.assertEqual(len(self.read_session()["versions"]), 1)
+        self.assertEqual(self.read_session()["proposals"][0]["status"], "pending")
+        with repository.connect() as database:
+            record = database.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='reply_pipeline_diagnostic' "
+                "AND json_extract(payload_json,'$.messageKey')='permission-accept'", (self.session_id,)).fetchone()
+        self.assertEqual(repository.load_json(record["payload_json"])["proposalDiagnostic"]["requestOutcome"], "failed")
 
     def test_unverified_ordinary_understanding_delivers_conversation_once_without_actions(self):
         version_id = self.read_session()["currentVersionId"]
@@ -1381,11 +1487,11 @@ class CoCreationSessionTests(unittest.TestCase):
             {"x": 1, "y": 1, "before": ".", "after": "#"},
         ])
 
-    def test_multi_cell_entity_revision_replays_its_complete_frozen_diff(self):
+    def test_multi_cell_water_revision_replays_its_complete_frozen_diff(self):
         version_id = self.read_session()["currentVersionId"]
         source_turn = self.offer_bound_revision(
-            PLAYER_MOVE_BRIEF,
-            summary="Move the player start left",
+            WATER_RESHAPE_BRIEF,
+            summary="Adjust the water distribution",
             message_key="exact-player-offer-001",
         )
 
@@ -1397,7 +1503,7 @@ class CoCreationSessionTests(unittest.TestCase):
             executed = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Execute this frozen player proposal.",
+                    "content": "Execute this frozen water proposal.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "exact-player-execute-001",
                     "action": "execute_revision",
@@ -1407,10 +1513,10 @@ class CoCreationSessionTests(unittest.TestCase):
 
         self.assertEqual(executed.status_code, 200, executed.text)
         proposal = executed.json()["proposals"][0]
-        self.assertEqual(proposal["proposedRows"], EDITED_ROWS)
+        self.assertEqual(proposal["proposedRows"], WATER_EDITED_ROWS)
         self.assertEqual(
             {(item["x"], item["y"], item["before"], item["after"]) for item in proposal["diff"]},
-            {(4, 4, "p", "."), (3, 4, ".", "p")},
+            {(1, 1, ".", "@"), (2, 1, ".", "@")},
         )
 
     def test_already_satisfied_binding_stops_before_revision_generation(self):
@@ -3453,11 +3559,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 "solutionSummary": "One-box route",
                 "difficultyOpinion": "Likely easy",
                 "features": ["Compact"],
-                "suggestions": ["Review the player start"],
+                "suggestions": ["Review the water distribution"],
                 "satisfactionQuestion": "Does this match your intention?",
             },
-            proposed_rows=EDITED_ROWS,
-            modification_summary="Moved the player start left.",
+            proposed_rows=WATER_EDITED_ROWS,
+            modification_summary="Adjusted the water distribution.",
             model="mock-model",
             guidance={
                 "move": "deliver_revision",
@@ -3468,19 +3574,19 @@ class CoCreationSessionTests(unittest.TestCase):
             },
             revision_plan={
                 "strategies": [{
-                    "effect": "relocate_start",
-                    "operators": ["move_player"],
+                    "effect": "reshape_water",
+                    "operators": ["add_water"],
                 }],
             },
             proposal_diagnostics={
                 "constructedCandidates": 12,
                 "validCandidates": 4,
-                "selectedOperators": ["move_player"],
+                "selectedOperators": ["add_water"],
                 "selectedStrategyIndex": 1,
                 "changedCellCount": 2,
             },
-            revision_contract=PLAYER_MOVE_CONTRACT,
-            revision_operations=PLAYER_MOVE_OPERATIONS,
+            revision_contract=WATER_RESHAPE_CONTRACT,
+            revision_operations=WATER_RESHAPE_OPERATIONS,
         )
 
         offer_execution = LLMExecutionResult(
@@ -3494,9 +3600,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": None,
                 "proposalOffer": {
-                    "summary": "Move the player start left",
+                    "summary": "Adjust the water distribution",
                     "rationale": "This changes the first route choice while preserving the box-target relationship.",
-                    "executionBrief": PLAYER_MOVE_BRIEF,
+                    "executionBrief": WATER_RESHAPE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -3506,7 +3612,7 @@ class CoCreationSessionTests(unittest.TestCase):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Move the player one cell left.",
+                    "content": "Add water in the upper-left area.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "proposal_offer_001",
                 },
@@ -3529,8 +3635,8 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(proposed_session["proposals"][0]["status"], "pending")
         self.assertEqual(
             proposed_session["proposals"][0]["summary"],
-            "Verified tile changes (2 total): row 5, column 4: floor → player; "
-            "row 5, column 5: player → floor.",
+            "Verified tile changes (2 total): row 2, column 2: floor → water; "
+            "row 2, column 3: floor → water.",
         )
         proposal_turn_before_acceptance = next(
             turn
@@ -3562,7 +3668,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(search_payload["search"]["validCandidates"], 4)
         self.assertEqual(
             search_payload["revisionPlan"]["strategies"][0]["effect"],
-            "relocate_start",
+            "reshape_water",
         )
         repeated = self.client.post(
             f"/api/sessions/{self.session_id}/messages",
@@ -3598,7 +3704,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(accepted.status_code, 200, accepted.text)
         self.assertEqual(len(accepted.json()["versions"]), 2)
-        self.assertEqual(accepted.json()["versions"][1]["rows"], EDITED_ROWS)
+        self.assertEqual(accepted.json()["versions"][1]["rows"], WATER_EDITED_ROWS)
         self.assertEqual(accepted.json()["versions"][1]["source"], "llm_accepted")
         stage_two = accepted.json()["versions"][1]
         proposal_turn = next(
@@ -3725,8 +3831,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "I prepared a focused map proposal for your review.",
             1,
             "hypothesis-proposal-request",
-            proposed_rows=EDITED_ROWS,
-            modification_summary="Move the player start left.",
+            proposed_rows=WATER_EDITED_ROWS,
+            modification_summary="Adjust the water distribution.",
             model="mock-model",
             guidance={
                 "move": "deliver_revision",
@@ -3736,10 +3842,10 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": None,
             },
             revision_plan={
-                "strategies": [{"effect": "relocate_start", "operators": ["move_player"]}]
+                "strategies": [{"effect": "reshape_water", "operators": ["add_water"]}]
             },
-            revision_contract=PLAYER_MOVE_CONTRACT,
-            revision_operations=PLAYER_MOVE_OPERATIONS,
+            revision_contract=WATER_RESHAPE_CONTRACT,
+            revision_operations=WATER_RESHAPE_OPERATIONS,
             proposal_diagnostics={
                 "selectedStrategyIndex": 1,
                 "changedCellCount": 2,
@@ -3757,9 +3863,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": None,
                 "proposalOffer": {
-                    "summary": "Move the player start left",
+                    "summary": "Adjust the water distribution",
                     "rationale": "This changes the first route choice while preserving the box-target relationship.",
-                    "executionBrief": PLAYER_MOVE_BRIEF,
+                    "executionBrief": WATER_RESHAPE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -3768,7 +3874,7 @@ class CoCreationSessionTests(unittest.TestCase):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
-                    "content": "Move the player one cell left.",
+                    "content": "Add water in the upper-left area.",
                     "baseVersionId": version_id,
                     "idempotencyKey": "hypothesis_offer_001",
                 },
@@ -3941,7 +4047,7 @@ class CoCreationSessionTests(unittest.TestCase):
     def test_unchanged_pending_proposal_cannot_be_accepted(self):
         version_id = self.read_session()["currentVersionId"]
         self.seed_answered_proposal_topic(
-            "Please shift player P left.",
+            "Please adjust water in the upper-left area.",
             "Keep the first route readable.",
             key="tamper-offer-seed",
         )
@@ -3949,8 +4055,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "Here is a real revision for review.",
             1,
             "proposal-before-tamper",
-            proposed_rows=EDITED_ROWS,
-            modification_summary="Moved the player start left.",
+            proposed_rows=WATER_EDITED_ROWS,
+            modification_summary="Adjusted the water distribution.",
             model="mock-model",
             guidance={
                 "move": "deliver_revision",
@@ -3972,9 +4078,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "intentConfidence": None,
                 "followUpQuestion": None,
                 "proposalOffer": {
-                    "summary": "Move the player start left",
+                    "summary": "Adjust the water distribution",
                     "rationale": "This changes the opening route while keeping the puzzle solvable.",
-                    "executionBrief": PLAYER_MOVE_BRIEF,
+                    "executionBrief": WATER_RESHAPE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -4774,7 +4880,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Make the first push create a detour choice",
                     "rationale": "The player should compare the central route with a local detour.",
-                    "executionBrief": PLAYER_MOVE_BRIEF,
+                    "executionBrief": WATER_RESHAPE_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -4811,7 +4917,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": source_turn["guidance"]["proposalOffer"],
                 "uiCues": [],
             },
-            proposed_rows=EDITED_ROWS,
+            proposed_rows=WATER_EDITED_ROWS,
         )
         with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
             challenged = self.client.post(
@@ -4865,7 +4971,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Change the box approach order instead",
                     "rationale": "This changes the decision before the first push without copying the detour treatment.",
-                    "executionBrief": PLAYER_MOVE_BRIEF,
+                    "executionBrief": WATER_RIGHT_BRIEF,
                 },
                 "uiCues": [],
             },
@@ -4906,10 +5012,10 @@ class CoCreationSessionTests(unittest.TestCase):
             1,
             "execute-001",
             model="mock-model",
-            proposed_rows=EDITED_ROWS,
-            revision_plan={"strategies": [{"effect": "relocate_start"}]},
-            revision_contract=PLAYER_MOVE_CONTRACT,
-            revision_operations=PLAYER_MOVE_OPERATIONS,
+            proposed_rows=WATER_RIGHT_ROWS,
+            revision_plan={"strategies": [{"effect": "reshape_water"}]},
+            revision_contract=WATER_RIGHT_CONTRACT,
+            revision_operations=WATER_RIGHT_OPERATIONS,
             proposal_diagnostics={"selectedStrategyIndex": 1, "changedCellCount": 2},
             guidance={
                 "move": "deliver_revision",
@@ -5172,7 +5278,7 @@ class CoCreationSessionTests(unittest.TestCase):
         offer = {
             "summary": "Make the first push create a detour choice",
             "rationale": "The player should compare the central route with a local detour.",
-            "executionBrief": PLAYER_MOVE_BRIEF,
+            "executionBrief": WATER_RESHAPE_BRIEF,
         }
         offer_execution = LLMExecutionResult(
             "I see one focused direction worth comparing.",
@@ -5316,7 +5422,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": {
                     "summary": "Keep the direct opening and sharpen its first commitment",
                     "rationale": "This follows your reason while making the early commitment easier to read.",
-                    "executionBrief": PLAYER_MOVE_RIGHT_BRIEF,
+                    "executionBrief": WATER_RIGHT_BRIEF,
                 },
                 "disagreement": resolved,
                 "uiCues": [],
@@ -6099,8 +6205,8 @@ class CoCreationSessionTests(unittest.TestCase):
     def test_choice_pending_yes_revalidates_challenged_exact_tiles(self):
         version_id = self.read_session()["currentVersionId"]
         source = self.offer_bound_revision(
-            PLAYER_MOVE_BRIEF,
-            summary="Move the player start left by one tile",
+            WATER_RESHAPE_BRIEF,
+            summary="Adjust the water distribution",
             message_key="choice-exact-source",
         )
         challenge_execution = LLMExecutionResult(
@@ -6136,7 +6242,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "subject": "ai_revision_challenge",
                 "phase": "choice_pending",
                 "challengeId": challenge_id,
-                "proposalSummary": "Move the player start left by one tile",
+                "proposalSummary": "Adjust the water distribution",
                 "acceptedReason": "I also want to change the water",
                 "nextQuestion": "Revalidate the original exact tile changes?",
             }
@@ -6157,7 +6263,7 @@ class CoCreationSessionTests(unittest.TestCase):
         pending = [item for item in response.json()["proposals"] if item["status"] == "pending"]
         self.assertEqual(len(pending), 1, response.json()["turns"][-1])
         expected = {(item["row"], item["column"], item["from"], item["to"])
-                    for item in PLAYER_MOVE_BRIEF["requiredTransitions"]}
+                    for item in WATER_RESHAPE_BRIEF["requiredTransitions"]}
         actual = {(item["y"] + 1, item["x"] + 1, item["before"], item["after"])
                   for item in pending[0]["diff"]}
         self.assertEqual(actual, expected)

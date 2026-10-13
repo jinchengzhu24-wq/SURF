@@ -83,7 +83,13 @@ def summarize(events, example_limit=3):
     skipped = Counter()
     recoveries = {}
     pipeline_attempts = {}
+    proposal_attempts = {}
     for event in events:
+        payload_for_diagnostic = event.get("payload") or {}
+        proposal_diagnostic = (payload_for_diagnostic.get("proposalDiagnostic") or
+            (payload_for_diagnostic.get("details") or {}).get("proposalDiagnostic")) if isinstance(payload_for_diagnostic, dict) else None
+        if isinstance(proposal_diagnostic, dict) and proposal_diagnostic.get("requestId"):
+            proposal_attempts[(event.get("sessionId"), proposal_diagnostic["requestId"])] = proposal_diagnostic
         if event.get("eventType") == "reply_pipeline_diagnostic":
             value = event.get("payload") or {}
             if value.get("requestId"):
@@ -164,6 +170,20 @@ def summarize(events, example_limit=3):
             "stageOutcomes": dict(Counter(step.get("stage", "unknown") + ":" + step.get("status", "unknown")
                 for p in pipeline_attempts.values() for step in p.get("steps", []) if isinstance(step, dict))),
             "scope": "stage outcomes per observed HTTP attempt; not model accuracy or browser receipt"},
+        "proposalDiagnostics": {
+            "httpAttempts": len(proposal_attempts),
+            "pipelineRecordsMissingDiagnostic": sum(not isinstance(value.get("proposalDiagnostic"), dict) for value in pipeline_attempts.values()),
+            "versions": dict(Counter(value.get("diagnosticVersion", "unknown") for value in proposal_attempts.values())),
+            "stageOutcomes": dict(Counter(step.get("stage", "unknown") + ":" + step.get("status", "unknown")
+                for value in proposal_attempts.values() for step in value.get("steps", []) if isinstance(step, dict))),
+            "failureReasons": dict(Counter(step.get("reasonCode", "UNKNOWN")
+                for value in proposal_attempts.values() for step in value.get("steps", [])
+                if isinstance(step, dict) and step.get("status") in {"failed", "rejected", "revalidation_failed"})),
+            "repairOutcomes": dict(Counter(step.get("component", "unknown") + ":" + step.get("status", "unknown")
+                for value in proposal_attempts.values() for step in value.get("steps", [])
+                if isinstance(step, dict) and step.get("stage") == "component_repair")),
+            "scope": "observed phase/repair outcomes only; merged patches are not verified repairs or model accuracy",
+        },
         "stateRecoveries": {"tasks": len(recoveries),
             "attemptsUsed": sum(item.get("attemptsUsed", 0) for item in recoveries.values()),
             "byStatus": dict(Counter(item.get("status", "unknown") for item in recoveries.values())),

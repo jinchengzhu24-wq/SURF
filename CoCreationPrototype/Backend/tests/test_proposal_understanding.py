@@ -123,14 +123,14 @@ class ProposalUnderstandingTests(unittest.TestCase):
                 self.assertEqual(reviewer_input["source"]["proposalContext"]["lastQuestionText"], question)
                 self.assertEqual(result["changes"][0]["operation"], "change" if "relocated" in question else "mention")
 
-    def test_unverified_review_uses_two_rounds_and_returns_retryable_error(self):
+    def test_verified_review_rejection_stops_without_repairing_acceptance(self):
         answer = "Around T1"
         bad = understanding(answer, topic(focus=[item(answer, entities=["T1"])]), operation="change", acts=["revision_request"])
         rejected = {"accepted": False, "issues": ["ambiguous action"], "understanding": bad}
         with self.assertRaises(llm.LLMServiceError) as caught:
-            self.classify(answer, [bad, rejected, bad, rejected])
+            self.classify(answer, [bad, rejected])
         self.assertTrue(caught.exception.retryable)
-        self.assertEqual(caught.exception.attempts_used, 2)
+        self.assertEqual(caught.exception.attempts_used, 1)
         self.assertFalse(self.context["understanding"]["sufficient"])
 
     def test_scope_correction_gets_review_and_old_focus_does_not_replace_scope(self):
