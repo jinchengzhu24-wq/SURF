@@ -1,7 +1,66 @@
 """Component outcomes and bounded recovery shared by the 8010 LLM tasks."""
 import json
 import time
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
+
+
+REPLY_PIPELINE_VERSION = "ordinary-harness-2026-10-13-v2"
+CURRENT_REPLY_TRACE = ContextVar("cocreation_reply_trace", default=None)
+
+
+def failure_reason(error):
+    """Stable categories only: never put exception/model text in delivery traces."""
+    if isinstance(error, TimeoutError):
+        return "UPSTREAM_TIMEOUT"
+    if isinstance(error, json.JSONDecodeError):
+        return "INVALID_JSON"
+    code = getattr(error, "code", "")
+    if isinstance(code, str) and code and code.replace("_", "").isalnum() and code.upper() == code:
+        return code[:80]
+    message = str(error).lower()
+    for marker, reason in (("truncat", "TRUNCATED_OUTPUT"), ("output limit", "TRUNCATED_OUTPUT"),
+                           ("evidence", "EXACT_EVIDENCE_INVALID"), ("ground", "MAP_GROUNDING_INVALID"),
+                           ("coordinate", "MAP_GROUNDING_INVALID"), ("language", "VISIBLE_LANGUAGE_INVALID"),
+                           ("implementation identifier", "VISIBLE_LANGUAGE_INVALID"),
+                           ("tentative", "TENTATIVE_PRESENTATION_INVALID")):
+        if marker in message:
+            return reason
+    return "VALIDATION_FAILED"
+
+
+class ReplyTrace:
+    """Bounded request-local diagnostics, independent of model and state decisions."""
+    def __init__(self, request_id, message_key, version_id, logger):
+        self.identity = {"requestId": request_id, "messageKey": message_key,
+                         "baseVersionId": version_id, "pipelineVersion": REPLY_PIPELINE_VERSION}
+        self.steps = []
+        self.started = {}
+        self.logger = logger
+
+    def record(self, stage, status, code="", **fields):
+        allowed = {"attempt", "modelCalls", "repairAttempts", "optionalSpentSeconds", "optionalRemainingSeconds",
+                   "classification", "relation", "source", "cardPresent", "questionCount", "answeredCount",
+                   "rule", "assistantTurnId", "branch", "cacheHits", "mapChecks", "questionIds"}
+        data = {key: value for key, value in fields.items() if key in allowed}
+        stamp = time.monotonic()
+        if status == "started":
+            self.started[stage] = stamp
+        elif stage in self.started:
+            data["elapsedMs"] = int(max(0, stamp - self.started.pop(stage)) * 1000)
+        step = {"stage": stage, "status": status, "code": code, **data}
+        self.steps.append(step)
+        self.steps = self.steps[-96:]
+        self.logger("reply_pipeline_stage", **self.identity, **step)
+
+    def diagnostic(self, assistant_turn_id=None):
+        return {**self.identity, "assistantTurnId": assistant_turn_id, "steps": list(self.steps)}
+
+
+def trace_reply(stage, status, code="", **fields):
+    trace = CURRENT_REPLY_TRACE.get()
+    if trace is not None:
+        trace.record(stage, status, code, **fields)
 
 
 @dataclass(frozen=True)

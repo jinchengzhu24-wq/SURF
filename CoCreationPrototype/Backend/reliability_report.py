@@ -13,7 +13,7 @@ from pathlib import Path
 EVENT_TYPES = (
     "message_generation_failed", "reply_generation_failed",
     "challenge_reason_review_pending", "reply_delivery_outcome",
-    "component_recovery",
+    "component_recovery", "reply_pipeline_diagnostic",
 )
 CATEGORY_LABELS = {
     "upstream_timeout": "请求时间预算或模型/网络超时",
@@ -82,7 +82,13 @@ def summarize(events, example_limit=3):
     requests = {}
     skipped = Counter()
     recoveries = {}
+    pipeline_attempts = {}
     for event in events:
+        if event.get("eventType") == "reply_pipeline_diagnostic":
+            value = event.get("payload") or {}
+            if value.get("requestId"):
+                pipeline_attempts[(event.get("sessionId"), value["requestId"])] = value
+            continue
         if event.get("eventType") == "component_recovery":
             payload = event.get("payload") or {}
             if payload.get("recoveryId"):
@@ -115,7 +121,8 @@ def summarize(events, example_limit=3):
     def counts(samples):
         eligible = [item for item in samples if not item.get("deterministicReceipt") and not item.get("snapshotFallback")]
         result = {}
-        for field in ("modelGenerationSucceeded", "reliableBodyDelivered", "fullQualityPassed"):
+        for field in ("modelGenerationSucceeded", "reliableBodyDelivered", "fullQualityPassed",
+                      "intentReviewVerified", "intentCardCommitted", "questionReviewVerified", "questionProgressUpdated"):
             observed = [item for item in eligible if isinstance(item.get(field), bool)]
             passed = sum(item[field] for item in observed)
             result[field] = {"passed": passed, "total": len(eligible), "observed": len(observed),
@@ -152,6 +159,11 @@ def summarize(events, example_limit=3):
     verified = sum(bool(item["last"].get("verifiedProposal")) for item in proposals)
     return {
         "logicalRequests": len(requests),
+        "pipelineDiagnostics": {"httpAttempts": len(pipeline_attempts),
+            "versions": dict(Counter(p.get("pipelineVersion", "unknown") for p in pipeline_attempts.values())),
+            "stageOutcomes": dict(Counter(step.get("stage", "unknown") + ":" + step.get("status", "unknown")
+                for p in pipeline_attempts.values() for step in p.get("steps", []) if isinstance(step, dict))),
+            "scope": "stage outcomes per observed HTTP attempt; not model accuracy or browser receipt"},
         "stateRecoveries": {"tasks": len(recoveries),
             "attemptsUsed": sum(item.get("attemptsUsed", 0) for item in recoveries.values()),
             "byStatus": dict(Counter(item.get("status", "unknown") for item in recoveries.values())),

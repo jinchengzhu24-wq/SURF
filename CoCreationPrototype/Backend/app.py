@@ -48,6 +48,7 @@ from level_validation import (
 from demo_level_generator import generate_demo_level
 from conversation_evidence import build_dialogue_evidence, with_latest
 import component_recovery
+from reply_reliability import CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, ReplyTrace, trace_reply, failure_reason
 from llm_client import (
     LLMExecutionResult,
     LLMServiceError,
@@ -74,6 +75,7 @@ from llm_client import (
     translate_turns,
     validate_execution_brief,
     _repair_stage_one_opening_display,
+    _log_llm_event,
 )
 from repository import (
     DATABASE_PATH,
@@ -750,6 +752,7 @@ async def attach_request_id(request: Request, call_next):
     request.state.llm_deadline = request.state.llm_started_at + LLM_INTERNAL_DEADLINE_SECONDS
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    response.headers["X-Reply-Pipeline-Version"] = REPLY_PIPELINE_VERSION
     if request.url.path in {"/", "/index.html", "/cocreation/", "/cocreation/index.html"}:
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
@@ -2949,7 +2952,37 @@ def _record_dashboard_failed_request(session_id, payload, content, access_cookie
     return None
 
 
-def _send_message_locked(
+def _send_message_locked(session_id, payload, content, request, response, access_cookie):
+    trace = ReplyTrace(request.state.request_id, payload.idempotencyKey, payload.baseVersionId, _log_llm_event)
+    token = CURRENT_REPLY_TRACE.set(trace)
+    trace.record("routing", "started")
+    try:
+        result = _send_message_locked_impl(session_id, payload, content, request, response, access_cookie)
+        trace.record("http_response", "prepared")
+        return result
+    except (ApiError, LLMServiceError) as error:
+        trace.record("request", "failed", failure_reason(error))
+        error.details = {**(getattr(error, "details", {}) or {}), "replyPipeline": trace.diagnostic()}
+        raise
+    finally:
+        # One append-only diagnostic record per HTTP attempt, including failures
+        # already recorded as logical outcomes. It is not another request/retry.
+        try:
+            with connect(immediate=True) as database:
+                require_browser_session(database, session_id, access_cookie)
+                observed = database.execute("SELECT 1 FROM conversation_turns WHERE session_id=? AND request_id=? LIMIT 1",
+                    (session_id, payload.idempotencyKey)).fetchone()
+                if not observed:
+                    observed = database.execute("SELECT 1 FROM audit_events WHERE session_id=? AND event_type='message_generation_failed' "
+                        "AND json_extract(payload_json,'$.messageKey')=? LIMIT 1", (session_id, payload.idempotencyKey)).fetchone()
+                if observed:
+                    record_event(database, session_id, "reply_pipeline_diagnostic", trace.diagnostic(), utc_now())
+        except (ApiError, sqlite3.Error):
+            pass
+        CURRENT_REPLY_TRACE.reset(token)
+
+
+def _send_message_locked_impl(
     session_id,
     payload,
     content,
@@ -3037,7 +3070,7 @@ def _send_message_locked(
                         "proposalRequested": payload.requestProposal,
                         "requestSignature": request_signature,
                         "details": {**_llm_failure_details(error), "task": "turn_understanding",
-                                    "failureStage": "understanding", "maximumAttempts": 2},
+                                    "failureStage": (getattr(error, "details", {}) or {}).get("failureStage", "understanding"), "maximumAttempts": 2},
                     }, utc_now())
                 # A failed interpretation cannot authorize a proposal or a state
                 # transition. Ordinary input can still receive reliable Kimi prose.
@@ -3260,6 +3293,7 @@ def _send_message_locked(
             # act, not from the legacy keyword classifier.
             context = build_llm_context(database, session_id, current)
         stage_context = context["stageContext"]
+        stage_context.setdefault("_reliabilityState", {})
         stage_context["requirementPolicyVersion"] = 1
         stage_context["requirementUserTurns"] = [{"id": user_turn_id, "content": content}]
         if turn_understanding is not None:
@@ -3492,8 +3526,16 @@ def _send_message_locked(
             if excluded_rows is not None:
                 stage_context["excludedProposalCandidateFingerprint"] = map_fingerprint(excluded_rows)
     question_answer_review = {"answeredQuestionIds": [], "results": []}
+    joint_ordinary_review = bool(payload.action == "none" and not payload.requestProposal
+        and not proposal_discovery and not stage_context.get("activeDisagreement")
+        and not stage_context.get("conversationOnly")
+        and not set((stage_context.get("turnUnderstanding") or {}).get("acts") or []) & {"revision_request"})
+    stage_context["ordinaryOpenQuestions"] = [{"questionId": q.get("id"), "question": q.get("question")}
+        for q in stage_context.get("designContext", {}).get("openQuestions", [])
+        if q.get("status") == "open" and q.get("sourceKind") in {"visible_output", "legacy"}][:24] if joint_ordinary_review and allow_progress else []
     if (
-        payload.action in {"none", "continue_challenge"}
+        not joint_ordinary_review
+        and payload.action in {"none", "continue_challenge"}
         and deterministic_challenge_choice is None
         and (
             allow_progress
@@ -3518,7 +3560,7 @@ def _send_message_locked(
                     content,
                     language,
                     request.state.request_id,
-                    _deadline=min(message_started_at + 10.0,
+                    _deadline=min(optional_started + 10.0,
                         message_started_at + LLM_INTERNAL_DEADLINE_SECONDS - 20.0),
                 )
             except LLMServiceError:
@@ -4008,6 +4050,9 @@ def _send_message_locked(
     context["stageContext"]["conversationBranch"] = (
         "proposal" if proposal_branch else "ordinary"
     )
+    trace_reply("routing", "passed", branch="conversation_only" if context["stageContext"].get("conversationOnly") else
+                "disagreement" if context["stageContext"].get("activeDisagreement") else
+                context["stageContext"]["conversationBranch"])
     message_deadline = (
         challenge_deadline
         or message_started_at + LLM_INTERNAL_DEADLINE_SECONDS
@@ -4230,6 +4275,10 @@ def _send_message_locked(
                         utc_now(),
                     )
     _persist_verified_requirements(session_id, payload.baseVersionId, context["stageContext"])
+    if joint_ordinary_review:
+        question_answer_review = context["stageContext"].get("_reliabilityState", {}).get("questionAnswerReview") or question_answer_review
+        execution = replace(execution, proposal_diagnostics={**(execution.proposal_diagnostics or {}),
+            "questionProgressUpdated": bool(question_answer_review.get("answeredQuestionIds"))})
     proposal_recovery = bool((execution.proposal_diagnostics or {}).get("verifiedFailureAnalysis"))
     if proposal_recovery and challenge_choice_resolution is not None:
         # No validated replacement exists yet. Keep the canonical choice
@@ -4396,7 +4445,6 @@ def _send_message_locked(
     )
     intent_allowed = bool(
         context["stageContext"].get("conversationBranch") == "ordinary"
-        and not context["stageContext"].get("answeredVisibleQuestion")
         and (
             execution_guidance.get("_intentDecision", {}).get("classification")
             == "candidate"
@@ -4538,6 +4586,7 @@ def _send_message_locked(
     )
     response.headers["X-LLM-Attempts-Used"] = str(execution.attempts_used)
 
+    trace_reply("commit", "started")
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         require_current_base(session, payload.baseVersionId)
@@ -4557,6 +4606,7 @@ def _send_message_locked(
                     or payload.action != "none"):
                 raise ApiError(409, "PROPOSAL_STALE", "The dialogue evidence or interaction state changed. Send a request based on the current dialogue.",
                                retryable=False, details={"failureStage": "context_binding", "failureKind": "state_or_evidence_change"})
+            trace_reply("commit", "preserved", "CONCURRENT_CHANGE", cardPresent=False)
             # Immutable map prose can remain useful, but old optional metadata
             # and old state signals cannot overwrite a newer user/state change.
             body = _strip_unverified_state_claims(execution.assistant_message)
@@ -5158,6 +5208,9 @@ def _send_message_locked(
                 component_recovery.enqueue(database, session_id, payload.baseVersionId,
                                            user_turn_id, assistant_turn_id, payload.idempotencyKey)
 
+        trace_reply("commit", "passed", assistantTurnId=assistant_turn_id,
+                    cardPresent=bool((execution.guidance or {}).get("intentHypothesis")),
+                    answeredCount=len(question_answer_review.get("answeredQuestionIds") or []))
         session_payload = serialize_session(database, session_id)
 
     synchronize_turn_with_online_match(session_id, payload.idempotencyKey)
@@ -5179,6 +5232,12 @@ def _record_reply_outcome(database, session_id, message_key, version_id, executi
         "snapshotFallback": snapshot_fallback, "deterministicReceipt": deterministic,
         "attemptsUsed": execution.attempts_used, "latencyMs": execution.latency_ms,
         "componentChecks": diagnostics.get("componentChecks") or [],
+        "requestId": CURRENT_REPLY_TRACE.get().identity["requestId"] if CURRENT_REPLY_TRACE.get() else execution.request_id,
+        "pipelineVersion": REPLY_PIPELINE_VERSION,
+        "intentCardCommitted": bool((execution.guidance or {}).get("intentHypothesis")),
+        "intentReviewVerified": diagnostics.get("intentReviewVerified"),
+        "questionReviewVerified": diagnostics.get("questionReviewVerified"),
+        "questionProgressUpdated": diagnostics.get("questionProgressUpdated"),
         "failureCode": diagnostics.get("failureCode"),
         "proposalStatus": diagnostics.get("proposalStatus"),
     }, utc_now())
@@ -11928,6 +11987,8 @@ def _public_guidance(guidance):
     result.pop("_intentSemanticClaims", None)
     result.pop("_intentDecision", None)
     result.pop("_intentCandidateReview", None)
+    result.pop("_intentDraftAudit", None)
+    result.pop("_intentReviewAudit", None)
     result.pop("_humanEditEngagement", None)
     result.pop("_stateTransitionDeferred", None)
     result.pop("manualEditReview", None)
@@ -12419,7 +12480,7 @@ def _update_design_context_from_turn(
 
     previous = load_design_context(database, session_id, version_id)
     candidate_review = guidance.get("_intentCandidateReview") or {}
-    lazy_updates = candidate_review.get("reviewedActiveClaims") or []
+    lazy_updates = (candidate_review.get("reviewedActiveClaims") or []) if guidance.get("intentHypothesis") else []
     for update in lazy_updates:
         target = next((
             item for item in previous.get("intentHypotheses", [])
@@ -12501,8 +12562,8 @@ def _update_design_context_from_turn(
 
     hypothesis_id = None
     hypothesis = str(guidance.get("intentHypothesis") or "").strip()
-    intent_decision = guidance.get("_intentDecision")
-    intent_candidate_review = guidance.get("_intentCandidateReview")
+    intent_decision = guidance.get("_intentDraftAudit", guidance.get("_intentDecision"))
+    intent_candidate_review = guidance.get("_intentReviewAudit", guidance.get("_intentCandidateReview"))
     if allow_progress and isinstance(intent_decision, dict):
         record_event(
             database,
@@ -12537,7 +12598,8 @@ def _update_design_context_from_turn(
                     claim.get("evidenceSpan")
                     for claim in intent_candidate_review.get("claims") or []
                 ],
-                "claims": guidance.get("_intentSemanticClaims") or [],
+                "claims": intent_candidate_review.get("claims") or [],
+                "cardDelivered": bool(hypothesis),
             },
             utc_now(),
         )

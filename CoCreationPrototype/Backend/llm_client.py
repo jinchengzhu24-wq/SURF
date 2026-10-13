@@ -1,4 +1,6 @@
 import asyncio
+import copy
+from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
@@ -37,7 +39,8 @@ from level_validation import (
 )
 from design_context import validate_design_context_patch
 from repository import map_fingerprint
-from reply_reliability import ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key
+from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key,
+    CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
 from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
 from conversation_evidence import CONTEXT_VERSION
 from proposal_understanding import (
@@ -139,7 +142,7 @@ PROMPT_VERSION = "cocreation-v62-human-edit-state-replay"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
-INTENT_REVIEW_VERSION = "intent-candidate-review-v1"
+INTENT_REVIEW_VERSION = "intent-candidate-review-v2-joint-components"
 QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS = 700
 INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS = 700
 MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS = 3200
@@ -348,6 +351,7 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
                 "classification": {"type": "string", "enum": ["none", "candidate", "reference_only"]},
                 "claims": {"type": "array", "maxItems": 4, "items": claim_schema},
                 "cardText": {"type": "string"},
+                "answeredQuestionIds": {"type": "array", "maxItems": 24, "items": {"type": "string"}},
                 "cardTextValid": {"type": "boolean"},
                 "bodyValid": {"type": "boolean"},
                 "relation": {"type": "string", "enum": ["none", "compatible", "conflict", "unclear"]},
@@ -368,11 +372,15 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
             },
             "required": [
                 "classification", "claims", "cardText", "cardTextValid", "bodyValid", "relation",
-                "conflictingHypothesisIds", "explanation", "issues", "reviewedActiveClaims",
+                "conflictingHypothesisIds", "explanation", "issues", "reviewedActiveClaims", "answeredQuestionIds",
             ],
         }
         name = "cocreation_intent_candidate_review"
-    elif task in {"intent_component_repair", "intent_body_repair", "intent_card_repair"}:
+    elif task == "intent_card_repair":
+        schema = {"type": "object", "additionalProperties": False,
+                  "properties": {"cardText": {"type": "string"}}, "required": ["cardText"]}
+        name = "cocreation_intent_card_repair"
+    elif task in {"intent_component_repair", "intent_body_repair"}:
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -1279,7 +1287,7 @@ def build_plain_chat_messages(
             "decrease, maintain, avoid, evaluate, or unspecified; degree=excessive, insufficient, "
             "neutral, or unspecified; aspect=visual, gameplay, or unspecified; scopeType=stage, "
             "region, entity, or other. Use subjectType or attributeType=other with precise natural-language Text "
-            "when a fixed label is inadequate. candidate requires claims and a two-to-four-sentence "
+            "when a fixed label is inadequate. candidate requires claims and a concise "
             "tentative, correctable cardText; none/reference_only require empty claims and cardText. "
             "A modal possibility such as 水域可以多一些 expresses a candidate direction, while a "
             "bare 可以, 这个方案可以, or 可以按刚才的方案做 is reference_only. Do not infer a gameplay "
@@ -2662,7 +2670,23 @@ def _validate_named_entity_relations(text, facts):
                         )
 
 
-def _validate_map_grounding_texts(
+_GROUNDING_MEMO = ContextVar("cocreation_grounding_memo", default=None)
+
+
+def _validate_map_grounding_texts(texts, rows, *, historical_reference=False, entity_bindings=None):
+    memo = _GROUNDING_MEMO.get()
+    key = json.dumps([texts, rows, historical_reference, entity_bindings], sort_keys=True, ensure_ascii=False)
+    if memo is not None and key in memo["passed"]:
+        memo["hits"] += 1
+        return
+    _check_map_grounding_texts(texts, rows, historical_reference=historical_reference, entity_bindings=entity_bindings)
+    if memo is not None:
+        memo["checks"] += 1
+        if len(memo["passed"]) < 256:
+            memo["passed"].add(key)
+
+
+def _check_map_grounding_texts(
     texts,
     rows,
     *,
@@ -9267,9 +9291,42 @@ async def _translate_with_model_fallback(
 
 async def _review_intent_candidate_async(
     *, api_key, base_url, user_text, body, decision, active_inclinations,
-    language, request_id, deadline, discussion_background="",
+    language, request_id, deadline, discussion_background="", visible_questions=None, component_state=None, locked_review=None,
 ):
-    """Independently review card presence, semantics, prose, and conflicts."""
+    """One independent call; intent, presentation and question results validate separately."""
+    safe_questions = _ordinary_review_questions(visible_questions)
+    if locked_review is not None:
+        # Reuse this existing review slot for the changed body only. The model
+        # must not re-copy or reconsider verified claims, cards or question IDs.
+        timeout = min(30.0, _remaining_until(deadline))
+        if timeout <= 0:
+            raise asyncio.TimeoutError()
+        schema = {"type": "json_schema", "json_schema": {"name": "cocreation_intent_body_review", "strict": True,
+            "schema": {"type": "object", "additionalProperties": False,
+                "properties": {"bodyValid": {"type": "boolean"}, "issues": {"type": "array", "items": {"type": "string"}}},
+                "required": ["bodyValid", "issues"]}}}
+        messages = [{"role": "system", "content": (
+            "Independently review ONLY the changed BODY against exact user evidence and LOCKED CLAIMS. "
+            "Return JSON bodyValid and concise issues. Reject irrelevant prose, invented user purposes, "
+            "claim contradictions or unfinished prose; length, sentence count and stylistic depth are advisory. "
+            "Map facts are checked by the server. Do not generate or reclassify intent, a card, question progress, "
+            "permission or state. The locked semantic result remains authoritative.")},
+            {"role": "user", "content": json.dumps({"userEvidence": user_text, "body": body,
+                "lockedClaims": locked_review["claims"]}, ensure_ascii=False)}]
+        trace_reply("body_review", "started", modelCalls=1)
+        response = await asyncio.wait_for(_request_completion(api_key, base_url, KIMI_MODEL, messages,
+            900, timeout, task="intent_candidate_review", response_format_override=schema), timeout=timeout)
+        choice = response.choices[0]
+        if str(getattr(choice, "finish_reason", "")) == "length":
+            raise ValueError("Body review was truncated.")
+        verdict = parse_json_object(choice.message.content)
+        if (set(verdict) != {"bodyValid", "issues"} or type(verdict["bodyValid"]) is not bool
+                or not isinstance(verdict["issues"], list) or any(not isinstance(x, str) for x in verdict["issues"])):
+            raise ValueError("Body review has invalid fields.")
+        result = {**locked_review, "bodyValid": verdict["bodyValid"], "issues": verdict["issues"][:4]}
+        trace_reply("body_review", "passed" if result["bodyValid"] else "rejected",
+                    "" if result["bodyValid"] else "BODY_SEMANTIC_INVALID")
+        return result
     active = []
     for item in active_inclinations or []:
         if not isinstance(item, dict):
@@ -9298,7 +9355,7 @@ async def _review_intent_candidate_async(
         "clarity, concentration, separation, or other. degree is excessive, insufficient, "
         "neutral, or unspecified; aspect is visual, gameplay, or unspecified; scopeType is "
         "stage, region, entity, or other. Use other plus natural-language Text fields when needed. "
-        "Do not invent a gameplay purpose. For candidate return cardText: two to four complete, "
+        "Do not invent a gameplay purpose. For candidate return cardText: concise complete, "
         "tentative, correctable sentences that preserve every claim without restating the draft body. "
         "For non-candidate return empty cardText and no claims. cardTextValid means the "
         "draft card covers every claim, stays tentative/correctable, and adds no purpose. For none or "
@@ -9320,6 +9377,14 @@ async def _review_intent_candidate_async(
         "ACTIVE CONFIRMED INTENTIONS:\n" + json.dumps(active[:12], ensure_ascii=False, separators=(",", ":"))
     )}]
     messages[0]["content"] += discussion_background
+    messages[0]["content"] += (
+        "\nAlso independently judge which OPEN QUESTIONS the current user actually answers. "
+        "Return answeredQuestionIds only from the supplied IDs, once each; use [] when none. "
+        "A concrete position, choice, information or explicit closure answers a question; vague "
+        "acknowledgement or not knowing does not. An answer can ALSO express a candidate inclination. "
+        "Question progress never confirms intent, clears disagreement or authorizes an edit.\nOPEN QUESTIONS:\n"
+        + json.dumps(safe_questions, ensure_ascii=False, separators=(",", ":")))
+    trace_reply("joint_review", "started", modelCalls=1, questionCount=len(safe_questions))
     remaining = _remaining_until(deadline)
     if remaining <= 0:
         raise asyncio.TimeoutError()
@@ -9335,12 +9400,59 @@ async def _review_intent_candidate_async(
     if str(getattr(choice, "finish_reason", "") or "") == "length":
         raise ValueError("The intent candidate review reached its output limit.")
     payload = parse_json_object(choice.message.content)
+    trace_reply("joint_review", "passed")
+    try:
+        question_review = _validate_joint_question_answers(payload.get("answeredQuestionIds", [] if not safe_questions else None), safe_questions)
+        if component_state is not None:
+            component_state.setdefault("questionAnswerReview", question_review)
+            component_state.pop("questionReviewIssue", None)
+        trace_reply("question_review", "passed", questionCount=len(safe_questions), answeredCount=len(question_review["answeredQuestionIds"]), questionIds=question_review["answeredQuestionIds"])
+    except (ValueError, TypeError):
+        if component_state is not None:
+            component_state["questionReviewIssue"] = "QUESTION_RESULTS_INVALID"
+        trace_reply("question_review", "omitted", "QUESTION_RESULTS_INVALID")
+    trace_reply("intent_semantics", "started")
+    try:
+        reviewed = _validate_intent_review_payload({k: v for k, v in payload.items() if k != "answeredQuestionIds"}, user_text, active, language)
+    except (ValueError, TypeError, KeyError) as error:
+        trace_reply("intent_semantics", "omitted", failure_reason(error))
+        raise
+    trace_reply("intent_semantics", "passed", classification=reviewed["classification"], relation=reviewed["relation"])
+    if component_state is not None:
+        component_state["intentReviewAudit"] = copy.deepcopy(reviewed)
+    return reviewed
+
+
+def _ordinary_review_questions(questions):
+    result = []
+    for item in questions or []:
+        if not isinstance(item, dict):
+            continue
+        identity = str(item.get("questionId") or item.get("id") or "").strip()[:96]
+        text = str(item.get("question") or "").strip()[:1200]
+        if identity and text and not any(q["questionId"] == identity for q in result):
+            result.append({"questionId": identity, "question": text})
+    return result[:24]
+
+
+def _validate_joint_question_answers(identities, questions):
+    expected = {item["questionId"] for item in questions}
+    if (not isinstance(identities, list) or any(not isinstance(x, str) for x in identities)
+            or len(identities) != len(set(identities)) or not set(identities).issubset(expected)):
+        raise ValueError("Question results must use unique supplied IDs.")
+    return {"answeredQuestionIds": list(identities), "results": [
+        {"questionId": q["questionId"], "status": "answered" if q["questionId"] in identities else "unanswered"}
+        for q in questions]}
+
+
+def _validate_intent_review_payload(payload, user_text, active, language):
     expected = {
         "classification", "claims", "cardText", "cardTextValid", "bodyValid", "relation",
         "conflictingHypothesisIds", "explanation", "issues", "reviewedActiveClaims",
     }
-    if not isinstance(payload, dict) or set(payload) != expected:
-        raise ValueError("Intent candidate review contains unexpected or missing fields.")
+    semantic_fields = {"classification", "claims", "relation", "conflictingHypothesisIds"}
+    if not isinstance(payload, dict) or set(payload) - expected or not semantic_fields.issubset(payload):
+        raise ValueError("Intent candidate review contains invalid semantic fields.")
     classification = payload.get("classification")
     if classification not in {"none", "candidate", "reference_only"}:
         raise ValueError("Intent candidate review classification is invalid.")
@@ -9348,7 +9460,7 @@ async def _review_intent_candidate_async(
     if not isinstance(claims, list) or len(claims) > 4:
         raise ValueError("Intent candidate review claims are invalid.")
     claims = [_normalize_reviewed_claim(item, user_text) for item in claims]
-    card_text = _normalize_response_paragraphs(str(payload.get("cardText") or ""))[:1000]
+    card_text = _normalize_response_paragraphs(payload.get("cardText") or "")[:1000] if isinstance(payload.get("cardText"), str) else ""
     if classification == "candidate" and not claims:
         raise ValueError("A reviewed candidate must contain claims.")
     if classification != "candidate" and claims:
@@ -9360,8 +9472,8 @@ async def _review_intent_candidate_async(
         # because its unused recovery wording is shorter would cause needless
         # retries.  If recovery is actually used, the normal card validator
         # below still applies to that selected text.
-        if not card_text:
-            raise ValueError("A reviewed candidate must include recovery cardText.")
+        if not isinstance(payload.get("cardText"), str):
+            card_text = ""
     elif card_text:
         raise ValueError("A reviewed non-candidate must have empty cardText.")
     active_ids = {item["hypothesisId"] for item in active}
@@ -9448,106 +9560,84 @@ async def _repair_intent_components_async(
     """Repair only rejected intent presentation components under locked semantics."""
     if not repair_body and not repair_card:
         return body, card_text
-    repair_task = ("intent_component_repair" if repair_body and repair_card
-        else "intent_body_repair" if repair_body else "intent_card_repair")
-    response_language = "Simplified Chinese" if language == "zh-CN" else "English"
-    messages = [{"role": "system", "content": (
-        "You repair presentation components for a Sokoban tentative-intent reply. Return JSON only. "
-        "The LOCKED CLAIMS and exact user evidence are authoritative and must not be changed, expanded, "
-        "or assigned a new gameplay purpose. Preserve every component not marked REPAIR. If BODY is marked, "
-        "repair the specified semantic defect using the Stage facts and discussion background; return "
-        "complete bodyParagraphs without forcing length, two effects, or a stock structure. "
-        "If CARD is marked, write concise, tentative, explicitly correctable sentences preserving locked claims. Return "
-        "those sentences as separate cardSentences array items, including their closing punctuation. Do not "
-        "mention this workflow, offer options, or leave a dangling clause. Write in " + response_language + ".\n\n"
-        "CURRENT USER TEXT:\n" + str(user_text or "")[:2000] + "\n\n"
-        "LOCKED CLAIMS:\n" + json.dumps(claims, ensure_ascii=False, separators=(",", ":")) + "\n\n"
-        "AUTHORITATIVE STAGE FACTS:\n" + str(map_facts or "")[:8000] + "\n\n"
-        "REPAIR BODY: " + ("yes" if repair_body else "no") + "\n"
-        "REPAIR CARD: " + ("yes" if repair_card else "no") + "\n"
-        "CURRENT BODY:\n" + str(body or "")[:5000] + "\n\n"
-        "CURRENT CARD:\n" + str(card_text or "")[:1200] + "\n\n"
-        "REVIEW ISSUES:\n" + json.dumps(list(issues or [])[:8], ensure_ascii=False)
-    )}]
-    messages[0]["content"] += discussion_background + "\nReturn ONLY the fields of components marked REPAIR."
-    remaining = _remaining_until(deadline)
-    if remaining <= 0:
-        raise asyncio.TimeoutError()
-    required = ({"bodyParagraphs"} if repair_body else set()) | ({"cardSentences"} if repair_card else set())
-    candidate = {"bodyParagraphs": str(body or "").split("\n\n"), "cardSentences": [card_text]}
-    patch = PatchRequest("intent_presentation", candidate,
-        [Target(field, (field,), (list,)) for field in sorted(required)],
-        {"user_evidence": {"text": user_text, "lockedClaims": claims}, "snapshot": map_facts})
-    payload = await _request_component_patch(api_key, base_url, patch, messages, request_id, deadline,
-        repair_task, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, min(30.0, remaining))
-    repaired_body = body
-    if repair_body:
-        body_paragraphs = payload.get("bodyParagraphs")
-        if not isinstance(body_paragraphs, list) or not body_paragraphs:
-            raise ValueError("Intent body repair must return non-empty paragraph items.")
-        body_paragraphs = [
-            re.sub(r"\s+", " ", str(item or "")).strip()
-            for item in body_paragraphs
-        ]
-        if any(not item for item in body_paragraphs):
-            raise ValueError("Intent body repair returned an empty paragraph item.")
-        body_sentence_end = "。" if language == "zh-CN" else "."
-        normalized_body_paragraphs = []
-        for paragraph in body_paragraphs:
-            if paragraph.endswith((",", "，", ";", "；")):
-                paragraph = paragraph[:-1].rstrip() + body_sentence_end
-            elif not re.search(r"[.!?。！？:]$", paragraph):
-                paragraph += body_sentence_end
-            normalized_body_paragraphs.append(paragraph)
-        repaired_body = "\n\n".join(normalized_body_paragraphs)
-    repaired_card = card_text
-    repaired_card_issue = None
-    if repair_card:
-        card_sentences = payload.get("cardSentences")
-        if not isinstance(card_sentences, list) or not card_sentences:
-            raise ValueError("Intent card repair must return non-empty sentence items.")
-        card_sentences = [
-            re.sub(r"\s+", " ", str(item or "")).strip()
-            for item in card_sentences
-        ]
-        if any(not item for item in card_sentences):
-            raise ValueError("Intent card repair returned an empty sentence item.")
-        sentence_end = "。" if language == "zh-CN" else "."
-        internal_separator = "，" if language == "zh-CN" else "; "
-        card_sentences = [
-            re.sub(r"[.!?;。！？；]+(?=\s*\S)", internal_separator, item)
-            for item in card_sentences
-        ]
-        card_sentences = [
-            item if re.search(r"[.!?;。！？；]$", item) else item + sentence_end
-            for item in card_sentences
-        ]
-        repaired_card = (("" if language == "zh-CN" else " ").join(card_sentences))[:1000]
-        repaired_card_issue = _intent_hypothesis_detail_issue(repaired_card, language)
-        if repaired_card_issue == "intentHypothesis must remain explicitly tentative":
-            tentative_prefix = (
-                "我目前的暂定理解是，"
-                if language == "zh-CN"
-                else "My current tentative reading is that "
-            )
-            repaired_card = tentative_prefix + repaired_card
-            repaired_card_issue = _intent_hypothesis_detail_issue(repaired_card, language)
-    result_body = repaired_body if repair_body else body
-    result_card = repaired_card if repair_card else card_text
-    if repair_body and not result_body:
-        raise ValueError("Intent body repair returned no prose.")
-    if repair_card and repaired_card_issue:
-        raise ValueError(
-            "Intent card repair did not produce a complete tentative card: "
-            + repaired_card_issue
-        )
-    return result_body, result_card
+    if repair_body and not repair_card:
+        timeout = min(30.0, _remaining_until(deadline))
+        if timeout <= 0:
+            raise asyncio.TimeoutError()
+        messages = [{"role": "system", "content": (
+            "Repair ONLY the rejected body, preserving locked claims and exact user evidence. "
+            "Return JSON with only bodyParagraphs, a non-empty array of complete paragraphs. "
+            "Fix the specified relevance or semantic defect; add no user purpose, authorization, "
+            "state success or map changes. Use the supplied Stage facts only. Keep concise natural prose "
+            "without a fixed sentence count. Write in " + ("Simplified Chinese." if language == "zh-CN" else "English.")
+            + "\nLOCKED CLAIMS:\n" + json.dumps(claims, ensure_ascii=False)
+            + "\n\nAUTHORITATIVE STAGE FACTS:\n" + str(map_facts or "")[:8000]
+            + "\n\nCURRENT BODY:\n" + str(body or "")[:5000]
+            + "\n\nCURRENT CARD:\n" + str(card_text or "")[:1200]
+            + "\n\nREVIEW ISSUES:\n" + json.dumps(issues or [], ensure_ascii=False)
+            + "\nREPAIR BODY: yes\nREPAIR CARD: no" + discussion_background)},
+            {"role": "user", "content": str(user_text or "")[:2000]}]
+        response = await asyncio.wait_for(_request_completion(api_key, base_url, KIMI_MODEL, messages,
+            INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, timeout, task="intent_body_repair"), timeout=timeout)
+        choice = response.choices[0]
+        if str(getattr(choice, "finish_reason", "")) == "length":
+            raise ValueError("Intent body repair was truncated.")
+        payload = parse_json_object(choice.message.content)
+        paragraphs = payload.get("bodyParagraphs")
+        if (set(payload) != {"bodyParagraphs"} or not isinstance(paragraphs, list) or not 1 <= len(paragraphs) <= 3
+                or any(not isinstance(part, str) or not part.strip() for part in paragraphs)):
+            raise ValueError("Intent body repair has invalid paragraph fields.")
+        repaired = "\n\n".join(_normalize_response_paragraphs(part) for part in paragraphs)
+        _assert_visible_output_language(language, repaired)
+        return repaired, card_text
+    if repair_card and not repair_body:
+        # Only this ordinary presentation slot is simplified. Formal patches
+        # still use evidence-bound PatchRequest and their original validators.
+        timeout = min(30.0, _remaining_until(deadline))
+        if timeout <= 0:
+            raise asyncio.TimeoutError()
+        messages = [{"role": "system", "content": (
+            "Repair only the tentative intent card. Return JSON with only cardText. "
+            "Keep every locked claim and exact user evidence, remain tentative and explicitly "
+            "correctable; add no purpose, certainty, permission or state conclusion. "
+            "Use Simplified Chinese." if language == "zh-CN" else
+            "Repair only the tentative intent card. Return JSON with only cardText. "
+            "Keep every locked claim and exact user evidence, remain tentative and explicitly "
+            "correctable; add no purpose, certainty, permission or state conclusion. Use English."
+        )}, {"role": "user", "content": json.dumps({
+            "userEvidence": user_text, "lockedClaims": claims, "currentCard": card_text,
+            "stageFacts": map_facts, "issues": issues, "discussionBackground": discussion_background,
+        }, ensure_ascii=False)}]
+        response = await asyncio.wait_for(_request_completion(
+            api_key, base_url, KIMI_MODEL, messages, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS,
+            timeout, task="intent_card_repair"), timeout=timeout)
+        choice = response.choices[0]
+        if str(getattr(choice, "finish_reason", "")) == "length":
+            raise ValueError("Intent card repair was truncated.")
+        payload = parse_json_object(choice.message.content)
+        if set(payload) != {"cardText"} or not isinstance(payload["cardText"], str):
+            raise ValueError("Intent card repair has an invalid envelope.")
+        repaired = _normalize_response_paragraphs(payload["cardText"])
+        issue = _intent_hypothesis_detail_issue(repaired, language, semantic_reviewed=True)
+        if issue:
+            raise ValueError(issue)
+        _assert_visible_output_language(language, repaired)
+        return body, repaired
+    raise ValueError("Repair one rejected presentation component at a time.")
 
 
 async def _review_ordinary_intent_with_recovery(*, optional_budget, component_checks, **kwargs):
     # Discovering a new inclination is optional even when memory already exists.
     # Only a verified defect in the visible answer justifies blocking its delivery.
-    optional = True
+    state = kwargs.get("component_state")
+    if state is None:
+        state = {}
+    locked = state.get("lockedIntentReview")
+    # A verified semantic defect in the old body is mandatory recovery, not
+    # optional discovery. It uses the same next review slot and original deadline.
+    optional = not bool(locked and state.get("bodyReviewRequired"))
+    if not optional:
+        kwargs["locked_review"] = locked
     started = time.monotonic()
     try:
         if optional:
@@ -9556,6 +9646,11 @@ async def _review_ordinary_intent_with_recovery(*, optional_budget, component_ch
                 raise asyncio.TimeoutError()
             kwargs["deadline"] = min(kwargs["deadline"], started + timeout)
         result = await _review_intent_candidate_async(**kwargs)
+        if result["classification"] == "candidate" and not result["bodyValid"]:
+            state["lockedIntentReview"] = copy.deepcopy(result)
+            state["bodyReviewRequired"] = True
+        if not optional and not result["bodyValid"]:
+            raise LowQualityModelResponse("The changed body still contradicts the locked designer evidence.")
         if result["classification"] != "candidate" and not result["bodyValid"]:
             if result.get("issues"):
                 # A specific relevance or semantic defect is still mandatory;
@@ -9568,8 +9663,13 @@ async def _review_ordinary_intent_with_recovery(*, optional_budget, component_ch
     except (LLMServiceError, APIConnectionError, APIStatusError, asyncio.TimeoutError,
             ValueError, TypeError, KeyError, IndexError) as error:
         body = kwargs["body"]
-        if isinstance(error, LowQualityModelResponse) or not body.strip():
+        if not optional or isinstance(error, LowQualityModelResponse) or not body.strip():
             raise
+        trace = CURRENT_REPLY_TRACE.get()
+        parsed = bool(trace and any(step["stage"] == "joint_review" and step["status"] == "passed" for step in trace.steps))
+        if not parsed:
+            trace_reply("joint_review", "omitted", "OPTIONAL_BUDGET_EXHAUSTED" if optional_budget.timeout() <= 0 else failure_reason(error),
+                        optionalSpentSeconds=round(optional_budget.spent, 3))
         component_checks.append(ComponentCheck("intent_discovery", "omitted", "OPTIONAL_REVIEW_FAILED"))
         return {"classification": "none", "claims": [], "cardText": "", "cardTextValid": True,
             "bodyValid": True, "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
@@ -9670,6 +9770,7 @@ async def _repair_reviewed_intent_presentation(
         return body, card_text
     timeout = _remaining_until(deadline) if card_required else optional_budget.timeout()
     started = time.monotonic()
+    trace_reply("card_repair", "started", repairAttempts=int(timeout > 0), optionalRemainingSeconds=round(timeout, 3))
     try:
         if timeout <= 0:
             raise asyncio.TimeoutError()
@@ -9680,19 +9781,38 @@ async def _repair_reviewed_intent_presentation(
         if rows:
             _validate_map_grounding_texts([card_text], rows, entity_bindings=entity_bindings)
         component_checks.append(ComponentCheck("intent_card", "repaired", repairable=True))
+        trace_reply("card_repair", "passed", cardPresent=True)
         return body, card_text
     except (ValueError, TypeError, KeyError, IndexError, LLMServiceError,
-            APIConnectionError, APIStatusError, asyncio.TimeoutError):
+            APIConnectionError, APIStatusError, asyncio.TimeoutError) as error:
         if card_required:
             raise
         component_checks.append(ComponentCheck("intent_card", "omitted", "OPTIONAL_PRESENTATION_FAILED"))
+        trace_reply("card_repair", "omitted", "OPTIONAL_BUDGET_EXHAUSTED" if timeout <= 0 else failure_reason(error),
+                    repairAttempts=int(timeout > 0), optionalSpentSeconds=round(optional_budget.spent, 3))
         return body, ""
     finally:
         if not card_required:
             optional_budget.record(started)
 
 
-async def _generate_plain_with_model_fallback(
+def _components_quality_passed(checks):
+    advisory = {"INTENT_SCORE_NOT_APPLICABLE", "PRESENTATION_QUALITY", "QUALITY_REVIEW_ISSUES"}
+    return all(check.status in {"passed", "repaired"} or
+               (check.status == "preserved" and check.code in advisory) for check in checks)
+
+
+async def _generate_plain_with_model_fallback(**kwargs):
+    memo = {"passed": set(), "hits": 0, "checks": 0}
+    token = _GROUNDING_MEMO.set(memo)
+    try:
+        return await _generate_plain_with_model_fallback_impl(**kwargs)
+    finally:
+        trace_reply("map_validation", "completed", cacheHits=memo["hits"], mapChecks=memo["checks"])
+        _GROUNDING_MEMO.reset(token)
+
+
+async def _generate_plain_with_model_fallback_impl(
     *,
     api_key,
     base_url,
@@ -9714,6 +9834,7 @@ async def _generate_plain_with_model_fallback(
     deadline=None,
     attempt_state=None,
 ):
+    stage_context = stage_context if stage_context is not None else {}
     last_error = None
     validation_feedback = None
     deadline = deadline or _request_deadline(started_at)
@@ -10129,6 +10250,10 @@ async def _generate_plain_with_model_fallback(
             if human_edit_engagement_required:
                 visible_content = _strip_unverified_state_claims(visible_content)
             proposal_binding_downgraded = False
+            kimi_ordinary = bool(not stage_opening and not clarification_active
+                and not (stage_context or {}).get("conversationOnly")
+                and not _is_proposal_conversation_branch(stage_context)
+                and not isinstance(disagreement, dict) and proposal_offer is None)
             intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = (
                 _apply_deterministic_guidance_fallback(
                     semantic_messages,
@@ -10143,6 +10268,7 @@ async def _generate_plain_with_model_fallback(
                     play_summary,
                     guidance_mode=guidance_mode,
                     allow_required_fallback=attempt >= max_attempts,
+                    semantic_intent=kimi_ordinary,
                 )
             )
             if stage_opening:
@@ -10363,6 +10489,7 @@ async def _generate_plain_with_model_fallback(
                 stage_context,
                 visible_content=visible_content,
                 guidance_mode=guidance_mode,
+                semantic_intent=kimi_ordinary,
             )
             body = _deduplicate_assistant_body(body)
             if guidance.get("intentHypothesis"):
@@ -10373,7 +10500,6 @@ async def _generate_plain_with_model_fallback(
                 not stage_opening
                 and not (stage_context or {}).get("conversationOnly")
                 and not clarification_active
-                and not (stage_context or {}).get("answeredVisibleQuestion")
                 and not _is_proposal_conversation_branch(stage_context)
                 and not isinstance(guidance.get("disagreement"), dict)
                 and guidance.get("proposalOffer") is None
@@ -10403,6 +10529,8 @@ async def _generate_plain_with_model_fallback(
                     intent_decision = {
                         "classification": "none", "claims": [], "cardText": "",
                     }
+                stage_context.setdefault("_reliabilityState", {})["intentDraftAudit"] = (copy.deepcopy(intent_decision)
+                    if not draft_decision_missing else {"classification": None, "claims": [], "cardText": ""})
                 draft_classification = intent_decision["classification"]
                 guidance["intentHypothesis"] = (
                     intent_decision["cardText"]
@@ -10437,7 +10565,11 @@ async def _generate_plain_with_model_fallback(
                     request_id=request_id,
                     deadline=deadline,
                     discussion_background=_dialogue_background_prompt(stage_context),
+                    visible_questions=(stage_context or {}).get("ordinaryOpenQuestions"),
+                    component_state=stage_context.setdefault("_reliabilityState", {}),
                 )
+                if stage_context.get("_reliabilityState", {}).get("questionReviewIssue"):
+                    component_checks.append(ComponentCheck("question_review", "omitted", "QUESTION_RESULTS_INVALID"))
                 if intent_review.get("issues"):
                     component_checks.append(ComponentCheck("intent_presentation", "preserved", "QUALITY_REVIEW_ISSUES"))
                 core_fields = (
@@ -10459,11 +10591,9 @@ async def _generate_plain_with_model_fallback(
                 relation_unverified = intent_review["relation"] == "unclear"
                 if relation_unverified and intent_review["bodyValid"]:
                     component_checks.append(ComponentCheck("intent_card", "omitted", "RELATION_UNCLEAR"))
-                    intent_review = {**intent_review, "classification": "none", "claims": [], "cardText": "",
-                                     "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
-                                     "reviewedActiveClaims": []}
+                    intent_review = {**intent_review, "presentationOmitted": True}
 
-                if intent_review["classification"] != "candidate":
+                if intent_review["classification"] != "candidate" or relation_unverified:
                     # Reviewer classification is authoritative for card
                     # presence. A false-positive draft card is disposable
                     # metadata; preserve the already-valid visible answer.
@@ -10491,6 +10621,7 @@ async def _generate_plain_with_model_fallback(
                         )
                         else intent_decision["cardText"]
                     )
+                    trace_reply("card_selection", "passed", source="reviewer" if selected_card == intent_review["cardText"] else "draft", cardPresent=bool(selected_card))
                     pre_repair_body_issue = _intent_body_detail_issue(
                         body, language, selected_card
                     )
@@ -10509,15 +10640,21 @@ async def _generate_plain_with_model_fallback(
                         or pre_repair_body_issue
                     )
                     repair_card = bool(
-                        _intent_hypothesis_detail_issue(selected_card, language)
+                        _intent_hypothesis_detail_issue(selected_card, language, semantic_reviewed=True)
                     )
                     try:
                         _assert_visible_output_language(language, selected_card)
                         _validate_map_grounding_texts([selected_card], rows,
                             entity_bindings=(stage_context or {}).get("entityBindings"))
+                        if not repair_card:
+                            state = stage_context.setdefault("_reliabilityState", {})
+                            state["lockedIntentReview"] = {**copy.deepcopy(intent_review), "cardText": selected_card, "cardTextValid": True}
                     except ValueError:
                         repair_card = True
                     if repair_body or repair_card:
+                        if repair_body:
+                            stage_context.setdefault("_reliabilityState", {})["bodyReviewRequired"] = True
+                            trace_reply("body_repair", "started", repairAttempts=1)
                         body, selected_card = await _repair_reviewed_intent_presentation(
                             api_key=api_key,
                             base_url=base_url,
@@ -10592,11 +10729,12 @@ async def _generate_plain_with_model_fallback(
                                 raise LowQualityModelResponse(
                                     "No reliable second-pass intent prose remained after map-grounding cleanup."
                                 )
+                    if repair_body:
+                        stage_context["_reliabilityState"]["bodyReviewRequired"] = False
+                        trace_reply("body_repair", "passed")
                     if relation_unverified:
                         selected_card = ""
-                        intent_review = {**intent_review, "classification": "none", "claims": [],
-                                         "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
-                                         "reviewedActiveClaims": []}
+                        intent_review = {**intent_review, "presentationOmitted": True}
                     if selected_card:
                         intent_decision = {"classification": "candidate",
                             "claims": intent_review["claims"], "cardText": selected_card}
@@ -10606,10 +10744,8 @@ async def _generate_plain_with_model_fallback(
                     else:
                         # Omitted optional presentation never creates a hidden
                         # inclination, confirmation, or conflict decision.
-                        intent_decision = {"classification": "none", "claims": [], "cardText": ""}
-                        intent_review = {**intent_review, "classification": "none", "claims": [],
-                            "relation": "none", "conflictingHypothesisIds": [], "explanation": None,
-                            "reviewedActiveClaims": []}
+                        intent_decision = {"classification": "candidate", "claims": intent_review["claims"], "cardText": ""}
+                        intent_review = {**intent_review, "presentationOmitted": True}
                         guidance["intentHypothesis"] = None
                         guidance["intentConfidence"] = None
                 reviewed_claims = []
@@ -10630,7 +10766,6 @@ async def _generate_plain_with_model_fallback(
             elif (
                 clarification_active
                 or _is_proposal_conversation_branch(stage_context)
-                or (stage_context or {}).get("answeredVisibleQuestion")
                 or guidance.get("proposalOffer") is not None
                 or isinstance(guidance.get("disagreement"), dict)
             ):
@@ -10638,7 +10773,7 @@ async def _generate_plain_with_model_fallback(
                 guidance["intentConfidence"] = None
             if guidance.get("intentHypothesis"):
                 intent_issue = _intent_hypothesis_detail_issue(
-                    guidance["intentHypothesis"], language
+                    guidance["intentHypothesis"], language, semantic_reviewed=ordinary_branch
                 )
                 semantic_issue = None if ordinary_branch else _intent_semantic_binding_issue(
                     guidance["intentHypothesis"], latest_user_text, language
@@ -10846,6 +10981,12 @@ async def _generate_plain_with_model_fallback(
                     historical_reference=historical_reference,
                     entity_bindings=(stage_context or {}).get("entityBindings"),
                 )
+            state = (stage_context or {}).get("_reliabilityState") or {}
+            if state.get("intentDraftAudit") is not None:
+                guidance["_intentDraftAudit"] = copy.deepcopy(state["intentDraftAudit"])
+            if state.get("intentReviewAudit") is not None:
+                guidance["_intentReviewAudit"] = copy.deepcopy(state["intentReviewAudit"])
+            trace_reply("final_projection", "passed", cardPresent=bool(guidance.get("intentHypothesis")))
             visible_body_source = (
                 "kimi_salvaged"
                 if grounding_dropped_count
@@ -10901,8 +11042,10 @@ async def _generate_plain_with_model_fallback(
                     else {
                         "visibleBodySource": visible_body_source,
                         "groundingSentencesDropped": total_grounding_dropped_count,
+                        "intentReviewVerified": bool(state.get("intentReviewAudit") and state["intentReviewAudit"].get("relation") != "unclear"),
+                        "questionReviewVerified": "questionAnswerReview" in state,
                         "componentChecks": [check.diagnostic() for check in component_checks],
-                        "fullQualityPassed": all(check.status in {"passed", "repaired"} for check in component_checks) and not total_grounding_dropped_count,
+                        "fullQualityPassed": _components_quality_passed(component_checks) and not total_grounding_dropped_count,
                     }
                     if ordinary_discussion
                     else {}
@@ -10915,7 +11058,7 @@ async def _generate_plain_with_model_fallback(
                 outcome="success",
                 modelGenerationSucceeded=True,
                 reliableBodyDelivered=True,
-                fullQualityPassed=all(check.status in {"passed", "repaired"} for check in component_checks) and not total_grounding_dropped_count,
+                fullQualityPassed=_components_quality_passed(component_checks) and not total_grounding_dropped_count,
                 componentChecks=[check.diagnostic() for check in component_checks],
                 model=model,
                 attemptsUsed=attempt,
@@ -10993,6 +11136,8 @@ async def _generate_plain_with_model_fallback(
             )
         except Exception as exception:
             failure_reason = _safe_validation_reason(exception)
+            from reply_reliability import failure_reason as diagnostic_reason
+            trace_reply("body_validation", "rejected", diagnostic_reason(exception), attempt=attempt)
             last_error = classify_exception(exception, request_id, attempt)
             if last_error.code == "MODEL_RESPONSE_INVALID" and failure_reason:
                 validation_feedback = failure_reason
@@ -11918,7 +12063,20 @@ def _validate_translated_text(value, source_value, field_name, allow_empty=False
     return _normalize_single_level_language(normalized)
 
 
-async def _request_completion(
+async def _request_completion(*args, **kwargs):
+    task = kwargs.get("task") or "unspecified"
+    stage = "body_generation" if task == "plain_chat" else "model_" + task
+    trace_reply(stage, "started", modelCalls=1)
+    try:
+        result = await _request_completion_impl(*args, **kwargs)
+        trace_reply(stage, "passed")
+        return result
+    except BaseException as error:
+        trace_reply(stage, "failed", failure_reason(error))
+        raise
+
+
+async def _request_completion_impl(
     api_key,
     base_url,
     model,
@@ -11928,6 +12086,7 @@ async def _request_completion(
     structured=True,
     task=None,
     manual_edit_direction_count=None,
+    response_format_override=None,
 ):
     client = _create_async_client(api_key, base_url, timeout_seconds)
     request_options = {
@@ -11947,14 +12106,24 @@ async def _request_completion(
     }
 
     if structured:
-        request_options["response_format"] = _structured_response_format(
+        request_options["response_format"] = response_format_override or _structured_response_format(
             task,
             manual_edit_direction_count=manual_edit_direction_count,
         )
 
+    async def create_completion():
+        trace_reply("provider_call", "started", modelCalls=1)
+        try:
+            result = await client.chat.completions.create(**request_options)
+            trace_reply("provider_call", "passed")
+            return result
+        except BaseException as error:
+            trace_reply("provider_call", "failed", failure_reason(error))
+            raise
+
     try:
         try:
-            return await client.chat.completions.create(**request_options)
+            return await create_completion()
         except APIStatusError as exception:
             # Kimi deployments can differ in their JSON-schema rollout.  A
             # schema rejection is safe to retry once in JSON-object mode; the
@@ -11966,7 +12135,7 @@ async def _request_completion(
                 and status_code in {400, 404, 422}
             ):
                 request_options["response_format"] = {"type": "json_object"}
-                return await client.chat.completions.create(**request_options)
+                return await create_completion()
             raise
     finally:
         await client.close()
@@ -16336,6 +16505,7 @@ def _apply_deterministic_guidance_fallback(
     play_summary,
     guidance_mode=None,
     allow_required_fallback=False,
+    semantic_intent=False,
 ):
     if stage_opening:
         return intent_hypothesis, proposal_offer, [], False
@@ -16351,32 +16521,33 @@ def _apply_deterministic_guidance_fallback(
     evidence_signature = (stage_context or {}).get("guidanceEvidenceSignature")
     fallback_used = False
 
-    difficulty_reframe = _user_reframes_difficulty_judgment(messages)
-    intent_hypothesis = _replace_echoed_intent_hypothesis(
-        intent_hypothesis,
-        latest_user,
-        language,
-    )
-    if intent_hypothesis is None and (
-        difficulty_reframe
-        or (
-            explicit_direction
-            and (
-                not recent.get("intentHypothesis")
-                or _latest_direction_is_new(messages)
-            )
-        )
-    ):
-        candidate = _natural_intent_candidate(
+    if not semantic_intent:
+        difficulty_reframe = _user_reframes_difficulty_judgment(messages)
+        intent_hypothesis = _replace_echoed_intent_hypothesis(
+            intent_hypothesis,
             latest_user,
             language,
-            explicit_agreement,
-            difficulty_reframe=difficulty_reframe,
         )
+        if intent_hypothesis is None and (
+            difficulty_reframe
+            or (
+                explicit_direction
+                and (
+                    not recent.get("intentHypothesis")
+                    or _latest_direction_is_new(messages)
+                )
+            )
+        ):
+            candidate = _natural_intent_candidate(
+                latest_user,
+                language,
+                explicit_agreement,
+                difficulty_reframe=difficulty_reframe,
+            )
 
-        if not _guidance_text_matches(candidate, recent.get("intentHypothesis")):
-            intent_hypothesis = candidate
-            fallback_used = True
+            if not _guidance_text_matches(candidate, recent.get("intentHypothesis")):
+                intent_hypothesis = candidate
+                fallback_used = True
 
     cue_by_type = {
         cue.get("type"): cue
@@ -16528,6 +16699,7 @@ def _ensure_required_guidance_card(
     stage_context,
     visible_content="",
     guidance_mode=None,
+    semantic_intent=False,
 ):
     normalized = dict(guidance or {})
     latest_user = _latest_role_content(messages, "user")
@@ -16644,27 +16816,27 @@ def _ensure_required_guidance_card(
         ][:1]
         return normalized
 
-    ordinary_intent_allowed = bool(
-        not _is_proposal_conversation_branch(stage_context)
-        and not (stage_context or {}).get("answeredVisibleQuestion")
-        and _user_explicitly_states_design_stance(latest_user)
-    )
-    if not ordinary_intent_allowed:
-        normalized["intentHypothesis"] = None
-        normalized["intentConfidence"] = None
-    elif _user_explicitly_states_design_stance(latest_user):
-        hypothesis = normalized.get("intentHypothesis") or _natural_intent_candidate(
-            latest_user,
-            language,
-            _latest_user_explicitly_agrees(latest_user),
-            difficulty_reframe=_user_reframes_difficulty_judgment(messages),
+    if not semantic_intent:
+        ordinary_intent_allowed = bool(
+            not _is_proposal_conversation_branch(stage_context)
+            and _user_explicitly_states_design_stance(latest_user)
         )
-        normalized["intentHypothesis"] = _replace_echoed_intent_hypothesis(
-            hypothesis,
-            latest_user,
-            language,
-        )
-        normalized["intentConfidence"] = "medium"
+        if not ordinary_intent_allowed:
+            normalized["intentHypothesis"] = None
+            normalized["intentConfidence"] = None
+        elif _user_explicitly_states_design_stance(latest_user):
+            hypothesis = normalized.get("intentHypothesis") or _natural_intent_candidate(
+                latest_user,
+                language,
+                _latest_user_explicitly_agrees(latest_user),
+                difficulty_reframe=_user_reframes_difficulty_judgment(messages),
+            )
+            normalized["intentHypothesis"] = _replace_echoed_intent_hypothesis(
+                hypothesis,
+                latest_user,
+                language,
+            )
+            normalized["intentConfidence"] = "medium"
 
     card_count = (
         int(bool(normalized.get("intentHypothesis")))
@@ -20296,7 +20468,7 @@ def _intent_sentence_count(value):
     ])
 
 
-def _intent_hypothesis_detail_issue(value, language):
+def _intent_hypothesis_detail_issue(value, language, *, semantic_reviewed=False):
     """Require one concise, tentative, coherent orange-card understanding."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     chinese = language == "zh-CN" or bool(re.search(r"[\u3400-\u9fff]", text))
@@ -20326,7 +20498,7 @@ def _intent_hypothesis_detail_issue(value, language):
             text,
             re.IGNORECASE,
         )
-    if not tentative:
+    if not tentative and not semantic_reviewed:
         return "intentHypothesis must remain explicitly tentative"
     return None
 

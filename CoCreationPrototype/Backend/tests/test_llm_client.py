@@ -193,8 +193,16 @@ class FakeCompletions:
                 finish_reason="stop",
                 message=SimpleNamespace(content=json.dumps(
                     patch_fixture(patch_spec, {"bodyParagraphs": body_paragraphs[:3], "cardSentences": card_sentences[:4]})
-                    if patch_spec else {"bodyParagraphs": body_paragraphs[:3], "cardSentences": card_sentences[:4]}, ensure_ascii=False)),
+                    if patch_spec else {key: value for key, value in {"bodyParagraphs": body_paragraphs[:3], "cardSentences": card_sentences[:4]}.items()
+                        if key in kwargs["response_format"]["json_schema"]["schema"]["properties"]}, ensure_ascii=False)),
             )])
+        if schema_name == "cocreation_intent_card_repair":
+            source = json.loads(kwargs["messages"][-1]["content"])
+            meaning = str((source["lockedClaims"][0] if source["lockedClaims"] else {}).get("normalizedMeaning") or "the stated direction")
+            card = (f"我暂时理解为，你表达的方向是：{meaning}。你可以纠正我。"
+                    if "Simplified Chinese" in kwargs["messages"][0]["content"] else
+                    f"For now, I understand your direction as: {meaning}. You can correct me.")
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=json.dumps({"cardText": card}, ensure_ascii=False)))])
         if schema_name == "cocreation_intent_candidate_review":
             prompt = str((kwargs.get("messages") or [{}])[-1].get("content") or "")
             match = re.search(
@@ -205,7 +213,7 @@ class FakeCompletions:
             decision = json.loads(match.group(1)) if match else {
                 "classification": "none", "claims": [], "cardText": "",
             }
-            active_match = re.search(r"ACTIVE CONFIRMED INTENTIONS:\n(.*)$", prompt, re.DOTALL)
+            active_match = re.search(r"ACTIVE CONFIRMED INTENTIONS:\n(.*?)(?=\nAlso independently|$)", prompt, re.DOTALL)
             active = json.loads(active_match.group(1)) if active_match else []
             body_match = re.search(r"DRAFT BODY:\n(.*?)\n\nDRAFT INTENT", prompt, re.DOTALL)
             draft_body = body_match.group(1).strip() if body_match else ""
@@ -230,6 +238,7 @@ class FakeCompletions:
                     "explanation": None,
                     "issues": [] if body_valid and card_valid else ["Repair only the incomplete component."],
                     "reviewedActiveClaims": [],
+                    "answeredQuestionIds": [],
                 }, ensure_ascii=False)),
             )])
         outcome = self.outcomes.pop(0)
@@ -3601,7 +3610,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result.guidance["intentHypothesis"])
         self.assertIsNone(result.guidance["intentConfidence"])
 
-    def test_answered_question_statement_has_no_orange_card(self):
+    def test_answered_question_statement_can_also_have_verified_orange_card(self):
         result, _ = self.execute(
             ["这会把体验重点放在路线规划上。"],
             language="zh-CN",
@@ -3612,8 +3621,8 @@ class LLMClientTests(unittest.TestCase):
             stage_context={"answeredVisibleQuestion": True},
         )
 
-        self.assertIsNone(result.guidance["intentHypothesis"])
-        self.assertIsNone(result.guidance["intentConfidence"])
+        self.assertIsNotNone(result.guidance["intentHypothesis"])
+        self.assertEqual(result.guidance["intentConfidence"], "medium")
 
     def test_user_difficulty_reframe_gets_a_tentative_intent_card(self):
         result, _ = self.execute(

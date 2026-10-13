@@ -48,6 +48,8 @@ function loadApp({ keepSubmit = false } = {}) {
         window: { location: { pathname: "/cocreation/", origin: "http://localhost" }, addEventListener() {} },
         crypto: { randomUUID: () => "12345678-1234-1234-1234-123456789abc" },
         localStorage: { setItem() {}, removeItem() {} },
+        sessionStorage: { data: new Map(), getItem(key) { return this.data.get(key) || null; },
+            setItem(key, value) { this.data.set(key, value); } },
         console,
     });
     const appPath = path.join(__dirname, "..", "app.js");
@@ -477,4 +479,53 @@ test("message refresh recovers a diagnostic without changing retry input, then c
         assert.equal(vm.runInContext("state.chatStatus", context), "idle");
         assert.equal(vm.runInContext("state.busy", context), false);
     }
+});
+
+
+test("reply diagnostics are bounded, survive storage, and never include prose", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        for (let i = 0; i < 205; i++) recordReplyDiagnostic("render", "completed", {
+            messageKey: "m-" + i, renderedCard: true, content: "private chat", prompt: "private prompt", token: "secret"
+        });
+        const storedDiagnostics = JSON.parse(sessionStorage.getItem(REPLY_DIAGNOSTICS_KEY));
+    `, context);
+    assert.equal(vm.runInContext("storedDiagnostics.length", context), 200);
+    assert.equal(vm.runInContext("storedDiagnostics[0].messageKey", context), "m-5");
+    assert.equal(vm.runInContext("JSON.stringify(storedDiagnostics).includes('private')", context), false);
+    assert.equal(vm.runInContext("storedDiagnostics[199].frontendVersion", context), "ordinary-harness-2026-10-13-v2");
+    vm.runInContext("sessionStorage.setItem = () => { throw new Error('storage unavailable'); }; recordReplyDiagnostic('render', 'completed');", context);
+});
+
+test("reply rendering distinguishes card family filtering and renderer failures", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        localizedAssistantTurn = turn => turn;
+        proposalForTurn = () => null;
+        renderAssistantBody = () => {};
+        assistantBodyWithoutCues = body => body;
+        const turnWithCard = { turnId: "a1", requestId: "m1", versionId: "v1", content: "private body",
+            guidance: { intentHypothesis: "private card", uiCues: [{ type: "manual_edit", text: "manual guidance" }] } };
+        const diagnosticBubble = document.createElement("div");
+        renderAssistantBubble(turnWithCard, diagnosticBubble);
+    `, context);
+    assert.equal(vm.runInContext("replyDiagnostics.find(item => item.stage === 'display_policy').code", context), "MANUAL_CARD_FAMILY");
+    assert.equal(vm.runInContext("replyDiagnostics.find(item => item.stage === 'render').renderedCard", context), false);
+    vm.runInContext("renderAssistantBody = () => { throw new Error('private rendering error'); };", context);
+    assert.throws(() => vm.runInContext("renderAssistantBubble(turnWithCard, diagnosticBubble)", context));
+    assert.equal(vm.runInContext("replyDiagnostics.at(-1).code", context), "RENDER_EXCEPTION");
+    assert.equal(vm.runInContext("JSON.stringify(replyDiagnostics).includes('private')", context), false);
+});
+
+test("message diagnostics retain HTTP identities and distinguish unreadable success", async () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        fetch = async () => ({ ok: true, status: 200, headers: { get: name => name === "X-Request-ID" ? "http-1" : "ordinary-harness-2026-10-13-v2" },
+            json: async () => { throw new Error("private invalid body"); } });
+    `, context);
+    await assert.rejects(vm.runInContext("api('/api/sessions/session/messages', { method: 'POST', body: { idempotencyKey: 'm1', baseVersionId: 'v1', content: 'private input' } })", context));
+    assert.equal(vm.runInContext("replyDiagnostics.at(-1).stage", context), "response_body");
+    assert.equal(vm.runInContext("replyDiagnostics.at(-1).code", context), "INVALID_RESPONSE");
+    assert.equal(vm.runInContext("replyDiagnostics.at(-1).requestId", context), "http-1");
+    assert.equal(vm.runInContext("JSON.stringify(replyDiagnostics).includes('private')", context), false);
 });

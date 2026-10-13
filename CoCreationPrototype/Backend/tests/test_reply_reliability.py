@@ -58,6 +58,10 @@ class ReplyReliabilityTests(unittest.TestCase):
 
     def repair(self, payload, *, body=True, card=False):
         async def request(*args, **kwargs):
+            if kwargs.get("task") == "intent_body_repair":
+                return completion({"bodyParagraphs": payload.get("bodyParagraphs")})
+            if kwargs.get("task") == "intent_card_repair":
+                return completion({"cardText": " ".join(payload.get("cardSentences") or [])})
             return completion(patch_fixture(args[3][-1]["content"], payload))
         with patch.object(llm, "_request_completion", side_effect=request) as mocked:
             result = asyncio.run(llm._repair_intent_components_async(api_key="fake", base_url="fake",
@@ -71,14 +75,14 @@ class ReplyReliabilityTests(unittest.TestCase):
                         {"bodyParagraphs": ["The route choice affects planning."], "cardSentences": []}):
             result, mocked = self.repair(payload)
             self.assertEqual(result[1], "Verified card.")
-            self.assertEqual(mocked.call_args.kwargs["task"], "intent_body_repair_patch")
+            self.assertEqual(mocked.call_args.kwargs["task"], "intent_body_repair")
 
     def test_card_repair_does_not_require_or_validate_body(self):
         card = ["For now, I understand that you may prefer a clearer route choice.",
                 "This interpretation remains tentative and you can correct me."]
         result, mocked = self.repair({"cardSentences": card, "bodyParagraphs": []}, body=False, card=True)
         self.assertEqual(result[0], "Verified body.")
-        self.assertEqual(mocked.call_args.kwargs["task"], "intent_card_repair_patch")
+        self.assertEqual(mocked.call_args.kwargs["task"], "intent_card_repair")
 
     def test_failed_optional_card_keeps_verified_body(self):
         checks = []

@@ -1,5 +1,42 @@
 "use strict";
 
+const REPLY_PIPELINE_VERSION = "ordinary-harness-2026-10-13-v2";
+const REPLY_DIAGNOSTICS_KEY = "sokobanReplyDiagnosticsV2";
+const replyHttpAttempts = new Map();
+let replyDiagnostics = [];
+try {
+    const saved = JSON.parse(sessionStorage.getItem(REPLY_DIAGNOSTICS_KEY) || "[]");
+    if (Array.isArray(saved)) replyDiagnostics = saved.slice(-200).map(safeReplyDiagnostic);
+} catch (_) { /* Diagnostics never block the workbench. */ }
+
+function safeReplyDiagnostic(value) {
+    const allowed = ["stage", "status", "code", "requestId", "messageKey", "versionId", "assistantTurnId",
+        "pipelineVersion", "frontendVersion", "receivedCard", "displayCard", "renderedCard", "turnPresent", "httpStatus", "at"];
+    const result = {};
+    for (const key of allowed) {
+        const item = value?.[key];
+        if (typeof item === "boolean" || (typeof item === "number" && Number.isFinite(item))) result[key] = item;
+        else if (typeof item === "string" && item.length <= 128 && /^[a-zA-Z0-9_:. /-]*$/.test(item)) result[key] = item;
+    }
+    return result;
+}
+
+function recordReplyDiagnostic(stage, status, fields = {}) {
+    try {
+        const item = safeReplyDiagnostic({ stage, status, frontendVersion: REPLY_PIPELINE_VERSION, at: Date.now(), ...fields });
+        replyDiagnostics.push(item);
+        replyDiagnostics = replyDiagnostics.slice(-200);
+        sessionStorage.setItem(REPLY_DIAGNOSTICS_KEY, JSON.stringify(replyDiagnostics));
+    } catch (_) { /* Storage and diagnostics have no effect on delivery. */ }
+}
+
+function turnReplyIdentity(turn) {
+    const known = replyHttpAttempts.get(turn.requestId)
+        || [...replyDiagnostics].reverse().find(item => item.messageKey === turn.requestId && item.requestId) || {};
+    return { requestId: known.requestId, pipelineVersion: known.pipelineVersion,
+        messageKey: turn.requestId, versionId: turn.versionId, assistantTurnId: turn.turnId };
+}
+
 const MAX_MESSAGE_LENGTH = 2000;
 const LLM_REQUEST_TIMEOUT_MS = 120000;
 const MESSAGE_REQUEST_TIMEOUT_MS = 125000;
@@ -1313,9 +1350,25 @@ function renderMessages() {
 }
 
 function renderAssistantBubble(turn, bubble) {
+    try { return renderAssistantBubbleContent(turn, bubble); }
+    catch (error) {
+        recordReplyDiagnostic("render", "failed", { ...turnReplyIdentity(turn), code: "RENDER_EXCEPTION" });
+        throw error;
+    }
+}
+
+function renderAssistantBubbleContent(turn, bubble) {
     const localized = localizedAssistantTurn(turn);
     const proposal = proposalForTurn(turn.turnId);
     const guidance = guidanceForDisplay(localized.guidance || {}, proposal);
+    let renderedIntent = false;
+    const receivedIntent = Boolean(localized.guidance?.intentHypothesis);
+    const filterCode = receivedIntent && !guidance.intentHypothesis
+        ? (proposal || localized.guidance?.proposalOffer ? "ACTION_CARD_FAMILY"
+            : (localized.guidance?.uiCues || []).some(cue => cue?.type === "manual_edit") ? "MANUAL_CARD_FAMILY" : "CLARIFICATION_CARD_FAMILY")
+        : "";
+    recordReplyDiagnostic("display_policy", filterCode ? "filtered" : "passed", {
+        ...turnReplyIdentity(turn), code: filterCode, receivedCard: receivedIntent, displayCard: Boolean(guidance.intentHypothesis) });
     const question = String(guidance.followUpQuestion || "").trim();
     const uiCues = Array.isArray(guidance.uiCues) ? guidance.uiCues : [];
     const activeDisagreement = guidance.disagreement?.status === "active"
@@ -1412,6 +1465,7 @@ function renderAssistantBubble(turn, bubble) {
             localizedProposalSummary(proposal)
         ));
     } else if (guidance.intentHypothesis) {
+        renderedIntent = true;
         if (guidance.intentState?.interactionMode === "conflict_choice") {
             cueList.appendChild(createIntentConflictChoiceCue(
                 guidance.intentHypothesis,
@@ -1443,6 +1497,8 @@ function renderAssistantBubble(turn, bubble) {
         // Legacy render contract: if (question) bubble.appendChild(createDiscussionFocus(question));
         bubble.appendChild(createDiscussionFocus(question));
     }
+    recordReplyDiagnostic("render", "completed", { ...turnReplyIdentity(turn), renderedCard: renderedIntent,
+        code: receivedIntent && !renderedIntent ? "CARD_NOT_RENDERED" : "" });
 }
 
 function proposalStateMessage(status) {
@@ -4049,9 +4105,17 @@ async function api(path, options = {}) {
     }
     let response;
     let phase = "transport";
+    const messageDiagnostic = /\/messages$/.test(path) ? {
+        messageKey: options.body?.idempotencyKey, versionId: options.body?.baseVersionId } : null;
+    if (messageDiagnostic) recordReplyDiagnostic("transport", "started", messageDiagnostic);
     try {
         response = await fetch(path.startsWith("/api/") ? API_PREFIX + path : path, request);
         phase = "response_body";
+        if (messageDiagnostic) {
+            Object.assign(messageDiagnostic, { requestId: response.headers?.get?.("X-Request-ID"),
+                pipelineVersion: response.headers?.get?.("X-Reply-Pipeline-Version"), httpStatus: response.status });
+            recordReplyDiagnostic("response_body", "started", messageDiagnostic);
+        }
         let payload;
         try { payload = await response.json(); }
         catch (error) {
@@ -4076,6 +4140,14 @@ async function api(path, options = {}) {
             invalid.retryable = safeRetry;
             throw invalid;
         }
+        if (messageDiagnostic) {
+            replyHttpAttempts.set(messageDiagnostic.messageKey, { ...messageDiagnostic });
+            if (replyHttpAttempts.size > 200) replyHttpAttempts.delete(replyHttpAttempts.keys().next().value);
+            const turn = (payload.turns || []).find(item => item.role === "assistant" && item.requestId === messageDiagnostic.messageKey);
+            recordReplyDiagnostic("response_body", "passed", { ...messageDiagnostic, assistantTurnId: turn?.turnId,
+                turnPresent: Boolean(turn), receivedCard: Boolean(turn?.guidance?.intentHypothesis),
+                code: turn ? "" : "ASSISTANT_TURN_MISSING" });
+        }
         return typeof payload.sessionId === "string" && Array.isArray(payload.turns)
             ? retainNewerInteractionState(payload) : payload;
     } catch (error) {
@@ -4089,6 +4161,8 @@ async function api(path, options = {}) {
             retryError.retryable = true;
             error = retryError;
         }
+        if (messageDiagnostic) recordReplyDiagnostic(phase, "failed", { ...messageDiagnostic,
+            code: ["CLIENT_TIMEOUT", "INVALID_RESPONSE", "RETRYABLE_REQUEST_FAILED"].includes(error.code) ? error.code : "REQUEST_FAILED" });
         error.details = { ...(error.details || {}), httpStatus: response?.status,
             requestId: response?.headers?.get?.("X-Request-ID") || error.details?.requestId,
             contentType: response?.headers?.get?.("Content-Type"), failureStage: error.details?.failureStage || phase };

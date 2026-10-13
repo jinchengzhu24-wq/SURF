@@ -4,7 +4,7 @@
 
 当前产品把“地图共创”和“Unity 游玩”分开：Unity 负责生成并验证首版地图，8010 网页负责聊天、版本管理、手工编辑、AI 提案和 Stage 试玩；最终确认后，Unity 再取得最终地图进入在线挑战。
 
-本文于 2026-10-12 按当前代码与已确认修订核对。产品流程以本文为入口，开发约束见 [AGENTS.md](AGENTS.md)，回复验收与恢复见 [可靠性说明](CoCreationPrototype/REPLY_RELIABILITY.md)，离线评测见 [评测说明](CoCreationPrototype/Backend/evaluations/README.md)。历史角色说明与示例保存在 `Multi-Agent/`；其中旧流程不能覆盖当前规则。
+本文于 2026-10-13 按当前代码与已确认修订核对。产品流程以本文为入口，开发约束见 [AGENTS.md](AGENTS.md)，回复验收与恢复见 [可靠性说明](CoCreationPrototype/REPLY_RELIABILITY.md)，离线评测见 [评测说明](CoCreationPrototype/Backend/evaluations/README.md)。历史角色说明与示例保存在 `Multi-Agent/`；其中旧流程不能覆盖当前规则。
 
 ## 代码与职责入口
 
@@ -231,6 +231,10 @@ python CoCreationPrototype/Backend/semantic_eval.py validate
 统计按会话、任务、消息键归并；多条结果记录不等于内部模型尝试或精确 HTTP 重试数。生成、正文、质量指标的缺失布尔值为未知，`rate` 使用 `observed` 分母；正文交付不等于有效方案或浏览器收到响应，少量样本与空问题列表不证明稳定成功率。时间允许明确时区，`--until` 为不包含的结束时间。
 
 固定集目前为 36 个合成入口理解案例、两张可解地图。`validate`、`score`、`compare` 不调用模型；`run --live` 单独启用真实 Kimi 采样，复用生产入口理解函数，不创建线上会话或写 SQLite。预期值和人工说明不进入模型上下文。缺失样本保留在评测分母，比较使用相同套件和重复次数；结果保存在 Git 忽略的 `CoCreationPrototype/Backend/evaluation_runs/`。评测不覆盖完整正文、活跃质疑或地图执行，不能当作线上成功率；2026-10-06 本轮仅做离线验收，尚未进行真实模型采样。详细运行及比较格式见 [评测说明](CoCreationPrototype/Backend/evaluations/README.md)。
+
+## 2026-10-13 普通聊天精简
+
+普通聊天将问题回答判断合入已有独立意图复核，减少一次辅助调用；回答问题可同时产生经过验证的橙卡。意图语义、卡片呈现和问题结果独立验收，呈现失败不清空已验证语义，也不把未展示候选写成确认倾向。普通卡片使用单字段表达修复，原预算、地图/权限/合同/求解/竞态和正式恢复边界保持。服务端追加阶段诊断与版本响应头，浏览器只在当前标签页保存最多 200 条无正文诊断；只读报告分别统计复核、提交和问题更新，不能据后台成功推断浏览器展示。实现与验证说明见 [回复可靠性](CoCreationPrototype/REPLY_RELIABILITY.md)。
 
 ## 8010 API 分类
 

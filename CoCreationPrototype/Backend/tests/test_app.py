@@ -955,7 +955,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("minimal-evidence-repair-20261012", index_response.text)
+        self.assertIn("ordinary-harness-20261013-v2", index_response.text)
         self.assertIn("sendChallengeChoice", js_response.text)
         self.assertIn("offer.availableActions.includes(action)", js_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
