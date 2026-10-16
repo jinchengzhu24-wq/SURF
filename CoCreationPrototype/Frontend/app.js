@@ -2574,7 +2574,7 @@ function updateControls() {
     const intentConflictPending = selectedStageHasPendingIntentConflict();
     const proposalFlowStatus = state.session?.proposalFlowState?.status || "inactive";
     const proposalPlanning = proposalFlowStatus === "planning";
-    const proposalRetryPending = proposalFlowStatus === "retry_pending";
+    const proposalRetryPending = proposalFlowStatus === "retry_pending" && Boolean(state.pendingMessage);
     const interactionBusy = state.busy || state.unityPlayActive;
     const generationPending = state.chatStatus === "waiting"
         || state.assessmentRetryTimers.size > 0
@@ -2819,7 +2819,18 @@ async function submitPendingMessage() {
         updateCharacterCount();
         render();
     } catch (error) {
-        if (
+        if (error?.code === "PROPOSAL_STALE" && (!pending.action || pending.action === "none")) {
+            // Keep the wording for a deliberate new answer, but never retry
+            // an old question binding with the old key after dialogue changed.
+            clearPendingMessage();
+            elements.messageInput.value = pending.content;
+            localStorage.setItem(composerKey(), pending.content);
+            try {
+                await refreshSession();
+            } catch (_refreshError) {
+                // Preserve the original stale-context error and draft.
+            }
+        } else if (
             [
                 "INVALID_CARD_SOURCE",
                 "PROPOSAL_STALE",

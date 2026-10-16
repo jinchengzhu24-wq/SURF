@@ -48,6 +48,7 @@ from level_validation import (
 from demo_level_generator import generate_demo_level
 from conversation_evidence import build_dialogue_evidence, with_latest
 import component_recovery
+import proposal_options
 from reply_reliability import CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, ReplyTrace, trace_reply, failure_reason
 from proposal_diagnostics import (ProposalDiagnostic, CURRENT_PROPOSAL_DIAGNOSTIC, proposal_phase, trace_proposal)
 from llm_client import validate_ai_edit_diff
@@ -3065,7 +3066,8 @@ def _send_message_locked_impl(
                 prior_conversation = None
         if saved_understanding is None and already_answered is None:
             interpretation_context = {key: proposal_context_for_understanding.get(key) for key in (
-                "topicId", "initialRequest", "questions", "answers", "lastQuestionText", "userTurns", "understanding"
+                "topicId", "versionId", "initialRequest", "questions", "answers", "lastQuestionText", "userTurns", "understanding",
+                "optionSet", "optionQuestion", "optionDecision", "clarificationQuestionCount"
             )} if proposal_context_for_understanding else {}
             interpretation_context["dialogueEvidence"] = with_latest(
                 read_context["stageContext"].get("dialogueEvidence"), content)
@@ -3079,7 +3081,8 @@ def _send_message_locked_impl(
                 )
             except LLMServiceError as error:
                 with connect(immediate=True) as database:
-                    require_active_session(database, session_id, access_cookie)
+                    active_session = require_active_session(database, session_id, access_cookie)
+                    require_current_base(active_session, payload.baseVersionId)
                     record_event(database, session_id, "message_generation_failed", {
                         "messageKey": payload.idempotencyKey, "baseVersionId": payload.baseVersionId,
                         "requestId": request.state.request_id, "code": error.code,
@@ -3089,9 +3092,17 @@ def _send_message_locked_impl(
                         "details": {**_llm_failure_details(error), "task": "turn_understanding",
                                     "failureStage": (getattr(error, "details", {}) or {}).get("failureStage", "understanding"), "maximumAttempts": 2},
                     }, utc_now())
+                    if proposal_context_for_understanding:
+                        record_event(database, session_id, "proposal_discovery_progress", {
+                            "stageId": payload.baseVersionId,
+                            "topicId": proposal_context_for_understanding["topicId"],
+                            "messageKey": payload.idempotencyKey, "status": "retry_pending",
+                            "retryable": True, "failureCode": error.code,
+                            "clarificationQuestionCount": proposal_context_for_understanding.get("clarificationQuestionCount", 0),
+                        }, utc_now())
                 # A failed interpretation cannot authorize a proposal or a state
                 # transition. Ordinary input can still receive reliable Kimi prose.
-                if payload.requestProposal or error.code != "MODEL_RESPONSE_INVALID":
+                if payload.requestProposal or proposal_context_for_understanding or error.code != "MODEL_RESPONSE_INVALID":
                     raise
                 precomputed_understanding = {
                     "acts": ["unclear"], "elements": [], "evidenceSpan": content,
@@ -3334,6 +3345,7 @@ def _send_message_locked_impl(
         )
         stage_context["adaptiveProposalCompletion"] = (
             revision_routing == "needs_clarification"
+            and not proposal_options.current_set(proposal_discovery, stage_context.get("stageSnapshot"))
             and _allow_adaptive_proposal_completion(
                 content,
                 user_map_claims,
@@ -4621,6 +4633,7 @@ def _send_message_locked_impl(
         newer_receipt = bool(guard_receipt and guard_receipt["id"] != current_binding["latestMessageReceipt"])
         if captured_binding and (captured_binding != current_binding or superseded or newer_receipt):
             if (execution.proposed_rows is not None or (execution.guidance or {}).get("proposalOffer")
+                    or (execution.guidance or {}).get("proposalDiscovery")
                     or payload.action != "none"):
                 raise ApiError(409, "PROPOSAL_STALE", "The dialogue evidence or interaction state changed. Send a request based on the current dialogue.",
                                retryable=False, details={"failureStage": "context_binding", "failureKind": "state_or_evidence_change"})
@@ -4880,6 +4893,9 @@ def _send_message_locked_impl(
                         "clarificationQuestionCount": discovery_marker.get(
                             "clarificationQuestionCount"
                         ),
+                        "optionPolicyVersion": (discovery_marker.get("optionSet") or {}).get("schemaVersion"),
+                        "optionCount": len((discovery_marker.get("optionSet") or {}).get("options") or []),
+                        "optionSelection": (discovery_marker.get("optionDecision") or {}).get("selection"),
                         "clarificationQuestionKey": discovery_marker.get(
                             "clarificationQuestionKey"
                         ),
@@ -9710,6 +9726,9 @@ def _proposal_discovery_from_turns(
                     # to resemble a fresh imperative design command.
                     active["status"] = "revision_needed"
             if active is not None and request_key in reviewed:
+                decision = reviewed[request_key].get("optionDecision")
+                if isinstance(decision, dict) and reviewed[request_key].get("versionId") == version_id:
+                    active["optionDecision"] = decision
                 interpretation = reviewed[request_key].get("proposalUnderstanding")
                 if (isinstance(interpretation, dict)
                         and reviewed[request_key].get("semanticPolicyVersion") == 1
@@ -9734,6 +9753,11 @@ def _proposal_discovery_from_turns(
         if isinstance(marker, dict) and marker.get("topicId") != active["topicId"]:
             continue
         marker = marker if isinstance(marker, dict) else {}
+        if isinstance(marker.get("optionSet"), dict):
+            active["optionSet"] = marker["optionSet"]
+            active["optionQuestion"] = marker.get("optionQuestion")
+        if isinstance(marker.get("optionDecision"), dict):
+            active["optionDecision"] = marker["optionDecision"]
         visible_questions = _visible_proposal_questions(content)
         for index, question_text in enumerate(visible_questions):
             question_id = f"{turn['id']}:{index + 1}"
@@ -9859,6 +9883,21 @@ def _semantic_proposal_clarification_spec(discovery, snapshot, language):
 
 
 def _proposal_clarification_spec(discovery, snapshot, language):
+    specification = _proposal_clarification_dimensions_spec(discovery, snapshot, language)
+    if (specification is None and proposal_options.current_set(discovery, snapshot)
+            and int(discovery.get("clarificationQuestionCount") or 0) < 3):
+        specification = {"countBefore": int(discovery.get("clarificationQuestionCount") or 0),
+            "allowedEntityLabels": [str(item["id"]) for item in (snapshot or {}).get("entities") or [] if item.get("id")],
+            "topicContinued": True, "semanticPolicyVersion": 1}
+    if specification is None:
+        return None
+    return {**specification, "optionPolicyVersion": proposal_options.VERSION,
+        "questionKey": f"option_choice_{int(discovery.get('clarificationQuestionCount') or 0) + 1}",
+        "fallbackQuestion": "", "fallbackAcknowledgement": "",
+        "questionIntent": "compare materially different, permission-safe proposal directions before choosing a route"}
+
+
+def _proposal_clarification_dimensions_spec(discovery, snapshot, language):
     """Choose one server-owned question for an active proposal topic."""
     if not discovery or discovery.get("status") != "clarifying":
         return None
@@ -10124,6 +10163,8 @@ def _adaptive_revision_routing(
         return "none"
     discovery = proposal_discovery or {}
     if (turn_understanding or {}).get("conversationOnly"):
+        if discovery:
+            raise ApiError(502, "MODEL_RESPONSE_INVALID", "Retry the original proposal answer.", retryable=True)
         return "none"
     if isinstance(turn_understanding, dict):
         if turn_understanding.get("mapRelated") is False:
@@ -10139,6 +10180,29 @@ def _adaptive_revision_routing(
         if interpretation:
             if discovery and _proposal_topic_reset_requested(text):
                 return "proposal_cancelled"
+            option_set = proposal_options.current_set(discovery, snapshot)
+            if option_set:
+                if turn_understanding.get("optionContextSignature") != proposal_options.context_signature(discovery):
+                    raise ApiError(409, "PROPOSAL_STALE", "The proposal question changed. Answer the current question.")
+                decision = discovery.get("optionDecision") or {}
+                if (decision.get("selection") == "unclear" and not requested
+                        and acts & {"explanation_request", "idea_request"}):
+                    # Explaining an option is not choosing it, even after the
+                    # last allowed question. Keep the pending question bound.
+                    return "none"
+                remaining_options = [item for item in proposal_options.all_options(option_set)
+                    if item["id"] not in decision.get("rejectedOptionIds", [])]
+                count = int(discovery.get("clarificationQuestionCount") or 0)
+                if decision.get("selection") == "revise" and interpretation.get("sufficient"):
+                    return "proposal_conservative"
+                if decision.get("selection") == "revise" or not remaining_options:
+                    return "needs_clarification" if count < 3 else "proposal_blocked"
+                if decision.get("selection") == "unclear" and len(remaining_options) > 1 and count < 3:
+                    return "needs_clarification"
+                if len(remaining_options) == 1:
+                    return "proposal_conservative"
+                if decision.get("selection") == "explicit" and len(decision.get("preferredOptionIds") or []) == 1:
+                    return "proposal_conservative"
             if (interpretation.get("sufficient") or int(discovery.get("clarificationQuestionCount") or 0) >= 3
                     or discovery.get("status") in {"revision_needed", "retry_pending", "planning"}):
                 return "proposal" if _proposal_discovery_has_unique_anchor(discovery, snapshot) else "proposal_conservative"
@@ -10309,9 +10373,8 @@ def _proposal_feasibility_profile(
         "bindableEntities": entities,
         "availableOperators": [
             "add_wall", "remove_wall", "add_water", "remove_water",
-            "move_player", "move_box", "move_target",
         ],
-        "protected": ["outer_shell", "unrelated_areas", "entity_overlap"],
+        "protected": ["outer_shell", "player", "boxes", "targets", "unrelated_areas", "entity_overlap"],
         "waterComponents": len(component_sizes),
         "waterComponentSizes": sorted(component_sizes, reverse=True),
         "editableCellCount": editable_cells,
@@ -11800,8 +11863,36 @@ def _mark_proposal_discovery_guidance(execution, stage_context):
         ),
         "askedQuestionKeys": list(discovery.get("askedQuestionKeys") or []),
         "lastQuestionKey": discovery.get("lastQuestionKey"),
+        **{key: discovery[key] for key in ("optionSet", "optionQuestion", "optionDecision") if key in discovery},
     }
     body = execution.assistant_message
+    diagnostics = execution.proposal_diagnostics or {}
+    if diagnostics.get("optionAutoPlan"):
+        routing = "proposal_conservative"
+        marker["optionSet"] = diagnostics["optionSet"]
+        if diagnostics.get("optionDecision"):
+            marker["optionDecision"] = diagnostics["optionDecision"]
+        else:
+            marker.pop("optionDecision", None)
+    specification = (stage_context or {}).get("proposalClarification") or {}
+    if routing == "needs_clarification" and specification.get("optionPolicyVersion") == proposal_options.VERSION:
+        option_set = diagnostics.get("optionSet")
+        if (not option_set or not proposal_options.current_set({**discovery, "optionSet": option_set},
+                (stage_context or {}).get("stageSnapshot") or {})):
+            raise ApiError(502, "MODEL_RESPONSE_INVALID", "No verified proposal directions remain. Retry the original message.", retryable=True)
+        marker["optionSet"] = option_set
+        marker["optionQuestion"] = diagnostics.get("optionQuestion")
+        if (discovery.get("optionDecision") or {}).get("selection") == "revise":
+            marker.pop("optionDecision", None)
+        if diagnostics.get("optionOutcome") == "revision_needed":
+            routing = "proposal_blocked"
+        else:
+            question = diagnostics.get("clarificationQuestion")
+            compact = lambda text: re.sub(r"\s+", "", str(text or ""))
+            if (not question or question not in body or not diagnostics.get("clarificationQuestionValidated")
+                    or any(compact(item[key]) not in compact(body)
+                        for item in option_set["options"] for key in proposal_options.FIELDS - {"components"})):
+                raise ApiError(502, "MODEL_RESPONSE_INVALID", "The displayed question or directions changed after verification. Retry the message.", retryable=True)
     if (stage_context or {}).get("conversationOnly"):
         # A conversational recovery cannot end or restart an authorized topic.
         marker["status"] = discovery.get("status") or "clarifying"

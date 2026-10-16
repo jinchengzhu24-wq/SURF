@@ -43,10 +43,11 @@ from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_
     CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
 from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
 from conversation_evidence import CONTEXT_VERSION
+import proposal_options
 from proposal_understanding import (
     turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
     engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
-    understanding_patch_request,
+    understanding_patch_request, validate_option_plan_scope,
 )
 from proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
     CURRENT_PROPOSAL_DIAGNOSTIC, ProposalValidationError)
@@ -1693,6 +1694,43 @@ def _compact_kimi_plain_prompt(
         else None
     )
     if isinstance(proposal_clarification, dict) and proposal_clarification.get("questionKey"):
+        if proposal_clarification.get("optionPolicyVersion") == proposal_options.VERSION:
+            discovery = (stage_context or {}).get("proposalDiscovery") or {}
+            return "\n\n".join([
+                f"You are the warm first-person Sokoban co-creation peer. Write in {response_language}.",
+                "Before asking, form normally TWO, at most THREE materially different, fairly complete "
+                "direction plans for the same designer request. Each must explain a local treatment, "
+                "expected visual/play effect and a real tradeoff. No padding, invented locks, guaranteed "
+                "effects, numerical requirements, coordinates or per-cell edits. Only water/internal walls "
+                "may change; player, boxes, targets and shell remain fixed. Gameplay pushes are distinct "
+                "from design relocation. Respect explicit component scope, goals and prohibitions. "
+                "Directions are your tentative suggestions, not designer instructions or solved maps.",
+                'Return direct JSON only: {"body":"brief first-person reflection without questions", '
+                '"options":[{"summary":"...","components":["water"],"focus":"...",'
+                '"mechanism":"...","effect":"...","tradeoff":"...","preserve":"..."}],'
+                '"comparedOptions":["1","2"],"discriminant":"the actual unresolved tradeoff",'
+                '"question":"one natural preference question?"}. '
+                "Each option text field is one concise complete sentence, at most 240 characters; "
+                "all six text fields will be visible in A/B/C order, so avoid duplication. No question "
+                "marks inside body/options. Ask ONE neutral question discriminating the actual options; "
+                "explain the differences concretely rather than asking for an abstract mechanism or coordinates. "
+                "Use option indexes as comparedOptions for NEW directions. If a saved optionSet exists "
+                "and optionDecision.selection is not revise, options MUST be null: the saved directions "
+                "are locked, reference their exact IDs in comparedOptions; never regenerate or rewrite them. "
+                "Compare only directions not rejected by the designer, and address an unresolved tradeoff. "
+                "If only one responsible direction is possible, return one option and empty question, "
+                "comparedOptions and discriminant; planning follows immediately. If none is responsible, "
+                "return [] and the same empty question fields with evidence-grounded failure analysis in body. "
+                "Never use a question merely to fill the three-question allowance.",
+                "Order new directions by fit to expressed priorities, current focus and plausible map feasibility, "
+                "then smaller scope. This order is your proposal preference, not a designer decision. "
+                "Keep the visible comparison neutral and do not claim deterministic feasibility.",
+                "Current StageSnapshot (only map authority): " + str(map_facts),
+                "Designer topic and actually displayed questions/options (AI suggestions are not user constraints): "
+                + json.dumps(discovery, ensure_ascii=False, separators=(',', ':')),
+                "Verified single route witness, not a proof of all solutions or player time: "
+                + json.dumps(proposal_clarification.get("routeEvidence") or {}, ensure_ascii=False),
+            ])
         compact_clarification = _proposal_clarification_compact_experiment_enabled()
         discovery = (stage_context or {}).get("proposalDiscovery") or {}
         topic_brief = str(discovery.get("brief") or "").strip()[-2400:]
@@ -4289,6 +4327,20 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     )
     messages[0]["content"] += _dialogue_background_prompt({
         "dialogueEvidence": (proposal_context or {}).get("dialogueEvidence"), "stageSnapshot": snapshot})
+    if proposal_options.current_set(proposal_context, snapshot):
+        messages[0]["content"] += (
+            " Return optionDecision with preferredOptionIds (ranked), rejectedOptionIds, selection "
+            "(explicit/inferred/unclear/revise), and exact latest-user evidenceSpan. Bind the answer to the "
+            "actually displayed options and question. explicit requires an unambiguous designer choice; "
+            "inferred is only a proposal assumption. unclear has no preferred IDs. revise means an actual "
+            "direction correction and has no preferred IDs. Preserve earlier rejections unless explicitly "
+            "withdrawn. Never infer consent to hidden option details. A remaining implementation detail is "
+            "not a reason to keep asking: sufficient=true when a compatible route can be selected."
+            " When three questions have already been displayed, rank remaining compatible directions by "
+            "expressed priorities, current focus and plausible snapshot fit as an inferred planning choice "
+            "even if an implementation detail remains unspecified; do not invent a designer preference "
+            "or solvability guarantee. Genuine correction or rejection of every option is still revise."
+        )
     active_human_edit = ((proposal_context or {}).get("activeDisagreement") or {}).get("subject") == "human_edit"
     messages[0]["content"] += (
         " Return humanEditEngagement=null unless there is an active human-edit disagreement. Otherwise "
@@ -4302,6 +4354,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     repair_request = None
     payload = {}
     review_repair_request = None
+    review_cold_retry = False
     verdict = {}
     for attempt in range(1, 3):
         try:
@@ -4309,7 +4362,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             timeout = min(15.0, _remaining_until(_deadline)) if _deadline is not None else 15.0
             if timeout <= 0:
                 raise asyncio.TimeoutError()
-            if review_repair_request is not None:
+            if review_repair_request is not None or review_cold_retry:
                 pass  # Preserve the original understanding; repair its reviewer only.
             elif repair_request is not None:
                 merged = asyncio.run(_request_component_patch(api_key, base_url, repair_request,
@@ -4329,7 +4382,8 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 payload = parse_json_object(response.choices[0].message.content)
             if set(payload) & {"semanticPolicyVersion", "criticalReview", "versionId", "evidenceSignature"}:
                 raise ValueError("A model cannot author server review metadata.")
-            candidate = ({**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding")}
+            candidate = ({**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding"),
+                          "optionDecision": payload.get("optionDecision")}
                          if locked_base is not None else _validate_turn_understanding(payload, latest, forced_proposal))
             if active_human_edit and not (locked_base or {}).get("humanEditEngagement"):
                 try:
@@ -4338,8 +4392,9 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     candidate.pop("humanEditEngagement", None)
             elif not active_human_edit:
                 candidate.pop("humanEditEngagement", None)
-            locked_base = {key: value for key, value in candidate.items() if key != "proposalUnderstanding"}
+            locked_base = {key: value for key, value in candidate.items() if key not in {"proposalUnderstanding", "optionDecision"}}
             _validate_proposal_interpretation(candidate, latest, snapshot, proposal_context, forced_proposal)
+            candidate["optionDecision"] = proposal_options.validate_decision(payload.get("optionDecision"), latest, proposal_context, snapshot)
             review_reason = critical_review_reason(candidate, proposal_context)
             if review_reason:
                 phase = "understanding_review"
@@ -4360,6 +4415,10 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     "all active goals and locks, numerical inventions, visual versus gameplay meaning, and "
                     "short-answer binding. Assistant claims and solver counts cannot create user requirements. "
                     "Current map facts use only Current Stage Snapshot. Do not judge feasibility here."
+                    " When proposalContext has optionSet, independently verify optionDecision against the latest "
+                    "answer and the displayed optionQuestion. Preserve previously rejected options unless the user "
+                    "withdraws that rejection. Distinguish explicit choice from inferred planning preference; "
+                    "AI alternatives never establish hidden designer constraints."
                 )}, {"role": "user", "content": json.dumps({
                     "source": json.loads(messages[1]["content"]), "candidate": candidate,
                     "reviewReason": review_reason,
@@ -4388,6 +4447,8 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     raise ValueError("A model cannot author server review metadata.")
                 corrected = _validate_turn_understanding(verdict["understanding"], latest, forced_proposal)
                 _validate_proposal_interpretation(corrected, latest, snapshot, proposal_context, forced_proposal)
+                corrected["optionDecision"] = proposal_options.validate_decision(
+                    corrected.get("optionDecision"), latest, proposal_context, snapshot)
                 if any(not x.get("evidenceSpan") for x in corrected.get("changes") or []):
                     raise ValueError("Reviewed changes lack individual designer evidence.")
                 # Permission review must not reinterpret an independently validated state signal.
@@ -4408,6 +4469,8 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             candidate["semanticPolicyVersion"] = 1
             candidate["dialogueContextVersion"] = CONTEXT_VERSION
             candidate["evidenceSignature"] = topic_signature(snapshot, proposal_context, latest)
+            if proposal_options.current_set(proposal_context, snapshot):
+                candidate["optionContextSignature"] = proposal_options.context_signature(proposal_context)
             return candidate
         except LLMServiceError:
             raise
@@ -4426,15 +4489,26 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             if reason_code(exception) == "SEMANTIC_REVIEW_REJECTED":
                 trace_proposal(phase, "understanding_review", "not_repairable", "SEMANTIC_REVIEW_REJECTED", attempt=attempt)
                 break
-            frozen = {**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding")} if locked_base else payload
+            frozen = {**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding"),
+                      "optionDecision": payload.get("optionDecision")} if locked_base else payload
             sources = designer_sources(proposal_context, latest)
-            if locked_base is not None:
+            if any(issue.get("fieldPath") == "optionDecision" for issue in getattr(exception, "issues", [])):
+                repair_request = PatchRequest("understanding", {"understanding": payload},
+                    [Target("optionDecision", ("understanding", "optionDecision"), (dict,))],
+                    {"snapshot": snapshot, "proposal_context": proposal_context,
+                     **{f"user:{key}": content for key, content in sources.items()}})
+            elif locked_base is not None:
                 repair_request = understanding_patch_request(frozen, exception, sources, snapshot)
-            else:
+            elif payload:
                 repair_request = PatchRequest("understanding", {"understanding": frozen},
                     [Target("understanding", ("understanding",), (dict,))],
                     {"snapshot": snapshot, **{f"user:{key}": content for key, content in sources.items()}})
+            else:
+                # No parsed component exists: the existing second slot is a clean retry,
+                # not a patch of an empty invented understanding.
+                repair_request = None
             review_repair_request = None
+            review_cold_retry = phase == "understanding_review" and not verdict
             if phase == "understanding_review":
                 parts, missing = {}, []
                 for field, kinds in (("accepted", (bool,)), ("issues", (list,)), ("understanding", (dict,))):
@@ -4443,7 +4517,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                         parts[field] = value
                     else:
                         missing.append(Target(field, (field,), kinds))
-                if missing:
+                if missing and not review_cold_retry:
                     review_repair_request = PatchRequest("understanding_review", parts, missing,
                         {"review_source": json.loads(review_messages[1]["content"])})
                 elif isinstance(exception, ProposalValidationError) and any(
@@ -4451,6 +4525,10 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     scoped = understanding_patch_request(verdict["understanding"], exception, sources, snapshot)
                     review_repair_request = PatchRequest("understanding_review", verdict, list(scoped.targets.values()),
                         {"review_source": json.loads(review_messages[1]["content"]), **scoped.evidence})
+                elif any(issue.get("fieldPath") == "optionDecision" for issue in getattr(exception, "issues", [])):
+                    review_repair_request = PatchRequest("understanding_review", verdict,
+                        [Target("optionDecision", ("understanding", "optionDecision"), (dict,))],
+                        {"review_source": json.loads(review_messages[1]["content"])})
             trace_repair("understanding_review" if review_repair_request is not None else "understanding",
                          "proposed" if attempt < 2 else "exhausted")
             messages.append({"role": "user", "content": (
@@ -4466,7 +4544,9 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     error = LLMServiceError("MODEL_RESPONSE_INVALID",
         "Kimi could not reliably classify the designer's latest message. Retry it.", request_id, True, attempt, 502)
     error.details = {"task": "turn_understanding", "failureStage": phase,
-                     "failureKind": "semantic_rejection" if reason_code(last_error) == "SEMANTIC_REVIEW_REJECTED" else
+                     "reasonCode": reason_code(last_error), "issues": safe_issues(last_error),
+                     "failureKind": "timeout" if isinstance(last_error, (TimeoutError, asyncio.TimeoutError)) else
+                         "semantic_rejection" if reason_code(last_error) == "SEMANTIC_REVIEW_REJECTED" else
                          "review_validation" if review_repair_request is not None else "understanding",
                      "maximumAttempts": 2}
     diagnostic = CURRENT_PROPOSAL_DIAGNOSTIC.get()
@@ -4483,18 +4563,20 @@ def _validate_proposal_interpretation(candidate, latest, snapshot, context, forc
         return
     if topic is None:
         if required:
-            raise ValueError("An authorized proposal topic needs an evidence-bound interpretation.")
+            raise ProposalValidationError([{"fieldPath": "proposalUnderstanding", "reasonCode": "TOPIC_REQUIRED", "sourceKind": "unknown"}])
         return
     roles = {turn["id"]: turn["role"] for turn in ((context or {}).get("dialogueEvidence") or {}).get("turns", [])}
     candidate["proposalUnderstanding"] = validate_topic(topic, designer_sources(context, latest), snapshot, roles)
 
 
 def _validate_turn_understanding(payload, latest, forced_proposal=False):
-    metadata = {"proposalUnderstanding", "humanEditEngagement", "semanticPolicyVersion", "evidenceSignature", "criticalReview", "versionId"}
+    def fail(field, code):
+        raise ProposalValidationError([{"fieldPath": field, "reasonCode": code, "sourceKind": "latest_user"}])
+    metadata = {"proposalUnderstanding", "humanEditEngagement", "optionDecision", "semanticPolicyVersion", "evidenceSignature", "criticalReview", "versionId"}
     if not isinstance(payload, dict) or set(payload) - metadata not in ({
         "acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated",
     }, {"acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated", "changes"}):
-        raise ValueError("Turn understanding has an invalid envelope.")
+        fail("understanding", "UNDERSTANDING_SCHEMA_INVALID")
     allowed_acts = {
         "evaluation", "intent", "explanation_request", "idea_request",
         "revision_request", "unclear",
@@ -4507,16 +4589,17 @@ def _validate_turn_understanding(payload, latest, forced_proposal=False):
     elements = payload["elements"]
     evidence = payload["evidenceSpan"]
     if (not isinstance(acts, list) or not 1 <= len(acts) <= 3
-            or len(acts) != len(set(acts)) or any(act not in allowed_acts for act in acts)):
-        raise ValueError("Turn understanding has invalid acts.")
+            or any(not isinstance(act, str) or act not in allowed_acts for act in acts)
+            or len(acts) != len(set(acts))):
+        fail("acts", "SPEECH_ACT_INVALID")
     if (not isinstance(elements, list) or len(elements) > 6
-            or len(elements) != len(set(elements))
-            or any(element not in allowed_elements for element in elements)):
-        raise ValueError("Turn understanding has invalid elements.")
+            or any(not isinstance(element, str) or element not in allowed_elements for element in elements)
+            or len(elements) != len(set(elements))):
+        fail("elements", "ELEMENT_INVALID")
     if not isinstance(evidence, str) or not evidence.strip() or evidence not in latest:
-        raise ValueError("Turn understanding lacks exact user evidence.")
+        fail("evidenceSpan", "EVIDENCE_SPAN_NOT_EXACT")
     if not isinstance(payload["directionSufficient"], bool) or not isinstance(payload["mapRelated"], bool):
-        raise ValueError("Turn understanding has invalid routing booleans.")
+        fail("directionSufficient", "ROUTING_BOOLEAN_INVALID")
     if forced_proposal and "revision_request" not in acts:
         acts = [*acts[:2], "revision_request"]
     result = {
@@ -4532,14 +4615,15 @@ def _validate_turn_understanding(payload, latest, forced_proposal=False):
         allowed_properties = {"count", "position", "shape", "layout", "route", "push_order", "switching", "rhythm", "appearance", "unknown"}
         if not isinstance(changes, list) or any(
             not isinstance(x, dict) or set(x) not in ({"component", "property"}, {"component", "property", "operation"}, {"component", "property", "operation", "evidenceSpan"})
+            or any(not isinstance(x.get(key), str) for key in ("component", "property"))
             or x.get("operation", "change") not in {"change", "preserve", "mention"}
             or x["component"] not in allowed_elements | {"gameplay"}
             or x["property"] not in allowed_properties for x in changes
         ):
-            raise ValueError("Invalid requested change attributes.")
+            fail("changes", "CHANGE_ATTRIBUTE_INVALID")
         if any("evidenceSpan" in x and (not isinstance(x["evidenceSpan"], str)
                 or not x["evidenceSpan"].strip() or x["evidenceSpan"] not in latest) for x in changes):
-            raise ValueError("A requested change lacks exact latest-user evidence.")
+            fail("changes", "EVIDENCE_SPAN_NOT_EXACT")
         result["changes"] = changes
     return result
 
@@ -4707,8 +4791,9 @@ def generate_chat_reply(
             500,
         )
 
+    direction_handoff = None
     if not assessment_only and not proposal_request:
-        return _generate_plain_chat_sync(
+        discussion = _generate_plain_chat_sync(
             conversation=conversation,
             rows=rows,
             request_id=request_id,
@@ -4718,22 +4803,43 @@ def generate_chat_reply(
             stage_context=effective_stage_context,
             deadline=deadline,
         )
+        if (discussion.proposal_diagnostics or {}).get("optionOutcome") != "ready":
+            return discussion
+        # One safe direction needs no preference question. Continue in the same
+        # request/deadline; it is an AI assumption, never a designer decision.
+        discovery = dict(effective_stage_context.get("proposalDiscovery") or {})
+        previous_options = proposal_options.current_set(discovery)
+        discovery["optionSet"] = discussion.proposal_diagnostics["optionSet"]
+        if not previous_options or (discovery.get("optionDecision") or {}).get("selection") == "revise":
+            discovery.pop("optionDecision", None)
+        effective_stage_context.update({"proposalDiscovery": discovery,
+            "revisionRouting": "proposal_conservative", "proposalBindingMode": "conservative"})
+        effective_stage_context.pop("proposalClarification", None)
+        direction_handoff = {"optionSet": discovery["optionSet"],
+            "optionDecision": discovery.get("optionDecision"), "optionAutoPlan": True}
+        proposal_request = True
 
     if proposal_request:
         reserve = 12.0 if effective_stage_context.get("requirementPolicyVersion") == 1 and _remaining_until(deadline) > 32 else 0.0
         try:
-            return _generate_revision_search_proposal_sync(
+            planned = _generate_revision_search_proposal_sync(
                 api_key=api_key, base_url=base_url, conversation=conversation, rows=rows,
                 request_id=request_id, language=language, proposal_validator=proposal_validator,
                 stage_context=effective_stage_context, baseline_metrics=solver_metrics,
                 deadline=deadline - reserve,
             )
+            if direction_handoff:
+                planned = replace(planned, proposal_diagnostics={**(planned.proposal_diagnostics or {}),
+                    **direction_handoff})
+            return planned
         except LLMServiceError as error:
             recovery = _generate_verified_proposal_failure_analysis(
                 api_key, base_url, effective_stage_context, rows, language, request_id, deadline, error,
             )
             if recovery is None:
                 raise
+            if direction_handoff:
+                recovery = replace(recovery, proposal_diagnostics={**(recovery.proposal_diagnostics or {}), **direction_handoff})
             return recovery
 
     messages = build_chat_messages(
@@ -4905,6 +5011,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         "currentStageSnapshot": snapshot, "responseLanguage": stage_context.get("responseLanguage", "en"),
         "editableComponents": ["water", "internal_walls"],
         "proposalUnderstanding": discovery.get("understanding") or {},
+        "selectedDirection": proposal_options.planning_projection(discovery),
         "inheritedVerifiedRequirements": inherited,
         "requirementDefinitions": REQUIREMENT_DEFINITIONS,
         "inheritanceRule": "Retain unchanged verified meanings. Only exact later designer correction may supersede related items; recheck complete coverage, including inherited items, against all supplied evidence.",
@@ -6366,6 +6473,7 @@ def _preflight_revision_strategies(
         partial = RevisionPlan((strategy,))
         try:
             validate_plan_scope(partial, ((stage_context or {}).get("proposalDiscovery") or {}).get("understanding"))
+            validate_option_plan_scope(partial, (stage_context or {}).get("proposalDiscovery") or {})
             validate_revision_plan_against_map(
                 rows,
                 partial,
@@ -6505,6 +6613,12 @@ def _build_revision_plan_messages(
         ""
         f"Authorized direction (no chat transcript): {revision_brief!r}"
     )
+    selected_route = proposal_options.planning_projection(stage_context.get("proposalDiscovery") or {})
+    if selected_route:
+        user_prompt += "\nSelected direction context (not additional user requirements): " + json.dumps(selected_route, ensure_ascii=False)
+        system_prompt += (" All strategies must realize the first selected direction in this context. "
+                          "Vary its local implementations only. Do not switch to another direction during repair/search, "
+                          "invent consent to hidden details, or claim an inferred preference was explicitly chosen.")
     record = stage_context.get("requirementRecord")
     if isinstance(record, dict):
         system_prompt = system_prompt.replace("second strategy is a strict alternative, not permission to weaken the request.", "second strategy may prioritize a feasible subset of goals without reversing any direction.")
@@ -7020,6 +7134,7 @@ def _build_legacy_revision_execution_contract(stage_context=None):
 @proposal_phase('contract', 'contract', revalidates='plan')
 def _build_revision_execution_contract(plan, authorized_brief, stage_context=None):
     validate_plan_scope(plan, ((stage_context or {}).get("proposalDiscovery") or {}).get("understanding"))
+    validate_option_plan_scope(plan, (stage_context or {}).get("proposalDiscovery") or {})
     if (stage_context or {}).get("aiEditableTilesOnly"):
         allowed = {"add_wall", "remove_wall", "add_water", "remove_water"}
         for strategy in plan.strategies:
@@ -9202,6 +9317,12 @@ def _translation_patch_request(payload, items, target_language, locked):
     return PatchRequest("translation", candidate, targets, evidence), candidate
 
 
+def prompt_translation_sources(items):
+    return [{key: item[key] for key in ("turnId", "body", "followUpQuestion", "intentHypothesis",
+        "proposalOfferSummary", "proposalOfferRationale", "proposalSummary", "uiCueTexts", "disagreement")
+        if key in item} for item in items]
+
+
 async def _translate_with_model_fallback(
     *,
     api_key,
@@ -9217,6 +9338,8 @@ async def _translate_with_model_fallback(
     last_error = None
     validation_feedback = None
     locked_translations = {}
+    option_translation = any(((item.get("guidance") or {}).get("proposalDiscovery") or {}).get("optionSet") for item in items)
+    pending_option_translation = None
     repair_request = None
     payload = {}
     deadline = deadline or _request_deadline(started_at)
@@ -9245,6 +9368,29 @@ async def _translate_with_model_fallback(
         )
 
         try:
+            if pending_option_translation is not None:
+                # Use the existing second translation slot, never add a third
+                # model call or expose snapshot internals to translation review.
+                review_messages = [{"role": "system", "content": (
+                    "Independently verify a translation of proposal directions. Return only {\"accepted\":true} "
+                    "or {\"accepted\":false}. Preserve the original option labels, every choice/tradeoff, "
+                    "question, uncertainty and speaker attribution. Reject new advice or claims, omitted "
+                    "choices, and design relocation/addition/removal of boxes, targets, player start or shell. "
+                    "Only water/internal walls are editable; gameplay pushes are distinct. Judge the actual "
+                    "translated text against the source, never map geometry.")},
+                    {"role": "user", "content": json.dumps({"sources": prompt_translation_sources(items),
+                        "translations": pending_option_translation}, ensure_ascii=False)}]
+                timeout = min(10.0, _remaining_until(deadline))
+                if timeout <= 0:
+                    raise asyncio.TimeoutError()
+                reviewed = await asyncio.wait_for(_request_completion(api_key, base_url, model,
+                    review_messages, 120, timeout, task="translation_permission_review"), timeout=timeout)
+                verdict = parse_json_object(reviewed.choices[0].message.content)
+                if (str(getattr(reviewed.choices[0], "finish_reason", "")) == "length"
+                        or set(verdict) != {"accepted"} or verdict["accepted"] is not True):
+                    raise ValueError("The proposal translation could not be independently verified.")
+                return TranslationExecutionResult(translations=pending_option_translation, attempts_used=attempt,
+                    request_id=request_id, model=model, latency_ms=int((time.monotonic() - started_at) * 1000))
             if repair_request is not None:
                 payload = await _request_component_patch(api_key, base_url, repair_request,
                     messages, request_id, deadline, "translation", TRANSLATION_MAX_TOKENS, attempt_timeout)
@@ -9286,6 +9432,11 @@ async def _translate_with_model_fallback(
                 items,
                 target_language=target_language,
             )
+            if option_translation:
+                if attempt >= max_attempts:
+                    raise ValueError("The proposal translation has no remaining verification slot.")
+                pending_option_translation = translations
+                continue
             latency_ms = int((time.monotonic() - started_at) * 1000)
             _log_llm_event(
                 "llm_request_completed",
@@ -9326,7 +9477,7 @@ async def _translate_with_model_fallback(
                     "instruction": "Preserve verified fields exactly; return only patches for listed failed translation fields.",
                 }, ensure_ascii=False)}]
                 repair_request, recovered = _translation_patch_request(payload, items, target_language, locked_translations)
-                if repair_request is None:
+                if repair_request is None and not option_translation:
                     translations = validate_translation_response(recovered, items, target_language)
                     return TranslationExecutionResult(translations=translations, attempts_used=attempt,
                         request_id=request_id, model=model, latency_ms=int((time.monotonic() - started_at) * 1000))
@@ -9349,6 +9500,9 @@ async def _translate_with_model_fallback(
             failure_fields["validationReason"] = failure_reason
 
         _log_llm_event("llm_attempt_failed", **failure_fields)
+
+        if pending_option_translation is not None:
+            raise last_error
 
         if not last_error.retryable:
             raise last_error
@@ -9464,7 +9618,9 @@ async def _review_intent_candidate_async(
         "tentative, correctable sentences that preserve every claim without restating the draft body. "
         "For non-candidate return empty cardText and no claims. cardTextValid means the "
         "draft card covers every claim, stays tentative/correctable, and adds no purpose. For none or "
-        "reference_only, bodyValid checks only that the prose directly answers the user and has no "
+        "reference_only, bodyValid checks that the prose directly answers the user and has no "
+        "unauthorized design advice relocating/adding/removing boxes, targets, player start or shell "
+        "(only water/internal walls are editable; normal gameplay pushes are different), or "
         "dangling introduction, option-list fragment, workflow talk, or unfinished paragraph; do not "
         "require Stage evidence, two effects, or an uncertainty boundary. Only for candidate, bodyValid "
         "also checks semantic agreement with the evidence-bound claims. Stage facts are verified by the "
@@ -10028,8 +10184,9 @@ async def _generate_plain_with_model_fallback_impl(
             if clarification_active and clarification_body_candidate:
                 attempt_messages = [dict(message) for message in attempt_messages]
                 attempt_messages[0]["content"] += (
-                    "\nThe body is already verified and locked. Repair only the question for the same "
-                    "topic/dimension; do not invent new goals or alternatives. Return body unchanged: "
+                    "\nThe body is already verified and locked. Repair only the server-listed rejected "
+                    "components for this topic; change options only when options is a listed target. "
+                    "Do not invent user goals. Return body unchanged: "
                     + clarification_body_candidate)
             if clarification_repair_request is not None:
                 envelope = await _request_component_patch(api_key, base_url, clarification_repair_request,
@@ -10091,9 +10248,10 @@ async def _generate_plain_with_model_fallback_impl(
                     language,
                     stage_context,
                 )
-                if ((proposal_clarification or {}).get("semanticPolicyVersion") == 1
+                if ((proposal_clarification or {}).get("optionPolicyVersion") == proposal_options.VERSION
+                        or ((proposal_clarification or {}).get("semanticPolicyVersion") == 1
                         and _clarification_needs_semantic_review(
-                            "" if clarification_body_candidate else parsed_body, clarification_question)):
+                            "" if clarification_body_candidate else parsed_body, clarification_question))):
                     clarification_semantic_review_failed = True
                     reviewed_body, reviewed_question_issue = await _review_proposal_clarification(
                         api_key, base_url, "" if clarification_body_candidate else parsed_body,
@@ -10108,20 +10266,32 @@ async def _generate_plain_with_model_fallback_impl(
                 if parsed_body:
                     clarification_body_candidate = parsed_body
                 if clarification_question_issue and attempt < max_attempts:
+                    frozen_envelope = {"body": parsed_body, "question": clarification_question}
+                    targets = [Target("question", ("question",), (str,))]
+                    if (proposal_clarification or {}).get("optionPolicyVersion") == proposal_options.VERSION:
+                        frozen_envelope = {**parse_json_object(content), "body": parsed_body}
+                        targets += [Target("comparedOptions", ("comparedOptions",), (list,)),
+                                    Target("discriminant", ("discriminant",), (str,))]
+                        if stage_context.get("_optionReviewIssues"):
+                            targets.append(Target("options", ("options",), (list, type(None))))
                     clarification_repair_request = PatchRequest("clarification_question",
-                        {"body": parsed_body, "question": clarification_question},
-                        [Target("question", ("question",), (str,))],
+                        frozen_envelope, targets,
                         {"snapshot": (stage_context or {}).get("stageSnapshot"),
                          "proposal_topic": (stage_context or {}).get("proposalDiscovery"),
                          "question_specification": proposal_clarification})
                     raise ValueError(clarification_question_issue)
                 if clarification_question_issue:
+                    if (proposal_clarification or {}).get("optionPolicyVersion") == proposal_options.VERSION:
+                        raise LowQualityModelResponse("No verified option-bound question remains; retry the original answer.")
                     clarification_question = _proposal_clarification_fallback_question(
                         language,
                         stage_context,
                     )
                     clarification_fallback_reason = clarification_question_issue
                 content = parsed_body or clarification_body_candidate
+                if (proposal_clarification or {}).get("optionPolicyVersion") == proposal_options.VERSION:
+                    option_set = stage_context["_clarificationOptions"]
+                    content = "\n\n".join(part for part in (content, proposal_options.render_options(option_set)) if part)
                 if not content:
                     if clarification_question and not clarification_question_issue:
                         content = clarification_question
@@ -10142,6 +10312,12 @@ async def _generate_plain_with_model_fallback_impl(
                 ),
                 language,
             )
+            if (not stage_opening and (stage_context.get("conversationOnly")
+                    or (proposal_options.current_set(stage_context.get("proposalDiscovery")) and not clarification_active))):
+                content, permission_issue = await _review_proposal_clarification(
+                    api_key, base_url, content, "", stage_context, request_id, deadline)
+                if permission_issue or not content.strip():
+                    raise LowQualityModelResponse("No independently reliable permission-safe discussion remains.")
             discussion_focus = _extract_plain_discussion_focus(
                 content,
                 language,
@@ -11134,6 +11310,11 @@ async def _generate_plain_with_model_fallback_impl(
                             proposal_clarification or {}
                         ).get("questionKey"),
                         "clarificationQuestion": clarification_question,
+                        **({"optionSet": stage_context.get("_clarificationOptions"),
+                            "optionQuestion": stage_context.get("_clarificationOptionQuestion"),
+                            "optionOutcome": "clarifying" if len(stage_context["_clarificationOptions"]["options"]) > 1 else
+                                "ready" if stage_context["_clarificationOptions"]["options"] else "revision_needed"}
+                           if (proposal_clarification or {}).get("optionPolicyVersion") == proposal_options.VERSION else {}),
                         "clarificationQuestionValidated": not bool(
                             clarification_question_issue
                         ),
@@ -16196,6 +16377,8 @@ def _clarification_review_components(verdict, sentence_ids):
 async def _review_proposal_clarification(api_key, base_url, body, question, stage_context, request_id, deadline):
     discovery = stage_context.get("proposalDiscovery") or {}
     specification = stage_context.get("proposalClarification") or {}
+    option_mode = specification.get("optionPolicyVersion") == proposal_options.VERSION
+    option_set = stage_context.get("_clarificationOptions") or {}
     messages = [{"role": "system", "content": (
         "Review the actual body and question, not just annotations. Reject design options/questions moving "
         "boxes, targets, player start or shell: only water/internal walls may change. Gameplay pushes are distinct. "
@@ -16211,6 +16394,14 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
         "change gameplay. Preserve reliable sentences and personal opinions; do not rewrite them, reject "
         "a response for length/style, or require a stock opening. Questions may offer valid optional choices. "
         "Do not put assistant suggestions into designer memory."
+        + (" Also return optionIssues, an array of exact option IDs that are unsafe, inconsistent with "
+           "the designer's expressed goals/prohibitions, unsupported by the snapshot, duplicate directions, "
+           "or claim guaranteed effects. Empty means all options verified. Check every option's actual "
+           "text, not just its components. questionIssue must also reject a question that fails to "
+           "discriminate the compared options, introduces an unrelated choice, repeats an answered "
+           "tradeoff, or attributes an inferred option to the designer. With zero/one options the "
+           "question must be empty. Do not require extra choices or questions merely to fill a quota."
+           if option_mode else "")
     )}, {"role": "user", "content": json.dumps({
         "body": body, "bodySentences": [{"id": f"sentence-{i}", "text": sentence}
             for i, sentence in enumerate(_content_block_sentences(body), 1)],
@@ -16219,6 +16410,8 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
         "questionIntent": specification.get("questionIntent"),
         "currentStageSnapshot": stage_context.get("stageSnapshot") or {},
         "verifiedRouteWitness": specification.get("routeEvidence") or {},
+        **({"optionSet": option_set, "optionQuestion": stage_context.get("_clarificationOptionQuestion")}
+           if option_mode else {}),
     }, ensure_ascii=False)}]
     review_deadline = min(deadline, time.monotonic() + 10.0)
     remaining = min(6.0, _remaining_until(review_deadline))
@@ -16238,14 +16431,25 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
     except (ValueError, TypeError, IndexError, AttributeError):
         verdict = {}
     valid, issues = _clarification_review_components(verdict, sentence_ids)
+    def option_component(verdict, valid, issues):
+        if not option_mode:
+            return
+        option_ids = {item["id"] for item in option_set.get("options") or []}
+        value = verdict.get("optionIssues") if isinstance(verdict, dict) else None
+        if isinstance(value, list) and all(isinstance(item, str) and item in option_ids for item in value):
+            valid["optionIssues"] = list(dict.fromkeys(value))
+        else:
+            issues.append("optionIssues")
+    option_component(verdict, valid, issues)
     if issues:
         patch = PatchRequest("clarification_review", valid,
-            [Target(field, (field,), (list,) if field == "bodyIssues" else (str, type(None))) for field in issues],
+            [Target(field, (field,), (list,) if field in {"bodyIssues", "optionIssues"} else (str, type(None))) for field in issues],
             {"review_source": json.loads(messages[1]["content"])})
         try:
             verdict = await _request_component_patch(api_key, base_url, patch, messages, request_id,
                 review_deadline, "proposal_clarification_review", max_tokens=1000, timeout_limit=4.0)
             valid, issues = _clarification_review_components(verdict, sentence_ids)
+            option_component(verdict, valid, issues)
             if issues:
                 raise PatchError("CLARIFICATION_REVIEW_REFERENCE_INVALID")
         except (ValueError, TypeError, KeyError, asyncio.TimeoutError) as error:
@@ -16256,12 +16460,14 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
                 "repairAttemptsUsed": 1, "maximumRepairAttempts": 1}
             raise failure from error
     verdict = valid
+    stage_context["_optionReviewIssues"] = verdict.get("optionIssues") or []
     rejected_ids = set(verdict["bodyIssues"])
     for identity in rejected_ids:
         body = body.replace(sentence_ids[identity], "", 1)
     _log_llm_event("proposal_clarification_semantics_reviewed", requestId=request_id,
         droppedSentenceCount=len(verdict["bodyIssues"]), questionAccepted=verdict["questionIssue"] is None)
-    return body.strip(), verdict["questionIssue"] or ""
+    return body.strip(), ("Repair the rejected direction options and their dependent question."
+                          if verdict.get("optionIssues") else verdict["questionIssue"] or "")
 
 
 @proposal_phase('clarification', 'clarification')
@@ -16280,6 +16486,20 @@ def _parse_proposal_clarification_payload(content, language, stage_context):
     body = _sanitize_visible_model_text(raw_body.strip(), language)
     question = _sanitize_visible_model_text(raw_question.strip(), language)
     body, dropped = _clean_proposal_clarification_body(body, stage_context)
+    specification = (stage_context or {}).get("proposalClarification") or {}
+    if specification.get("optionPolicyVersion") == proposal_options.VERSION:
+        option_set, option_question = proposal_options.parse_envelope(payload,
+            stage_context.get("proposalDiscovery") or {}, stage_context.get("stageSnapshot") or {})
+        for item in option_set["options"]:
+            for key in proposal_options.FIELDS - {"components"}:
+                text = item[key]
+                if ("?" in text or "？" in text or _proposal_clarification_forbidden_detail(text)
+                        or not _proposal_clarification_allowed_labels(text, stage_context)):
+                    proposal_options.invalid("options", "OPTION_MAP_DETAIL_INVALID")
+        stage_context["_clarificationOptions"] = option_set
+        stage_context["_clarificationOptionQuestion"] = option_question
+        if len(option_set["options"]) < 2:
+            return body, "", "", dropped
     issue = ""
     if not question or sum(question.count(mark) for mark in ("?", "？")) != 1:
         issue = "The clarification must contain exactly one question."

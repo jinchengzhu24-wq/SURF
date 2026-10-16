@@ -10,10 +10,11 @@ import re
 from conversation_evidence import CONTEXT_VERSION, user_sources, evidence_signature
 from proposal_diagnostics import ProposalValidationError, structural_issue
 from component_patches import PatchRequest, Target
+from proposal_options import decision_schema, current_set, planning_projection
 
 
 POLICY_VERSION = 1
-MEANING_REVIEW_VERSION = "meaning-preservation-2"
+MEANING_REVIEW_VERSION = "meaning-preservation-3-options"
 EDITABLE = {"water", "internal_walls"}
 PROTECTED = {"outer_shell", "player", "boxes", "targets"}
 COMPONENTS = EDITABLE | PROTECTED | {"gameplay", "unknown"}
@@ -61,6 +62,7 @@ def turn_schema():
             "properties": change_properties, "required": list(change_properties)}},
         "proposalUnderstanding": {"anyOf": [topic_schema(), {"type": "null"}]},
         "humanEditEngagement": {"anyOf": [engagement_schema(), {"type": "null"}]},
+        "optionDecision": {"anyOf": [decision_schema(), {"type": "null"}]},
     }
     return {"type": "object", "additionalProperties": False, "properties": properties,
         "required": list(properties)}
@@ -182,6 +184,8 @@ def understanding_patch_request(frozen, error, sources, snapshot):
 
 
 def critical_review_reason(understanding, context):
+    if current_set(context):
+        return "proposal_option_choice"
     changes = (understanding or {}).get("changes")
     if changes is None and set(understanding.get("elements") or []) & PROTECTED:
         return "legacy_protected_annotation"
@@ -253,11 +257,20 @@ def validate_plan_scope(plan, topic):
             raise ValueError("RevisionPlan changes components outside the designer's current requested edit scope.")
 
 
+def validate_option_plan_scope(plan, discovery):
+    selected = planning_projection(discovery)
+    if selected and selected["candidates"]:
+        scope = selected["candidates"][0]["components"]
+        validate_plan_scope(plan, {"editScope": [{"component": component} for component in scope]})
+
+
 def topic_signature(snapshot, context, latest):
     data = {"snapshot": snapshot, "sources": designer_sources(context, latest),
         "questions": (context or {}).get("questions") or [], "answers": (context or {}).get("answers") or [],
         "understanding": (context or {}).get("understanding"), "latest": latest,
         "policyVersion": POLICY_VERSION}
+    data["optionSet"] = (context or {}).get("optionSet")
+    data["optionQuestion"] = (context or {}).get("optionQuestion")
     data["contextVersion"] = CONTEXT_VERSION
     data["meaningReviewVersion"] = MEANING_REVIEW_VERSION
     data["dialogueSignature"] = evidence_signature((context or {}).get("dialogueEvidence"))

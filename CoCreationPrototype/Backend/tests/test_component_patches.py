@@ -273,7 +273,7 @@ class ComponentIntegrationTests(unittest.TestCase):
         case.setUp()
         discovery = {**case.context, "status": "clarifying", "understanding": topic(sufficient=False),
                      "brief": "Visual order\nWater and interior walls"}
-        spec = app._proposal_clarification_spec(discovery, case.snapshot, "en")
+        spec = app._proposal_clarification_dimensions_spec(discovery, case.snapshot, "en")
         question = "Which local area should carry the water pattern?"
         with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
                 patch.object(llm, "_request_completion", AsyncMock(return_value=completion({"question": question}))) as call:

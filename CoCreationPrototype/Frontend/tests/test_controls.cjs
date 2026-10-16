@@ -76,6 +76,35 @@ function loadApp({ keepSubmit = false } = {}) {
     return { context, created };
 }
 
+test("proposal retry without a local request allows re-entry while captured retries stay locked", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.turns = [];
+        state.session.proposalFlowState = { active: true, status: "retry_pending" };
+        state.pendingMessage = null;
+        elements.messageInput.value = "My previous answer";
+        updateControls();
+    `, context);
+    assert.equal(vm.runInContext("elements.messageInput.disabled", context), false);
+    assert.equal(vm.runInContext("elements.sendButton.disabled", context), false);
+    vm.runInContext("state.pendingMessage = {content: 'My previous answer'}; updateControls();", context);
+    assert.equal(vm.runInContext("elements.messageInput.disabled", context), true);
+});
+
+test("a stale proposal answer keeps its wording but drops the old question retry key", async () => {
+    const { context } = loadApp({ keepSubmit: true });
+    vm.runInContext(`
+        startChatTimer = stopChatTimer = hideNotice = renderChatRequestStatus = updateControls = render = updateCharacterCount = () => {};
+        state.pendingMessage = {content: "I prefer the second direction", baseVersionId: "v1", idempotencyKey: "old-question"};
+        api = async () => { const error = new Error("Question changed"); error.code = "PROPOSAL_STALE"; throw error; };
+        refreshSession = async () => { state.session.proposalFlowState = {active: true, status: "clarifying"}; };
+    `, context);
+    await vm.runInContext("submitPendingMessage()", context);
+    assert.equal(vm.runInContext("state.pendingMessage", context), null);
+    assert.equal(vm.runInContext("elements.messageInput.value", context), "I prefer the second direction");
+    assert.equal(vm.runInContext("state.chatError.code", context), "PROPOSAL_STALE");
+});
+
 test("current controls use canonical disagreement state while history retains its marker", () => {
     const { context } = loadApp();
     vm.runInContext(`

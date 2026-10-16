@@ -181,7 +181,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
         record = topic(sufficient=False)
         discovery = {**self.context, "status": "clarifying", "understanding": record,
             "clarificationQuestionCount": 1, "askedQuestionKeys": ["binding"]}
-        spec = backend._proposal_clarification_spec(discovery, self.snapshot, "en")
+        spec = backend._proposal_clarification_dimensions_spec(discovery, self.snapshot, "en")
         execution = llm.LLMExecutionResult("I would try a local pattern.\n\n" + spec["fallbackQuestion"], 1, "test",
             proposal_diagnostics={"clarificationQuestion": spec["fallbackQuestion"]})
         context = {"proposalDiscovery": discovery, "proposalClarification": spec, "revisionRouting": "needs_clarification"}
@@ -293,7 +293,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
     def test_failing_question_keeps_semantically_verified_body_during_repair(self):
         discovery = {**self.context, "status": "clarifying", "understanding": topic(sufficient=False),
             "brief": "Visual order\nWater and interior walls"}
-        spec = backend._proposal_clarification_spec(discovery, self.snapshot, "en")
+        spec = backend._proposal_clarification_dimensions_spec(discovery, self.snapshot, "en")
         first = {"body": "I would keep the current objects fixed and try repeated water edges.", "question": "Which local area should frame it?"}
         second = {"body": "", "question": "Which local area should carry the water pattern?"}
         async def request(*args, **kwargs):

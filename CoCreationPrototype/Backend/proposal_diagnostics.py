@@ -1,4 +1,5 @@
 """Bounded structural diagnostics; never infer designer meaning from prose."""
+import asyncio
 import functools
 import inspect
 import json
@@ -41,7 +42,7 @@ def reason_code(error):
     issues = safe_issues(error)
     if issues:
         return issues[0]["reasonCode"]
-    if isinstance(error, TimeoutError):
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
         return "BUDGET_OR_ATTEMPT_TIMEOUT"
     if isinstance(error, json.JSONDecodeError):
         return "INVALID_JSON"

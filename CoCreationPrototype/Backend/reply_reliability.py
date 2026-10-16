@@ -1,4 +1,5 @@
 """Component outcomes and bounded recovery shared by the 8010 LLM tasks."""
+import asyncio
 import json
 import time
 from contextvars import ContextVar
@@ -11,7 +12,7 @@ CURRENT_REPLY_TRACE = ContextVar("cocreation_reply_trace", default=None)
 
 def failure_reason(error):
     """Stable categories only: never put exception/model text in delivery traces."""
-    if isinstance(error, TimeoutError):
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
         return "UPSTREAM_TIMEOUT"
     if isinstance(error, json.JSONDecodeError):
         return "INVALID_JSON"
@@ -112,6 +113,8 @@ def requirement_cache_key(stage_context, turns):
         "turns": turns,
         "answers": (stage_context.get("proposalDiscovery") or {}).get("answers") or [],
         "proposalUnderstanding": (stage_context.get("proposalDiscovery") or {}).get("understanding") or {},
+        "optionSet": (stage_context.get("proposalDiscovery") or {}).get("optionSet"),
+        "optionDecision": (stage_context.get("proposalDiscovery") or {}).get("optionDecision"),
         "decisions": (stage_context.get("revisionDesignContext") or {}).get("confirmedDecisions") or [],
         "projection": stage_context.get("revisionDesignContext") or {},
         "responseLanguage": stage_context.get("responseLanguage", "en"),

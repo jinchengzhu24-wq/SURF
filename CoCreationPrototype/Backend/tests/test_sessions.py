@@ -20,6 +20,8 @@ if str(BACKEND_DIR) not in sys.path:
 import app as backend
 import llm_client
 import repository
+import proposal_options
+from option_fixtures import with_options
 from llm_client import (
     LLMExecutionResult,
     LLMServiceError,
@@ -129,6 +131,47 @@ WATER_RIGHT_CONTRACT["revisionPlan"]["strategies"][0]["requiredTransitions"] = W
 
 
 class CoCreationSessionTests(unittest.TestCase):
+
+    def test_active_topic_understanding_failure_keeps_each_question_boundary_and_original_key(self):
+        for count in (1, 2, 3):
+            with self.subTest(question_count=count):
+                self.session_id, _ = self.create_and_open_session(f"option-failure-{count}")
+                version_id = self.read_session()["currentVersionId"]
+                with repository.connect(immediate=True) as database:
+                    session = repository.get_session(database, self.session_id)
+                    topic_id = backend.insert_turn(database, session, "user", "Please change the water layout.",
+                        version_id, f"topic-{count}", None)
+                    repository.record_event(database, self.session_id, "proposal_request_requested",
+                        {"messageKey": f"topic-{count}", "turnId": topic_id, "baseVersionId": version_id}, backend.utc_now())
+                    question = "Would you prefer the grouped contour or open spacing?"
+                    reply = LLMExecutionResult(question, 1, "entry", guidance={"proposalDiscovery": {
+                        "topicId": topic_id, "status": "clarifying", "clarificationQuestionCount": count}})
+                    backend.insert_turn(database, session, "assistant", question, version_id, f"ask-{count}", reply)
+                before = self.read_session()["turns"]
+                payload = {"content": "More open spacing", "baseVersionId": version_id,
+                    "idempotencyKey": f"bound-answer-{count}", "requestProposal": False}
+                error = LLMServiceError("MODEL_RESPONSE_INVALID", "private model content", "offline", True, 2, 502)
+                with patch.object(backend, "classify_turn_understanding", side_effect=error), \
+                        patch.object(backend, "generate_chat_reply") as forbidden:
+                    failed = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+                self.assertEqual(failed.status_code, 502, failed.text)
+                forbidden.assert_not_called()
+                current = self.read_session()
+                self.assertEqual(current["turns"], before)
+                self.assertEqual(current["proposalFlowState"]["status"], "retry_pending")
+                self.assertEqual(current["proposalFlowState"]["clarificationQuestionCount"], count)
+                def reply(*args, **kwargs):
+                    value = LLMExecutionResult("I cannot yet validate the requested direction.", 1, "retry")
+                    return with_options(value, kwargs["stage_context"]) if kwargs["stage_context"]["revisionRouting"] == "needs_clarification" else value
+                with patch.object(backend, "generate_chat_reply", side_effect=reply):
+                    recovered = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+                    repeat = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
+                self.assertEqual(recovered.status_code, 200, recovered.text)
+                self.assertEqual(repeat.json()["turns"], recovered.json()["turns"])
+                self.assertEqual(sum(turn["role"] == "user" and turn["requestId"] == payload["idempotencyKey"]
+                    for turn in recovered.json()["turns"]), 1)
+                if count == 3:
+                    self.assertEqual(recovered.json()["proposalFlowState"]["clarificationQuestionCount"], 3)
 
     def test_proposal_entry_failure_and_original_key_retry_have_exact_private_safe_diagnostics(self):
         from types import SimpleNamespace
@@ -282,7 +325,7 @@ class CoCreationSessionTests(unittest.TestCase):
                                                "preserve": [], "sufficient": False, "nextQuestionDimension": "edit_scope"}}
         reply = LLMExecutionResult("Would you like to focus on water or interior walls?", 1, "r", guidance={"proposalOffer": None, "uiCues": []})
         with patch.object(backend, "classify_turn_understanding", return_value=understood), \
-                patch.object(backend, "generate_chat_reply", return_value=reply) as generate:
+                patch.object(backend, "generate_chat_reply", side_effect=lambda *a, **kw: with_options(reply, kw["stage_context"])) as generate:
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": latest, "baseVersionId": version_id, "idempotencyKey": "referential-proposal"})
         self.assertEqual(response.status_code, 200, response.text)
@@ -452,11 +495,14 @@ class CoCreationSessionTests(unittest.TestCase):
         with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
                 patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
                 patch.object(llm_client, "_request_completion", call), \
-                patch.object(backend, "generate_chat_reply", return_value=clarify):
+                patch.object(backend, "generate_chat_reply", side_effect=lambda *a, **kw: with_options(clarify, kw["stage_context"])):
             saved = self.client.post(f"/api/sessions/{self.session_id}/messages", json={"content": initial,
                 "baseVersionId": version_id, "idempotencyKey": "semantic-start", "requestProposal": True})
         self.assertEqual(saved.status_code, 200, saved.text)
         user_id = next(x["turnId"] for x in saved.json()["turns"] if x["role"] == "user" and x["content"] == initial)
+        with repository.connect() as database:
+            current = repository.get_current_version(database, repository.get_session(database, self.session_id))
+            option_set = backend.build_llm_context(database, self.session_id, current)["stageContext"]["proposalDiscovery"]["optionSet"]
         record = {**record, "goals": [item(initial, user_id)],
             "editScope": [item(initial, user_id, component=x) for x in ("water", "internal_walls")],
             "focus": [item(answer, entities=["T1"])], "sufficient": True, "nextQuestionDimension": "none"}
@@ -464,6 +510,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "directionSufficient": True, "mapRelated": True,
             "changes": [{"component": "targets", "property": "position", "operation": "change", "evidenceSpan": answer}],
             "proposalUnderstanding": record}
+        wrong["optionDecision"] = {"selection": "inferred", "preferredOptionIds": [option_set["options"][0]["id"]],
+            "rejectedOptionIds": [], "evidenceSpan": answer}
         corrected = {**wrong, "acts": ["intent"], "changes": [{**wrong["changes"][0], "operation": "mention"}]}
         payload = {"content": answer, "baseVersionId": version_id, "idempotencyKey": "semantic-answer", "requestProposal": True}
         rejected = {"accepted": False, "issues": ["Unclear whether this is a focus or a move"], "understanding": wrong}
@@ -562,11 +610,18 @@ class CoCreationSessionTests(unittest.TestCase):
         acts = ["revision_request"] if state != "not_request" else ["evaluation"]
         if forced_proposal:
             acts = ["revision_request"]
-        return {
+        result = {
             "acts": acts, "elements": ["unknown"],
             "evidenceSpan": latest, "directionSufficient": state == "authorized",
             "mapRelated": True,
         }
+        option_set = proposal_options.current_set(proposal_context, snapshot)
+        if option_set:
+            result["optionDecision"] = {"selection": "inferred" if state == "authorized" else "unclear",
+                "preferredOptionIds": [option_set["options"][0]["id"]] if state == "authorized" else [],
+                "rejectedOptionIds": [], "evidenceSpan": latest}
+            result["optionContextSignature"] = proposal_options.context_signature(proposal_context)
+        return result
 
     def test_deterministic_intent_conflict_requires_same_scope_and_aspect(self):
         decrease = [{
@@ -2955,10 +3010,17 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
+        attempts = iter([timeout, execution])
+        def reply(*args, **kwargs):
+            value = next(attempts)
+            if isinstance(value, Exception):
+                raise value
+            return with_options(value, kwargs["stage_context"])
+
         with patch.object(
             backend,
             "generate_chat_reply",
-            side_effect=[timeout, execution],
+            side_effect=reply,
         ) as mocked:
             failed = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -3018,10 +3080,14 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
+        replies = iter([first_execution, second_execution])
+        def reply(*args, **kwargs):
+            return with_options(next(replies), kwargs["stage_context"])
+
         with patch.object(
             backend,
             "generate_chat_reply",
-            side_effect=[first_execution, second_execution],
+            side_effect=reply,
         ) as mocked:
             started = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -3074,7 +3140,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with patch.object(backend, "generate_chat_reply", side_effect=lambda *a, **kw: with_options(execution, kw["stage_context"])):
             started = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -3097,7 +3163,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "results": [{"questionId": first_question_id, "answered": True}],
         }
         with patch.object(backend, "review_question_answers", return_value=answer_review), patch.object(
-            backend, "generate_chat_reply", return_value=execution
+            backend, "generate_chat_reply", side_effect=lambda *a, **kw: with_options(execution, kw["stage_context"])
         ):
             continued = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -5675,7 +5741,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
         def reply(*args, **kwargs):
             contexts.append(kwargs["stage_context"])
-            return execution
+            return with_options(execution, kwargs["stage_context"]) if kwargs["stage_context"].get("revisionRouting") == "needs_clarification" else execution
 
         with patch.object(backend, "generate_chat_reply", side_effect=reply):
             ordinary = self.client.post(

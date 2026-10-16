@@ -427,11 +427,11 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(discovery["topicId"], "request")
         self.assertEqual(discovery["askedQuestionKeys"], ["mechanism"])
-        self.assertEqual(specification["questionKey"], "binding")
+        self.assertEqual(specification["questionKey"], "option_choice_2")
         self.assertIn("B1", specification["allowedEntityLabels"])
         self.assertIn("B2", specification["allowedEntityLabels"])
-        self.assertTrue(specification["fallbackQuestion"].endswith(("?", "？")))
-        self.assertIn("增加实际推箱次数", specification["fallbackAcknowledgement"])
+        self.assertEqual(specification["optionPolicyVersion"], 1)
+        self.assertEqual(specification["fallbackQuestion"], "")
 
     def test_sparse_region_proposal_asks_neutral_visual_or_play_question(self):
         snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
@@ -459,10 +459,9 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             snapshot,
             "zh-CN",
         )
-        self.assertEqual(specification["questionKey"], "experience_goal")
-        self.assertIn("左下角", specification["fallbackQuestion"])
-        self.assertIn("视觉上的空间分布", specification["fallbackQuestion"])
-        self.assertIn("路线或推箱节奏", specification["fallbackQuestion"])
+        self.assertEqual(specification["questionKey"], "option_choice_1")
+        self.assertEqual(specification["optionPolicyVersion"], 1)
+        self.assertEqual(specification["fallbackQuestion"], "")
         self.assertNotIn("解题时间", specification["fallbackQuestion"])
 
         continued = {
@@ -955,7 +954,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertIn("ordinary-harness-20261013-v2", index_response.text)
+        self.assertIn("proposal-directions-20261016-v1", index_response.text)
         self.assertIn("sendChallengeChoice", js_response.text)
         self.assertIn("offer.availableActions.includes(action)", js_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")

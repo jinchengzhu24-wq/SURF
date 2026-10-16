@@ -161,7 +161,8 @@ class ConversationalDeliveryTests(unittest.TestCase):
         self.assertTrue(result["omitted"])
 
     def test_unverified_routing_never_delivers_cards_or_applied_state_claims(self):
-        result, _ = self.execute(["我可以先解释两个方向的区别。\n<GUIDANCE>INTENT: 我目前理解为你想增加水面。</GUIDANCE>"],
+        result, _ = self.execute(["我可以先解释两个方向的区别。\n<GUIDANCE>INTENT: 我目前理解为你想增加水面。</GUIDANCE>",
+            json.dumps({"bodyIssues": [], "questionIssue": None})],
             language="zh-CN", conversation=[{"role": "user", "content": "那你觉得呢"}],
             stage_context={"conversationOnly": True})
         self.assertIsNone(result.guidance["intentHypothesis"])
