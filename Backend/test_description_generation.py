@@ -309,8 +309,8 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(open_layout["recommendedLayout"], "Open")
         self.assertEqual(defaults["recommendedDifficulty"], "Random")
         self.assertEqual(defaults["recommendedLayout"], "Random")
-        self.assertIn("Your choices suggest", focused["summary"])
-        self.assertIn("get moving with little inspection", focused["summary"])
+        self.assertIn("Got it, I'd try", focused["summary"])
+        self.assertIn("a quick start", focused["summary"])
         self.assertNotIn("Tell me if I am reading", focused["summary"])
         self.assertNotEqual(focused["summary"], open_layout["summary"])
 
@@ -555,7 +555,7 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(response.json()["recommendedDifficulty"], "Hard")
         self.assertEqual(response.json()["recommendedLayout"], "Open")
         self.assertEqual(response.json()["source"], "deterministic_fallback")
-        self.assertTrue(response.json()["summary"].startswith("Your choices suggest"))
+        self.assertTrue(response.json()["summary"].startswith("Got it, I'd try"))
         self.assertTrue(response.json()["difficultyRationale"].startswith("I connect"))
 
     def test_custom_single_wall_range_is_supported(self):

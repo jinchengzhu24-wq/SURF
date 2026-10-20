@@ -192,7 +192,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Unity receives the final Stage after intention submission.
+  m_Text: Choose your final version and send it back
 --- !u!222 &24338393
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -429,7 +429,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Open the persistent LLM co-creation workspace.
+  m_Text: Work with AI to make a level for another player.
 --- !u!222 &216684468
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -474,8 +474,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 0, y: -268}
-  m_SizeDelta: {x: 520, y: 68}
+  m_AnchoredPosition: {x: -10.1555, y: -268}
+  m_SizeDelta: {x: 303.9645, y: 68}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &242612604
 MonoBehaviour:
@@ -1849,7 +1849,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Review the synchronized Stage and discuss it over multiple turns.
+  m_Text: Look at the level and talk with AI step by step
 --- !u!222 &547315051
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2007,7 +2007,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Launch the independent workspace in your browser.
+  m_Text: Open the build space in your browser
 --- !u!222 &558755499
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2207,7 +2207,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: ' Creating level with AI'
+  m_Text: Build a Level with AI
 --- !u!222 &646156193
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2455,8 +2455,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Explore a Sokoban level with the LLM for another player. No design goal
-    is assigned.
+  m_Text: Make a Sokoban level with AI for another player
 --- !u!222 &733619233
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2592,7 +2591,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: Ready to open the independent co-creation prototype.
+  m_Text: You will build in your own space
 --- !u!222 &996307295
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2892,7 +2891,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: PROTOTYPE - ONLY THE CONFIRMED FINAL STAGE IS SYNCHRONIZED.
+  m_Text: Only your final version will be sent back
 --- !u!222 &1160447709
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -3039,7 +3038,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: OPEN CO-CREATION LAB
+  m_Text: START BUILDING !
 --- !u!222 &1667969787
 CanvasRenderer:
   m_ObjectHideFlags: 0

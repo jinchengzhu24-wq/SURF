@@ -69,7 +69,7 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 ## 系统边界与当前实现
 
 - 唯一正式公网入口为 `https://sokobanaidemo.top/game/`、`https://sokobanaidemo.top/frontend/` 和 `https://sokobanaidemo.top/cocreation/`；Cloudflare 对外提供 HTTPS，HTTP、`www` 和旧 IP 统一跳转到 HTTPS 根域名。WebGL 运行时从当前页面 origin 解析首方地址，公开链接不使用 `:8000` 或 `:8010`。
-- DG 使用四道中立地图设计问题：首步检查、推箱依赖、空间分布和路线结构。Q1–Q2 只用于 8000 的难度建议，Q3–Q4 只用于 8000 的布局建议；DG context 不会传入 8010 或其 LLM 上下文。
+- DG 使用四道中立地图设计问题：首步检查、推箱依赖、空间分布和路线结构。Q1–Q2 只用于 8000 的难度建议，Q3–Q4 只用于 8000 的布局建议；DG context 不会传入 8010 或其 LLM 上下文。 AI reflection 使用两到三句短英文（目标 25–40 词），统一采用游戏伙伴口吻（如 Got it、Let's try、How about），只用基础词汇、保持中立并保留玩家选择权；前后端备用文案同步遵循该风格，维度含义、推荐映射和首版生成规则保持不变。
 - 8000 的两个 Agent 使用 `deepseek-v4-flash`；8010 的聊天助手、关卡修改助手、Stage 开场、翻译、Revision 和意图反馈审查使用 Kimi `kimi-k2.6`。8010 不读取或回退到 8000 的 DeepSeek 环境变量。
 - `Draft` 场景已退役。`PC`、`PC_Design` 和 `PC_Level` 仅作为历史实现资产保留，不在当前 Build Settings 或在线导航中。
 - 8010 正式 Unity 会话在用户点击“进入共创流程”、最新 Draft 被原子固化为 Stage 1 后才启动服务端 deadline，当前为 20 分钟。浏览首版 Draft、刷新页面和重新生成均不计时。到期后聊天、编辑、保存、恢复、试玩和提案锁定，只保留最终 Stage 提交；提交时可将当前可解的本地草稿原子保存为最终 `human_edit` Stage。

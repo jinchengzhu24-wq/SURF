@@ -2678,6 +2678,13 @@ DG_LAYOUT_ANSWERS = {
     "no_preference": None,
 }
 DG_FIRST_PERSON_PREFIXES = (
+    "got it",
+    "let's try",
+    "let us try",
+    "i'd try",
+    "how about",
+    "i picture",
+    "i'm picturing",
     "your choices suggest",
     "i get the sense that",
     "it sounds like",
@@ -2777,38 +2784,38 @@ def build_dg_fallback_summary(context, reason=""):
     first_move = dg_choice_phrase(
         context["firstMovePreference"],
         {
-            "quick_start": "get moving with little inspection",
-            "observe_then_decide": "look over boxes, goals, and passages before settling on a move",
-            "plan_ahead": "inspect the map broadly and plan before acting",
+            "quick_start": "a quick start",
+            "observe_then_decide": "a look at boxes, goals, and paths",
+            "plan_ahead": "time to look over the map and plan",
         },
-        "leave the first move open-ended",
+        "no set start style",
     )
     push_planning = dg_choice_phrase(
         context["pushPlanningPreference"],
         {
-            "easy_to_adjust": "treat most pushes as independent decisions",
-            "consider_order": "watch how position and order affect some pushes",
-            "connected_pushes": "connect several pushes into one fuller plan",
+            "easy_to_adjust": "pushes that mostly work on their own",
+            "consider_order": "some pushes linked by place or order",
+            "connected_pushes": "several pushes that need earlier pushes",
         },
-        "leave push dependencies open-ended",
+        "no set push links",
     )
     space = dg_choice_phrase(
         context["spacePreference"],
         {
-            "focused_area": "keep important positions in one focused area",
-            "connected_areas": "spread them across a few connected areas",
-            "wide_area": "give them room across a wider playable area",
+            "focused_area": "key spots together in one area",
+            "connected_areas": "key spots in a few linked areas",
+            "wide_area": "key spots spread across a wider area",
         },
-        "leave the position distribution open-ended",
+        "no set spot layout",
     )
     route = dg_choice_phrase(
         context["routeRhythmPreference"],
         {
-            "short_routes": "use short routes between nearby decisions",
-            "occasional_detours": "keep progress mostly direct with occasional detours",
-            "long_routes": "include longer routes with exploration or returns",
+            "short_routes": "short paths between nearby spots",
+            "occasional_detours": "mostly direct paths with a few side trips",
+            "long_routes": "long paths to explore or come back",
         },
-        "leave the route rhythm open-ended",
+        "no set path length",
     )
     if difficulty == "Random":
         difficulty_rationale = (
@@ -2830,8 +2837,8 @@ def build_dg_fallback_summary(context, reason=""):
         )
     return {
         "summary": (
-            "Your choices suggest a level where the first move can " + first_move + " and pushes can " + push_planning
-            + ". For the space, the choices point toward " + space + " with routes that " + route + "."
+            "Got it, I'd try " + first_move + " with " + push_planning
+            + " for now. How about " + space + " and " + route + "?"
         )[:480],
         "recommendedDifficulty": difficulty,
         "difficultyRationale": difficulty_rationale,

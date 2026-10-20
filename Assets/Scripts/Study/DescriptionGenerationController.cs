@@ -27,10 +27,10 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     };
     private static readonly Question[] Questions =
     {
-        new Question("How much inspection should the map require before the first move?", new[] { "Little inspection before acting", "Some inspection of boxes, goals, and passages", "Broader inspection and planning before acting", "No preference" }, new[] { "quick_start", "observe_then_decide", "plan_ahead", "no_preference" }),
-        new Question("How much should box-push decisions depend on other pushes?", new[] { "Most pushes can be considered independently", "Some pushes depend on position or order", "Several pushes depend on one another", "No preference" }, new[] { "easy_to_adjust", "consider_order", "connected_pushes", "no_preference" }),
-        new Question("How should important positions be distributed across the playable space?", new[] { "Concentrated within one main area", "Distributed across a few connected areas", "Distributed across a wider area", "No preference" }, new[] { "focused_area", "connected_areas", "wide_area", "no_preference" }),
-        new Question("What route structure would you prefer?", new[] { "Short routes connecting nearby decisions", "Mostly direct routes with some detours", "Longer routes with exploration or return paths", "No preference" }, new[] { "short_routes", "occasional_detours", "long_routes", "no_preference" })
+        new Question("How should players start?", new[] { "Let's go! Start right away.", "Take a look at the boxes, goals, and paths.", "Look at the whole map and make a plan.", "Any is fine!" }, new[] { "quick_start", "observe_then_decide", "plan_ahead", "no_preference" }),
+        new Question("How should box pushes work together?", new[] { "Most pushes work on their own.", "Some pushes need the right place or order.", "Many pushes need other pushes first.", "Any is fine!" }, new[] { "easy_to_adjust", "consider_order", "connected_pushes", "no_preference" }),
+        new Question("Where should the important spots be?", new[] { "Keep them close together!", "Put them in a few areas with paths between.", "Spread them all over the map!", "Any is fine!" }, new[] { "focused_area", "connected_areas", "wide_area", "no_preference" }),
+        new Question("What kind of paths would you like?", new[] { "Short paths between close places!", "Mostly direct paths, with a few side trips.", "Long paths to explore and come back!", "Any is fine!" }, new[] { "short_routes", "occasional_detours", "long_routes", "no_preference" })
     };
 
     [Header("Navigation")]
@@ -310,42 +310,42 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         string space = SpacePhrase(settings.spacePreference);
         string route = RoutePhrase(settings.routeRhythmPreference);
         string summary = (
-            "Your choices suggest a level where the first move can " + firstMove + " and pushes can " + pushPlanning
-            + ". For the space, the choices point toward " + space + " with routes that " + route + "."
+            "Got it, I'd try " + firstMove + " with " + pushPlanning
+            + ". How about " + space + " and " + route + "?"
         );
         return summary.Length > 480 ? summary.Substring(0, 480).TrimEnd() : summary;
     }
 
     private static string FirstMovePhrase(string value)
     {
-        if (value == "quick_start") return "get moving with little inspection";
-        if (value == "observe_then_decide") return "look over boxes, goals, and passages before settling on a move";
-        if (value == "plan_ahead") return "inspect the map broadly and plan before acting";
-        return "leave the first move open-ended";
+        if (value == "quick_start") return "a quick start";
+        if (value == "observe_then_decide") return "a look at boxes, goals, and paths";
+        if (value == "plan_ahead") return "time to look over the map and plan";
+        return "no set start style";
     }
 
     private static string PushPlanningPhrase(string value)
     {
-        if (value == "easy_to_adjust") return "treat most pushes as independent decisions";
-        if (value == "consider_order") return "watch how position and order affect some pushes";
-        if (value == "connected_pushes") return "connect several pushes into one fuller plan";
-        return "leave push dependencies open-ended";
+        if (value == "easy_to_adjust") return "pushes that mostly work on their own";
+        if (value == "consider_order") return "some pushes linked by place or order";
+        if (value == "connected_pushes") return "several pushes that need earlier pushes";
+        return "no set push links";
     }
 
     private static string SpacePhrase(string value)
     {
-        if (value == "focused_area") return "keep important positions in one focused area";
-        if (value == "connected_areas") return "spread them across a few connected areas";
-        if (value == "wide_area") return "give them room across a wider playable area";
-        return "leave the position distribution open-ended";
+        if (value == "focused_area") return "key spots together in one area";
+        if (value == "connected_areas") return "key spots in a few linked areas";
+        if (value == "wide_area") return "key spots spread across a wider area";
+        return "no set spot layout";
     }
 
     private static string RoutePhrase(string value)
     {
-        if (value == "short_routes") return "use short routes between nearby decisions";
-        if (value == "occasional_detours") return "keep progress mostly direct with occasional detours";
-        if (value == "long_routes") return "include longer routes with exploration or returns";
-        return "leave the route rhythm open-ended";
+        if (value == "short_routes") return "short paths between nearby spots";
+        if (value == "occasional_detours") return "mostly direct paths with a few side trips";
+        if (value == "long_routes") return "long paths to explore or come back";
+        return "no set path length";
     }
 
     private static int ResolvePreferenceScore(string first, string second)

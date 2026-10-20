@@ -479,7 +479,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: How much inspection should the map require before the first move?
+  m_Text: How should players start?
 --- !u!1 &200601938
 GameObject:
   m_ObjectHideFlags: 0
@@ -2650,7 +2650,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Little inspection before acting
+  m_Text: Let's go! Start right away.
 --- !u!222 &508054741
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -3550,7 +3550,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Broader inspection and planning before acting
+  m_Text: Look at the whole map and make a plan.
 --- !u!222 &1055952691
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4150,7 +4150,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: No preference
+  m_Text: Any is fine!
 --- !u!222 &1466115373
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4499,7 +4499,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Some inspection of boxes, goals, and passages
+  m_Text: Take a look at the boxes, goals, and paths.
 --- !u!222 &1836342901
 CanvasRenderer:
   m_ObjectHideFlags: 0
