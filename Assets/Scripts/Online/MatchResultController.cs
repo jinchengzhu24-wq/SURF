@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
@@ -12,13 +12,11 @@ public class MatchResultController : MonoBehaviour
     [SerializeField] private Text statusText;
 
     [Header("Your Challenge / Opponent Run")]
-    [SerializeField] private Text ownChallengeAssistantText;
     [SerializeField] private Text ownFeedbackText;
     [SerializeField] private Text opponentRunTimeText;
     [SerializeField] private Text opponentRunMovesText;
 
     [Header("Opponent Challenge / Your Run")]
-    [SerializeField] private Text opponentChallengeAssistantText;
     [SerializeField] private Text opponentFeedbackText;
     [SerializeField] private Text ownRunTimeText;
     [SerializeField] private Text ownRunMovesText;
@@ -93,7 +91,6 @@ public class MatchResultController : MonoBehaviour
     {
         OnlineSceneUi.EnsureEventSystem();
         ResolveUi();
-        ConfigureResultTextLayout();
         WireUi();
         OnlineSceneUi.ConfigureRaycastTargets();
 
@@ -166,16 +163,8 @@ public class MatchResultController : MonoBehaviour
 
         bool opponentSubmittedResult = HasOpponentSubmittedResult(state);
 
-        RenderMetadata(
-            state.ownChallengeMetadata,
-            ownChallengeAssistantText
-        );
         SetOwnFeedbackText(
             GetDesignerIntention(state.ownChallengeMetadata)
-        );
-        RenderMetadata(
-            state.opponentChallengeMetadata,
-            opponentChallengeAssistantText
         );
         SetOpponentFeedbackText(
             GetDesignerIntention(state.opponentChallengeMetadata)
@@ -216,22 +205,6 @@ public class MatchResultController : MonoBehaviour
 
         OnlinePlayerState opponent = state.FindPlayer(3 - playerNumber);
         return opponent != null && opponent.resultSubmitted;
-    }
-
-    private static void RenderMetadata(
-        OnlineChallengeMetadata metadata,
-        Text assistantText)
-    {
-        if (metadata == null)
-        {
-            SetText(assistantText, "AI MODE  --");
-            return;
-        }
-
-        SetText(
-            assistantText,
-            "AI MODE  " + FormatAssistantMode(metadata.aiAssistantMode)
-        );
     }
 
     private static void RenderResult(
@@ -282,13 +255,6 @@ public class MatchResultController : MonoBehaviour
         return string.IsNullOrWhiteSpace(value)
             ? normalizedLabel + ":  --"
             : normalizedLabel + ":\n" + value.Trim();
-    }
-
-    private static string FormatAssistantMode(string mode)
-    {
-        return mode == AIAssistantModeController.PartialCompletionApiMode
-            ? "PARTIAL-LEVEL COMPLETION"
-            : "DESCRIPTION-TO-LEVEL";
     }
 
     private static string FormatDuration(float seconds)
@@ -346,10 +312,6 @@ public class MatchResultController : MonoBehaviour
     {
         roomCodeText = ResolveText(roomCodeText, "RoomCodeText");
         statusText = ResolveText(statusText, "MatchResultStatusText");
-        ownChallengeAssistantText = ResolveText(
-            ownChallengeAssistantText,
-            "OwnChallengeAssistantText"
-        );
         ownFeedbackText = ResolveText(ownFeedbackText, "OwnFeedbackText");
         opponentRunTimeText = ResolveText(
             opponentRunTimeText,
@@ -358,10 +320,6 @@ public class MatchResultController : MonoBehaviour
         opponentRunMovesText = ResolveText(
             opponentRunMovesText,
             "OpponentRunMovesText"
-        );
-        opponentChallengeAssistantText = ResolveText(
-            opponentChallengeAssistantText,
-            "OpponentChallengeAssistantText"
         );
         opponentFeedbackText = ResolveText(
             opponentFeedbackText,
@@ -383,82 +341,9 @@ public class MatchResultController : MonoBehaviour
         }
     }
 
-    private void ConfigureResultTextLayout()
-    {
-        ConfigureResultCardTextLayout(
-            opponentRunTimeText,
-            opponentRunMovesText,
-            ownFeedbackText
-        );
-        ConfigureResultCardTextLayout(
-            ownRunTimeText,
-            ownRunMovesText,
-            opponentFeedbackText
-        );
-    }
-
-    private static void ConfigureResultCardTextLayout(
-        Text timeText,
-        Text movesText,
-        Text feedbackText)
-    {
-        ConfigureTextRect(
-            timeText,
-            new Vector2(-190f, -4f),
-            new Vector2(310f, 55f)
-        );
-        ConfigureTextRect(
-            movesText,
-            new Vector2(155f, -4f),
-            new Vector2(380f, 55f)
-        );
-
-        if (feedbackText == null)
-        {
-            return;
-        }
-
-        ConfigureTextRect(
-            feedbackText,
-            new Vector2(0f, -113f),
-            new Vector2(690f, 145f)
-        );
-        feedbackText.alignment = TextAnchor.UpperLeft;
-        feedbackText.horizontalOverflow = HorizontalWrapMode.Wrap;
-        feedbackText.verticalOverflow = VerticalWrapMode.Truncate;
-        feedbackText.resizeTextForBestFit = true;
-        feedbackText.resizeTextMinSize = 18;
-        feedbackText.resizeTextMaxSize = Mathf.Max(
-            feedbackText.resizeTextMinSize,
-            feedbackText.fontSize
-        );
-    }
-
-    private static void ConfigureTextRect(
-        Text text,
-        Vector2 anchoredPosition,
-        Vector2 sizeDelta)
-    {
-        if (text == null)
-        {
-            return;
-        }
-
-        text.rectTransform.anchoredPosition = anchoredPosition;
-        text.rectTransform.sizeDelta = sizeDelta;
-    }
-
     private void RenderUnavailable()
     {
-        RenderMetadata(
-            null,
-            ownChallengeAssistantText
-        );
         SetOwnFeedbackText("");
-        RenderMetadata(
-            null,
-            opponentChallengeAssistantText
-        );
         SetOpponentFeedbackText("");
         RenderResult(null, opponentRunTimeText, opponentRunMovesText);
         RenderResult(null, ownRunTimeText, ownRunMovesText);

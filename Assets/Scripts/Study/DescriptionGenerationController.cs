@@ -43,8 +43,6 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     [Header("Static Scene References")]
     [SerializeField] private Text progressText;
     [SerializeField] private Text summaryText;
-    [SerializeField] private Text difficultyRationaleText;
-    [SerializeField] private Text layoutRationaleText;
     [SerializeField] private Text statusText;
     [SerializeField] private Text difficultyText;
     [SerializeField] private Text layoutText;
@@ -56,6 +54,10 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     [SerializeField] private Button previousDifficultyButton;
     [SerializeField] private Button nextDifficultyButton;
     [SerializeField] private Button confirmButton;
+    [Header("Scene Presentation")]
+    [SerializeField] private Text aiHeadingText;
+    [SerializeField] private Text parameterHintText;
+    [SerializeField] private Image[] progressSegments;
 
     private DescriptionGenerationSettings settings;
     private int displayedDifficulty;
@@ -171,12 +173,15 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         displayedDifficulty = loaded ? ResolveSavedDifficulty() : 1;
         displayedLayout = loaded ? ResolveSavedLayout() : 1;
         BindStaticControls();
+        if (aiHeadingText != null) aiHeadingText.text = "AI'S IDEA";
+        summaryText.text = "Finish the four questions to see my idea!";
+        if (parameterHintText != null) parameterHintText.text = "Answer all four questions to unlock these picks.";
         ShowQuestion(0);
     }
 
     private bool HasValidStaticInterface()
     {
-        return questionText != null && summaryText != null && difficultyRationaleText != null && layoutRationaleText != null
+        return questionText != null && summaryText != null
             && difficultyText != null && layoutText != null && difficultyControls != null
             && previousLayoutButton != null && nextLayoutButton != null && previousDifficultyButton != null
             && nextDifficultyButton != null && confirmButton != null && optionButtons != null && optionButtons.Length == 4
@@ -203,9 +208,17 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     {
         questionIndex = index;
         Question question = Questions[index];
-        if (progressText != null) progressText.text = "Question " + (index + 1) + " of " + Questions.Length;
+        if (progressText != null) progressText.text = (index + 1) + " of " + Questions.Length;
+        if (progressSegments != null)
+        {
+            for (int i = 0; i < progressSegments.Length; i++)
+                if (progressSegments[i] != null)
+                    progressSegments[i].color = i <= index
+                        ? new Color32(54, 113, 190, 255)
+                        : new Color32(224, 219, 211, 255);
+        }
         questionText.text = question.prompt;
-        if (statusText != null) statusText.text = "Choose one option.";
+        if (statusText != null) statusText.text = "Choose one to continue.";
         for (int i = 0; i < optionButtons.Length; i++)
         {
             int answerIndex = i;
@@ -237,11 +250,11 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     {
         requestInFlight = true;
         SetOptionButtonsInteractable(false);
-        questionText.text = "AI is reviewing your initial-map preferences.";
-        summaryText.text = "AI reflection is being prepared...";
-        difficultyRationaleText.text = "AI difficulty suggestion is being prepared...";
-        layoutRationaleText.text = "AI layout suggestion is being prepared...";
-        if (statusText != null) statusText.text = "AI is preparing difficulty and layout suggestions...";
+        questionText.text = "All four answers are in!";
+        summaryText.text = "I'm putting your ideas together...";
+        if (aiHeadingText != null) aiHeadingText.text = "PUTTING OUR IDEAS TOGETHER...";
+        if (parameterHintText != null) parameterHintText.text = "Your starting picks will be ready in a moment.";
+        if (statusText != null) statusText.text = "Thanks! AI is preparing a starting idea.";
         GuideRequest payload = new GuideRequest
         {
             firstMovePreference = settings.firstMovePreference,
@@ -436,10 +449,10 @@ public sealed class DescriptionGenerationController : MonoBehaviour
         settings.aiRecommendationSource = response.source ?? "llm";
         displayedDifficulty = DifficultyIndex(settings.aiRecommendedDifficulty);
         displayedLayout = LayoutIndex(settings.aiRecommendedLayout);
-        summaryText.text = "AI reflection: " + settings.aiSummary;
-        difficultyRationaleText.text = "AI difficulty suggestion: " + DifficultyLabels[displayedDifficulty] + "\n" + settings.aiDifficultyRationale;
-        layoutRationaleText.text = "AI layout suggestion: " + LayoutLabels[displayedLayout] + "\n" + settings.aiLayoutRationale;
-        if (statusText != null) statusText.text = "Review the suggestions, adjust either setting if needed, then confirm.";
+        summaryText.text = settings.aiSummary;
+        if (aiHeadingText != null) aiHeadingText.text = "HERE'S MY IDEA!";
+        if (parameterHintText != null) parameterHintText.text = "You can change these picks!";
+        if (statusText != null) statusText.text = "Your four answers are ready. Check the idea below.";
         summaryReady = true;
         UpdateParameterUi();
         SetControlsInteractable(true);
@@ -459,8 +472,8 @@ public sealed class DescriptionGenerationController : MonoBehaviour
 
     private void UpdateParameterUi()
     {
-        difficultyText.text = DifficultyLabels[displayedDifficulty];
-        layoutText.text = LayoutLabels[displayedLayout];
+        difficultyText.text = summaryReady ? DifficultyLabels[displayedDifficulty] : "--";
+        layoutText.text = summaryReady ? LayoutLabels[displayedLayout] : "--";
     }
 
     private void SetControlsInteractable(bool interactable)
@@ -545,7 +558,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
             request.SetRequestHeader("Content-Type", "application/json");
             request.SetRequestHeader("X-Player-Token", OnlineMatchContext.PlayerToken);
             request.timeout = Mathf.Max(1, requestTimeoutSeconds);
-            if (statusText != null) statusText.text = "Recording Draft settings...";
+            if (statusText != null) statusText.text = "Saving your picks before we build...";
             yield return request.SendWebRequest();
             if (request.result != UnityWebRequest.Result.Success)
             {
@@ -573,7 +586,7 @@ public sealed class DescriptionGenerationController : MonoBehaviour
     private void ShowDraftRecordFailure(string message)
     {
         requestInFlight = false;
-        if (statusText != null) statusText.text = "Draft was not recorded. Retry Confirm.";
+        if (statusText != null) statusText.text = "Your picks could not be saved. Select LET'S BUILD! to retry.";
         summaryText.text = "Draft record failed: " + message;
         SetControlsInteractable(true);
     }

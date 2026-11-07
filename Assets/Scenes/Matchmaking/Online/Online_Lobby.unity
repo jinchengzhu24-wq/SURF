@@ -269,7 +269,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: ONLINE LOBBY
+  m_Text: PLAY TOGETHER !
 --- !u!222 &285799731
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -1824,7 +1824,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Open a private match and share the generated code with your opponent.
+  m_Text: Get a room code and share it with your partner!
 --- !u!222 &560588852
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2208,7 +2208,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: 119.93848, y: -357}
+  m_AnchoredPosition: {x: 21, y: -336}
   m_SizeDelta: {x: 1139.877, y: 54}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &945078168
@@ -2244,7 +2244,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Room creation, code entry and matchmaking will be connected later.
+  m_Text: One makes a room, the other joins!
 --- !u!222 &945078169
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2323,7 +2323,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Create a private room or join a friend with a room code.
+  m_Text: You'll each make a level with AI, then swap and play!
 --- !u!222 &1030216203
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2764,7 +2764,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Enter the six-digit room code shared by the room host.
+  m_Text: Got a room code? Type it below!
 --- !u!222 &1412659232
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2877,7 +2877,7 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -618, y: -358}
+  m_AnchoredPosition: {x: -618, y: -337}
   m_SizeDelta: {x: 250, y: 62}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1436587831
@@ -3049,8 +3049,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: d199490a83bb2b844b9695cbf13b01ef, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_Navigation:
     m_Mode: 3
     m_WrapAround: 0

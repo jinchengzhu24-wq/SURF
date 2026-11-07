@@ -175,16 +175,6 @@ public static class BuildOnlineMatchResultScene
             new Vector2(690f, 45f),
             TextAnchor.MiddleCenter
         );
-        Text ownAssistantText = CreateText(
-            "OwnChallengeAssistantText",
-            ownCard.rectTransform,
-            "AI MODE  DESCRIPTION-TO-LEVEL",
-            22,
-            Ink,
-            new Vector2(0f, 50f),
-            new Vector2(690f, 48f),
-            TextAnchor.MiddleLeft
-        );
         Text opponentTimeText = CreateText(
             "OpponentRunTimeText",
             ownCard.rectTransform,
@@ -251,16 +241,6 @@ public static class BuildOnlineMatchResultScene
             new Vector2(690f, 45f),
             TextAnchor.MiddleCenter
         );
-        Text opponentAssistantText = CreateText(
-            "OpponentChallengeAssistantText",
-            opponentCard.rectTransform,
-            "AI MODE  PARTIAL-LEVEL COMPLETION",
-            22,
-            Ink,
-            new Vector2(0f, 50f),
-            new Vector2(690f, 48f),
-            TextAnchor.MiddleLeft
-        );
         Text ownTimeText = CreateText(
             "OwnRunTimeText",
             opponentCard.rectTransform,
@@ -314,11 +294,6 @@ public static class BuildOnlineMatchResultScene
         SerializedObject serializedController = new SerializedObject(controller);
         SetReference(serializedController, "roomCodeText", roomCodeText);
         SetReference(serializedController, "statusText", statusText);
-        SetReference(
-            serializedController,
-            "ownChallengeAssistantText",
-            ownAssistantText
-        );
         SetReference(serializedController, "ownFeedbackText", ownFeedbackText);
         SetReference(
             serializedController,
@@ -329,11 +304,6 @@ public static class BuildOnlineMatchResultScene
             serializedController,
             "opponentRunMovesText",
             opponentMovesText
-        );
-        SetReference(
-            serializedController,
-            "opponentChallengeAssistantText",
-            opponentAssistantText
         );
         SetReference(
             serializedController,

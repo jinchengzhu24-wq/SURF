@@ -271,7 +271,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: MATCH TYPE
+  m_Text: 1. MAKE
 --- !u!222 &129837287
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -864,7 +864,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: NEXT STEP
+  m_Text: 2. SWAP
 --- !u!222 &392401397
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -1129,7 +1129,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: READY
+  m_Text: I'M READY!
 --- !u!222 &452352903
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2447,7 +2447,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: MATCH BRIEFING
+  m_Text: READY TO START?
 --- !u!222 &924004179
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2541,7 +2541,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: The ready state and scene transition will be connected later.
+  m_Text: Both players need to be ready to start
 --- !u!222 &945078169
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -2815,8 +2815,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0.5, y: 0.5}
   m_AnchorMax: {x: 0.5, y: 0.5}
-  m_AnchoredPosition: {x: -565, y: 75}
-  m_SizeDelta: {x: 210, y: 34}
+  m_AnchoredPosition: {x: -495.2096, y: 75}
+  m_SizeDelta: {x: 349.5808, y: 34}
   m_Pivot: {x: 0.5, y: 0.5}
 --- !u!114 &1139195775
 MonoBehaviour:
@@ -2851,7 +2851,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: MATCH FLOW
+  m_Text: HERE'S THE PLAN!
 --- !u!222 &1139195776
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -3321,7 +3321,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Review the match setup. Both players must be ready to continue.
+  m_Text: You'll each make a level with AI, then swap and play!
 --- !u!222 &1351359902
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -3468,7 +3468,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: DESIGN A CHALLENGE
+  m_Text: Swap your levels
 --- !u!222 &1412659232
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -3944,7 +3944,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: EXCHANGE & SOLVE
+  m_Text: Make a level with AI
 --- !u!222 &1859830195
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4023,7 +4023,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Flow
+  m_Text: 3. PLAY
 --- !u!222 &1910679919
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -4102,7 +4102,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: DESIGN > EXCHANGE > SOLVE
+  m_Text: Play your partner's level!
 --- !u!222 &1993466415
 CanvasRenderer:
   m_ObjectHideFlags: 0

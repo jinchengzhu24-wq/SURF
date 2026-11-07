@@ -968,6 +968,10 @@ PrefabInstance:
       value: 1
       objectReference: {fileID: 0}
     - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
+      propertyPath: initialLLMLoadingMessage
+      value: AI is preparing your first map...
+      objectReference: {fileID: 0}
+    - target: {fileID: 6664791497047780563, guid: 2061e813fa8e707428c61a36f456a9bf, type: 3}
       propertyPath: generatedLevelLimitAction
       value: 0
       objectReference: {fileID: 0}
@@ -1077,7 +1081,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 1
     m_LineSpacing: 1
-  m_Text: LLM is generating...
+  m_Text: AI is preparing your first map...
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

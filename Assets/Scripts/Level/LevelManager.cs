@@ -39,7 +39,7 @@ public class LevelManager : MonoBehaviour
     public Text initialLLMLoadingText;
     public Button initialLLMRetryButton;
     public Text initialLLMRetryButtonText;
-    public string initialLLMLoadingMessage = "LLM is generating...";
+    public string initialLLMLoadingMessage = "AI is preparing your first map...";
     public string initialLLMFailureMessage = "LLM generation failed.";
     public string initialLLMRetryLabel = "Retry";
 
