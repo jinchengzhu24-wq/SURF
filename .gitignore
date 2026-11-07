@@ -12,6 +12,7 @@
 # IDE and editor generated files
 .playwright-mcp/
 .vs/
+/.vsconfig
 .vscode/
 *.csproj
 *.unityproj
