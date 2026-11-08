@@ -10,20 +10,21 @@ public class MatchResultController : MonoBehaviour
     [Header("Header")]
     [SerializeField] private Text roomCodeText;
     [SerializeField] private Text statusText;
+    [SerializeField] private Text finishedCountText;
+    [SerializeField] private Text footerText;
 
     [Header("Your Challenge / Opponent Run")]
     [SerializeField] private Text ownFeedbackText;
     [SerializeField] private Text opponentRunTimeText;
     [SerializeField] private Text opponentRunMovesText;
+    [SerializeField] private Text opponentRunStatusText;
 
     [Header("Opponent Challenge / Your Run")]
     [SerializeField] private Text opponentFeedbackText;
     [SerializeField] private Text ownRunTimeText;
     [SerializeField] private Text ownRunMovesText;
+    [SerializeField] private Text ownRunStatusText;
 
-    [Header("Dynamic Feedback Text")]
-    [SerializeField] private string ownFeedbackLabel = "YOUR MESSAGE";
-    [SerializeField] private string opponentFeedbackLabel = "OPPONENT'S MESSAGE";
     [Header("Runtime Values (Play Mode)")]
     [SerializeField, TextArea(2, 6)]
     private string ownFeedbackDynamicText = "";
@@ -43,24 +44,18 @@ public class MatchResultController : MonoBehaviour
     public void SetOwnFeedbackText(string value)
     {
         ownFeedbackDynamicText = (value ?? "").Trim();
-        ownFeedbackText = ResolveText(ownFeedbackText, "OwnFeedbackText");
         SetText(
             ownFeedbackText,
-            FormatFeedbackText(ownFeedbackLabel, ownFeedbackDynamicText)
+            FormatFeedbackText(ownFeedbackDynamicText)
         );
     }
 
     public void SetOpponentFeedbackText(string value)
     {
         opponentFeedbackDynamicText = (value ?? "").Trim();
-        opponentFeedbackText = ResolveText(
-            opponentFeedbackText,
-            "OpponentFeedbackText"
-        );
         SetText(
             opponentFeedbackText,
             FormatFeedbackText(
-                opponentFeedbackLabel,
                 opponentFeedbackDynamicText
             )
         );
@@ -76,12 +71,11 @@ public class MatchResultController : MonoBehaviour
     {
         SetText(
             ownFeedbackText,
-            FormatFeedbackText(ownFeedbackLabel, ownFeedbackDynamicText)
+            FormatFeedbackText(ownFeedbackDynamicText)
         );
         SetText(
             opponentFeedbackText,
             FormatFeedbackText(
-                opponentFeedbackLabel,
                 opponentFeedbackDynamicText
             )
         );
@@ -90,11 +84,10 @@ public class MatchResultController : MonoBehaviour
     private void Start()
     {
         OnlineSceneUi.EnsureEventSystem();
-        ResolveUi();
         WireUi();
-        OnlineSceneUi.ConfigureRaycastTargets();
 
-        SetText(roomCodeText, "ROOM " + OnlineMatchContext.RoomCode);
+        SetText(roomCodeText, "ROOM " + (string.IsNullOrEmpty(OnlineMatchContext.RoomCode)
+            ? "------" : OnlineMatchContext.RoomCode));
 
         if (!OnlineMatchContext.HasMatch
             || OnlineMatchContext.RoomState == null)
@@ -162,6 +155,11 @@ public class MatchResultController : MonoBehaviour
         }
 
         bool opponentSubmittedResult = HasOpponentSubmittedResult(state);
+        bool ownSubmittedResult = state.FindPlayer(state.playerNumber)
+            ?.resultSubmitted == true;
+        int finishedCount = (ownSubmittedResult ? 1 : 0)
+            + (opponentSubmittedResult ? 1 : 0);
+        SetText(finishedCountText, finishedCount + "/2 FINISHED");
 
         SetOwnFeedbackText(
             GetDesignerIntention(state.ownChallengeMetadata)
@@ -172,25 +170,38 @@ public class MatchResultController : MonoBehaviour
         RenderResult(
             state.ownResult,
             ownRunTimeText,
-            ownRunMovesText
+            ownRunMovesText,
+            ownRunStatusText,
+            "YOU"
         );
         RenderResult(
             opponentSubmittedResult ? state.opponentResult : null,
             opponentRunTimeText,
-            opponentRunMovesText
+            opponentRunMovesText,
+            opponentRunStatusText,
+            "PARTNER"
         );
 
-        if (opponentSubmittedResult)
+        if (state.status == "cancelled")
+        {
+            SetText(statusText, "YOUR PARTNER LEFT THE MATCH.");
+            if (!opponentSubmittedResult)
+            {
+                SetText(opponentRunStatusText, "PARTNER LEFT THE MATCH.");
+            }
+            SetText(footerText, "Continue to the post-match questionnaire.");
+        }
+        else if (finishedCount == 2)
         {
             SetText(statusText, "BOTH PLAYERS HAVE FINISHED.");
-        }
-        else if (state.status == "cancelled")
-        {
-            SetText(statusText, "YOUR OPPONENT LEFT THE MATCH.");
+            SetText(footerText, "Continue to the post-match questionnaire.");
         }
         else
         {
-            SetText(statusText, "WAITING FOR OPPONENT TO FINISH...");
+            SetText(statusText, opponentSubmittedResult
+                ? "YOUR PARTNER HAS FINISHED."
+                : "YOUR PARTNER IS STILL PLAYING...");
+            SetText(footerText, "More results appear when both players finish.");
         }
     }
 
@@ -210,31 +221,37 @@ public class MatchResultController : MonoBehaviour
     private static void RenderResult(
         OnlineMatchResult result,
         Text timeText,
-        Text movesText)
+        Text movesText,
+        Text runStatusText,
+        string player)
     {
         if (result == null)
         {
-            SetText(timeText, "TIME  --");
-            SetText(movesText, "MOVES  -- / MIN --");
+            SetText(timeText, "--");
+            SetText(movesText, "-- / --");
+            SetText(runStatusText, player == "YOU"
+                ? "WAITING FOR YOUR RESULT..."
+                : "PARTNER IS PLAYING...");
             return;
         }
 
         if (result.outcome == "timed_out")
         {
-            SetText(timeText, "TIMEOUT  " + FormatDuration(result.durationSeconds));
+            SetText(runStatusText, player == "YOU" ? "YOU TIMED OUT." : "PARTNER TIMED OUT.");
+            SetText(timeText, FormatDuration(result.durationSeconds));
             SetText(
                 movesText,
-                "MOVES  " + result.moveCount + " / MIN " + result.minimumMoves
+                result.moveCount + " / " + result.minimumMoves
             );
             return;
         }
 
-        SetText(timeText, "TIME  " + FormatDuration(result.durationSeconds));
+        SetText(runStatusText, player == "YOU" ? "YOU FINISHED!" : "PARTNER FINISHED!");
+        SetText(timeText, FormatDuration(result.durationSeconds));
         SetText(
             movesText,
-            "MOVES  "
-            + result.moveCount
-            + " / MIN "
+            result.moveCount
+            + " / "
             + result.minimumMoves
         );
     }
@@ -247,14 +264,11 @@ public class MatchResultController : MonoBehaviour
             : "";
     }
 
-    private static string FormatFeedbackText(string label, string value)
+    private static string FormatFeedbackText(string value)
     {
-        string normalizedLabel = string.IsNullOrWhiteSpace(label)
-            ? "MESSAGE"
-            : label.Trim();
         return string.IsNullOrWhiteSpace(value)
-            ? normalizedLabel + ":  --"
-            : normalizedLabel + ":\n" + value.Trim();
+            ? "No message yet."
+            : value.Trim();
     }
 
     private static string FormatDuration(float seconds)
@@ -308,30 +322,6 @@ public class MatchResultController : MonoBehaviour
         SceneManager.LoadScene(QuestionnaireSceneName);
     }
 
-    private void ResolveUi()
-    {
-        roomCodeText = ResolveText(roomCodeText, "RoomCodeText");
-        statusText = ResolveText(statusText, "MatchResultStatusText");
-        ownFeedbackText = ResolveText(ownFeedbackText, "OwnFeedbackText");
-        opponentRunTimeText = ResolveText(
-            opponentRunTimeText,
-            "OpponentRunTimeText"
-        );
-        opponentRunMovesText = ResolveText(
-            opponentRunMovesText,
-            "OpponentRunMovesText"
-        );
-        opponentFeedbackText = ResolveText(
-            opponentFeedbackText,
-            "OpponentFeedbackText"
-        );
-        ownRunTimeText = ResolveText(ownRunTimeText, "OwnRunTimeText");
-        ownRunMovesText = ResolveText(ownRunMovesText, "OwnRunMovesText");
-        backToLobbyButton = backToLobbyButton != null
-            ? backToLobbyButton
-            : OnlineSceneUi.EnsureButton("BackToLobbyButton");
-    }
-
     private void WireUi()
     {
         if (backToLobbyButton != null)
@@ -345,15 +335,12 @@ public class MatchResultController : MonoBehaviour
     {
         SetOwnFeedbackText("");
         SetOpponentFeedbackText("");
-        RenderResult(null, opponentRunTimeText, opponentRunMovesText);
-        RenderResult(null, ownRunTimeText, ownRunMovesText);
-    }
-
-    private static Text ResolveText(Text current, string objectName)
-    {
-        return current != null
-            ? current
-            : OnlineSceneUi.FindText(objectName);
+        RenderResult(null, opponentRunTimeText, opponentRunMovesText, opponentRunStatusText, "PARTNER");
+        RenderResult(null, ownRunTimeText, ownRunMovesText, ownRunStatusText, "YOU");
+        SetText(opponentRunStatusText, "RESULT UNAVAILABLE");
+        SetText(ownRunStatusText, "RESULT UNAVAILABLE");
+        SetText(finishedCountText, "--/2 FINISHED");
+        SetText(footerText, "Continue to the post-match questionnaire.");
     }
 
     private static void SetText(Text text, string value)

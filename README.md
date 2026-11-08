@@ -66,6 +66,8 @@ Online1 是共创前的匹配问卷，Online2 是比赛后的问卷；两者都�
 
 `Online_Level` 的 30 秒挑战计时从玩家获得控制后开始。超时锁定输入、提交 `timed_out` 并显示静态失败面板；结果页分别显示超时与完成及各自记录的移动数。旧结果缺失 outcome 时按 `completed` 兼容。
 
+`Match_Result` 以双栏显示“自己的关卡／对方游玩结果”和“对方的关卡／自己游玩结果”。完成计数由现有房间响应的双方 `resultSubmitted` 计算，超时提交也计入已结束；消息区标为 `YOUR MESSAGE` / `PARTNER'S MESSAGE`，展示对应关卡设计者在共创结束时填写的设计意图原文，长内容可滚动查看，不新增赛后留言接口。`KEEP GOING!` 仍进入每轮必经的 `Questionnaire(Online2)`。
+
 ## 系统边界与当前实现
 
 - 唯一正式公网入口为 `https://sokobanaidemo.top/game/`、`https://sokobanaidemo.top/frontend/` 和 `https://sokobanaidemo.top/cocreation/`；Cloudflare 对外提供 HTTPS，HTTP、`www` 和旧 IP 统一跳转到 HTTPS 根域名。WebGL 运行时从当前页面 origin 解析首方地址，公开链接不使用 `:8000` 或 `:8010`。

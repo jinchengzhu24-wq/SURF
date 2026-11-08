@@ -13,6 +13,10 @@ public class ChallengeWaitingController : MonoBehaviour
     [SerializeField] private Button playButton;
     [SerializeField] private Text playButtonText;
     [SerializeField] private Button leaveButton;
+    [SerializeField] private Text titleText;
+    [SerializeField] private Text subtitleText;
+    [SerializeField] private Text ownLevelStatusText;
+    [SerializeField] private Text partnerLevelStatusText;
 
     private OnlineMatchClient client;
     private bool leaving;
@@ -22,7 +26,6 @@ public class ChallengeWaitingController : MonoBehaviour
     private void Start()
     {
         OnlineSceneUi.EnsureEventSystem();
-        ResolveUi();
         WireUi();
         OnlineSceneUi.ConfigureRaycastTargets();
 
@@ -30,6 +33,8 @@ public class ChallengeWaitingController : MonoBehaviour
             || !OnlineMatchContext.HasPendingChallenge)
         {
             SetStatus("NO ACTIVE CHALLENGE WAS FOUND.");
+            SetText(ownLevelStatusText, "NO ACTIVE LEVEL");
+            SetText(partnerLevelStatusText, "UNAVAILABLE");
             SetPlayEnabled(false);
             return;
         }
@@ -42,28 +47,9 @@ public class ChallengeWaitingController : MonoBehaviour
         }
 
         SetText(roomCodeText, "ROOM " + OnlineMatchContext.RoomCode);
-        SetText(playButtonText, "PLAY OPPONENT LEVEL");
+        SetText(playButtonText, "PLAY PARTNER'S LEVEL");
         SetPlayEnabled(false);
         StartCoroutine(SynchronizeChallenge());
-    }
-
-    private void ResolveUi()
-    {
-        statusText = statusText != null
-            ? statusText
-            : OnlineSceneUi.FindText("ChallengeStatusText");
-        roomCodeText = roomCodeText != null
-            ? roomCodeText
-            : OnlineSceneUi.FindText("RoomCodeText");
-        playButton = playButton != null
-            ? playButton
-            : OnlineSceneUi.EnsureButton("PlayOpponentButton");
-        playButtonText = playButtonText != null
-            ? playButtonText
-            : OnlineSceneUi.FindText("PlayOpponentButtonText");
-        leaveButton = leaveButton != null
-            ? leaveButton
-            : OnlineSceneUi.EnsureButton("LeaveMatchButton");
     }
 
     private void WireUi()
@@ -113,6 +99,7 @@ public class ChallengeWaitingController : MonoBehaviour
         }
 
         submitInFlight = true;
+        SetText(ownLevelStatusText, "SENDING...");
         SetStatus("SUBMITTING YOUR CHALLENGE...");
         SetPlayEnabled(false);
         bool succeeded = false;
@@ -126,9 +113,11 @@ public class ChallengeWaitingController : MonoBehaviour
                 OnlineMatchContext.ApplyState(state);
                 UpdateFromState(state);
             },
-            error => SetStatus(
-                "SUBMISSION FAILED. RETRYING...\n" + error.ToUpperInvariant()
-            )
+            error =>
+            {
+                SetText(ownLevelStatusText, "RETRYING...");
+                SetStatus("SUBMISSION FAILED. RETRYING...\n" + error.ToUpperInvariant());
+            }
         );
 
         submitInFlight = false;
@@ -160,8 +149,17 @@ public class ChallengeWaitingController : MonoBehaviour
             return;
         }
 
+        bool ownSubmitted = state.FindPlayer(OnlineMatchContext.PlayerNumber)
+            ?.challengeSubmitted == true;
+        SetText(ownLevelStatusText, ownSubmitted ? "SENT!" : "SENDING...");
+        SetText(titleText, ownSubmitted ? "LEVEL SENT!" : "LEVEL READY!");
+        SetText(subtitleText, ownSubmitted
+            ? "Nice! Your level is ready for your partner!"
+            : "Your level is saved! Sending it to your partner...");
+
         if (state.status == "cancelled")
         {
+            SetText(partnerLevelStatusText, "PARTNER LEFT");
             SetStatus("YOUR OPPONENT LEFT. THIS MATCH WAS CANCELLED.");
             SetPlayEnabled(false);
             return;
@@ -174,12 +172,14 @@ public class ChallengeWaitingController : MonoBehaviour
                 || state.status == "results_ready"
             ))
         {
+            SetText(partnerLevelStatusText, "READY TO PLAY!");
             SetStatus("OPPONENT HAS FINISHED. READY TO PLAY.");
             SetPlayEnabled(true);
             return;
         }
 
-        SetStatus("WAITING FOR OPPONENT TO FINISH CREATING...");
+        SetText(partnerLevelStatusText, "STILL BUILDING...");
+        SetStatus("WAITING FOR YOUR PARTNER...");
         SetPlayEnabled(false);
     }
 
