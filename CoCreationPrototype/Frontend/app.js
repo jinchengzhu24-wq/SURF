@@ -756,7 +756,475 @@ const validationTileNames = {
     t: { en: "target (t)", zh: "目标（t）" }
 };
 
+// Button labels are presentation only. Preserve the existing request wording.
+const REQUEST_COPY = Object.fromEntries(["en", "zh-CN"].map(language => [language,
+    Object.freeze(Object.fromEntries(["executeBoundProposal", "challengeRevision", "alternativeRevision", "proposalConsent"]
+        .map(key => [key, translations[language][key]])))
+]));
+const ORIGINAL_ERROR_COPY = { en: { ...translations.en }, "zh-CN": { ...chineseApiErrors } };
+
+// Player-facing copy; never use these new labels as action request content.
+Object.assign(translations["en"], {
+    "subtitle": "Share ideas. Make changes. Give them a play.",
+    "demoLandingTitle": "Map’s ready. Want to tinker?",
+    "formalLandingTitle": "Map’s ready. Want to tinker?",
+    "demoLandingBody": "Here’s an algorithm-generated starting map. Generate another, or start co-creating with this one.",
+    "formalLandingBody": "Here’s your starting map, generated from the earlier AI plan and checked for a solution. Take a look, or generate another.",
+    "draftLoadingTitle": "Getting your map ready…",
+    "draftLoadingBody": "Getting the map ready and checking for a solution…",
+    "draftInitialGenerating": "Getting the map ready and checking for a solution…",
+    "draftRegenerating": "Preparing another map. This one stays until the new map is ready.",
+    "draftInitialFailed": "This map couldn’t be prepared. Select “Generate another” to try again.",
+    "draftRegenerationFailed": "The new map couldn’t be prepared. Your previous map is still here. Try generating another.",
+    "draftReady": "Your map is ready. Let’s get started.",
+    "demoDraftPreviewTitle": "Starting map",
+    "formalDraftPreviewTitle": "Starting map",
+    "draftGeneration": "Generation {generation}",
+    "enterSession": "Let’s get started",
+    "regenerateDraft": "Generate another",
+    "sessionSetup": "Before we begin",
+    "sessionLanguage": "Which language for this session?",
+    "formalLanguageLock": "You cannot change the language after starting. Your 20 minutes begin when you select “Let’s get started”.",
+    "demoLanguageLock": "You cannot change the language after starting.",
+    "ready": "Ready",
+    "versionHistory": "Version history",
+    "stages": "Saved versions",
+    "versionHint": "Stage 1, Stage 2… are saved versions of the same map. You can revisit them here.",
+    "discuss": "What do you think of this version?",
+    "messagePlaceholder": "Got an idea? Tell us what you’d like to discuss or change.",
+    "assessmentPending": "AI is taking a look at the map…",
+    "assessmentPendingBody": "Take a look around the map while the opening reply is being prepared.",
+    "requestProposal": "Ask AI for a plan",
+    "requestProposalHint": "Want a concrete plan? Turn this on, then send your idea. You decide whether to use the proposal.",
+    "playStage": "Play this version",
+    "playEvidence": "Play history",
+    "noPlayEvidence": "Haven’t tried this version yet? Give it a play.",
+    "saveStage": "Save this version",
+    "saveHint": "Saving creates a new Stage and keeps the earlier versions.",
+    "discard": "Discard unsaved changes",
+    "continueFromStage": "Continue from this version",
+    "draftSuggestedRevision": "Preview these changes",
+    "challengeRevision": "I see it differently",
+    "alternativeRevision": "Try another plan",
+    "proposalValid": "The proposed map has a solution. Take a look at the changed tiles before deciding.",
+    "accept": "Use this and save a new version",
+    "reject": "Don’t use this one",
+    "designInclinations": "Your confirmed ideas",
+    "unresolvedQuestions": "Questions still open",
+    "finalizeStage": "Choose this version",
+    "confirmFinal": "Choose this version",
+    "confirmQuestion": "Is this your final pick?",
+    "confirmBody": "After confirming, you cannot edit or continue chatting in this session. Next, leave a message for the other player.",
+    "finalizeHint": "After confirming, you cannot edit or continue chatting in this session. Next, leave a message for the other player.",
+    "intentionTitle": "Leave a message for the other player",
+    "completeSession": "Save message and finish",
+    "sessionComplete": "That’s a wrap!",
+    "sessionCompleteBody": "Your map and message are saved. Return to the original game page to continue.",
+    "demoCompleteBody": "Your map and message are saved. This co-creation session is complete.",
+    "chatWaitingPrimary": "Preparing a reply. Please wait…",
+    "chatWaitingProposal": "Preparing a proposal. Please wait…",
+    "chatElapsed": "Waiting {seconds} seconds",
+    "thinking": "Preparing a reply. Please wait…",
+    "proposalPlanningPlaceholder": "Preparing a proposal. Please wait…",
+    "draftReconnecting": "The connection was interrupted. Checking the result of your last action.",
+    "deadlineExpiredAnnouncement": "Time is up. Please submit your final version.",
+    "deadlineExpiredAction": "SUBMIT FINAL VERSION",
+    "verified": "This version has a solution",
+    "previousVerified": "The last saved version has a solution",
+    "draftUnchecked": "Your unsaved changes have not been checked",
+    "savedSolution": "Saved version: {steps} moves · {pushes} pushes",
+    "solutionSummary": "{steps} moves · {pushes} pushes",
+    "editMode": "Choose a tile, then click the map to edit. Save when you’re ready.",
+    "readOnlyMode": "You’re viewing an earlier save. Select “Continue from this version” to edit from it.",
+    "lockedMode": "This session has ended. The map can no longer be edited.",
+    "proposalUnbound": "This old proposal is view-only. Please use the latest proposal.",
+    "proposalPreconditionFailed": "The map has changed, so this proposal can no longer be used.",
+    "errorIntentRequired": "Leave a message before finishing this session.",
+    "contextChanged": "The conversation has changed. Send your request based on the current dialogue. This request did not change the map.",
+    "replyFailed": "This reply couldn’t be completed. Please retry.",
+    "connectionFailed": "The connection was interrupted. Checking the result of your last action.",
+    "modificationFailed": "These changes did not pass the checks. The map was not changed.",
+    "checkIncomplete": "The check could not finish, so we cannot yet confirm whether this map has a solution.",
+    "oldProposal": "This proposal is no longer available. Please check the latest proposal.",
+    "noProposal": "No suitable proposal was found. The map was not changed.",
+    "requirementsUnclear": "The requested changes could not be understood reliably. Retry the original message.",
+    "permissionConflict": "This direction goes beyond the allowed changes. Please adjust the idea.",
+    "unsolved": "No solution was found for this map. Please check the map.",
+    "needsDiscussion": "Discuss the current difference of views before choosing another proposal.",
+    "noAlternative": "No different proposal was found. The current map was not changed.",
+    "busyHint": "Your last action is still being processed. Please wait.",
+    "playActiveHint": "Return here after your play attempt.",
+    "closedHint": "This session has ended. Editing and chat are closed.",
+    "historyHint": "Return to the current Stage to edit or chat.",
+    "noChangesHint": "There are no new map changes to save.",
+    "dirtyPlayHint": "Save or discard your changes before playing.",
+    "pendingHint": "Accept or reject the pending proposal before continuing.",
+    "finalDirtyHint": "Save or discard your changes before choosing the final version.",
+    "conflictHint": "Choose which idea to keep before continuing the conversation.",
+    "retryHint": "Retry the unfinished message first.",
+    "emptyMessageHint": "Write your idea, then select Send.",
+    "noVersionHint": "The map is not ready yet. Please wait.",
+    "openingHint": "The AI reply is still being prepared. Wait before confirming.",
+    "saveReason": "Save: {reason}",
+    "playReason": "Play: {reason}",
+    "chatReason": "Chat: {reason}",
+    "finalReason": "Final version: {reason}",
+    "chatAriaLabel": "Talk about the map with AI",
+    "workspaceAriaLabel": "Map co-creation workspace",
+    "routeAriaLabel": "Show route from row {fromRow}, column {fromColumn} to row {toRow}, column {toColumn}"
+});
+Object.assign(translations["zh-CN"], {
+    "subtitle": "聊聊想法，动手改改，再下场试试",
+    "demoLandingTitle": "地图就位，一起捣鼓一下？",
+    "formalLandingTitle": "地图就位，一起捣鼓一下？",
+    "demoLandingBody": "这是一张算法生成的初始地图。想换个开头，可以重新生成；想从这里开始，就点“开始共创”。",
+    "formalLandingBody": "这是根据前面的 AI 规划生成的初始地图，已经检查可解。先看看，想换一张也可以重新生成。",
+    "draftLoadingTitle": "地图正在准备中……",
+    "draftLoadingBody": "地图正在准备中，还要检查一下能不能通关……",
+    "draftInitialGenerating": "地图正在准备中，还要检查一下能不能通关……",
+    "draftRegenerating": "正在准备另一张地图。生成成功前，眼前这张会保留。",
+    "draftInitialFailed": "这张地图没能准备好，点“重新生成”再试一次。",
+    "draftRegenerationFailed": "新地图没能准备好，之前那张还在。可以重新生成再试一次。",
+    "draftReady": "地图准备好了，可以开始共创。",
+    "demoDraftPreviewTitle": "初始地图",
+    "formalDraftPreviewTitle": "初始地图",
+    "draftGeneration": "第 {generation} 次生成",
+    "enterSession": "开始共创",
+    "regenerateDraft": "重新生成",
+    "sessionSetup": "开始之前",
+    "sessionLanguage": "这轮用什么语言？",
+    "formalLanguageLock": "开始后，本轮语言不能更换。点击“开始共创”后，将开始 20 分钟计时。",
+    "demoLanguageLock": "开始后，本轮语言不能更换。",
+    "ready": "准备好了",
+    "versionHistory": "版本记录",
+    "stages": "地图存档",
+    "versionHint": "Stage 1、Stage 2……是同一张地图先后保存的版本。随时可以回来看看。",
+    "discuss": "这版地图，你怎么看？",
+    "messagePlaceholder": "有什么想法？想聊聊，或想改哪里，都可以从这里开始。",
+    "assessmentPending": "AI 正在看看这张地图……",
+    "assessmentPendingBody": "可以先看看地图，等回复准备好再一起聊聊。",
+    "requestProposal": "请 AI 出个方案",
+    "requestProposalHint": "想看看具体怎么改？打开这个开关，再发送你的想法。方案出来后，由你决定用不用。",
+    "playStage": "下场试试这一版",
+    "playEvidence": "试玩足迹",
+    "noPlayEvidence": "还没下场试过？可以先走一趟。",
+    "saveStage": "给这版存个档",
+    "saveHint": "保存会创建一个新 Stage，之前的版本也会保留。",
+    "discard": "撤销未保存的修改",
+    "continueFromStage": "接着这一版改",
+    "draftSuggestedRevision": "先看看改完的样子",
+    "challengeRevision": "我有点不同想法",
+    "alternativeRevision": "换个方案看看",
+    "proposalValid": "改完的地图已经确认可解。看看哪些格子变了，喜欢再采用。",
+    "accept": "就用这个，存成新版本",
+    "reject": "这次先不用",
+    "designInclinations": "你确认过的点子",
+    "unresolvedQuestions": "还没聊完的话题",
+    "finalizeStage": "就选这一版",
+    "confirmFinal": "就选这一版",
+    "confirmQuestion": "这一版，定下来了吗？",
+    "confirmBody": "确认后，这轮不能再修改地图或继续聊天。接下来，给另一位玩家留句话。",
+    "finalizeHint": "确认后，这轮不能再修改地图或继续聊天。接下来，给另一位玩家留句话。",
+    "intentionTitle": "给另一位玩家留句话",
+    "completeSession": "保存留言，完成共创",
+    "sessionComplete": "这轮创作，收工啦！",
+    "sessionCompleteBody": "关卡和留言都已保存。回到原游戏页面，继续接下来的挑战。",
+    "demoCompleteBody": "关卡和留言都已保存，这次共创完成了。",
+    "chatWaitingPrimary": "回复还在准备中，稍等一下……",
+    "chatWaitingProposal": "正在准备修改方案，稍等一下……",
+    "chatElapsed": "已等待 {seconds} 秒",
+    "thinking": "回复还在准备中，稍等一下……",
+    "proposalPlanningPlaceholder": "正在准备修改方案，稍等一下……",
+    "draftReconnecting": "连接中断了，正在确认刚才的操作结果。",
+    "deadlineExpiredAnnouncement": "时间到了，请提交最终版本。",
+    "deadlineExpiredAction": "请提交最终版本",
+    "verified": "这一版已确认可解",
+    "previousVerified": "上次保存的版本已确认可解",
+    "draftUnchecked": "当前修改尚未检查",
+    "savedSolution": "已保存版本：{steps} 步 · {pushes} 次推动",
+    "solutionSummary": "{steps} 步 · {pushes} 次推动",
+    "editMode": "选一种格子，再点地图就能修改。改好后记得存档。",
+    "readOnlyMode": "这是以前的存档。想接着改，可以点“接着这一版改”。",
+    "lockedMode": "这一轮已结束，地图不能再修改。",
+    "proposalUnbound": "这份旧方案现在只能查看，请使用最新方案。",
+    "proposalPreconditionFailed": "地图已经变了，这份方案不能直接使用。",
+    "errorIntentRequired": "先留句话，再完成这次共创。",
+    "contextChanged": "对话已经更新，请根据当前内容重新发送。地图未因这次请求改变。",
+    "replyFailed": "这次回复没能完成，请重试。",
+    "connectionFailed": "连接中断了，正在确认刚才的操作结果。",
+    "modificationFailed": "这次修改没能通过检查，地图未改变。",
+    "checkIncomplete": "检查暂时没能完成，还不能确认这张地图是否可解。",
+    "oldProposal": "这份方案现在不能使用，请查看最新方案。",
+    "noProposal": "暂时没找到合适的修改方案，地图未改变。",
+    "requirementsUnclear": "还没能准确理解这次修改要求，请重试原消息。",
+    "permissionConflict": "这个方向超出了当前允许修改的范围，请调整一下想法。",
+    "unsolved": "暂时没找到这张地图的通关走法，请检查一下地图。",
+    "needsDiscussion": "先把当前的不同想法聊清楚，再继续选方案。",
+    "noAlternative": "还没找到不同的新方案，当前地图未改变。",
+    "busyHint": "正在处理刚才的操作，请稍等。",
+    "playActiveHint": "试玩结束后，回到这里继续。",
+    "closedHint": "这轮已结束，不能再修改或聊天。",
+    "historyHint": "先回到当前 Stage，再继续修改或聊天。",
+    "noChangesHint": "地图还没有新改动。",
+    "dirtyPlayHint": "先保存或撤销修改，再来试玩。",
+    "pendingHint": "先采用或拒绝待确认方案，再继续这项操作。",
+    "finalDirtyHint": "先保存或撤销修改，再选定最终版本。",
+    "conflictHint": "先选择要保留的想法，再继续聊天。",
+    "retryHint": "先重试刚才未完成的消息。",
+    "emptyMessageHint": "写下你的想法，再点发送。",
+    "noVersionHint": "地图还没有准备好，请稍等。",
+    "openingHint": "AI 的回复还在准备中，稍等一下再确认。",
+    "saveReason": "存档：{reason}",
+    "playReason": "试玩：{reason}",
+    "chatReason": "聊天：{reason}",
+    "finalReason": "最终版本：{reason}",
+    "chatAriaLabel": "和 AI 聊聊地图",
+    "workspaceAriaLabel": "地图共创工作台",
+    "routeAriaLabel": "查看从第 {fromRow} 行第 {fromColumn} 列到第 {toRow} 行第 {toColumn} 列的路线"
+});
+
+Object.assign(GUIDANCE_CUE_LABELS.en, {
+    revision: "REVISION · How about these changes?", intent: "TENTATIVE INTENT · Am I getting your idea?",
+    warning: "WARNING · Something to watch for", tradeoff: "WARNING · Something to watch for",
+    question: "LET’S DISCUSS · Let’s talk this through"
+});
+Object.assign(GUIDANCE_CUE_LABELS["zh-CN"], {
+    revision: "REVISION · 要不要试试这样改？", intent: "TENTATIVE INTENT · 我这样理解，对吗？",
+    warning: "WARNING · 这里留意一下", tradeoff: "WARNING · 这里留意一下",
+    question: "LET’S DISCUSS · 这里，咱们聊聊"
+});
+
+// Help and status labels stay beside the controls they explain.
+Object.assign(translations.en, {
+    versionHelp: "About Stages", proposalHelp: "How it works", editorTitle: "Make it your own",
+    finishTitle: "Ready to wrap up?", proposalModeOff: "For your next message",
+    proposalModeOn: "Next: request a plan", proposalTopicActive: "Continuing this proposal"
+});
+Object.assign(translations["zh-CN"], {
+    versionHelp: "Stage 是什么？", proposalHelp: "开关说明", editorTitle: "动手改改",
+    finishTitle: "准备定稿？", proposalModeOff: "仅影响下一条消息",
+    proposalModeOn: "下一条：请求方案", proposalTopicActive: "继续讨论当前方案"
+});
+
+// Presentation-only help. These strings never enter action payloads or model context.
+const UI_ACTION_HELP = {
+    languageSetupSwitch: ["选择本轮界面和对话语言；开始共创后不能更换。", "Choose the language for this session. It cannot be changed after co-creation starts."],
+    regenerateDraftButton: ["重新准备一张初始地图。新地图准备成功前，当前预览会保留。", "Prepare another starting map. The current preview stays until the new map is ready."],
+    enterSessionButton: ["从眼前这张初始地图开始共创，它会成为 Stage 1。", "Start co-creating with this starting map. It becomes Stage 1."],
+    playButton: ["试玩当前选中的已保存版本，结束后回到这里继续。", "Play the selected saved version, then return here to continue."],
+    saveStageButton: ["把当前修改存成一个新 Stage，之前保存的版本会保留。", "Save your changes as a new Stage. Earlier saved versions are kept."],
+    discardDraftButton: ["撤销尚未保存的地图修改，回到当前选中版本的地图。", "Discard unsaved map changes and return to the selected saved map."],
+    restoreStageButton: ["以这张历史地图创建新 Stage，接着修改；历史版本本身不会被覆盖。", "Create a new Stage from this earlier map and continue editing. The earlier version is kept."],
+    finalizeButton: ["选定当前查看的版本作为最终版本。确认后，本轮编辑和聊天结束，接着填写留言。", "Choose the version you are viewing as the final version. Confirmation ends editing and chat; your message comes next."],
+    confirmFinalizeButton: ["确认最终版本。本轮将不能继续改图或聊天，下一步填写给对方的留言。", "Confirm the final version. Editing and chat will close; next, write your message to the other player."],
+    cancelFinalizeButton: ["先不定稿，回到地图继续看看。", "Leave the final choice open and return to the map."],
+    sendButton: ["发送输入框里的消息。若方案开关已打开，这条消息会申请修改方案。", "Send your message. If proposal mode is on, this message requests a modification plan."],
+    proposalRequestButton: ["切换下一条消息是否申请修改方案。打开开关不会立即发送，也不会直接改图。", "Choose whether your next message requests a plan. Switching this on does not send anything or change the map."],
+    returnCurrentButton: ["回到最新的 Stage，继续当前对话和编辑。", "Return to the latest Stage to continue the current conversation and editing."],
+    returnUnityButton: ["回到原游戏页面，继续接下来的匹配流程。", "Return to the original game page to continue the match."],
+    retryButton: ["重试提示中尚未完成的操作，沿用该操作已保存的内容。", "Retry the unfinished action using its captured content."],
+    chatRetryButton: ["再试一次刚才未完成的消息，保留原来的文字和方案开关设置。", "Retry the unfinished message with the same text and proposal setting."],
+    completeSession: ["保存你写下的留言，完成这一轮共创。", "Save your message and finish this co-creation session."],
+    draftSuggestedRevision: ["生成这份修改建议的地图预览。预览出来后，还需要你明确采用才会创建新 Stage。", "Prepare the proposed map preview. A new Stage is created only after you explicitly accept the pending proposal."],
+    challengeRevision: ["告诉 AI 你对这个方案有不同想法，接下来通过对话说明原因。", "Tell AI you see this plan differently, then explain your concerns in the conversation."],
+    alternativeRevision: ["请 AI 另提一个不同方案。不会直接替换当前地图。", "Ask AI for a different proposal. This does not directly replace the current map."],
+    accept: ["采用待确认的地图方案，并保存为新的 Stage。", "Accept the pending map proposal and save it as a new Stage."],
+    reject: ["不采用这份待确认方案，保留当前地图。", "Reject the pending proposal and keep the current map."],
+    intentMatches: ["反馈这个理解符合你的想法。这是对理解的反馈，不是改图授权。", "Say this interpretation matches your idea. This feedback does not authorize a map edit."],
+    intentReject: ["反馈这个理解不是你的意思，不会因此修改地图。", "Say this interpretation is not what you meant. This does not change the map."],
+    intentAdjust: ["打开文字框，把你的想法说明得更准确。", "Open the text field to explain your idea more precisely."],
+    intentModify: ["修改这条已记录的设计想法，再提交确认。", "Edit this recorded design idea and submit the adjustment."],
+    intentSave: ["提交你调整后的想法。不会因此自动修改地图。", "Submit your adjusted idea. This does not automatically edit the map."],
+    intentCancel: ["关闭这次文字调整，不提交本次修改。", "Close this text adjustment without submitting it."],
+    intentKeepThis: ["选择保留这张卡里的设计想法。不会因此改图。", "Choose to keep the idea on this card. This does not edit the map."],
+    ignoreQuestion: ["把这个问题移到“已处理”，之后不再带入对话；需要时可以手动恢复。", "Move this question to Processed and leave it out of later conversation. You can restore it manually."],
+    restoreQuestion: ["把这个问题恢复到还没聊完的话题中。", "Restore this question to the open questions."],
+    challengeChoice: ["回答上方讨论中的问题。这个选择本身不会创建新 Stage。", "Answer the question in the discussion above. This choice does not itself create a new Stage."],
+};
+const UI_TILE_HELP = {
+    ".": ["可以走动的地面。", "Walkable floor."],
+    "#": ["挡住通路的墙。", "A wall that blocks passage."],
+    "@": ["不能直接走过的水域。", "Water that the player cannot walk through."],
+    p: ["试玩时玩家的起点。", "The player’s starting position during play."],
+    s: ["需要推动到目标上的箱子。B1、B2 用于区分箱子。", "A box to push onto a target. B1 and B2 distinguish the boxes."],
+    t: ["箱子需要到达的目标位置。T1、T2 用于区分目标。", "A target position for a box. T1 and T2 distinguish the targets."],
+    " ": ["地图外围的空白，不是可行走的地面。", "Empty space outside the map, not walkable floor."],
+};
+Object.assign(translations.en, {
+    editorHelpTitle: "Editing help", editorHelpBody: "Hover over a tool or tile to see what it means. Select a tool, then click a map tile to replace it. Save changes to create a new Stage.",
+    progressHelpBody: "Revisit open questions and your confirmed ideas here. Open Processed to revisit earlier questions.",
+});
+Object.assign(translations["zh-CN"], {
+    editorHelpTitle: "编辑说明", editorHelpBody: "悬停在工具或格子上查看说明。先选工具，再点击地图格子进行替换；改好后存档，才会成为新 Stage。",
+    progressHelpBody: "这里收着还没聊完的问题，以及你确认过的点子。展开“已处理”可回看之前的问题。",
+});
+const uiHelpView = { target: null, pendingTarget: null, timer: null, previousDescription: null };
+
+function helpLocale(pair) { return pair?.[state.language === "zh-CN" ? 0 : 1] || ""; }
+
+function markTileHelp(node, tile, x, y, entity, kind) {
+    node.dataset.uiHelpKind = kind;
+    node.dataset.uiHelpTile = tile;
+    node.dataset.uiHelpRow = String(y + 1);
+    node.dataset.uiHelpColumn = String(x + 1);
+    if (entity) node.dataset.uiHelpEntity = entity;
+}
+
+function uiHelpFor(target) {
+    const zh = state.language === "zh-CN";
+    const kind = target.dataset.uiHelpKind;
+    if (kind === "palette" || kind === "map" || kind === "preview") {
+        const tile = target.dataset.uiHelpTile;
+        const title = [target.dataset.uiHelpEntity, t(tileName(tile))].filter(Boolean).join(" · ");
+        const coordinates = kind === "palette" ? "" : zh
+            ? `第 ${target.dataset.uiHelpRow} 行，第 ${target.dataset.uiHelpColumn} 列。`
+            : `Row ${target.dataset.uiHelpRow}, column ${target.dataset.uiHelpColumn}. `;
+        const stagePreview = kind === "preview" && target.closest?.(".stage-card");
+        const instruction = kind === "palette" ? helpLocale(["选中这个工具后，再点击地图放置。改动需要另行保存。", "Select this tool, then click the map to place it. Save your changes separately."])
+            : stagePreview ? helpLocale(["点击缩略图可查看这一版的地图、对话和试玩记录。", "Click the thumbnail to view this version’s map, conversation, and play history."])
+                + (state.dirty ? helpLocale([" 切换会放弃未保存的修改，请先存档。", " Switching discards unsaved changes, so save them first."]) : "")
+            : kind === "preview" ? helpLocale(["这是预览中的格子，只供查看。", "This is a preview tile, for viewing only."])
+            : target.disabled ? helpLocale(["这一格当前不能编辑。", "This tile cannot be edited right now."])
+            : helpLocale([`点击会用当前选中的“${t(tileName(state.selectedTile))}”工具替换这一格。`, `Click to replace this tile with the selected ${t(tileName(state.selectedTile))} tool.`]);
+        return { title, body: coordinates + helpLocale(UI_TILE_HELP[tile]) + " " + instruction,
+            status: target.disabled ? uiHelpBlockedStatus(target, kind) : "" };
+    }
+    if (kind === "stage") return { title: `Stage ${target.dataset.uiHelpStage}`,
+        body: helpLocale(["查看这一版的地图、对话和试玩记录。", "View this version’s map, conversation, and play history."])
+            + (state.dirty ? helpLocale([" 切换会放弃未保存的修改，请先存档。", " Switching discards unsaved changes, so save them first."]) : ""),
+        status: target.disabled ? uiHelpBlockedStatus(target, kind) : "" };
+    if (target.dataset.coordinateLinkIndex != null) return { title: helpLocale(["查看路线", "View route"]),
+        body: helpLocale(["在地图上显示这段文字对应的路线，再点一次收起。", "Show the route described by this text on the map. Click again to hide it."]), status: "" };
+    const key = target.dataset.uiHelpKey || target.id || (target.dataset.i18n === "completeSession" ? "completeSession" : "");
+    const pair = UI_ACTION_HELP[key];
+    if (!pair) return null;
+    const labelKey = ({ saveStageButton: "saveStage", discardDraftButton: "discard", playButton: "playStage", restoreStageButton: "continueFromStage", finalizeButton: "finalizeStage", confirmFinalizeButton: "confirmFinal", cancelFinalizeButton: "cancel", sendButton: "send", proposalRequestButton: "requestProposal", enterSessionButton: "enterSession", regenerateDraftButton: "regenerateDraft", returnUnityButton: "returnUnity", returnCurrentButton: "returnCurrent", retryButton: "retry", chatRetryButton: "retry", languageSetupSwitch: "sessionLanguage" })[key] || key;
+    return { title: translations[state.language]?.[labelKey] || target.textContent.trim(), body: helpLocale(pair),
+        status: target.disabled || target.getAttribute("aria-disabled") === "true" ? uiHelpBlockedStatus(target, key) : "" };
+}
+
+function uiHelpBlockedStatus(target, key) {
+    if (target.dataset.uiHelpStatus) return target.dataset.uiHelpStatus;
+    if (deadlineExpired()) return t("deadlineExpiredAnnouncement");
+    if (state.unityPlayActive) return t("playActiveHint");
+    if (state.busy) return t("busyHint");
+    const hint = ({ playButton: elements.playControlHint, saveStageButton: elements.mapControlHint,
+        sendButton: elements.chatControlHint, finalizeButton: elements.finalizeControlHint })[key];
+    if (hint?.textContent) return hint.textContent;
+    if (key === "saveStageButton" && !state.dirty) return t("noChangesHint");
+    if (key === "discardDraftButton" && !state.dirty) return t("noChangesHint");
+    if (key === "sendButton" && !elements.messageInput.value.trim()) return t("emptyMessageHint");
+    if (key === "proposalRequestButton" && (selectedStageHasActiveDisagreement() || proposalFlowActive())) return t("needsDiscussion");
+    if (state.session?.status && state.session.status !== "active") return t("closedHint");
+    if (["map", "palette"].includes(key) && state.selectedVersionId !== state.session?.currentVersionId) return t("historyHint");
+    return helpLocale(["当前暂不可用。", "Currently unavailable."]);
+}
+
+function uiHelpTarget(node) {
+    if (!node?.closest) return null;
+    return node.closest("[data-ui-help-kind], [data-ui-help-key], button, [data-coordinate-link-index]");
+}
+
+function hideUiHelp() {
+    if (uiHelpView.timer != null) window.clearTimeout(uiHelpView.timer);
+    uiHelpView.timer = null;
+    uiHelpView.pendingTarget = null;
+    const node = uiHelpView.target;
+    if (node) {
+        if (uiHelpView.previousDescription == null) node.removeAttribute("aria-describedby");
+        else node.setAttribute("aria-describedby", uiHelpView.previousDescription);
+    }
+    uiHelpView.target = null;
+    uiHelpView.previousDescription = null;
+    const tooltip = document.getElementById("uiTooltip");
+    if (tooltip) tooltip.hidden = true;
+}
+
+function showUiHelp(target) {
+    if (!target?.isConnected) return;
+    const help = uiHelpFor(target);
+    if (!help) return;
+    hideUiHelp();
+    const tooltip = document.getElementById("uiTooltip");
+    const title = document.getElementById("uiTooltipTitle");
+    const body = document.getElementById("uiTooltipBody");
+    const status = document.getElementById("uiTooltipStatus");
+    title.textContent = help.title;
+    body.textContent = help.body;
+    status.textContent = help.status;
+    status.hidden = !help.status;
+    tooltip.hidden = false;
+    uiHelpView.target = target;
+    uiHelpView.previousDescription = target.getAttribute("aria-describedby");
+    target.setAttribute("aria-describedby", [uiHelpView.previousDescription, "uiTooltip"].filter(Boolean).join(" "));
+    const rect = target.getBoundingClientRect();
+    const box = tooltip.getBoundingClientRect();
+    const left = Math.max(8, Math.min(rect.left + rect.width / 2 - box.width / 2, window.innerWidth - box.width - 8));
+    const above = rect.top >= box.height + 16;
+    const top = above ? rect.top - box.height - 10 : Math.min(rect.bottom + 10, window.innerHeight - box.height - 8);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${Math.max(8, top)}px`;
+    tooltip.dataset.placement = above ? "above" : "below";
+    tooltip.style.setProperty("--help-anchor-x", `${Math.max(14, Math.min(rect.left + rect.width / 2 - left, box.width - 14))}px`);
+}
+
+function queueUiHelp(target, immediate = false) {
+    if (target === uiHelpView.target || target === uiHelpView.pendingTarget) return;
+    hideUiHelp();
+    if (!target || !uiHelpFor(target)) return;
+    uiHelpView.pendingTarget = target;
+    uiHelpView.timer = window.setTimeout(() => showUiHelp(target), immediate ? 0 : 360);
+}
+
+function initializeUiHelp() {
+    document.addEventListener("pointerover", event => {
+        if (event.pointerType !== "touch") queueUiHelp(uiHelpTarget(event.target));
+    });
+    document.addEventListener("pointerout", event => {
+        const target = uiHelpTarget(event.target);
+        if (target && !target.contains(event.relatedTarget)) hideUiHelp();
+    });
+    document.addEventListener("focusin", event => queueUiHelp(uiHelpTarget(event.target), true));
+    document.addEventListener("focusout", hideUiHelp);
+    document.addEventListener("pointerdown", event => {
+        hideUiHelp();
+        document.querySelectorAll(".contextual-help[open]").forEach(details => {
+            if (!details.contains(event.target)) details.open = false;
+        });
+    });
+    document.addEventListener("keydown", event => {
+        if (event.key === "Escape") {
+            hideUiHelp();
+            document.querySelectorAll(".contextual-help[open]").forEach(details => details.open = false);
+        }
+    });
+    window.addEventListener("scroll", hideUiHelp, true);
+    window.addEventListener("resize", hideUiHelp);
+}
+
+
+// Keep peer workspace headers aligned, including translated titles and blocked-play hints.
+function initializeWorkspaceHeaderAlignment() {
+    if (typeof ResizeObserver === "undefined") return;
+    const headers = [document.querySelector(".chat-panel > .panel-header"), document.querySelector(".map-panel > .panel-header")];
+    if (headers.some(header => !header)) return;
+    const synchronize = () => {
+        if (headers.some(header => !header.getClientRects().length)) return;
+        const height = Math.max(72, ...headers.map(header => {
+            const style = getComputedStyle(header);
+            const edges = [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
+                .reduce((sum, value) => sum + (parseFloat(value) || 0), 0);
+            return Math.max(0, ...Array.from(header.children, child => child.getBoundingClientRect().height)) + edges;
+        }));
+        headers.forEach(header => header.style.minHeight = `${height}px`);
+    };
+    const observer = new ResizeObserver(synchronize);
+    headers.forEach(header => Array.from(header.children).forEach(child => observer.observe(child)));
+    synchronize();
+}
+
 const elements = Object.fromEntries([
+    "playControlHint", "proposalModeCaption", "noticeTechnicalDetails", "chatTechnicalDetails", "mapControlHint", "chatControlHint", "finalizeControlHint", "sessionCompleteMessage",
     "workspace", "landing", "formalStandaloneBlock", "notice", "noticeMessage", "retryButton", "prototypeStatus", "deadlineStatus", "deadlineLabel", "deadlineValue", "deadlineAnnouncement",
     "landingEyebrow", "landingTitle", "landingBody", "languageSetupSwitch", "languageLockNotice", "draftActions", "regenerateDraftButton", "enterSessionButton", "draftPreview", "draftPreviewTitle", "draftGenerationLabel", "draftPreviewGrid", "draftPreviewLoading", "draftPreviewLoadingMessage", "draftPreviewStatus", "stageList", "stageCount", "methodPill", "historyBanner",
     "returnCurrentButton", "progressPanel", "progressSummary", "unresolvedQuestionsList", "answeredQuestionsPanel", "answeredQuestionsSummary", "answeredQuestionsList", "designInclinationsList", "chatScroll", "emptyChat", "messageList", "translationStatus", "typingRow", "proposalArea",
@@ -824,6 +1292,8 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", cancelComponentRecoveryTimer);
 
+initializeUiHelp();
+initializeWorkspaceHeaderAlignment();
 applyTranslations();
 initialize();
 
@@ -982,6 +1452,8 @@ function renderStages() {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "stage-card";
+        button.dataset.uiHelpKind = "stage";
+        button.dataset.uiHelpStage = String(version.stageNumber);
         button.disabled = deadlineExpired()
             || state.translationInProgress
             || state.unityPlayActive;
@@ -1612,7 +2084,7 @@ function createDiscussionFocus(text) {
     cue.className = "discussion-focus";
     const label = document.createElement("span");
     label.className = "discussion-focus-label";
-    label.textContent = DISCUSSION_FOCUS_LABEL;
+    label.textContent = GUIDANCE_CUE_LABELS[state.language].question;
     const message = document.createElement("strong");
     message.textContent = text;
     cue.append(label, message);
@@ -1624,7 +2096,7 @@ function createDisagreementCard(disagreement) {
     cue.className = "discussion-focus disagreement-card";
     const label = document.createElement("span");
     label.className = "discussion-focus-label";
-    label.textContent = DISCUSSION_FOCUS_LABEL;
+    label.textContent = GUIDANCE_CUE_LABELS[state.language].question;
     cue.appendChild(label);
 
     const fields = [
@@ -1757,7 +2229,7 @@ function renderAssistantBody(node, body, links, turn) {
         button.setAttribute("tabindex", "0");
         button.setAttribute(
             "aria-label",
-            `Show route from ${formatCoordinatePoint(candidate.link.from)} to ${formatCoordinatePoint(candidate.link.to)}`
+            t("routeAriaLabel").replace("{fromRow}", candidate.link.from.row).replace("{fromColumn}", candidate.link.from.column).replace("{toRow}", candidate.link.to.row).replace("{toColumn}", candidate.link.to.column)
         );
         button.addEventListener("click", () => toggleCoordinateLink(turn, candidate.linkIndex, candidate.link));
         button.addEventListener("keydown", event => {
@@ -2249,7 +2721,7 @@ function prefillProposalConsent(offer) {
     // clicks now go through sendRevisionCardAction so the server receives the
     // explicit execute_revision action and source turn.
     const summary = String(offer.summary || "").trim();
-    elements.messageInput.value = t("proposalConsent").replace("{summary}", summary);
+    elements.messageInput.value = REQUEST_COPY[state.language].proposalConsent.replace("{summary}", summary);
     handleComposerInput();
     elements.chatForm.requestSubmit();
 }
@@ -2267,10 +2739,10 @@ function sendRevisionCardAction(action, turn, offer) {
         return;
     }
     const content = action === "execute_revision"
-        ? t("executeBoundProposal")
+        ? REQUEST_COPY[state.language].executeBoundProposal
         : action === "challenge_revision"
-            ? t("challengeRevision")
-            : t("alternativeRevision");
+            ? REQUEST_COPY[state.language].challengeRevision
+            : REQUEST_COPY[state.language].alternativeRevision;
     state.pendingMessage = {
         content,
         baseVersionId: state.session.currentVersionId,
@@ -2394,7 +2866,7 @@ function renderMap() {
             cell.className = `tile ${tileClass(tile)}`;
             const entityLabel = entityLabels.get(`${x},${y}`);
             cell.textContent = entityLabel || tileLabel(tile);
-            cell.title = formatEntityCoordinate(entityLabel, x, y);
+            markTileHelp(cell, tile, x, y, entityLabel, "map");
             cell.dataset.row = String(y + 1);
             cell.dataset.column = String(x + 1);
             if (entityLabel) cell.dataset.entityId = entityLabel;
@@ -2416,12 +2888,12 @@ function renderMap() {
     elements.validationCard.className = `validation-card${failedValidation ? " invalid" : ""}`;
     elements.validationCard.setAttribute("role", failedValidation ? "alert" : "status");
     elements.validationCard.innerHTML = failedValidation
-        ? `
-        <strong>✗ ${escapeHtml(t("validationFailed"))}</strong>
-        <span>${escapeHtml(localizedErrorMessage(state.validationError))}</span>`
-        : `
-        <strong>✓ ${escapeHtml(t("verified"))}</strong>
-        <span>${validation.solutionSteps} ${escapeHtml(t("steps"))} · ${validation.solutionPushes} ${escapeHtml(t("pushes"))} · ${validation.searchedStates} states</span>`;
+        ? `<strong>✗ ${escapeHtml(t("validationFailed"))}</strong><span>${escapeHtml(localizedErrorMessage(state.validationError))}</span>${technicalDetailsMarkup(state.validationError)}`
+        : `<strong>✓ ${escapeHtml(t(state.dirty ? "previousVerified" : "verified"))}</strong>
+           ${state.dirty ? `<span>${escapeHtml(t("draftUnchecked"))}</span>` : ""}
+           <span>${escapeHtml(t(state.dirty ? "savedSolution" : "solutionSummary").replace("{steps}", validation.solutionSteps).replace("{pushes}", validation.solutionPushes))}</span>
+           <details class="technical-details"><summary>${escapeHtml(technicalDetailsLabel())}</summary><p>${escapeHtml(String(validation.searchedStates))} states</p></details>`;
+
     elements.mapMode.textContent = state.session.status !== "active" ? t("lockedMode") : version.versionId === state.session.currentVersionId ? t("editMode") : t("readOnlyMode");
     if (state.dirty) elements.mapMode.textContent += ` · ${t("unsaved")}`;
     renderAttempts(version);
@@ -2435,9 +2907,12 @@ function renderToolbar() {
         const button = document.createElement("button");
         button.type = "button";
         button.className = `palette-button ${tileClass(tile)}`;
+        button.dataset.uiHelpTile = tile;
+        button.dataset.uiHelpKind = "palette";
         if (state.selectedTile === tile) button.classList.add("selected");
         button.disabled = !canEditSelected() || state.busy;
-        button.innerHTML = `<span>${escapeHtml(tileLabel(tile) || "×")}</span><small>${escapeHtml(t(tileName(tile)))}</small>`;
+        const toolSymbol = ({ ".": "·", "#": "", "@": "~", p: "P", s: "B", t: "T", " ": "×" })[tile];
+        button.innerHTML = `<span aria-hidden="true">${escapeHtml(toolSymbol)}</span><small>${escapeHtml(t(tileName(tile)))}</small>`;
         button.addEventListener("click", () => {
             if (!canEditSelected() || state.busy) return;
             state.selectedTile = tile;
@@ -2471,6 +2946,7 @@ function renderSessionState() {
     // legacy sessions do not carry online-room metadata, but they may still
     // have been opened by Unity and therefore retain a valid opener tab.
     elements.returnUnityButton.hidden = status !== "completed" || state.session.demoMode;
+    elements.sessionCompleteMessage.textContent = t(state.session.demoMode ? "demoCompleteBody" : "sessionCompleteBody");
     elements.historyBanner.hidden = state.selectedVersionId === state.session.currentVersionId;
 }
 
@@ -2634,6 +3110,7 @@ function updateControls() {
         && state.chatBusyVersionId === state.selectedVersionId;
     elements.sendButton.textContent = selectedStageChatBusy ? t("sending") : t("send");
     elements.typingRow.hidden = !selectedStageChatBusy;
+    renderControlHints();
 }
 
 function renderChatRequestStatus() {
@@ -2650,6 +3127,7 @@ function renderChatRequestStatus() {
         : localizedErrorMessage(state.chatError);
     elements.chatRetryButton.hidden = !failed || !state.chatError?.retryable || !state.pendingMessage;
     elements.chatRetryButton.textContent = t("retry");
+    renderTechnicalDetails(elements.chatTechnicalDetails, failed ? state.chatError : null);
 }
 
 function renderTranslationStatus() {
@@ -2664,13 +3142,11 @@ function renderTranslationStatus() {
 
 function chatWaitingMessage() {
     const elapsedSeconds = Math.max(0, Math.floor((Date.now() - state.chatStartedAt) / 1000));
-    if (elapsedSeconds > PROPOSAL_DISPLAY_LIMIT_SECONDS) {
-        return `${t("chatWaitingServerResult")} · ${elapsedSeconds} ${t("seconds")}`;
-    }
-    const phase = elapsedSeconds < LLM_PRIMARY_WAIT_SECONDS
-        ? t("chatWaitingPrimary")
-        : t("chatWaitingProposal");
-    return `${phase} · ${elapsedSeconds} / ${PROPOSAL_DISPLAY_LIMIT_SECONDS} ${t("seconds")}`;
+    const pending = state.pendingMessage;
+    const proposal = pending?.requestProposal === true
+        || ["execute_revision", "alternative_revision"].includes(pending?.action)
+        || proposalFlowActive();
+    return `${t(proposal ? "chatWaitingProposal" : "chatWaitingPrimary")} · ${t("chatElapsed").replace("{seconds}", String(elapsedSeconds))}`;
 }
 
 function startChatTimer() {
@@ -3861,7 +4337,7 @@ function createMiniMap(rows, diff, extraClass = "") {
         const cell = document.createElement("i");
         cell.className = tileClass(tile);
         const entityLabel = entityLabels.get(`${x},${y}`);
-        cell.title = formatEntityCoordinate(entityLabel, x, y);
+        markTileHelp(cell, tile, x, y, entityLabel, "preview");
         if (entityLabel) {
             cell.dataset.entityId = entityLabel;
             cell.setAttribute("role", "img");
@@ -3885,8 +4361,11 @@ function showLanding(mode = "demo") {
     elements.landing.hidden = false;
     const isFormal = mode === "formal";
     elements.landingEyebrow.dataset.i18n = "sessionSetup";
-    elements.landingTitle.dataset.i18n = isFormal ? "formalLandingTitle" : "demoLandingTitle";
-    elements.landingBody.dataset.i18n = isFormal ? "formalLandingBody" : "demoLandingBody";
+    elements.landingTitle.dataset.i18n = state.demoCreationPending ? "draftLoadingTitle"
+        : state.demoCreationFailed ? "draftInitialFailed"
+        : isFormal ? "formalLandingTitle" : "demoLandingTitle";
+    elements.landingBody.dataset.i18n = state.demoCreationPending ? "draftLoadingBody"
+        : isFormal ? "formalLandingBody" : "demoLandingBody";
     elements.languageLockNotice.dataset.i18n = mode === "formal" ? "formalLanguageLock" : "demoLanguageLock";
     elements.draftActions.hidden = false;
     applyTranslations();
@@ -3930,7 +4409,7 @@ function renderDraftPreview() {
             cell.className = `draft-preview-cell ${tileClass(tile)}`;
             const label = entityLabels.get(`${x},${y}`);
             cell.textContent = label || tileLabel(tile);
-            cell.title = formatEntityCoordinate(label, x, y);
+            markTileHelp(cell, tile, x, y, label, "preview");
             elements.draftPreviewGrid.appendChild(cell);
         }));
     }
@@ -4199,9 +4678,100 @@ function recoverMessageFailure(error, session, pending) {
 
 function showError(error, retryAction) {
     showNotice(localizedErrorMessage(error), error.retryable ? retryAction : null);
+    renderTechnicalDetails(elements.noticeTechnicalDetails, error);
 }
 
 function localizedErrorMessage(error) {
+    if (error?.details?.failureStage === "context_binding") return t("contextChanged");
+    if (error?.code === "PENDING_MESSAGE") return t("chatRetryPending");
+    if (error?.code === "PROPOSAL_PRECONDITION_FAILED") {
+        const reason = error.details?.reason;
+        if (reason === "already_satisfied") return t("proposalAlreadySatisfied");
+        if (reason === "unbound") return t("proposalUnbound");
+        if (reason === "already_executed") return t("proposalAlreadyExecuted");
+        return t("proposalPreconditionFailed");
+    }
+    const groups = {
+        replyFailed: ["UPSTREAM_TIMEOUT", "UPSTREAM_CONNECTION_ERROR", "UPSTREAM_SERVER_ERROR", "MODEL_EMPTY_RESPONSE", "MODEL_RESPONSE_INVALID", "MODEL_LOW_QUALITY_RESPONSE", "CLIENT_TIMEOUT", "RETRYABLE_REQUEST_FAILED", "INVALID_RESPONSE", "CHALLENGE_REVIEW_FAILED"],
+        modificationFailed: ["REVISION_EXECUTION_INVALID", "REVISION_EXECUTION_MISMATCH", "SEMANTIC_POSTCONDITION_FAILED", "EXECUTION_REPLAY_MISMATCH", "CANDIDATE_UNSOLVABLE"],
+        checkIncomplete: ["SEARCH_BUDGET_EXCEEDED"],
+        oldProposal: ["INVALID_CARD_SOURCE", "PROPOSAL_STALE"],
+        noProposal: ["PROPOSAL_SEARCH_EXHAUSTED", "DETERMINISTIC_SEARCH_EXHAUSTED", "SEMANTIC_CONSTRAINT_NOT_MET"],
+        requirementsUnclear: ["REQUIREMENT_INTERPRETATION_INVALID", "REQUIREMENT_EVIDENCE_MISSING"],
+        permissionConflict: ["REQUIREMENT_PERMISSION_CONFLICT"],
+        unsolved: ["UNSOLVABLE_LEVEL"],
+        needsDiscussion: ["DISAGREEMENT_ACTIVE"],
+        noAlternative: ["CANDIDATE_DUPLICATED"],
+    };
+    for (const [key, codes] of Object.entries(groups)) {
+        if (codes.includes(error?.code)) return t(key);
+    }
+    const special = {
+        IDEMPOTENCY_CONFLICT: ["这次操作没有完成，请重新发起。", "This action could not be completed. Start it again."],
+        INVALID_PLAY_TICKET: ["这次试玩链接不能使用，请回到工作台重新点试玩。", "This play link is unavailable. Return to the workspace and select Play again."],
+        PLAY_TICKET_USED: ["这次试玩链接已用过，请回到工作台重新点试玩。", "This play link has been used. Return to the workspace and select Play again."],
+        PLAY_TICKET_EXPIRED: ["这次试玩链接已过期，请回到工作台重新点试玩。", "This play link has expired. Return to the workspace and select Play again."],
+        CONFIGURATION_ERROR: ["回复服务暂时不可用，请稍后再试。", "Replies are temporarily unavailable. Please try again later."],
+    };
+    if (special[error?.code]) return special[error.code][state.language === "zh-CN" ? 0 : 1];
+    const message = state.language === "zh-CN"
+        ? chineseApiErrors[error?.code] : translations.en[`error_${error?.code}`];
+    const details = formatValidationDetails(error);
+    return [message || t("errorGeneric"), details].filter(Boolean).join(" ");
+}
+
+function technicalDetailsLabel() { return state.language === "zh-CN" ? "技术详情" : "Technical details"; }
+
+function technicalDetailsMarkup(error) {
+    if (!error) return "";
+    const code = /^[A-Z0-9_]{1,100}$/.test(error.code || "") ? error.code : "";
+    return `<details class="technical-details"><summary>${escapeHtml(technicalDetailsLabel())}</summary><p>${escapeHtml(code)} ${escapeHtml(technicalErrorMessage(error))}</p></details>`;
+}
+
+function renderTechnicalDetails(target, error) {
+    if (!target) return;
+    target.hidden = !error;
+    if (!error) { target.innerHTML = ""; target.open = false; return; }
+    const code = /^[A-Z0-9_]{1,100}$/.test(error.code || "") ? error.code : "";
+    target.innerHTML = `<summary>${escapeHtml(technicalDetailsLabel())}</summary><p>${escapeHtml(code)} ${escapeHtml(technicalErrorMessage(error))}</p>`;
+}
+
+function renderControlHints() {
+    const session = state.session;
+    if (!session) return;
+    const common = deadlineExpired() ? "deadlineExpiredAnnouncement"
+        : session.status !== "active" ? "closedHint"
+        : state.unityPlayActive ? "playActiveHint"
+        : state.busy ? "busyHint" : "";
+    const historical = state.selectedVersionId !== session.currentVersionId;
+    const pending = Boolean(currentPendingProposal());
+    const generationPending = state.chatStatus === "waiting"
+        || state.assessmentRetryTimers.size > 0 || state.assessing.size > 0;
+    const flow = session.proposalFlowState?.status;
+    const save = elements.saveStageButton.disabled
+        ? common || (historical ? "historyHint" : "") : "";
+    const play = elements.playButton.disabled
+        ? (state.busy || state.unityPlayActive || deadlineExpired() ? common : "")
+            || (state.dirty ? "dirtyPlayHint" : pending ? "pendingHint" : !selectedVersion() ? "noVersionHint" : "") : "";
+    const chat = elements.messageInput.disabled || elements.sendButton.disabled
+        ? common || (historical ? "historyHint" : selectedStageHasPendingIntentConflict() ? "conflictHint"
+            : flow === "planning" ? "proposalPlanningPlaceholder"
+            : flow === "retry_pending" && state.pendingMessage ? "retryHint"
+            : "") : "";
+    const final = elements.finalizeButton.disabled
+        ? (state.busy || state.unityPlayActive ? common : "")
+            || (generationPending ? "openingHint" : !selectedVersion() ? "noVersionHint"
+                : !historical && state.dirty ? "finalDirtyHint" : !historical && pending ? "pendingHint" : "") : "";
+    const display = (node, value) => { if (node) { node.textContent = value; node.hidden = !value; } };
+    display(elements.mapControlHint, save ? t(save) : "");
+    display(elements.playControlHint, play ? t(play) : "");
+    display(elements.chatControlHint, chat ? t(chat) : "");
+    display(elements.finalizeControlHint, final ? t(final) : "");
+    display(elements.proposalModeCaption, t(proposalFlowActive() ? "proposalTopicActive"
+        : state.proposalMode ? "proposalModeOn" : "proposalModeOff"));
+}
+
+function technicalErrorMessage(error) {
     if (error?.details?.failureStage === "context_binding") {
         return state.language === "zh-CN"
             ? "对话或交互状态已经更新，请根据当前对话重新发送请求。地图未因这次请求改变。"
@@ -4217,16 +4787,14 @@ function localizedErrorMessage(error) {
     }
     if (error?.code === "PROPOSAL_STALE") return t("proposalStale");
     const localized = state.language === "zh-CN"
-        ? chineseApiErrors[error?.code]
-        : translations.en[`error_${error?.code}`];
+        ? ORIGINAL_ERROR_COPY["zh-CN"][error?.code]
+        : ORIGINAL_ERROR_COPY.en[`error_${error?.code}`];
     const componentMessage = error?.details?.failureStage === "clarification_review"
         ? (state.language === "zh-CN"
             ? "方案澄清的复核未完成，可使用原消息安全重试。"
             : "The proposal clarification review could not be verified. Retry the original message safely.")
         : null;
-    const message = componentMessage || localized
-        || (state.language === "zh-CN" ? t("errorGeneric") : error?.message)
-        || t("errorGeneric");
+    const message = componentMessage || localized || t("errorGeneric");
     const attemptsUsed = Number(error?.details?.attemptsUsed);
     const maximumAttempts = Number(error?.details?.maximumAttempts);
     const attemptSuffix = Number.isInteger(attemptsUsed) && Number.isInteger(maximumAttempts)
@@ -4306,6 +4874,7 @@ function formatValidationDetails(error) {
 
 function showNotice(message, retryAction = null) {
     state.retryAction = retryAction;
+    renderTechnicalDetails(elements.noticeTechnicalDetails, null);
     elements.noticeMessage.textContent = message;
     elements.retryButton.hidden = !retryAction;
     elements.notice.classList.add("visible");
@@ -4318,6 +4887,7 @@ function showPlayReturnNotice(status) {
 
 function hideNotice() {
     state.retryAction = null;
+    renderTechnicalDetails(elements.noticeTechnicalDetails, null);
     elements.notice.classList.remove("visible");
     elements.retryButton.hidden = true;
 }
@@ -4328,6 +4898,7 @@ function setStatus(label, status) {
 }
 
 function applyTranslations() {
+    hideUiHelp();
     document.documentElement.lang = state.language;
     document.querySelectorAll("[data-i18n]").forEach(element => element.textContent = t(element.dataset.i18n));
     document.querySelectorAll("[data-i18n-placeholder]").forEach(element => element.placeholder = t(element.dataset.i18nPlaceholder));
@@ -4516,7 +5087,10 @@ function makeButton(label, className, handler, options = {}) {
         button.disabled = true;
         button.setAttribute("aria-disabled", "true");
     }
-    if (options.title) button.title = options.title;
+    const helpKey = Object.keys(UI_ACTION_HELP).find(key => translations[state.language]?.[key] === label);
+    if (helpKey) button.dataset.uiHelpKey = helpKey;
+    if (className.includes("challenge-choice-button")) button.dataset.uiHelpKey = "challengeChoice";
+    if (options.title) button.dataset.uiHelpStatus = options.title;
     if (handler && !options.disabled) button.addEventListener("click", handler);
     return button;
 }

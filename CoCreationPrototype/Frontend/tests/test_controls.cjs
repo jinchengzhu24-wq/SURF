@@ -442,7 +442,7 @@ test("unreadable response recovers only the matching current request diagnostic"
 test("classification diagnostics show actual attempts without claiming three body attempts", () => {
     const { context } = loadApp();
     for (const language of ["en", "zh-CN"]) {
-        const message = vm.runInContext(`state.language = '${language}'; localizedErrorMessage({
+        const message = vm.runInContext(`state.language = '${language}'; technicalErrorMessage({
             code: 'MODEL_RESPONSE_INVALID', details: { task: 'turn_understanding', attemptsUsed: 2, maximumAttempts: 2 }
         })`, context);
         assert.match(message, /2\/2/);
@@ -453,7 +453,7 @@ test("classification diagnostics show actual attempts without claiming three bod
 test("review diagnostics separate component repair from generation and do not invent missing counts", () => {
     const { context } = loadApp();
     for (const language of ["en", "zh-CN"]) {
-        const message = vm.runInContext(`state.language = '${language}'; localizedErrorMessage({
+        const message = vm.runInContext(`state.language = '${language}'; technicalErrorMessage({
             code: 'MODEL_RESPONSE_INVALID', details: { failureStage: 'clarification_review',
                 attemptsUsed: 1, maximumAttempts: 2, repairAttemptsUsed: 1, maximumRepairAttempts: 1 }
         })`, context);
@@ -461,9 +461,9 @@ test("review diagnostics separate component repair from generation and do not in
         assert.match(message, /1\/1/);
         assert.match(message, language === "en" ? /clarification review/ : /澄清的复核/);
         assert.doesNotMatch(message, /2\/3/);
-        const unknown = vm.runInContext("localizedErrorMessage({ code: 'MODEL_RESPONSE_INVALID', details: { attemptsUsed: 2 } })", context);
+        const unknown = vm.runInContext("technicalErrorMessage({ code: 'MODEL_RESPONSE_INVALID', details: { attemptsUsed: 2 } })", context);
         assert.doesNotMatch(unknown, /\(\d+\/\d+\)/);
-        const invalid = vm.runInContext("localizedErrorMessage({ code: 'MODEL_RESPONSE_INVALID', details: { attemptsUsed: 3, maximumAttempts: 2 } })", context);
+        const invalid = vm.runInContext("technicalErrorMessage({ code: 'MODEL_RESPONSE_INVALID', details: { attemptsUsed: 3, maximumAttempts: 2 } })", context);
         assert.doesNotMatch(invalid, /3\/2/);
     }
 });
@@ -557,4 +557,159 @@ test("message diagnostics retain HTTP identities and distinguish unreadable succ
     assert.equal(vm.runInContext("replyDiagnostics.at(-1).code", context), "INVALID_RESPONSE");
     assert.equal(vm.runInContext("replyDiagnostics.at(-1).requestId", context), "http-1");
     assert.equal(vm.runInContext("JSON.stringify(replyDiagnostics).includes('private')", context), false);
+});
+
+test("friendly buttons preserve the original request wording in both languages", () => {
+    const { context } = loadApp();
+    const expected = {
+        en: ['Execute the bound proposal.', 'Challenge this plan', 'Regenerate proposal'],
+        'zh-CN': ['执行已绑定的方案。', '质疑这个方案', '重新生成方案'],
+    };
+    vm.runInContext(`
+        canEditSelected = isLatestRevisionOfferTurn = () => true;
+        state.session.turns = [];
+    `, context);
+    for (const language of ['en', 'zh-CN']) {
+        for (const [index, action] of ['execute_revision', 'challenge_revision', 'alternative_revision'].entries()) {
+            context.language = language;
+            context.action = action;
+            vm.runInContext(`state.language = language;
+                sendRevisionCardAction(action, { turnId: 'original-card' }, {});`, context);
+            const pending = vm.runInContext('state.pendingMessage', context);
+            assert.equal(pending.content, expected[language][index]);
+            assert.equal(pending.action, action);
+            assert.equal(pending.sourceTurnId, 'original-card');
+            assert.equal(pending.baseVersionId, 'v1');
+            assert.match(pending.idempotencyKey, /^card-/);
+        }
+        const legacy = vm.runInContext(`state.language = language;
+            elements.chatForm.requestSubmit = () => {};
+            handleComposerInput = () => {};
+            prefillProposalConsent({ summary: 'KEEP THIS WORDING' });
+            elements.messageInput.value`, context);
+        assert.equal(legacy, language === 'en'
+            ? 'Please create a reviewable map proposal for this direction: KEEP THIS WORDING'
+            : '请根据这个方向生成一份可供审查的地图提案：KEEP THIS WORDING');
+    }
+});
+
+test("main errors stay readable while safe diagnostics retain attempt counts", () => {
+    const { context } = loadApp();
+    vm.runInContext("escapeHtml = value => String(value)", context);
+    for (const language of ['en', 'zh-CN']) {
+        context.language = language;
+        const result = vm.runInContext(`state.language = language;
+            var failure = { code: 'MODEL_RESPONSE_INVALID', retryable: true,
+                message: 'do not expose raw output or credentials',
+                details: { attemptsUsed: 2, maximumAttempts: 2, rawOutput: 'SECRET' } };
+            [localizedErrorMessage(failure), technicalDetailsMarkup(failure)]`, context);
+        assert.doesNotMatch(result[0], /Kimi|LLM|2\/2|SECRET|credentials/);
+        assert.match(result[1], /<details/);
+        assert.doesNotMatch(result[1], /\bopen\b|SECRET|credentials/);
+        assert.match(result[1], /MODEL_RESPONSE_INVALID/);
+        assert.match(result[1], /2\/2/);
+    }
+});
+
+test("waiting text follows known request type instead of elapsed-time guesses", () => {
+    const { context } = loadApp();
+    vm.runInContext(`state.session.turns = []; state.chatStartedAt = Date.now() - 95000;
+        state.pendingMessage = { content: 'ordinary question', requestProposal: false };`, context);
+    const ordinary = vm.runInContext('chatWaitingMessage()', context);
+    assert.doesNotMatch(ordinary, /方案|120|模型|服务器/);
+    vm.runInContext('state.pendingMessage.requestProposal = true', context);
+    assert.match(vm.runInContext('chatWaitingMessage()', context), /修改方案/);
+});
+
+test("completion copy follows session type without changing actions", () => {
+    const { context } = loadApp();
+    for (const demoMode of [true, false]) {
+        context.demoMode = demoMode;
+        const result = vm.runInContext(`state.session.status = 'completed'; state.session.demoMode = demoMode;
+            renderSessionState(); [elements.sessionCompleteMessage.textContent, elements.returnUnityButton.hidden]`, context);
+        assert.equal(result[1], demoMode);
+        if (demoMode) assert.doesNotMatch(result[0], /Unity|Challenge|游戏页面/);
+        else assert.match(result[0], /原游戏页面/);
+    }
+});
+
+test("UI label updates do not rewrite stored turns", () => {
+    const { context } = loadApp();
+    const result = vm.runInContext(`
+        const savedTurns = JSON.stringify(state.session.turns);
+        for (const language of ['en', 'zh-CN']) {
+            state.language = language; createGuidanceCue('revision', 'UNCHANGED BODY', 'UNCHANGED DETAIL');
+        }
+        JSON.stringify(state.session.turns) === savedTurns`, context);
+    assert.equal(result, true);
+});
+
+test("idle guidance stays quiet and blocked play explains itself beside the Play button", () => {
+    const { context } = loadApp();
+    vm.runInContext('state.session.turns = []; updateControls()', context);
+    assert.equal(vm.runInContext('elements.mapControlHint.hidden', context), true);
+    assert.equal(vm.runInContext('elements.chatControlHint.hidden', context), true);
+    assert.equal(vm.runInContext('elements.playControlHint.hidden', context), true);
+    vm.runInContext('state.dirty = true; updateControls()', context);
+    assert.equal(vm.runInContext('elements.playButton.disabled', context), true);
+    assert.match(vm.runInContext('elements.playControlHint.textContent', context), /保存或撤销/);
+    assert.equal(vm.runInContext('elements.mapControlHint.hidden', context), true);
+    vm.runInContext("state.selectedVersionId = 'history'; updateControls()", context);
+    assert.match(vm.runInContext('elements.chatControlHint.textContent', context), /当前 Stage/);
+});
+
+test("proposal mode captions explain the next message without submitting or changing a turn", () => {
+    const { context } = loadApp();
+    const result = vm.runInContext(`
+        state.session.turns = [];
+        const beforeCaptionTurns = JSON.stringify(state.session.turns);
+        toggleProposalMode();
+        [state.proposalMode, elements.proposalModeCaption.textContent,
+            state.pendingMessage, JSON.stringify(state.session.turns) === beforeCaptionTurns]`, context);
+    assert.equal(result[0], true);
+    assert.match(result[1], /下一条/);
+    assert.equal(result[2], null);
+    assert.equal(result[3], true);
+});
+
+test("tile and tool help describe the displayed tile without modifying map or request state", () => {
+    const { context } = loadApp();
+    const result = vm.runInContext(`
+        const helpTile = document.createElement('button');
+        state.session.turns = []; state.draftRows = ['KEEP MAP']; state.selectedTile = '#';
+        const beforeHover = JSON.stringify([state.draftRows, state.session.turns, state.pendingMessage]);
+        markTileHelp(helpTile, 's', 3, 2, 'B1', 'map');
+        const zhTile = uiHelpFor(helpTile);
+        helpTile.dataset.uiHelpKind = 'preview';
+        const previewTile = uiHelpFor(helpTile);
+        helpTile.dataset.uiHelpKind = 'palette';
+        const tool = uiHelpFor(helpTile);
+        state.language = 'en';
+        const enTool = uiHelpFor(helpTile);
+        [zhTile, previewTile, tool, enTool,
+            JSON.stringify([state.draftRows, state.session.turns, state.pendingMessage]) === beforeHover]`, context);
+    assert.match(result[0].title, /B1/);
+    assert.match(result[0].body, /第 3 行，第 4 列/);
+    assert.match(result[0].body, /墙/);
+    assert.match(result[1].body, /只供查看/);
+    assert.doesNotMatch(result[2].body, /第 3 行/);
+    assert.match(result[2].body, /选中这个工具/);
+    assert.match(result[3].body, /Select this tool/);
+    assert.equal(result[4], true);
+});
+
+test("hover help on disabled actions retains the existing reason and button state", () => {
+    const { context } = loadApp();
+    const result = vm.runInContext(`
+        state.session.turns = []; updateControls();
+        const saveHover = document.createElement('button'); saveHover.id = 'saveStageButton'; saveHover.disabled = true;
+        const saveExplanation = uiHelpFor(saveHover);
+        state.dirty = true; updateControls();
+        const playHover = document.createElement('button'); playHover.id = 'playButton'; playHover.disabled = true;
+        const playExplanation = uiHelpFor(playHover);
+        [saveExplanation, playExplanation, elements.playButton.disabled, state.pendingMessage]`, context);
+    assert.match(result[0].status, /没有新改动/);
+    assert.match(result[1].status, /保存或撤销/);
+    assert.equal(result[2], true);
+    assert.equal(result[3], null);
 });

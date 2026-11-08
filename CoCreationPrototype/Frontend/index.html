@@ -3,10 +3,10 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="A persistent Sokoban and LLM co-creation workspace.">
+    <meta name="description" content="Share ideas, edit your Sokoban map, and give it a play with AI.">
     <title>Sokoban Co-Creation Lab</title>
     <link rel="icon" type="image/png" href="./favicon.png?v=fox-df2f6509133d">
-    <link rel="stylesheet" href="./styles.css?v=challenge-flow-20260927-2">
+    <link rel="stylesheet" href="./styles.css?v=aligned-workspace-type-20261108-v6">
 </head>
 <body>
     <div class="app">
@@ -15,7 +15,7 @@
                 <div class="brand-mark" aria-hidden="true">S</div>
                 <div>
                     <h1 data-i18n="title">Sokoban Co-Creation Lab</h1>
-                    <p class="subtitle" data-i18n="subtitle">Persistent level design workspace</p>
+                    <p class="subtitle" data-i18n="subtitle">Share ideas. Make changes. Give them a play.</p>
                 </div>
             </div>
             <div class="topbar-actions">
@@ -34,6 +34,7 @@
         <main>
             <div class="notice" id="notice" role="alert" aria-live="assertive">
                 <span id="noticeMessage"></span>
+                <details class="technical-details" id="noticeTechnicalDetails" hidden></details>
                 <button class="notice-retry" id="retryButton" type="button" hidden data-i18n="retry">Retry</button>
             </div>
 
@@ -62,7 +63,7 @@
                 </div>
                 <div class="draft-actions" id="draftActions" hidden>
                     <button class="secondary-button" id="regenerateDraftButton" type="button" data-i18n="regenerateDraft">Regenerate</button>
-                    <button class="primary-button" id="enterSessionButton" type="button" data-i18n="enterSession">Enter co-creation flow</button>
+                    <button class="primary-button" id="enterSessionButton" type="button" data-i18n="enterSession">Let’s get started</button>
                 </div>
                 <section class="draft-preview" id="draftPreview" hidden aria-labelledby="draftPreviewTitle">
                     <div class="draft-preview-heading">
@@ -82,12 +83,16 @@
                 </section>
             </section>
 
-            <section class="workspace" id="workspace" hidden aria-label="Co-creation workspace">
+            <section class="workspace" id="workspace" hidden aria-label="Co-creation workspace" data-i18n-aria-label="workspaceAriaLabel">
                 <aside class="panel stage-panel" aria-labelledby="stageTitle">
                     <header class="panel-header compact">
                         <div>
                             <p class="eyebrow" data-i18n="versionHistory">Version history</p>
                             <h2 id="stageTitle" data-i18n="stages">Stages</h2>
+                            <details class="contextual-help version-help">
+                                <summary data-i18n="versionHelp">About Stages</summary>
+                                <p id="versionHelpText" data-i18n="versionHint"></p>
+                            </details>
                         </div>
                         <span class="count-pill" id="stageCount">0</span>
                     </header>
@@ -98,7 +103,7 @@
                     <header class="panel-header">
                         <div>
                             <p class="eyebrow" data-i18n="conversation">Co-creation conversation</p>
-                            <h2 id="chatTitle" data-i18n="discuss">Discuss and refine this Stage</h2>
+                            <h2 id="chatTitle" data-i18n="discuss">What do you think of this version?</h2>
                         </div>
                         <span class="method-pill" id="methodPill"></span>
                     </header>
@@ -111,8 +116,9 @@
                     <details class="progress-panel" id="progressPanel">
                         <summary id="progressSummary" aria-controls="progressPanelBody" aria-expanded="false"><span data-i18n="progressTitle">Co-creation progress</span></summary>
                         <div class="progress-panel-body" id="progressPanelBody">
+                            <p class="progress-introduction" data-i18n="progressHelpBody"></p>
                             <section class="progress-section progress-section-questions" aria-labelledby="progressQuestionsTitle">
-                                <h3 id="progressQuestionsTitle" data-i18n="unresolvedQuestions">Unresolved questions</h3>
+                                <h3 id="progressQuestionsTitle" data-i18n="unresolvedQuestions">Questions still open</h3>
                                 <div class="progress-items" id="unresolvedQuestionsList" aria-live="polite"></div>
                                 <details class="answered-questions" id="answeredQuestionsPanel">
                                     <summary id="answeredQuestionsSummary" aria-controls="answeredQuestionsList" aria-expanded="false" data-i18n="answeredQuestions">Processed</summary>
@@ -120,16 +126,16 @@
                                 </details>
                             </section>
                             <section class="progress-section progress-section-inclinations" aria-labelledby="designInclinationsTitle">
-                                <h3 id="designInclinationsTitle" data-i18n="designInclinations">Design inclinations</h3>
+                                <h3 id="designInclinationsTitle" data-i18n="designInclinations">Your confirmed ideas</h3>
                                 <div class="progress-items" id="designInclinationsList" aria-live="polite"></div>
                             </section>
                         </div>
                     </details>
 
-                    <div class="chat-scroll" id="chatScroll" role="log" tabindex="0" aria-label="Conversation history">
+                    <div class="chat-scroll" id="chatScroll" role="log" tabindex="0" aria-label="Conversation history" data-i18n-aria-label="chatAriaLabel">
                         <div class="empty-chat" id="emptyChat">
                             <div class="empty-mark" aria-hidden="true">AI</div>
-                            <h3 data-i18n="assessmentPending">Preparing the first Stage opening</h3>
+                            <h3 data-i18n="assessmentPending">AI is taking a look at the map…</h3>
                             <p data-i18n="assessmentPendingBody">The assistant will discuss what stands out in the verified current map.</p>
                         </div>
                         <div class="message-list" id="messageList" aria-live="polite"></div>
@@ -144,23 +150,36 @@
 
                     <div class="chat-request-status" id="chatRequestStatus" role="status" aria-live="polite" hidden>
                         <span id="chatRequestMessage"></span>
+                        <details class="technical-details" id="chatTechnicalDetails" hidden></details>
                         <button class="chat-retry-button" id="chatRetryButton" type="button" data-i18n="retry">Retry</button>
                     </div>
 
+                    <div class="composer-dock">
                     <form class="composer" id="chatForm">
                         <label class="sr-only" for="messageInput" data-i18n="messageLabel">Message the level design assistant</label>
-                        <textarea id="messageInput" rows="2" maxlength="2000" data-i18n-placeholder="messagePlaceholder" placeholder="Explain what you want to change or ask about the level..."></textarea>
+                        <textarea id="messageInput" aria-describedby="chatControlHint" rows="2" maxlength="2000" data-i18n-placeholder="messagePlaceholder" placeholder="Got an idea? Tell us what you’d like to discuss or change."></textarea>
                         <div class="composer-actions">
-                            <button class="secondary-button proposal-mode-toggle" id="proposalRequestButton" type="button" aria-pressed="false" data-i18n-title="requestProposalHint" data-i18n-aria-label="requestProposalHint">
+                            <div class="proposal-control">
+                            <button class="secondary-button proposal-mode-toggle" id="proposalRequestButton" type="button" aria-pressed="false" aria-describedby="proposalModeCaption proposalModeHelp" data-i18n-aria-label="requestProposalHint">
                                 <span class="proposal-toggle-label" data-i18n="requestProposal">Proposal</span>
                                 <span class="proposal-toggle-track" aria-hidden="true"><span class="proposal-toggle-thumb"></span></span>
                             </button>
+                                <div class="proposal-caption-row">
+                                    <span id="proposalModeCaption" class="proposal-mode-caption"></span>
+                                    <details class="contextual-help proposal-help">
+                                        <summary data-i18n="proposalHelp">How it works</summary>
+                                        <p id="proposalModeHelp" data-i18n="requestProposalHint"></p>
+                                    </details>
+                                </div>
+                            </div>
                             <button class="primary-button" id="sendButton" type="submit" data-i18n="send">Send</button>
                         </div>
                     </form>
+                    <p class="interface-hint control-hint" id="chatControlHint" role="status" hidden></p>
                     <div class="composer-meta">
                         <span data-i18n="sendHint">Enter to send · Shift+Enter for a new line</span>
                         <span id="characterCount">0 / 2000</span>
+                    </div>
                     </div>
                 </section>
 
@@ -170,12 +189,16 @@
                             <p class="eyebrow" id="selectedStageEyebrow">STAGE</p>
                             <h2 id="mapTitle" data-i18n="currentLevel">Current level</h2>
                         </div>
-                        <button class="play-button" id="playButton" type="button">
+                        <div class="play-control">
+                        <button class="play-button" id="playButton" type="button" aria-describedby="playControlHint">
                             <span class="play-icon">▶</span>
-                            <span data-i18n="playStage">Play this Stage</span>
+                            <span data-i18n="playStage">Play this version</span>
                         </button>
+                        <p class="control-hint" id="playControlHint" role="status" hidden></p>
+                        </div>
                     </header>
                     <div class="map-content">
+                        <section class="map-preview-section" aria-labelledby="mapTitle">
                         <div class="map-frame" id="mapFrame">
                             <div class="map-board" id="mapBoard">
                                 <div class="map-grid" id="mapGrid" aria-label="Sokoban map"></div>
@@ -183,38 +206,55 @@
                             </div>
                         </div>
                         <p class="map-entity-legend" data-i18n="entityLegend">P: Player · B1/B2: Boxes · T1/T2: Targets · ~: Water</p>
-                        <div class="map-toolbar" id="mapToolbar" aria-label="Tile palette"></div>
-                        <div class="map-mode" id="mapMode"></div>
                         <div class="validation-card" id="validationCard"></div>
-                        <div class="map-actions">
-                            <button class="primary-button" id="saveStageButton" type="button" data-i18n="saveStage">Save as new Stage</button>
-                            <button class="secondary-button" id="discardDraftButton" type="button" data-i18n="discard">Discard draft</button>
-                            <button class="secondary-button" id="restoreStageButton" type="button" data-i18n="continueFromStage" hidden>Continue from this Stage</button>
-                        </div>
-
-                        <section class="play-evidence" aria-labelledby="playEvidenceTitle">
-                            <div class="section-heading">
-                                <h3 id="playEvidenceTitle" data-i18n="playEvidence">Play evidence</h3>
-                                <span id="playAttemptCount">0</span>
+                        </section>
+                        <section class="editor-section" aria-labelledby="editorSectionTitle">
+                            <div class="editor-section-heading">
+                                <h3 id="editorSectionTitle"><svg class="map-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6Z M13 6l5 5"/></svg><span data-i18n="editorTitle">Make it your own</span></h3>
+                                <details class="contextual-help editor-help">
+                                    <summary data-i18n="editorHelpTitle">Editing help</summary>
+                                    <p data-i18n="editorHelpBody"></p>
+                                </details>
                             </div>
-                            <div id="playAttemptList" class="attempt-list"></div>
+                            <div class="map-mode" id="mapMode"></div>
+                            <div class="map-toolbar" id="mapToolbar" aria-label="Tile palette"></div>
+                            <div class="map-save-block">
+                                <div class="map-actions">
+                                    <button class="primary-button" id="saveStageButton" type="button" aria-describedby="saveStageHint mapControlHint"><svg class="map-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h12l4 4v14H3V3Z M7 3v7h10V3 M7 21v-8h10v8"/></svg><span data-i18n="saveStage">Save this version</span></button>
+                                    <button class="secondary-button" id="discardDraftButton" type="button" data-i18n="discard">Discard unsaved changes</button>
+                                    <button class="secondary-button" id="restoreStageButton" type="button" data-i18n="continueFromStage" hidden>Continue from this version</button>
+                                </div>
+                                <p class="interface-hint save-explanation" id="saveStageHint" data-i18n="saveHint"></p>
+                                <p class="control-hint" id="mapControlHint" role="status" hidden></p>
+                            </div>
                         </section>
 
+                        <details class="play-evidence" aria-labelledby="playEvidenceTitle">
+                            <summary class="section-heading">
+                                <svg class="map-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2 7 M3 5v6h6 M12 7v5l3 2"/></svg>
+                                <span id="playEvidenceTitle" data-i18n="playEvidence">Play history</span>
+                                <span class="attempt-count" id="playAttemptCount">0</span>
+                            </summary>
+                            <div id="playAttemptList" class="attempt-list"></div>
+                        </details>
+
                         <div class="final-actions" id="finalActions">
-                            <button class="finalize-button" id="finalizeButton" type="button" data-i18n="finalizeStage">Confirm final Stage</button>
-                            <p data-i18n="finalizeHint">Confirmation freezes editing. Your design intention is collected next.</p>
+                            <h3><svg class="map-section-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4c5-4 9 4 14 0v11c-5 4-9-4-14 0"/></svg><span data-i18n="finishTitle">Ready to wrap up?</span></h3>
+                            <p data-i18n="finalizeHint">After confirming, you cannot edit or continue chatting in this session. Next, leave a message for the other player.</p>
+                            <button class="finalize-button" id="finalizeButton" type="button" aria-describedby="finalizeControlHint" data-i18n="finalizeStage">Choose this version</button>
+                            <p class="control-hint" id="finalizeControlHint" role="status" hidden></p>
                         </div>
 
                         <form class="intention-form" id="intentionForm" hidden>
-                            <p class="eyebrow" data-i18n="intentionTitle">Designer intention</p>
+                            <p class="eyebrow" data-i18n="intentionTitle">Leave a message for the other player</p>
                             <h3 data-i18n="intentionQuestion">What would you like to say to the other player?</h3>
                             <textarea id="intentionInput" rows="4" maxlength="4000" required></textarea>
-                            <button class="primary-button" type="submit" data-i18n="completeSession">Complete session</button>
+                            <button class="primary-button" type="submit" data-i18n="completeSession">Save message and finish</button>
                         </form>
 
                         <div class="complete-card" id="completeCard" hidden>
-                            <strong data-i18n="sessionComplete">Session complete</strong>
-                            <p data-i18n="sessionCompleteBody">The final Stage, intention, conversation and play evidence are safely recorded.</p>
+                            <strong data-i18n="sessionComplete">That’s a wrap!</strong>
+                            <p id="sessionCompleteMessage" data-i18n="sessionCompleteBody">Your map and message are saved.</p>
                             <button class="primary-button" id="returnUnityButton" type="button" data-i18n="returnUnity">Continue in Unity</button>
                         </div>
                     </div>
@@ -226,15 +266,21 @@
     <div class="modal-backdrop" id="finalizeModal" hidden>
         <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="finalizeModalTitle">
             <p class="eyebrow" data-i18n="finalConfirmation">Final confirmation</p>
-            <h2 id="finalizeModalTitle" data-i18n="confirmQuestion">Confirm this as your final Stage?</h2>
-            <p data-i18n="confirmBody">Editing and chat will be locked after confirmation. You will then report your design intention.</p>
+            <h2 id="finalizeModalTitle" data-i18n="confirmQuestion">Is this your final pick?</h2>
+            <p data-i18n="confirmBody">After confirming, you cannot edit or continue chatting in this session. Next, leave a message for the other player.</p>
             <div class="modal-actions">
                 <button class="secondary-button" id="cancelFinalizeButton" type="button" data-i18n="cancel">Cancel</button>
-                <button class="finalize-button" id="confirmFinalizeButton" type="button" data-i18n="confirmFinal">Confirm final Stage</button>
+                <button class="finalize-button" id="confirmFinalizeButton" type="button" data-i18n="confirmFinal">Choose this version</button>
             </div>
         </section>
     </div>
 
-    <script src="./app.js?v=proposal-directions-20261016-v1"></script>
+    <div class="ui-tooltip" id="uiTooltip" role="tooltip" hidden>
+        <strong id="uiTooltipTitle"></strong>
+        <p id="uiTooltipBody"></p>
+        <p class="ui-tooltip-status" id="uiTooltipStatus" hidden></p>
+    </div>
+
+    <script src="./app.js?v=aligned-workspace-type-20261108-v6"></script>
 </body>
 </html>
