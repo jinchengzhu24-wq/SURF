@@ -1483,6 +1483,47 @@ def build_plain_chat_messages(
     ]
 
 
+def _visible_reply_style(mode="conversation"):
+    """Expression guidance for visible prose only, never semantic/execution tasks."""
+    common = (
+        "Visible expression: speak as a warm, equal design peer with an independent view. "
+        "Answer the latest contribution directly, using natural first-person observations and "
+        "clear, concrete reasoning. When it helps explain this exchange, light metaphor, gentle "
+        "personification or self-directed wit is welcome. Humor is optional: no joke quota, "
+        "stock catchphrase, forced punchline or theatrical persona. Never mock the designer's "
+        "ability, trivialize a disagreement, or invent player reactions or personal play experience. "
+        "Keep verified facts, subjective predictions, tentative intentions, suggestions and "
+        "server-confirmed actions distinct. Figurative wording must not add unsupported positions, "
+        "routes, reachability, mandatory paths or success claims; humor never exempts a claim "
+        "from evidence checks. Be clear about uncertainty without adding a disclaimer to every sentence. "
+        "Use the length, paragraphing and order the actual question needs; a short complete answer "
+        "is welcome. Preserve useful design reasoning, relevant verified route explanation and your "
+        "own grounded perspective without padding or a fixed rhetorical template. "
+        "Apply this voice only to visible prose, never machine-only fields, evidence quotes or "
+        "semantic decisions. Keep cards, warnings and action/status explanations precise and plain. "
+        "During disagreement, stay warm and restrained; do not joke about the user's position. "
+    )
+    context = {
+        "conversation": "Ordinary discussion and route explanation may use light humor when it clarifies the point. ",
+        "opening": "For a Stage opening, keep any humor subtle and secondary to grounded observation. ",
+        "clarification": (
+            "In proposal clarification, only the body may be lightly playful. Keep every option, "
+            "trade-off and the question neutral and equally respectful; do not make one direction "
+            "more attractive through jokes or loaded wording. "
+        ),
+        "review": (
+            "For human-edit observations, comparisons and disagreements, use restrained warmth. "
+            "Keep evidence, alternatives and the designer's position clear; do not use humor to persuade. "
+        ),
+        "repair": (
+            "Repair only the specified factual or semantic defect. Preserve reliable views and "
+            "natural voice, including harmless existing wit; remove unsupported humor with its "
+            "claim. Do not introduce a joke merely to satisfy the style guidance. "
+        ),
+    }
+    return common + context[mode]
+
+
 def _compact_kimi_structured_prompt(
     *,
     assessment_only,
@@ -1503,6 +1544,10 @@ def _compact_kimi_structured_prompt(
     historical_reference_instruction="",
 ):
     """Use a short, task-first contract for Kimi's structured responses."""
+    reply_style = _visible_reply_style(
+        "opening" if assessment_only else
+        "clarification" if _has_proposal_clarification(stage_context) else "conversation"
+    )
     clarification_count = max(
         0,
         min(3, int((stage_context or {}).get("clarificationQuestionCount") or 0)),
@@ -1513,18 +1558,18 @@ def _compact_kimi_structured_prompt(
     )
     opening = (
         (
-            "This is the opening after a verified human edit. Usually write three concise "
-            "paragraphs with seven to ten declarative sentences: acknowledge the saved, solvable "
-            "edit once; explain the changed layout structure and two or three likely play effects; "
-            "then give one first-person design reflection about difficulty, push order, or route rhythm. "
+            "This is the opening after a verified human edit. Acknowledge the saved, solvable edit once. "
+            "Discuss the changed layout structure and supported likely play effects, with a "
+            "first-person design reflection about difficulty, push order, or route rhythm. "
+            "Choose the order and depth that suit this edit, without a fixed sentence or paragraph count. "
             "Use one or two verified anchors only when they make a specific layout judgment clearer. "
             "Do not inventory the layout, narrate every changed tile, or say that the designer placed "
             "a particular object."
             if human_edit_opening
-            else "This is a Stage opening. Usually write three concise paragraphs with seven to ten "
-            "declarative sentences: first observe the layout structure and spatial distribution; then "
-            "connect concrete map choices to the first push, dependencies, bottlenecks, detours, or "
-            "route rhythm; finally give your own first-person difficulty and design reaction. Use one "
+            else "This is a Stage opening. Discuss the layout structure and spatial distribution, "
+            "connecting useful map details to the first push, dependencies, bottlenecks, detours, or "
+            "route rhythm. Include your own first-person difficulty and design reaction without a "
+            "fixed order, sentence or paragraph count. Use one "
             "or two verified anchors only when they make the observation clearer, never as an inventory."
         )
         + " Keep followUpQuestion and assessment.satisfactionQuestion null; do not put questions, "
@@ -1584,7 +1629,7 @@ def _compact_kimi_structured_prompt(
         "missing implementation details conservatively instead of asking indefinitely. "
         "Otherwise let a useful observation stand. "
         "Give a detailed, natural design response when the topic needs it, while keeping it "
-        "balanced: normally two to four paragraphs and roughly six to ten sentences. For a "
+        "balanced: choose paragraphing and depth to suit the question, without a sentence quota. For a "
         "relevant route, use one or two short verifiable passages plus a concrete first-person "
         "reflection; do not enumerate every solver step, alternative route, or internal search "
         "state. End every response with a complete sentence."
@@ -1596,6 +1641,7 @@ def _compact_kimi_structured_prompt(
         # an otherwise useful first response needlessly fragile.
         return "\n\n".join([
             f"You are the Kimi K2.6 Sokoban co-creation design peer. Write all new natural-language fields in {response_language}.",
+            reply_style,
             opening,
             (
                 "Set guidance.move to observe_stage. Set intentHypothesis, "
@@ -1627,6 +1673,7 @@ def _compact_kimi_structured_prompt(
 
     return "\n\n".join([
         f"You are the Kimi K2.6 Sokoban co-creation design peer. Write all new natural-language fields in {response_language}.",
+        reply_style,
         opening,
         progress,
         route,
@@ -1680,6 +1727,10 @@ def _compact_kimi_plain_prompt(
     compact_experiment=False,
 ):
     """Use the same compact facts/routing contract for text fallback."""
+    reply_style = _visible_reply_style(
+        "opening" if stage_opening else
+        "clarification" if _has_proposal_clarification(stage_context) else "conversation"
+    )
     clarification_count = max(
         0,
         min(3, int((stage_context or {}).get("clarificationQuestionCount") or 0)),
@@ -1698,6 +1749,7 @@ def _compact_kimi_plain_prompt(
             discovery = (stage_context or {}).get("proposalDiscovery") or {}
             return "\n\n".join([
                 f"You are the warm first-person Sokoban co-creation peer. Write in {response_language}.",
+                reply_style,
                 "Before asking, form normally TWO, at most THREE materially different, fairly complete "
                 "direction plans for the same designer request. Each must explain a local treatment, "
                 "expected visual/play effect and a real tradeoff. No padding, invented locks, guaranteed "
@@ -1748,6 +1800,7 @@ def _compact_kimi_plain_prompt(
         }
         return "\n\n".join([
             f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
+            reply_style,
             (
                 "This is a bounded proposal-clarification turn. You own the natural wording: "
                 "write a warm first-person design response and exactly one useful clarification "
@@ -1819,16 +1872,16 @@ def _compact_kimi_plain_prompt(
         ])
     opening = (
         (
-            "This is the opening after a verified human edit. Usually write three concise paragraphs "
-            "with seven to ten declarative sentences: acknowledge the saved, solvable edit once; explain "
-            "the changed layout structure and likely play effects; then give a first-person design reflection. "
+            "This is the opening after a verified human edit. Acknowledge the saved, solvable edit once; "
+            "explain the changed layout structure and likely play effects, with a first-person design reflection. "
+            "Choose a natural order and depth without a fixed sentence or paragraph count. "
             "Use one or two verified anchors only when they clarify a specific judgment. Do not inventory "
             "the layout, narrate every changed tile, or say the designer placed a particular object."
             if human_edit_opening
-            else "This is a Stage opening. Usually write three concise paragraphs with seven to ten "
-            "declarative sentences: observe layout structure and spatial distribution; explain its effect "
-            "on the first push, dependencies, bottlenecks, detours, or route rhythm; then give your own "
-            "first-person difficulty and design reaction. Use verified anchors sparingly, never as an inventory."
+            else "This is a Stage opening. Discuss layout structure and spatial distribution and its "
+            "supported effects on the first push, dependencies, bottlenecks, detours, or route rhythm. "
+            "Include your own first-person difficulty and design reaction without a fixed order, "
+            "sentence or paragraph count. Use verified anchors sparingly, never as an inventory."
         )
         + " Do not include questions, choices, or process/editor instructions; the server owns "
         "optional discussion metadata and appends the Stage 1 closing."
@@ -1872,11 +1925,10 @@ def _compact_kimi_plain_prompt(
         "solutionSteps, DESIGN_CONTEXT_PATCH, or COORDINATE_LINKS in visible prose. Do not claim "
         "an edit was applied or saved. If the designer asks for a change, describe or clarify "
         "the direction; the server controls execution. Connect specific map details to a playable "
-        "moment when explaining a design judgment. Keep the visible reply balanced: normally use "
-        "2-4 paragraphs with 2-4 sentences per paragraph, split an overfull paragraph at a semantic "
-        "boundary, and merge adjacent one-sentence paragraphs about the same point. Keep the full "
-        "reply to roughly six paragraphs and twelve sentences; a simple factual answer may be one "
-        "short paragraph. When route discussion is relevant, include one or two concise passages "
+        "moment when explaining a design judgment. Keep the visible reply balanced: choose the "
+        "length and paragraphing the latest question needs, without a sentence quota or fixed "
+        "order. A simple factual answer may be one short paragraph. When route discussion is "
+        "relevant, include one or two concise passages "
         "that connect a verified corridor or turn to a player/box choice and its design consequence, "
         "plus one or two concrete first-person reflection sentences. Preserve useful route detail "
         "without an exhaustive solver trace. At a real "
@@ -1902,6 +1954,7 @@ def _compact_kimi_plain_prompt(
         # metadata instructions while asking for a recoverable prose body.
         return "\n\n".join([
             f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
+            reply_style,
             opening,
             (
                 "Return only the visible opening prose: no JSON, metadata block, question, "
@@ -1921,6 +1974,7 @@ def _compact_kimi_plain_prompt(
 
     return "\n\n".join([
         f"You are the Kimi K2.6 Sokoban co-creation design peer. Write in {response_language}.",
+        reply_style,
         opening,
         progress,
         opening_instruction,
@@ -3948,6 +4002,7 @@ def _generate_manual_edit_assessment_pair(
             "direction available for comparison and discuss only verified map, solver, or play effects. In that "
             "case, never describe the edit as expressing, supporting, or conflicting with an implicit intention, "
             "preference, pursuit, hope, or goal. The saved edit itself is not proof of motive.\n\n"
+            + _visible_reply_style("review") + "\n\n"
             + conflict_instruction + "\n\n"
             "When conflict is non-null, fill one warm human_edit discussion: userPosition, aiPosition, "
             "a substantive coreDisagreement, and exactly one nextQuestion. This produces LET'S DISCUSS "
@@ -8561,6 +8616,9 @@ def translate_turns(items, target_language, request_id, *, _deadline=None):
                 f"Translate the supplied Sokoban co-design UI text into {target_name}. "
                 "Return one complete JSON object only. Preserve meaning, uncertainty, "
                 "direct first/second-person voice, paragraph breaks, and question marks. "
+                "Preserve the source tone and strength of judgment. Naturally rephrase existing "
+                "metaphor or humor when needed, but do not add jokes, intensify conclusions, or "
+                "change the relative appeal of options. Cards and status text must remain clear. "
                 "Do not add advice, questions, claims, or explanations. Keep null values "
                 "null and keep every turnId unchanged. Translate each uiCueTexts item in "
                 "the same order. Return exactly {\"translations\":[{\"turnId\":\"...\","
@@ -9833,6 +9891,7 @@ async def _repair_intent_components_async(
             "Fix the specified relevance or semantic defect; add no user purpose, authorization, "
             "state success or map changes. Use the supplied Stage facts only. Keep concise natural prose "
             "without a fixed sentence count. Write in " + ("Simplified Chinese." if language == "zh-CN" else "English.")
+            + "\n\n" + _visible_reply_style("repair")
             + "\nLOCKED CLAIMS:\n" + json.dumps(claims, ensure_ascii=False)
             + "\n\nAUTHORITATIVE STAGE FACTS:\n" + str(map_facts or "")[:8000]
             + "\n\nCURRENT BODY:\n" + str(body or "")[:5000]
@@ -11926,6 +11985,9 @@ def _messages_with_validation_feedback(messages, validation_feedback, task=None)
             "assistantMessage with a complete sentence."
         )
 
+    if task in {"chat", "stage_assessment", "stage_assessment_fallback"}:
+        instruction += " Preserve reliable views and natural voice; repair the specified defect without adding forced humor."
+
     if task == "map_proposal":
         instruction += (
             " The designer explicitly authorized a complete map proposal, so keep "
@@ -12075,6 +12137,10 @@ def _plain_messages_with_validation_feedback(
                 )
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
+    instruction += (
+        " Preserve reliable views and the original natural voice while correcting only the specified "
+        "defect; do not add jokes merely to meet a style preference."
+    )
     for message in corrected:
         if message.get("role") == "system":
             message["content"] = f"{message.get('content', '')}\n\n{instruction}"
@@ -18710,9 +18776,10 @@ def _ensure_stage_one_orientation(message, rows, language):
         )
         map_markers = ("水", "墙", "箱", "目标", "玩家", "路线", "通道", "区域", "格")
         compact_guidance = (
-            "你可以先说说你的第一反应或试玩当前关卡，之后不满意的话，你可以指出来，我们一起探讨商量然后制定方案，"
-            "或者你自己在右侧面板进行局部编辑；我只能协助进行小范围更改、提供可审查的改动内容以及帮助你梳理思路，"
-            "较大的改动我建议由你亲手试一试。"
+            "你可以先说说你的第一反应或试玩当前关卡，让直觉和手指都来投一票。"
+            "有哪里不对味，就指出来，我们一起探讨、制定方案，或者你自己在右侧面板进行局部编辑。"
+            "我能协助的限于小范围更改、提供可审查的改动内容，以及帮你梳理思路；"
+            "较大的改动我建议由你亲手试一试，我在旁边当参谋，不抢你的设计师席位。"
         )
     else:
         process_markers = (
@@ -18721,8 +18788,9 @@ def _ensure_stage_one_orientation(message, rows, language):
         )
         map_markers = ("water", "wall", "box", "target", "player", "route", "corridor", "area", "tile")
         compact_guidance = (
-            "You can share a first reaction or play the Stage; I support only small, "
-            "reviewable edits and thinking through them, while a broad rebuild stays designer-led."
+            "You can share a first reaction or play the Stage and let your fingers weigh in. "
+            "I support only small, reviewable edits and help you think through ideas; "
+            "for a broad rebuild, you keep the designer's chair and I can be your sounding board."
         )
 
     kept = []

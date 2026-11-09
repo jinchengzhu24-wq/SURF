@@ -76,6 +76,27 @@ function loadApp({ keepSubmit = false } = {}) {
     return { context, created };
 }
 
+test("entry language buttons select directly and respect pending and locked sessions", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        applyTranslations = () => {};
+        elements.landing.hidden = true;
+        state.session.languageLocked = false;
+        state.language = "zh-CN";
+        elements.setupEnglishButton.click();
+        elements.setupEnglishButton.click();
+    `, context);
+    assert.equal(vm.runInContext("state.language", context), "en");
+    vm.runInContext("state.busy = true; elements.setupChineseButton.click();", context);
+    assert.equal(vm.runInContext("state.language", context), "en");
+    vm.runInContext("state.busy = false; state.demoCreationPending = true; elements.setupChineseButton.click();", context);
+    assert.equal(vm.runInContext("state.language", context), "en");
+    vm.runInContext("state.demoCreationPending = false; state.session.languageLocked = true; elements.setupChineseButton.click();", context);
+    assert.equal(vm.runInContext("state.language", context), "en");
+    vm.runInContext("state.session.languageLocked = false; elements.setupChineseButton.click();", context);
+    assert.equal(vm.runInContext("state.language", context), "zh-CN");
+});
+
 test("proposal retry without a local request allows re-entry while captured retries stay locked", () => {
     const { context } = loadApp();
     vm.runInContext(`
@@ -619,6 +640,82 @@ test("waiting text follows known request type instead of elapsed-time guesses", 
     assert.doesNotMatch(ordinary, /方案|120|模型|服务器/);
     vm.runInContext('state.pendingMessage.requestProposal = true', context);
     assert.match(vm.runInContext('chatWaitingMessage()', context), /修改方案/);
+});
+
+test("reply waiting and elapsed time replace the composer hint and clear on success", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.turns = [];
+        state.busy = state.chatBusy = true; state.chatBusyVersionId = 'v1';
+        state.chatStatus = 'waiting'; state.chatStartedAt = Date.now() - 16000;
+        elements.messageInput.value = 'Original input';
+        state.pendingMessage = {content:'Original input', baseVersionId:'v1', idempotencyKey:'same-key'};
+        updateControls(); renderChatRequestStatus();
+    `, context);
+    assert.match(vm.runInContext('elements.chatControlHint.textContent', context), /回复.*已等待 16 秒/);
+    assert.equal(vm.runInContext('elements.replyFeedbackIcon.dataset.state', context), 'thinking');
+    assert.equal(vm.runInContext('elements.chatRequestStatus.hidden', context), false);
+    assert.doesNotMatch(vm.runInContext('elements.chatControlHint.textContent', context), /正在处理刚才/);
+    vm.runInContext("state.chatStartedAt = Date.now() - 22000; renderChatRequestStatus()", context);
+    assert.match(vm.runInContext('elements.chatControlHint.textContent', context), /22 秒/);
+    vm.runInContext("state.busy = state.chatBusy = false; state.chatStatus = 'idle'; state.pendingMessage = null; updateControls()", context);
+    assert.equal(vm.runInContext('elements.chatRequestStatus.hidden', context), true);
+    assert.equal(vm.runInContext('elements.messageInput.value', context), 'Original input');
+});
+
+test("footer errors retain technical details and retry the same captured request", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.turns = []; state.chatStatus = 'error';
+        state.pendingMessage = {content:'Keep this', baseVersionId:'v1', idempotencyKey:'original-key', requestProposal:true};
+        state.chatError = {code:'CLIENT_TIMEOUT', retryable:true};
+        var retriedKey = null;
+        retryPendingMessage = () => { retriedKey = state.pendingMessage.idempotencyKey; };
+        renderChatRequestStatus();
+    `, context);
+    assert.equal(vm.runInContext('elements.replyFeedbackIcon.dataset.state', context), 'error');
+    assert.equal(vm.runInContext('elements.chatRetryButton.hidden', context), false);
+    assert.equal(vm.runInContext('elements.chatTechnicalDetails.hidden', context), false);
+    vm.runInContext('elements.chatRetryButton.click()', context);
+    assert.equal(vm.runInContext('retriedKey', context), 'original-key');
+    assert.equal(vm.runInContext('state.pendingMessage.requestProposal', context), true);
+    vm.runInContext("state.selectedVersionId = 'history'; renderChatRequestStatus()", context);
+    assert.equal(vm.runInContext('elements.chatRetryButton.hidden', context), true);
+    assert.equal(vm.runInContext('elements.replyFeedbackIcon.dataset.state', context), 'info');
+});
+
+test("opening, translation and translation failure share the lower status area", () => {
+    const { context } = loadApp();
+    vm.runInContext("state.session.turns = []; state.assessing.add('v1'); renderControlHints()", context);
+    assert.match(vm.runInContext('elements.chatControlHint.textContent', context), /AI.*地图/);
+    assert.equal(vm.runInContext('elements.replyFeedbackIcon.dataset.state', context), 'thinking');
+    vm.runInContext(`
+        state.assessing.clear(); state.translationInProgress = true; state.translationRemainingCount = 1;
+        state.session.turns = [{turnId:'t1',role:'assistant',versionId:'v1',language:'en',content:'Source'}];
+        renderTranslationStatus();
+    `, context);
+    assert.match(vm.runInContext('elements.chatControlHint.textContent', context), /翻译.*1/);
+    assert.equal(vm.runInContext('elements.replyFeedbackIcon.dataset.state', context), 'translation');
+    vm.runInContext("state.translationInProgress = false; state.translationFailures.add('t1:zh-CN'); renderTranslationStatus()", context);
+    assert.equal(vm.runInContext('elements.replyFeedbackIcon.dataset.state', context), 'error');
+    assert.equal(vm.runInContext('elements.chatControlHint.textContent', context), vm.runInContext('t("translationUnavailable")', context));
+    vm.runInContext("state.session.turns[0].translations = {'zh-CN': {content:'Translated'}}; renderTranslationStatus()", context);
+    assert.equal(vm.runInContext('elements.chatRequestStatus.hidden', context), true);
+});
+
+test("workspace errors appear below the composer and keep their original retry callback", () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.turns = []; elements.workspace.hidden = false;
+        var retryCount = 0;
+        showError({code:'MODEL_RESPONSE_INVALID',retryable:true}, () => { retryCount += 1; });
+    `, context);
+    assert.equal(vm.runInContext('elements.chatRequestStatus.hidden', context), false);
+    assert.equal(vm.runInContext('elements.replyFeedbackIcon.dataset.state', context), 'error');
+    assert.equal(vm.runInContext('state.retryAction', context), null);
+    vm.runInContext('elements.chatRetryButton.click()', context);
+    assert.equal(vm.runInContext('retryCount', context), 1);
+    assert.equal(vm.runInContext('state.replyFeedback', context), null);
 });
 
 test("completion copy follows session type without changing actions", () => {

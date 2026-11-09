@@ -6,7 +6,7 @@
     <meta name="description" content="Share ideas, edit your Sokoban map, and give it a play with AI.">
     <title>Sokoban Co-Creation Lab</title>
     <link rel="icon" type="image/png" href="./favicon.png?v=fox-df2f6509133d">
-    <link rel="stylesheet" href="./styles.css?v=aligned-workspace-type-20261108-v6">
+    <link rel="stylesheet" href="./styles.css?v=composer-feedback-compact-20261109-v4">
 </head>
 <body>
     <div class="app">
@@ -52,18 +52,11 @@
                 <p id="landingBody" data-i18n="landingBody">The lab keeps every accepted Stage, conversation and play attempt together. No predefined design goal is assigned.</p>
                 <div class="language-setup" aria-labelledby="languageSetupLabel">
                     <p class="language-setup-label" id="languageSetupLabel" data-i18n="sessionLanguage">Session language</p>
-                    <div class="language-choice">
-                        <span>中文</span>
-                        <button class="language-switch" id="languageSetupSwitch" type="button" role="switch" aria-checked="false" data-i18n-aria-label="sessionLanguage">
-                            <span class="language-switch-thumb" aria-hidden="true"></span>
-                        </button>
-                        <span>English</span>
+                    <div class="language-choice" role="group" aria-labelledby="languageSetupLabel">
+                        <button class="setup-language-button" id="setupChineseButton" type="button" lang="zh-CN" aria-pressed="true">中文</button>
+                        <button class="setup-language-button" id="setupEnglishButton" type="button" lang="en" aria-pressed="false">English</button>
                     </div>
                     <p class="language-lock-notice" id="languageLockNotice" data-i18n="demoLanguageLock">Your selection cannot be changed after the session is created.</p>
-                </div>
-                <div class="draft-actions" id="draftActions" hidden>
-                    <button class="secondary-button" id="regenerateDraftButton" type="button" data-i18n="regenerateDraft">Regenerate</button>
-                    <button class="primary-button" id="enterSessionButton" type="button" data-i18n="enterSession">Let’s get started</button>
                 </div>
                 <section class="draft-preview" id="draftPreview" hidden aria-labelledby="draftPreviewTitle">
                     <div class="draft-preview-heading">
@@ -79,8 +72,13 @@
                             <span id="draftPreviewLoadingMessage"></span>
                         </div>
                     </div>
+                    <p class="draft-preview-legend" data-i18n="draftLegend">P 玩家 · B 箱子 · T 目标 · ~ 水</p>
                     <p class="draft-preview-status" id="draftPreviewStatus" role="status" aria-live="polite"></p>
                 </section>
+                <div class="draft-actions" id="draftActions" hidden>
+                    <button class="secondary-button" id="regenerateDraftButton" type="button" data-i18n="regenerateDraft">Regenerate</button>
+                    <button class="primary-button" id="enterSessionButton" type="button" data-i18n="enterSession">Let’s get started</button>
+                </div>
             </section>
 
             <section class="workspace" id="workspace" hidden aria-label="Co-creation workspace" data-i18n-aria-label="workspaceAriaLabel">
@@ -139,20 +137,9 @@
                             <p data-i18n="assessmentPendingBody">The assistant will discuss what stands out in the verified current map.</p>
                         </div>
                         <div class="message-list" id="messageList" aria-live="polite"></div>
-                        <div class="translation-status" id="translationStatus" role="status" aria-live="polite" hidden></div>
-                        <div class="typing-row" id="typingRow" hidden>
-                            <span></span><span></span><span></span>
-                            <small data-i18n="thinking">Assistant is considering the current Stage...</small>
-                        </div>
                     </div>
 
                     <div class="proposal-area" id="proposalArea"></div>
-
-                    <div class="chat-request-status" id="chatRequestStatus" role="status" aria-live="polite" hidden>
-                        <span id="chatRequestMessage"></span>
-                        <details class="technical-details" id="chatTechnicalDetails" hidden></details>
-                        <button class="chat-retry-button" id="chatRetryButton" type="button" data-i18n="retry">Retry</button>
-                    </div>
 
                     <div class="composer-dock">
                     <form class="composer" id="chatForm">
@@ -175,7 +162,17 @@
                             <button class="primary-button" id="sendButton" type="submit" data-i18n="send">Send</button>
                         </div>
                     </form>
-                    <p class="interface-hint control-hint" id="chatControlHint" role="status" hidden></p>
+                    <div class="chat-request-status composer-feedback" id="chatRequestStatus" role="status" aria-live="polite" hidden>
+                        <span class="reply-feedback-icon" id="replyFeedbackIcon" aria-hidden="true" data-state="info">
+                            <svg class="feedback-thinking" viewBox="0 0 20 20" focusable="false"><path d="M3 3h14v10H9l-4 4v-4H3zM6 7h1m3 0h1m3 0h1"/></svg>
+                            <svg class="feedback-translation" viewBox="0 0 20 20" focusable="false"><path d="M2 4h9M6 2v2m-2 1c0 4 3 7 6 8M9 5c0 4-3 7-7 9m9 3 3-9 4 9m-6-3h5"/></svg>
+                            <svg class="feedback-error" viewBox="0 0 20 20" focusable="false"><path d="M3 3h14v14H3zM10 6v5m0 2v1"/></svg>
+                            <svg class="feedback-info" viewBox="0 0 20 20" focusable="false"><path d="M3 3h14v14H3zM10 6v1m0 2v5"/></svg>
+                        </span>
+                        <p class="interface-hint control-hint" id="chatControlHint" hidden></p>
+                        <details class="technical-details" id="chatTechnicalDetails" hidden></details>
+                        <button class="chat-retry-button" id="chatRetryButton" type="button" hidden data-i18n="retry">Retry</button>
+                    </div>
                     <div class="composer-meta">
                         <span data-i18n="sendHint">Enter to send · Shift+Enter for a new line</span>
                         <span id="characterCount">0 / 2000</span>
@@ -281,6 +278,6 @@
         <p class="ui-tooltip-status" id="uiTooltipStatus" hidden></p>
     </div>
 
-    <script src="./app.js?v=aligned-workspace-type-20261108-v6"></script>
+    <script src="./app.js?v=composer-feedback-compact-20261109-v4"></script>
 </body>
 </html>

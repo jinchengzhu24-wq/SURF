@@ -3069,7 +3069,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("recentGuidance", messages[0]["content"])
         self.assertIn("mandatory INTENT_DECISION", messages[0]["content"])
         self.assertIn("Never produce four cards", messages[0]["content"])
-        self.assertIn("2-4 paragraphs with 2-4 sentences per paragraph", messages[0]["content"])
+        self.assertIn("without a sentence quota or fixed order", messages[0]["content"])
         self.assertIn("one or two concise passages", messages[0]["content"])
         self.assertIn(
             "Do not introduce a route, coordinate, or entity-position inventory",
@@ -4427,7 +4427,9 @@ class LLMClientTests(unittest.TestCase):
         client = FakeClient(["not valid JSON"])
         with (
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "LLM_INTERNAL_DEADLINE_SECONDS", 0.01),
+            # Exhaust the budget after the first response, independent of CPU scheduling.
+            patch.object(llm_client, "_remaining_until", side_effect=lambda deadline:
+                30.0 if not client.chat.completions.calls else 0.01),
             patch.object(llm_client, "_create_async_client", return_value=client),
         ):
             result = llm_client.generate_stage_assessment(
@@ -7672,7 +7674,8 @@ class LLMClientTests(unittest.TestCase):
         )
         prompt = messages[0]["content"]
 
-        self.assertIn("three concise paragraphs with seven to ten declarative sentences", prompt)
+        self.assertIn("sentence or paragraph count", prompt)
+        self.assertNotIn("seven to ten declarative sentences", prompt)
         self.assertIn("your own first-person difficulty and design reaction", prompt)
         self.assertIn("do not put questions, choices", prompt)
         self.assertIn("The server owns optional discussion metadata", prompt)
@@ -7695,7 +7698,8 @@ class LLMClientTests(unittest.TestCase):
 
         for prompt in (structured, plain):
             self.assertIn("opening after a verified human edit", prompt)
-            self.assertIn("three concise paragraphs with seven to ten declarative sentences", prompt)
+            self.assertIn("sentence or paragraph count", prompt)
+            self.assertNotIn("seven to ten declarative sentences", prompt)
             self.assertIn("saved, solvable edit once", prompt)
             self.assertIn("Do not inventory the layout", prompt)
             self.assertIn("one or two verified anchors", prompt)
