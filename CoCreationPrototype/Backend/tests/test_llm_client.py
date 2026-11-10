@@ -3070,7 +3070,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("mandatory INTENT_DECISION", messages[0]["content"])
         self.assertIn("Never produce four cards", messages[0]["content"])
         self.assertIn("without a sentence quota or fixed order", messages[0]["content"])
-        self.assertIn("one or two concise passages", messages[0]["content"])
+        self.assertIn("personal reflection is optional", messages[0]["content"])
         self.assertIn(
             "Do not introduce a route, coordinate, or entity-position inventory",
             messages[0]["content"],
@@ -3959,8 +3959,8 @@ class LLMClientTests(unittest.TestCase):
             OPERATION_BASE_ROWS,
             "zh-CN",
         )
-        self.assertIn("小范围更改、提供可审查的改动内容", body)
-        self.assertIn("较大的改动我建议由你亲手试一试", body)
+        self.assertIn("提出可审查的小改动", body)
+        self.assertIn("大改由你掌舵", body)
 
     def test_legacy_stage_one_display_keeps_fixed_guidance_in_its_own_paragraph(self):
         body = llm_client._repair_stage_one_opening_display(
@@ -3974,7 +3974,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(body.count("当前快照中的实体位置"), 1)
         self.assertEqual(body.count("\n\n"), 2)
         self.assertIn("我会先把这种分隔", body)
-        self.assertIn("小范围更改、提供可审查的改动内容", body)
+        self.assertIn("提出可审查的小改动", body)
 
     def test_stage_one_display_replaces_missing_entity_coordinates_from_snapshot(self):
         body = llm_client._repair_stage_one_opening_display(
@@ -4033,8 +4033,8 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertIn("中间水域让箱子第一次靠近目标", body)
-        self.assertEqual(body.count("你可以先说说你的第一反应或试玩当前关卡"), 1)
-        self.assertEqual(body.count("右侧面板进行局部编辑"), 1)
+        self.assertEqual(body.count("可以先聊聊或试玩"), 1)
+        self.assertEqual(body.count("右侧局部编辑"), 1)
 
     def test_stage_one_opening_removes_model_written_scope_paragraph(self):
         body = llm_client._ensure_stage_one_orientation(
@@ -4047,7 +4047,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIn("右下角被水和墙夹住的箱子", body)
         self.assertNotIn("小调整我可以帮你改", body)
-        self.assertEqual(body.count("你可以先说说你的第一反应或试玩当前关卡"), 1)
+        self.assertEqual(body.count("可以先聊聊或试玩"), 1)
 
     def test_revision_card_uses_the_concrete_plan_not_a_confirmation_word(self):
         visible = (
@@ -4191,10 +4191,10 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("The first push is not only about approaching a target", result.assistant_message)
         self.assertNotIn("did not finish cleanly", result.assistant_message)
         self.assertNotIn("?", result.assistant_message)
-        self.assertIn("play the Stage", result.assistant_message)
-        self.assertIn("small, reviewable edits", result.assistant_message)
+        self.assertIn("try playing", result.assistant_message)
+        self.assertIn("small, reviewable changes", result.assistant_message)
         self.assertEqual(
-            result.assistant_message.count("You can share a first reaction or play the Stage"),
+            result.assistant_message.count("Share a reaction or try playing"),
             1,
         )
         self.assertIsNone(result.guidance["followUpQuestion"])
@@ -5326,7 +5326,7 @@ class LLMClientTests(unittest.TestCase):
                 {"stageNumber": 1, "source": "initial"},
             )
 
-        self.assertIn("small, reviewable edits", result.assistant_message)
+        self.assertIn("small, reviewable changes", result.assistant_message)
         self.assertGreaterEqual(result.assistant_message.count("."), 4)
         self.assertEqual(result.assistant_message.count("\n\n"), 1)
         self.assertEqual(result.attempts_used, 1)
@@ -7676,7 +7676,7 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertIn("sentence or paragraph count", prompt)
         self.assertNotIn("seven to ten declarative sentences", prompt)
-        self.assertIn("your own first-person difficulty and design reaction", prompt)
+        self.assertIn("Add a personal reaction only when useful", prompt)
         self.assertIn("do not put questions, choices", prompt)
         self.assertIn("The server owns optional discussion metadata", prompt)
         self.assertIn("satisfactionQuestion must be null", prompt)
@@ -8081,10 +8081,9 @@ class LLMClientTests(unittest.TestCase):
         )
 
         self.assertIn("first push a meaningful design choice", recovered)
-        self.assertLessEqual(
-            len(llm_client._personal_reflection_sentences(recovered)),
-            llm_client.PERSONAL_REFLECTION_SENTENCE_LIMIT,
-        )
+        self.assertLess(len(llm_client._personal_reflection_sentences(recovered)),
+            len(llm_client._personal_reflection_sentences(body)))
+        self.assertGreater(diagnostics["reflectionDroppedSentenceCount"], 0)
         self.assertTrue(diagnostics["changed"])
 
     def test_presentation_budget_does_not_discard_non_route_analysis(self):

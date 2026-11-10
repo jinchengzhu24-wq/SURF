@@ -122,6 +122,35 @@ class DirectionDiscoveryTests(unittest.TestCase):
         with self.assertRaises(backend.ApiError):
             backend._adaptive_revision_routing("Either", {}, self.snapshot, proposal_discovery=changed, turn_understanding=record)
 
+    def test_early_selection_explanation_and_exhausted_revision_preserve_topic(self):
+        option_set = directions.build_set(options(), self.discovery, self.snapshot)
+        chosen = option_set["options"][0]["id"]
+        for count in (1, 2, 3):
+            discovery = {**self.discovery, "optionSet": option_set, "clarificationQuestionCount": count,
+                "optionDecision": {"selection": "explicit", "preferredOptionIds": [chosen],
+                    "rejectedOptionIds": [], "evidenceSpan": "A"}}
+            record = understanding("A", topic(sufficient=False))
+            record["optionContextSignature"] = directions.context_signature(discovery)
+            with self.subTest(count=count):
+                self.assertEqual(backend._adaptive_revision_routing("A", {}, self.snapshot,
+                    proposal_discovery=discovery, turn_understanding=record), "proposal_conservative")
+                discovery["optionDecision"] = {**discovery["optionDecision"], "selection": "unclear",
+                    "preferredOptionIds": [], "evidenceSpan": "Explain A"}
+                record = {**record, "acts": ["explanation_request"],
+                    "optionContextSignature": directions.context_signature(discovery)}
+                before = copy.deepcopy(discovery)
+                self.assertEqual(backend._adaptive_revision_routing("Explain A", {}, self.snapshot,
+                    proposal_discovery=discovery, turn_understanding=record), "none")
+                self.assertEqual(discovery, before)
+                discovery["optionDecision"]["selection"] = "revise"
+                record = {**record, "acts": ["revision_request"],
+                    "optionContextSignature": directions.context_signature(discovery)}
+                self.assertEqual(backend._adaptive_revision_routing("Another direction", {}, self.snapshot,
+                    proposal_discovery=discovery, turn_understanding=record),
+                    "needs_clarification" if count < 3 else "proposal_blocked")
+                self.assertEqual(discovery["clarificationQuestionCount"], count)
+                self.assertEqual(discovery["optionSet"], before["optionSet"])
+
     def test_empty_understanding_or_review_uses_clean_existing_retry_slot(self):
         latest = "Around the first destination"
         context = {**self.discovery, "lastQuestionText": "Which area?"}

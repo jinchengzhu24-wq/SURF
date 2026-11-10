@@ -46,6 +46,15 @@ class ReplyStyleTests(unittest.TestCase):
                         self.assertEqual(prompt.count("Visible expression:"), 1)
                         self.assertIn("Humor is optional", prompt)
                         self.assertIn("humor never exempts a claim from evidence checks", prompt)
+                        self.assertIn("A simple difficulty question needs a judgment and its strongest reason", prompt)
+                        self.assertIn("a complex question may need depth", prompt)
+                        self.assertIn("without Markdown emphasis markers or headings", prompt)
+                        self.assertNotIn("plus one or two concrete first-person reflection sentences", prompt)
+                        self.assertNotIn("plus a concrete first-person reflection", prompt)
+                        if context.get("proposalClarification"):
+                            self.assertIn("Three questions are a ceiling, not a required sequence", prompt)
+                            self.assertIn("An explanation request is not a choice", prompt)
+                            self.assertIn("options carry the treatments, effects and trade-offs", prompt)
                         self.assertNotIn("seven to ten declarative sentences", prompt)
                         self.assertNotIn("2-4 paragraphs with 2-4 sentences", prompt)
                         if opening:
@@ -169,11 +178,11 @@ class ReplyStyleTests(unittest.TestCase):
 
     def test_stage_one_fixed_witty_closing_is_stable_and_read_time_compatible(self):
         cases = [
-            ("zh-CN", "我会先观察这张地图的推箱顺序。", "让直觉和手指都来投一票",
+            ("zh-CN", "我会先观察这张地图的推箱顺序。", "大改由你掌舵",
                 "你可以先说说你的第一反应或试玩当前关卡，之后不满意的话，你可以指出来，我们一起探讨商量然后制定方案，"
                 "或者你自己在右侧面板进行局部编辑；我只能协助进行小范围更改、提供可审查的改动内容以及帮助你梳理思路，"
                 "较大的改动我建议由你亲手试一试。"),
-            ("en", "I would inspect the push order first.", "let your fingers weigh in",
+            ("en", "I would inspect the push order first.", "you steer any broad rebuild",
                 "You can share a first reaction or play the Stage; I support only small, "
                 "reviewable edits and thinking through them, while a broad rebuild stays designer-led."),
         ]
@@ -189,6 +198,62 @@ class ReplyStyleTests(unittest.TestCase):
                 displayed = llm._repair_stage_one_opening_display(repaired, ROWS, language)
                 self.assertEqual(displayed.count(closing), 1)
                 self.assertTrue(displayed.endswith(closing))
+
+    def test_distinct_reflections_preserve_all_views_and_paragraphs(self):
+        cases = {
+            "en": "I feel the opening is calm.\n\nI prefer room to experiment. My worry is the late commitment.\n\nI notice a useful visual contrast.",
+            "zh-CN": "我觉得开头很轻松。\n\n我喜欢留出试错的余地。我会担心最后一步的承诺。\n\n对我来说，这种视觉变化很有趣。",
+        }
+        for language, body in cases.items():
+            with self.subTest(language=language):
+                self.assertGreater(len(llm._personal_reflection_sentences(body)), 2)
+                recovered, diagnostics = llm._recover_overlong_personal_reflection(body, language=language)
+                self.assertEqual(recovered, body)
+                self.assertFalse(diagnostics["changed"])
+                self.assertEqual(diagnostics["reflectionDroppedSentenceCount"], 0)
+
+    def test_duplicate_reflections_are_removed_without_truncating_later_views(self):
+        repeated = "I feel the opening is calm."
+        later = "My worry is the late commitment."
+        body = f"{repeated} I prefer room to experiment. {repeated} {later}"
+        recovered, diagnostics = llm._recover_overlong_personal_reflection(body)
+        self.assertEqual(recovered.count(repeated), 1)
+        self.assertIn(later, recovered)
+        self.assertEqual(diagnostics["reflectionDroppedSentenceCount"], 1)
+
+    def test_short_manual_review_uses_real_validation_and_rejects_invalid_content(self):
+        context = {"stageNumber": 2, "source": "human_edit", "evaluatorDesignContext": {}}
+        solver = {"solvable": True, "solutionSteps": 24, "solutionPushes": 6}
+        evidence = llm._manual_edit_review_evidence(context, solver, {})
+        payload = {"openingMessage": "The saved Stage remains solvable. I would inspect the first push.",
+            "assessment": {"solutionSummary": "The Stage is solvable.", "difficultyOpinion": "A calm opening.",
+                "features": [], "suggestions": [], "satisfactionQuestion": None},
+            "reviewMessage": "Still solvable.", "conflict": None}
+
+        def validate(candidate, language="en"):
+            return llm._validate_manual_edit_pair_payload(candidate, ROWS, language, solver,
+                context, evidence, {"verdict": "no_conflict"}, "short-review", 1, "offline", 0)
+
+        result = validate(payload)
+        self.assertEqual(result.secondary_execution.assistant_message, "Still solvable.")
+        chinese = {**payload, "openingMessage": "已保存的地图可解，我会先观察推箱顺序。",
+            "assessment": {"solutionSummary": "地图可解。", "difficultyOpinion": "开头较温和。",
+                "features": [], "suggestions": [], "satisfactionQuestion": None},
+            "reviewMessage": "修改后的地图仍然可解。"}
+        self.assertEqual(validate(chinese, "zh-CN").secondary_execution.assistant_message, chinese["reviewMessage"])
+        for invalid in ("", "   ", "B1 is at (2, 2).", "Your hidden intention is speed."):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate({**payload, "reviewMessage": invalid})
+
+    def test_retry_prompts_preserve_relevance_without_requiring_detailed_analysis(self):
+        for feedback in ("token limit", "route reasoning is too detailed"):
+            messages = [{"role": "system", "content": "Original task."}]
+            repaired = llm._plain_messages_with_validation_feedback(messages, feedback)
+            self.assertIn("needed to answer the question", repaired[0]["content"])
+            self.assertNotIn("keeps the detailed design analysis", repaired[0]["content"])
+            self.assertEqual(messages[0]["content"], "Original task.")
+        structured = llm._messages_with_validation_feedback(messages, "token limit", task="chat")
+        self.assertNotIn("Preserve the detailed map/design analysis", structured[0]["content"])
 
 
 if __name__ == "__main__":

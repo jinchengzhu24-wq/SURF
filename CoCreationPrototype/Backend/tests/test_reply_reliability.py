@@ -234,7 +234,7 @@ class ReplyReliabilityTests(unittest.TestCase):
         payload = {"openingMessage": "The saved Stage remains solvable. The central space is open. The first walking route reaches a pushing position. I would inspect that position before committing to a push.",
             "assessment": {"solutionSummary": "The solver found a route.", "difficultyOpinion": "The pushing position requires care.",
                 "features": ["Open space"], "suggestions": ["Inspect the first push"], "satisfactionQuestion": None},
-            "reviewMessage": "bad", "conflict": None}
+            "reviewMessage": "Your hidden intention is speed.", "conflict": None}
         evidence = llm._manual_edit_review_evidence(stage_context, solver, {})
         decision = {"verdict": "no_conflict", "decisionSource": "deterministic_no_comparable_evidence",
             "confirmedDirectionIds": [], "effectEvidenceIds": [], "relation": "no comparable direction", "solverDelta": {}, "comparisons": []}

@@ -132,6 +132,7 @@ CHAT_RESPONSE_MAX_LENGTH = 8000
 # the whole designer-facing reply to disappear.
 CHAT_RESPONSE_HARD_LENGTH = 24000
 ROUTE_REASONING_PASSAGE_LIMIT = 2
+# Compatibility constant only; distinct reflections have no runtime sentence cap.
 PERSONAL_REFLECTION_SENTENCE_LIMIT = 2
 COORDINATE_LINK_LIMIT = 12
 CHAT_MAX_PARAGRAPHS = 6
@@ -142,7 +143,7 @@ CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
 PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV = (
     "COCREATION_PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT"
 )
-PROMPT_VERSION = "cocreation-v63-proposal-evidence-diagnostics"
+PROMPT_VERSION = "cocreation-v64-gentle-reply-relief"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -1487,8 +1488,13 @@ def _visible_reply_style(mode="conversation"):
     """Expression guidance for visible prose only, never semantic/execution tasks."""
     common = (
         "Visible expression: speak as a warm, equal design peer with an independent view. "
-        "Answer the latest contribution directly, using natural first-person observations and "
-        "clear, concrete reasoning. When it helps explain this exchange, light metaphor, gentle "
+        "Answer the latest contribution first, then give only the reasoning it needs. State each "
+        "judgment once; do not paraphrase it later or append a default summary. Use everyday words "
+        "and natural first-person observations when useful, without requiring a map analysis, "
+        "route explanation, personal reflection and follow-up in every reply. A simple difficulty "
+        "question needs a judgment and its strongest reason; a complex question may need depth. "
+        "Write plain text for the existing interface, without Markdown emphasis markers or headings. "
+        "When it helps explain this exchange, light metaphor, gentle "
         "personification or self-directed wit is welcome. Humor is optional: no joke quota, "
         "stock catchphrase, forced punchline or theatrical persona. Never mock the designer's "
         "ability, trivialize a disagreement, or invent player reactions or personal play experience. "
@@ -1498,7 +1504,7 @@ def _visible_reply_style(mode="conversation"):
         "from evidence checks. Be clear about uncertainty without adding a disclaimer to every sentence. "
         "Use the length, paragraphing and order the actual question needs; a short complete answer "
         "is welcome. Preserve useful design reasoning, relevant verified route explanation and your "
-        "own grounded perspective without padding or a fixed rhetorical template. "
+        "own grounded perspective when relevant, without padding, a minimum length or a fixed rhetorical template. "
         "Apply this voice only to visible prose, never machine-only fields, evidence quotes or "
         "semantic decisions. Keep cards, warnings and action/status explanations precise and plain. "
         "During disagreement, stay warm and restrained; do not joke about the user's position. "
@@ -1509,11 +1515,20 @@ def _visible_reply_style(mode="conversation"):
         "clarification": (
             "In proposal clarification, only the body may be lightly playful. Keep every option, "
             "trade-off and the question neutral and equally respectful; do not make one direction "
-            "more attractive through jokes or loaded wording. "
+            "more attractive through jokes or loaded wording. The body introduces the unresolved "
+            "decision; options carry the treatments, effects and trade-offs without repeating the body. "
+            "Keep option fields complementary and preserve necessary distinctions and costs. Later "
+            "rounds address only what remains unresolved, without recapping settled goals or locked "
+            "options. Three questions are a ceiling, not a required sequence; never pad the allowance. "
+            "An explanation request is not a choice: explain the referenced option without adding a "
+            "new preference question. Do not infer consent or reopen the question budget. "
         ),
         "review": (
             "For human-edit observations, comparisons and disagreements, use restrained warmth. "
             "Keep evidence, alternatives and the designer's position clear; do not use humor to persuade. "
+            "Keep the opening about the current map and the review about the verified change and "
+            "design direction; do not repeat the same analysis in both messages. State the concrete "
+            "disagreement, its reason and next choice without replaying the whole discussion. "
         ),
         "repair": (
             "Repair only the specified factual or semantic defect. Preserve reliable views and "
@@ -1559,17 +1574,16 @@ def _compact_kimi_structured_prompt(
     opening = (
         (
             "This is the opening after a verified human edit. Acknowledge the saved, solvable edit once. "
-            "Discuss the changed layout structure and supported likely play effects, with a "
-            "first-person design reflection about difficulty, push order, or route rhythm. "
+            "Highlight the most useful changed layout feature and its supported likely play effect. "
+            "Add a personal design reaction only when it helps explain that feature. "
             "Choose the order and depth that suit this edit, without a fixed sentence or paragraph count. "
             "Use one or two verified anchors only when they make a specific layout judgment clearer. "
             "Do not inventory the layout, narrate every changed tile, or say that the designer placed "
             "a particular object."
             if human_edit_opening
-            else "This is a Stage opening. Discuss the layout structure and spatial distribution, "
-            "connecting useful map details to the first push, dependencies, bottlenecks, detours, or "
-            "route rhythm. Include your own first-person difficulty and design reaction without a "
-            "fixed order, sentence or paragraph count. Use one "
+            else "This is a Stage opening. Highlight the most useful layout feature and connect it "
+            "to its supported play effect; do not cover every design dimension. Add a personal "
+            "reaction only when useful, without a fixed order, sentence or paragraph count. Use one "
             "or two verified anchors only when they make the observation clearer, never as an inventory."
         )
         + " Keep followUpQuestion and assessment.satisfactionQuestion null; do not put questions, "
@@ -1588,16 +1602,15 @@ def _compact_kimi_structured_prompt(
         else "Do not add progress items from this opening."
     )
     route = (
-        "For a map-related reply, you may include detailed design analysis and one main route "
-        "passage when it describes movement between two real anchors (player/box to target, "
+        "Include route explanation only when it answers the current question, describing "
+        "movement between two real anchors (player/box to target, "
         "coordinate to coordinate, or through a named corridor). Keep only the key corridor, "
-        "endpoint, and risk or design consequence; keep the route to 2–4 sentences and at "
-        "most 6 key coordinate nodes. Do not enumerate every step, alternative, "
+        "endpoint, and risk or design consequence without a sentence quota. Do not enumerate every step, alternative, "
         "BFS result, or solver state. A location, adjacency, comparison, or direction-only "
         "sentence is not a route. If used, copy the exact visible route sentence into one "
         "coordinateLinks item with authoritative one-based from/to points. Omit it when the "
         "relation or endpoints are uncertain. If a short grounded route cannot be written, "
-        "omit the route and finish the detailed design analysis; never stop or invalidate the "
+        "omit the route and finish answering the question; never stop or invalidate the "
         "whole response because route metadata is unavailable. Do not add a fixed progress "
         "heading or checklist."
     )
@@ -1630,8 +1643,8 @@ def _compact_kimi_structured_prompt(
         "Otherwise let a useful observation stand. "
         "Give a detailed, natural design response when the topic needs it, while keeping it "
         "balanced: choose paragraphing and depth to suit the question, without a sentence quota. For a "
-        "relevant route, use one or two short verifiable passages plus a concrete first-person "
-        "reflection; do not enumerate every solver step, alternative route, or internal search "
+        "relevant route, explain the key verified relation and its consequence; personal reflection "
+        "is optional. Do not enumerate every solver step, alternative route, or internal search "
         "state. End every response with a complete sentence."
     )
     if assessment_only:
@@ -1757,7 +1770,7 @@ def _compact_kimi_plain_prompt(
                 "may change; player, boxes, targets and shell remain fixed. Gameplay pushes are distinct "
                 "from design relocation. Respect explicit component scope, goals and prohibitions. "
                 "Directions are your tentative suggestions, not designer instructions or solved maps.",
-                'Return direct JSON only: {"body":"brief first-person reflection without questions", '
+                'Return direct JSON only: {"body":"brief introduction to the unresolved decision without questions", '
                 '"options":[{"summary":"...","components":["water"],"focus":"...",'
                 '"mechanism":"...","effect":"...","tradeoff":"...","preserve":"..."}],'
                 '"comparedOptions":["1","2"],"discriminant":"the actual unresolved tradeoff",'
@@ -1873,14 +1886,15 @@ def _compact_kimi_plain_prompt(
     opening = (
         (
             "This is the opening after a verified human edit. Acknowledge the saved, solvable edit once; "
-            "explain the changed layout structure and likely play effects, with a first-person design reflection. "
+            "highlight the key changed layout feature and its supported likely play effect. "
+            "Add a personal reaction only when useful. "
             "Choose a natural order and depth without a fixed sentence or paragraph count. "
             "Use one or two verified anchors only when they clarify a specific judgment. Do not inventory "
             "the layout, narrate every changed tile, or say the designer placed a particular object."
             if human_edit_opening
-            else "This is a Stage opening. Discuss layout structure and spatial distribution and its "
-            "supported effects on the first push, dependencies, bottlenecks, detours, or route rhythm. "
-            "Include your own first-person difficulty and design reaction without a fixed order, "
+            else "This is a Stage opening. Highlight the most useful layout feature and its "
+            "supported play effect rather than covering every design dimension. "
+            "Add your own reaction only when useful, without a fixed order, "
             "sentence or paragraph count. Use verified anchors sparingly, never as an inventory."
         )
         + " Do not include questions, choices, or process/editor instructions; the server owns "
@@ -1928,9 +1942,8 @@ def _compact_kimi_plain_prompt(
         "moment when explaining a design judgment. Keep the visible reply balanced: choose the "
         "length and paragraphing the latest question needs, without a sentence quota or fixed "
         "order. A simple factual answer may be one short paragraph. When route discussion is "
-        "relevant, include one or two concise passages "
-        "that connect a verified corridor or turn to a player/box choice and its design consequence, "
-        "plus one or two concrete first-person reflection sentences. Preserve useful route detail "
+        "relevant, explain the verified corridor or turn, the player/box choice and its consequence "
+        "only as needed to answer the question; personal reflection is optional. Preserve useful route detail "
         "without an exhaustive solver trace. At a real "
         "decision point, ask one specific design question; for an under-specified revision, ask no "
         "more than three tightly related clarification questions and stop early when the direction "
@@ -3808,8 +3821,8 @@ def _validate_manual_edit_pair_payload(
         language,
     )
     review_message = _normalize_response_paragraphs(review_message)
-    if len(review_message) < 20:
-        raise ValueError("The manual-edit review is too short.")
+    if not review_message.strip():
+        raise ValueError("The manual-edit review is empty.")
     if review_message.count("?") + review_message.count("\uFF1F"):
         raise ValueError("The manual-edit review body must remain declarative.")
     _assert_no_unsupported_manual_edit_intent([review_message], evidence)
@@ -3989,11 +4002,13 @@ def _generate_manual_edit_assessment_pair(
             "deterministically validated manual edit. Return one JSON object containing two distinct "
             "messages. Write every natural-language field in " + response_language + ".\n\n"
             "openingMessage is the first Stage-opening bubble. It must be declarative and card-free: "
-            "acknowledge the saved solvable Stage once, discuss layout, route relationships, push rhythm, "
-            "and a concrete first-person imagined play experience. Do not ask a question or infer intent.\n\n"
+            "acknowledge the saved solvable Stage once and highlight the key current layout feature "
+            "and its supported play effect. A personal reaction is optional; do not cover every design "
+            "dimension or repeat the comparison below. Do not ask a question or infer intent.\n\n"
             "reviewMessage is a second, always-visible declarative evaluator bubble. Compare the verified manual diff "
             "with active explicit/confirmed design directions and the bounded Stage lineage. Explain where "
-            "the edit aligns, shifts, or creates a trade-off. Do not invent a motive, proposal, map change, "
+            "the edit aligns, shifts, or creates a trade-off without repeating openingMessage. "
+            "Do not invent a motive, proposal, map change, "
             "question, or warning card. Do not print evidence IDs or raw tile transitions in visible prose.\n\n"
             "This project's tile legend is # wall, . floor, @ water, p player, s box, t target. "
             "Never reinterpret these glyphs using another Sokoban convention. The server's verified change "
@@ -5283,12 +5298,14 @@ def _generate_verified_proposal_failure_analysis(api_key, base_url, context, row
         return None
     prompt = [{"role": "system", "content": (
         "Return JSON with body only, in " + ("Simplified Chinese" if language == "zh-CN" else "English") + ". "
-        "Write substantive first-person design analysis of this unsuccessful proposal search. "
+        "Explain this unsuccessful proposal search directly: the verified result, its key reason "
+        "and a useful next step, without recapping the entire planning process. "
         "Respond to the verified designer requirements, explain only the supplied verified failure, "
         "and suggest a conceptual next direction without inventing a cause or new hard requirement. "
         "No candidate passed: do not claim a proposal exists, a goal was achieved or any map was changed. "
         "Do not expose internal fields, add cards, or promise an unverified mechanism. "
-        "The supplied StageSnapshot is the only current map authority."
+        "The supplied StageSnapshot is the only current map authority. "
+        + _visible_reply_style()
     )}, {"role": "user", "content": json.dumps({
         "designerTurns": context.get("requirementUserTurns") or [],
         "requirements": verified["record"], "failureCode": failure.code,
@@ -9683,9 +9700,10 @@ async def _review_intent_candidate_async(
         "require Stage evidence, two effects, or an uncertainty boundary. Only for candidate, bodyValid "
         "also checks semantic agreement with the evidence-bound claims. Stage facts are verified by the "
         "server. Sentence counts, depth, two effects, uncertainty phrasing and repetition are quality "
-        "issues only: report them in issues without setting bodyValid=false. "
+        "issues only: report them in issues without setting bodyValid=false. A short complete "
+        "answer needs no extra analysis, route passage, personal reflection, humor or summary. "
         "relation is none without a candidate or active inclination, otherwise compatible, conflict, "
-        "or unclear. conflict must cite exact active IDs and explain in 2-4 first-person sentences in "
+        "or unclear. conflict must cite exact active IDs and explain directly in "
         f"{response_language} why the new and old directions cannot both guide the same decision; never "
         "choose, recommend compromise, or demand revision. reviewedActiveClaims may provide claims only "
         "for legacy active inclinations whose evidenceText supports them unambiguously; otherwise omit. "
@@ -11980,8 +11998,8 @@ def _messages_with_validation_feedback(messages, validation_feedback, task=None)
     )
     if any(marker in str(validation_feedback).casefold() for marker in ("token limit", "too long", "cut off")):
         instruction += (
-            " Preserve the detailed map/design analysis, but compress only the route reasoning "
-            "to one short, verifiable passage; do not enumerate a full solver trace. End the "
+            " Preserve reliable content needed to answer the question and remove repetition, "
+            "including unnecessary route detail; do not enumerate a full solver trace. End the "
             "assistantMessage with a complete sentence."
         )
 
@@ -12041,8 +12059,8 @@ def _plain_messages_with_validation_feedback(
         instruction = (
             "Your previous reply for this same request was cut off or exceeded the visible "
             "response limit. Write a fresh, complete reply rather than continuing the partial "
-            "text. Preserve the useful design observations, causes, consequences, and trade-offs; "
-            "only compress the route reasoning into one short verifiable passage, without an "
+            "text. Preserve the reliable observations and trade-offs needed to answer the question; "
+            "remove repetition and unnecessary route detail, without an "
             "exhaustive solver trace. Do not mention this correction to the designer. End with "
             "a complete conclusion."
         )
@@ -12058,7 +12076,7 @@ def _plain_messages_with_validation_feedback(
     elif "route reasoning" in feedback_lower:
         instruction = (
             "Your previous reply used an over-expanded route trace. Write a fresh reply that "
-            "keeps the detailed design analysis, but reduces route reasoning to one short, "
+            "preserves reliable content needed to answer the question and reduces route reasoning to a short, "
             "grounded passage with only the key corridor, endpoint, and design consequence. "
             "Do not enumerate every coordinate, movement, alternative, BFS result, or solver "
             "state. Do not mention this correction to the designer."
@@ -15914,7 +15932,7 @@ def _personal_reflection_sentences(value):
 
 
 def _recover_overlong_personal_reflection(value, *, language="en"):
-    """Compress only repetitive first-person reflection, never the analysis body."""
+    """Deduplicate reflections without imposing a quota on distinct views."""
     original = str(value or "").strip()
     reflections = _personal_reflection_sentences(original)
     result = {
@@ -15922,7 +15940,7 @@ def _recover_overlong_personal_reflection(value, *, language="en"):
         "reflectionSentenceCount": len(reflections),
         "reflectionDroppedSentenceCount": 0,
     }
-    if len(reflections) <= PERSONAL_REFLECTION_SENTENCE_LIMIT:
+    if len(reflections) < 2:
         return original, result
 
     kept_reflections = []
@@ -15934,17 +15952,21 @@ def _recover_overlong_personal_reflection(value, *, language="en"):
         ):
             continue
         kept_reflections.append(sentence)
-        if len(kept_reflections) >= PERSONAL_REFLECTION_SENTENCE_LIMIT:
-            break
 
     reflection_set = set(reflections)
     kept_set = set(kept_reflections)
+    emitted_reflections = set()
     kept_sentences = []
     for sentence in _content_block_sentences(original):
-        if sentence not in reflection_set or sentence in kept_set:
+        if sentence not in reflection_set:
             kept_sentences.append(sentence)
+        elif sentence in kept_set and sentence not in emitted_reflections:
+            kept_sentences.append(sentence)
+            emitted_reflections.add(sentence)
         else:
             result["reflectionDroppedSentenceCount"] += 1
+    if not result["reflectionDroppedSentenceCount"]:
+        return original, result
     separator = "" if re.search(r"[\u3400-\u9fff]", original) else " "
     recovered = separator.join(kept_sentences).strip()
     result["changed"] = recovered != original
@@ -18776,10 +18798,8 @@ def _ensure_stage_one_orientation(message, rows, language):
         )
         map_markers = ("水", "墙", "箱", "目标", "玩家", "路线", "通道", "区域", "格")
         compact_guidance = (
-            "你可以先说说你的第一反应或试玩当前关卡，让直觉和手指都来投一票。"
-            "有哪里不对味，就指出来，我们一起探讨、制定方案，或者你自己在右侧面板进行局部编辑。"
-            "我能协助的限于小范围更改、提供可审查的改动内容，以及帮你梳理思路；"
-            "较大的改动我建议由你亲手试一试，我在旁边当参谋，不抢你的设计师席位。"
+            "可以先聊聊或试玩，再一起商量；你也可以在右侧局部编辑。"
+            "我能帮你梳理思路、提出可审查的小改动；大改由你掌舵，我当参谋。"
         )
     else:
         process_markers = (
@@ -18788,9 +18808,8 @@ def _ensure_stage_one_orientation(message, rows, language):
         )
         map_markers = ("water", "wall", "box", "target", "player", "route", "corridor", "area", "tile")
         compact_guidance = (
-            "You can share a first reaction or play the Stage and let your fingers weigh in. "
-            "I support only small, reviewable edits and help you think through ideas; "
-            "for a broad rebuild, you keep the designer's chair and I can be your sounding board."
+            "Share a reaction or try playing; you can also make local edits in the right panel. "
+            "I help think through small, reviewable changes; you steer any broad rebuild, with me as a sounding board."
         )
 
     kept = []
