@@ -699,6 +699,10 @@ class CoCreationSessionTests(unittest.TestCase):
         cls.temp_directory.cleanup()
 
     def setUp(self):
+        # These fixtures exercise immutable legacy-topic behavior. V2 has its own HTTP/provider tests.
+        legacy_discovery = patch("binary_routes.should_start", return_value=False)
+        legacy_discovery.start()
+        self.addCleanup(legacy_discovery.stop)
         understanding_patch = patch.object(
             backend, "classify_turn_understanding",
             side_effect=self._fake_turn_understanding,

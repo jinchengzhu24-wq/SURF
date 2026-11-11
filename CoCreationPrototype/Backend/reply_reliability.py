@@ -4,6 +4,7 @@ import json
 import time
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
+from proposal_diagnostics import safe_issues
 
 
 REPLY_PIPELINE_VERSION = "ordinary-harness-2026-10-13-v2"
@@ -16,6 +17,9 @@ def failure_reason(error):
         return "UPSTREAM_TIMEOUT"
     if isinstance(error, json.JSONDecodeError):
         return "INVALID_JSON"
+    issues = safe_issues(error)
+    if issues:
+        return issues[0]["reasonCode"]
     code = getattr(error, "code", "")
     if isinstance(code, str) and code and code.replace("_", "").isalnum() and code.upper() == code:
         return code[:80]

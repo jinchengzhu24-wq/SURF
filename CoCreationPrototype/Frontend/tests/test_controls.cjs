@@ -810,3 +810,49 @@ test("hover help on disabled actions retains the existing reason and button stat
     assert.equal(result[2], true);
     assert.equal(result[3], null);
 });
+test("binary questions render separated text and deterministic short buttons", () => {
+    const { context, created } = loadApp();
+    vm.runInContext(`
+        state.language = "zh-CN";
+        state.session.proposalFlowState = {active:true,interactionMode:"binary_choice",status:"clarifying",pendingQuestion:{questionId:"q1"}};
+        const q = {questionId:"q1",topicId:"topic",baseVersionId:"v1",question:"先松开哪边？",note:"另一边保持。",status:"pending",sourceLanguage:"zh-CN",
+            choices:[{choiceId:"a",letter:"A",label:"左边松口气！"},{choiceId:"b",letter:"B",label:"右边宽一点！"}]};
+        globalThis.selectedBinaryAction = null;
+        submitBinaryAction = async action => { globalThis.selectedBinaryAction = action; };
+        renderBinaryQuestion(q, document.createElement("div"), {language:"en"});
+    `, context);
+    const buttons = created.filter(n => n.className.includes("binary-choice-button"));
+    assert.equal(buttons.length, 2);
+    assert.equal(buttons[0].textContent, "A: 左边松口气！");
+    buttons[0].click();
+    assert.equal(vm.runInContext("selectedBinaryAction.choiceId", context), "a");
+    assert.equal(vm.runInContext("selectedBinaryAction.displayLanguage", context), "zh-CN");
+    assert.equal(vm.runInContext("'label' in selectedBinaryAction", context), false);
+});
+
+test("binary controls block free text, dirty/stale choices and cancel during generation", async () => {
+    const { context } = loadApp();
+    vm.runInContext(`
+        state.session.proposalFlowState = {active:true,interactionMode:"binary_choice",status:"clarifying",pendingQuestion:{questionId:"q1"}};
+        elements.messageInput.value = "This must not send";
+        updateControls();
+    `, context);
+    assert.equal(vm.runInContext("elements.messageInput.disabled && elements.sendButton.disabled", context), true);
+    assert.equal(vm.runInContext("canChooseBinary('q1')", context), true);
+    assert.equal(vm.runInContext("canChooseBinary('old')", context), false);
+    vm.runInContext("state.dirty = true", context);
+    assert.equal(vm.runInContext("canChooseBinary('q1')", context), false);
+    vm.runInContext("state.dirty = false;state.busy = true", context);
+    assert.equal(vm.runInContext("canChooseBinary('q1')", context), false);
+    await vm.runInContext("sendMessage({preventDefault(){}})", context);
+    assert.equal(vm.runInContext("state.pendingMessage", context), null);
+});
+
+test("compact binary purple card keeps coordinates and history in details", () => {
+    const { context } = loadApp();
+    const node = vm.runInContext(`createProposalPresentationV2({schemaVersion:2,binaryCompact:true,
+        verifiedActions:["Remove left water"],requestText:"Make it simpler",answerTexts:["A: left"],reason:"Open this area",
+        changes:[{row:3,column:3,before:"@",after:"."}],solution:{minimumMoves:4,pushesOnMinimumMoveSolution:2}})`, context);
+    assert.equal(node.children.some(n => n.tagName === "details"), true);
+    assert.equal(node.children.filter(n => n.tagName === "p").some(n => n.textContent.includes("(3, 3)")), false);
+});

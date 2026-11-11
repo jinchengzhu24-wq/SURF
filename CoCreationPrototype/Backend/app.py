@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager, suppress
@@ -49,6 +50,8 @@ from demo_level_generator import generate_demo_level
 from conversation_evidence import build_dialogue_evidence, with_latest
 import component_recovery
 import proposal_options
+import binary_discovery
+import binary_routes
 from reply_reliability import CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, ReplyTrace, trace_reply, failure_reason
 from proposal_diagnostics import (ProposalDiagnostic, CURRENT_PROPOSAL_DIAGNOSTIC, proposal_phase, trace_proposal)
 from llm_client import validate_ai_edit_diff
@@ -665,6 +668,18 @@ class MessageRequest(StrictModel):
     challengeId: str | None = None
     challengeChoice: Literal["ai", "user"] | None = None
     exitChallenge: bool = False
+
+
+class BinaryCancelRequest(StrictModel):
+    baseVersionId: str
+    topicId: str
+    idempotencyKey: str
+
+
+class BinaryChoiceRequest(BinaryCancelRequest):
+    questionId: str
+    choiceId: str
+    displayLanguage: Literal["en", "zh-CN"]
 
 
 class ChallengeReviewRetryRequest(StrictModel):
@@ -2897,6 +2912,24 @@ def send_message(
                             database, get_session(database, session_id))
 
 
+@app.post("/api/sessions/{session_id}/proposal-discovery/choices")
+def choose_binary_proposal(session_id: str, payload: BinaryChoiceRequest, request: Request,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME)):
+    for field in ("idempotencyKey", "topicId", "questionId", "choiceId", "baseVersionId"):
+        _validate_identifier(getattr(payload, field), field)
+    with message_request_lock(session_id, payload.idempotencyKey):
+        return binary_routes.choose(sys.modules[__name__], session_id, payload, request, access_cookie)
+
+
+@app.post("/api/sessions/{session_id}/proposal-discovery/cancel")
+def cancel_binary_proposal(session_id: str, payload: BinaryCancelRequest,
+    access_cookie: str | None = Cookie(None, alias=SESSION_COOKIE_NAME)):
+    for field in ("idempotencyKey", "topicId", "baseVersionId"):
+        _validate_identifier(getattr(payload, field), field)
+    with message_request_lock(session_id, payload.idempotencyKey):
+        return binary_routes.cancel(sys.modules[__name__], session_id, payload, access_cookie)
+
+
 @app.post("/api/sessions/{session_id}/challenge-reviews/{review_id}/retry")
 def retry_challenge_review(
     session_id: str,
@@ -3009,6 +3042,12 @@ def _send_message_locked_impl(
 ):
     message_started_at = getattr(request.state, "llm_started_at", time.monotonic())
     precomputed_understanding = None
+    if payload.action != "none":
+        with connect() as database:
+            require_active_session(database, session_id, access_cookie)
+            active_binary = binary_discovery.current_topic(database, session_id, payload.baseVersionId)
+            if active_binary and active_binary["status"] in binary_discovery.ACTIVE:
+                raise ApiError(409, "PROPOSAL_CHOICE_REQUIRED", "Finish or cancel the current A/B proposal first.")
     if payload.action == "none":
         with connect() as read_database:
             read_session = require_active_session(read_database, session_id, access_cookie)
@@ -3035,8 +3074,20 @@ def _send_message_locked_impl(
                 WHERE session_id = ? AND request_id = ? AND role = 'assistant'""",
                 (session_id, payload.idempotencyKey),
             ).fetchone()
+            binary_receipt = binary_routes._receipt(read_database, session_id, payload.idempotencyKey)
+            if binary_receipt and binary_receipt["request"].get("kind") == "start":
+                expected = {"kind": "start", "baseVersionId": payload.baseVersionId,
+                            "content": content, "requestProposal": payload.requestProposal}
+                if binary_receipt["request"] != expected:
+                    raise ApiError(409, "IDEMPOTENCY_CONFLICT", "This key belongs to another action.")
+                if binary_receipt["status"] == "done":
+                    return serialize_session(read_database, session_id)
             if already_answered is None:
                 require_current_base(read_session, payload.baseVersionId)
+                binary_topic = binary_discovery.current_topic(read_database, session_id, payload.baseVersionId)
+                if binary_topic and binary_topic["status"] in binary_discovery.ACTIVE and (
+                        payload.idempotencyKey != binary_topic["initialMessageKey"] or content != binary_topic["initialRequest"]):
+                    raise ApiError(409, "PROPOSAL_CHOICE_REQUIRED", "Use the current A/B buttons, retry, or cancel this proposal.")
             saved_understanding = read_database.execute(
                 """SELECT payload_json FROM audit_events
                 WHERE session_id = ? AND event_type = 'turn_understanding'
@@ -3110,6 +3161,17 @@ def _send_message_locked_impl(
                     "proposalUnderstanding": None, "conversationOnly": True,
                     "semanticPolicyVersion": 1,
                 }
+    if payload.action == "none" and precomputed_understanding is not None and already_answered is None:
+        with connect() as database:
+            session = require_active_session(database, session_id, access_cookie)
+            require_current_base(session, payload.baseVersionId)
+            binary_context = build_llm_context(database, session_id, get_current_version(database, session))
+            binary_topic = binary_discovery.current_topic(database, session_id, payload.baseVersionId)
+            retry_binary = bool(binary_topic and binary_topic["status"] in binary_discovery.ACTIVE
+                and binary_topic["initialMessageKey"] == payload.idempotencyKey)
+        if retry_binary or binary_routes.should_start(payload, precomputed_understanding, binary_context):
+            return binary_routes.start(sys.modules[__name__], session_id, payload, content,
+                precomputed_understanding, request, access_cookie)
     with connect(immediate=True) as database:
         session = require_active_session(database, session_id, access_cookie)
         prior_user = database.execute(
@@ -5525,7 +5587,7 @@ def _proposal_origin_texts(stage_context):
         for item in discovery.get("answers") or []
         if isinstance(item, dict) and _inline_display_text(item.get("answerText"))
     ][:3]
-    if request_text and answer_texts:
+    if request_text and (answer_texts or context.get("binaryDiscovery")):
         return request_text[:2000], [item[:2000] for item in answer_texts]
 
     source_offer = context.get("sourceProposalOffer") or {}
@@ -5572,10 +5634,10 @@ def _verified_offer_presentation_v2(
 
 
 @proposal_phase('freeze', 'brief')
-def _materialize_verified_automatic_offer(execution, base_rows, language, stage_context):
+def _materialize_verified_automatic_offer(execution, base_rows, language, stage_context, *, deadline=None):
     """Freeze a validated semantic candidate into the existing exact purple-card binding."""
     _execute_revision_candidate_or_api_error(base_rows, execution)
-    validation = _solve_changed_proposal_or_api_error(base_rows, execution.proposed_rows)
+    validation = _solve_changed_proposal_or_api_error(base_rows, execution.proposed_rows, **({"deadline": deadline} if deadline is not None else {}))
     strategies = (execution.revision_contract or {}).get("strategies") or []
     selected_index = (execution.proposal_diagnostics or {}).get("selectedStrategyIndex")
     if not isinstance(selected_index, int) or not 1 <= selected_index <= len(strategies):
@@ -5655,8 +5717,8 @@ def _materialize_verified_automatic_offer(execution, base_rows, language, stage_
         from llm_client import validate_frozen_requirements
         try:
             outcomes = validate_frozen_requirements(base_rows, validation.rows, revision_workflow,
-                (stage_context or {}).get("validation") or validate_and_solve(base_rows), validation,
-                (stage_context or {}).get("entityBindings"))
+                (stage_context or {}).get("validation") or validate_and_solve(base_rows, **({"deadline": deadline} if deadline is not None else {})), validation,
+                (stage_context or {}).get("entityBindings"), **({"deadline": deadline} if deadline is not None else {}))
         except SemanticConstraintError as exception:
             raise ApiError(422, "SEMANTIC_POSTCONDITION_FAILED", "The candidate violated a fixed requirement or reversed a design direction.") from exception
         revision_workflow["goalOutcomes"] = outcomes
@@ -8875,6 +8937,10 @@ def _pending_assistant_translations(database, session_id, language, turn_ids):
             "entityBindings": load_json(row["entity_bindings_json"]) or {},
         }
         coordinate_links = guidance.get("coordinateLinks") or []
+        if guidance.get("proposalQuestion"):
+            item["proposalQuestion"] = guidance["proposalQuestion"]
+        if proposal_presentation.get("binaryCompact"):
+            item["proposalVerifiedActions"] = proposal_presentation.get("verifiedActions") or []
         if coordinate_links:
             item["coordinateLinks"] = coordinate_links
         items.append(item)
@@ -8884,6 +8950,8 @@ def _pending_assistant_translations(database, session_id, language, turn_ids):
 
 def _translated_guidance(source_guidance, translated):
     guidance = dict(source_guidance or {})
+    if guidance.get("proposalQuestion") and translated.get("proposalQuestion"):
+        guidance["proposalQuestion"] = translated["proposalQuestion"]
     guidance["followUpQuestion"] = translated["followUpQuestion"]
     guidance["intentHypothesis"] = translated["intentHypothesis"]
     source_offer = guidance.get("proposalOffer")
@@ -8898,6 +8966,8 @@ def _translated_guidance(source_guidance, translated):
         if isinstance(presentation, dict):
             presentation = dict(presentation)
             if presentation.get("schemaVersion") == 2:
+                if presentation.get("binaryCompact") and "proposalVerifiedActions" in translated:
+                    presentation["verifiedActions"] = translated["proposalVerifiedActions"]
                 if translated["proposalPresentationReason"] is not None:
                     presentation["reason"] = translated["proposalPresentationReason"]
             else:
@@ -12219,12 +12289,15 @@ def _proposal_presentation_for_binding(
         route_pushes = solution.get("pushesOnMinimumMoveSolution")
         if (
             request_text
-            and answer_texts
             and isinstance(minimum_moves, int)
             and isinstance(route_pushes, int)
         ):
             return {
                 "schemaVersion": 2,
+                **({"binaryCompact": True,
+                    "verifiedActions": list(source_presentation.get("verifiedActions") or []),
+                    "verification": source_presentation.get("verification", "")}
+                   if source_presentation.get("binaryCompact") else {}),
                 "requestText": request_text[:2000],
                 "answerTexts": [item[:2000] for item in answer_texts],
                 "changes": [
@@ -13021,13 +13094,13 @@ def _solve_or_api_error(rows):
 
 
 @proposal_phase("structure_and_solve", "candidate")
-def _validate_changed_proposal(base_rows, proposed_rows):
+def _validate_changed_proposal(base_rows, proposed_rows, *, deadline=None):
     try:
         validate_ai_edit_diff(base_rows, proposed_rows)
     except ValueError as error:
         raise LevelValidationError("PROTECTED_EDIT", "AI revisions may edit water and internal walls only.",
             details=getattr(error, "details", {})) from error
-    validation = validate_and_solve(proposed_rows)
+    validation = validate_and_solve(proposed_rows, **({"deadline": deadline} if deadline is not None else {}))
 
     if not describe_diff(base_rows, validation.rows):
         raise LevelValidationError(
@@ -13039,9 +13112,9 @@ def _validate_changed_proposal(base_rows, proposed_rows):
 
 
 @proposal_phase('structure_and_solve', 'candidate')
-def _solve_changed_proposal_or_api_error(base_rows, proposed_rows):
+def _solve_changed_proposal_or_api_error(base_rows, proposed_rows, *, deadline=None):
     try:
-        return _validate_changed_proposal(base_rows, proposed_rows)
+        return _validate_changed_proposal(base_rows, proposed_rows, **({"deadline": deadline} if deadline is not None else {}))
     except LevelValidationError as error:
         raise ApiError(400, error.code, str(error), details=error.details) from error
 

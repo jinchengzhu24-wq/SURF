@@ -1842,6 +1842,10 @@ function renderAssistantBubble(turn, bubble) {
 
 function renderAssistantBubbleContent(turn, bubble) {
     const localized = localizedAssistantTurn(turn);
+    if (localized.guidance?.proposalQuestion) {
+        renderBinaryQuestion(localized.guidance.proposalQuestion, bubble, turn);
+        return;
+    }
     const proposal = proposalForTurn(turn.turnId);
     const guidance = guidanceForDisplay(localized.guidance || {}, proposal);
     let renderedIntent = false;
@@ -2668,6 +2672,37 @@ function createProposalPresentation(presentation) {
 function createProposalPresentationV2(presentation) {
     const container = document.createElement("div");
     container.className = "proposal-plan-details proposal-plan-details-v2";
+    if (presentation.binaryCompact) {
+        const title = document.createElement("strong");
+        title.textContent = state.language === "zh-CN" ? "局部调整方案" : "Local revision plan";
+        const summary = document.createElement("p");
+        const groups = new Map();
+        (presentation.changes || []).forEach(change => {
+            const label = `${proposalPresentationTileLabel(change.before)} → ${proposalPresentationTileLabel(change.after)}`;
+            groups.set(label, (groups.get(label) || 0) + 1);
+        });
+        summary.textContent = [...groups].map(([label, count]) => `${label}: ${count}${state.language === "zh-CN" ? "格" : " tiles"}`).join("; ");
+        const actions = document.createElement("p");
+        actions.textContent = (state.language === "zh-CN" ? "回应你的选择：" : "Your selected actions: ")
+            + (presentation.verifiedActions || []).join(" / ");
+        const verified = document.createElement("p");
+        verified.textContent = state.language === "zh-CN"
+            ? "修改权限、所选动作与可解性已验证；实际体验等你试玩。"
+            : "Permissions, selected actions and solvability verified; experience needs playtesting.";
+        const details = document.createElement("details");
+        const caption = document.createElement("summary");
+        caption.textContent = state.language === "zh-CN" ? "逐格变化与选择记录" : "Tile changes and choice history";
+        details.append(caption, createProposalPresentationV2({ ...presentation, binaryCompact: false }));
+        container.append(title, summary);
+        if ((presentation.verifiedActions || []).length) container.appendChild(actions);
+        if (presentation.reason) {
+            const limits = document.createElement("p");
+            limits.textContent = presentation.reason;
+            container.appendChild(limits);
+        }
+        container.append(verified, details);
+        return container;
+    }
 
     const appendSection = (labelKey, values) => {
         const items = (Array.isArray(values) ? values : [values])
@@ -3052,6 +3087,9 @@ function updateControls() {
     const selectedHistoricalStage = state.selectedVersionId !== state.session.currentVersionId;
     const intentConflictPending = selectedStageHasPendingIntentConflict();
     const proposalFlowStatus = state.session?.proposalFlowState?.status || "inactive";
+    const binaryActive = binaryFlowActive();
+    elements.chatForm.classList.toggle("is-binary", binaryActive);
+    scheduleBinaryRefresh();
     const proposalPlanning = proposalFlowStatus === "planning";
     const proposalRetryPending = proposalFlowStatus === "retry_pending" && Boolean(state.pendingMessage);
     const interactionBusy = state.busy || state.unityPlayActive;
@@ -3067,8 +3105,10 @@ function updateControls() {
         || !selectedVersion()
         || (!selectedHistoricalStage && !expired && (state.dirty || pending));
     elements.messageInput.disabled = interactionBusy || !editable || intentConflictPending
-        || proposalPlanning || proposalRetryPending;
-    elements.messageInput.placeholder = intentConflictPending
+        || proposalPlanning || proposalRetryPending || binaryActive;
+    elements.messageInput.placeholder = binaryActive
+        ? (state.language === "zh-CN" ? "请点选 A/B；想重新描述时，先取消本次方案。" : "Choose A or B. Cancel this proposal to describe a different request.")
+        : intentConflictPending
         ? t("intentConflictPlaceholder")
         : proposalPlanning
             ? t("proposalPlanningPlaceholder")
@@ -3090,8 +3130,18 @@ function updateControls() {
     elements.proposalRequestButton.classList.toggle("is-active", proposalActive);
     elements.proposalRequestButton.setAttribute("aria-pressed", proposalActive ? "true" : "false");
     elements.sendButton.disabled = interactionBusy || !editable || intentConflictPending
-        || proposalPlanning || proposalRetryPending
+        || proposalPlanning || proposalRetryPending || binaryActive
         || !elements.messageInput.value.trim();
+    const cancel = document.getElementById("cancelProposalButton");
+    if (cancel) {
+        cancel.hidden = !binaryActive;
+        cancel.textContent = state.language === "zh-CN" ? "取消本次方案" : "Cancel proposal";
+        cancel.disabled = interactionBusy || expired || proposalPlanning || selectedHistoricalStage;
+        cancel.onclick = cancelBinaryProposal;
+    }
+    document.querySelectorAll(".binary-choice-button").forEach(button => {
+        button.disabled = !canChooseBinary(button.dataset.questionId);
+    });
     document.querySelectorAll(".question-feedback-button").forEach(button => {
         button.disabled = interactionBusy || !editable
             || state.questionFeedbackBusy.has(button.dataset.feedbackKey || "");
@@ -3122,6 +3172,11 @@ function renderTranslationStatus() {
 }
 
 function selectedReplyFailure() {
+    if (binaryFlowActive() && (state.session.proposalFlowState.retryable || state.pendingBinary && state.chatStatus === "error")) {
+        return { error: state.chatError, message: state.language === "zh-CN"
+            ? "本次方案尚未完成，已保存你的选择。可以重试或取消。"
+            : "Your choices are saved. Retry or cancel this proposal.", retryAction: retryBinaryProposal };
+    }
     if (canEditSelected() && state.chatStatus === "error"
         && (!state.pendingMessage || state.pendingMessage.baseVersionId === state.selectedVersionId)) {
         return { error: state.chatError, retryAction: state.chatError?.retryable && state.pendingMessage
@@ -3235,6 +3290,7 @@ async function ensureAssessment(versionId) {
 
 async function sendMessage(event) {
     event.preventDefault();
+    if (binaryFlowActive()) return;
     const content = elements.messageInput.value.trim();
     if (!content || state.busy) return;
 
@@ -3285,6 +3341,120 @@ function toggleProposalMode() {
 
 function proposalFlowActive() {
     return Boolean(state.session?.proposalFlowState?.active);
+}
+
+function binaryFlowActive() {
+    return state.session?.proposalFlowState?.interactionMode === "binary_choice" && proposalFlowActive();
+}
+
+function canChooseBinary(questionId) {
+    const flow = state.session?.proposalFlowState;
+    return binaryFlowActive() && flow.status === "clarifying" && !state.busy && !state.unityPlayActive
+        && !state.dirty && !deadlineExpired() && canEditSelected()
+        && state.selectedVersionId === state.session.currentVersionId
+        && flow.pendingQuestion?.questionId === questionId && !flow.pendingQuestion.selectedChoiceId;
+}
+
+function renderBinaryQuestion(question, bubble, turn) {
+    const heading = document.createElement("p");
+    heading.className = "binary-question";
+    heading.textContent = question.question;
+    bubble.appendChild(heading);
+    if (question.note) {
+        const note = document.createElement("p");
+        note.className = "binary-note";
+        note.textContent = question.note;
+        bubble.appendChild(note);
+    }
+    const choices = document.createElement("div");
+    choices.className = "binary-choices";
+    question.choices.forEach(choice => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "secondary-button binary-choice-button";
+        button.dataset.questionId = question.questionId;
+        button.textContent = `${choice.letter}: ${choice.label}`;
+        const selected = question.selectedChoiceId === choice.choiceId;
+        button.classList.toggle("is-selected", selected);
+        button.setAttribute("aria-pressed", String(selected));
+        button.disabled = !canChooseBinary(question.questionId) || question.status !== "pending";
+        button.addEventListener("click", () => {
+            if (!canChooseBinary(question.questionId)) return;
+            const payload = { baseVersionId: question.baseVersionId, topicId: question.topicId,
+                questionId: question.questionId, choiceId: choice.choiceId,
+                displayLanguage: question.sourceLanguage || turn.language,
+                idempotencyKey: uniqueId("binary-choice") };
+            submitBinaryAction({ kind: "choice", ...payload });
+        });
+        choices.appendChild(button);
+    });
+    bubble.appendChild(choices);
+}
+
+function binaryStorageKey() { return `cocreationBinaryAction:${state.sessionId}`; }
+
+async function cancelBinaryProposal() {
+    if (!binaryFlowActive() || state.busy || state.session.proposalFlowState.status === "planning") return;
+    return submitBinaryAction({ kind: "cancel", baseVersionId: state.session.currentVersionId,
+        topicId: state.session.proposalFlowState.topicId, idempotencyKey: uniqueId("binary-cancel") });
+}
+
+async function retryBinaryProposal() {
+    if (state.busy) return;
+    let stored;
+    try { stored = JSON.parse(localStorage.getItem(binaryStorageKey()) || "null"); } catch (_) { stored = null; }
+    const action = state.session?.proposalFlowState?.retryAction || state.pendingBinary || stored;
+    if (!action || action.baseVersionId !== state.session.currentVersionId) return;
+    if (action.kind === "start") {
+        const { kind, ...pending } = action;
+        state.pendingMessage = pending;
+        return submitPendingMessage();
+    }
+    return submitBinaryAction(action);
+}
+
+async function submitBinaryAction(action) {
+    if (state.busy) return;
+    state.pendingBinary = action;
+    localStorage.setItem(binaryStorageKey(), JSON.stringify(action));
+    state.busy = state.chatBusy = true;
+    state.chatBusyVersionId = action.baseVersionId;
+    state.chatStatus = "waiting";
+    state.chatError = null;
+    startChatTimer();
+    updateControls();
+    try {
+        const { kind, ...body } = action;
+        state.session = await api(`/api/sessions/${state.sessionId}/proposal-discovery/${kind === "cancel" ? "cancel" : "choices"}`,
+            { method: "POST", body, timeoutMs: MESSAGE_REQUEST_TIMEOUT_MS });
+        state.pendingBinary = null;
+        localStorage.removeItem(binaryStorageKey());
+        clearPendingMessage();
+        setProposalMode(false);
+        state.chatStatus = "idle";
+    } catch (error) {
+        state.chatError = error;
+        state.chatStatus = "error";
+        try { state.session = await api(`/api/sessions/${state.sessionId}`); } catch (_) { /* Keep recoverable action. */ }
+        if (!error.retryable && error.code !== "BINARY_BUSY") {
+            state.pendingBinary = null;
+            localStorage.removeItem(binaryStorageKey());
+        }
+    } finally {
+        stopChatTimer();
+        state.busy = state.chatBusy = false;
+        state.chatBusyVersionId = "";
+        render();
+    }
+}
+
+function scheduleBinaryRefresh() {
+    if (!binaryFlowActive() || state.session.proposalFlowState.status !== "planning" || state.busy || state.binaryRefreshTimer) return;
+    state.binaryRefreshTimer = window.setTimeout(async () => {
+        state.binaryRefreshTimer = null;
+        if (!binaryFlowActive() || state.busy) return;
+        try { await refreshSession(); } catch (_) { scheduleBinaryRefresh(); }
+    }, 4000);
 }
 
 async function retryPendingMessage() {
@@ -4972,11 +5142,20 @@ function restoreComposerDraft() {
 }
 
 function recoverPendingMessage() {
+    if (binaryFlowActive()) {
+        state.pendingMessage = null;
+        return;
+    }
     const stored = readPendingMessage();
     const turns = (state.session?.turns || []).filter(
         turn => turn.versionId === state.session.currentVersionId
     );
     const finalTurn = turns[turns.length - 1];
+    if (state.session?.proposalFlowState?.interactionMode === "binary_choice"
+        && state.session.proposalFlowState.recordedUserTurnIds?.includes(finalTurn?.turnId)) {
+        clearPendingMessage();
+        return;
+    }
     const unmatched = finalTurn?.role === "user"
         && finalTurn.requestId
         && !turns.some(turn => turn.role === "assistant" && turn.requestId === finalTurn.requestId)

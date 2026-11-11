@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import time
 
 
 WIDTH = 12
@@ -48,7 +49,7 @@ class LevelValidationResult:
         }
 
 
-def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES):
+def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadline=None):
     normalized = validate_rows(rows)
     walkable = {
         (x, y)
@@ -69,6 +70,8 @@ def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES):
     )
 
     while queue:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("The shared solver deadline was exhausted.")
         current_player, current_boxes, trace, pushes = queue.popleft()
 
         if set(current_boxes) == set(targets):
@@ -124,7 +127,7 @@ def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES):
     )
 
 
-def minimum_pushes(rows, maximum_search_states=MAX_SEARCH_STATES):
+def minimum_pushes(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadline=None):
     """Return the fewest pushes needed to solve a valid Stage.
 
     The ordinary validator optimizes total player moves and reports the pushes
@@ -147,6 +150,8 @@ def minimum_pushes(rows, maximum_search_states=MAX_SEARCH_STATES):
     directions = ((0, -1), (0, 1), (-1, 0), (1, 0))
 
     while pending:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("The shared minimum-push deadline was exhausted.")
         current_player, current_boxes = pending.popleft()
         current_state = (current_player, current_boxes)
         current_cost = costs[current_state]

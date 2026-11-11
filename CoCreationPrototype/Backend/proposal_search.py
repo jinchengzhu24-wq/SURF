@@ -591,6 +591,7 @@ def search_revision_plan(
     required_transitions=None,
     entity_bindings=None,
     excluded_map_fingerprints=None,
+    maximum_valid_candidates=MAX_VALID_CANDIDATES,
 ):
     search_started_at = time.monotonic()
     base_rows = tuple(base_rows)
@@ -676,7 +677,7 @@ def search_revision_plan(
                             else strategy.required_transitions
                         ),
                     )
-                    if len(verified) >= MAX_VALID_CANDIDATES:
+                    if len(verified) >= maximum_valid_candidates:
                         break
                 if depth < BEAM_DEPTH:
                     used_positions = frozenset().union(*(
@@ -696,14 +697,14 @@ def search_revision_plan(
             if (
                 diagnostics["constructedCandidates"] >= MAX_CONSTRUCTED_CANDIDATES
                 or diagnostics["deadlineReached"]
-                or len(verified) >= MAX_VALID_CANDIDATES
+                or len(verified) >= maximum_valid_candidates
             ):
                 break
             beam = _select_beam(next_states)
         if (
             diagnostics["constructedCandidates"] >= MAX_CONSTRUCTED_CANDIDATES
             or diagnostics["deadlineReached"]
-            or len(verified) >= MAX_VALID_CANDIDATES
+            or len(verified) >= maximum_valid_candidates
         ):
             break
 

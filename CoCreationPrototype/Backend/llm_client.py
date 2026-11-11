@@ -143,7 +143,7 @@ CHAT_COMPACT_EXPERIMENT_ENV = "COCREATION_CHAT_COMPACT_EXPERIMENT"
 PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV = (
     "COCREATION_PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT"
 )
-PROMPT_VERSION = "cocreation-v64-gentle-reply-relief"
+PROMPT_VERSION = "cocreation-v66-binary-promises"
 INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS = 500
 INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS = 1400
 INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS = 1400
@@ -176,6 +176,10 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
     task = str(task or "chat")
     if task.endswith("_patch"):
         return patch_response_format()
+    if task == "translation_permission_review":
+        return {"type": "json_schema", "json_schema": {"name": "cocreation_translation_permission_review",
+            "strict": True, "schema": {"type": "object", "additionalProperties": False,
+                "properties": {"accepted": {"type": "boolean"}}, "required": ["accepted"]}}}
     if task == "proposal_clarification_review":
         schema = {"type": "object", "additionalProperties": False, "properties": {
             "bodyIssues": {"type": "array", "items": {"type": "string"}},
@@ -5026,6 +5030,8 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         candidate = cached.get("record") or {}
         try:
             restored = validate_requirement_record(requirement_model_view(candidate), turns, snapshot)
+            from binary_discovery import require_choice_coverage
+            require_choice_coverage(restored, stage_context.get("binaryChoices") or [])
         except (ValueError, TypeError, KeyError):
             continue
         restored.update({"topicId": candidate.get("topicId"), "evidenceSignature": cache_key,
@@ -5046,6 +5052,10 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 inherited.append(raw)
     messages = [{"role": "system", "content": REQUIREMENT_SEMANTICS + " " + (
         "Interpret this single authorized proposal topic into the supplied JSON schema. "
+        "selectedInterfaceChoices are explicit clicks, not inferred agreement. Cover EACH sourceTurnId "
+        "with its visible action meaning. Do not import hidden promise focus, coordinates or budgets as "
+        "user constraints. Concrete button promises receive a separate strict execution check; keep the "
+        "existing negotiable-goal policy for other goals. "
         "Every requirement must use an exact evidenceSpan and sourceTurnId from a designer turn. "
         "Question text is linguistic context only, never evidence of a user requirement or current map fact. "
         "The current StageSnapshot is the only map authority. Ignore 'I do not know', 'either is fine' "
@@ -5066,6 +5076,9 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         "Preserve all clear still-active directions. A later explicit correction can replace an earlier "
         "direction for the same property; an unclear reply cannot supersede it. "
         "Unspecified entities may be chosen from current snapshot labels within the water/internal-wall "
+        "editing scope. automaticBindings accepts ONLY existing entity LABELS (P, B1, T1, etc.), "
+        "never terrain names, cells, zones or invented IDs. It may be empty; terrain-only wishes do "
+        "not require choosing an entity. "
         "editing scope. Record those choices only in automaticBindings, never as explicit requirements "
         "or confirmed design memory. Never replace a designer's explicit entity. "
         "statements must be short, understandable, and in the response language; avoid new map claims. "
@@ -5078,6 +5091,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         "change. Never extract exact changes or coordinates from question text."
     )}, {"role": "user", "content": json.dumps({
         "designerTurns": turns, "answeredQuestions": discovery.get("answers") or [],
+        "selectedInterfaceChoices": stage_context.get("binaryChoices") or [],
         "currentStageSnapshot": snapshot, "responseLanguage": stage_context.get("responseLanguage", "en"),
         "editableComponents": ["water", "internal_walls"],
         "proposalUnderstanding": discovery.get("understanding") or {},
@@ -5121,8 +5135,18 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 repair_issues = component_issues
                 locked = {item["requirementId"]: raw for item, raw in valid_items}
                 raise ValueError(json.dumps(component_issues, ensure_ascii=False))
-            record = validate_requirement_record(payload, turns, snapshot)
             raw_by_id = {item["requirementId"]: raw for item, raw in valid_items}
+            try:
+                record = validate_requirement_record(payload, turns, snapshot)
+            except (ValueError, TypeError, KeyError):
+                locked = dict(raw_by_id)
+                raise
+            try:
+                from binary_discovery import require_choice_coverage
+                require_choice_coverage(record, stage_context.get("binaryChoices") or [])
+            except ValueError:
+                locked = dict(raw_by_id)
+                raise
             if any(raw_by_id.get(identity) != raw for identity, raw in locked.items()):
                 raise ValueError("A local repair changed a locked, previously valid requirement.")
             review_messages = [{"role": "system", "content": REQUIREMENT_SEMANTICS + " " + (
@@ -5139,6 +5163,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 "fill an unspecified goal but cannot replace an explicit binding. A short answer binds "
                 "to its supplied question. Reject 'early' interpreted as a fixed push count."
             )}, {"role": "user", "content": json.dumps({"designerTurns": turns,
+                "selectedInterfaceChoices": stage_context.get("binaryChoices") or [],
                 "answeredQuestions": discovery.get("answers") or [], "interpretation": record,
                 "proposalUnderstanding": discovery.get("understanding") or {}}, ensure_ascii=False)}]
             review_messages[1]["content"] = json.dumps({
@@ -5497,7 +5522,7 @@ def _apply_objective_policy_to_plan(plan, policy, preserved_components=None):
     return replace(plan, strategies=tuple(strategies))
 
 
-def _proposal_route_features(rows, validation, entity_bindings=None):
+def _proposal_route_features(rows, validation, entity_bindings=None, *, deadline=None):
     metrics = validation.as_dict() if hasattr(validation, "as_dict") else dict(validation or {})
     evidence = _proposal_clarification_route_evidence(
         rows,
@@ -5505,7 +5530,9 @@ def _proposal_route_features(rows, validation, entity_bindings=None):
         {"entityBindings": entity_bindings or {}},
     )
     try:
-        minimum = minimum_pushes(rows)
+        minimum = minimum_pushes(rows, deadline=deadline) if deadline is not None else minimum_pushes(rows)
+    except TimeoutError:
+        raise
     except Exception:
         minimum = None
     push_order = evidence.get("pushOrder") or []
@@ -5645,11 +5672,13 @@ def _objective_validating_proposal_validator(
     entity_bindings,
     evidence_by_fingerprint,
     revision_workflow=None,
+    deadline=None,
 ):
     baseline_features = _proposal_route_features(
         base_rows,
         baseline_validation,
         entity_bindings,
+        **({"deadline": deadline} if deadline is not None else {}),
     )
 
     @proposal_phase("structure_and_solve", "candidate")
@@ -5659,7 +5688,8 @@ def _objective_validating_proposal_validator(
             if proposal_validator is not None
             else validate_and_solve(candidate_rows)
         )
-        features = _proposal_route_features(candidate_rows, validation, entity_bindings)
+        features = _proposal_route_features(candidate_rows, validation, entity_bindings,
+            **({"deadline": deadline} if deadline is not None else {}))
         evidence = _objective_mechanism_evidence(
             base_rows,
             candidate_rows,
@@ -5681,6 +5711,9 @@ def _objective_validating_proposal_validator(
             evidence["goalRank"] = goal_rank(outcomes)
             if any(not x["passed"] for x in outcomes):
                 raise SemanticConstraintError(outcomes)
+        if (revision_workflow or {}).get("binaryPromises"):
+            from binary_discovery import check_promises
+            check_promises(base_rows, candidate_rows, revision_workflow["binaryPromises"], baseline_validation, validation)
         if policy.get("requiresMechanismEvidence") and not evidence["passed"]:
             raise ObjectiveEvidenceError(evidence)
         return validation
@@ -5691,13 +5724,19 @@ def _objective_validating_proposal_validator(
 
 
 @proposal_phase('requirement_postcondition', 'requirements')
-def validate_frozen_requirements(base_rows, candidate_rows, workflow, baseline_validation, candidate_validation, entity_bindings):
+def validate_frozen_requirements(base_rows, candidate_rows, workflow, baseline_validation, candidate_validation, entity_bindings, *, deadline=None):
+    if (workflow or {}).get("binaryPromises"):
+        from binary_discovery import check_promises, BinaryError
+        try:
+            check_promises(base_rows, candidate_rows, workflow["binaryPromises"], baseline_validation, candidate_validation)
+        except BinaryError as error:
+            raise SemanticConstraintError([{"reason": error.code, "passed": False}]) from error
     record = (workflow or {}).get("requirementRecord")
     if not isinstance(record, dict):
         return []
     outcomes = evaluate_requirements(base_rows, candidate_rows, record,
-        _proposal_route_features(base_rows, baseline_validation, entity_bindings),
-        _proposal_route_features(candidate_rows, candidate_validation, entity_bindings))
+        _proposal_route_features(base_rows, baseline_validation, entity_bindings, **({"deadline": deadline} if deadline is not None else {})),
+        _proposal_route_features(candidate_rows, candidate_validation, entity_bindings, **({"deadline": deadline} if deadline is not None else {})))
     promised = {x["requirementId"]: x for x in (workflow or {}).get("goalOutcomes") or []}
     failures = [x for x in outcomes if not x["passed"] or (
         promised.get(x["requirementId"], {}).get("status") == "fulfilled" and x["status"] != "fulfilled")]
@@ -6096,7 +6135,7 @@ def _generate_revision_search_proposal_sync(
         error.proposal_diagnostics = {"category": "coordinate_or_contract_conflict"}
         raise error from exception
     evidence_by_fingerprint = {}
-    baseline_validation = validate_and_solve(rows)
+    baseline_validation = validate_and_solve(rows, **({"deadline": deadline} if stage_context.get("binaryDiscovery") else {}))
     objective_validator = _objective_validating_proposal_validator(
         proposal_validator,
         rows,
@@ -6105,6 +6144,7 @@ def _generate_revision_search_proposal_sync(
         stage_context.get("entityBindings"),
         evidence_by_fingerprint,
         revision_contract.get("revisionWorkflow"),
+        deadline=deadline if stage_context.get("binaryDiscovery") else None,
     )
     exact_strategies = [
         item for item in revision_contract.get("strategies") or []
@@ -7307,6 +7347,8 @@ def _build_revision_execution_contract(plan, authorized_brief, stage_context=Non
         "revisionWorkflow": revision_workflow,
         "aiEditableTilesOnly": bool((stage_context or {}).get("aiEditableTilesOnly")),
     }
+    if (stage_context or {}).get("binaryPromises"):
+        contract["revisionWorkflow"]["binaryPromises"] = copy.deepcopy(stage_context["binaryPromises"])
     for strategy in contract["strategies"]:
         if strategy["minimumChangedCells"] > strategy["maximumChangedCells"]:
             raise ValueError(
@@ -8636,6 +8678,10 @@ def translate_turns(items, target_language, request_id, *, _deadline=None):
                 "Preserve the source tone and strength of judgment. Naturally rephrase existing "
                 "metaphor or humor when needed, but do not add jokes, intensify conclusions, or "
                 "change the relative appeal of options. Cards and status text must remain clear. "
+                "When a source has proposalQuestion, return that complete object too: translate only "
+                "question, note and choices[].label, retaining all IDs, letters, counts and status. "
+                "Treat its question, note and two buttons as one indivisible translation group. "
+                "When a source includes proposalVerifiedActions, return and translate that entire list in the same order. "
                 "Do not add advice, questions, claims, or explanations. Keep null values "
                 "null and keep every turnId unchanged. Translate each uiCueTexts item in "
                 "the same order. Return exactly {\"translations\":[{\"turnId\":\"...\","
@@ -9360,7 +9406,8 @@ def _translation_patch_request(payload, items, target_language, locked):
             translated[field] = (verified[field] if field in verified else restore_text(source[field], raw_item.get(field),
                 ("translations", index, field), prefix + "." + field))
         for field, source_texts in (("uiCueTexts", source.get("uiCueTexts") or []),
-                                  ("coordinateLinkTexts", [link["text"] for link in source.get("coordinateLinks") or []])):
+                                  ("coordinateLinkTexts", [link["text"] for link in source.get("coordinateLinks") or []]),
+                                  *((("proposalVerifiedActions", source["proposalVerifiedActions"]),) if "proposalVerifiedActions" in source else ())):
             if field == "coordinateLinkTexts" and not source_texts:
                 continue
             raw_texts = raw_item.get(field)
@@ -9394,7 +9441,7 @@ def _translation_patch_request(payload, items, target_language, locked):
 
 def prompt_translation_sources(items):
     return [{key: item[key] for key in ("turnId", "body", "followUpQuestion", "intentHypothesis",
-        "proposalOfferSummary", "proposalOfferRationale", "proposalSummary", "uiCueTexts", "disagreement")
+        "proposalOfferSummary", "proposalOfferRationale", "proposalSummary", "uiCueTexts", "disagreement", "proposalQuestion", "proposalVerifiedActions")
         if key in item} for item in items]
 
 
@@ -9413,7 +9460,8 @@ async def _translate_with_model_fallback(
     last_error = None
     validation_feedback = None
     locked_translations = {}
-    option_translation = any(((item.get("guidance") or {}).get("proposalDiscovery") or {}).get("optionSet") for item in items)
+    option_translation = any(item.get("proposalQuestion") or "proposalVerifiedActions" in item or
+        ((item.get("guidance") or {}).get("proposalDiscovery") or {}).get("optionSet") for item in items)
     pending_option_translation = None
     repair_request = None
     payload = {}
@@ -10284,6 +10332,10 @@ async def _generate_plain_with_model_fallback_impl(
                             if clarification_active
                             else "stage_assessment_fallback" if stage_opening else "plain_chat"
                         ),
+                        response_format_override=(proposal_options.clarification_response_format(
+                            stage_context.get("proposalDiscovery") or {}, stage_context.get("stageSnapshot") or {})
+                            if clarification_active and (proposal_clarification or {}).get("optionPolicyVersion") == proposal_options.VERSION
+                            else None),
                     ),
                     timeout=attempt_timeout,
                 )
@@ -10315,16 +10367,20 @@ async def _generate_plain_with_model_fallback_impl(
                         content = json.dumps(envelope, ensure_ascii=False)
                     except (TypeError, ValueError):
                         pass
-                (
-                    parsed_body,
-                    clarification_question,
-                    clarification_question_issue,
-                    clarification_body_dropped,
-                ) = _parse_proposal_clarification_payload(
-                    content,
-                    language,
-                    stage_context,
-                )
+                try:
+                    (
+                        parsed_body,
+                        clarification_question,
+                        clarification_question_issue,
+                        clarification_body_dropped,
+                    ) = _parse_proposal_clarification_payload(content, language, stage_context)
+                except ProposalValidationError as error:
+                    if attempt < max_attempts:
+                        # This is only a retained candidate. The complete merged
+                        # envelope still needs the normal independent review.
+                        clarification_repair_request = _clarification_envelope_patch(
+                            parse_json_object(content), error, stage_context)
+                    raise
                 if ((proposal_clarification or {}).get("optionPolicyVersion") == proposal_options.VERSION
                         or ((proposal_clarification or {}).get("semanticPolicyVersion") == 1
                         and _clarification_needs_semantic_review(
@@ -10365,6 +10421,8 @@ async def _generate_plain_with_model_fallback_impl(
                         stage_context,
                     )
                     clarification_fallback_reason = clarification_question_issue
+                if clarification_repair_request is not None and not clarification_question_issue:
+                    trace_repair(clarification_repair_request.component, "revalidated")
                 content = parsed_body or clarification_body_candidate
                 if (proposal_clarification or {}).get("optionPolicyVersion") == proposal_options.VERSION:
                     option_set = stage_context["_clarificationOptions"]
@@ -12048,11 +12106,18 @@ def _plain_messages_with_validation_feedback(
         )
     elif _has_proposal_clarification(stage_context):
         specification = (stage_context or {}).get("proposalClarification") or {}
+        envelope_instruction = (
+            "Return fresh JSON with exactly body, question, options, comparedOptions and discriminant. "
+            "Keep options null for locked directions; only an authorized revision may replace them. "
+            "Ask one question only for two or more directions; for zero/one directions keep question, "
+            "comparedOptions and discriminant empty. "
+            if specification.get("optionPolicyVersion") == proposal_options.VERSION else
+            "Return fresh JSON with exactly body and question. Write exactly one question for "
+            f"target dimension {specification.get('questionKey')}. ")
         instruction = (
             "Your previous private proposal-clarification envelope was rejected: "
-            f"{feedback_text} Return fresh JSON with exactly body and question. Preserve "
-            "the useful design interpretation, write exactly one question for target dimension "
-            f"{specification.get('questionKey')}, and do not mention this repair. Do not ask "
+            f"{feedback_text} " + envelope_instruction + "Preserve "
+            "the useful design interpretation and do not mention this repair. Do not ask "
             "for coordinates, cells, positions, adjacency, routes, or implementation details."
         )
     elif "token limit" in feedback_lower or "too long" in feedback_lower:
@@ -12168,6 +12233,9 @@ def _plain_messages_with_validation_feedback(
 
 
 def _safe_validation_reason(exception):
+    issues = safe_issues(exception)
+    if issues:
+        return "; ".join(f"{item['fieldPath']}:{item['reasonCode']}" for item in issues[:4])
     if isinstance(exception, json.JSONDecodeError):
         return "The response was not a complete valid JSON object."
 
@@ -12235,7 +12303,7 @@ def validate_translation_response(payload, source_items, target_language="en"):
 
     for index, translation in enumerate(translations):
         source_links = source_items[index].get("coordinateLinks") or []
-        item_expected_fields = expected_fields | (
+        item_expected_fields = expected_fields | ({"proposalVerifiedActions"} if "proposalVerifiedActions" in source_items[index] else set()) | ({"proposalQuestion"} if source_items[index].get("proposalQuestion") else set()) | (
             {"disagreement"} if "disagreement" in source_items[index] else set()
         ) | ({"coordinateLinkTexts"} if source_links else set()) | (
             {"proposalPresentationReason"}
@@ -12252,6 +12320,33 @@ def validate_translation_response(payload, source_items, target_language="en"):
 
         source = source_by_id[turn_id]
         normalized = {"turnId": turn_id}
+        if "proposalVerifiedActions" in source:
+            values = translation.get("proposalVerifiedActions")
+            if not isinstance(values, list) or len(values) != len(source["proposalVerifiedActions"]):
+                raise ValueError("Verified action translations must retain every selection.")
+            normalized["proposalVerifiedActions"] = [_validate_translated_text(value, original, "proposalVerifiedActions")
+                for value, original in zip(values, source["proposalVerifiedActions"])]
+            _assert_visible_output_language(target_language, *normalized["proposalVerifiedActions"])
+            _validate_map_grounding_texts(normalized["proposalVerifiedActions"], source.get("stageRows"), entity_bindings=source.get("entityBindings"))
+        if source.get("proposalQuestion"):
+            original, group = source["proposalQuestion"], translation.get("proposalQuestion")
+            if not isinstance(group, dict) or set(group) != set(original):
+                raise ValueError("Binary translation must retain the whole question group.")
+            if any(group[k] != original[k] for k in original if k not in {"question", "note", "choices"}):
+                raise ValueError("Binary translation changed question identity or state.")
+            group = copy.deepcopy(group)
+            for field in ("question", "note"):
+                group[field] = _validate_translated_text(group[field], original[field], "proposalQuestion." + field, allow_empty=field == "note")
+            if not isinstance(group["choices"], list) or len(group["choices"]) != 2:
+                raise ValueError("Binary translation lost a choice.")
+            for before, after in zip(original["choices"], group["choices"]):
+                if set(before) != set(after) or any(before[k] != after[k] for k in before if k != "label"):
+                    raise ValueError("Binary translation changed choice identity.")
+                after["label"] = _validate_translated_text(after["label"], before["label"], "proposalQuestion.label")
+            texts = [group["question"], group["note"], *[c["label"] for c in group["choices"]]]
+            _assert_visible_output_language(target_language, *texts)
+            _validate_map_grounding_texts(texts, source.get("stageRows"), entity_bindings=source.get("entityBindings"))
+            normalized["proposalQuestion"] = group
         normalized["body"] = _validate_translated_text(
             translation["body"],
             source["body"],
@@ -16422,7 +16517,10 @@ async def _request_component_patch(api_key, base_url, patch_request, messages, r
     patch_messages.append({"role": "system", "content": (
         "This corrective attempt returns ONLY the component patch schema; it supersedes earlier full-envelope output instructions. "
         "All original evidence, semantic scope, permissions and map rules still apply. Frozen candidate text is not new designer evidence. "
-        "Preserve locked content exactly. A patch is only a candidate repair, never proof, consent or a committed action.")})
+        "Preserve locked content exactly. Return exactly one patches item for EVERY targets entry, including "
+        "targets whose repaired value is an empty list. field must be the exact target name, valueJson a JSON-encoded "
+        "value of its targetTypes, and evidenceRefs a nonempty list of keys from evidence. "
+        "A patch is only a candidate repair, never proof, consent or a committed action.")})
     patch_messages.append({"role": "user", "content": json.dumps(patch_request.prompt(), ensure_ascii=False)})
     response = await asyncio.wait_for(_request_completion(
         api_key, base_url, KIMI_MODEL, patch_messages, max_tokens, remaining,
@@ -16507,7 +16605,8 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
         raise asyncio.TimeoutError()
     try:
         response = await asyncio.wait_for(_request_completion(api_key, base_url, KIMI_MODEL,
-            messages, 1000, remaining, task="proposal_clarification_review"), timeout=remaining)
+            messages, 1000, remaining, task="proposal_clarification_review",
+            response_format_override=proposal_options.review_response_format() if option_mode else None), timeout=remaining)
     except asyncio.TimeoutError:
         response = None
     sentences = _content_block_sentences(body)
@@ -16558,13 +16657,46 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
                           if verdict.get("optionIssues") else verdict["questionIssue"] or "")
 
 
+def _clarification_envelope_patch(payload, error, stage_context):
+    """Keep parseable candidate fields, never label them semantically verified."""
+    if not isinstance(payload, dict) or set(payload) - proposal_options.ENVELOPE_FIELDS:
+        return None
+    fields = set()
+    for issue in safe_issues(error):
+        path = issue["fieldPath"]
+        if path == "question" and issue["reasonCode"] != "OPTION_FIELD_INVALID":
+            fields.update({"question", "comparedOptions", "discriminant"})
+        elif path in proposal_options.ENVELOPE_FIELDS:
+            fields.add(path)
+        else:
+            return None
+    if not fields:
+        return None
+    reuse = proposal_options.reuses_options(stage_context.get("proposalDiscovery") or {},
+        stage_context.get("stageSnapshot") or {})
+    kinds = {"body": (str,), "question": (str,), "options": (type(None),) if reuse else (list,),
+        "comparedOptions": (list,), "discriminant": (str,)}
+    return PatchRequest("clarification_question", payload,
+        [Target(field, (field,), kinds[field]) for field in sorted(fields)],
+        {"snapshot": stage_context.get("stageSnapshot"),
+         "proposal_topic": stage_context.get("proposalDiscovery"),
+         "question_specification": stage_context.get("proposalClarification")})
+
+
 @proposal_phase('clarification', 'clarification')
 def _parse_proposal_clarification_payload(content, language, stage_context):
-    """Parse Kimi's private body/question envelope and validate only the question."""
+    """Validate the selected envelope and bindings before independent semantic review."""
+    specification = (stage_context or {}).get("proposalClarification") or {}
+    option_mode = specification.get("optionPolicyVersion") == proposal_options.VERSION
     try:
         payload = json.loads(str(content or ""))
     except (TypeError, ValueError, json.JSONDecodeError):
+        if option_mode:
+            raise
         return "", "", "The clarification response must be valid JSON.", 0
+    if option_mode:
+        proposal_options.validate_envelope_shape(payload,
+            stage_context.get("proposalDiscovery") or {}, stage_context.get("stageSnapshot") or {})
     if not isinstance(payload, dict) or "question" not in payload:
         return "", "", "The clarification response must contain only body and question.", 0
     raw_body = payload.get("body") if isinstance(payload.get("body"), str) else ""
@@ -16574,8 +16706,7 @@ def _parse_proposal_clarification_payload(content, language, stage_context):
     body = _sanitize_visible_model_text(raw_body.strip(), language)
     question = _sanitize_visible_model_text(raw_question.strip(), language)
     body, dropped = _clean_proposal_clarification_body(body, stage_context)
-    specification = (stage_context or {}).get("proposalClarification") or {}
-    if specification.get("optionPolicyVersion") == proposal_options.VERSION:
+    if option_mode:
         option_set, option_question = proposal_options.parse_envelope(payload,
             stage_context.get("proposalDiscovery") or {}, stage_context.get("stageSnapshot") or {})
         for item in option_set["options"]:
@@ -21339,7 +21470,7 @@ def classify_exception(exception, request_id, attempts_used):
         )
 
     if isinstance(exception, (json.JSONDecodeError, ValueError, TypeError, KeyError)):
-        return LLMServiceError(
+        error = LLMServiceError(
             "MODEL_RESPONSE_INVALID",
             "The LLM returned an invalid response.",
             request_id,
@@ -21347,6 +21478,19 @@ def classify_exception(exception, request_id, attempts_used):
             attempts_used,
             502,
         )
+        issues = safe_issues(exception)
+        diagnostic = (getattr(exception, "details", {}) or {}).get("proposalDiagnostic")
+        if issues or diagnostic:
+            error.details = {"reasonCode": reason_code(exception), "issues": issues}
+            if diagnostic:
+                error.details["proposalDiagnostic"] = diagnostic
+                failure = diagnostic.get("finalFailure") or {}
+                if failure.get("stage"):
+                    error.details["failureStage"] = failure["stage"]
+                if failure.get("stage") == "clarification":
+                    error.details.update(task="proposal_clarification", failureStage="clarification",
+                        failureKind="schema_or_model_validation")
+        return error
 
     return LLMServiceError(
         "INTERNAL_ERROR",

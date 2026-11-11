@@ -2437,6 +2437,29 @@ def serialize_session(database, session_id):
             )
             proposal_flow_topic_id = latest_marker.get("topicId")
 
+    import binary_discovery
+    binary_topic = binary_discovery.current_topic(database, session_id, session["current_version_id"])
+    # Question text is immutable; selection/availability is projected from authoritative topic events.
+    for turn in turns:
+        question = public_guidance_by_turn.get(turn["id"], {}).get("proposalQuestion")
+        if not question:
+            continue
+        selected = next((c["choiceId"] for c in (binary_topic or {}).get("choices", [])
+                         if c["questionId"] == question["questionId"]), None)
+        if selected is None:
+            saved_choice = database.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='binary_choice_selected' "
+                "AND json_extract(payload_json,'$.questionId')=? ORDER BY id DESC LIMIT 1", (session_id, question["questionId"])).fetchone()
+            selected = (load_json(saved_choice["payload_json"]) or {}).get("choiceId") if saved_choice else None
+        active = bool(binary_topic and binary_topic["topicId"] == question["topicId"]
+                      and binary_topic["status"] == "clarifying"
+                      and (binary_topic.get("pendingQuestion") or {}).get("questionId") == question["questionId"])
+        question.update(selectedChoiceId=selected, status="selected" if selected else "pending" if active else "expired",
+                        sourceLanguage=turn["language"])
+        for locale, translation in translations_by_turn.get(turn["id"], {}).items():
+            translated_question = (translation.get("guidance") or {}).get("proposalQuestion")
+            if translated_question:
+                translated_question.update(selectedChoiceId=selected, status=question["status"], sourceLanguage=locale)
+
     return {
         "sessionId": session["id"],
         "status": session["status"],
@@ -2471,7 +2494,7 @@ def serialize_session(database, session_id):
             if session["draft_rows_json"]
             else None
         ),
-        "proposalFlowState": {
+        "proposalFlowState": binary_discovery.public_flow(binary_topic) if binary_topic else {
             "active": proposal_flow_status in {
                 "clarifying", "planning", "retry_pending", "revision_needed",
             },

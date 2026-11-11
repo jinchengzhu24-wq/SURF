@@ -3125,3 +3125,12 @@ body:has(#landing:not([hidden])) main:has(.notice.visible) #landing { height: ca
 .reply-feedback-icon[data-state="error"] .feedback-error,
 .reply-feedback-icon[data-state="info"] .feedback-info { display: block; }
 .composer-feedback #chatControlHint::before { content: none; }
+/* Binary discovery uses the shared pixel buttons; wrap labels without clipping. */
+.binary-question { margin: 0 0 10px; font-weight: bold; white-space: pre-wrap; }
+.binary-note { margin: 0 0 14px; white-space: pre-wrap; }
+.binary-choices { display: flex; flex-wrap: wrap; gap: 12px; }
+.binary-choice-button { flex: 1 1 180px; white-space: normal; overflow-wrap: anywhere; text-align: left; min-height: 48px; }
+.binary-choice-button.is-selected { background: var(--accent, #e6c267); color: #182c35; }
+.binary-choice-button:focus-visible { outline: 3px solid #e6a12d; outline-offset: 4px; }
+#cancelProposalButton { white-space: normal; }
+.composer.is-binary .proposal-control { display: none; }

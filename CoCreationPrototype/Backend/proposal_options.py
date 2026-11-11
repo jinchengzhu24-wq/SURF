@@ -9,6 +9,61 @@ from proposal_diagnostics import ProposalValidationError, structural_issue
 VERSION = 1
 FIELDS = {"summary", "components", "focus", "mechanism", "effect", "tradeoff", "preserve"}
 EDITABLE = {"water", "internal_walls"}
+ENVELOPE_FIELDS = {"body", "question", "options", "comparedOptions", "discriminant"}
+
+
+def reuses_options(discovery, snapshot):
+    return bool(current_set(discovery, snapshot) and
+                (discovery.get("optionDecision") or {}).get("selection") != "revise")
+
+
+def clarification_response_format(discovery, snapshot):
+    """The wire contract and parser share the same server-owned option mode."""
+    option = {"type": "object", "additionalProperties": False,
+        "properties": {key: ({"type": "array", "minItems": 1, "maxItems": 2,
+            "items": {"type": "string", "enum": sorted(EDITABLE)}} if key == "components" else
+            {"type": "string", "minLength": 1, "maxLength": 240}) for key in sorted(FIELDS)},
+        "required": sorted(FIELDS)}
+    properties = {"body": {"type": "string"}, "question": {"type": "string"},
+        "options": ({"type": "null"} if reuses_options(discovery, snapshot) else
+                    {"type": "array", "maxItems": 3, "items": option}),
+        "comparedOptions": {"type": "array", "items": {"type": "string"}},
+        "discriminant": {"type": "string", "maxLength": 240}}
+    return {"type": "json_schema", "json_schema": {"name": "cocreation_proposal_options",
+        "strict": True, "schema": {"type": "object", "additionalProperties": False,
+            "properties": properties, "required": sorted(properties)}}}
+
+
+def review_response_format():
+    properties = {"bodyIssues": {"type": "array", "items": {"type": "string"}},
+        "questionIssue": {"type": ["string", "null"]},
+        "optionIssues": {"type": "array", "items": {"type": "string"}}}
+    return {"type": "json_schema", "json_schema": {"name": "cocreation_proposal_options_review",
+        "strict": True, "schema": {"type": "object", "additionalProperties": False,
+            "properties": properties, "required": sorted(properties)}}}
+
+
+def validate_envelope_shape(payload, discovery, snapshot):
+    """Report technical fields together, before any semantic component is locked."""
+    if not isinstance(payload, dict) or set(payload) - ENVELOPE_FIELDS:
+        invalid("envelope", "OPTION_ENVELOPE_INVALID")
+    properties = clarification_response_format(discovery, snapshot)["json_schema"]["schema"]["properties"]
+    issues = []
+    for field, schema in properties.items():
+        value = payload.get(field)
+        kind = schema["type"]
+        valid = field in payload and (
+            (kind == "string" and isinstance(value, str)) or
+            (kind == "array" and isinstance(value, list)) or
+            (kind == "null" and value is None))
+        if valid and field == "comparedOptions":
+            valid = all(isinstance(item, str) for item in value)
+        if valid and field == "discriminant":
+            valid = len(value) <= 240
+        if not valid:
+            issues.append(structural_issue(field, "OPTION_FIELD_INVALID", "invalid_type"))
+    if issues:
+        raise ProposalValidationError(issues)
 
 
 def context_signature(discovery):
