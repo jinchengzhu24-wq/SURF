@@ -14,7 +14,7 @@ from proposal_options import decision_schema, current_set, planning_projection
 
 
 POLICY_VERSION = 1
-MEANING_REVIEW_VERSION = "meaning-preservation-3-options"
+MEANING_REVIEW_VERSION = "meaning-preservation-5-quote-leaf"
 EDITABLE = {"water", "internal_walls"}
 PROTECTED = {"outer_shell", "player", "boxes", "targets"}
 COMPONENTS = EDITABLE | PROTECTED | {"gameplay", "unknown"}

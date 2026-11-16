@@ -281,6 +281,79 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409)
         forbidden.assert_not_called()
 
+    def test_real_review_validation_failure_keeps_business_rows_and_stage_unchanged(self):
+        from test_understanding_review import UnderstandingReviewTests
+        fixture = UnderstandingReviewTests()
+        fixture.setUp()
+        version_id = self.read_session()["currentVersionId"]
+        before = self.read_session()
+        tables = ("conversation_turns", "level_versions", "change_proposals", "designer_decisions", "designer_intentions")
+        with repository.connect() as database:
+            counts = {table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
+        def model(call, number):
+            if number == 1:
+                return fixture.candidate_wire()
+            return fixture.correction(call, ["proposalUnderstanding", "preserve", 0], {
+                "statement": "保留右侧的墙", "sourceTurnId": "latest", "evidenceSpan": "fabricated quotation"})
+        with fixture.wire.provider(model), patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
+                patch.object(backend, "classify_turn_understanding", llm_client.classify_turn_understanding), \
+                patch.object(backend, "generate_chat_reply") as forbidden:
+            response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
+                "content": fixture.latest, "baseVersionId": version_id, "idempotencyKey": "delta-review-failure", "requestProposal": True})
+        self.assertEqual(response.status_code, 502, response.text)
+        forbidden.assert_not_called()
+        after = self.read_session()
+        self.assertEqual(after["currentVersionId"], version_id)
+        self.assertEqual(after["turns"], before["turns"])
+        self.assertEqual(after["versions"], before["versions"])
+        self.assertEqual(after["lastMessageFailure"]["details"]["recoveryState"], "retry_pending")
+        with repository.connect() as database:
+            self.assertEqual(counts, {table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables})
+
+    def test_quote_repair_attacks_keep_stage_and_research_business_rows_unchanged(self):
+        import copy
+        from test_understanding_review import UnderstandingReviewTests
+        from test_proposal_understanding import item
+        for attack in ("semantic_flip", "drop_sibling"):
+            with self.subTest(attack=attack):
+                fixture = UnderstandingReviewTests()
+                fixture.setUp()
+                fixture.candidate["proposalUnderstanding"]["preserve"][0]["statement"] = "允许删除右侧的墙"
+                before = self.read_session()
+                tables = ("conversation_turns", "level_versions", "change_proposals", "designer_decisions", "designer_intentions")
+                with repository.connect() as database:
+                    counts = {table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
+                def model(call, number):
+                    if number == 1:
+                        return fixture.candidate_wire()
+                    if number == 2:
+                        if attack == "semantic_flip":
+                            return fixture.correction(call, ["proposalUnderstanding", "preserve", 0], item("保留右侧的墙", span="not exact"))
+                        return fixture.correction(call, ["proposalUnderstanding", "preserve"],
+                            [item("玩家不变", span="not exact"), item("箱子和目标不变", span="箱子和目标位置保持不变")], "append")
+                    spec = json.loads(call["messages"][-1]["content"])
+                    frozen = copy.deepcopy(spec["frozenCandidate"])
+                    frozen["corrections"][0]["value"] = (item("可以移除右侧墙体", span="保留右侧的墙") if attack == "semantic_flip"
+                        else [item("玩家不变", span="玩家、箱子和目标位置保持不变")])
+                    return {"patches": [{"componentId": "understanding_review", "field": "corrections[0].value",
+                        "valueJson": json.dumps(frozen["corrections"][0]["value"], ensure_ascii=False), "evidenceRefs": ["user:latest"]}]}
+                with fixture.wire.provider(model), patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
+                        patch.object(backend, "classify_turn_understanding", llm_client.classify_turn_understanding), \
+                        patch.object(backend, "generate_chat_reply") as forbidden:
+                    response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
+                        "content": fixture.latest, "baseVersionId": before["currentVersionId"],
+                        "idempotencyKey": "quote-safety-" + attack, "requestProposal": True})
+                self.assertEqual(response.status_code, 502, response.text)
+                self.assertEqual(response.json()["details"]["reasonCode"], "PATCH_TARGET_NOT_ALLOWED")
+                self.assertEqual(len(fixture.wire.calls), 3)
+                forbidden.assert_not_called()
+                after = self.read_session()
+                self.assertEqual(after["currentVersionId"], before["currentVersionId"])
+                self.assertEqual(after["turns"], before["turns"])
+                self.assertEqual(after["versions"], before["versions"])
+                with repository.connect() as database:
+                    self.assertEqual(counts, {table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables})
+
     def test_unverified_human_edit_engagement_commits_body_and_keeps_proposal_block(self):
         from types import SimpleNamespace
         version_id = self.read_session()["currentVersionId"]
@@ -514,7 +587,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "rejectedOptionIds": [], "evidenceSpan": answer}
         corrected = {**wrong, "acts": ["intent"], "changes": [{**wrong["changes"][0], "operation": "mention"}]}
         payload = {"content": answer, "baseVersionId": version_id, "idempotencyKey": "semantic-answer", "requestProposal": True}
-        rejected = {"accepted": False, "issues": ["Unclear whether this is a focus or a move"], "understanding": wrong}
+        rejected = {"decision": "REJECT", "issues": ["Unclear whether this is a focus or a move"], "corrections": []}
         failed_call = AsyncMock(side_effect=[response(wrong), response(rejected)] * 2)
         with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
                 patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
@@ -530,7 +603,8 @@ class CoCreationSessionTests(unittest.TestCase):
             pending = backend.build_llm_context(database, self.session_id, current)["stageContext"]["proposalDiscovery"]
             self.assertEqual(pending["clarificationQuestionCount"], 1)
             self.assertEqual(pending["initialRequest"], initial)
-        call = AsyncMock(side_effect=[response(wrong), response({"accepted": True, "issues": [], "understanding": corrected})])
+        from review_fixtures import review_fixture
+        call = AsyncMock(side_effect=[response(wrong), response(review_fixture(wrong, corrected))])
         plan_reply = LLMExecutionResult("I would frame that area with the editable water/wall boundary.", 1, "test")
         with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
                 patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \

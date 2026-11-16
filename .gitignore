@@ -74,6 +74,7 @@ crashlytics-build.properties
 /WebGLBuild/
 
 # Local documentation
+/AI_Exchange/
 /SERVER.md
 /Nodes.md
 /Draft_question.md

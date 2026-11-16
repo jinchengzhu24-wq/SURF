@@ -43,6 +43,7 @@ from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_
     CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
 from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
 from conversation_evidence import CONTEXT_VERSION
+from understanding_review import review_schema, review_targets, merge_review, review_patch_request, REVIEW_VERSION
 import proposal_options
 from proposal_understanding import (
     turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
@@ -323,10 +324,7 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
         schema = turn_schema()
         name = "cocreation_turn_understanding"
         if task == "turn_understanding_review":
-            schema = {"type": "object", "additionalProperties": False,
-                "properties": {"understanding": schema, "accepted": {"type": "boolean"},
-                    "issues": {"type": "array", "items": {"type": "string"}}},
-                "required": ["understanding", "accepted", "issues"]}
+            schema = review_schema()
             name = "cocreation_turn_understanding_review"
     elif task == "intent_candidate_review":
         claim_schema = {
@@ -4370,6 +4368,9 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             "and the previous understanding. Keep goals, editScope, focus and preserve separate. Each item has "
             "statement, sourceTurnId and exact designer evidenceSpan. editScope also has component; focus also "
             "has entities (current labels, or [] for a region). 'latest' identifies the latest designer turn. "
+            "Select a source ID from designerTurns first, then copy a nonempty contiguous substring of its "
+            "content verbatim into evidenceSpan. Never paraphrase, join fragments, normalize punctuation "
+            "or line breaks, or invent a preservation requirement for a server-owned protection. "
             "A water/wall layout request around T1/T2 edits water/internal_walls and focuses on targets; "
             "it does NOT move targets. Do not replace earlier scope when a short answer supplies a focus. "
             "Only a clear designer correction changes earlier goals/scope/locks. Assistant suggestions, "
@@ -4480,8 +4481,22 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     raise asyncio.TimeoutError()
                 review_messages = [{"role": "system", "content": (
                     "Independently check the candidate understanding against designer evidence and its bound "
-                    "question. Return accepted=true with a corrected understanding only if every conclusion is "
-                    "reliable; otherwise accepted=false and issues. A region/focus is not an entity move. "
+                    "question. Return exactly decision, issues, corrections. APPROVE means every conclusion "
+                    "is reliable: issues=[] and corrections=[], do not copy or rewrite the understanding. "
+                    "CORRECT means you independently verify the FINAL understanding after all necessary "
+                    "corrections: issues=[]; each correction has a server targetId, a specific semantic reason, "
+                    "value containing the native JSON replacement (or list of appended items), and "
+                    "evidenceRefs using supplied user:<sourceTurnId> IDs. Select only supplied targets. "
+                    "Correct only actual defects, never rephrase valid items. Existing goals/preserve items "
+                    "cannot be deleted or reordered; no whole-object or collection replacement. If safe "
+                    "correction is impossible, return REJECT with issues and corrections=[]. Never approve "
+                    "a candidate with unresolved semantic errors. Copy evidenceSpan verbatim as a nonempty "
+                    "contiguous substring of its bound designerTurns content, including punctuation/newlines; "
+                    "A substring may omit punctuation outside its selected boundaries: that is valid, not a "
+                    "reason to rephrase or expand the quote. value must match the target's value type: "
+                    "replace an evidence item with its complete object, never just a quote string. "
+                    "do not add server protections as designer preservation requirements. "
+                    "A region/focus is not an entity move. "
                     "Preserve earlier edit scope unless the latest designer clearly corrects it. Distinguish "
                     "mention/preserve/change; protected position/count/layout/shape edits require an actual "
                     "designer request, not a label or assistant option. Each change needs exact latest-user "
@@ -4496,6 +4511,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 )}, {"role": "user", "content": json.dumps({
                     "source": json.loads(messages[1]["content"]), "candidate": candidate,
                     "reviewReason": review_reason,
+                    "correctionTargets": review_targets(candidate), "reviewVersion": REVIEW_VERSION,
                 }, ensure_ascii=False)}]
                 if review_repair_request is not None:
                     verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request,
@@ -4508,19 +4524,13 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     if str(getattr(reviewed.choices[0], "finish_reason", "")) == "length":
                         raise ValueError("Turn understanding review was truncated.")
                     verdict = parse_json_object(reviewed.choices[0].message.content)
-                if (not isinstance(verdict, dict) or set(verdict) != {"accepted", "issues", "understanding"}
-                        or type(verdict.get("accepted")) is not bool or not isinstance(verdict.get("issues"), list)
-                        or any(not isinstance(item, str) for item in verdict.get("issues", []))
-                        or not isinstance(verdict.get("understanding"), dict)):
-                    raise ProposalValidationError([{"fieldPath": "criticalReview", "reasonCode": "REVIEW_COMPONENT_INVALID", "sourceKind": "unknown"}],
-                        message="Independent proposal understanding review has invalid components.")
-                if verdict["accepted"] is not True or verdict["issues"]:
-                    raise ProposalValidationError([{"fieldPath": "criticalReview", "reasonCode": "SEMANTIC_REVIEW_REJECTED", "sourceKind": "unknown"}],
-                        message="Independent proposal understanding review did not verify the request.")
-                if set(verdict["understanding"]) & {"semanticPolicyVersion", "criticalReview", "versionId", "evidenceSignature"}:
-                    raise ValueError("A model cannot author server review metadata.")
-                corrected = _validate_turn_understanding(verdict["understanding"], latest, forced_proposal)
+                review_source = json.loads(review_messages[1]["content"])
+                corrected = merge_review(verdict, candidate, review_source["correctionTargets"],
+                                         designer_sources(proposal_context, latest))
+                corrected = _validate_turn_understanding(corrected, latest, forced_proposal)
                 _validate_proposal_interpretation(corrected, latest, snapshot, proposal_context, forced_proposal)
+                if candidate.get("proposalUnderstanding") and not corrected.get("proposalUnderstanding"):
+                    raise ProposalValidationError([{"fieldPath": "criticalReview", "reasonCode": "REVIEW_TOPIC_REMOVED", "sourceKind": "unknown"}])
                 corrected["optionDecision"] = proposal_options.validate_decision(
                     corrected.get("optionDecision"), latest, proposal_context, snapshot)
                 if any(not x.get("evidenceSpan") for x in corrected.get("changes") or []):
@@ -4534,6 +4544,10 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                     "corrected": corrected != candidate, "attempt": attempt,
                     "latencyMs": int((time.monotonic() - review_started) * 1000),
                     "initialChanges": candidate.get("changes") or []}
+                changed_targets = [x["targetId"] for x in verdict["corrections"]]
+                trace_proposal(phase, "understanding_review", "merged", reviewVersion=REVIEW_VERSION,
+                    reviewDecision=verdict["decision"], correctionCount=len(changed_targets), targetIds=changed_targets,
+                    bindingSignature=hashlib.sha256(json.dumps(candidate, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
                 candidate = corrected
                 if review_repair_request is not None:
                     trace_repair("understanding_review", "revalidated")
@@ -4563,9 +4577,20 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             if reason_code(exception) == "SEMANTIC_REVIEW_REJECTED":
                 trace_proposal(phase, "understanding_review", "not_repairable", "SEMANTIC_REVIEW_REJECTED", attempt=attempt)
                 break
+            sources = designer_sources(proposal_context, latest)
+            if phase == "understanding_review":
+                review_source = json.loads(review_messages[1]["content"])
+                review_repair_request = review_patch_request(verdict, exception,
+                    review_source["correctionTargets"], sources, review_source)
+                review_cold_retry = not verdict
+                trace_repair("understanding_review", "proposed" if attempt < 2 else "exhausted")
+                # A parsed necessary correction must never be replaced by approval
+                # of the old candidate. Only located defects can use the next slot.
+                if verdict and review_repair_request is None:
+                    break
+                continue
             frozen = {**locked_base, "proposalUnderstanding": payload.get("proposalUnderstanding"),
                       "optionDecision": payload.get("optionDecision")} if locked_base else payload
-            sources = designer_sources(proposal_context, latest)
             if any(issue.get("fieldPath") == "optionDecision" for issue in getattr(exception, "issues", [])):
                 repair_request = PatchRequest("understanding", {"understanding": payload},
                     [Target("optionDecision", ("understanding", "optionDecision"), (dict,))],
@@ -4582,29 +4607,8 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 # not a patch of an empty invented understanding.
                 repair_request = None
             review_repair_request = None
-            review_cold_retry = phase == "understanding_review" and not verdict
-            if phase == "understanding_review":
-                parts, missing = {}, []
-                for field, kinds in (("accepted", (bool,)), ("issues", (list,)), ("understanding", (dict,))):
-                    value = verdict.get(field) if isinstance(verdict, dict) else None
-                    if type(value) in kinds and (field != "issues" or all(isinstance(item, str) for item in value)):
-                        parts[field] = value
-                    else:
-                        missing.append(Target(field, (field,), kinds))
-                if missing and not review_cold_retry:
-                    review_repair_request = PatchRequest("understanding_review", parts, missing,
-                        {"review_source": json.loads(review_messages[1]["content"])})
-                elif isinstance(exception, ProposalValidationError) and any(
-                        issue["fieldPath"].startswith("proposalUnderstanding") for issue in exception.issues):
-                    scoped = understanding_patch_request(verdict["understanding"], exception, sources, snapshot)
-                    review_repair_request = PatchRequest("understanding_review", verdict, list(scoped.targets.values()),
-                        {"review_source": json.loads(review_messages[1]["content"]), **scoped.evidence})
-                elif any(issue.get("fieldPath") == "optionDecision" for issue in getattr(exception, "issues", [])):
-                    review_repair_request = PatchRequest("understanding_review", verdict,
-                        [Target("optionDecision", ("understanding", "optionDecision"), (dict,))],
-                        {"review_source": json.loads(review_messages[1]["content"])})
-            trace_repair("understanding_review" if review_repair_request is not None else "understanding",
-                         "proposed" if attempt < 2 else "exhausted")
+            review_cold_retry = False
+            trace_repair("understanding", "proposed" if attempt < 2 else "exhausted")
             messages.append({"role": "user", "content": (
                 ("Repair only the server-listed failed fields. Validated speech acts, changes and latest evidence "
                  "are locked: " + json.dumps(locked_base, ensure_ascii=False) + ". "
@@ -4621,7 +4625,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                      "reasonCode": reason_code(last_error), "issues": safe_issues(last_error),
                      "failureKind": "timeout" if isinstance(last_error, (TimeoutError, asyncio.TimeoutError)) else
                          "semantic_rejection" if reason_code(last_error) == "SEMANTIC_REVIEW_REJECTED" else
-                         "review_validation" if review_repair_request is not None else "understanding",
+                         "review_validation" if phase == "understanding_review" else "understanding",
                      "maximumAttempts": 2}
     diagnostic = CURRENT_PROPOSAL_DIAGNOSTIC.get()
     if diagnostic is not None:

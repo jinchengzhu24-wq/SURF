@@ -69,17 +69,20 @@ class ProposalDiagnostic:
 
     def record(self, stage, component, status, code="", **fields):
         step = {"stage": stage, "component": component, "status": status, "reasonCode": code}
-        for name in ("attempt", "repairAttempts", "maximumAttempts", "issueCount", "issuesTruncated", "sourceTurnId", "proposalId", "bindingSignature"):
+        for name in ("attempt", "repairAttempts", "maximumAttempts", "issueCount", "correctionCount", "reviewVersion", "reviewDecision", "issuesTruncated", "sourceTurnId", "proposalId", "bindingSignature"):
             if name not in fields:
                 continue
             value = fields.get(name)
-            if name in {"attempt", "repairAttempts", "maximumAttempts", "issueCount"}:
+            if name in {"attempt", "repairAttempts", "maximumAttempts", "issueCount", "correctionCount"}:
                 if value is None or type(value) is int:
                     step[name] = value
             elif name == "issuesTruncated":
                 step[name] = value is True
             elif isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,96}", value):
                 step[name] = value
+        if "targetIds" in fields:
+            step["targetIds"] = [x for x in fields["targetIds"][:32]
+                                 if isinstance(x, str) and re.fullmatch(r"[a-f0-9]{24}", x)]
         if "issues" in fields:
             holder = ProposalValidationError(fields["issues"])
             step["issues"] = safe_issues(holder)

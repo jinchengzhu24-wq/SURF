@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app as backend
 import llm_client as llm
 from patch_fixtures import patch_fixture
+from review_fixtures import review_fixture
 from level_validation import build_entity_bindings, build_stage_snapshot
 from proposal_search import Focus, RevisionPlan, RevisionStrategy
 from proposal_understanding import (
@@ -71,7 +72,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
                 interpretation = topic(focus=[item(answer, entities=[label])])
                 bad = understanding(answer, interpretation, component, "change", ["revision_request"])
                 good = understanding(answer, interpretation, component)
-                result, call = self.classify(answer, [bad, {"accepted": True, "issues": [], "understanding": good}])
+                result, call = self.classify(answer, [bad, review_fixture(bad, good)])
                 self.assertEqual(result["changes"][0]["operation"], "mention")
                 self.assertTrue(result["criticalReview"]["corrected"])
                 self.assertEqual([x.kwargs["task"] for x in call.call_args_list], ["turn_understanding", "turn_understanding_review"])
@@ -95,7 +96,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
                 interpretation = topic()
                 interpretation["editScope"] = [item(answer, component=component)]
                 candidate = understanding(answer, interpretation, component, "change", ["revision_request"])
-                result, _ = self.classify(answer, [candidate, {"accepted": True, "issues": [], "understanding": candidate}])
+                result, _ = self.classify(answer, [candidate, review_fixture(candidate)])
                 text = protected_request_message(result, "zh-CN")
                 self.assertIn(answer, text)
                 self.assertNotIn("箱子、玩家、目标或外壳", text)
@@ -118,7 +119,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
                         "aspect": "gameplay", "editScope": [item("Relocate a target", "u1", component="targets")],
                         "focus": [item(answer, entities=["T1"])]}
                     corrected = copy.deepcopy(candidate)
-                result, call = self.classify(answer, [candidate, {"accepted": True, "issues": [], "understanding": corrected}], context)
+                result, call = self.classify(answer, [candidate, review_fixture(candidate, corrected)], context)
                 reviewer_input = json.loads(call.call_args_list[1].args[3][1]["content"])
                 self.assertEqual(reviewer_input["source"]["proposalContext"]["lastQuestionText"], question)
                 self.assertEqual(result["changes"][0]["operation"], "change" if "relocated" in question else "mention")
@@ -126,7 +127,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
     def test_verified_review_rejection_stops_without_repairing_acceptance(self):
         answer = "Around T1"
         bad = understanding(answer, topic(focus=[item(answer, entities=["T1"])]), operation="change", acts=["revision_request"])
-        rejected = {"accepted": False, "issues": ["ambiguous action"], "understanding": bad}
+        rejected = {"decision": "REJECT", "issues": ["ambiguous action"], "corrections": []}
         with self.assertRaises(llm.LLMServiceError) as caught:
             self.classify(answer, [bad, rejected])
         self.assertTrue(caught.exception.retryable)
@@ -139,7 +140,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
         interpretation["editScope"] = [item(answer, component="water")]
         candidate = understanding(answer, interpretation, "water", "change", ["revision_request"])
         self.assertEqual(critical_review_reason(candidate, self.context), "edit_scope_changed")
-        result, _ = self.classify(answer, [candidate, {"accepted": True, "issues": [], "understanding": candidate}])
+        result, _ = self.classify(answer, [candidate, review_fixture(candidate)])
         self.assertEqual(result["criticalReview"]["reason"], "edit_scope_changed")
 
     def test_a_model_cannot_self_authorize_review_metadata(self):
@@ -220,7 +221,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
         answer = "Around T1"
         candidate = understanding(answer, topic(focus=[item(answer, entities=["T1"])]))
         before = copy.deepcopy(context)
-        result, _ = self.classify(answer, [candidate, {"accepted": True, "issues": [], "understanding": candidate}], context)
+        result, _ = self.classify(answer, [candidate, review_fixture(candidate)], context)
         self.assertEqual(result["criticalReview"]["reason"], "legacy_topic_reconstruction")
         self.assertEqual(context, before)
 

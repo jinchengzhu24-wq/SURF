@@ -14,6 +14,7 @@ import llm_client as llm
 import proposal_options as directions
 from option_fixtures import options, envelope
 from patch_fixtures import patch_fixture
+from review_fixtures import review_fixture
 from test_proposal_understanding import ROWS, response, topic, understanding
 from level_validation import build_entity_bindings, build_stage_snapshot
 from proposal_diagnostics import ProposalValidationError, reason_code
@@ -157,7 +158,7 @@ class DirectionDiscoveryTests(unittest.TestCase):
         candidate = understanding(latest, topic(sufficient=True))
         for review_timeout in (False, True):
             with self.subTest(review_timeout=review_timeout):
-                outputs = ([response(candidate), asyncio.TimeoutError(), response({"accepted": True, "issues": [], "understanding": candidate})]
+                outputs = ([response(candidate), asyncio.TimeoutError(), response(review_fixture(candidate))]
                     if review_timeout else [asyncio.TimeoutError(), response(candidate)])
                 if review_timeout:
                     context = {**context, "understanding": None}
@@ -184,7 +185,7 @@ class DirectionDiscoveryTests(unittest.TestCase):
                 self.assertEqual(spec["targets"], ["optionDecision"])
                 self.assertEqual(spec["frozenCandidate"]["understanding"]["proposalUnderstanding"], candidate["proposalUnderstanding"])
                 return response(patch_fixture(spec, {"understanding": fixed}))
-            return response({"accepted": True, "issues": [], "understanding": fixed})
+            return response(review_fixture(fixed))
         call = AsyncMock(side_effect=model)
         with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), patch.object(llm, "_request_completion", call):
             result = llm.classify_turn_understanding([{"role": "user", "content": "B please"}], self.snapshot,

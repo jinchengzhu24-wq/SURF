@@ -300,7 +300,7 @@ class WireContracts(unittest.TestCase):
     def test_outbound_task_schemas_cover_their_consumed_root_fields(self):
         contracts = {
             "turn_understanding": {"acts", "elements", "evidenceSpan", "directionSufficient", "mapRelated", "changes", "proposalUnderstanding", "humanEditEngagement", "optionDecision"},
-            "turn_understanding_review": {"understanding", "accepted", "issues"},
+            "turn_understanding_review": {"decision", "corrections", "issues"},
             "revision_requirements": {"requirements", "automaticBindings", "exactTransitions"},
             "revision_requirement_review": {"accepted", "issues"},
             "revision_plan": {"strategies"}, "operation_candidates": {"candidates"},
