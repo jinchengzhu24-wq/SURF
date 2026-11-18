@@ -205,6 +205,11 @@ public class OnlineLevelController : MonoBehaviour
         runDurationSeconds = Mathf.Round(
             Mathf.Max(0f, Time.realtimeSinceStartup - runStartedAt) * 100f
         ) / 100f;
+
+        if (levelManager != null)
+        {
+            levelManager.SetExternalRestartAllowed(false);
+        }
     }
 
     private void HandleTimeExpired()
@@ -222,6 +227,7 @@ public class OnlineLevelController : MonoBehaviour
         if (levelManager != null)
         {
             levelManager.SetExternalPlayerInputEnabled(false);
+            levelManager.SetExternalRestartAllowed(false);
         }
 
         SetPanelVisible(completePanel, false);
@@ -338,7 +344,7 @@ public class OnlineLevelController : MonoBehaviour
 
         if (!Application.CanStreamedLevelBeLoaded(ResultSceneName))
         {
-            SetText(completeHintText, "MATCH RESULT SCENE IS NOT AVAILABLE.");
+            SetText(ActiveHintText, "MATCH RESULT SCENE IS NOT AVAILABLE.");
             return;
         }
 
@@ -454,70 +460,19 @@ public class OnlineLevelController : MonoBehaviour
 
     private static bool TryValidateRows(string[] rows, out string error)
     {
-        error = "";
-
-        if (rows == null || rows.Length != 10)
+        if (LevelMapUtilities.TryValidatePlayableRows(rows, "OPPONENT CHALLENGE", out string rawError))
         {
-            error = "THE OPPONENT CHALLENGE MUST CONTAIN 10 ROWS.";
-            return false;
+            error = "";
+            return true;
         }
 
-        int playerCount = 0;
-        int boxCount = 0;
-        int targetCount = 0;
-        const string allowedTiles = " #.@pst";
-
-        for (int row = 0; row < rows.Length; row++)
-        {
-            if (rows[row] == null || rows[row].Length != 12)
-            {
-                error = "EVERY OPPONENT CHALLENGE ROW MUST CONTAIN 12 TILES.";
-                return false;
-            }
-
-            for (int column = 0; column < rows[row].Length; column++)
-            {
-                char tile = rows[row][column];
-
-                if (allowedTiles.IndexOf(tile) < 0)
-                {
-                    error = "THE OPPONENT CHALLENGE CONTAINS AN UNKNOWN TILE.";
-                    return false;
-                }
-
-                playerCount += tile == LevelData.Player ? 1 : 0;
-                boxCount += tile == LevelData.Box ? 1 : 0;
-                targetCount += tile == LevelData.Target ? 1 : 0;
-            }
-        }
-
-        if (playerCount != 1
-            || boxCount < 1
-            || boxCount > 2
-            || targetCount != boxCount)
-        {
-            error = "THE OPPONENT CHALLENGE HAS INVALID PLAYER OR BOX DATA.";
-            return false;
-        }
-
-        return true;
+        error = rawError.ToUpperInvariant();
+        return false;
     }
 
     private static string[] CloneRows(string[] rows)
     {
-        if (rows == null)
-        {
-            return null;
-        }
-
-        string[] clone = new string[rows.Length];
-
-        for (int row = 0; row < rows.Length; row++)
-        {
-            clone[row] = rows[row] ?? "";
-        }
-
-        return clone;
+        return LevelMapUtilities.CloneRows(rows);
     }
 
     private static void SetPanelVisible(GameObject panel, bool visible)

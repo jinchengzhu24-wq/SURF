@@ -381,17 +381,19 @@ public class QuestionnaireController : MonoBehaviour
         SurveyResponseRecord record = CreateResponseRecord();
         string json = JsonUtility.ToJson(record);
         string url = GetBackendUrl(SurveyResponsePath);
-        byte[] body = Encoding.UTF8.GetBytes(json);
-        UnityWebRequest request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
-        request.uploadHandler = new UploadHandlerRaw(body);
-        request.downloadHandler = new DownloadHandlerBuffer();
-        request.timeout = Mathf.Max(1, requestTimeoutSeconds);
-        request.SetRequestHeader("Content-Type", "application/json");
-        request.SetRequestHeader("Accept", "application/json");
+        UnityWebRequest.Result requestResult;
+        long responseCode;
+        string requestError;
 
-        yield return request.SendWebRequest();
+        using (UnityWebRequest request = UnityJsonWebRequest.CreatePost(url, json, requestTimeoutSeconds))
+        {
+            yield return request.SendWebRequest();
+            requestResult = request.result;
+            responseCode = request.responseCode;
+            requestError = request.error;
+        }
 
-        if (request.result == UnityWebRequest.Result.Success)
+        if (requestResult == UnityWebRequest.Result.Success)
         {
             if (!IsBlank(record.matchId))
             {
@@ -414,12 +416,11 @@ public class QuestionnaireController : MonoBehaviour
             Debug.LogWarning(
                 "Questionnaire submit failed:"
                 + " url=" + url
-                + ", error=" + request.error
-                + ", responseCode=" + request.responseCode
+                + ", error=" + requestError
+                + ", responseCode=" + responseCode
             );
         }
 
-        request.Dispose();
         isSubmitting = false;
         UpdateSubmitState();
     }
@@ -580,22 +581,14 @@ public class QuestionnaireController : MonoBehaviour
 
     private static bool TryGetHttpUrl(string value, out string resolvedUrl)
     {
+        if (PublicEndpointResolver.TryGetSafeHttpUri(value, out Uri uri))
+        {
+            resolvedUrl = uri.AbsoluteUri;
+            return true;
+        }
+
         resolvedUrl = string.Empty;
-
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        Uri uri;
-        if (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
-        {
-            return false;
-        }
-
-        resolvedUrl = uri.AbsoluteUri;
-        return true;
+        return false;
     }
 
     private bool TryGetStudySessionQuestionNumber(out int questionNumber)

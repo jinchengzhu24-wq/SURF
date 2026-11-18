@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cocreation  # noqa: F401
 import semantic_eval as evaluation
 import llm_client as llm
 

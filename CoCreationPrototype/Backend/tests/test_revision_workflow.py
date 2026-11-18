@@ -7,6 +7,7 @@ from unittest.mock import patch
 BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
+    import cocreation  # noqa: F401
 
 from revision_workflow import (  # noqa: E402
     SemanticConstraintError,

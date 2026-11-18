@@ -31,6 +31,9 @@ public class OnlineLobbyController : MonoBehaviour
 
     [DllImport("__Internal")]
     private static extern void SokobanLobbySetJoinCode(string roomCode);
+
+    [DllImport("__Internal")]
+    private static extern void SokobanLobbySetJoinInteractable(int interactable);
 #endif
 
     private void Start()
@@ -420,5 +423,9 @@ public class OnlineLobbyController : MonoBehaviour
         {
             roomCodeInput.interactable = interactable;
         }
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        SokobanLobbySetJoinInteractable(interactable ? 1 : 0);
+#endif
     }
 }

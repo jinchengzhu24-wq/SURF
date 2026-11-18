@@ -8,6 +8,7 @@ from pathlib import Path
 from contextlib import closing
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cocreation  # noqa: F401
 from reliability_report import failure_category, read_events, render_text, summarize, utc_timestamp
 
 

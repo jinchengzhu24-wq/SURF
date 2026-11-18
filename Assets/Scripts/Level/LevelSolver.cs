@@ -31,6 +31,7 @@ public class LevelSolver : MonoBehaviour
 
     private Vector2Int playerPos;
     private bool hasPlayer;
+    private int playerCount;
     private readonly List<Vector2Int> boxes = new List<Vector2Int>();
     private readonly HashSet<Vector2Int> targets = new HashSet<Vector2Int>();
     private readonly HashSet<Vector2Int> blocks = new HashSet<Vector2Int>();
@@ -100,7 +101,7 @@ public class LevelSolver : MonoBehaviour
 
         for (int y = 0; y < levelData.rows.Length; y++)
         {
-            string row = levelData.rows[y];
+            string row = levelData.rows[y] ?? "";
 
             for (int x = 0; x < row.Length; x++)
             {
@@ -108,8 +109,7 @@ public class LevelSolver : MonoBehaviour
             }
         }
 
-        ValidateParsedData();
-        return true;
+        return ValidateParsedData();
     }
 
     [ContextMenu("Solve And Log")]
@@ -395,6 +395,7 @@ public class LevelSolver : MonoBehaviour
             }
 
             hasPlayer = true;
+            playerCount++;
             playerPos = position;
         }
         else if (tile == 's')
@@ -415,16 +416,22 @@ public class LevelSolver : MonoBehaviour
     {
         playerPos = Vector2Int.zero;
         hasPlayer = false;
+        playerCount = 0;
         boxes.Clear();
         targets.Clear();
         blocks.Clear();
     }
 
-    private void ValidateParsedData()
+    private bool ValidateParsedData()
     {
         if (!hasPlayer)
         {
             Debug.LogWarning("LevelSolver: No player start found. Add one 'p' to LevelData.");
+        }
+
+        if (playerCount > 1)
+        {
+            Debug.LogWarning("LevelSolver: Duplicate player start 'p' found in LevelData.");
         }
 
         if (boxes.Count == 0)
@@ -441,6 +448,8 @@ public class LevelSolver : MonoBehaviour
         {
             Debug.LogWarning("LevelSolver: Box count and target count do not match.");
         }
+
+        return playerCount == 1 && boxes.Count > 0 && targets.Count == boxes.Count;
     }
 
     private void LogParseResult()

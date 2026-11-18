@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cocreation  # noqa: F401
 import app as backend
 import llm_client as llm
 import proposal_options as directions

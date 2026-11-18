@@ -77,14 +77,7 @@ public static class CoCreationPlayContext
 
     private static string[] CloneRows(string[] rows)
     {
-        string[] clone = new string[rows.Length];
-
-        for (int index = 0; index < rows.Length; index++)
-        {
-            clone[index] = rows[index] ?? "";
-        }
-
-        return clone;
+        return LevelMapUtilities.CloneRows(rows) ?? new string[0];
     }
 }
 

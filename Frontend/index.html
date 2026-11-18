@@ -9,7 +9,9 @@
             ? "."
             : (window.location.pathname.startsWith("/frontend/") ? "." : "/frontend");
         document.write('<link rel="icon" type="image/png" href="' + window.FRONTEND_ASSET_BASE + '/favicon.png?v=fox-df2f6509133d">');
-        document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/styles.css?v=dashboard-20260827-2">');
+        document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/tokens-base.css?v=dashboard-20261118-1">');
+        document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/layout-panels.css?v=dashboard-20261118-1">');
+        document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/timeline-maps.css?v=dashboard-20261118-1">');
     </script>
 </head>
 <body>
@@ -211,9 +213,17 @@
     </dialog>
 
     <script>
-        const script = document.createElement("script");
-        script.src = window.FRONTEND_ASSET_BASE + "/matchmaking.js?v=research-nodes-20261010-1";
-        document.body.appendChild(script);
+        [
+            "/js/shared/api-utils.js?v=research-nodes-20261010-1",
+            "/js/matchmaking/nodes-timeline.js?v=research-nodes-20261010-1",
+            "/js/matchmaking/inspector-compare.js?v=research-nodes-20261010-1",
+            "/js/matchmaking/main.js?v=research-nodes-20261010-1"
+        ].forEach(srcPath => {
+            const script = document.createElement("script");
+            script.async = false;
+            script.src = window.FRONTEND_ASSET_BASE + srcPath;
+            document.body.appendChild(script);
+        });
     </script>
 </body>
 </html>

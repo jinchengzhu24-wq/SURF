@@ -15,14 +15,14 @@
 
 ## Project Structure
 
-This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, and the independent 8010 co-creation service. Unity code is under `Assets/Scripts/`; scenes are under `Assets/Scenes/`; preserve every Unity asset's `.meta` file. `Backend/` is the 8000 service, `Frontend/` is its static dashboard, and `CoCreationPrototype/` contains the 8010 backend and frontend. `Library/`, `Temp/`, `Logs/`, generated solution files, and `WebGLBuild/` are generated output.
+This repository combines a Unity 2D Sokoban client, the 8000 FastAPI service, and the independent 8010 co-creation service. Unity code is under `Assets/Scripts/` (with partial generator modules under `Assets/Scripts/Level/Generation/`, player controller/map/request helpers under `Player/`, `Level/`, `Networking/`); scenes are under `Assets/Scenes/`; preserve every Unity asset's `.meta` file. `Backend/` hosts the 8000 entrypoint `app.py` and `sokoban_backend/` package (`tests/` holds unit tests), `Frontend/` keeps root `index.html`/`train.html`/`favicon.png` with modular assets under `css/`, `js/`, and `tests/`, and `CoCreationPrototype/` contains the 8010 backend (`app.py`, `reliability_report.py`, `semantic_eval.py` wrappers over the `cocreation/` package and `tests/`) and frontend (`index.html`, `favicon.png`, modular `css/`, `js/`, and `tests/`). `Library/`, `Temp/`, `Logs/`, generated solution files, and `WebGLBuild/` are generated output.
 
 Documentation and implementation entry points:
 
 - [README.md](README.md): current product route, service/Agent boundaries, data ownership, and verification entry points.
 - [CoCreationPrototype/REPLY_RELIABILITY.md](CoCreationPrototype/REPLY_RELIABILITY.md): component acceptance, request budgets, recovery, audit metrics, and 8010 deployment/rollback.
 - [CoCreationPrototype/Backend/evaluations/README.md](CoCreationPrototype/Backend/evaluations/README.md): isolated semantic evaluation scope and commands.
-- `CoCreationPrototype/Backend/app.py` and `repository.py`: API state, persistence, idempotency, deadline, and research projections. `llm_client.py` and `design_context.py`: role-specific LLM context and semantic memory. `design_requirements.py`, `revision_workflow.py`, `proposal_search.py`, and `level_validation.py`: requirements, execution constraints, search, snapshots, and solving.
+- `CoCreationPrototype/Backend/app.py` and `cocreation/` (`api/`, `persistence/`): API state, persistence, idempotency, deadline, and research projections. `cocreation/llm/`: role-specific LLM context and semantic memory. `cocreation/domain/`: requirements, execution constraints, search, snapshots, and solving. `cocreation/reliability/` & `cocreation/tools/`: audit reporting and offline semantic evaluation.
 - `Multi-Agent/` contains role descriptions and historical examples; do not restore obsolete flows from those examples. `SERVER.md` and the research PDFs/action plan are local, non-distributed references. Do not invent missing reference files.
 
 Keep these documents consistent with confirmed revisions and implementation. A documentation discrepancy or existing implementation bug does not authorize changing the study design or weakening its guardrails. The 2026-10-02 requirements policy and 2026-10-03 component-recovery rules supersede older conflicting descriptions; the 2026-10-06 reporting/evaluation tools do not change runtime behavior.
@@ -133,7 +133,7 @@ Keep these documents consistent with confirmed revisions and implementation. A d
 
 - `python Backend/app.py` starts 8000; run `python -m unittest discover -s Backend -p "test_*.py"` for its tests.
 - `python CoCreationPrototype/Backend/app.py` starts 8010; run `python -m unittest discover -s CoCreationPrototype/Backend/tests -p "test_*.py"` for its tests.
-- Frontend checks: `node --test CoCreationPrototype/Frontend/tests/*.cjs` and `node --check CoCreationPrototype/Frontend/app.js`. Offline suite validation: `python CoCreationPrototype/Backend/semantic_eval.py validate`. Do not make a normal regression or documentation check call the real model.
+- Frontend checks: `node --test Frontend/tests/*.cjs`, `node --test CoCreationPrototype/Frontend/tests/*.cjs`, `node --test Tests/WebGLBridge/*.cjs`, and `node --check` on `Frontend/js/**/*.js` and `CoCreationPrototype/Frontend/js/*.js`. Offline suite validation: `python CoCreationPrototype/Backend/semantic_eval.py validate`. Do not make a normal regression or documentation check call the real model.
 - Generate Unity project files through the Editor before using `dotnet build Assembly-CSharp.csproj -v:minimal` as an optional C# compile check; it does not replace Unity Test Runner or validate a WebGL build. `Algorithm_Level` is an enabled standalone experience, not part of the formal online route.
 - Use Unity `2022.3.62f2c1`; run Unity tests through Test Runner as appropriate. Do not build WebGL unless requested.
 - Use four-space indentation. C# types/methods are `PascalCase`, C# fields/locals are `camelCase`, and Python uses `snake_case`. Add focused regression coverage for behavior changes; tests must not require a real API key or network call.

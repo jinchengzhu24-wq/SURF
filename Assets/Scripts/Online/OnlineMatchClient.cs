@@ -268,19 +268,7 @@ public class OnlineMatchClient : MonoBehaviour
 
     private static string[] CloneRows(string[] rows)
     {
-        if (rows == null)
-        {
-            return null;
-        }
-
-        string[] clone = new string[rows.Length];
-
-        for (int row = 0; row < rows.Length; row++)
-        {
-            clone[row] = rows[row] ?? "";
-        }
-
-        return clone;
+        return LevelMapUtilities.CloneRows(rows);
     }
 
     private void OnDestroy()

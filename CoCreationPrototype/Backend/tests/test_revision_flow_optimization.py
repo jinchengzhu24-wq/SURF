@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cocreation  # noqa: F401
 import llm_client as llm
 from patch_fixtures import patch_fixture
 from design_requirements import (

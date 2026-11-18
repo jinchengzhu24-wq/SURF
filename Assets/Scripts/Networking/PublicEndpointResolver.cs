@@ -70,6 +70,21 @@ public static class PublicEndpointResolver
         return true;
     }
 
+    public static bool TryGetSafeHttpUri(string value, out Uri uri)
+    {
+        uri = null;
+        string candidate = value == null ? "" : value.Trim();
+
+        if (!Uri.TryCreate(candidate, UriKind.Absolute, out Uri parsed)
+            || (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
+        {
+            return false;
+        }
+
+        uri = parsed;
+        return true;
+    }
+
     private static string ResolveServiceBaseUrl(
         string configuredFallback,
         string servicePath)

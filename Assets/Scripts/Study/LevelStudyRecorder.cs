@@ -636,27 +636,20 @@ public class LevelStudyRecorder : MonoBehaviour
     private IEnumerator PostJson(string path, string json)
     {
         string url = GetBackendUrl(path);
-        byte[] body = Encoding.UTF8.GetBytes(json);
-        UnityWebRequest request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
-        request.uploadHandler = new UploadHandlerRaw(body);
-        request.downloadHandler = new DownloadHandlerBuffer();
-        request.timeout = Mathf.Max(1, requestTimeoutSeconds);
-        request.SetRequestHeader("Content-Type", "application/json");
-        request.SetRequestHeader("Accept", "application/json");
-
-        yield return request.SendWebRequest();
-
-        if (request.result != UnityWebRequest.Result.Success)
+        using (UnityWebRequest request = UnityJsonWebRequest.CreatePost(url, json, requestTimeoutSeconds))
         {
-            Debug.LogWarning(
-                "LevelStudyRecorder failed to send record:"
-                + " url=" + url
-                + ", error=" + request.error
-                + ", responseCode=" + request.responseCode
-            );
-        }
+            yield return request.SendWebRequest();
 
-        request.Dispose();
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogWarning(
+                    "LevelStudyRecorder failed to send record:"
+                    + " url=" + url
+                    + ", error=" + request.error
+                    + ", responseCode=" + request.responseCode
+                );
+            }
+        }
     }
 
     private string GetBackendUrl(string path)
@@ -794,19 +787,7 @@ public class LevelStudyRecorder : MonoBehaviour
 
     private string[] CloneRows(string[] rows)
     {
-        if (rows == null)
-        {
-            return new string[0];
-        }
-
-        string[] copy = new string[rows.Length];
-
-        for (int i = 0; i < rows.Length; i++)
-        {
-            copy[i] = rows[i] ?? "";
-        }
-
-        return copy;
+        return LevelMapUtilities.CloneRows(rows) ?? new string[0];
     }
 
     private int GetMapWidth(string[] rows)
@@ -826,26 +807,7 @@ public class LevelStudyRecorder : MonoBehaviour
 
     private string GetMapHash(string[] rows)
     {
-        unchecked
-        {
-            uint hash = 2166136261;
-
-            for (int i = 0; i < rows.Length; i++)
-            {
-                string row = rows[i] ?? "";
-
-                for (int j = 0; j < row.Length; j++)
-                {
-                    hash ^= row[j];
-                    hash *= 16777619;
-                }
-
-                hash ^= '\n';
-                hash *= 16777619;
-            }
-
-            return hash.ToString("x8");
-        }
+        return LevelMapUtilities.ComputeMapHash(rows);
     }
 
     private int ManhattanDistance(Vector2Int first, Vector2Int second)

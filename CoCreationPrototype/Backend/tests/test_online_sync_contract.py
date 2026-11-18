@@ -8,6 +8,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 if str(COCREATION_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(COCREATION_BACKEND_DIR))
+    import cocreation  # noqa: F401
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.append(str(REPOSITORY_ROOT))
 

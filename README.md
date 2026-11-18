@@ -12,14 +12,14 @@
 
 | 位置 | 职责 |
 | --- | --- |
-| `Assets/Scripts/`、`Assets/Scenes/` | Unity 导航、首版生成、iframe 协议、Stage 试玩与在线挑战；保留资产 `.meta` |
+| `Assets/Scripts/`、`Assets/Scenes/` | Unity 导航、首版生成（含 `Level/Generation/` 部分类及 `LevelMapUtilities`）、`GridPlayerController`、`UnityJsonWebRequest`、iframe 协议、Stage 试玩与在线挑战；保留资产 `.meta` |
 | `Assets/WebGLTemplates/SokobanPixel/`、`Assets/Plugins/WebGL/BrowserNavigation.jslib` | 游戏网页模板、Dashboard 密码入口、浏览器房间码和 Unity 通信 |
-| `Backend/`、`Frontend/` | 8000 匹配、研究记录、两个首版 Agent 与 Dashboard |
-| `CoCreationPrototype/Backend/app.py`、`repository.py` | 8010 API、流程状态、持久化、幂等、deadline 和研究投影 |
-| `CoCreationPrototype/Backend/llm_client.py`、`design_context.py` | Kimi 任务、当前快照与分角色语义上下文、意图及证据 |
-| `CoCreationPrototype/Backend/design_requirements.py`、`revision_workflow.py`、`proposal_search.py`、`level_validation.py` | 要求策略、执行约束、候选搜索、地图事实及求解；这些是确定性程序，不是 Agent |
-| `CoCreationPrototype/Frontend/` | 共创网页、编辑器、卡片、进度、错误与重试恢复 |
-| `CoCreationPrototype/Backend/reliability_report.py`、`semantic_eval.py`、`evaluations/` | 独立只读统计与语义评测，不接入用户流程 |
+| `Backend/`（`app.py`、`sokoban_backend/`、`tests/`）、`Frontend/`（`index.html`、`train.html`、`css/`、`js/`、`tests/`） | 8000 匹配、研究记录、两个首版 Agent 与模块化 Dashboard |
+| `CoCreationPrototype/Backend/app.py`、`cocreation/api/`、`cocreation/persistence/` | 8010 API、流程状态、持久化、幂等、deadline 和研究投影 |
+| `CoCreationPrototype/Backend/cocreation/llm/` | Kimi 任务、当前快照与分角色语义上下文、意图及证据 |
+| `CoCreationPrototype/Backend/cocreation/domain/` | 要求策略、执行约束、候选搜索、地图事实及求解；这些是确定性程序，不是 Agent |
+| `CoCreationPrototype/Frontend/`（`index.html`、`css/`、`js/`、`tests/`） | 共创网页、编辑器、卡片、进度、错误与重试恢复 |
+| `CoCreationPrototype/Backend/reliability_report.py`、`semantic_eval.py`、`cocreation/tools/`、`evaluations/` | 独立只读统计与语义评测（根脚本转发至模块化包），不接入用户流程 |
 
 `Library/`、`Temp/`、`Logs/`、Unity 工程文件和 `WebGLBuild/` 是生成结果；凭据、数据库、研究日志和评测运行结果不提交到 Git。
 

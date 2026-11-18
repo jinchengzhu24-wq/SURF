@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cocreation  # noqa: F401
 import llm_client as llm
 import test_wire_contracts as wire
 from test_proposal_understanding import ROWS, topic, item, understanding

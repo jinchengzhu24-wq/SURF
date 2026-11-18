@@ -59,6 +59,7 @@ public class LevelManager : MonoBehaviour
     public KeyCode restartKey = KeyCode.R;
 
     private bool isCompletingLevel;
+    private bool externalRestartBlocked;
     private bool usesExternalInitialLoadingTransition;
     private bool completionTransitionHandled;
 
@@ -97,6 +98,7 @@ public class LevelManager : MonoBehaviour
     {
         usesExternalInitialLoadingTransition = true;
         isCompletingLevel = true;
+        externalRestartBlocked = false;
         StretchBlackPanelToFullscreen();
         SetPlayerInputEnabled(false);
         SetBlackPanelAlpha(0);
@@ -131,6 +133,11 @@ public class LevelManager : MonoBehaviour
     public void SetExternalPlayerInputEnabled(bool enabled)
     {
         SetPlayerInputEnabled(enabled);
+    }
+
+    public void SetExternalRestartAllowed(bool allowed)
+    {
+        externalRestartBlocked = !allowed;
     }
 
     private IEnumerator InitialLLMLoadingTransition()
@@ -336,7 +343,7 @@ public class LevelManager : MonoBehaviour
 
     private void Update()
     {
-        if (!allowRestartWithR || isCompletingLevel)
+        if (!allowRestartWithR || isCompletingLevel || externalRestartBlocked)
         {
             return;
         }
@@ -380,6 +387,11 @@ public class LevelManager : MonoBehaviour
 
     public void RestartCurrentLevel()
     {
+        if (isCompletingLevel || externalRestartBlocked)
+        {
+            return;
+        }
+
         if (levelLoader == null)
         {
             levelLoader = FindObjectOfType<LevelLoader>();

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cocreation  # noqa: F401
 import app as backend
 import component_recovery as recovery
 import llm_client as llm

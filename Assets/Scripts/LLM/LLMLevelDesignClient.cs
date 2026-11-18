@@ -574,7 +574,16 @@ public static class LLMBackendError
         try
         {
             ErrorEnvelope envelope = JsonUtility.FromJson<ErrorEnvelope>(responseBody);
-            return envelope != null ? envelope.detail : null;
+            ErrorDetail detail = envelope != null ? envelope.detail : null;
+            if (detail != null
+                && (!string.IsNullOrWhiteSpace(detail.code)
+                    || !string.IsNullOrWhiteSpace(detail.stage)
+                    || !string.IsNullOrWhiteSpace(detail.message)
+                    || !string.IsNullOrWhiteSpace(detail.requestId)))
+            {
+                return detail;
+            }
+            return null;
         }
         catch (Exception)
         {

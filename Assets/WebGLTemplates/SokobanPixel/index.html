@@ -345,13 +345,16 @@
       var coCreationLabWindow = null;
       var coCreationLabOrigin = "";
       var coCreationSessionId = "";
+      var isLocalCoCreationHost = window.location.hostname === "localhost"
+        || window.location.hostname === "127.0.0.1";
       var allowedCoCreationOrigins = [
         window.location.origin,
         "https://sokobanaidemo.top",
-        "https://www.sokobanaidemo.top",
-        "http://127.0.0.1:8010",
-        "http://localhost:8010"
+        "https://www.sokobanaidemo.top"
       ];
+      if (isLocalCoCreationHost) {
+        allowedCoCreationOrigins.push("http://127.0.0.1:8010", "http://localhost:8010");
+      }
 
       function isAllowedCoCreationOrigin(origin) {
         return allowedCoCreationOrigins.indexOf(origin) !== -1;
@@ -632,6 +635,17 @@
           parkCoCreationHost();
         } else if (message.type === "sokoban:cocreation-show-lab") {
           showCoCreationHost();
+          if (window.SokobanUnityInstance) {
+            try {
+              window.SokobanUnityInstance.SendMessage(
+                "CoCreationStagePlayController",
+                "ReceiveBrowserReturnToLab",
+                ""
+              );
+            } catch (_error) {
+              // Unity may already be transitioning out of Stage Play.
+            }
+          }
         }
       });
 
@@ -896,7 +910,13 @@
         lobbyJoinRoomCode.value = normalizeLobbyRoomCode(value);
       };
 
+      window.SokobanSetLobbyJoinInteractable = function (interactable) {
+        if (!lobbyJoinRoomCode) return;
+        lobbyJoinRoomCode.disabled = !interactable;
+      };
+
       lobbyJoinRoomCode.addEventListener("input", function () {
+        if (lobbyJoinRoomCode.disabled) return;
         var normalized = normalizeLobbyRoomCode(lobbyJoinRoomCode.value);
         if (lobbyJoinRoomCode.value !== normalized) {
           lobbyJoinRoomCode.value = normalized;
@@ -905,7 +925,7 @@
       });
 
       lobbyJoinRoomCode.addEventListener("keydown", function (event) {
-        if (event.key !== "Enter") return;
+        if (lobbyJoinRoomCode.disabled || event.key !== "Enter") return;
         event.preventDefault();
         event.stopPropagation();
         sendLobbyMessage("SubmitNativeJoinRoomCode");
@@ -914,6 +934,27 @@
       window.addEventListener("resize", positionLobbyNativeInputs);
       document.addEventListener("fullscreenchange", positionLobbyNativeInputs);
 
+      function applyPasswordInputEdit(input, replacement, isForwardDelete) {
+        var value = input.value || "";
+        var start = typeof input.selectionStart === "number" ? input.selectionStart : value.length;
+        var end = typeof input.selectionEnd === "number" ? input.selectionEnd : value.length;
+        var nextCaret = start + replacement.length;
+        if (replacement === "" && start === end) {
+          if (isForwardDelete) {
+            if (end < value.length) end += 1;
+          } else if (start > 0) {
+            start -= 1;
+            nextCaret = start;
+          }
+        }
+        input.value = value.slice(0, start) + replacement + value.slice(end);
+        input.focus();
+        if (typeof input.setSelectionRange === "function") {
+          input.setSelectionRange(nextCaret, nextCaret);
+        }
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
       function captureDashboardPasswordKey(event) {
         if (dashboardAccessModal.hidden
           || !event.target
@@ -921,21 +962,87 @@
           return;
         }
 
-        if (event.type === "keydown") {
-          if (event.key === "Backspace") {
-            dashboardAccessPassword.value = dashboardAccessPassword.value.slice(0, -1);
-          } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey) {
-            dashboardAccessPassword.value += event.key;
-          } else if (event.key === "Enter") {
-            dashboardAccessForm.requestSubmit();
-          }
-
-          dashboardAccessPassword.dispatchEvent(new Event("input", { bubbles: true }));
+        if (event.type === "keypress" || event.type === "keyup") {
+          event.stopImmediatePropagation();
+          return;
         }
 
-        event.preventDefault();
+        if (event.type !== "keydown") {
+          return;
+        }
+
         event.stopImmediatePropagation();
-        dashboardAccessPassword.focus();
+
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeDashboardAccessGate();
+          return;
+        }
+
+        if (dashboardAccessSubmit.disabled) {
+          event.preventDefault();
+          return;
+        }
+
+        if (event.key === "Tab") {
+          return;
+        }
+
+        if (event.target === dashboardAccessCancel) {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            closeDashboardAccessGate();
+          }
+          return;
+        }
+
+        if (event.target === dashboardAccessSubmit) {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            dashboardAccessForm.requestSubmit();
+          }
+          return;
+        }
+
+        if (event.ctrlKey || event.metaKey || event.altKey) {
+          if ((event.ctrlKey || event.metaKey)
+            && typeof event.key === "string"
+            && event.key.toLowerCase() === "a") {
+            event.preventDefault();
+            dashboardAccessPassword.focus();
+            if (typeof dashboardAccessPassword.select === "function") {
+              dashboardAccessPassword.select();
+            }
+          }
+          return;
+        }
+
+        if (["ArrowLeft", "ArrowRight", "Home", "End"].indexOf(event.key) !== -1) {
+          return;
+        }
+
+        if (event.key === "Enter") {
+          event.preventDefault();
+          dashboardAccessForm.requestSubmit();
+          return;
+        }
+
+        if (event.key === "Backspace") {
+          event.preventDefault();
+          applyPasswordInputEdit(dashboardAccessPassword, "", false);
+          return;
+        }
+
+        if (event.key === "Delete") {
+          event.preventDefault();
+          applyPasswordInputEdit(dashboardAccessPassword, "", true);
+          return;
+        }
+
+        if (event.key.length === 1) {
+          event.preventDefault();
+          applyPasswordInputEdit(dashboardAccessPassword, event.key, false);
+        }
       }
 
       ["keydown", "keypress", "keyup"].forEach(function (eventName) {
@@ -944,6 +1051,8 @@
 
       window.SokobanOpenDashboardGate = function (url) {
         dashboardAccessTarget = url || dashboardAccessTarget;
+        dashboardAccessSubmit.disabled = false;
+        dashboardAccessCancel.disabled = false;
         dashboardAccessStatus.textContent = "";
         dashboardAccessPassword.value = "";
         dashboardAccessModal.hidden = false;
@@ -979,6 +1088,10 @@
           } else {
             throw new Error("Please allow popups to open the dashboard.");
           }
+          dashboardAccessSubmit.disabled = false;
+          dashboardAccessCancel.disabled = false;
+          dashboardAccessPassword.value = "";
+          dashboardAccessStatus.textContent = "";
           dashboardAccessModal.hidden = true;
         }).catch(function (error) {
           if (popup && !popup.closed) popup.close();
@@ -1003,7 +1116,7 @@
 
         var banner = document.createElement("div");
         banner.className = "unity-banner " + (type || "info");
-        banner.innerHTML = message;
+        banner.textContent = message;
         warningBanner.appendChild(banner);
 
         if (type !== "error") {

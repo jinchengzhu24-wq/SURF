@@ -11,6 +11,7 @@ import httpx
 from openai import APIStatusError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cocreation  # noqa: F401
 import llm_client as llm
 from patch_fixtures import patch_fixture
 import test_llm_client as llm_tests

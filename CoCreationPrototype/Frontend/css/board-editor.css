@@ -1,0 +1,297 @@
+.mini-map,
+.map-frame {
+    border: 4px solid var(--stone-dark);
+    border-radius: 2px;
+    background: #27342f;
+    box-shadow:
+        inset 0 0 0 2px #7b8581,
+        3px 3px 0 rgba(37, 42, 39, 0.38);
+}
+
+.mini-map {
+    padding: 4px;
+    border-width: 2px;
+    box-shadow:
+        inset 0 0 0 1px #7b8581,
+        2px 2px 0 rgba(37, 42, 39, 0.32);
+}
+
+.mini-map i,
+.tile {
+    border-radius: 1px;
+    box-shadow: inset 0 -2px 0 rgba(22, 31, 28, 0.15);
+}
+
+.play-button {
+    border-color: #29451f;
+    color: #fff6c9;
+    background: #558636;
+    box-shadow:
+        inset 0 0 0 2px #96bd62,
+        inset 0 -3px 0 #355b26,
+        2px 2px 0 #283b24;
+    text-shadow: 1px 1px 0 #29451f;
+}
+
+.play-button:hover:not(:disabled) {
+    background: #659744;
+    box-shadow:
+        inset 0 0 0 2px #acd174,
+        inset 0 -3px 0 #355b26,
+        3px 3px 0 #283b24;
+    transform: translate(-1px, -1px);
+}
+
+.finalize-button {
+    border-color: #684513;
+    color: #332512;
+    background: #e7b747;
+    box-shadow:
+        inset 0 0 0 2px #ffe28c,
+        2px 2px 0 #4c3421;
+}
+
+.finalize-button:hover:not(:disabled) {
+    background: #f0c45d;
+    box-shadow:
+        inset 0 0 0 2px #ffedaa,
+        3px 3px 0 #4c3421;
+    transform: translate(-1px, -1px);
+}
+
+.map-content {
+    background: #f0ede3;
+}
+
+.map-panel .panel-header h2 {
+    font-size: 18px;
+}
+
+.map-panel .play-button,
+.map-panel .map-actions button,
+.map-panel .finalize-button,
+.map-panel .intention-form button {
+    font-size: 12px;
+}
+
+.map-frame {
+    padding: 18px;
+}
+
+.map-panel .tile {
+    font-size: 11px;
+    letter-spacing: -0.04em;
+    white-space: nowrap;
+}
+
+.map-panel .map-entity-legend {
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.map-panel .palette-button > span {
+    font-size: 10px;
+}
+
+.map-panel .palette-button small {
+    font-size: 10px;
+}
+
+.map-panel .map-mode {
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.map-panel .validation-card {
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.map-panel .validation-card strong {
+    font-size: 12px;
+}
+
+.map-panel .section-heading h3 {
+    font-size: 14px;
+}
+
+.map-panel .section-heading span {
+    font-size: 12px;
+}
+
+.map-panel .attempt-list {
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.map-panel .final-actions p {
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+.map-panel .intention-form h3 {
+    font-size: 15px;
+}
+
+.map-panel .complete-card {
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.palette-button,
+.attempt-item,
+.intention-form,
+.complete-card,
+.validation-card {
+    border: 2px solid #747b7c;
+    border-radius: 2px;
+    background: #dfddd3;
+    box-shadow: inset 0 0 0 1px #f4f1e7;
+}
+
+.palette-button.selected {
+    border-color: #365d27;
+    background: #d5e7b8;
+    box-shadow:
+        inset 0 0 0 2px #edf6dc,
+        2px 2px 0 #3a4931;
+}
+
+.validation-card,
+.attempt-item.completed,
+.complete-card {
+    border-color: #315d21;
+    color: #214715;
+    background: #b9d985;
+    box-shadow: inset 0 0 0 2px #dcebac;
+}
+
+.validation-card.invalid {
+    border-color: #713729;
+    color: #672a20;
+    background: #e2a58e;
+    box-shadow: inset 0 0 0 2px #f5c9b8;
+}
+
+.attempt-item.abandoned,
+.attempt-item.interrupted {
+    border-color: #684513;
+    color: #3f2f18;
+    background: #efd17c;
+}
+
+.intention-form {
+    border-color: #365d27;
+    background: #d5e7b8;
+}
+
+.play-control { min-width: 0; max-width: 60%; text-align: right; }
+.play-control .control-hint { max-width: 250px; margin: 6px 0 0 auto; color: #ffe8c9; font-size: 11px; line-height: 1.45; text-align: right; }
+.map-panel .validation-card { gap: 5px 12px; margin: 0 0 10px; padding: 7px 0 10px; border: 0; border-bottom: 1px solid #c8c5b7; border-radius: 0; color: #35552b; background: transparent; box-shadow: none; }
+.map-panel .validation-card .technical-details { flex-basis: auto; margin-left: auto; }
+.map-panel .validation-card .technical-details[open] { flex-basis: 100%; margin-left: 0; }
+.map-panel .validation-card.invalid { padding: 8px 10px; border-bottom-color: #b56c51; color: #743c2d; background: #f4e2d7; }
+.editor-section { min-width: 0; }
+.editor-section h3, .map-panel .final-actions h3 { margin: 0 0 4px; color: #315363; font-size: 13px; line-height: 1.4; }
+.map-panel .editor-section .map-mode { margin: 0 0 8px; color: #626963; font-size: 11px; }
+.map-save-block { margin-top: 10px; }
+.map-save-block .map-actions { margin-top: 0; }
+.map-save-block .save-explanation { margin: 7px 0 0; color: #6a6d61; font-size: 11px; }
+.map-save-block .control-hint { margin: 6px 0 0; color: #80562c; font-size: 11px; line-height: 1.5; }
+.map-panel details.play-evidence { margin-top: 12px; padding-top: 10px; border-top: 1px solid #c8c5b7; }
+.play-evidence > summary { justify-content: flex-start; gap: 8px; list-style: none; cursor: pointer; color: #465852; font-size: 12px; font-weight: 800; }
+.play-evidence > summary::-webkit-details-marker { display: none; }
+.play-evidence > summary::before { content: "▸"; color: #61736b; }
+.play-evidence[open] > summary::before { content: "▾"; }
+.play-evidence .attempt-count { margin-left: auto; padding: 1px 7px; border-radius: 10px; background: #dedfd5; font-size: 11px; }
+.play-evidence .attempt-list { margin-top: 9px; }
+.map-panel .final-actions { margin-top: 12px; padding: 12px 0 0; border: 0; border-top: 1px solid #c8c5b7; border-radius: 0; background: transparent; box-shadow: none; text-align: left; }
+.map-panel .final-actions h3 { color: #795621; }
+.map-panel .final-actions p { margin: 0 0 8px; color: #72705c; }
+.map-panel .final-actions .finalize-button { margin-top: 2px; }
+.map-panel #finalizeControlHint { margin: 7px 0 0; color: #80562c; }
+/* Reorganize the map workspace while retaining the existing pixel-adventure theme. */
+.map-panel { display: flex; flex-direction: column; }
+.chat-panel > .panel-header, .map-panel > .panel-header { flex: 0 0 auto; min-height: 72px; }
+.map-panel .panel-header .eyebrow { font-size: 10px; }
+.map-panel .panel-header h2 { font-size: 16px; }
+.map-panel .play-button { min-height: 38px; font-size: 12px; }
+.map-panel .map-content {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    overflow-y: auto;
+    scrollbar-color: #858c8e #deddd4;
+    scrollbar-gutter: stable;
+}
+.map-preview-section, .map-panel .editor-section, .map-panel details.play-evidence,
+.map-panel .final-actions, .map-panel .intention-form, .map-panel .complete-card {
+    flex: 0 0 auto;
+    min-width: 0;
+    margin: 0;
+    padding: 14px;
+    border: 2px solid #858c8e;
+    border-radius: 2px;
+    background: #f0ede3;
+    box-shadow: inset 0 0 0 1px #fff9e9;
+}
+.map-preview-section { padding: 10px 10px 0; }
+.map-panel .map-frame { min-height: 0; padding: 14px; }
+.map-panel .map-entity-legend { margin: 10px 2px 0; font-size: 11px; line-height: 1.5; }
+.map-panel .validation-card { gap: 5px 8px; margin: 0; padding: 12px 0; border: 0; font-family: inherit; font-size: 11px; line-height: 1.5; }
+.map-panel .validation-card strong { font-size: inherit; font-weight: 700; }
+.map-panel .validation-card .technical-details { margin-left: auto; font-size: 11px; }
+.map-panel .validation-card .technical-details[open] { margin-left: 0; }
+.map-panel .validation-card.invalid { margin-top: 8px; padding: 10px; border: 2px solid #b56c51; color: #743c2d; background: #f4e2d7; }
+.map-panel .editor-section { padding: 10px; }
+.map-panel .editor-section-heading { align-items: center; gap: 12px; margin-bottom: 6px; }
+.map-panel .editor-section h3, .map-panel .final-actions h3 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.4;
+}
+.map-section-icon { flex: 0 0 auto; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: square; stroke-linejoin: miter; }
+.map-panel .editor-help { font-size: 11px; }
+.map-panel .editor-section .map-mode { margin: 0 0 8px; font-size: 12px; line-height: 1.6; }
+.map-panel .map-toolbar { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 0; }
+.map-panel .palette-button {
+    display: flex;
+    min-height: 42px;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px 4px;
+}
+.map-panel .palette-button > span { flex: 0 0 auto; width: 22px; height: 22px; margin: 0; border-radius: 1px; font-size: 14px; }
+.map-panel .palette-button.tile-wall > span { box-shadow: inset 0 -2px 0 rgba(22, 31, 28, .15); }
+.map-panel .palette-button small { max-width: 100%; font-size: 11px; line-height: 1.4; }
+.map-panel .map-save-block { margin-top: 10px; padding-top: 10px; border-top: 1px solid #b7bab0; }
+.map-panel .map-actions { grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 10px; }
+.map-panel .map-actions button { min-height: 36px; gap: 7px; padding: 6px; font-size: 12px; line-height: 1.4; }
+.map-panel .map-actions .secondary-button { font-size: 12px; }
+.map-panel .map-save-block .save-explanation { margin: 8px 0 0; font-size: 12px; line-height: 1.6; }
+.map-panel .map-save-block .control-hint { margin-top: 8px; font-size: 12px; }
+.map-panel details.play-evidence { padding: 9px 10px; }
+.map-panel .play-evidence > summary { display: flex; gap: 8px; font-family: inherit; font-size: 12px; font-weight: 700; line-height: 1.5; }
+.map-panel .play-evidence > summary::before { content: none; }
+.map-panel .play-evidence > summary::after { content: "▾"; margin-left: 4px; color: #61736b; }
+.map-panel .play-evidence[open] > summary::after { content: "▴"; }
+.map-panel .play-evidence > summary span { font-size: inherit; }
+.map-panel .play-evidence .attempt-count { padding: 0; color: #626963; background: transparent; font-size: 12px; }
+.map-panel .attempt-list { margin-top: 14px; font-size: 12px; line-height: 1.6; }
+.map-panel .final-actions { padding: 10px; border-color: #a8782e; background: #f3dc8e; box-shadow: inset 0 0 0 2px #fff0b5; }
+.map-panel .final-actions h3 { color: #795621; font-size: 13px; }
+.map-panel .final-actions p { margin: 6px 0 8px; color: #705b1d; font-size: 12px; line-height: 1.65; }
+.map-panel .final-actions .finalize-button { min-height: 36px; margin: 0; padding: 6px; font-size: 12px; line-height: 1.4; }
+.map-panel #finalizeControlHint { margin: 10px 0 0; font-size: 12px; }
+.map-panel .intention-form h3 { font-size: 13px; }
+.map-panel .complete-card { border-color: #315d21; color: #214715; background: #b9d985; box-shadow: inset 0 0 0 2px #dcebac; }

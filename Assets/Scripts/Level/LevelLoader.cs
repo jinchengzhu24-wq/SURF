@@ -382,6 +382,7 @@ public class LevelLoader : MonoBehaviour
                 levelData = levelGenerator.levelData;
                 currentLoadUsedLLMPlan = false;
                 currentLoadUsedAlgorithmFallbackAfterLLM = true;
+                lastValidatedLLMPlan = null;
                 ClearPendingLLMPlanContext();
 
                 Debug.LogWarning(
@@ -708,10 +709,7 @@ public class LevelLoader : MonoBehaviour
         }
         else if (tile == '@')
         {
-            if (!IsWall(x, y - 1))
-            {
-                SetTile(waterTilemap, GetWaterTile(x, y), cellPosition);
-            }
+            SetTile(waterTilemap, GetWaterTile(x, y), cellPosition);
         }
         else if (tile == '#')
         {
@@ -785,12 +783,6 @@ public class LevelLoader : MonoBehaviour
         }
 
         if (IsGround(tile))
-        {
-            SetTile(groundTilemap, GetGroundTile(x, y), cellPosition);
-            return;
-        }
-
-        if (tile == '@' && IsWall(x, y - 1))
         {
             SetTile(groundTilemap, GetGroundTile(x, y), cellPosition);
         }
@@ -955,31 +947,9 @@ public class LevelLoader : MonoBehaviour
 
     private string GetLevelMapHash()
     {
-        if (levelData == null || levelData.rows == null)
-        {
-            return "";
-        }
-
-        unchecked
-        {
-            uint hash = 2166136261;
-
-            for (int i = 0; i < levelData.rows.Length; i++)
-            {
-                string row = levelData.rows[i] ?? "";
-
-                for (int j = 0; j < row.Length; j++)
-                {
-                    hash ^= row[j];
-                    hash *= 16777619;
-                }
-
-                hash ^= '\n';
-                hash *= 16777619;
-            }
-
-            return hash.ToString("x8");
-        }
+        return levelData != null
+            ? LevelMapUtilities.ComputeMapHash(levelData.rows)
+            : "";
     }
 
     private bool IsGround(int x, int y)

@@ -108,8 +108,56 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
         levelLoader.LoadLevel();
         yield return levelManager.FadeFromBlackAfterExternalInitialLoad(false);
         levelReady = true;
+        levelManager.SetExternalRestartAllowed(true);
         levelManager.SetExternalPlayerInputEnabled(true);
         StartCoroutine(SendMetrics("start"));
+    }
+
+    private void Update()
+    {
+        if (levelReady && !completed && !returning && Input.GetKeyDown(KeyCode.Escape))
+        {
+            BeginAbandonAndReturn();
+        }
+    }
+
+    public void ReceiveBrowserReturnToLab(string _unused = "")
+    {
+        if (completed || returning)
+        {
+            return;
+        }
+
+        BeginAbandonAndReturn();
+    }
+
+    private void BeginAbandonAndReturn()
+    {
+        if (completed || returning)
+        {
+            return;
+        }
+
+        returning = true;
+        if (levelManager != null)
+        {
+            levelManager.SetExternalPlayerInputEnabled(false);
+            levelManager.SetExternalRestartAllowed(false);
+        }
+
+        StartCoroutine(AbandonAndReturnRoutine());
+    }
+
+    private IEnumerator AbandonAndReturnRoutine()
+    {
+        bool submitted = false;
+        yield return SendMetrics(
+            "abandon",
+            CompletionRequestTimeoutSeconds,
+            "abandoned",
+            success => submitted = success
+        );
+        NavigateToLab(submitted ? "" : "sync_failed");
     }
 
     private void OnDestroy()
@@ -170,6 +218,10 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
         completed = true;
         completedDuration = GetActiveDuration();
+        if (manager != null)
+        {
+            manager.SetExternalRestartAllowed(false);
+        }
     }
 
     private void HandleCompletionTransition(LevelManager manager)
@@ -182,6 +234,7 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
         }
 
         returning = true;
+        manager.SetExternalRestartAllowed(false);
         manager.SetExternalPlayerInputEnabled(false);
         StartCoroutine(CompleteAndReturnRoutine());
     }
@@ -221,6 +274,7 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
         if (levelManager != null)
         {
+            levelManager.SetExternalRestartAllowed(false);
             levelManager.SetExternalPlayerInputEnabled(false);
         }
 
@@ -323,14 +377,11 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
             + "/"
             + action;
 
-        using (UnityWebRequest request = new UnityWebRequest(endpoint, "POST"))
+        using (UnityWebRequest request = UnityJsonWebRequest.CreatePost(
+            endpoint,
+            JsonUtility.ToJson(payload),
+            timeoutSeconds))
         {
-            request.uploadHandler = new UploadHandlerRaw(
-                Encoding.UTF8.GetBytes(JsonUtility.ToJson(payload))
-            );
-            request.downloadHandler = new DownloadHandlerBuffer();
-            request.SetRequestHeader("Content-Type", "application/json");
-            request.timeout = Mathf.Max(1, timeoutSeconds);
             yield return request.SendWebRequest();
 
             bool succeeded = request.result == UnityWebRequest.Result.Success;
@@ -452,55 +503,17 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
     private static bool TryGetSafeHttpUri(string value, out Uri uri)
     {
-        uri = null;
-
-        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri parsed)
-            || (parsed.Scheme != Uri.UriSchemeHttp
-                && parsed.Scheme != Uri.UriSchemeHttps))
-        {
-            return false;
-        }
-
-        uri = parsed;
-        return true;
+        return PublicEndpointResolver.TryGetSafeHttpUri(value, out uri);
     }
 
     private static bool TryValidateRows(string[] rows, out string error)
     {
-        if (rows == null || rows.Length != 10)
-        {
-            error = "The Stage must contain exactly 10 rows.";
-            return false;
-        }
-
-        const string allowed = " #.@pst";
-        for (int index = 0; index < rows.Length; index++)
-        {
-            if (rows[index] == null || rows[index].Length != 12)
-            {
-                error = "Every Stage row must contain exactly 12 cells.";
-                return false;
-            }
-
-            foreach (char tile in rows[index])
-            {
-                if (allowed.IndexOf(tile) < 0)
-                {
-                    error = "The Stage contains an unsupported tile.";
-                    return false;
-                }
-            }
-        }
-
-        error = "";
-        return true;
+        return LevelMapUtilities.TryValidatePlayableRows(rows, "Stage", out error);
     }
 
     private static string[] CloneRows(string[] rows)
     {
-        string[] clone = new string[rows.Length];
-        Array.Copy(rows, clone, rows.Length);
-        return clone;
+        return LevelMapUtilities.CloneRows(rows) ?? new string[0];
     }
 }
 

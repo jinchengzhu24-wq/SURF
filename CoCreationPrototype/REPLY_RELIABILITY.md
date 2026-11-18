@@ -1,5 +1,13 @@
 # 8010 回复可靠性与流程恢复
 
+## 2026-11-18 全仓 Bug 修复与模块化重构（仅本地修订，未部署）
+
+本轮在不改变外部 HTTP 契约、研究记录格式及设计原则的前提下，完成本地代码模块化拆分与多项经源码核实 Bug 的修复（零真实模型 API 调用，未重打 WebGL 构建，未部署到生产环境）：
+
+- **8010 后端模块化（`cocreation/` 包）**：将原根目录单文件拆分为 `api/`、`domain/`、`persistence/`、`llm/`、`reliability/`、`tools/` 子包，根 `app.py`、`reliability_report.py`、`semantic_eval.py` 保留兼容入口；清理死代码并修复提案取消早退、Policy 2 与澄清计数隔离、草稿未保存误提交与幂等冲突、`minimum_pushes` 超时穿透、二选一去重指纹、诊断详情与 `retryable` 状态、理解复核禁止改动对象以及快照接地/翻译校验等问题。
+- **8010 前端模块化（`css/`、`js/`）**：将 `styles.css` 与 `app.js` 拆分为有序的 5 个 CSS 模块与 7 个经典 JS 模块；修复提案接受/拒绝与同 Stage 反馈草稿丢失、`ensureAssessment` 过期并发及到期后阻塞定稿、翻译无限重试与并发漏翻、坐标高亮闪烁、schema-v2 提案卡识别及本地调试域隔离。
+- **8000 与 Unity/WebGL 联动**：同步模块化拆分 `Backend/sokoban_backend/`、`Frontend/{css,js}/` 与 `Assets/Scripts/Level/Generation/`，修复靠墙南侧水域失灵（`LevelLoader`）、超时按 `R` 绕过锁定、`Physics2D` 推箱同步、Stage Play `Esc`/宿主返回退出、`DATA DASHBOARD` 弹窗二次打开锁死及 Unity `JsonUtility` 非空嵌套对象误判等缺陷。
+
 ## 2026-11-16 理解复核局部纠正（本地修订，未部署）
 
 当前本地协议为 `understanding-delta-3-quote-leaf`，由下述首轮 `understanding-delta-2-native` 收尾修复而来，仅调整8010理解复核。独立复核完整审阅同一份用户来源、StageSnapshot、历史主题和基准理解：`APPROVE` 返回空纠正列表，沿用已校验对象；`CORRECT` 只返回服务器提供的目标 ID、理由、原生 JSON `value` 及用户来源引用；`REJECT` 安全失败。首次语义纠正仍可逐项替换或追加遗漏项；不暴露整份理解、整组目标/保留条件替换或删除/重排操作，额外拒绝字面跨条目复制/交换及新增重复项。这不等于能确定性识别语义等价改写。必要纠正不合法不得回退旧理解宣告通过。

@@ -57,5 +57,10 @@ mergeInto(LibraryManager.library, {
         if (window.SokobanSetLobbyJoinCode) {
             window.SokobanSetLobbyJoinCode(UTF8ToString(roomCodePointer));
         }
+    },
+    SokobanLobbySetJoinInteractable: function (interactable) {
+        if (window.SokobanSetLobbyJoinInteractable) {
+            window.SokobanSetLobbyJoinInteractable(interactable !== 0);
+        }
     }
 });

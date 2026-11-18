@@ -11,6 +11,7 @@ public class Box : MonoBehaviour
     public void Move(Vector3 dir)
     {
         transform.position += dir;
+        Physics2D.SyncTransforms();
     }
 
     public void Awake()

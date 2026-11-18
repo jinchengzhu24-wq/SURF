@@ -64,3 +64,28 @@ test("unknown message sources are silently ignored before acknowledgement", () =
   assert.equal(contract.shouldHandleSource(true), true);
   assert.equal(contract.shouldHandleSource(false), false);
 });
+
+test("webgl template preserves dashboard modal recovery, lobby lock, origin gating, and stage return", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const templateHtml = fs.readFileSync(
+    path.join(__dirname, "../../Assets/WebGLTemplates/SokobanPixel/index.html"),
+    "utf8"
+  );
+  const jslib = fs.readFileSync(
+    path.join(__dirname, "../../Assets/Plugins/WebGL/BrowserNavigation.jslib"),
+    "utf8"
+  );
+
+  assert.match(templateHtml, /window\.SokobanOpenDashboardGate[\s\S]*dashboardAccessSubmit\.disabled = false;[\s\S]*dashboardAccessCancel\.disabled = false;/);
+  assert.match(templateHtml, /dashboardAccessForm\.addEventListener\("submit"[\s\S]*dashboardAccessSubmit\.disabled = false;[\s\S]*dashboardAccessCancel\.disabled = false;[\s\S]*dashboardAccessModal\.hidden = true;/);
+  assert.match(templateHtml, /event\.key === "Escape"[\s\S]*closeDashboardAccessGate\(\)/);
+  assert.match(templateHtml, /event\.target === dashboardAccessCancel/);
+  assert.match(templateHtml, /banner\.textContent = message;/);
+  assert.doesNotMatch(templateHtml, /banner\.innerHTML\s*=/);
+
+  assert.match(templateHtml, /isLocalCoCreationHost[\s\S]*allowedCoCreationOrigins\.push\("http:\/\/127\.0\.0\.1:8010"/);
+  assert.match(templateHtml, /sokoban:cocreation-show-lab[\s\S]*ReceiveBrowserReturnToLab/);
+  assert.match(templateHtml, /window\.SokobanSetLobbyJoinInteractable = function/);
+  assert.match(jslib, /SokobanLobbySetJoinInteractable:\s*function/);
+});

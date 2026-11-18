@@ -25,7 +25,8 @@ function loadApp({ keepSubmit = false } = {}) {
             append(...children) { this.children.push(...children); },
             appendChild(child) { this.children.push(child); return child; },
             click() { if (!this.disabled) listeners.get("click")?.(); },
-            classList: { toggle() {} },
+            classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
+            querySelectorAll() { return []; },
             get clickHandler() { return listeners.get("click"); },
         };
         created.push(node);
@@ -47,13 +48,24 @@ function loadApp({ keepSubmit = false } = {}) {
         document,
         window: { location: { pathname: "/cocreation/", origin: "http://localhost" }, addEventListener() {} },
         crypto: { randomUUID: () => "12345678-1234-1234-1234-123456789abc" },
-        localStorage: { setItem() {}, removeItem() {} },
+        localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
         sessionStorage: { data: new Map(), getItem(key) { return this.data.get(key) || null; },
             setItem(key, value) { this.data.set(key, value); } },
+        URLSearchParams,
         console,
     });
-    const appPath = path.join(__dirname, "..", "app.js");
-    const source = fs.readFileSync(appPath, "utf8");
+    const appFiles = [
+        "js/i18n.js",
+        "js/state-storage.js",
+        "js/unity-bridge.js",
+        "js/map-editor.js",
+        "js/chat-cards.js",
+        "js/session-actions.js",
+        "js/main.js",
+    ];
+    const source = appFiles
+        .map(rel => fs.readFileSync(path.join(__dirname, "..", rel), "utf8"))
+        .join("\n");
     assert.match(source, /applyTranslations\(\);\s*initialize\(\);/);
     vm.runInContext(source.replace(/applyTranslations\(\);\s*initialize\(\);/, ""), context);
     vm.runInContext(`
@@ -855,4 +867,150 @@ test("compact binary purple card keeps coordinates and history in details", () =
         changes:[{row:3,column:3,before:"@",after:"."}],solution:{minimumMoves:4,pushesOnMinimumMoveSolution:2}})`, context);
     assert.equal(node.children.some(n => n.tagName === "details"), true);
     assert.equal(node.children.filter(n => n.tagName === "p").some(n => n.textContent.includes("(3, 3)")), false);
+});
+
+test("phase5 fixes preserve reject draft, v2 offers, pending binary guard, translation retry cap, and deadline cleanup", async () => {
+    const { context, created } = loadApp();
+    await vm.runInContext(`(async () => {
+        globalThis.__phase5Checks = {};
+
+        // 1. v2 proposalPresentation counts as revision offer turn even without offer.summary
+        __phase5Checks.v2Offer = isRevisionOfferTurn({
+            role: "assistant",
+            guidance: { proposalOffer: { proposalPresentation: { schemaVersion: 2 } } }
+        });
+
+        // 2. Binary button status guard prevents click and updateControls keeps non-pending disabled
+        state.session.proposalFlowState = { active: true, interactionMode: "binary_choice", status: "clarifying", pendingQuestion: { questionId: "q2" } };
+        const q = {
+            questionId: "q2", topicId: "topic", baseVersionId: "v1", question: "Pick one", status: "resolved",
+            sourceLanguage: "en", choices: [{ choiceId: "c1", letter: "A", label: "Left" }]
+        };
+        let clickedResolved = false;
+        submitBinaryAction = async () => { clickedResolved = true; };
+        renderBinaryQuestion(q, document.createElement("div"), { language: "en" });
+        const resolvedBtn = document.querySelectorAll(".binary-choice-button").find(b => b.dataset.questionId === "q2");
+        resolvedBtn.click();
+        updateControls();
+        __phase5Checks.resolvedStatusAttr = resolvedBtn.dataset.questionStatus;
+        __phase5Checks.resolvedClicked = clickedResolved;
+        __phase5Checks.resolvedDisabled = resolvedBtn.disabled;
+
+        // 3. decideProposal reject preserves same-stage dirty draft & activeCoordinateLink
+        globalThis.history = { replaceState() {} };
+        state.selectedVersionId = "v1";
+        state.dirty = true;
+        state.draftRows = ["#####", "#@$.#", "#####"];
+        state.activeCoordinateLink = { row: 2, column: 2 };
+        state.session.versions = [{ versionId: "v1", stageNumber: 1, rows: ["#####", "#@$.#", "#####"] }];
+        render = () => {};
+        applyTranslations = () => {};
+        ensureAssessment = async () => { __phase5Checks.assessedOnAccept = true; };
+        api = async () => ({
+            ...state.session,
+            currentVersionId: "v1",
+            versions: state.session.versions,
+        });
+        await decideProposal({ proposalId: "p1" }, "reject");
+        __phase5Checks.rejectKeptDirty = state.dirty;
+        __phase5Checks.rejectKeptLink = Boolean(state.activeCoordinateLink);
+        __phase5Checks.rejectDraftRow = state.draftRows[1];
+        await decideProposal({ proposalId: "p1" }, "accept");
+        __phase5Checks.acceptClearedDirty = !state.dirty;
+        __phase5Checks.acceptAssessed = Boolean(__phase5Checks.assessedOnAccept);
+
+        // 4. finalizeSession omits rows when deadlineExpired && !state.dirty
+        let finalizePayload = null;
+        api = async (_url, opts) => { finalizePayload = opts.body; return state.session; };
+        state.dirty = false;
+        state.session.deadlineExpired = true;
+        state.draftRows = ["###"];
+        await finalizeSession();
+        __phase5Checks.finalizeCleanRows = finalizePayload.rows;
+
+        // 5. renderDeadline clears assessmentRetryTimers & unityPlayActive on expiration transition,
+        // and finalizeButton remains unlocked after deadline even while assessing is active
+        let clearedTimers = 0;
+        let requestedHostView = "";
+        window.clearTimeout = () => { clearedTimers += 1; };
+        window.clearInterval = () => {};
+        requestEmbeddedHostView = type => { requestedHostView = type; };
+        state.assessmentRetryTimers.set("v1", 99);
+        state.assessing.add("v1");
+        state.unityPlayActive = true;
+        state.deadlinePresentationState = "normal";
+        state.session.deadlineAt = "2026-11-18T12:00:00Z";
+        state.session.remainingSeconds = 0;
+        state.session.deadlineActive = true;
+        state.session.deadlineExpired = true;
+        state.session.status = "active";
+        performance = { now: () => 0 };
+        renderDeadline();
+        __phase5Checks.clearedTimers = clearedTimers;
+        __phase5Checks.timerSizeAfterExpire = state.assessmentRetryTimers.size;
+        __phase5Checks.unityPlayActiveAfterExpire = state.unityPlayActive;
+        __phase5Checks.requestedHostView = requestedHostView;
+        __phase5Checks.finalizeEnabledAfterDeadlineWhileAssessing = !elements.finalizeButton.disabled;
+        state.assessing.clear();
+
+        // 6. submitIntentFeedback reuses the identical idempotencyKey and baseVersionId across retries
+        state.session.deadlineExpired = false;
+        const baseIntentSession = state.session;
+        const intentKeys = [];
+        let intentAttempts = 0;
+        api = async (_url, opts) => {
+            if (!opts || opts.method !== "POST") {
+                return baseIntentSession;
+            }
+            intentKeys.push(opts?.body?.idempotencyKey);
+            intentAttempts += 1;
+            if (intentAttempts === 1) {
+                const err = new Error("temporary");
+                err.retryable = true;
+                throw err;
+            }
+            return { outcome: "recorded", session: baseIntentSession };
+        };
+        const cueNode = document.createElement("div");
+        await submitIntentFeedback("confirm", { turnId: "t-intent" }, { hypothesisId: "h1", actionable: true }, "", cueNode);
+        const intentRetry = state.replyFeedback?.retryAction || state.retryAction;
+        if (typeof intentRetry === "function") {
+            await intentRetry();
+        }
+        __phase5Checks.intentKeysCount = intentKeys.length;
+        __phase5Checks.intentKeysMatch = intentKeys.length >= 2 && intentKeys[0] === intentKeys[1];
+
+        // 7. translateVisibleBatch caps retries at 3
+        let scheduledRetries = 0;
+        window.setTimeout = () => { scheduledRetries += 1; return scheduledRetries; };
+        api = async () => { throw new Error("translation down"); };
+        const batchTurn = [{ turnId: "t1", role: "assistant", language: "en" }];
+        await translateVisibleBatch(batchTurn, "zh-CN");
+        await translateVisibleBatch(batchTurn, "zh-CN");
+        state.translationRetryTimerId = null;
+        await translateVisibleBatch(batchTurn, "zh-CN");
+        __phase5Checks.scheduledRetriesAfter3Fails = scheduledRetries;
+        __phase5Checks.attemptsRecorded = state.translationRetryAttempts.get("t1:zh-CN");
+    })()`, context);
+    const checks = vm.runInContext("globalThis.__phase5Checks", context);
+    assert.equal(checks.v2Offer, true);
+    assert.equal(checks.resolvedStatusAttr, "resolved");
+    assert.equal(checks.resolvedClicked, false);
+    assert.equal(checks.resolvedDisabled, true);
+    assert.equal(checks.rejectKeptDirty, true);
+    assert.equal(checks.rejectKeptLink, true);
+    assert.equal(checks.rejectDraftRow, "#@$.#");
+    assert.equal(checks.acceptClearedDirty, true);
+    assert.equal(checks.acceptAssessed, true);
+    assert.equal(checks.finalizeCleanRows, null);
+    assert.equal(checks.clearedTimers, 1);
+    assert.equal(checks.timerSizeAfterExpire, 0);
+    assert.equal(checks.unityPlayActiveAfterExpire, false);
+    assert.equal(checks.requestedHostView, "sokoban:cocreation-show-lab");
+    assert.equal(checks.finalizeEnabledAfterDeadlineWhileAssessing, true);
+    assert.equal(checks.intentKeysCount, 2);
+    assert.equal(checks.intentKeysMatch, true);
+    assert.equal(checks.scheduledRetriesAfter3Fails, 1);
+    assert.equal(checks.attemptsRecorded, 3);
+    assert.ok(created.length > 0);
 });

@@ -121,7 +121,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
                 "Stage play complete. Continue designing in the existing lab tab.",
                 ReadyStatusColor
             );
-            trackingRoutine = StartCoroutine(TrackSessionCompletion());
+            RestartSessionCompletionTracking();
             return;
         }
 
@@ -134,7 +134,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
             }
             SetButtonState(true, "RETURN TO CO-CREATION LAB");
             SetStatus("Draft preview is synchronized. Continue in the existing lab tab.", ReadyStatusColor);
-            trackingRoutine = StartCoroutine(TrackSessionCompletion());
+            RestartSessionCompletionTracking();
             return;
         }
 
@@ -318,11 +318,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
                 ReadyStatusColor
             );
 
-            if (trackingRoutine != null)
-            {
-                StopCoroutine(trackingRoutine);
-            }
-            trackingRoutine = StartCoroutine(TrackSessionCompletion());
+            RestartSessionCompletionTracking();
         }
     }
 
@@ -371,7 +367,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
                         );
                     }
                     else if (response != null
-                        && response.draftRegeneration != null
+                        && HasDraftRegeneration(response.draftRegeneration)
                         && (response.draftRegeneration.status == "pending"
                             || response.draftRegeneration.status == "claimed")
                         && !processingRegeneration
@@ -407,6 +403,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
             yield break;
         }
 
+        StopSessionCompletionTracking();
         processingRegeneration = true;
         SetButtonState(false, "REGENERATING DRAFT...");
         SetStatus("Claiming the persistent draft regeneration request...", WaitingStatusColor);
@@ -435,7 +432,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
                         : "The regeneration service is temporarily unavailable. Unity will reconcile the persistent request; the previous draft is preserved.",
                     ErrorStatusColor
                 );
-                trackingRoutine = StartCoroutine(TrackSessionCompletion());
+                RestartSessionCompletionTracking();
                 yield break;
             }
         }
@@ -503,7 +500,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
                     processingRegeneration = false;
                     SetButtonState(true, "RETURN TO CO-CREATION LAB");
                     SetStatus("The server rejected the generated map during validation. The previous draft was preserved.", ErrorStatusColor);
-                    trackingRoutine = StartCoroutine(TrackSessionCompletion());
+                    RestartSessionCompletionTracking();
                     yield break;
                 }
 
@@ -552,7 +549,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
             succeeded ? "The regenerated draft is ready in the lab." : "Regeneration failed; the previous draft was preserved.",
             succeeded ? ReadyStatusColor : ErrorStatusColor
         );
-        trackingRoutine = StartCoroutine(TrackSessionCompletion());
+        RestartSessionCompletionTracking();
     }
 
     private IEnumerator ReconcileRegenerationSubmission(string requestId, bool localSucceeded)
@@ -580,6 +577,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
             }
 
             DraftRegenerationIntegrationState remote = response != null
+                && HasDraftRegeneration(response.draftRegeneration)
                 ? response.draftRegeneration
                 : null;
             bool sameRequest = remote != null && remote.requestId == requestId;
@@ -604,7 +602,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
                         : "The server closed this regeneration request. The previous draft was preserved.",
                     completed ? ReadyStatusColor : ErrorStatusColor
                 );
-                trackingRoutine = StartCoroutine(TrackSessionCompletion());
+                RestartSessionCompletionTracking();
                 yield break;
             }
             if (remote != null && remote.requestId != requestId)
@@ -617,7 +615,7 @@ public sealed class CoCreationEntryController : MonoBehaviour
                     "A newer regeneration request is active. The stale local result was discarded without changing the draft.",
                     ErrorStatusColor
                 );
-                trackingRoutine = StartCoroutine(TrackSessionCompletion());
+                RestartSessionCompletionTracking();
                 yield break;
             }
         }
@@ -711,19 +709,36 @@ public sealed class CoCreationEntryController : MonoBehaviour
         return true;
     }
 
+    private static bool HasDraftRegeneration(DraftRegenerationIntegrationState state)
+    {
+        return state != null && !string.IsNullOrWhiteSpace(state.requestId);
+    }
+
+    private void StopSessionCompletionTracking()
+    {
+        if (trackingRoutine != null)
+        {
+            StopCoroutine(trackingRoutine);
+            trackingRoutine = null;
+        }
+    }
+
+    private void RestartSessionCompletionTracking()
+    {
+        StopSessionCompletionTracking();
+        trackingRoutine = StartCoroutine(TrackSessionCompletion());
+    }
+
     private static bool TryValidateLaunchUrl(string value, out string targetUrl)
     {
-        targetUrl = "";
-        string candidate = value == null ? "" : value.Trim();
-
-        if (!Uri.TryCreate(candidate, UriKind.Absolute, out Uri uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        if (PublicEndpointResolver.TryGetSafeHttpUri(value, out Uri uri))
         {
-            return false;
+            targetUrl = uri.AbsoluteUri;
+            return true;
         }
 
-        targetUrl = uri.AbsoluteUri;
-        return true;
+        targetUrl = "";
+        return false;
     }
 
     private void ApplyFailure(string message)

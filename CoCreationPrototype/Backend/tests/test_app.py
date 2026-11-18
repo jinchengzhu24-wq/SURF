@@ -11,6 +11,7 @@ REPOSITORY_ROOT = BACKEND_DIR.parents[1]
 
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
+    import cocreation  # noqa: F401
 
 import app as backend
 from level_validation import summarize_stage_changes, summarize_verified_diff
@@ -949,14 +950,43 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
     def test_frontend_and_static_assets_are_served(self):
         index_response = self.client.get("/")
-        css_response = self.client.get("/styles.css")
-        js_response = self.client.get("/app.js")
-        css_text = css_response.text.replace("\r\n", "\n")
+        css_paths = (
+            "/css/tokens-base.css",
+            "/css/layout-landing.css",
+            "/css/board-editor.css",
+            "/css/chat-cards.css",
+            "/css/modals-responsive.css",
+        )
+        js_paths = (
+            "/js/i18n.js",
+            "/js/state-storage.js",
+            "/js/unity-bridge.js",
+            "/js/map-editor.js",
+            "/js/chat-cards.js",
+            "/js/session-actions.js",
+            "/js/main.js",
+        )
+        css_responses = [self.client.get(asset_path) for asset_path in css_paths]
+        js_responses = [self.client.get(asset_path) for asset_path in js_paths]
+        css_text = "\n".join(resp.text.replace("\r\n", "\n") for resp in css_responses)
+        js_combined = "\n".join(resp.text for resp in js_responses)
+        css_response = type("CssBundle", (), {"status_code": 200 if all(r.status_code == 200 for r in css_responses) else 500, "text": css_text})()
+        js_response = type("JsBundle", (), {"status_code": 200 if all(r.status_code == 200 for r in js_responses) else 500, "text": js_combined})()
 
         self.assertEqual(index_response.status_code, 200)
         self.assertIn("Sokoban Co-Creation Lab", index_response.text)
-        self.assertRegex(index_response.text, r'href="\./styles\.css\?v=[^"]+"')
-        self.assertRegex(index_response.text, r'src="\./app\.js\?v=[^"]+"')
+        for asset_path in css_paths:
+            escaped_path = asset_path.replace(".", r"\.")
+            self.assertRegex(
+                index_response.text,
+                rf'href="\.{escaped_path}\?v=[^"]+"',
+            )
+        for asset_path in js_paths:
+            escaped_path = asset_path.replace(".", r"\.")
+            self.assertRegex(
+                index_response.text,
+                rf'src="\.{escaped_path}\?v=[^"]+"',
+            )
         self.assertIn("sendChallengeChoice", js_response.text)
         self.assertIn("offer.availableActions.includes(action)", js_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
@@ -1165,7 +1195,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn('const selectedHistoricalStage = state.selectedVersionId !== state.session.currentVersionId;', js_response.text)
         self.assertIn('!selectedHistoricalStage && !expired && (state.dirty || pending)', js_response.text)
         self.assertIn('const targetVersionId = state.selectedVersionId;', js_response.text)
-        self.assertIn('rows: deadlineExpired() && targetIsCurrent ? state.draftRows.map(row => row) : null', js_response.text)
+        self.assertIn('rows: deadlineExpired() && targetIsCurrent && state.dirty ? state.draftRows.map(row => row) : null', js_response.text)
         self.assertIn('chatBusyVersionId: ""', js_response.text)
         self.assertIn('state.chatBusyVersionId = pending.baseVersionId;', js_response.text)
         self.assertIn('state.chatBusyVersionId === state.selectedVersionId', js_response.text)
@@ -1294,12 +1324,16 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIn("第2行第4列：地面→水面", summary)
 
     def test_cocreation_frontend_uses_active_dashboard_visual_contract(self):
-        dashboard_css = (REPOSITORY_ROOT / "Frontend" / "styles.css").read_text(
-            encoding="utf-8"
+        dashboard_css = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((REPOSITORY_ROOT / "Frontend" / "css").glob("*.css"))
         )
-        cocreation_css = (
-            REPOSITORY_ROOT / "CoCreationPrototype" / "Frontend" / "styles.css"
-        ).read_text(encoding="utf-8")
+        cocreation_css = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(
+                (REPOSITORY_ROOT / "CoCreationPrototype" / "Frontend" / "css").glob("*.css")
+            )
+        )
         shared_tokens = (
             "--bg: #6f9d31",
             "--wood: #8b562c",

@@ -1,4003 +1,750 @@
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using UnityEngine;
-
-[DefaultExecutionOrder(-100)]
-public class LevelGenerator : MonoBehaviour
-{
-    [Header("References")]
-    public LevelData levelData;
-    public LevelLoader levelLoader;
-    public LevelSolver levelSolver;
-    public LevelGenerationRules rules;
-
-    [Header("Runtime")]
-    public bool generateOnAwake = true;
-    public bool logGenerationResult = true;
-
-    [Header("Last Result")]
-    public int lastAttempts;
-    public int lastReversePulls;
-    public int lastSearchedStates;
-    public int lastSolutionSteps;
-    public int lastPushes;
-
-    [Header("Repeat Prevention")]
-    public bool rejectRecentlyGeneratedLayouts = true;
-    public int recentGeneratedLayoutHistory = 6;
-
-    private const char Ground = '.';
-    private const char Wall = '#';
-    private const char Water = '@';
-    private const char Empty = ' ';
-    private const char Player = 'p';
-    private const char Box = 's';
-    private const char Target = 't';
-    private const int LLMTopCandidatePoolSize = 3;
-
-    private const string DefaultArchetype = "open_workshop";
-    private const string DefaultTargetLayout = "split_pair";
-    private const string DefaultObstacleStyle = "central_baffle";
-    private const string DefaultWaterStyle = "side_pool";
-    private enum CandidateFailureReason
-    {
-        None,
-        BaseGrid,
-        WallObstacles,
-        WaterAreas,
-        Targets,
-        Player,
-        ReversePulls,
-        TileRules,
-        BuildRows
-    }
-
-    private sealed class LevelQualityReport
-    {
-        public int score;
-        public int solutionSteps;
-        public int pushes;
-        public int reversePulls;
-        public int searchedStates;
-        public int waterTiles;
-        public int waterAreas;
-        public int surroundedWallCount;
-        public int obstacleInfluence;
-        public int boxInteractionScore;
-        public int targetDistance;
-        public int structureSimilarity;
-
-        public string Summary()
-        {
-            return "score=" + score
-                + ", solutionSteps=" + solutionSteps
-                + ", pushes=" + pushes
-                + ", reversePulls=" + reversePulls
-                + ", searchedStates=" + searchedStates
-                + ", waterTiles=" + waterTiles
-                + ", waterAreas=" + waterAreas
-                + ", surroundedWalls=" + surroundedWallCount
-                + ", obstacleInfluence=" + obstacleInfluence
-                + ", boxInteractionScore=" + boxInteractionScore
-                + ", targetDistance=" + targetDistance
-                + ", structureSimilarity=" + structureSimilarity;
-        }
-    }
-
-    private sealed class GeneratedCandidate
-    {
-        public readonly string[] rows;
-        public readonly int attempt;
-        public readonly LevelQualityReport quality;
-        public readonly CorridorValidationResult corridorValidation;
-
-        public GeneratedCandidate(
-            string[] rows,
-            int attempt,
-            LevelQualityReport quality,
-            CorridorValidationResult corridorValidation)
-        {
-            this.rows = rows;
-            this.attempt = attempt;
-            this.quality = quality;
-            this.corridorValidation = corridorValidation;
-        }
-    }
-
-    private static readonly Queue<string> recentFullLevelSignatures = new Queue<string>();
-    private static readonly HashSet<string> recentFullLevelLookup = new HashSet<string>();
-    private static readonly Queue<string> recentStructureSignatures = new Queue<string>();
-    private static readonly HashSet<string> recentStructureLookup = new HashSet<string>();
-    private static int runtimeSeedCounter;
-    private static int algorithmTemplateRoundCounter;
-    private static int algorithmTemplateCursor;
-    private static int[] algorithmTemplateOrder;
-    private static bool algorithmTemplateOrderNeedsShuffle = true;
-
-    private static readonly Vector2Int[] directions =
-    {
-        new Vector2Int(0, -1),
-        new Vector2Int(0, 1),
-        new Vector2Int(-1, 0),
-        new Vector2Int(1, 0)
-    };
-
-    private readonly List<Vector2Int> boxes = new List<Vector2Int>();
-    private readonly List<Vector2Int> targets = new List<Vector2Int>();
-    private readonly HashSet<Vector2Int> targetLookup = new HashSet<Vector2Int>();
-    private System.Random random;
-    private Vector2Int playerPosition;
-    private bool hasDesignBlueprint;
-    private LevelGenerationTemplates.StructureTemplate currentStructureTemplate =
-        LevelGenerationTemplates.GetStructureTemplate(DefaultArchetype);
-    private string currentArchetype = DefaultArchetype;
-    private string currentTargetLayout = DefaultTargetLayout;
-    private string currentObstacleStyle = DefaultObstacleStyle;
-    private string currentWaterStyle = DefaultWaterStyle;
-    private string currentDesignNote = "";
-    private string currentCorridorPlacement = "none";
-    private int currentCorridorWidth;
-    private string currentCorridorOrientation = "any";
-    private string currentCorridorRole = "visual_only";
-    private string currentCorridorPriority = "preferred";
-    private string candidateCorridorOrientation = "any";
-    private readonly HashSet<Vector2Int> candidateCorridorOpeningCells = new HashSet<Vector2Int>();
-    public CorridorValidationResult LastCorridorValidation { get; private set; }
-    private bool activeLLMQualityGate;
-    private bool activeRelaxedBlueprint;
-    private bool preserveZeroWaterConstraint;
-    private bool preserveZeroInternalWallConstraint;
-    private GenerationRuleSnapshot algorithmRuleBaseline;
-
-    private sealed class GenerationRuleSnapshot
-    {
-        public int minSolutionSteps;
-        public int maxSolutionSteps;
-        public int minPushes;
-        public int maxPushes;
-        public int minWaterAreas;
-        public int maxWaterAreas;
-        public int minWallObstacleBlocks;
-        public int maxWallObstacleBlocks;
-        public int minReversePulls;
-        public int maxReversePulls;
-        public int maxGenerateAttempts;
-        public int maxReverseStepAttempts;
-        public int maxSearchStates;
-    }
-
-    public static void BeginAlgorithmTemplateRound()
-    {
-        algorithmTemplateRoundCounter++;
-        algorithmTemplateCursor = 0;
-        algorithmTemplateOrderNeedsShuffle = true;
-    }
-
-    private void Awake()
-    {
-        ResolveReferences();
-        CaptureAlgorithmRuleBaseline();
-
-        if (generateOnAwake)
-        {
-            Generate();
-        }
-    }
-
-    [ContextMenu("Generate And Reload")]
-    public void GenerateAndReload()
-    {
-        ResolveReferences();
-
-        if (levelLoader != null)
-        {
-            levelLoader.levelGenerator = this;
-
-            if (levelData != null)
-            {
-                levelLoader.levelData = levelData;
-            }
-
-            levelLoader.GenerateAndReload();
-            return;
-        }
-
-        Generate();
-    }
-
-    public int GetLLMPlanRetryCount()
-    {
-        ResolveReferences();
-        return rules != null ? Mathf.Max(1, rules.llmMaxPlanRetries) : 2;
-    }
-
-    public void SetLLMQualityGateRequired(bool required)
-    {
-        activeLLMQualityGate = required;
-    }
-
-    public void BeginLLMPlanAttempts()
-    {
-        ResolveReferences();
-        CaptureAlgorithmRuleBaseline();
-        RestoreAlgorithmRuleBaseline();
-        preserveZeroWaterConstraint = false;
-        preserveZeroInternalWallConstraint = false;
-        ClearDesignPlan();
-    }
-
-    public void ResetAfterLLMPlanAttempts()
-    {
-        RestoreAlgorithmRuleBaseline();
-        preserveZeroWaterConstraint = false;
-        preserveZeroInternalWallConstraint = false;
-        ClearDesignPlan();
-    }
-
-    public void ClearDesignPlan(bool keepLLMQualityGate = false)
-    {
-        hasDesignBlueprint = false;
-        activeLLMQualityGate = keepLLMQualityGate;
-        activeRelaxedBlueprint = false;
-        currentArchetype = DefaultArchetype;
-        currentTargetLayout = DefaultTargetLayout;
-        currentObstacleStyle = DefaultObstacleStyle;
-        currentWaterStyle = DefaultWaterStyle;
-        currentDesignNote = "";
-        currentCorridorPlacement = "none";
-        currentCorridorWidth = 0;
-        currentCorridorOrientation = "any";
-        currentCorridorRole = "visual_only";
-        currentCorridorPriority = "preferred";
-        candidateCorridorOpeningCells.Clear();
-        LastCorridorValidation = null;
-        currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(DefaultArchetype);
-    }
-
-    public bool Generate()
-    {
-        ResolveReferences();
-
-        if (!CanGenerate())
-        {
-            return false;
-        }
-
-        random = rules.useFixedSeed
-            ? new System.Random(rules.seed)
-            : new System.Random(GetRuntimeSeed());
-
-        if (activeLLMQualityGate && hasDesignBlueprint)
-        {
-            currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(currentArchetype, random);
-        }
-        else if (!activeLLMQualityGate)
-        {
-            ApplyAlgorithmDesignBlueprint();
-        }
-
-        if (TryGenerateWithCurrentRules("strict", rules.maxGenerateAttempts, true))
-        {
-            return true;
-        }
-
-        if ((hasDesignBlueprint || activeLLMQualityGate) && TryGenerateRelaxedBlueprint())
-        {
-            return true;
-        }
-
-        Debug.LogWarning("LevelGenerator: Failed to generate a solvable level.");
-        return false;
-    }
-
-    public IEnumerator GenerateSavedPlanRoutine(
-        float budgetSeconds,
-        Action<bool, string> onComplete)
-    {
-        ResolveReferences();
-
-        if (!CanGenerate() || !hasDesignBlueprint || !activeLLMQualityGate)
-        {
-            onComplete?.Invoke(false, "generation_failed");
-            yield break;
-        }
-
-        float deadline = Time.realtimeSinceStartup + Mathf.Max(1f, budgetSeconds);
-        random = rules.useFixedSeed
-            ? new System.Random(unchecked(rules.seed + GetRuntimeSeed()))
-            : new System.Random(GetRuntimeSeed());
-
-        for (int attempt = 0; attempt < rules.maxGenerateAttempts; attempt++)
-        {
-            if (Time.realtimeSinceStartup >= deadline)
-            {
-                onComplete?.Invoke(false, "generation_timed_out");
-                yield break;
-            }
-
-            bool generated;
-            try
-            {
-                generated = TryGenerateWithCurrentRules(
-                    "saved-blueprint-strict",
-                    1,
-                    false
-                );
-            }
-            catch (Exception exception)
-            {
-                Debug.LogException(exception);
-                onComplete?.Invoke(false, "generation_failed");
-                yield break;
-            }
-
-            if (Time.realtimeSinceStartup >= deadline)
-            {
-                onComplete?.Invoke(false, "generation_timed_out");
-                yield break;
-            }
-
-            if (generated)
-            {
-                onComplete?.Invoke(true, "");
-                yield break;
-            }
-
-            yield return null;
-        }
-
-        int originalMinSolutionSteps = rules.minSolutionSteps;
-        int originalMaxSolutionSteps = rules.maxSolutionSteps;
-        int originalMinPushes = rules.minPushes;
-        int originalMaxPushes = rules.maxPushes;
-        int originalMinWaterAreas = rules.minWaterAreas;
-        int originalMaxWaterAreas = rules.maxWaterAreas;
-        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
-        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
-        int originalMinReversePulls = rules.minReversePulls;
-        int originalMaxReversePulls = rules.maxReversePulls;
-        bool originalHasDesignBlueprint = hasDesignBlueprint;
-        bool originalActiveLLMQualityGate = activeLLMQualityGate;
-        bool originalActiveRelaxedBlueprint = activeRelaxedBlueprint;
-        bool relaxedGenerated = false;
-        string failureCode = "generation_failed";
-
-        activeRelaxedBlueprint = true;
-        rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 10);
-        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 20);
-        rules.minPushes = Mathf.Max(4, originalMinPushes - 6);
-        rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 10);
-        rules.minReversePulls = Mathf.Max(8, originalMinReversePulls - 10);
-        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls);
-
-        for (int attempt = 0; attempt < rules.maxGenerateAttempts; attempt++)
-        {
-            if (Time.realtimeSinceStartup >= deadline)
-            {
-                failureCode = "generation_timed_out";
-                break;
-            }
-
-            try
-            {
-                relaxedGenerated = TryGenerateWithCurrentRules(
-                    "saved-blueprint-relaxed",
-                    1,
-                    false
-                );
-            }
-            catch (Exception exception)
-            {
-                Debug.LogException(exception);
-                failureCode = "generation_failed";
-                break;
-            }
-
-            if (Time.realtimeSinceStartup >= deadline)
-            {
-                relaxedGenerated = false;
-                failureCode = "generation_timed_out";
-                break;
-            }
-
-            if (relaxedGenerated)
-            {
-                break;
-            }
-
-            yield return null;
-        }
-
-        RestoreGenerationRules(
-            originalMinSolutionSteps,
-            originalMaxSolutionSteps,
-            originalMinPushes,
-            originalMaxPushes,
-            originalMinWaterAreas,
-            originalMaxWaterAreas,
-            originalMinWallObstacleBlocks,
-            originalMaxWallObstacleBlocks,
-            originalMinReversePulls,
-            originalMaxReversePulls,
-            originalHasDesignBlueprint,
-            originalActiveLLMQualityGate
-        );
-        activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
-        onComplete?.Invoke(relaxedGenerated, relaxedGenerated ? "" : failureCode);
-    }
-
-    public bool GenerateAlgorithmFallbackAfterLLM()
-    {
-        ResolveReferences();
-        CaptureAlgorithmRuleBaseline();
-        RestoreAlgorithmRuleBaseline();
-        ClearDesignPlan();
-
-        if (!CanGenerate())
-        {
-            return false;
-        }
-
-        int originalMinSolutionSteps = rules.minSolutionSteps;
-        int originalMaxSolutionSteps = rules.maxSolutionSteps;
-        int originalMinPushes = rules.minPushes;
-        int originalMaxPushes = rules.maxPushes;
-        int originalMinWaterAreas = rules.minWaterAreas;
-        int originalMaxWaterAreas = rules.maxWaterAreas;
-        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
-        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
-        int originalMinReversePulls = rules.minReversePulls;
-        int originalMaxReversePulls = rules.maxReversePulls;
-
-        rules.minSolutionSteps = 10;
-        rules.maxSolutionSteps = Mathf.Max(45, originalMaxSolutionSteps + 20);
-        rules.minPushes = 4;
-        rules.maxPushes = Mathf.Max(30, originalMaxPushes + 12);
-        rules.minWaterAreas = preserveZeroWaterConstraint ? 0 : 1;
-        rules.maxWaterAreas = preserveZeroWaterConstraint
-            ? 0
-            : Mathf.Max(1, originalMaxWaterAreas);
-        rules.minWallObstacleBlocks = preserveZeroInternalWallConstraint ? 0 : 1;
-        rules.maxWallObstacleBlocks = preserveZeroInternalWallConstraint
-            ? 0
-            : Mathf.Max(1, originalMaxWallObstacleBlocks);
-        rules.minReversePulls = Mathf.Max(4, originalMinReversePulls - 12);
-        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls + 12);
-
-        random = rules.useFixedSeed
-            ? new System.Random(rules.seed)
-            : new System.Random(GetRuntimeSeed());
-        ApplyAlgorithmDesignBlueprint();
-
-        Debug.LogWarning(
-            "LevelGenerator: LLM plans were valid, but templates could not realize them."
-            + " Running one cleared algorithm fallback:"
-            + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
-            + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
-            + ", waterAreas=" + rules.minWaterAreas + "-" + rules.maxWaterAreas
-            + ", wallObstacleBlocks=" + rules.minWallObstacleBlocks + "-" + rules.maxWallObstacleBlocks
-            + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
-        );
-
-        bool generated = TryGenerateWithCurrentRules(
-            "llm-success-algorithm-fallback",
-            rules.maxGenerateAttempts,
-            true
-        );
-
-        RestoreGenerationRules(
-            originalMinSolutionSteps,
-            originalMaxSolutionSteps,
-            originalMinPushes,
-            originalMaxPushes,
-            originalMinWaterAreas,
-            originalMaxWaterAreas,
-            originalMinWallObstacleBlocks,
-            originalMaxWallObstacleBlocks,
-            originalMinReversePulls,
-            originalMaxReversePulls,
-            hasDesignBlueprint,
-            false
-        );
-
-        return generated;
-    }
-
-    private bool TryGenerateRelaxedBlueprint()
-    {
-        int originalMinSolutionSteps = rules.minSolutionSteps;
-        int originalMaxSolutionSteps = rules.maxSolutionSteps;
-        int originalMinPushes = rules.minPushes;
-        int originalMaxPushes = rules.maxPushes;
-        int originalMinWaterAreas = rules.minWaterAreas;
-        int originalMaxWaterAreas = rules.maxWaterAreas;
-        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
-        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
-        int originalMinReversePulls = rules.minReversePulls;
-        int originalMaxReversePulls = rules.maxReversePulls;
-        bool originalHasDesignBlueprint = hasDesignBlueprint;
-        bool originalActiveLLMQualityGate = activeLLMQualityGate;
-        bool originalActiveRelaxedBlueprint = activeRelaxedBlueprint;
-
-        activeRelaxedBlueprint = true;
-        rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 10);
-        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 20);
-        rules.minPushes = Mathf.Max(4, originalMinPushes - 6);
-        rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 10);
-        rules.minReversePulls = Mathf.Max(8, originalMinReversePulls - 10);
-        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls);
-
-        if (logGenerationResult)
-        {
-            Debug.LogWarning(
-                "LevelGenerator: Strict LLM blueprint failed. Retrying relaxed blueprint:"
-                + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
-                + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
-                + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
-                + ", qualityScore>=" + rules.llmRelaxedMinimumQualityScore
-                + ", structureSimilarity<" + rules.llmRelaxedStructureSimilarityThreshold
-            );
-        }
-
-        if (TryGenerateWithCurrentRules("relaxed-blueprint", rules.maxGenerateAttempts, true))
-        {
-            RestoreGenerationRules(
-                originalMinSolutionSteps,
-                originalMaxSolutionSteps,
-                originalMinPushes,
-                originalMaxPushes,
-                originalMinWaterAreas,
-                originalMaxWaterAreas,
-                originalMinWallObstacleBlocks,
-                originalMaxWallObstacleBlocks,
-                originalMinReversePulls,
-                originalMaxReversePulls,
-                originalHasDesignBlueprint,
-                originalActiveLLMQualityGate
-            );
-            activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
-            return true;
-        }
-
-        RestoreGenerationRules(
-            originalMinSolutionSteps,
-            originalMaxSolutionSteps,
-            originalMinPushes,
-            originalMaxPushes,
-            originalMinWaterAreas,
-            originalMaxWaterAreas,
-            originalMinWallObstacleBlocks,
-            originalMaxWallObstacleBlocks,
-            originalMinReversePulls,
-            originalMaxReversePulls,
-            originalHasDesignBlueprint,
-            originalActiveLLMQualityGate
-        );
-        activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
-
-        return false;
-    }
-
-    private void CaptureAlgorithmRuleBaseline()
-    {
-        if (algorithmRuleBaseline != null || rules == null)
-        {
-            return;
-        }
-
-        algorithmRuleBaseline = new GenerationRuleSnapshot
-        {
-            minSolutionSteps = rules.minSolutionSteps,
-            maxSolutionSteps = rules.maxSolutionSteps,
-            minPushes = rules.minPushes,
-            maxPushes = rules.maxPushes,
-            minWaterAreas = rules.minWaterAreas,
-            maxWaterAreas = rules.maxWaterAreas,
-            minWallObstacleBlocks = rules.minWallObstacleBlocks,
-            maxWallObstacleBlocks = rules.maxWallObstacleBlocks,
-            minReversePulls = rules.minReversePulls,
-            maxReversePulls = rules.maxReversePulls,
-            maxGenerateAttempts = rules.maxGenerateAttempts,
-            maxReverseStepAttempts = rules.maxReverseStepAttempts,
-            maxSearchStates = levelSolver != null ? levelSolver.maxSearchStates : 0
-        };
-    }
-
-    private void RestoreAlgorithmRuleBaseline()
-    {
-        if (algorithmRuleBaseline == null || rules == null)
-        {
-            return;
-        }
-
-        rules.minSolutionSteps = algorithmRuleBaseline.minSolutionSteps;
-        rules.maxSolutionSteps = algorithmRuleBaseline.maxSolutionSteps;
-        rules.minPushes = algorithmRuleBaseline.minPushes;
-        rules.maxPushes = algorithmRuleBaseline.maxPushes;
-        rules.minWaterAreas = algorithmRuleBaseline.minWaterAreas;
-        rules.maxWaterAreas = algorithmRuleBaseline.maxWaterAreas;
-        rules.minWallObstacleBlocks = algorithmRuleBaseline.minWallObstacleBlocks;
-        rules.maxWallObstacleBlocks = algorithmRuleBaseline.maxWallObstacleBlocks;
-        rules.minReversePulls = algorithmRuleBaseline.minReversePulls;
-        rules.maxReversePulls = algorithmRuleBaseline.maxReversePulls;
-        rules.maxGenerateAttempts = algorithmRuleBaseline.maxGenerateAttempts;
-        rules.maxReverseStepAttempts = algorithmRuleBaseline.maxReverseStepAttempts;
-
-        if (levelSolver != null && algorithmRuleBaseline.maxSearchStates > 0)
-        {
-            levelSolver.maxSearchStates = algorithmRuleBaseline.maxSearchStates;
-        }
-    }
-
-    private struct ReversePullAction
-    {
-        public readonly int boxIndex;
-        public readonly Vector2Int direction;
-
-        public ReversePullAction(int boxIndex, Vector2Int direction)
-        {
-            this.boxIndex = boxIndex;
-            this.direction = direction;
-        }
-    }
-
-    private void RestoreGenerationRules(
-        int minSolutionSteps,
-        int maxSolutionSteps,
-        int minPushes,
-        int maxPushes,
-        int minWaterAreas,
-        int maxWaterAreas,
-        int minWallObstacleBlocks,
-        int maxWallObstacleBlocks,
-        int minReversePulls,
-        int maxReversePulls,
-        bool restoreDesignBlueprint,
-        bool restoreActiveLLMQualityGate)
-    {
-        rules.minSolutionSteps = minSolutionSteps;
-        rules.maxSolutionSteps = maxSolutionSteps;
-        rules.minPushes = minPushes;
-        rules.maxPushes = maxPushes;
-        rules.minWaterAreas = minWaterAreas;
-        rules.maxWaterAreas = maxWaterAreas;
-        rules.minWallObstacleBlocks = minWallObstacleBlocks;
-        rules.maxWallObstacleBlocks = maxWallObstacleBlocks;
-        rules.minReversePulls = minReversePulls;
-        rules.maxReversePulls = maxReversePulls;
-        hasDesignBlueprint = restoreDesignBlueprint;
-        activeLLMQualityGate = restoreActiveLLMQualityGate;
-    }
-
-    private bool TryGenerateWithCurrentRules(string mode, int maxAttempts, bool logRejections)
-    {
-        float modeStartedAt = Time.realtimeSinceStartup;
-        int rejectedBySolve = 0;
-        int rejectedByDifficulty = 0;
-        int rejectedByParse = 0;
-        int rejectedByRepeat = 0;
-        int rejectedByQuality = 0;
-        int rejectedByObstacleInfluence = 0;
-        int rejectedByCorridor = 0;
-        int scoredCandidates = 0;
-        int selectableCandidates = 0;
-        int qualifiedCandidates = 0;
-        int candidatesSinceFirstQualified = 0;
-        int[] candidateFailures = new int[(int)CandidateFailureReason.BuildRows + 1];
-        int candidateSampleTarget = GetCandidateSampleTarget();
-        GeneratedCandidate bestCandidate = null;
-        GeneratedCandidate bestQualifiedCandidate = null;
-        List<GeneratedCandidate> topLLMQualifiedCandidates = new List<GeneratedCandidate>();
-
-        for (int attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            if (activeLLMQualityGate && hasDesignBlueprint)
-            {
-                currentStructureTemplate =
-                    LevelGenerationTemplates.GetStructureTemplate(currentArchetype, random);
-            }
-
-            if (!TryCreateCandidate(out string[] rows, out int reversePulls, out CandidateFailureReason failureReason))
-            {
-                candidateFailures[(int)failureReason]++;
-                continue;
-            }
-
-            if (IsRecentlyGeneratedLayout(rows, true))
-            {
-                rejectedByRepeat++;
-                continue;
-            }
-
-            levelData.rows = rows;
-            levelSolver.levelData = levelData;
-
-            if (!levelSolver.ParseLevel())
-            {
-                rejectedByParse++;
-                continue;
-            }
-
-            CorridorValidationResult corridorValidation = ValidateCorridorStructure(rows);
-            bool requiresBoxPassage = currentCorridorRole == "required_box_route";
-            bool solved;
-            int searchedStates;
-            int solutionSteps;
-            int pushCount;
-            bool boxPassedThrough = false;
-
-            if (requiresBoxPassage && candidateCorridorOpeningCells.Count > 0)
-            {
-                solved = levelSolver.CanSolveWithRequiredBoxCells(
-                    new HashSet<Vector2Int>(candidateCorridorOpeningCells),
-                    out searchedStates,
-                    out solutionSteps,
-                    out pushCount,
-                    out boxPassedThrough
-                );
-            }
-            else
-            {
-                solved = levelSolver.CanSolve(out searchedStates, out solutionSteps, out pushCount);
-            }
-
-            corridorValidation.playerCanPass = solved && corridorValidation.uniquePassage;
-            corridorValidation.boxPassedThrough = boxPassedThrough;
-            corridorValidation.verified = corridorValidation.uniquePassage
-                && corridorValidation.playerCanPass
-                && (!requiresBoxPassage || boxPassedThrough);
-            corridorValidation.message = corridorValidation.verified
-                ? "Requested corridor was generated and verified."
-                : GetCorridorFailureMessage(corridorValidation, requiresBoxPassage);
-
-            if (!solved)
-            {
-                rejectedBySolve++;
-                continue;
-            }
-
-            if (HasRequiredCorridor() && !corridorValidation.verified)
-            {
-                rejectedByCorridor++;
-                continue;
-            }
-
-            if (solutionSteps < GetEffectiveMinSolutionSteps()
-                || solutionSteps > rules.maxSolutionSteps
-                || pushCount < GetEffectiveMinPushes()
-                || pushCount > rules.maxPushes)
-            {
-                rejectedByDifficulty++;
-                continue;
-            }
-
-            LevelQualityReport quality = BuildQualityReport(
-                rows,
-                reversePulls,
-                searchedStates,
-                solutionSteps,
-                pushCount
-            );
-            scoredCandidates++;
-
-            if (!MeetsRequiredObstacleInfluence(quality))
-            {
-                rejectedByObstacleInfluence++;
-                rejectedByQuality++;
-                continue;
-            }
-
-            GeneratedCandidate candidate = new GeneratedCandidate(
-                CloneRows(rows),
-                attempt,
-                quality,
-                corridorValidation.Copy()
-            );
-            selectableCandidates++;
-
-            if (bestCandidate == null || IsBetterCandidate(candidate, bestCandidate))
-            {
-                bestCandidate = candidate;
-            }
-
-            if (MeetsRequiredQuality(quality))
-            {
-                qualifiedCandidates++;
-
-                if (bestQualifiedCandidate == null || IsBetterCandidate(candidate, bestQualifiedCandidate))
-                {
-                    bestQualifiedCandidate = candidate;
-                }
-
-                if (RequiresLLMQualityGate())
-                {
-                    AddToTopCandidatePool(
-                        topLLMQualifiedCandidates,
-                        candidate,
-                        LLMTopCandidatePoolSize
-                    );
-                }
-            }
-            else
-            {
-                rejectedByQuality++;
-            }
-
-            if (RequiresLLMQualityGate() && bestQualifiedCandidate != null)
-            {
-                candidatesSinceFirstQualified++;
-            }
-
-            if (ShouldStopCollectingCandidates(
-                    selectableCandidates,
-                    qualifiedCandidates,
-                    candidatesSinceFirstQualified,
-                    candidateSampleTarget))
-            {
-                break;
-            }
-        }
-
-        GeneratedCandidate selectedCandidate = bestQualifiedCandidate;
-        string selectionMode = "best";
-        int selectionPoolSize = selectedCandidate == null ? 0 : 1;
-        int selectedRank = selectedCandidate == null ? 0 : 1;
-
-        if (RequiresLLMQualityGate() && topLLMQualifiedCandidates.Count > 0)
-        {
-            selectionPoolSize = topLLMQualifiedCandidates.Count;
-            int selectedIndex = random.Next(selectionPoolSize);
-            selectedCandidate = topLLMQualifiedCandidates[selectedIndex];
-            selectedRank = selectedIndex + 1;
-            selectionMode = "llm-top3-random";
-        }
-
-        if (selectedCandidate == null && !RequiresLLMQualityGate())
-        {
-            selectedCandidate = bestCandidate;
-            selectionPoolSize = selectedCandidate == null ? 0 : 1;
-            selectedRank = selectedCandidate == null ? 0 : 1;
-        }
-
-        if (selectedCandidate != null)
-        {
-            AcceptCandidate(
-                selectedCandidate,
-                mode,
-                scoredCandidates,
-                selectableCandidates,
-                qualifiedCandidates,
-                GetElapsedMilliseconds(modeStartedAt),
-                selectionMode,
-                selectionPoolSize,
-                selectedRank
-            );
-            return true;
-        }
-
-        if (logRejections && logGenerationResult)
-        {
-            Debug.LogWarning(
-                "LevelGenerator generation mode failed:"
-                + " mode=" + mode
-                + ", candidateFailures=" + FormatCandidateFailures(candidateFailures)
-                + ", rejectedByParse=" + rejectedByParse
-                + ", rejectedBySolve=" + rejectedBySolve
-                + ", rejectedByDifficulty=" + rejectedByDifficulty
-                + ", rejectedByRepeat=" + rejectedByRepeat
-                + ", rejectedByQuality=" + rejectedByQuality
-                + ", rejectedByObstacleInfluence=" + rejectedByObstacleInfluence
-                + ", rejectedByCorridor=" + rejectedByCorridor
-                + ", scoredCandidates=" + scoredCandidates
-                + ", selectableCandidates=" + selectableCandidates
-                + ", qualifiedCandidates=" + qualifiedCandidates
-                + ", elapsedMs=" + GetElapsedMilliseconds(modeStartedAt)
-            );
-        }
-
-        return false;
-    }
-
-    private int GetCandidateSampleTarget()
-    {
-        return RequiresLLMQualityGate()
-            ? Mathf.Max(1, rules.llmCandidateSampleCount)
-            : Mathf.Max(1, rules.algorithmCandidateSampleCount);
-    }
-
-    private bool ShouldStopCollectingCandidates(
-        int selectableCandidates,
-        int qualifiedCandidates,
-        int candidatesSinceFirstQualified,
-        int candidateSampleTarget)
-    {
-        if (RequiresLLMQualityGate())
-        {
-            return qualifiedCandidates >= LLMTopCandidatePoolSize
-                && candidatesSinceFirstQualified > candidateSampleTarget;
-        }
-
-        return selectableCandidates >= candidateSampleTarget;
-    }
-
-    private bool IsBetterCandidate(GeneratedCandidate candidate, GeneratedCandidate currentBest)
-    {
-        if (candidate.quality.score != currentBest.quality.score)
-        {
-            return candidate.quality.score > currentBest.quality.score;
-        }
-
-        if (candidate.quality.solutionSteps != currentBest.quality.solutionSteps)
-        {
-            return candidate.quality.solutionSteps > currentBest.quality.solutionSteps;
-        }
-
-        return candidate.quality.pushes > currentBest.quality.pushes;
-    }
-
-    private void AddToTopCandidatePool(
-        List<GeneratedCandidate> topCandidates,
-        GeneratedCandidate candidate,
-        int maxCount)
-    {
-        int insertIndex = topCandidates.Count;
-
-        for (int i = 0; i < topCandidates.Count; i++)
-        {
-            if (IsBetterCandidate(candidate, topCandidates[i]))
-            {
-                insertIndex = i;
-                break;
-            }
-        }
-
-        topCandidates.Insert(insertIndex, candidate);
-
-        if (topCandidates.Count > maxCount)
-        {
-            topCandidates.RemoveAt(topCandidates.Count - 1);
-        }
-    }
-
-    private bool MeetsRequiredQuality(LevelQualityReport quality)
-    {
-        if (RequiresLLMQualityGate())
-        {
-            int minimumWaterTiles = activeRelaxedBlueprint
-                ? rules.llmRelaxedMinimumWaterTiles
-                : rules.llmMinimumWaterTiles;
-            int minimumSurroundedWalls = activeRelaxedBlueprint
-                ? rules.llmRelaxedMinimumSurroundedWalls
-                : rules.llmMinimumSurroundedWalls;
-            int minimumBoxInteractionScore = activeRelaxedBlueprint
-                ? rules.llmRelaxedMinimumBoxInteractionScore
-                : rules.llmMinimumBoxInteractionScore;
-            int minimumQualityScore = activeRelaxedBlueprint
-                ? rules.llmRelaxedMinimumQualityScore
-                : rules.llmMinimumQualityScore;
-
-            if (rules.maxWaterAreas == 0)
-            {
-                minimumWaterTiles = 0;
-            }
-
-            if (rules.maxWallObstacleBlocks == 0 && currentCorridorPlacement == "none")
-            {
-                minimumSurroundedWalls = 0;
-            }
-
-            return quality.waterTiles >= minimumWaterTiles
-                && quality.surroundedWallCount >= minimumSurroundedWalls
-                && quality.boxInteractionScore >= minimumBoxInteractionScore
-                && quality.structureSimilarity < GetEffectiveStructureSimilarityThreshold()
-                && quality.score >= minimumQualityScore;
-        }
-
-        return MeetsRequiredObstacleInfluence(quality)
-            && quality.score >= rules.algorithmMinimumQualityScore;
-    }
-
-    private bool MeetsRequiredObstacleInfluence(LevelQualityReport quality)
-    {
-        return RequiresLLMQualityGate()
-            || quality.obstacleInfluence >= rules.algorithmMinimumObstacleInfluence;
-    }
-
-    private void AcceptCandidate(
-        GeneratedCandidate candidate,
-        string mode,
-        int scoredCandidates,
-        int selectableCandidates,
-        int qualifiedCandidates,
-        int elapsedMs,
-        string selectionMode,
-        int selectionPoolSize,
-        int selectedRank)
-    {
-        levelData.rows = CloneRows(candidate.rows);
-        levelSolver.levelData = levelData;
-        lastAttempts = candidate.attempt;
-        lastReversePulls = candidate.quality.reversePulls;
-        lastSearchedStates = candidate.quality.searchedStates;
-        lastSolutionSteps = candidate.quality.solutionSteps;
-        lastPushes = candidate.quality.pushes;
-        LastCorridorValidation = candidate.corridorValidation == null
-            ? null
-            : candidate.corridorValidation.Copy();
-        RememberGeneratedLayout(levelData.rows);
-
-        if (levelLoader != null)
-        {
-            levelLoader.levelData = levelData;
-        }
-
-        if (logGenerationResult)
-        {
-            Debug.Log(
-                "LevelGenerator generated level:"
-                + " mode=" + mode
-                + ", attempts=" + lastAttempts
-                + ", scoredCandidates=" + scoredCandidates
-                + ", selectableCandidates=" + selectableCandidates
-                + ", qualifiedCandidates=" + qualifiedCandidates
-                + ", selectionMode=" + selectionMode
-                + ", selectionPoolSize=" + selectionPoolSize
-                + ", selectedRank=" + selectedRank
-                + ", elapsedMs=" + elapsedMs
-                + ", " + candidate.quality.Summary()
-            );
-        }
-    }
-
-    private LevelQualityReport BuildQualityReport(
-        string[] rows,
-        int reversePulls,
-        int searchedStates,
-        int solutionSteps,
-        int pushes)
-    {
-        LevelQualityReport quality = new LevelQualityReport();
-        quality.solutionSteps = solutionSteps;
-        quality.pushes = pushes;
-        quality.reversePulls = reversePulls;
-        quality.searchedStates = searchedStates;
-        quality.waterTiles = CountTiles(rows, Water);
-        quality.waterAreas = CountWaterAreas(rows);
-        quality.surroundedWallCount = CountSurroundedWalls(rows);
-        quality.obstacleInfluence = CountObstacleInfluence(rows);
-        quality.boxInteractionScore = GetBoxInteractionScore(rows);
-        quality.targetDistance = GetTargetDistance(rows);
-        quality.structureSimilarity = GetMaxRecentStructureSimilarity(rows);
-        quality.score = GetQualityScore(quality);
-        return quality;
-    }
-
-    private int GetQualityScore(LevelQualityReport quality)
-    {
-        int score = 0;
-        score += quality.solutionSteps * 3;
-        score += quality.pushes * 10;
-        score += quality.reversePulls * 2;
-        score += Mathf.Min(quality.searchedStates / 100, 40);
-        score += Mathf.Min(quality.waterTiles, 12) * 3;
-        score += quality.waterAreas * 20;
-        score += Mathf.Min(quality.surroundedWallCount, 3) * 45;
-        score += Mathf.Min(quality.obstacleInfluence, 8) * 18;
-        score += quality.targetDistance * 6;
-        score -= quality.structureSimilarity;
-        return score;
-    }
-
-    private int GetEffectiveMinSolutionSteps()
-    {
-        if (RequiresLLMQualityGate())
-        {
-            return rules.minSolutionSteps;
-        }
-
-        return Mathf.Max(rules.minSolutionSteps, rules.algorithmPreferredMinSolutionSteps);
-    }
-
-    private int GetEffectiveMinPushes()
-    {
-        if (RequiresLLMQualityGate())
-        {
-            return rules.minPushes;
-        }
-
-        return Mathf.Max(rules.minPushes, rules.algorithmPreferredMinPushes);
-    }
-
-    private int GetEffectiveMinReversePulls()
-    {
-        if (RequiresLLMQualityGate())
-        {
-            return rules.minReversePulls;
-        }
-
-        return Mathf.Max(rules.minReversePulls, rules.algorithmPreferredMinReversePulls);
-    }
-
-    private int GetEffectiveMaxReversePulls()
-    {
-        return Mathf.Max(GetEffectiveMinReversePulls(), rules.maxReversePulls);
-    }
-
-    private bool RequiresLLMQualityGate()
-    {
-        return activeLLMQualityGate;
-    }
-
-    private int GetElapsedMilliseconds(float startedAt)
-    {
-        return Mathf.RoundToInt((Time.realtimeSinceStartup - startedAt) * 1000f);
-    }
-
-    private string FormatCandidateFailures(int[] candidateFailures)
-    {
-        List<string> parts = new List<string>();
-
-        for (int i = 1; i < candidateFailures.Length; i++)
-        {
-            if (candidateFailures[i] <= 0)
-            {
-                continue;
-            }
-
-            parts.Add(((CandidateFailureReason)i) + "=" + candidateFailures[i]);
-        }
-
-        return parts.Count > 0 ? string.Join(", ", parts.ToArray()) : "none";
-    }
-
-    public void ApplyPlan(LevelDesignPlan plan)
-    {
-        if (plan == null)
-        {
-            return;
-        }
-
-        ResolveReferences();
-
-        if (rules == null)
-        {
-            Debug.LogWarning("LevelGenerator: Cannot apply level design plan because rules are missing.");
-            return;
-        }
-
-        rules.minSolutionSteps = Mathf.Max(0, plan.minSolutionSteps);
-        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, plan.maxSolutionSteps);
-        if (plan.minPushes > 0 || plan.maxPushes > 0)
-        {
-            rules.minPushes = Mathf.Max(0, plan.minPushes);
-            rules.maxPushes = Mathf.Max(rules.minPushes, plan.maxPushes);
-        }
-
-        rules.minWaterAreas = Mathf.Max(0, plan.minWaterAreas);
-        rules.maxWaterAreas = Mathf.Max(rules.minWaterAreas, plan.maxWaterAreas);
-        rules.minWallObstacleBlocks = Mathf.Max(0, plan.minWallObstacleBlocks);
-        rules.maxWallObstacleBlocks = Mathf.Max(rules.minWallObstacleBlocks, plan.maxWallObstacleBlocks);
-        preserveZeroWaterConstraint = rules.maxWaterAreas == 0;
-        preserveZeroInternalWallConstraint = rules.maxWallObstacleBlocks == 0;
-
-        if (plan.minReversePulls > 0 || plan.maxReversePulls > 0)
-        {
-            rules.minReversePulls = Mathf.Max(0, plan.minReversePulls);
-            rules.maxReversePulls = Mathf.Max(rules.minReversePulls, plan.maxReversePulls);
-        }
-
-        currentArchetype = NormalizeArchetype(plan.archetype);
-        currentTargetLayout = NormalizeTargetLayout(plan.targetLayout);
-        currentObstacleStyle = NormalizeObstacleStyle(plan.obstacleStyle);
-        currentWaterStyle = NormalizeWaterStyle(plan.waterStyle);
-        currentDesignNote = string.IsNullOrEmpty(plan.designNote) ? "" : plan.designNote;
-        currentCorridorPlacement = NormalizeCorridorPlacement(plan.corridorPlacement);
-        currentCorridorWidth = currentCorridorPlacement == "none"
-            ? 0
-            : Mathf.Clamp(plan.corridorWidth, 1, 2);
-        currentCorridorOrientation = NormalizeCorridorOrientation(plan.corridorOrientation);
-        currentCorridorRole = NormalizeCorridorRole(plan.corridorRole);
-        currentCorridorPriority = NormalizeCorridorPriority(plan.corridorPriority);
-        currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(currentArchetype);
-        hasDesignBlueprint = true;
-        activeLLMQualityGate = true;
-
-        rules.maxGenerateAttempts = Mathf.Min(rules.maxGenerateAttempts, 450);
-        rules.maxReverseStepAttempts = Mathf.Min(rules.maxReverseStepAttempts, 320);
-
-        if (levelSolver != null)
-        {
-            levelSolver.maxSearchStates = Mathf.Min(levelSolver.maxSearchStates, 120000);
-        }
-
-        if (logGenerationResult)
-        {
-            Debug.Log(
-                "LevelGenerator applied level design plan:"
-                + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
-                + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
-                + ", waterAreas=" + rules.minWaterAreas + "-" + rules.maxWaterAreas
-                + ", wallObstacleBlocks=" + rules.minWallObstacleBlocks + "-" + rules.maxWallObstacleBlocks
-                + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
-                + ", archetype=" + currentArchetype
-                + ", targetLayout=" + currentTargetLayout
-                + ", obstacleStyle=" + currentObstacleStyle
-                + ", waterStyle=" + currentWaterStyle
-                + ", style=" + plan.style
-                + ", designNote=" + currentDesignNote
-                + ", corridor=" + currentCorridorPlacement
-                + "/" + currentCorridorWidth
-                + "/" + currentCorridorOrientation
-                + "/" + currentCorridorRole
-                + "/" + currentCorridorPriority
-            );
-        }
-    }
-
-    private void ApplyAlgorithmDesignBlueprint()
-    {
-        LevelGenerationTemplates.StructureTemplate[] templates = LevelGenerationTemplates.StructureTemplates;
-
-        if (templates == null || templates.Length == 0)
-        {
-            currentArchetype = DefaultArchetype;
-            currentTargetLayout = DefaultTargetLayout;
-            currentObstacleStyle = DefaultObstacleStyle;
-            currentWaterStyle = DefaultWaterStyle;
-            currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(DefaultArchetype);
-            return;
-        }
-
-        EnsureAlgorithmTemplateOrder(templates);
-
-        int orderIndex = algorithmTemplateCursor % algorithmTemplateOrder.Length;
-        int templateIndex = algorithmTemplateOrder[orderIndex];
-        algorithmTemplateCursor++;
-        currentStructureTemplate = templates[templateIndex];
-        currentArchetype = currentStructureTemplate.archetype;
-        currentTargetLayout = GetAlgorithmTargetLayout(currentArchetype);
-        currentObstacleStyle = GetAlgorithmObstacleStyle(currentArchetype);
-        currentWaterStyle = GetAlgorithmWaterStyle(currentArchetype);
-        currentDesignNote = "Algorithm template variation";
-        hasDesignBlueprint = true;
-        activeLLMQualityGate = false;
-    }
-
-    private void EnsureAlgorithmTemplateOrder(LevelGenerationTemplates.StructureTemplate[] templates)
-    {
-        if (!algorithmTemplateOrderNeedsShuffle
-            && algorithmTemplateOrder != null
-            && algorithmTemplateOrder.Length == templates.Length
-            && algorithmTemplateCursor < algorithmTemplateOrder.Length)
-        {
-            return;
-        }
-
-        int seed = rules != null && rules.useFixedSeed
-            ? rules.seed + algorithmTemplateRoundCounter
-            : GetRuntimeSeed();
-        System.Random shuffleRandom = new System.Random(seed);
-        algorithmTemplateOrder = BuildShuffledAlgorithmTemplateOrder(templates, shuffleRandom);
-        algorithmTemplateCursor = 0;
-        algorithmTemplateOrderNeedsShuffle = false;
-
-        if (logGenerationResult)
-        {
-            Debug.Log(
-                "LevelGenerator shuffled algorithm template order:"
-                + " roundCounter=" + algorithmTemplateRoundCounter
-                + ", seed=" + seed
-                + ", order=" + string.Join(",", algorithmTemplateOrder)
-            );
-        }
-    }
-
-    private static int[] BuildShuffledAlgorithmTemplateOrder(
-        LevelGenerationTemplates.StructureTemplate[] templates,
-        System.Random shuffleRandom)
-    {
-        int[] bestOrder = null;
-        int bestAdjacentMatchCount = int.MaxValue;
-        int attemptCount = Mathf.Max(8, templates.Length * 2);
-
-        for (int attempt = 0; attempt < attemptCount; attempt++)
-        {
-            int[] order = CreateSequentialTemplateOrder(templates.Length);
-            ShuffleTemplateOrder(order, shuffleRandom);
-            int adjacentMatchCount = CountAdjacentArchetypeMatches(order, templates);
-
-            if (adjacentMatchCount < bestAdjacentMatchCount)
-            {
-                bestOrder = order;
-                bestAdjacentMatchCount = adjacentMatchCount;
-
-                if (bestAdjacentMatchCount == 0)
-                {
-                    break;
-                }
-            }
-        }
-
-        return bestOrder ?? CreateSequentialTemplateOrder(templates.Length);
-    }
-
-    private static int[] CreateSequentialTemplateOrder(int count)
-    {
-        int[] order = new int[count];
-
-        for (int i = 0; i < count; i++)
-        {
-            order[i] = i;
-        }
-
-        return order;
-    }
-
-    private static void ShuffleTemplateOrder(int[] order, System.Random shuffleRandom)
-    {
-        for (int i = order.Length - 1; i > 0; i--)
-        {
-            int swapIndex = shuffleRandom.Next(i + 1);
-            int value = order[i];
-            order[i] = order[swapIndex];
-            order[swapIndex] = value;
-        }
-    }
-
-    private static int CountAdjacentArchetypeMatches(
-        int[] order,
-        LevelGenerationTemplates.StructureTemplate[] templates)
-    {
-        int count = 0;
-
-        for (int i = 1; i < order.Length; i++)
-        {
-            if (templates[order[i - 1]].archetype == templates[order[i]].archetype)
-            {
-                count++;
-            }
-        }
-
-        return count;
-    }
-
-    private string GetAlgorithmTargetLayout(string archetype)
-    {
-        if (archetype == "goal_room")
-        {
-            return random.Next(3) == 0 ? "edge_cluster" : "clustered";
-        }
-
-        if (archetype == "bottleneck_corridor")
-        {
-            return random.Next(2) == 0 ? "split_pair" : "edge_cluster";
-        }
-
-        if (archetype == "split_route")
-        {
-            return "split_pair";
-        }
-
-        return random.Next(2) == 0 ? "split_pair" : "clustered";
-    }
-
-    private string GetAlgorithmObstacleStyle(string archetype)
-    {
-        if (archetype == "goal_room")
-        {
-            return "goal_guard";
-        }
-
-        if (archetype == "bottleneck_corridor")
-        {
-            return "side_choke";
-        }
-
-        if (archetype == "split_route")
-        {
-            return "central_baffle";
-        }
-
-        return random.Next(2) == 0 ? "central_baffle" : "side_choke";
-    }
-
-    private string GetAlgorithmWaterStyle(string archetype)
-    {
-        if (archetype == "goal_room")
-        {
-            return random.Next(2) == 0 ? "corner_pool" : "side_pool";
-        }
-
-        if (archetype == "bottleneck_corridor")
-        {
-            return random.Next(2) == 0 ? "side_pool" : "route_divider";
-        }
-
-        if (archetype == "split_route")
-        {
-            return "route_divider";
-        }
-
-        return random.Next(2) == 0 ? "side_pool" : "corner_pool";
-    }
-
-    private void ResolveReferences()
-    {
-        if (rules == null)
-        {
-            rules = FindObjectOfType<LevelGenerationRules>();
-        }
-
-        if (levelLoader == null)
-        {
-            levelLoader = FindObjectOfType<LevelLoader>();
-        }
-
-        if (levelData == null && levelLoader != null)
-        {
-            levelData = levelLoader.levelData;
-        }
-
-        if (levelData == null)
-        {
-            levelData = FindObjectOfType<LevelData>();
-        }
-
-        if (levelSolver == null)
-        {
-            levelSolver = FindObjectOfType<LevelSolver>();
-        }
-
-        if (levelSolver == null)
-        {
-            levelSolver = gameObject.AddComponent<LevelSolver>();
-            levelSolver.parseOnStart = false;
-            levelSolver.solveOnStart = false;
-        }
-    }
-
-    private bool CanGenerate()
-    {
-        if (rules == null)
-        {
-            Debug.LogWarning("LevelGenerator: LevelGenerationRules is missing.");
-            return false;
-        }
-
-        if (levelData == null)
-        {
-            Debug.LogWarning("LevelGenerator: LevelData is missing.");
-            return false;
-        }
-
-        if (!rules.IsValid())
-        {
-            Debug.LogWarning("LevelGenerator: LevelGenerationRules contains invalid values.");
-            return false;
-        }
-
-        int playableCells = (rules.width - 2) * (rules.height - 2);
-        int minimumRequiredCells = rules.boxCount * 2 + 1;
-
-        if (playableCells < minimumRequiredCells)
-        {
-            Debug.LogWarning("LevelGenerator: Map is too small for the requested box count.");
-            return false;
-        }
-
-        return true;
-    }
-
-    private bool TryCreateCandidate(
-        out string[] rows,
-        out int reversePulls,
-        out CandidateFailureReason failureReason)
-    {
-        rows = null;
-        reversePulls = 0;
-        failureReason = CandidateFailureReason.None;
-        if (!TryCreateBaseGrid(out char[,] grid))
-        {
-            failureReason = CandidateFailureReason.BaseGrid;
-            return false;
-        }
-
-        bool placedTargets = false;
-
-        if (hasDesignBlueprint)
-        {
-            if (!TryAddWallObstacleBlocks(grid))
-            {
-                failureReason = CandidateFailureReason.WallObstacles;
-                return false;
-            }
-
-            if (!TryAddWaterAreas(grid))
-            {
-                failureReason = CandidateFailureReason.WaterAreas;
-                return false;
-            }
-        }
-        else
-        {
-            if (!TryAddWaterAreas(grid))
-            {
-                failureReason = CandidateFailureReason.WaterAreas;
-                return false;
-            }
-
-            if (!TryPlaceTargets(grid))
-            {
-                failureReason = CandidateFailureReason.Targets;
-                return false;
-            }
-
-            placedTargets = true;
-
-            if (!TryAddWallObstacleBlocks(grid))
-            {
-                failureReason = CandidateFailureReason.WallObstacles;
-                return false;
-            }
-        }
-
-        if (!placedTargets && !TryPlaceTargets(grid))
-        {
-            failureReason = CandidateFailureReason.Targets;
-            return false;
-        }
-
-        if (!TryPlacePlayer(grid))
-        {
-            failureReason = CandidateFailureReason.Player;
-            return false;
-        }
-
-        int targetPulls = NextInclusive(GetEffectiveMinReversePulls(), GetEffectiveMaxReversePulls());
-
-        if (!TryReversePulls(grid, targetPulls, out reversePulls))
-        {
-            failureReason = CandidateFailureReason.ReversePulls;
-            return false;
-        }
-
-        if (HasAdjacentBoxTargetPair())
-        {
-            if (logGenerationResult)
-            {
-                Debug.LogWarning("LevelGenerator: Rejected candidate with adjacent box start and target.");
-            }
-
-            failureReason = CandidateFailureReason.TileRules;
-            return false;
-        }
-
-        if (!ValidateTileRules(grid, true))
-        {
-            failureReason = CandidateFailureReason.TileRules;
-            return false;
-        }
-
-        if (!TryBuildRows(grid, out rows))
-        {
-            failureReason = CandidateFailureReason.BuildRows;
-            return false;
-        }
-
-        return true;
-    }
-
-    private bool TryCreateBaseGrid(out char[,] grid)
-    {
-        candidateCorridorOpeningCells.Clear();
-
-        if (rules.width != 12 || rules.height != 10)
-        {
-            grid = null;
-            return false;
-        }
-
-        bool needsHardCorridor = currentCorridorPlacement != "none";
-        grid = CreateSupportedOuterShell();
-
-        if (needsHardCorridor && !TryApplyCorridorTemplate(grid))
-        {
-            return false;
-        }
-
-        return HasEnoughGroundCells(grid)
-            && AreGroundCellsConnected(grid)
-            && ValidateWallTileRules(grid);
-    }
-
-    private bool TryApplyCorridorTemplate(char[,] grid)
-    {
-        if (grid == null || currentCorridorWidth < 1 || currentCorridorWidth > 2)
-        {
-            return false;
-        }
-
-        candidateCorridorOrientation = currentCorridorOrientation == "any"
-            ? (random.Next(2) == 0 ? "horizontal" : "vertical")
-            : currentCorridorOrientation;
-
-        if (candidateCorridorOrientation == "vertical")
-        {
-            int dividerX = currentCorridorPlacement == "center"
-                ? rules.width / 2
-                : (random.Next(2) == 0 ? 3 : rules.width - 4);
-            int openingStartY = rules.height / 2 - (currentCorridorWidth - 1) / 2;
-
-            for (int y = 1; y < rules.height - 1; y++)
-            {
-                Vector2Int position = new Vector2Int(dividerX, y);
-                bool opening = y >= openingStartY && y < openingStartY + currentCorridorWidth;
-                grid[dividerX, y] = opening ? Ground : Wall;
-
-                if (opening)
-                {
-                    candidateCorridorOpeningCells.Add(position);
-                }
-            }
-
-            int upperCapY = openingStartY - 1;
-            int lowerCapY = openingStartY + currentCorridorWidth;
-            grid[dividerX - 1, upperCapY] = Wall;
-            grid[dividerX - 1, lowerCapY] = Wall;
-        }
-        else if (candidateCorridorOrientation == "horizontal")
-        {
-            int dividerY = currentCorridorPlacement == "center"
-                ? rules.height / 2
-                : (random.Next(2) == 0 ? 3 : rules.height - 4);
-            int openingStartX = rules.width / 2 - (currentCorridorWidth - 1) / 2;
-
-            for (int x = 1; x < rules.width - 1; x++)
-            {
-                Vector2Int position = new Vector2Int(x, dividerY);
-                bool opening = x >= openingStartX && x < openingStartX + currentCorridorWidth;
-                grid[x, dividerY] = opening ? Ground : Wall;
-
-                if (opening)
-                {
-                    candidateCorridorOpeningCells.Add(position);
-                }
-            }
-
-            int leftCapX = openingStartX - 1;
-            int rightCapX = openingStartX + currentCorridorWidth;
-            grid[leftCapX, dividerY - 1] = Wall;
-            grid[rightCapX, dividerY - 1] = Wall;
-        }
-        else
-        {
-            return false;
-        }
-
-        return candidateCorridorOpeningCells.Count == currentCorridorWidth;
-    }
-
-    private CorridorValidationResult ValidateCorridorStructure(string[] rows)
-    {
-        CorridorValidationResult result = new CorridorValidationResult
-        {
-            requested = currentCorridorPlacement != "none",
-            placement = currentCorridorPlacement,
-            width = currentCorridorWidth,
-            orientation = candidateCorridorOrientation,
-            uniquePassage = currentCorridorPlacement == "none"
-        };
-
-        if (!result.requested || rows == null || candidateCorridorOpeningCells.Count == 0)
-        {
-            return result;
-        }
-
-        int passableCount = 0;
-        bool adjacentAreasOpen = true;
-
-        if (candidateCorridorOrientation == "vertical")
-        {
-            int dividerX = FirstCorridorOpening().x;
-
-            for (int y = 1; y < rules.height - 1; y++)
-            {
-                Vector2Int position = new Vector2Int(dividerX, y);
-                bool passable = IsCorridorPassable(rows, position);
-
-                if (passable)
-                {
-                    passableCount++;
-                }
-
-                if (candidateCorridorOpeningCells.Contains(position))
-                {
-                    adjacentAreasOpen &= IsCorridorPassable(rows, position + Vector2Int.left)
-                        && IsCorridorPassable(rows, position + Vector2Int.right);
-                }
-                else if (passable)
-                {
-                    adjacentAreasOpen = false;
-                }
-            }
-        }
-        else
-        {
-            int dividerY = FirstCorridorOpening().y;
-
-            for (int x = 1; x < rules.width - 1; x++)
-            {
-                Vector2Int position = new Vector2Int(x, dividerY);
-                bool passable = IsCorridorPassable(rows, position);
-
-                if (passable)
-                {
-                    passableCount++;
-                }
-
-                if (candidateCorridorOpeningCells.Contains(position))
-                {
-                    adjacentAreasOpen &= IsCorridorPassable(rows, position + Vector2Int.up)
-                        && IsCorridorPassable(rows, position + Vector2Int.down);
-                }
-                else if (passable)
-                {
-                    adjacentAreasOpen = false;
-                }
-            }
-        }
-
-        result.uniquePassage = adjacentAreasOpen && passableCount == currentCorridorWidth;
-        return result;
-    }
-
-    private Vector2Int FirstCorridorOpening()
-    {
-        foreach (Vector2Int position in candidateCorridorOpeningCells)
-        {
-            return position;
-        }
-
-        return Vector2Int.zero;
-    }
-
-    private bool IsCorridorPassable(string[] rows, Vector2Int position)
-    {
-        char tile = LevelData.GetMapTile(rows, position);
-        return tile == Ground || tile == Player || tile == Box || tile == Target;
-    }
-
-    private string GetCorridorFailureMessage(
-        CorridorValidationResult validation,
-        bool requiresBoxPassage)
-    {
-        if (!validation.uniquePassage)
-        {
-            return "The requested corridor position, width, or unique opening was not preserved.";
-        }
-
-        if (!validation.playerCanPass)
-        {
-            return "The requested corridor was not part of a solvable player route.";
-        }
-
-        if (requiresBoxPassage && !validation.boxPassedThrough)
-        {
-            return "No solved box route passed through the requested corridor.";
-        }
-
-        return "The requested corridor could not be verified.";
-    }
-
-    private bool HasRequiredCorridor()
-    {
-        return currentCorridorPlacement != "none" && currentCorridorPriority == "required";
-    }
-
-    private char[,] CreateSupportedOuterShell()
-    {
-        if (rules.width != 12 || rules.height != 10)
-        {
-            return CreateRectangularOuterShell();
-        }
-
-        string[] template = LevelGenerationTemplates.OuterShellTemplates[GetOuterShellTemplateIndex()];
-        bool mirrorHorizontally = random.Next(2) == 0;
-        char[,] grid = new char[rules.width, rules.height];
-
-        for (int y = 0; y < rules.height; y++)
-        {
-            string row = template[y];
-
-            for (int x = 0; x < rules.width; x++)
-            {
-                int sourceX = mirrorHorizontally ? rules.width - 1 - x : x;
-                grid[x, y] = row[sourceX];
-            }
-        }
-
-        return grid;
-    }
-
-    private int GetOuterShellTemplateIndex()
-    {
-        if (hasDesignBlueprint && currentStructureTemplate != null)
-        {
-            return currentStructureTemplate.outerShellTemplateIndex;
-        }
-
-        return random.Next(LevelGenerationTemplates.OuterShellTemplates.Length);
-    }
-
-    private char[,] CreateRectangularOuterShell()
-    {
-        char[,] grid = new char[rules.width, rules.height];
-
-        for (int y = 0; y < rules.height; y++)
-        {
-            for (int x = 0; x < rules.width; x++)
-            {
-                bool border = x == 0 || y == 0 || x == rules.width - 1 || y == rules.height - 1;
-                grid[x, y] = border ? Wall : Ground;
-            }
-        }
-
-        return grid;
-    }
-
-    private bool TryAddWaterAreas(char[,] grid)
-    {
-        int waterAreaCount = NextInclusive(rules.minWaterAreas, rules.maxWaterAreas);
-        int placedWaterAreas = 0;
-
-        for (int i = 0; i < waterAreaCount; i++)
-        {
-            if (TryAddWaterArea(grid))
-            {
-                placedWaterAreas++;
-            }
-        }
-
-        return placedWaterAreas >= rules.minWaterAreas
-            && AreGroundCellsConnected(grid)
-            && ValidateTileRules(grid);
-    }
-
-    private bool TryAddWaterArea(char[,] grid)
-    {
-        for (int attempt = 0; attempt < 20; attempt++)
-        {
-            Vector2Int size = new Vector2Int(
-                NextInclusive(rules.minWaterWidth, rules.maxWaterWidth),
-                NextInclusive(rules.minWaterHeight, rules.maxWaterHeight)
-            );
-
-            if (!rules.IsValidWaterRectSize(size.x, size.y))
-            {
-                continue;
-            }
-
-            List<Vector2Int> origins = GetWaterOriginCandidates(grid, size);
-
-            if (origins.Count == 0)
-            {
-                continue;
-            }
-
-            Shuffle(origins);
-            origins.Sort((left, right) => GetWaterOriginScore(right, size).CompareTo(GetWaterOriginScore(left, size)));
-
-            for (int originIndex = 0; originIndex < origins.Count; originIndex++)
-            {
-                Vector2Int origin = origins[originIndex];
-
-                for (int y = origin.y; y < origin.y + size.y; y++)
-                {
-                    for (int x = origin.x; x < origin.x + size.x; x++)
-                    {
-                        grid[x, y] = Water;
-                    }
-                }
-
-                if (AreGroundCellsConnected(grid))
-                {
-                    return true;
-                }
-
-                for (int y = origin.y; y < origin.y + size.y; y++)
-                {
-                    for (int x = origin.x; x < origin.x + size.x; x++)
-                    {
-                        grid[x, y] = Ground;
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private List<Vector2Int> GetWaterOriginCandidates(char[,] grid, Vector2Int size)
-    {
-        List<Vector2Int> origins = new List<Vector2Int>();
-        int minOriginY = 2;
-        int maxOriginX = rules.width - size.x - 1;
-        int maxOriginY = rules.height - size.y - 1;
-
-        if (maxOriginX < 1 || maxOriginY < minOriginY)
-        {
-            return origins;
-        }
-
-        for (int y = minOriginY; y <= maxOriginY; y++)
-        {
-            for (int x = 1; x <= maxOriginX; x++)
-            {
-                Vector2Int origin = new Vector2Int(x, y);
-
-                if (rules.IsValidWaterRect(origin, size) && CanPlaceWaterRect(grid, origin, size))
-                {
-                    origins.Add(origin);
-                }
-            }
-        }
-
-        return origins;
-    }
-
-    private int GetWaterOriginScore(Vector2Int origin, Vector2Int size)
-    {
-        Vector2Int center = new Vector2Int(origin.x + size.x / 2, origin.y + size.y / 2);
-        int score;
-
-        if (currentWaterStyle == "corner_pool")
-        {
-            score = 100 - GetDistanceToNearestPlayableCorner(center) * 8;
-            return score + GetAnchorScore(center, currentStructureTemplate.waterAnchors, 80);
-        }
-
-        if (currentWaterStyle == "route_divider")
-        {
-            Vector2Int mapCenter = GetMapCenter();
-            score = 100 - ManhattanDistance(center, mapCenter) * 6;
-            return score + GetAnchorScore(center, currentStructureTemplate.waterAnchors, 80);
-        }
-
-        int sideDistance = Mathf.Min(center.x - 1, rules.width - 2 - center.x);
-        int verticalCenterDistance = Mathf.Abs(center.y - GetMapCenter().y);
-        score = 100 - sideDistance * 8 - verticalCenterDistance * 2;
-        return score + GetAnchorScore(center, currentStructureTemplate.waterAnchors, 80);
-    }
-
-    private bool TryAddWallObstacleBlocks(char[,] grid)
-    {
-        if (!HasEnoughGroundCells(grid) || !AreGroundCellsConnected(grid) || !ValidateWallTileRules(grid))
-        {
-            return false;
-        }
-
-        int obstacleCount = NextInclusive(rules.minWallObstacleBlocks, rules.maxWallObstacleBlocks);
-        int placedObstacles = 0;
-        int maxAttempts = Mathf.Max(80, obstacleCount * 50);
-
-        if (RequiresLLMQualityGate() && placedObstacles < obstacleCount)
-        {
-            if (TryAddSurroundedWallObstacleBlock(grid))
-            {
-                placedObstacles++;
-            }
-        }
-
-        if (hasDesignBlueprint && placedObstacles < obstacleCount)
-        {
-            if (TryAddTemplateWallObstacleBlock(grid))
-            {
-                placedObstacles++;
-            }
-        }
-
-        for (int attempt = 0; attempt < maxAttempts && placedObstacles < obstacleCount; attempt++)
-        {
-            if (TryAddWallObstacleBlock(grid))
-            {
-                placedObstacles++;
-            }
-        }
-
-        return placedObstacles >= obstacleCount;
-    }
-
-    private bool TryAddSurroundedWallObstacleBlock(char[,] grid)
-    {
-        string[] shape = { "#" };
-        List<Vector2Int> origins = GetWallObstacleOriginCandidates(
-            grid,
-            shape,
-            GetWallObstacleShapeSize(shape)
-        );
-
-        Shuffle(origins);
-        origins.Sort((left, right) => GetWallObstacleOriginScore(right, Vector2Int.one)
-            .CompareTo(GetWallObstacleOriginScore(left, Vector2Int.one)));
-
-        for (int i = 0; i < origins.Count; i++)
-        {
-            if (TryCommitWallObstacleShape(grid, origins[i], shape))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryAddWallObstacleBlock(char[,] grid)
-    {
-        string[][] availableShapes = LevelGenerationTemplates.WallObstacleShapes;
-        string[] shape = availableShapes[random.Next(availableShapes.Length)];
-        Vector2Int size = GetWallObstacleShapeSize(shape);
-        List<Vector2Int> origins = GetWallObstacleOriginCandidates(grid, shape, size);
-
-        if (origins.Count == 0)
-        {
-            return false;
-        }
-
-        Shuffle(origins);
-        origins.Sort((left, right) => GetWallObstacleOriginScore(right, size).CompareTo(GetWallObstacleOriginScore(left, size)));
-
-        for (int i = 0; i < origins.Count; i++)
-        {
-            if (TryCommitWallObstacleShape(grid, origins[i], shape))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryAddTemplateWallObstacleBlock(char[,] grid)
-    {
-        List<int> shapeIndices = new List<int>(currentStructureTemplate.wallShapeIndices);
-        Shuffle(shapeIndices);
-
-        for (int shapeIndex = 0; shapeIndex < shapeIndices.Count; shapeIndex++)
-        {
-            string[] shape = GetWallObstacleShape(shapeIndices[shapeIndex]);
-            Vector2Int size = GetWallObstacleShapeSize(shape);
-            List<Vector2Int> origins = GetTemplateWallObstacleOrigins(size);
-
-            Shuffle(origins);
-            origins.Sort((left, right) => GetWallObstacleOriginScore(right, size).CompareTo(GetWallObstacleOriginScore(left, size)));
-
-            for (int i = 0; i < origins.Count; i++)
-            {
-                if (TryCommitWallObstacleShape(grid, origins[i], shape))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private string[] GetWallObstacleShape(int shapeIndex)
-    {
-        int index = Mathf.Abs(shapeIndex) % LevelGenerationTemplates.WallObstacleShapes.Length;
-        return LevelGenerationTemplates.WallObstacleShapes[index];
-    }
-
-    private List<Vector2Int> GetTemplateWallObstacleOrigins(Vector2Int size)
-    {
-        List<Vector2Int> origins = new List<Vector2Int>();
-
-        for (int i = 0; i < currentStructureTemplate.obstacleAnchors.Length; i++)
-        {
-            Vector2Int anchor = currentStructureTemplate.obstacleAnchors[i];
-
-            for (int yOffset = -1; yOffset <= 1; yOffset++)
-            {
-                for (int xOffset = -1; xOffset <= 1; xOffset++)
-                {
-                    Vector2Int origin = new Vector2Int(
-                        anchor.x - size.x / 2 + xOffset,
-                        anchor.y - size.y / 2 + yOffset
-                    );
-
-                    if (!ContainsPosition(origins, origin))
-                    {
-                        origins.Add(origin);
-                    }
-                }
-            }
-        }
-
-        return origins;
-    }
-
-    private List<Vector2Int> GetWallObstacleOriginCandidates(char[,] grid, string[] shape, Vector2Int size)
-    {
-        List<Vector2Int> origins = new List<Vector2Int>();
-        int minX = 2;
-        int minY = 2;
-        int maxX = rules.width - size.x - 2;
-        int maxY = rules.height - size.y - 2;
-
-        if (maxX < minX || maxY < minY)
-        {
-            return origins;
-        }
-
-        for (int y = minY; y <= maxY; y++)
-        {
-            for (int x = minX; x <= maxX; x++)
-            {
-                Vector2Int origin = new Vector2Int(x, y);
-
-                if (CanPlaceWallObstacleShape(grid, origin, shape))
-                {
-                    origins.Add(origin);
-                }
-            }
-        }
-
-        return origins;
-    }
-
-    private bool TryCommitWallObstacleShape(char[,] grid, Vector2Int origin, string[] shape)
-    {
-        if (!CanPlaceWallObstacleShape(grid, origin, shape))
-        {
-            return false;
-        }
-
-        SetWallObstacleShape(grid, origin, shape, Wall);
-
-        if (HasEnoughGroundCells(grid)
-            && AreGroundCellsConnected(grid)
-            && ValidateWallTileRules(grid))
-        {
-            return true;
-        }
-
-        SetWallObstacleShape(grid, origin, shape, Ground);
-        return false;
-    }
-
-    private int GetWallObstacleOriginScore(Vector2Int origin, Vector2Int size)
-    {
-        Vector2Int center = new Vector2Int(origin.x + size.x / 2, origin.y + size.y / 2);
-        Vector2Int mapCenter = GetMapCenter();
-        int templateScore = hasDesignBlueprint
-            ? GetAnchorScore(center, currentStructureTemplate.obstacleAnchors, 80)
-            : 0;
-        int routeScore = GetWallObstacleRouteScore(center);
-
-        if (currentObstacleStyle == "side_choke")
-        {
-            int sideDistance = Mathf.Min(center.x - 1, rules.width - 2 - center.x);
-            int verticalCenterDistance = Mathf.Abs(center.y - mapCenter.y);
-            return 120 - sideDistance * 10 - verticalCenterDistance * 3 + templateScore + routeScore;
-        }
-
-        if (currentObstacleStyle == "goal_guard")
-        {
-            int edgeDistance = GetDistanceToNearestPlayableEdge(center);
-            int horizontalCenterDistance = Mathf.Abs(center.x - mapCenter.x);
-            return 120 - edgeDistance * 8 - horizontalCenterDistance * 2 + templateScore + routeScore;
-        }
-
-        return 120 - ManhattanDistance(center, mapCenter) * 8 + templateScore + routeScore;
-    }
-
-    private int GetWallObstacleRouteScore(Vector2Int center)
-    {
-        IList<Vector2Int> routeTargets = targets;
-
-        if (routeTargets.Count == 0
-            && hasDesignBlueprint
-            && currentStructureTemplate.targetAnchors != null)
-        {
-            routeTargets = currentStructureTemplate.targetAnchors;
-        }
-
-        if (routeTargets.Count == 0)
-        {
-            return 0;
-        }
-
-        int nearestTargetDistance = GetNearestDistance(center, routeTargets);
-        int score = Mathf.Max(0, 72 - nearestTargetDistance * 16);
-
-        if (IsNearTargetCorridor(center, routeTargets))
-        {
-            score += 45;
-        }
-
-        Vector2Int mapCenter = GetMapCenter();
-        score += Mathf.Max(0, 28 - ManhattanDistance(center, mapCenter) * 4);
-        return score;
-    }
-
-    private bool IsNearTargetCorridor(Vector2Int position, IList<Vector2Int> routeTargets)
-    {
-        if (routeTargets.Count < 2)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < routeTargets.Count; i++)
-        {
-            for (int j = i + 1; j < routeTargets.Count; j++)
-            {
-                if (IsNearAxisAlignedCorridor(position, routeTargets[i], routeTargets[j], 2))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private bool CanPlaceWallObstacleShape(char[,] grid, Vector2Int origin, string[] shape)
-    {
-        Vector2Int size = GetWallObstacleShapeSize(shape);
-        for (int y = origin.y - 1; y <= origin.y + size.y; y++)
-        {
-            for (int x = origin.x - 1; x <= origin.x + size.x; x++)
-            {
-                Vector2Int position = new Vector2Int(x, y);
-
-                if (!rules.IsInsidePlayableArea(position))
-                {
-                    return false;
-                }
-
-                if (grid[x, y] != Ground)
-                {
-                    return false;
-                }
-            }
-        }
-
-        for (int y = origin.y; y < origin.y + size.y; y++)
-        {
-            for (int x = origin.x; x < origin.x + size.x; x++)
-            {
-                if (GetWallObstacleShapeTile(shape, x - origin.x, y - origin.y) != Wall)
-                {
-                    continue;
-                }
-
-                Vector2Int position = new Vector2Int(x, y);
-
-                if (grid[x, y] != Ground
-                    || targetLookup.Contains(position)
-                    || HasWaterBelow(grid, position))
-                {
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-
-    private void SetWallObstacleShape(char[,] grid, Vector2Int origin, string[] shape, char tile)
-    {
-        Vector2Int size = GetWallObstacleShapeSize(shape);
-
-        for (int y = origin.y; y < origin.y + size.y; y++)
-        {
-            for (int x = origin.x; x < origin.x + size.x; x++)
-            {
-                if (GetWallObstacleShapeTile(shape, x - origin.x, y - origin.y) != Wall)
-                {
-                    continue;
-                }
-
-                grid[x, y] = tile;
-            }
-        }
-    }
-
-    private Vector2Int GetWallObstacleShapeSize(string[] shape)
-    {
-        int width = 0;
-
-        for (int i = 0; i < shape.Length; i++)
-        {
-            width = Mathf.Max(width, shape[i].Length);
-        }
-
-        return new Vector2Int(width, shape.Length);
-    }
-
-    private char GetWallObstacleShapeTile(string[] shape, int x, int y)
-    {
-        if (y < 0 || y >= shape.Length || x < 0 || x >= shape[y].Length)
-        {
-            return Ground;
-        }
-
-        return shape[y][x];
-    }
-
-    private bool HasEnoughGroundCells(char[,] grid)
-    {
-        int requiredCells = rules.boxCount * 2 + 1;
-        return CountGroundCells(grid) >= requiredCells;
-    }
-
-    private int CountGroundCells(char[,] grid)
-    {
-        int count = 0;
-
-        for (int y = 1; y < rules.height - 1; y++)
-        {
-            for (int x = 1; x < rules.width - 1; x++)
-            {
-                if (grid[x, y] == Ground)
-                {
-                    count++;
-                }
-            }
-        }
-
-        return count;
-    }
-
-    private bool AreGroundCellsConnected(char[,] grid)
-    {
-        Vector2Int start = Vector2Int.zero;
-        bool hasStart = false;
-        int groundCellCount = 0;
-
-        for (int y = 1; y < rules.height - 1; y++)
-        {
-            for (int x = 1; x < rules.width - 1; x++)
-            {
-                if (grid[x, y] != Ground)
-                {
-                    continue;
-                }
-
-                groundCellCount++;
-
-                if (!hasStart)
-                {
-                    start = new Vector2Int(x, y);
-                    hasStart = true;
-                }
-            }
-        }
-
-        if (!hasStart)
-        {
-            return false;
-        }
-
-        Queue<Vector2Int> open = new Queue<Vector2Int>();
-        HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
-
-        open.Enqueue(start);
-        visited.Add(start);
-
-        while (open.Count > 0)
-        {
-            Vector2Int current = open.Dequeue();
-
-            for (int i = 0; i < directions.Length; i++)
-            {
-                Vector2Int next = current + directions[i];
-
-                if (!rules.IsInsidePlayableArea(next)
-                    || visited.Contains(next)
-                    || grid[next.x, next.y] != Ground)
-                {
-                    continue;
-                }
-
-                visited.Add(next);
-                open.Enqueue(next);
-            }
-        }
-
-        return visited.Count == groundCellCount;
-    }
-
-    private bool TryPlaceTargets(char[,] grid)
-    {
-        boxes.Clear();
-        targets.Clear();
-        targetLookup.Clear();
-
-        List<Vector2Int> candidates = GetGroundCells(grid);
-
-        if (candidates.Count < rules.boxCount)
-        {
-            return false;
-        }
-
-        if (TryPlaceTargetsByLayout(candidates))
-        {
-            return true;
-        }
-
-        if (hasDesignBlueprint && TryPlaceTargetsNearTemplateAnchors(candidates))
-        {
-            return true;
-        }
-
-        boxes.Clear();
-        targets.Clear();
-        targetLookup.Clear();
-        Shuffle(candidates);
-
-        for (int i = 0; i < rules.boxCount; i++)
-        {
-            Vector2Int position = candidates[i];
-            targets.Add(position);
-            targetLookup.Add(position);
-            boxes.Add(position);
-        }
-
-        return true;
-    }
-
-    private bool TryPlaceTargetsByLayout(List<Vector2Int> candidates)
-    {
-        if (currentTargetLayout == "clustered")
-        {
-            return TryPlaceClusteredTargets(candidates, false);
-        }
-
-        if (currentTargetLayout == "edge_cluster")
-        {
-            return TryPlaceClusteredTargets(candidates, true);
-        }
-
-        if (currentTargetLayout == "split_pair")
-        {
-            return TryPlaceSplitTargets(candidates);
-        }
-
-        return false;
-    }
-
-    private bool TryPlaceTargetsNearTemplateAnchors(List<Vector2Int> candidates)
-    {
-        if (currentStructureTemplate.targetAnchors.Length < rules.boxCount)
-        {
-            return false;
-        }
-
-        List<int> anchorOrder = new List<int>();
-
-        for (int i = 0; i < currentStructureTemplate.targetAnchors.Length; i++)
-        {
-            anchorOrder.Add(i);
-        }
-
-        Shuffle(anchorOrder);
-
-        for (int startIndex = 0; startIndex < anchorOrder.Count; startIndex++)
-        {
-            List<Vector2Int> selected = new List<Vector2Int>();
-            bool foundAllAnchors = true;
-
-            for (int offset = 0; offset < rules.boxCount; offset++)
-            {
-                int anchorIndex = anchorOrder[(startIndex + offset) % anchorOrder.Count];
-                Vector2Int anchor = currentStructureTemplate.targetAnchors[anchorIndex];
-                int bestDistance = int.MaxValue;
-                Vector2Int bestCandidate = Vector2Int.zero;
-                bool foundCandidate = false;
-
-                for (int i = 0; i < candidates.Count; i++)
-                {
-                    Vector2Int candidate = candidates[i];
-
-                    if (ContainsPosition(selected, candidate))
-                    {
-                        continue;
-                    }
-
-                    int distance = ManhattanDistance(candidate, anchor);
-
-                    if (distance >= bestDistance)
-                    {
-                        continue;
-                    }
-
-                    bestDistance = distance;
-                    bestCandidate = candidate;
-                    foundCandidate = true;
-                }
-
-                if (!foundCandidate || bestDistance > 4)
-                {
-                    foundAllAnchors = false;
-                    break;
-                }
-
-                selected.Add(bestCandidate);
-            }
-
-            if (foundAllAnchors && CommitTargetPositions(selected))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryPlaceClusteredTargets(List<Vector2Int> candidates, bool requireEdge)
-    {
-        List<Vector2Int> seeds = new List<Vector2Int>(candidates);
-        Shuffle(seeds);
-
-        for (int i = 0; i < seeds.Count; i++)
-        {
-            Vector2Int seed = seeds[i];
-
-            if (requireEdge && !IsNearPlayableEdge(seed))
-            {
-                continue;
-            }
-
-            List<Vector2Int> cluster = new List<Vector2Int>();
-
-            for (int j = 0; j < candidates.Count; j++)
-            {
-                Vector2Int candidate = candidates[j];
-
-                if (requireEdge && !IsNearPlayableEdge(candidate))
-                {
-                    continue;
-                }
-
-                if (ManhattanDistance(seed, candidate) <= 2)
-                {
-                    cluster.Add(candidate);
-                }
-            }
-
-            if (cluster.Count < rules.boxCount)
-            {
-                continue;
-            }
-
-            Shuffle(cluster);
-            cluster.Sort((left, right) => ManhattanDistance(left, seed).CompareTo(ManhattanDistance(right, seed)));
-
-            if (CommitTargetPositions(cluster))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryPlaceSplitTargets(List<Vector2Int> candidates)
-    {
-        if (rules.boxCount != 2)
-        {
-            return false;
-        }
-
-        int bestDistance = -1;
-        Vector2Int first = Vector2Int.zero;
-        Vector2Int second = Vector2Int.zero;
-
-        for (int i = 0; i < candidates.Count; i++)
-        {
-            for (int j = i + 1; j < candidates.Count; j++)
-            {
-                int distance = ManhattanDistance(candidates[i], candidates[j]);
-
-                if (distance <= bestDistance)
-                {
-                    continue;
-                }
-
-                bestDistance = distance;
-                first = candidates[i];
-                second = candidates[j];
-            }
-        }
-
-        if (bestDistance < Mathf.Max(4, rules.width / 3))
-        {
-            return false;
-        }
-
-        List<Vector2Int> selected = new List<Vector2Int>
-        {
-            first,
-            second
-        };
-
-        Shuffle(selected);
-        return CommitTargetPositions(selected);
-    }
-
-    private bool CommitTargetPositions(List<Vector2Int> selected)
-    {
-        if (selected.Count < rules.boxCount)
-        {
-            return false;
-        }
-
-        boxes.Clear();
-        targets.Clear();
-        targetLookup.Clear();
-
-        for (int i = 0; i < rules.boxCount; i++)
-        {
-            Vector2Int position = selected[i];
-
-            if (targetLookup.Contains(position))
-            {
-                return false;
-            }
-
-            targets.Add(position);
-            targetLookup.Add(position);
-            boxes.Add(position);
-        }
-
-        return true;
-    }
-
-    private bool TryPlacePlayer(char[,] grid)
-    {
-        List<Vector2Int> candidates = GetGroundCells(grid);
-        Shuffle(candidates);
-        candidates.Sort((left, right) => GetPlayerStartScore(right).CompareTo(GetPlayerStartScore(left)));
-
-        for (int i = 0; i < candidates.Count; i++)
-        {
-            Vector2Int position = candidates[i];
-
-            if (ContainsPosition(boxes, position) || targetLookup.Contains(position))
-            {
-                continue;
-            }
-
-            playerPosition = position;
-            return true;
-        }
-
-        return false;
-    }
-
-    private int GetPlayerStartScore(Vector2Int position)
-    {
-        int score = 0;
-
-        for (int i = 0; i < targets.Count; i++)
-        {
-            score += ManhattanDistance(position, targets[i]) * 4;
-        }
-
-        if (hasDesignBlueprint)
-        {
-            score += GetDistanceToNearestAnchor(position, currentStructureTemplate.targetAnchors) * 2;
-        }
-
-        return score;
-    }
-
-    private bool TryReversePulls(char[,] grid, int targetPulls, out int reversePulls)
-    {
-        reversePulls = 0;
-        bool[] movedBoxes = new bool[boxes.Count];
-        List<ReversePullAction> legalPulls = new List<ReversePullAction>();
-
-        for (int attempt = 0; attempt < rules.maxReverseStepAttempts && reversePulls < targetPulls; attempt++)
-        {
-            legalPulls.Clear();
-
-            for (int boxIndex = 0; boxIndex < boxes.Count; boxIndex++)
-            {
-                for (int directionIndex = 0; directionIndex < directions.Length; directionIndex++)
-                {
-                    Vector2Int direction = directions[directionIndex];
-
-                    if (CanReversePull(grid, boxIndex, direction))
-                    {
-                        legalPulls.Add(new ReversePullAction(boxIndex, direction));
-                    }
-                }
-            }
-
-            if (legalPulls.Count == 0)
-            {
-                break;
-            }
-
-            ReversePullAction selectedPull = legalPulls[random.Next(legalPulls.Count)];
-
-            if (!TryReversePull(grid, selectedPull.boxIndex, selectedPull.direction))
-            {
-                continue;
-            }
-
-            movedBoxes[selectedPull.boxIndex] = true;
-            reversePulls++;
-        }
-
-        if (reversePulls < targetPulls)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < movedBoxes.Length; i++)
-        {
-            if (!movedBoxes[i] || targetLookup.Contains(boxes[i]))
-            {
-                return false;
-            }
-        }
-
-        return !targetLookup.Contains(playerPosition);
-    }
-
-    private bool HasAdjacentBoxTargetPair()
-    {
-        for (int boxIndex = 0; boxIndex < boxes.Count; boxIndex++)
-        {
-            for (int targetIndex = 0; targetIndex < targets.Count; targetIndex++)
-            {
-                if (ManhattanDistance(boxes[boxIndex], targets[targetIndex]) == 1)
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryReversePull(char[,] grid, int boxIndex, Vector2Int direction)
-    {
-        if (!CanReversePull(grid, boxIndex, direction))
-        {
-            return false;
-        }
-
-        Vector2Int boxPosition = boxes[boxIndex];
-        boxes[boxIndex] = boxPosition - direction;
-        playerPosition = boxPosition - new Vector2Int(direction.x * 2, direction.y * 2);
-        return true;
-    }
-
-    private bool CanReversePull(char[,] grid, int boxIndex, Vector2Int direction)
-    {
-        Vector2Int boxPosition = boxes[boxIndex];
-        Vector2Int nextBoxPosition = boxPosition - direction;
-        Vector2Int nextPlayerPosition = boxPosition - new Vector2Int(direction.x * 2, direction.y * 2);
-
-        if (targetLookup.Contains(nextBoxPosition) || targetLookup.Contains(nextPlayerPosition))
-        {
-            return false;
-        }
-
-        if (!CanPlayerOccupy(grid, nextBoxPosition) || !CanPlayerOccupy(grid, nextPlayerPosition))
-        {
-            return false;
-        }
-
-        if (ContainsPositionExcept(boxes, nextBoxPosition, boxIndex)
-            || ContainsPositionExcept(boxes, nextPlayerPosition, boxIndex))
-        {
-            return false;
-        }
-
-        if (!CanReach(grid, playerPosition, nextBoxPosition))
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    private bool CanReach(char[,] grid, Vector2Int start, Vector2Int destination)
-    {
-        if (start == destination)
-        {
-            return true;
-        }
-
-        Queue<Vector2Int> open = new Queue<Vector2Int>();
-        HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
-
-        open.Enqueue(start);
-        visited.Add(start);
-
-        while (open.Count > 0)
-        {
-            Vector2Int current = open.Dequeue();
-
-            for (int i = 0; i < directions.Length; i++)
-            {
-                Vector2Int next = current + directions[i];
-
-                if (visited.Contains(next) || !CanPlayerOccupy(grid, next) || ContainsPosition(boxes, next))
-                {
-                    continue;
-                }
-
-                if (next == destination)
-                {
-                    return true;
-                }
-
-                visited.Add(next);
-                open.Enqueue(next);
-            }
-        }
-
-        return false;
-    }
-
-    private bool TryBuildRows(char[,] grid, out string[] rows)
-    {
-        rows = new string[rules.height];
-
-        if (ContainsPosition(boxes, playerPosition) || targetLookup.Contains(playerPosition))
-        {
-            return false;
-        }
-
-        for (int i = 0; i < boxes.Count; i++)
-        {
-            if (targetLookup.Contains(boxes[i]))
-            {
-                return false;
-            }
-        }
-
-        for (int y = 0; y < rules.height; y++)
-        {
-            char[] row = new char[rules.width];
-
-            for (int x = 0; x < rules.width; x++)
-            {
-                row[x] = grid[x, y];
-            }
-
-            rows[y] = new string(row);
-        }
-
-        for (int i = 0; i < targets.Count; i++)
-        {
-            SetRowTile(rows, targets[i], Target);
-        }
-
-        for (int i = 0; i < boxes.Count; i++)
-        {
-            SetRowTile(rows, boxes[i], Box);
-        }
-
-        SetRowTile(rows, playerPosition, Player);
-        return true;
-    }
-
-    private void SetRowTile(string[] rows, Vector2Int position, char tile)
-    {
-        char[] row = rows[position.y].ToCharArray();
-        row[position.x] = tile;
-        rows[position.y] = new string(row);
-    }
-
-    private string[] CloneRows(string[] rows)
-    {
-        if (rows == null)
-        {
-            return null;
-        }
-
-        string[] clone = new string[rows.Length];
-
-        for (int i = 0; i < rows.Length; i++)
-        {
-            clone[i] = rows[i] ?? "";
-        }
-
-        return clone;
-    }
-
-    private int CountTiles(string[] rows, char tile)
-    {
-        int count = 0;
-
-        for (int y = 0; y < rows.Length; y++)
-        {
-            string row = rows[y] ?? "";
-
-            for (int x = 0; x < row.Length; x++)
-            {
-                if (row[x] == tile)
-                {
-                    count++;
-                }
-            }
-        }
-
-        return count;
-    }
-
-    private int CountWaterAreas(string[] rows)
-    {
-        HashSet<Vector2Int> visited = new HashSet<Vector2Int>();
-        int waterAreas = 0;
-
-        for (int y = 0; y < rows.Length; y++)
-        {
-            string row = rows[y] ?? "";
-
-            for (int x = 0; x < row.Length; x++)
-            {
-                Vector2Int position = new Vector2Int(x, y);
-
-                if (row[x] != Water || visited.Contains(position))
-                {
-                    continue;
-                }
-
-                waterAreas++;
-                VisitWaterArea(rows, position, visited);
-            }
-        }
-
-        return waterAreas;
-    }
-
-    private void VisitWaterArea(string[] rows, Vector2Int start, HashSet<Vector2Int> visited)
-    {
-        Queue<Vector2Int> open = new Queue<Vector2Int>();
-        open.Enqueue(start);
-        visited.Add(start);
-
-        while (open.Count > 0)
-        {
-            Vector2Int current = open.Dequeue();
-
-            for (int i = 0; i < directions.Length; i++)
-            {
-                Vector2Int next = current + directions[i];
-
-                if (visited.Contains(next) || LevelData.GetMapTile(rows, next) != Water)
-                {
-                    continue;
-                }
-
-                visited.Add(next);
-                open.Enqueue(next);
-            }
-        }
-    }
-
-    private int CountSurroundedWalls(string[] rows)
-    {
-        int count = 0;
-
-        for (int y = 0; y < rows.Length; y++)
-        {
-            string row = rows[y] ?? "";
-
-            for (int x = 0; x < row.Length; x++)
-            {
-                if (LevelData.IsSurroundedWall(rows, new Vector2Int(x, y)))
-                {
-                    count++;
-                }
-            }
-        }
-
-        return count;
-    }
-
-    private int GetTargetDistance(string[] rows)
-    {
-        List<Vector2Int> targetPositions = new List<Vector2Int>();
-
-        for (int y = 0; y < rows.Length; y++)
-        {
-            string row = rows[y] ?? "";
-
-            for (int x = 0; x < row.Length; x++)
-            {
-                if (row[x] == Target)
-                {
-                    targetPositions.Add(new Vector2Int(x, y));
-                }
-            }
-        }
-
-        int distance = 0;
-
-        for (int i = 0; i < targetPositions.Count; i++)
-        {
-            for (int j = i + 1; j < targetPositions.Count; j++)
-            {
-                distance += ManhattanDistance(targetPositions[i], targetPositions[j]);
-            }
-        }
-
-        return distance;
-    }
-
-    private int CountObstacleInfluence(string[] rows)
-    {
-        List<Vector2Int> targetPositions = GetRowsPositions(rows, Target);
-        List<Vector2Int> boxPositions = GetRowsPositions(rows, Box);
-        List<Vector2Int> playerPositions = GetRowsPositions(rows, Player);
-
-        if (targetPositions.Count == 0 || boxPositions.Count == 0)
-        {
-            return 0;
-        }
-
-        int influence = 0;
-
-        for (int y = 1; y < rows.Length - 1; y++)
-        {
-            string row = rows[y] ?? "";
-
-            for (int x = 1; x < row.Length - 1; x++)
-            {
-                Vector2Int position = new Vector2Int(x, y);
-
-                if (LevelData.GetMapTile(rows, position) != Wall)
-                {
-                    continue;
-                }
-
-                int tileInfluence = 0;
-                int nearestTargetDistance = GetNearestDistance(position, targetPositions);
-                int nearestBoxDistance = GetNearestDistance(position, boxPositions);
-
-                if (nearestTargetDistance <= 2)
-                {
-                    tileInfluence += 2;
-                }
-                else if (nearestTargetDistance <= 3)
-                {
-                    tileInfluence++;
-                }
-
-                if (nearestBoxDistance <= 2)
-                {
-                    tileInfluence += 2;
-                }
-                else if (nearestBoxDistance <= 3)
-                {
-                    tileInfluence++;
-                }
-
-                if (IsNearAnyBoxTargetCorridor(position, boxPositions, targetPositions))
-                {
-                    tileInfluence += 2;
-                }
-
-                if (playerPositions.Count > 0 && GetNearestDistance(position, playerPositions) <= 4)
-                {
-                    tileInfluence++;
-                }
-
-                if (IsChokeInfluenceWall(rows, position))
-                {
-                    tileInfluence++;
-                }
-
-                influence += Mathf.Min(tileInfluence, 5);
-            }
-        }
-
-        return influence;
-    }
-
-    private int GetBoxInteractionScore(string[] rows)
-    {
-        List<Vector2Int> boxPositions = GetRowsPositions(rows, Box);
-        List<Vector2Int> targetPositions = GetRowsPositions(rows, Target);
-
-        if (boxPositions.Count != 2 || targetPositions.Count < 2)
-        {
-            return 0;
-        }
-
-        int score = 0;
-        int boxDistance = ManhattanDistance(boxPositions[0], boxPositions[1]);
-        int targetDistance = ManhattanDistance(targetPositions[0], targetPositions[1]);
-
-        if (boxDistance <= 2)
-        {
-            score += 2;
-        }
-        else if (boxDistance <= 4)
-        {
-            score += 4;
-        }
-        else if (boxDistance <= 6)
-        {
-            score += 3;
-        }
-        else if (boxDistance <= 8)
-        {
-            score += 1;
-        }
-
-        if (targetDistance <= 3)
-        {
-            score += 3;
-        }
-        else if (targetDistance <= 5)
-        {
-            score += 2;
-        }
-        else if (targetDistance <= 7)
-        {
-            score += 1;
-        }
-
-        int sharedRouteCells = CountSharedBoxRouteCells(rows, boxPositions, targetPositions);
-        int sharedChokeWalls = CountSharedBoxChokeWalls(rows, boxPositions, targetPositions);
-        score += Mathf.Min(sharedRouteCells / 3, 3);
-        score += Mathf.Min(sharedChokeWalls, 3);
-
-        if (boxDistance >= 9 && targetDistance >= 8)
-        {
-            score = Mathf.Max(0, score - 2);
-        }
-
-        return score;
-    }
-
-    private int CountSharedBoxRouteCells(
-        string[] rows,
-        List<Vector2Int> boxPositions,
-        List<Vector2Int> targetPositions)
-    {
-        int count = 0;
-
-        for (int y = 1; y < rows.Length - 1; y++)
-        {
-            string row = rows[y] ?? "";
-
-            for (int x = 1; x < row.Length - 1; x++)
-            {
-                Vector2Int position = new Vector2Int(x, y);
-
-                if (!IsRowsWalkableForInfluence(rows, position))
-                {
-                    continue;
-                }
-
-                if (IsNearBoxTargetRoute(position, boxPositions[0], targetPositions)
-                    && IsNearBoxTargetRoute(position, boxPositions[1], targetPositions))
-                {
-                    count++;
-                }
-            }
-        }
-
-        return count;
-    }
-
-    private int CountSharedBoxChokeWalls(
-        string[] rows,
-        List<Vector2Int> boxPositions,
-        List<Vector2Int> targetPositions)
-    {
-        int count = 0;
-
-        for (int y = 1; y < rows.Length - 1; y++)
-        {
-            string row = rows[y] ?? "";
-
-            for (int x = 1; x < row.Length - 1; x++)
-            {
-                Vector2Int position = new Vector2Int(x, y);
-
-                if (LevelData.GetMapTile(rows, position) != Wall || !IsChokeInfluenceWall(rows, position))
-                {
-                    continue;
-                }
-
-                if (IsNearBoxTargetRoute(position, boxPositions[0], targetPositions)
-                    && IsNearBoxTargetRoute(position, boxPositions[1], targetPositions))
-                {
-                    count++;
-                }
-            }
-        }
-
-        return count;
-    }
-
-    private bool IsNearBoxTargetRoute(
-        Vector2Int position,
-        Vector2Int boxPosition,
-        List<Vector2Int> targetPositions)
-    {
-        for (int i = 0; i < targetPositions.Count; i++)
-        {
-            if (IsNearAxisAlignedCorridor(position, boxPosition, targetPositions[i], 1))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private List<Vector2Int> GetRowsPositions(string[] rows, char tile)
-    {
-        List<Vector2Int> positions = new List<Vector2Int>();
-
-        for (int y = 0; y < rows.Length; y++)
-        {
-            string row = rows[y] ?? "";
-
-            for (int x = 0; x < row.Length; x++)
-            {
-                if (row[x] == tile)
-                {
-                    positions.Add(new Vector2Int(x, y));
-                }
-            }
-        }
-
-        return positions;
-    }
-
-    private bool IsNearAnyBoxTargetCorridor(
-        Vector2Int position,
-        List<Vector2Int> boxPositions,
-        List<Vector2Int> targetPositions)
-    {
-        for (int boxIndex = 0; boxIndex < boxPositions.Count; boxIndex++)
-        {
-            for (int targetIndex = 0; targetIndex < targetPositions.Count; targetIndex++)
-            {
-                if (IsNearAxisAlignedCorridor(
-                        position,
-                        boxPositions[boxIndex],
-                        targetPositions[targetIndex],
-                        2))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private bool IsChokeInfluenceWall(string[] rows, Vector2Int position)
-    {
-        bool leftOpen = IsRowsWalkableForInfluence(rows, position + new Vector2Int(-1, 0));
-        bool rightOpen = IsRowsWalkableForInfluence(rows, position + new Vector2Int(1, 0));
-        bool upOpen = IsRowsWalkableForInfluence(rows, position + new Vector2Int(0, -1));
-        bool downOpen = IsRowsWalkableForInfluence(rows, position + new Vector2Int(0, 1));
-        return (leftOpen && rightOpen && !upOpen && !downOpen)
-            || (upOpen && downOpen && !leftOpen && !rightOpen);
-    }
-
-    private bool IsRowsWalkableForInfluence(string[] rows, Vector2Int position)
-    {
-        return LevelData.IsGround(LevelData.GetMapTile(rows, position));
-    }
-
-    private List<Vector2Int> GetGroundCells(char[,] grid)
-    {
-        List<Vector2Int> cells = new List<Vector2Int>();
-
-        for (int y = 1; y < rules.height - 1; y++)
-        {
-            for (int x = 1; x < rules.width - 1; x++)
-            {
-                if (grid[x, y] == Ground)
-                {
-                    cells.Add(new Vector2Int(x, y));
-                }
-            }
-        }
-
-        return cells;
-    }
-
-    private bool IsRectClear(char[,] grid, Vector2Int origin, Vector2Int size)
-    {
-        for (int y = origin.y; y < origin.y + size.y; y++)
-        {
-            for (int x = origin.x; x < origin.x + size.x; x++)
-            {
-                if (grid[x, y] != Ground)
-                {
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-
-    private bool CanPlaceWaterRect(char[,] grid, Vector2Int origin, Vector2Int size)
-    {
-        if (!IsRectClear(grid, origin, size))
-        {
-            return false;
-        }
-
-        for (int y = origin.y; y < origin.y + size.y; y++)
-        {
-            for (int x = origin.x; x < origin.x + size.x; x++)
-            {
-                if (HasWallAbove(grid, new Vector2Int(x, y)))
-                {
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-
-    private bool ValidateTileRules(char[,] grid, bool logFailure = false)
-    {
-        for (int y = 0; y < rules.height; y++)
-        {
-            for (int x = 0; x < rules.width; x++)
-            {
-                Vector2Int position = new Vector2Int(x, y);
-
-                if (grid[x, y] == Water && HasWallAbove(grid, position))
-                {
-                    if (logFailure && logGenerationResult)
-                    {
-                        Debug.LogWarning("LevelGenerator: Water tile rejected below wall at " + position);
-                    }
-
-                    return false;
-                }
-            }
-        }
-
-        return ValidateWallTileRules(grid, logFailure);
-    }
-
-    private bool ValidateWallTileRules(char[,] grid, bool logFailure = false)
-    {
-        if (!ValidateNoParallelWallRows(grid, logFailure))
-        {
-            return false;
-        }
-
-        for (int y = 0; y < rules.height; y++)
-        {
-            for (int x = 0; x < rules.width; x++)
-            {
-                Vector2Int position = new Vector2Int(x, y);
-
-                if (grid[x, y] == Wall && !IsSupportedWallTileShape(grid, position))
-                {
-                    if (logFailure && logGenerationResult)
-                    {
-                        Debug.LogWarning(
-                            "LevelGenerator: Wall tile rule rejected wall at "
-                            + position
-                            + " neighbors="
-                            + GetTileNeighborhoodDebug(grid, position)
-                        );
-                    }
-
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-
-    private bool ValidateNoParallelWallRows(char[,] grid, bool logFailure = false)
-    {
-        for (int y = 0; y < rules.height - 1; y++)
-        {
-            int runStartX = -1;
-            int runLength = 0;
-
-            for (int x = 0; x < rules.width; x++)
-            {
-                bool parallelWall = grid[x, y] == Wall && grid[x, y + 1] == Wall;
-
-                if (parallelWall)
-                {
-                    if (runLength == 0)
-                    {
-                        runStartX = x;
-                    }
-
-                    runLength++;
-                    continue;
-                }
-
-                if (runLength >= 2
-                    && !IsAllowedOuterShellWallJoin(grid, runStartX, y, runLength))
-                {
-                    return RejectParallelWallRows(runStartX, y, runLength, logFailure);
-                }
-
-                runStartX = -1;
-                runLength = 0;
-            }
-
-            if (runLength >= 2
-                && !IsAllowedOuterShellWallJoin(grid, runStartX, y, runLength))
-            {
-                return RejectParallelWallRows(runStartX, y, runLength, logFailure);
-            }
-        }
-
-        return true;
-    }
-
-    private bool IsAllowedOuterShellWallJoin(
-        char[,] grid,
-        int startX,
-        int startY,
-        int length)
-    {
-        if (length != 2)
-        {
-            return false;
-        }
-
-        for (int y = startY; y <= startY + 1; y++)
-        {
-            for (int x = startX; x < startX + length; x++)
-            {
-                Vector2Int position = new Vector2Int(x, y);
-
-                for (int directionIndex = 0; directionIndex < directions.Length; directionIndex++)
-                {
-                    Vector2Int neighbor = position + directions[directionIndex];
-
-                    if (!rules.IsInsideMap(neighbor)
-                        || grid[neighbor.x, neighbor.y] == Empty)
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private bool RejectParallelWallRows(int startX, int y, int length, bool logFailure)
-    {
-        if (logFailure && logGenerationResult)
-        {
-            Debug.LogWarning(
-                "LevelGenerator: Parallel wall rows rejected at "
-                + new Vector2Int(startX, y)
-                + " length="
-                + length
-            );
-        }
-
-        return false;
-    }
-
-    private string GetTileNeighborhoodDebug(char[,] grid, Vector2Int position)
-    {
-        return "["
-            + GetDebugTile(grid, position + new Vector2Int(-1, -1))
-            + GetDebugTile(grid, position + new Vector2Int(0, -1))
-            + GetDebugTile(grid, position + new Vector2Int(1, -1))
-            + "/"
-            + GetDebugTile(grid, position + new Vector2Int(-1, 0))
-            + GetDebugTile(grid, position)
-            + GetDebugTile(grid, position + new Vector2Int(1, 0))
-            + "/"
-            + GetDebugTile(grid, position + new Vector2Int(-1, 1))
-            + GetDebugTile(grid, position + new Vector2Int(0, 1))
-            + GetDebugTile(grid, position + new Vector2Int(1, 1))
-            + "]";
-    }
-
-    private char GetDebugTile(char[,] grid, Vector2Int position)
-    {
-        if (!rules.IsInsideMap(position))
-        {
-            return '!';
-        }
-
-        return grid[position.x, position.y];
-    }
-
-    private bool IsSupportedWallTileShape(char[,] grid, Vector2Int position)
-    {
-        bool up = IsWallAt(grid, position + new Vector2Int(0, -1));
-        bool down = IsWallAt(grid, position + new Vector2Int(0, 1));
-        bool left = IsWallAt(grid, position + new Vector2Int(-1, 0));
-        bool right = IsWallAt(grid, position + new Vector2Int(1, 0));
-        bool rightDown = IsWallAt(grid, position + new Vector2Int(1, 1));
-
-        return LevelData.IsSupportedWallShape(
-            IsSurroundedWallTileShape(grid, position),
-            up,
-            down,
-            left,
-            right,
-            rightDown
-        );
-    }
-
-    private bool IsSurroundedWallTileShape(char[,] grid, Vector2Int position)
-    {
-        return IsWallAt(grid, position)
-            && HasTilesAround(grid, position)
-            && !IsWaterAt(grid, position + new Vector2Int(0, 1));
-    }
-
-    private bool HasTilesAround(char[,] grid, Vector2Int position)
-    {
-        for (int yOffset = -1; yOffset <= 1; yOffset++)
-        {
-            for (int xOffset = -1; xOffset <= 1; xOffset++)
-            {
-                if (xOffset == 0 && yOffset == 0)
-                {
-                    continue;
-                }
-
-                if (!HasTileAt(grid, position + new Vector2Int(xOffset, yOffset)))
-                {
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
-
-    private bool HasTileAt(char[,] grid, Vector2Int position)
-    {
-        return rules.IsInsideMap(position) && grid[position.x, position.y] != Empty;
-    }
-
-    private bool IsWallAt(char[,] grid, Vector2Int position)
-    {
-        return rules.IsInsideMap(position) && grid[position.x, position.y] == Wall;
-    }
-
-    private bool IsWaterAt(char[,] grid, Vector2Int position)
-    {
-        return rules.IsInsideMap(position) && grid[position.x, position.y] == Water;
-    }
-
-    private bool HasWallAbove(char[,] grid, Vector2Int position)
-    {
-        Vector2Int above = position + new Vector2Int(0, -1);
-        return rules.IsInsideMap(above) && grid[above.x, above.y] == Wall;
-    }
-
-    private bool HasWaterBelow(char[,] grid, Vector2Int position)
-    {
-        Vector2Int below = position + new Vector2Int(0, 1);
-        return rules.IsInsideMap(below) && grid[below.x, below.y] == Water;
-    }
-
-    private bool CanPlayerOccupy(char[,] grid, Vector2Int position)
-    {
-        return rules.IsInsidePlayableArea(position)
-            && grid[position.x, position.y] == Ground;
-    }
-
-    private bool ContainsPosition(List<Vector2Int> positions, Vector2Int position)
-    {
-        for (int i = 0; i < positions.Count; i++)
-        {
-            if (positions[i] == position)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private bool ContainsPositionExcept(List<Vector2Int> positions, Vector2Int position, int ignoredIndex)
-    {
-        for (int i = 0; i < positions.Count; i++)
-        {
-            if (i != ignoredIndex && positions[i] == position)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private string NormalizeArchetype(string value)
-    {
-        value = NormalizeBlueprintValue(value);
-
-        if (value == "goal_room"
-            || value == "bottleneck_corridor"
-            || value == "split_route"
-            || value == "open_workshop")
-        {
-            return value;
-        }
-
-        return DefaultArchetype;
-    }
-
-    private string NormalizeTargetLayout(string value)
-    {
-        value = NormalizeBlueprintValue(value);
-
-        if (value == "clustered" || value == "split_pair" || value == "edge_cluster")
-        {
-            return value;
-        }
-
-        return DefaultTargetLayout;
-    }
-
-    private string NormalizeObstacleStyle(string value)
-    {
-        value = NormalizeBlueprintValue(value);
-
-        if (value == "central_baffle" || value == "side_choke" || value == "goal_guard")
-        {
-            return value;
-        }
-
-        return DefaultObstacleStyle;
-    }
-
-    private string NormalizeWaterStyle(string value)
-    {
-        value = NormalizeBlueprintValue(value);
-
-        if (value == "corner_pool" || value == "side_pool" || value == "route_divider")
-        {
-            return value;
-        }
-
-        return DefaultWaterStyle;
-    }
-
-    private string NormalizeCorridorPlacement(string value)
-    {
-        value = NormalizeBlueprintValue(value);
-        return value == "center" || value == "side" ? value : "none";
-    }
-
-    private string NormalizeCorridorOrientation(string value)
-    {
-        value = NormalizeBlueprintValue(value);
-        return value == "horizontal" || value == "vertical" ? value : "any";
-    }
-
-    private string NormalizeCorridorRole(string value)
-    {
-        value = NormalizeBlueprintValue(value);
-
-        if (value == "player_route" || value == "required_box_route")
-        {
-            return value;
-        }
-
-        return "visual_only";
-    }
-
-    private string NormalizeCorridorPriority(string value)
-    {
-        return NormalizeBlueprintValue(value) == "required" ? "required" : "preferred";
-    }
-
-    private string NormalizeBlueprintValue(string value)
-    {
-        return string.IsNullOrEmpty(value) ? "" : value.Trim().ToLowerInvariant();
-    }
-
-    private Vector2Int GetMapCenter()
-    {
-        return new Vector2Int(rules.width / 2, rules.height / 2);
-    }
-
-    private int ManhattanDistance(Vector2Int first, Vector2Int second)
-    {
-        return Mathf.Abs(first.x - second.x) + Mathf.Abs(first.y - second.y);
-    }
-
-    private int GetNearestDistance(Vector2Int position, IList<Vector2Int> positions)
-    {
-        if (positions == null || positions.Count == 0)
-        {
-            return int.MaxValue;
-        }
-
-        int bestDistance = int.MaxValue;
-
-        for (int i = 0; i < positions.Count; i++)
-        {
-            bestDistance = Mathf.Min(bestDistance, ManhattanDistance(position, positions[i]));
-        }
-
-        return bestDistance;
-    }
-
-    private bool IsNearAxisAlignedCorridor(
-        Vector2Int position,
-        Vector2Int first,
-        Vector2Int second,
-        int tolerance)
-    {
-        int minX = Mathf.Min(first.x, second.x) - tolerance;
-        int maxX = Mathf.Max(first.x, second.x) + tolerance;
-        int minY = Mathf.Min(first.y, second.y) - tolerance;
-        int maxY = Mathf.Max(first.y, second.y) + tolerance;
-
-        bool insideHorizontalRange = position.x >= minX
-            && position.x <= maxX;
-        bool insideVerticalRange = position.y >= minY
-            && position.y <= maxY;
-        bool nearHorizontalCorridor = insideHorizontalRange
-            && (Mathf.Abs(position.y - first.y) <= tolerance
-                || Mathf.Abs(position.y - second.y) <= tolerance);
-        bool nearVerticalCorridor = insideVerticalRange
-            && (Mathf.Abs(position.x - first.x) <= tolerance
-                || Mathf.Abs(position.x - second.x) <= tolerance);
-
-        return nearHorizontalCorridor || nearVerticalCorridor;
-    }
-
-    private bool IsNearPlayableEdge(Vector2Int position)
-    {
-        return GetDistanceToNearestPlayableEdge(position) <= 2;
-    }
-
-    private int GetAnchorScore(Vector2Int position, Vector2Int[] anchors, int maxScore)
-    {
-        if (!hasDesignBlueprint || anchors == null || anchors.Length == 0)
-        {
-            return 0;
-        }
-
-        return Mathf.Max(0, maxScore - GetDistanceToNearestAnchor(position, anchors) * 12);
-    }
-
-    private int GetDistanceToNearestAnchor(Vector2Int position, Vector2Int[] anchors)
-    {
-        if (anchors == null || anchors.Length == 0)
-        {
-            return 0;
-        }
-
-        int bestDistance = int.MaxValue;
-
-        for (int i = 0; i < anchors.Length; i++)
-        {
-            bestDistance = Mathf.Min(bestDistance, ManhattanDistance(position, anchors[i]));
-        }
-
-        return bestDistance;
-    }
-
-    private int GetDistanceToNearestPlayableEdge(Vector2Int position)
-    {
-        int left = position.x - 1;
-        int right = rules.width - 2 - position.x;
-        int top = position.y - 1;
-        int bottom = rules.height - 2 - position.y;
-        return Mathf.Min(Mathf.Min(left, right), Mathf.Min(top, bottom));
-    }
-
-    private int GetDistanceToNearestPlayableCorner(Vector2Int position)
-    {
-        int topLeft = ManhattanDistance(position, new Vector2Int(1, 1));
-        int topRight = ManhattanDistance(position, new Vector2Int(rules.width - 2, 1));
-        int bottomLeft = ManhattanDistance(position, new Vector2Int(1, rules.height - 2));
-        int bottomRight = ManhattanDistance(position, new Vector2Int(rules.width - 2, rules.height - 2));
-        return Mathf.Min(Mathf.Min(topLeft, topRight), Mathf.Min(bottomLeft, bottomRight));
-    }
-
-    private void Shuffle<T>(List<T> values)
-    {
-        for (int i = values.Count - 1; i > 0; i--)
-        {
-            int swapIndex = random.Next(i + 1);
-            T value = values[i];
-            values[i] = values[swapIndex];
-            values[swapIndex] = value;
-        }
-    }
-
-    private int NextInclusive(int min, int max)
-    {
-        return random.Next(min, max + 1);
-    }
-
-    private int GetRuntimeSeed()
-    {
-        unchecked
-        {
-            runtimeSeedCounter++;
-            return System.Environment.TickCount
-                ^ (runtimeSeedCounter * 397)
-                ^ (GetInstanceID() * 17);
-        }
-    }
-
-    private bool IsRecentlyGeneratedLayout(string[] rows, bool rejectSimilar)
-    {
-        if (!rejectRecentlyGeneratedLayouts || recentGeneratedLayoutHistory <= 0 || rows == null)
-        {
-            return false;
-        }
-
-        string fullSignature = GetFullLevelSignature(rows);
-        string structureSignature = GetStructureSignature(rows);
-        int structureSimilarity = GetMaxRecentStructureSimilarity(structureSignature);
-
-        bool repeated = recentFullLevelLookup.Contains(fullSignature)
-            || recentStructureLookup.Contains(structureSignature)
-            || (rejectSimilar && structureSimilarity >= GetEffectiveStructureSimilarityThreshold());
-
-        if (repeated && logGenerationResult)
-        {
-            Debug.Log(
-                "LevelGenerator rejected repeated layout:"
-                + " recentGeneratedLayoutHistory=" + recentGeneratedLayoutHistory
-                + ", structureSimilarity=" + structureSimilarity
-                + ", threshold=" + GetEffectiveStructureSimilarityThreshold()
-            );
-        }
-
-        return repeated;
-    }
-
-    private int GetEffectiveStructureSimilarityThreshold()
-    {
-        return activeRelaxedBlueprint
-            ? rules.llmRelaxedStructureSimilarityThreshold
-            : rules.recentStructureSimilarityThreshold;
-    }
-
-    private void RememberGeneratedLayout(string[] rows)
-    {
-        if (!rejectRecentlyGeneratedLayouts || recentGeneratedLayoutHistory <= 0 || rows == null)
-        {
-            return;
-        }
-
-        RememberSignature(
-            recentFullLevelSignatures,
-            recentFullLevelLookup,
-            GetFullLevelSignature(rows),
-            recentGeneratedLayoutHistory
-        );
-
-        RememberSignature(
-            recentStructureSignatures,
-            recentStructureLookup,
-            GetStructureSignature(rows),
-            recentGeneratedLayoutHistory
-        );
-    }
-
-    private static void RememberSignature(
-        Queue<string> signatures,
-        HashSet<string> lookup,
-        string signature,
-        int maxHistory)
-    {
-        if (string.IsNullOrEmpty(signature) || lookup.Contains(signature))
-        {
-            return;
-        }
-
-        signatures.Enqueue(signature);
-        lookup.Add(signature);
-
-        while (signatures.Count > maxHistory)
-        {
-            lookup.Remove(signatures.Dequeue());
-        }
-    }
-
-    private string GetFullLevelSignature(string[] rows)
-    {
-        return string.Join("\n", rows);
-    }
-
-    private string GetStructureSignature(string[] rows)
-    {
-        System.Text.StringBuilder builder = new System.Text.StringBuilder();
-
-        for (int y = 0; y < rows.Length; y++)
-        {
-            string row = rows[y];
-
-            for (int x = 0; x < row.Length; x++)
-            {
-                char tile = row[x];
-                builder.Append(tile == Player || tile == Box || tile == Target ? Ground : tile);
-            }
-
-            builder.Append('\n');
-        }
-
-        return builder.ToString();
-    }
-
-    private int GetMaxRecentStructureSimilarity(string[] rows)
-    {
-        return GetMaxRecentStructureSimilarity(GetStructureSignature(rows));
-    }
-
-    private int GetMaxRecentStructureSimilarity(string structureSignature)
-    {
-        if (string.IsNullOrEmpty(structureSignature) || recentStructureSignatures.Count == 0)
-        {
-            return 0;
-        }
-
-        int maxSimilarity = 0;
-
-        foreach (string recentSignature in recentStructureSignatures)
-        {
-            maxSimilarity = Mathf.Max(
-                maxSimilarity,
-                GetStructureSimilarityPercent(structureSignature, recentSignature)
-            );
-        }
-
-        return maxSimilarity;
-    }
-
-    private int GetStructureSimilarityPercent(string first, string second)
-    {
-        if (string.IsNullOrEmpty(first) || string.IsNullOrEmpty(second))
-        {
-            return 0;
-        }
-
-        int maxLength = Mathf.Max(first.Length, second.Length);
-
-        if (maxLength == 0)
-        {
-            return 0;
-        }
-
-        int same = 0;
-        int minLength = Mathf.Min(first.Length, second.Length);
-
-        for (int i = 0; i < minLength; i++)
-        {
-            if (first[i] == second[i])
-            {
-                same++;
-            }
-        }
-
-        return Mathf.RoundToInt((same * 100f) / maxLength);
-    }
-}
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+[DefaultExecutionOrder(-100)]
+public partial class LevelGenerator : MonoBehaviour
+{
+    [Header("References")]
+    public LevelData levelData;
+    public LevelLoader levelLoader;
+    public LevelSolver levelSolver;
+    public LevelGenerationRules rules;
+
+    [Header("Runtime")]
+    public bool generateOnAwake = true;
+    public bool logGenerationResult = true;
+
+    [Header("Last Result")]
+    public int lastAttempts;
+    public int lastReversePulls;
+    public int lastSearchedStates;
+    public int lastSolutionSteps;
+    public int lastPushes;
+
+    [Header("Repeat Prevention")]
+    public bool rejectRecentlyGeneratedLayouts = true;
+    public int recentGeneratedLayoutHistory = 6;
+
+    private const char Ground = '.';
+    private const char Wall = '#';
+    private const char Water = '@';
+    private const char Empty = ' ';
+    private const char Player = 'p';
+    private const char Box = 's';
+    private const char Target = 't';
+    private const int LLMTopCandidatePoolSize = 3;
+
+    private const string DefaultArchetype = "open_workshop";
+    private const string DefaultTargetLayout = "split_pair";
+    private const string DefaultObstacleStyle = "central_baffle";
+    private const string DefaultWaterStyle = "side_pool";
+    private enum CandidateFailureReason
+    {
+        None,
+        BaseGrid,
+        WallObstacles,
+        WaterAreas,
+        Targets,
+        Player,
+        ReversePulls,
+        TileRules,
+        BuildRows
+    }
+
+    private sealed class LevelQualityReport
+    {
+        public int score;
+        public int solutionSteps;
+        public int pushes;
+        public int reversePulls;
+        public int searchedStates;
+        public int waterTiles;
+        public int waterAreas;
+        public int surroundedWallCount;
+        public int obstacleInfluence;
+        public int boxInteractionScore;
+        public int targetDistance;
+        public int structureSimilarity;
+
+        public string Summary()
+        {
+            return "score=" + score
+                + ", solutionSteps=" + solutionSteps
+                + ", pushes=" + pushes
+                + ", reversePulls=" + reversePulls
+                + ", searchedStates=" + searchedStates
+                + ", waterTiles=" + waterTiles
+                + ", waterAreas=" + waterAreas
+                + ", surroundedWalls=" + surroundedWallCount
+                + ", obstacleInfluence=" + obstacleInfluence
+                + ", boxInteractionScore=" + boxInteractionScore
+                + ", targetDistance=" + targetDistance
+                + ", structureSimilarity=" + structureSimilarity;
+        }
+    }
+
+    private sealed class GeneratedCandidate
+    {
+        public readonly string[] rows;
+        public readonly int attempt;
+        public readonly LevelQualityReport quality;
+        public readonly CorridorValidationResult corridorValidation;
+
+        public GeneratedCandidate(
+            string[] rows,
+            int attempt,
+            LevelQualityReport quality,
+            CorridorValidationResult corridorValidation)
+        {
+            this.rows = rows;
+            this.attempt = attempt;
+            this.quality = quality;
+            this.corridorValidation = corridorValidation;
+        }
+    }
+
+    private static readonly Queue<string> recentFullLevelSignatures = new Queue<string>();
+    private static readonly HashSet<string> recentFullLevelLookup = new HashSet<string>();
+    private static readonly Queue<string> recentStructureSignatures = new Queue<string>();
+    private static readonly HashSet<string> recentStructureLookup = new HashSet<string>();
+    private static int runtimeSeedCounter;
+    private static int algorithmTemplateRoundCounter;
+    private static int algorithmTemplateCursor;
+    private static int[] algorithmTemplateOrder;
+    private static bool algorithmTemplateOrderNeedsShuffle = true;
+
+    private static readonly Vector2Int[] directions =
+    {
+        new Vector2Int(0, -1),
+        new Vector2Int(0, 1),
+        new Vector2Int(-1, 0),
+        new Vector2Int(1, 0)
+    };
+
+    private readonly List<Vector2Int> boxes = new List<Vector2Int>();
+    private readonly List<Vector2Int> targets = new List<Vector2Int>();
+    private readonly HashSet<Vector2Int> targetLookup = new HashSet<Vector2Int>();
+    private System.Random random;
+    private Vector2Int playerPosition;
+    private bool hasDesignBlueprint;
+    private LevelGenerationTemplates.StructureTemplate currentStructureTemplate =
+        LevelGenerationTemplates.GetStructureTemplate(DefaultArchetype);
+    private string currentArchetype = DefaultArchetype;
+    private string currentTargetLayout = DefaultTargetLayout;
+    private string currentObstacleStyle = DefaultObstacleStyle;
+    private string currentWaterStyle = DefaultWaterStyle;
+    private string currentDesignNote = "";
+    private string currentCorridorPlacement = "none";
+    private int currentCorridorWidth;
+    private string currentCorridorOrientation = "any";
+    private string currentCorridorRole = "visual_only";
+    private string currentCorridorPriority = "preferred";
+    private string candidateCorridorOrientation = "any";
+    private readonly HashSet<Vector2Int> candidateCorridorOpeningCells = new HashSet<Vector2Int>();
+    public CorridorValidationResult LastCorridorValidation { get; private set; }
+    private bool activeLLMQualityGate;
+    private bool activeRelaxedBlueprint;
+    private bool preserveZeroWaterConstraint;
+    private bool preserveZeroInternalWallConstraint;
+    private GenerationRuleSnapshot algorithmRuleBaseline;
+
+    private sealed class GenerationRuleSnapshot
+    {
+        public int minSolutionSteps;
+        public int maxSolutionSteps;
+        public int minPushes;
+        public int maxPushes;
+        public int minWaterAreas;
+        public int maxWaterAreas;
+        public int minWallObstacleBlocks;
+        public int maxWallObstacleBlocks;
+        public int minReversePulls;
+        public int maxReversePulls;
+        public int maxGenerateAttempts;
+        public int maxReverseStepAttempts;
+        public int maxSearchStates;
+    }
+
+    public static void BeginAlgorithmTemplateRound()
+    {
+        algorithmTemplateRoundCounter++;
+        algorithmTemplateCursor = 0;
+        algorithmTemplateOrderNeedsShuffle = true;
+    }
+
+    private void Awake()
+    {
+        ResolveReferences();
+        CaptureAlgorithmRuleBaseline();
+
+        if (generateOnAwake)
+        {
+            Generate();
+        }
+    }
+
+    [ContextMenu("Generate And Reload")]
+    public void GenerateAndReload()
+    {
+        ResolveReferences();
+
+        if (levelLoader != null)
+        {
+            levelLoader.levelGenerator = this;
+
+            if (levelData != null)
+            {
+                levelLoader.levelData = levelData;
+            }
+
+            levelLoader.GenerateAndReload();
+            return;
+        }
+
+        Generate();
+    }
+
+    public int GetLLMPlanRetryCount()
+    {
+        ResolveReferences();
+        return rules != null ? Mathf.Max(1, rules.llmMaxPlanRetries) : 2;
+    }
+
+    public void SetLLMQualityGateRequired(bool required)
+    {
+        activeLLMQualityGate = required;
+    }
+
+    public void BeginLLMPlanAttempts()
+    {
+        ResolveReferences();
+        CaptureAlgorithmRuleBaseline();
+        RestoreAlgorithmRuleBaseline();
+        preserveZeroWaterConstraint = false;
+        preserveZeroInternalWallConstraint = false;
+        ClearDesignPlan();
+    }
+
+    public void ResetAfterLLMPlanAttempts()
+    {
+        RestoreAlgorithmRuleBaseline();
+        preserveZeroWaterConstraint = false;
+        preserveZeroInternalWallConstraint = false;
+        ClearDesignPlan();
+    }
+
+    public void ClearDesignPlan(bool keepLLMQualityGate = false)
+    {
+        hasDesignBlueprint = false;
+        activeLLMQualityGate = keepLLMQualityGate;
+        activeRelaxedBlueprint = false;
+        currentArchetype = DefaultArchetype;
+        currentTargetLayout = DefaultTargetLayout;
+        currentObstacleStyle = DefaultObstacleStyle;
+        currentWaterStyle = DefaultWaterStyle;
+        currentDesignNote = "";
+        currentCorridorPlacement = "none";
+        currentCorridorWidth = 0;
+        currentCorridorOrientation = "any";
+        currentCorridorRole = "visual_only";
+        currentCorridorPriority = "preferred";
+        candidateCorridorOpeningCells.Clear();
+        LastCorridorValidation = null;
+        currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(DefaultArchetype);
+    }
+
+    public bool Generate()
+    {
+        ResolveReferences();
+
+        if (!CanGenerate())
+        {
+            return false;
+        }
+
+        random = rules.useFixedSeed
+            ? new System.Random(rules.seed)
+            : new System.Random(GetRuntimeSeed());
+
+        if (activeLLMQualityGate && hasDesignBlueprint)
+        {
+            currentStructureTemplate = LevelGenerationTemplates.GetStructureTemplate(currentArchetype, random);
+        }
+        else if (!activeLLMQualityGate)
+        {
+            ApplyAlgorithmDesignBlueprint();
+        }
+
+        if (TryGenerateWithCurrentRules("strict", rules.maxGenerateAttempts, true))
+        {
+            return true;
+        }
+
+        if ((hasDesignBlueprint || activeLLMQualityGate) && TryGenerateRelaxedBlueprint())
+        {
+            return true;
+        }
+
+        Debug.LogWarning("LevelGenerator: Failed to generate a solvable level.");
+        return false;
+    }
+
+    public IEnumerator GenerateSavedPlanRoutine(
+        float budgetSeconds,
+        Action<bool, string> onComplete)
+    {
+        ResolveReferences();
+
+        if (!CanGenerate() || !hasDesignBlueprint || !activeLLMQualityGate)
+        {
+            onComplete?.Invoke(false, "generation_failed");
+            yield break;
+        }
+
+        float deadline = Time.realtimeSinceStartup + Mathf.Max(1f, budgetSeconds);
+        random = rules.useFixedSeed
+            ? new System.Random(unchecked(rules.seed + GetRuntimeSeed()))
+            : new System.Random(GetRuntimeSeed());
+
+        const float FrameBudgetSeconds = 0.008f;
+        float frameSliceStartedAt = Time.realtimeSinceStartup;
+        for (int attempt = 0; attempt < rules.maxGenerateAttempts; attempt++)
+        {
+            if (Time.realtimeSinceStartup >= deadline)
+            {
+                onComplete?.Invoke(false, "generation_timed_out");
+                yield break;
+            }
+
+            bool generated;
+            try
+            {
+                generated = TryGenerateWithCurrentRules(
+                    "saved-blueprint-strict",
+                    1,
+                    false
+                );
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                onComplete?.Invoke(false, "generation_failed");
+                yield break;
+            }
+
+            if (Time.realtimeSinceStartup >= deadline)
+            {
+                onComplete?.Invoke(false, "generation_timed_out");
+                yield break;
+            }
+
+            if (generated)
+            {
+                onComplete?.Invoke(true, "");
+                yield break;
+            }
+
+            if (Time.realtimeSinceStartup - frameSliceStartedAt >= FrameBudgetSeconds)
+            {
+                yield return null;
+                frameSliceStartedAt = Time.realtimeSinceStartup;
+            }
+        }
+
+        int originalMinSolutionSteps = rules.minSolutionSteps;
+        int originalMaxSolutionSteps = rules.maxSolutionSteps;
+        int originalMinPushes = rules.minPushes;
+        int originalMaxPushes = rules.maxPushes;
+        int originalMinWaterAreas = rules.minWaterAreas;
+        int originalMaxWaterAreas = rules.maxWaterAreas;
+        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
+        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
+        int originalMinReversePulls = rules.minReversePulls;
+        int originalMaxReversePulls = rules.maxReversePulls;
+        bool originalHasDesignBlueprint = hasDesignBlueprint;
+        bool originalActiveLLMQualityGate = activeLLMQualityGate;
+        bool originalActiveRelaxedBlueprint = activeRelaxedBlueprint;
+        bool relaxedGenerated = false;
+        string failureCode = "generation_failed";
+
+        activeRelaxedBlueprint = true;
+        rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 10);
+        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 20);
+        rules.minPushes = Mathf.Max(4, originalMinPushes - 6);
+        rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 10);
+        rules.minReversePulls = Mathf.Max(8, originalMinReversePulls - 10);
+        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls);
+
+        frameSliceStartedAt = Time.realtimeSinceStartup;
+        for (int attempt = 0; attempt < rules.maxGenerateAttempts; attempt++)
+        {
+            if (Time.realtimeSinceStartup >= deadline)
+            {
+                failureCode = "generation_timed_out";
+                break;
+            }
+
+            try
+            {
+                relaxedGenerated = TryGenerateWithCurrentRules(
+                    "saved-blueprint-relaxed",
+                    1,
+                    false
+                );
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                failureCode = "generation_failed";
+                break;
+            }
+
+            if (Time.realtimeSinceStartup >= deadline)
+            {
+                relaxedGenerated = false;
+                failureCode = "generation_timed_out";
+                break;
+            }
+
+            if (relaxedGenerated)
+            {
+                break;
+            }
+
+            if (Time.realtimeSinceStartup - frameSliceStartedAt >= FrameBudgetSeconds)
+            {
+                yield return null;
+                frameSliceStartedAt = Time.realtimeSinceStartup;
+            }
+        }
+
+        RestoreGenerationRules(
+            originalMinSolutionSteps,
+            originalMaxSolutionSteps,
+            originalMinPushes,
+            originalMaxPushes,
+            originalMinWaterAreas,
+            originalMaxWaterAreas,
+            originalMinWallObstacleBlocks,
+            originalMaxWallObstacleBlocks,
+            originalMinReversePulls,
+            originalMaxReversePulls,
+            originalHasDesignBlueprint,
+            originalActiveLLMQualityGate
+        );
+        activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
+        onComplete?.Invoke(relaxedGenerated, relaxedGenerated ? "" : failureCode);
+    }
+
+    public bool GenerateAlgorithmFallbackAfterLLM()
+    {
+        ResolveReferences();
+        CaptureAlgorithmRuleBaseline();
+        RestoreAlgorithmRuleBaseline();
+        ClearDesignPlan();
+
+        if (!CanGenerate())
+        {
+            return false;
+        }
+
+        int originalMinSolutionSteps = rules.minSolutionSteps;
+        int originalMaxSolutionSteps = rules.maxSolutionSteps;
+        int originalMinPushes = rules.minPushes;
+        int originalMaxPushes = rules.maxPushes;
+        int originalMinWaterAreas = rules.minWaterAreas;
+        int originalMaxWaterAreas = rules.maxWaterAreas;
+        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
+        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
+        int originalMinReversePulls = rules.minReversePulls;
+        int originalMaxReversePulls = rules.maxReversePulls;
+
+        rules.minSolutionSteps = 10;
+        rules.maxSolutionSteps = Mathf.Max(45, originalMaxSolutionSteps + 20);
+        rules.minPushes = 4;
+        rules.maxPushes = Mathf.Max(30, originalMaxPushes + 12);
+        rules.minWaterAreas = preserveZeroWaterConstraint ? 0 : 1;
+        rules.maxWaterAreas = preserveZeroWaterConstraint
+            ? 0
+            : Mathf.Max(1, originalMaxWaterAreas);
+        rules.minWallObstacleBlocks = preserveZeroInternalWallConstraint ? 0 : 1;
+        rules.maxWallObstacleBlocks = preserveZeroInternalWallConstraint
+            ? 0
+            : Mathf.Max(1, originalMaxWallObstacleBlocks);
+        rules.minReversePulls = Mathf.Max(4, originalMinReversePulls - 12);
+        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls + 12);
+
+        random = rules.useFixedSeed
+            ? new System.Random(rules.seed)
+            : new System.Random(GetRuntimeSeed());
+        ApplyAlgorithmDesignBlueprint();
+
+        Debug.LogWarning(
+            "LevelGenerator: LLM plans were valid, but templates could not realize them."
+            + " Running one cleared algorithm fallback:"
+            + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
+            + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
+            + ", waterAreas=" + rules.minWaterAreas + "-" + rules.maxWaterAreas
+            + ", wallObstacleBlocks=" + rules.minWallObstacleBlocks + "-" + rules.maxWallObstacleBlocks
+            + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
+        );
+
+        bool generated = TryGenerateWithCurrentRules(
+            "llm-success-algorithm-fallback",
+            rules.maxGenerateAttempts,
+            true
+        );
+
+        RestoreGenerationRules(
+            originalMinSolutionSteps,
+            originalMaxSolutionSteps,
+            originalMinPushes,
+            originalMaxPushes,
+            originalMinWaterAreas,
+            originalMaxWaterAreas,
+            originalMinWallObstacleBlocks,
+            originalMaxWallObstacleBlocks,
+            originalMinReversePulls,
+            originalMaxReversePulls,
+            hasDesignBlueprint,
+            false
+        );
+
+        return generated;
+    }
+
+    private bool TryGenerateRelaxedBlueprint()
+    {
+        int originalMinSolutionSteps = rules.minSolutionSteps;
+        int originalMaxSolutionSteps = rules.maxSolutionSteps;
+        int originalMinPushes = rules.minPushes;
+        int originalMaxPushes = rules.maxPushes;
+        int originalMinWaterAreas = rules.minWaterAreas;
+        int originalMaxWaterAreas = rules.maxWaterAreas;
+        int originalMinWallObstacleBlocks = rules.minWallObstacleBlocks;
+        int originalMaxWallObstacleBlocks = rules.maxWallObstacleBlocks;
+        int originalMinReversePulls = rules.minReversePulls;
+        int originalMaxReversePulls = rules.maxReversePulls;
+        bool originalHasDesignBlueprint = hasDesignBlueprint;
+        bool originalActiveLLMQualityGate = activeLLMQualityGate;
+        bool originalActiveRelaxedBlueprint = activeRelaxedBlueprint;
+
+        activeRelaxedBlueprint = true;
+        rules.minSolutionSteps = Mathf.Max(12, originalMinSolutionSteps - 10);
+        rules.maxSolutionSteps = Mathf.Max(rules.minSolutionSteps, originalMaxSolutionSteps + 20);
+        rules.minPushes = Mathf.Max(4, originalMinPushes - 6);
+        rules.maxPushes = Mathf.Max(rules.minPushes, originalMaxPushes + 10);
+        rules.minReversePulls = Mathf.Max(8, originalMinReversePulls - 10);
+        rules.maxReversePulls = Mathf.Max(rules.minReversePulls, originalMaxReversePulls);
+
+        if (logGenerationResult)
+        {
+            Debug.LogWarning(
+                "LevelGenerator: Strict LLM blueprint failed. Retrying relaxed blueprint:"
+                + " solutionSteps=" + rules.minSolutionSteps + "-" + rules.maxSolutionSteps
+                + ", pushes=" + rules.minPushes + "-" + rules.maxPushes
+                + ", reversePulls=" + rules.minReversePulls + "-" + rules.maxReversePulls
+                + ", qualityScore>=" + rules.llmRelaxedMinimumQualityScore
+                + ", structureSimilarity<" + rules.llmRelaxedStructureSimilarityThreshold
+            );
+        }
+
+        if (TryGenerateWithCurrentRules("relaxed-blueprint", rules.maxGenerateAttempts, true))
+        {
+            RestoreGenerationRules(
+                originalMinSolutionSteps,
+                originalMaxSolutionSteps,
+                originalMinPushes,
+                originalMaxPushes,
+                originalMinWaterAreas,
+                originalMaxWaterAreas,
+                originalMinWallObstacleBlocks,
+                originalMaxWallObstacleBlocks,
+                originalMinReversePulls,
+                originalMaxReversePulls,
+                originalHasDesignBlueprint,
+                originalActiveLLMQualityGate
+            );
+            activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
+            return true;
+        }
+
+        RestoreGenerationRules(
+            originalMinSolutionSteps,
+            originalMaxSolutionSteps,
+            originalMinPushes,
+            originalMaxPushes,
+            originalMinWaterAreas,
+            originalMaxWaterAreas,
+            originalMinWallObstacleBlocks,
+            originalMaxWallObstacleBlocks,
+            originalMinReversePulls,
+            originalMaxReversePulls,
+            originalHasDesignBlueprint,
+            originalActiveLLMQualityGate
+        );
+        activeRelaxedBlueprint = originalActiveRelaxedBlueprint;
+
+        return false;
+    }
+
+    private void CaptureAlgorithmRuleBaseline()
+    {
+        if (algorithmRuleBaseline != null || rules == null)
+        {
+            return;
+        }
+
+        algorithmRuleBaseline = new GenerationRuleSnapshot
+        {
+            minSolutionSteps = rules.minSolutionSteps,
+            maxSolutionSteps = rules.maxSolutionSteps,
+            minPushes = rules.minPushes,
+            maxPushes = rules.maxPushes,
+            minWaterAreas = rules.minWaterAreas,
+            maxWaterAreas = rules.maxWaterAreas,
+            minWallObstacleBlocks = rules.minWallObstacleBlocks,
+            maxWallObstacleBlocks = rules.maxWallObstacleBlocks,
+            minReversePulls = rules.minReversePulls,
+            maxReversePulls = rules.maxReversePulls,
+            maxGenerateAttempts = rules.maxGenerateAttempts,
+            maxReverseStepAttempts = rules.maxReverseStepAttempts,
+            maxSearchStates = levelSolver != null ? levelSolver.maxSearchStates : 0
+        };
+    }
+
+    private void RestoreAlgorithmRuleBaseline()
+    {
+        if (algorithmRuleBaseline == null || rules == null)
+        {
+            return;
+        }
+
+        rules.minSolutionSteps = algorithmRuleBaseline.minSolutionSteps;
+        rules.maxSolutionSteps = algorithmRuleBaseline.maxSolutionSteps;
+        rules.minPushes = algorithmRuleBaseline.minPushes;
+        rules.maxPushes = algorithmRuleBaseline.maxPushes;
+        rules.minWaterAreas = algorithmRuleBaseline.minWaterAreas;
+        rules.maxWaterAreas = algorithmRuleBaseline.maxWaterAreas;
+        rules.minWallObstacleBlocks = algorithmRuleBaseline.minWallObstacleBlocks;
+        rules.maxWallObstacleBlocks = algorithmRuleBaseline.maxWallObstacleBlocks;
+        rules.minReversePulls = algorithmRuleBaseline.minReversePulls;
+        rules.maxReversePulls = algorithmRuleBaseline.maxReversePulls;
+        rules.maxGenerateAttempts = algorithmRuleBaseline.maxGenerateAttempts;
+        rules.maxReverseStepAttempts = algorithmRuleBaseline.maxReverseStepAttempts;
+
+        if (levelSolver != null && algorithmRuleBaseline.maxSearchStates > 0)
+        {
+            levelSolver.maxSearchStates = algorithmRuleBaseline.maxSearchStates;
+        }
+    }
+
+    private struct ReversePullAction
+    {
+        public readonly int boxIndex;
+        public readonly Vector2Int direction;
+
+        public ReversePullAction(int boxIndex, Vector2Int direction)
+        {
+            this.boxIndex = boxIndex;
+            this.direction = direction;
+        }
+    }
+
+    private void RestoreGenerationRules(
+        int minSolutionSteps,
+        int maxSolutionSteps,
+        int minPushes,
+        int maxPushes,
+        int minWaterAreas,
+        int maxWaterAreas,
+        int minWallObstacleBlocks,
+        int maxWallObstacleBlocks,
+        int minReversePulls,
+        int maxReversePulls,
+        bool restoreDesignBlueprint,
+        bool restoreActiveLLMQualityGate)
+    {
+        rules.minSolutionSteps = minSolutionSteps;
+        rules.maxSolutionSteps = maxSolutionSteps;
+        rules.minPushes = minPushes;
+        rules.maxPushes = maxPushes;
+        rules.minWaterAreas = minWaterAreas;
+        rules.maxWaterAreas = maxWaterAreas;
+        rules.minWallObstacleBlocks = minWallObstacleBlocks;
+        rules.maxWallObstacleBlocks = maxWallObstacleBlocks;
+        rules.minReversePulls = minReversePulls;
+        rules.maxReversePulls = maxReversePulls;
+        hasDesignBlueprint = restoreDesignBlueprint;
+        activeLLMQualityGate = restoreActiveLLMQualityGate;
+    }
+
+    private void ResolveReferences()
+    {
+        if (rules == null)
+        {
+            rules = FindObjectOfType<LevelGenerationRules>();
+        }
+
+        if (levelLoader == null)
+        {
+            levelLoader = FindObjectOfType<LevelLoader>();
+        }
+
+        if (levelData == null && levelLoader != null)
+        {
+            levelData = levelLoader.levelData;
+        }
+
+        if (levelData == null)
+        {
+            levelData = FindObjectOfType<LevelData>();
+        }
+
+        if (levelSolver == null)
+        {
+            levelSolver = FindObjectOfType<LevelSolver>();
+        }
+
+        if (levelSolver == null)
+        {
+            levelSolver = gameObject.AddComponent<LevelSolver>();
+            levelSolver.parseOnStart = false;
+            levelSolver.solveOnStart = false;
+        }
+    }
+
+    private bool CanGenerate()
+    {
+        if (rules == null)
+        {
+            Debug.LogWarning("LevelGenerator: LevelGenerationRules is missing.");
+            return false;
+        }
+
+        if (levelData == null)
+        {
+            Debug.LogWarning("LevelGenerator: LevelData is missing.");
+            return false;
+        }
+
+        if (!rules.IsValid())
+        {
+            Debug.LogWarning("LevelGenerator: LevelGenerationRules contains invalid values.");
+            return false;
+        }
+
+        int playableCells = (rules.width - 2) * (rules.height - 2);
+        int minimumRequiredCells = rules.boxCount * 2 + 1;
+
+        if (playableCells < minimumRequiredCells)
+        {
+            Debug.LogWarning("LevelGenerator: Map is too small for the requested box count.");
+            return false;
+        }
+
+        return true;
+    }
+}

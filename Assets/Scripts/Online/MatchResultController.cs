@@ -168,7 +168,7 @@ public class MatchResultController : MonoBehaviour
             GetDesignerIntention(state.opponentChallengeMetadata)
         );
         RenderResult(
-            state.ownResult,
+            ownSubmittedResult ? state.ownResult : null,
             ownRunTimeText,
             ownRunMovesText,
             ownRunStatusText,

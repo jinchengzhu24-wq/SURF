@@ -13,6 +13,7 @@ import httpx
 from openai import APIStatusError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cocreation  # noqa: F401
 import llm_client as llm
 import proposal_options as options
 import app as backend

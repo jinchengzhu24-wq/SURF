@@ -17,6 +17,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
+    import cocreation  # noqa: F401
 
 import llm_client
 from patch_fixtures import patch_fixture
