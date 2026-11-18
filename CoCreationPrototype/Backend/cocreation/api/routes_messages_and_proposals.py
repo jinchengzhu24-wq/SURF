@@ -30,7 +30,6 @@ from cocreation.domain.design_context import (
 from cocreation.domain.level_validation import (
     analyze_user_map_claims,
     describe_diff,
-    format_map_claim_correction,
     summarize_verified_diff,
 )
 from cocreation.domain.proposal_diagnostics import (
@@ -102,6 +101,7 @@ from .context_and_discovery import (
     record_intent_evidence,
     record_intent_hypothesis,
 )
+from .message_response_policy import apply_conversation_only_policy, apply_map_claim_conflict_policy
 from .online_sync_and_dashboard import (
     synchronize_dashboard_intent_node,
     synchronize_dashboard_player_challenge,
@@ -2282,62 +2282,17 @@ def _send_message_locked_impl(
         execution = replace(execution, guidance=guidance)
     if payload.action == 'none' and context['stageContext'].get('source') == 'human_edit':
         execution = _normalize_manual_edit_review_execution(execution, context['stageContext'])
-    if payload.action == 'none' and user_map_claims.get('conflicts'):
-        correction = format_map_claim_correction(user_map_claims['conflicts'], language)
-        visible_body = str(execution.assistant_message or '').strip()
-        if correction and correction not in visible_body:
-            visible_body = '\n\n'.join((part for part in (correction, visible_body) if part))
-        corrected_guidance = dict(execution.guidance or {})
-        corrected_guidance.update(
-            {
-                'move': 'offer_perspective',
-                'intentHypothesis': None,
-                'intentConfidence': None,
-                'followUpQuestion': None,
-                'proposalOffer': None,
-                'disagreement': None,
-                'uiCues': [],
-                'coordinateLinks': [],
-            }
-        )
-        corrected_guidance.pop('designContextPatch', None)
-        corrected_guidance.pop('designContextPatchError', None)
-        execution = replace(
-            execution,
-            assistant_message=visible_body,
-            proposed_rows=None,
-            revision_plan={},
-            revision_contract={},
-            revision_operations=[],
-            proposal_binding={},
-            proposal_diagnostics={**(execution.proposal_diagnostics or {}), 'category': 'map_claim_conflict'},
-            guidance=corrected_guidance,
-        )
+    if payload.action == 'none':
+        execution = apply_map_claim_conflict_policy(execution, user_map_claims.get('conflicts'), language)
     execution = _mark_new_discussion_guidance(execution, context['stageContext'])
     execution = _mark_proposal_discovery_guidance(execution, context['stageContext'])
     execution = _enforce_human_edit_disagreement_followup(execution, context['stageContext'])
-    execution_guidance = dict(execution.guidance or {})
     if context['stageContext'].get('conversationOnly'):
-        active = context['stageContext'].get('activeDisagreement')
-        execution_guidance = {
-            'move': 'offer_perspective',
-            'intentHypothesis': None,
-            'intentConfidence': None,
-            'proposalOffer': None,
-            'uiCues': [],
-            'coordinateLinks': execution_guidance.get('coordinateLinks') or [],
-            'proposalDiscovery': execution_guidance.get('proposalDiscovery'),
-            'disagreement': {**active, 'displayCard': False} if active else None,
-        }
-        execution = replace(
+        execution = apply_conversation_only_policy(
             execution,
-            guidance=execution_guidance,
-            proposed_rows=None,
-            revision_plan={},
-            revision_contract={},
-            revision_operations=[],
-            proposal_binding={},
+            active_disagreement=context['stageContext'].get('activeDisagreement'),
         )
+    execution_guidance = dict(execution.guidance or {})
     active_disagreement_card = isinstance(execution_guidance.get('disagreement'), dict) and execution_guidance['disagreement'].get('status') == 'active'
     candidate_intent = str(execution_guidance.get('intentHypothesis') or '').strip()
     candidate_claims = execution_guidance.get('_intentSemanticClaims') or [] if candidate_intent else []
