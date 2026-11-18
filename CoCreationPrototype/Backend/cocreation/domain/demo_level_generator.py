@@ -10,7 +10,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from level_validation import (
+from cocreation.domain.level_validation import (
     HEIGHT,
     WIDTH,
     LevelValidationError,

@@ -5,11 +5,20 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from contextlib import closing
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import cocreation  # noqa: F401
-from reliability_report import failure_category, read_events, render_text, summarize, utc_timestamp
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from cocreation.persistence.database import SQLiteRepository, record_event
+from cocreation.reliability.reliability_audit import (
+    failure_category,
+    read_events,
+    render_text,
+    summarize,
+    utc_timestamp,
+)
+from tests.fakes import FakeClock
 
 
 def event(key="m", kind="reply_delivery_outcome", **payload):
@@ -105,12 +114,18 @@ class ReliabilityReportTests(unittest.TestCase):
     def test_read_only_window_handles_offsets_exclusive_end_and_bad_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "records.sqlite3"
-            with closing(sqlite3.connect(path)) as database, database:
-                database.execute("CREATE TABLE audit_events (id INTEGER PRIMARY KEY, session_id TEXT, event_type TEXT, payload_json TEXT, created_at TEXT)")
-                for stamp, payload in (("2026-10-06T00:00:00Z", "{}"),
-                        ("2026-10-06T08:30:00+08:00", '{"messageKey":"m"}'),
-                        ("2026-10-06T01:00:00Z", "{}"), ("2026-10-06T00:45:00Z", "broken")):
-                    database.execute("INSERT INTO audit_events VALUES (NULL,?,?,?,?)", ("s", "message_generation_failed", payload, stamp))
+            repository = SQLiteRepository(path, clock=FakeClock())
+            with repository.connect(immediate=True) as database:
+                for stamp, payload in (
+                    ("2026-10-06T00:00:00Z", "{}"),
+                    ("2026-10-06T08:30:00+08:00", '{"messageKey":"m"}'),
+                    ("2026-10-06T01:00:00Z", "{}"),
+                    ("2026-10-06T00:45:00Z", "broken"),
+                ):
+                    database.execute(
+                        "INSERT INTO audit_events(session_id, event_type, payload_json, created_at) VALUES (?,?,?,?)",
+                        ("s", "message_generation_failed", payload, stamp),
+                    )
             before = hashlib.sha256(path.read_bytes()).hexdigest()
             events = read_events(path, utc_timestamp("2026-10-06T08:15:00+08:00"), utc_timestamp("2026-10-06T01:00:00Z"))
             self.assertEqual(len(events), 2)
@@ -119,6 +134,64 @@ class ReliabilityReportTests(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 read_events(Path(directory) / "missing.sqlite3", "2026-10-06T00:00:00Z")
             self.assertFalse((Path(directory) / "missing.sqlite3").exists())
+
+    def test_sqlite_repository_audit_events_summarize_pipeline_and_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.sqlite3"
+            repository = SQLiteRepository(path, clock=FakeClock())
+            with repository.connect(immediate=True) as database:
+                record_event(
+                    database,
+                    "session-1",
+                    "reply_delivery_outcome",
+                    {
+                        "messageKey": "msg-1",
+                        "task": "message",
+                        "reliableBodyDelivered": True,
+                        "modelGenerationSucceeded": True,
+                        "fullQualityPassed": True,
+                        "proposalRequested": True,
+                        "verifiedProposal": True,
+                        "latencyMs": 320,
+                    },
+                    "2026-10-06T02:00:00Z",
+                )
+                record_event(
+                    database,
+                    "session-1",
+                    "reply_pipeline_diagnostic",
+                    {
+                        "requestId": "req-1",
+                        "pipelineVersion": "v2",
+                        "steps": [{"stage": "chat", "status": "ok"}],
+                        "proposalDiagnostic": {
+                            "requestId": "req-1",
+                            "diagnosticVersion": "v2",
+                            "steps": [{"stage": "component_repair", "component": "brief", "status": "repaired"}],
+                        },
+                    },
+                    "2026-10-06T02:00:01Z",
+                )
+                record_event(
+                    database,
+                    "session-1",
+                    "component_recovery",
+                    {
+                        "recoveryId": "rec-1",
+                        "attemptsUsed": 1,
+                        "status": "completed",
+                    },
+                    "2026-10-06T02:00:02Z",
+                )
+            events = read_events(path, "2026-10-06T00:00:00Z")
+            report = summarize(events)
+            self.assertEqual(report["logicalRequests"], 1)
+            self.assertEqual(report["pipelineDiagnostics"]["httpAttempts"], 1)
+            self.assertEqual(report["proposalDiagnostics"]["httpAttempts"], 1)
+            self.assertEqual(report["stateRecoveries"]["tasks"], 1)
+            self.assertEqual(report["stateRecoveries"]["attemptsUsed"], 1)
+            self.assertEqual(failure_category("PATCH_EVIDENCE_INVALID"), "component_repair")
+            self.assertIn("验证提案：1/1", render_text(report))
 
     def test_empty_text_report_does_not_claim_no_failures(self):
         report = summarize([])

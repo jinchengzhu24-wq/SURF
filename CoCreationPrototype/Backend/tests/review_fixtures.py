@@ -1,11 +1,11 @@
 """Explicit synthetic review deltas; never accepts legacy envelopes at runtime."""
 import copy
 
-from understanding_review import review_targets
+from cocreation.domain.understanding_review import review_targets
 
 
 def review_fixture(base, corrected=None):
-    import llm_client as llm
+    from cocreation.llm import facade as llm
     def normalized(value):
         value = llm._validate_turn_understanding(copy.deepcopy(value), value["evidenceSpan"])
         value.pop("humanEditEngagement", None)

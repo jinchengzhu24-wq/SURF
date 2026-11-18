@@ -1,6 +1,6 @@
 """Synthetic directions, never real-model evidence."""
 from dataclasses import replace
-import proposal_options
+from cocreation.domain import proposal_options
 
 
 def options():

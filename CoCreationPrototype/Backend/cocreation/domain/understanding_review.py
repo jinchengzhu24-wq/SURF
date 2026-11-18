@@ -6,9 +6,9 @@ literal cross-item copies are rejected. Semantic equivalence is model-reviewed.
 import copy
 import re
 
-from component_patches import PatchRequest, PatchError, Target, signature
-from proposal_diagnostics import ProposalValidationError, structural_issue
-from proposal_understanding import evidence_item_schema, turn_schema
+from cocreation.reliability.component_patches import PatchRequest, PatchError, Target, signature
+from cocreation.domain.proposal_diagnostics import ProposalValidationError, structural_issue
+from cocreation.domain.proposal_understanding import evidence_item_schema, turn_schema
 
 
 REVIEW_VERSION = "understanding-delta-3-quote-leaf"

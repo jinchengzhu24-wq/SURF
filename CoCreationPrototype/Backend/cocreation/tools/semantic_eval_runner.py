@@ -7,11 +7,14 @@ import argparse
 import copy
 import hashlib
 import json
-import time
 from collections import Counter
 from pathlib import Path
 
-from level_validation import build_entity_bindings, build_stage_snapshot, validate_and_solve
+from cocreation.clock import Clock, SYSTEM_CLOCK
+from cocreation.domain.level_validation import build_entity_bindings, build_stage_snapshot, validate_and_solve
+from cocreation.llm.config_and_runtime import LLMConfig, LLMServiceError
+from cocreation.llm.intent_and_review import _validate_turn_understanding
+from cocreation.llm.service import CoCreationLLMService
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -89,7 +92,6 @@ def build_model_input(suite, case):
 
 
 def check_result(case, result):
-    from llm_client import _validate_turn_understanding
     failures = []
     try:
         # Do not let forced-button normalization silently repair a captured result.
@@ -187,11 +189,19 @@ def compare(suite, baseline, candidate):
         "improvedCases": [key for key in before["byCase"] if after["byCase"][key]["passed"] > before["byCase"][key]["passed"]]}
 
 
-def run_live(suite, output, repeats=1):
-    from llm_client import classify_turn_understanding, _llm_credentials, LLMServiceError, KIMI_MODEL
-    if not _llm_credentials()[0]:
+def run_live(
+    suite,
+    output,
+    repeats=1,
+    *,
+    llm_service: CoCreationLLMService | None = None,
+    clock: Clock | None = None,
+):
+    effective_clock = clock if clock is not None else (llm_service.clock if llm_service is not None else SYSTEM_CLOCK)
+    service = llm_service if llm_service is not None else CoCreationLLMService(LLMConfig.from_env(), clock=effective_clock)
+    if not service.credentials()[0]:
         raise ValueError("8010 Kimi credentials must already be configured in the environment.")
-    captures = {"suiteHash": suite_hash(suite), "repeats": repeats, "model": KIMI_MODEL,
+    captures = {"suiteHash": suite_hash(suite), "repeats": repeats, "model": service.config.model,
         "sourceHash": hashlib.sha256(b"".join(p.read_bytes() for p in sorted((BACKEND_DIR / "cocreation" / "llm").glob("*.py")))).hexdigest(),
         "runs": []}
     # Refuse overwrite, then persist every run so a later interruption retains results.
@@ -200,16 +210,16 @@ def run_live(suite, output, repeats=1):
     for case in suite["cases"]:
         for repeat in range(1, repeats + 1):
             inputs = build_model_input(suite, case)
-            started = time.monotonic()
+            started = effective_clock.monotonic()
             run = {"caseId": case["id"], "repeat": repeat,
                 "mapFingerprint": inputs["snapshot"]["mapFingerprint"]}
             try:
-                run["result"] = classify_turn_understanding(inputs["conversation"], inputs["snapshot"],
+                run["result"] = service.classify_turn_understanding(inputs["conversation"], inputs["snapshot"],
                     f"semantic-eval-{case['id']}-{repeat}", forced_proposal=inputs["forced_proposal"],
                     proposal_context=inputs["proposal_context"], _deadline=started + 35.0)
             except LLMServiceError as error:
                 run["errorCode"] = error.code
-            run["latencyMs"] = round((time.monotonic() - started) * 1000)
+            run["latencyMs"] = round((effective_clock.monotonic() - started) * 1000)
             captures["runs"].append(run)
             temporary = output.with_suffix(output.suffix + ".tmp")
             temporary.write_text(json.dumps(captures, ensure_ascii=False, indent=2), encoding="utf-8")

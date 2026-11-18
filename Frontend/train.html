@@ -9,10 +9,12 @@
     <script>
         window.FRONTEND_ASSET_BASE = window.location.protocol === "file:"
             ? "."
-            : (window.location.pathname.startsWith("/frontend/") ? "." : "/frontend");
+            : (window.location.pathname.startsWith("/frontend/") ? "/frontend" : "");
         document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/tokens-base.css?v=dashboard-20261118-1">');
         document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/layout-panels.css?v=dashboard-20261118-1">');
         document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/timeline-maps.css?v=dashboard-20261118-1">');
+        document.write('<link rel="modulepreload" href="' + window.FRONTEND_ASSET_BASE + '/js/shared/api-utils.js">');
+        document.write('<link rel="modulepreload" href="' + window.FRONTEND_ASSET_BASE + '/js/study/timeline-inspector.js">');
     </script>
 </head>
 <body>
@@ -231,17 +233,8 @@
         </form>
     </dialog>
 
-    <script>
-        [
-            "/js/shared/api-utils.js?v=dashboard-access-20260823-1",
-            "/js/study/timeline-inspector.js?v=dashboard-access-20260823-1",
-            "/js/study/main.js?v=dashboard-access-20260823-1"
-        ].forEach(srcPath => {
-            const script = document.createElement("script");
-            script.async = false;
-            script.src = window.FRONTEND_ASSET_BASE + srcPath;
-            document.body.appendChild(script);
-        });
+    <script type="module">
+        import(`${window.FRONTEND_ASSET_BASE}/js/study/main.js?v=20261118-esm`);
     </script>
 </body>
 </html>

@@ -1,23 +1,23 @@
 import json
 import unittest
 
-from Backend.app import (
-    DEFAULT_PLAN,
-    apply_selected_ha_plan,
-    build_contextual_expansion_fallback_options,
-    parse_ha_revision_contract,
-    validate_human_adjustment_clarity_payload,
-    validate_ha_revision_plan_edit,
-    validate_ha_revision_plan_options,
-    validate_plan,
-)
-from Backend.prompt import (
+from sokoban_backend.llm.prompts import (
     build_creative_idea_expansion_messages,
     build_ha_revision_plan_edit_messages,
     build_ha_revision_plan_messages,
     build_human_adjustment_clarity_messages,
     build_level_plan_messages,
     resolve_zero_feature_constraints,
+)
+from sokoban_backend.schemas import DEFAULT_PLAN
+from sokoban_backend.services.blueprint_planner import (
+    apply_selected_ha_plan,
+    build_contextual_expansion_fallback_options,
+    parse_ha_revision_contract,
+    validate_ha_revision_plan_edit,
+    validate_ha_revision_plan_options,
+    validate_human_adjustment_clarity_payload,
+    validate_plan,
 )
 
 

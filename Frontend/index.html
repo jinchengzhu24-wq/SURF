@@ -7,11 +7,14 @@
     <script>
         window.FRONTEND_ASSET_BASE = window.location.protocol === "file:"
             ? "."
-            : (window.location.pathname.startsWith("/frontend/") ? "." : "/frontend");
+            : (window.location.pathname.startsWith("/frontend/") ? "/frontend" : "");
         document.write('<link rel="icon" type="image/png" href="' + window.FRONTEND_ASSET_BASE + '/favicon.png?v=fox-df2f6509133d">');
         document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/tokens-base.css?v=dashboard-20261118-1">');
         document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/layout-panels.css?v=dashboard-20261118-1">');
         document.write('<link rel="stylesheet" href="' + window.FRONTEND_ASSET_BASE + '/css/timeline-maps.css?v=dashboard-20261118-1">');
+        document.write('<link rel="modulepreload" href="' + window.FRONTEND_ASSET_BASE + '/js/shared/api-utils.js">');
+        document.write('<link rel="modulepreload" href="' + window.FRONTEND_ASSET_BASE + '/js/matchmaking/nodes-timeline.js">');
+        document.write('<link rel="modulepreload" href="' + window.FRONTEND_ASSET_BASE + '/js/matchmaking/inspector-compare.js">');
     </script>
 </head>
 <body>
@@ -212,18 +215,8 @@
         </form>
     </dialog>
 
-    <script>
-        [
-            "/js/shared/api-utils.js?v=research-nodes-20261010-1",
-            "/js/matchmaking/nodes-timeline.js?v=research-nodes-20261010-1",
-            "/js/matchmaking/inspector-compare.js?v=research-nodes-20261010-1",
-            "/js/matchmaking/main.js?v=research-nodes-20261010-1"
-        ].forEach(srcPath => {
-            const script = document.createElement("script");
-            script.async = false;
-            script.src = window.FRONTEND_ASSET_BASE + srcPath;
-            document.body.appendChild(script);
-        });
+    <script type="module">
+        import(`${window.FRONTEND_ASSET_BASE}/js/matchmaking/main.js?v=research-nodes-20261010-1-20261118-esm`);
     </script>
 </body>
 </html>

@@ -1,12 +1,11 @@
 import json
+from pathlib import Path
 import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-import Backend.app as backend
+from tests.fakes import FakeClock, create_test_app, create_test_container
 
 
 SOLVABLE_ROWS_A = [
@@ -52,40 +51,18 @@ FULL_DRAFT_METADATA = {
 class OnlineRoomTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        log_dir = Path(self.temp_dir.name)
-        self.log_patchers = [
-            patch.object(
-                backend,
-                "ONLINE_MATCH_LOG_FILE",
-                log_dir / "online_match_events.jsonl",
-            ),
-            patch.object(
-                backend,
-                "ONLINE_MATCH_FLOW_DIR",
-                log_dir / "matches",
-            ),
-            patch.object(
-                backend,
-                "SURVEY_LOG_FILE",
-                log_dir / "survey_responses.jsonl",
-            ),
-        ]
-
-        for patcher in self.log_patchers:
-            patcher.start()
-
-        with backend.ONLINE_ROOMS_LOCK:
-            backend.ONLINE_ROOMS.clear()
-        self.client = TestClient(backend.app)
+        self.tmp_path = Path(self.temp_dir.name)
+        self.clock = FakeClock(initial_time=1000.0)
+        self.container = create_test_container(
+            self.tmp_path,
+            clock=self.clock,
+            cocreation_intention_sync_secret="test-sync-secret",
+        )
+        self.client = TestClient(create_test_app(self.tmp_path, container=self.container))
 
     def tearDown(self):
         self.client.close()
-        with backend.ONLINE_ROOMS_LOCK:
-            backend.ONLINE_ROOMS.clear()
-
-        for patcher in reversed(self.log_patchers):
-            patcher.stop()
-
+        self.container.close()
         self.temp_dir.cleanup()
 
     @staticmethod
@@ -151,7 +128,7 @@ class OnlineRoomTests(unittest.TestCase):
         self.assertTrue(retry.json()["pending"])
         self.assertIsNone(retry.json()["event"])
         self.assertEqual(conflict.status_code, 409)
-        flow, _ = backend.read_online_match_flow_events(host["matchId"], 1)
+        flow, _ = self.container.store.read_online_match_flow_events(host["matchId"], 1)
         self.assertEqual(flow, [])
 
     def test_dashboard_aggregates_draft_fields(self):
@@ -179,15 +156,14 @@ class OnlineRoomTests(unittest.TestCase):
             "rows": SOLVABLE_ROWS_A,
             "diff": [],
         }
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            self.assertEqual(
-                self.client.post(
-                    "/online/rooms/" + host["matchId"] + "/cocreation-events",
-                    json=first_stage,
-                    headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
-                ).status_code,
-                200,
-            )
+        self.assertEqual(
+            self.client.post(
+                "/online/rooms/" + host["matchId"] + "/cocreation-events",
+                json=first_stage,
+                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+            ).status_code,
+            200,
+        )
 
         dashboard = self.client.get("/matchmaking-records-data").json()
         record = next(item for item in dashboard["matches"] if item["matchId"] == host["matchId"])
@@ -223,22 +199,23 @@ class OnlineRoomTests(unittest.TestCase):
             "rows": SOLVABLE_ROWS_A,
             "diff": [],
         }
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            later_stage = self.client.post(
-                "/online/rooms/" + host["matchId"] + "/cocreation-events",
-                json=stage,
-                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
-            )
+        later_stage = self.client.post(
+            "/online/rooms/" + host["matchId"] + "/cocreation-events",
+            json=stage,
+            headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+        )
 
         self.assertEqual(first_stage.status_code, 200)
         self.assertTrue(first_stage.json()["ignored"])
         self.assertEqual(later_stage.status_code, 200)
         self.assertTrue(later_stage.json()["ignored"])
-        events, _ = backend.read_online_match_events()
-        flow, _ = backend.read_online_match_flow_events(host["matchId"], 1)
+        events, _ = self.container.store.read_online_match_events()
+        flow, _ = self.container.store.read_online_match_flow_events(host["matchId"], 1)
         self.assertEqual(events, [])
         self.assertEqual(flow, [])
-        self.assertFalse(backend.online_match_flow_directory(host["matchId"]).exists())
+        self.assertFalse(
+            self.container.store.online_match_flow_directory(host["matchId"]).exists()
+        )
         self.assertEqual(
             self.client.get("/matchmaking-records-data").json()["matches"],
             [],
@@ -246,7 +223,7 @@ class OnlineRoomTests(unittest.TestCase):
 
     def test_dashboard_keeps_only_the_menu_started_player_in_a_mixed_room(self):
         host = self.create_room()
-        guest = self.client.post(
+        self.client.post(
             "/online/rooms/join",
             json={"roomCode": host["roomCode"]},
         ).json()
@@ -364,7 +341,7 @@ class OnlineRoomTests(unittest.TestCase):
 
         events = [
             json.loads(line)
-            for line in backend.ONLINE_MATCH_LOG_FILE.read_text(
+            for line in self.container.paths.online_match_log_file.read_text(
                 encoding="utf-8"
             ).splitlines()
         ]
@@ -512,17 +489,17 @@ class OnlineRoomTests(unittest.TestCase):
     def test_expired_room_is_removed_lazily(self):
         host = self.create_room()
 
-        with backend.ONLINE_ROOMS_LOCK:
-            backend.ONLINE_ROOMS[host["matchId"]]["lastActivity"] = 100.0
+        with self.container.room_manager.lock:
+            self.container.room_manager.rooms[host["matchId"]]["lastActivity"] = 100.0
 
-        with patch("Backend.app.time.time", return_value=1901.0):
-            response = self.client.get(
-                "/online/rooms/" + host["matchId"],
-                headers=self.auth_headers(host["playerToken"]),
-            )
+        self.clock.set_time(1901.0)
+        response = self.client.get(
+            "/online/rooms/" + host["matchId"],
+            headers=self.auth_headers(host["playerToken"]),
+        )
 
         self.assertEqual(response.status_code, 404)
-        self.assertNotIn(host["matchId"], backend.ONLINE_ROOMS)
+        self.assertNotIn(host["matchId"], self.container.room_manager.rooms)
 
     def ready_both_players(self):
         host = self.create_room()
@@ -592,12 +569,11 @@ class OnlineRoomTests(unittest.TestCase):
             "rows": rows or SOLVABLE_ROWS_A,
             "diff": [],
         }
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            return self.client.post(
-                "/online/rooms/" + match_id + "/cocreation-events",
-                json=event,
-                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
-            )
+        return self.client.post(
+            "/online/rooms/" + match_id + "/cocreation-events",
+            json=event,
+            headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+        )
 
     def test_challenge_requires_ready_players_and_valid_token(self):
         host = self.create_room()
@@ -670,12 +646,11 @@ class OnlineRoomTests(unittest.TestCase):
         host, guest = self.ready_both_players()
         host_goal = "I hope my opponent feels a careful route choice."
         self.assertEqual(self.submit_first_stage(host["matchId"], 1).status_code, 200)
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            synchronized = self.client.post(
-                "/online/rooms/" + host["matchId"] + "/designer-intention",
-                json={"playerNumber": host["playerNumber"], "designerIntention": host_goal},
-                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
-            )
+        synchronized = self.client.post(
+            "/online/rooms/" + host["matchId"] + "/designer-intention",
+            json={"playerNumber": host["playerNumber"], "designerIntention": host_goal},
+            headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+        )
         self.assertEqual(synchronized.status_code, 200)
         self.submit_challenge(host["matchId"], host["playerToken"], SOLVABLE_ROWS_A)
         response = self.submit_challenge(
@@ -704,7 +679,7 @@ class OnlineRoomTests(unittest.TestCase):
             "/online/rooms",
             json={"studySessionId": "study-host", "menuStartedFlow": True},
         ).json()
-        guest = self.client.post(
+        self.client.post(
             "/online/rooms/join",
             json={
                 "roomCode": host["roomCode"],
@@ -739,18 +714,17 @@ class OnlineRoomTests(unittest.TestCase):
 
         self.assertEqual(self.submit_first_stage(host["matchId"], 1).status_code, 200)
         self.assertEqual(self.submit_first_stage(host["matchId"], 2).status_code, 200)
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            first = self.client.post(endpoint, json=stage, headers=headers)
-            duplicate = self.client.post(endpoint, json=stage, headers=headers)
-            second = self.client.post(endpoint, json=turn, headers=headers)
+        first = self.client.post(endpoint, json=stage, headers=headers)
+        duplicate = self.client.post(endpoint, json=stage, headers=headers)
+        second = self.client.post(endpoint, json=turn, headers=headers)
 
         self.assertEqual(first.status_code, 200, first.text)
         self.assertTrue(first.json()["recorded"])
         self.assertEqual(duplicate.status_code, 200, duplicate.text)
         self.assertFalse(duplicate.json()["recorded"])
         self.assertEqual(second.status_code, 200, second.text)
-        host_events, _ = backend.read_online_match_flow_events(host["matchId"], 1)
-        guest_events, _ = backend.read_online_match_flow_events(host["matchId"], 2)
+        host_events, _ = self.container.store.read_online_match_flow_events(host["matchId"], 1)
+        guest_events, _ = self.container.store.read_online_match_flow_events(host["matchId"], 2)
         self.assertEqual([event["eventType"] for event in host_events], ["first_stage", "stage"])
         self.assertEqual([event["eventType"] for event in guest_events], ["first_stage", "turn"])
         self.assertEqual(host_events[1]["studySessionId"], "study-host")
@@ -772,17 +746,28 @@ class OnlineRoomTests(unittest.TestCase):
             "restoredFromVersionId": "stage-one", "restoredFromStageNumber": 1,
             "replacedVersionId": "stage-two", "replacedStageNumber": 2,
         }
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
-            first = self.client.post(endpoint, json=event, headers=headers)
-            retry = self.client.post(endpoint, json=event, headers=headers)
-            invalid = self.client.post(endpoint, json={**event, "eventId": "stage:bad-restoration", "replacedStageNumber": None}, headers=headers)
+        headers = {"X-CoCreation-Sync-Secret": "test-sync-secret"}
+        first = self.client.post(endpoint, json=event, headers=headers)
+        retry = self.client.post(endpoint, json=event, headers=headers)
+        invalid = self.client.post(
+            endpoint,
+            json={**event, "eventId": "stage:bad-restoration", "replacedStageNumber": None},
+            headers=headers,
+        )
         self.assertEqual(first.status_code, 200, first.text)
         self.assertFalse(retry.json()["recorded"])
         self.assertEqual(invalid.status_code, 400)
         match = self.client.get("/matchmaking-records-data").json()["matches"][0]
-        restored = next(item for item in match["players"][0]["coCreationFlow"] if item.get("source") == "restored")
-        for field in ("restoredFromVersionId", "restoredFromStageNumber", "replacedVersionId", "replacedStageNumber"):
+        restored = next(
+            item for item in match["players"][0]["coCreationFlow"]
+            if item.get("source") == "restored"
+        )
+        for field in (
+            "restoredFromVersionId",
+            "restoredFromStageNumber",
+            "replacedVersionId",
+            "replacedStageNumber",
+        ):
             self.assertEqual(restored[field], event[field])
 
     def test_dashboard_node_snapshots_are_validated_and_aggregated(self):
@@ -819,10 +804,10 @@ class OnlineRoomTests(unittest.TestCase):
         invalid = {**first, "eventId": "node:bad", "nodeEntries": [{
             **first["nodeEntries"][0], "kind": "internal_prompt",
         }]}
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            self.assertEqual(self.client.post(endpoint, json=first, headers=headers).status_code, 200)
-            self.assertEqual(self.client.post(endpoint, json=second, headers=headers).status_code, 200)
-            self.assertEqual(self.client.post(endpoint, json=invalid, headers=headers).status_code, 400)
+        self.assertEqual(self.client.post(endpoint, json=first, headers=headers).status_code, 200)
+        self.clock.advance(1.0)
+        self.assertEqual(self.client.post(endpoint, json=second, headers=headers).status_code, 200)
+        self.assertEqual(self.client.post(endpoint, json=invalid, headers=headers).status_code, 400)
 
         payload = self.client.get("/matchmaking-records-data").json()
         record = next(item for item in payload["matches"] if item["matchId"] == host["matchId"])
@@ -847,14 +832,13 @@ class OnlineRoomTests(unittest.TestCase):
             "rows": SOLVABLE_ROWS_A,
             "diff": [],
         }
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            response = self.client.post(
-                endpoint,
-                json=stage,
-                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
-            )
+        response = self.client.post(
+            endpoint,
+            json=stage,
+            headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+        )
         self.assertEqual(response.status_code, 409)
-        flow, _ = backend.read_online_match_flow_events(host["matchId"], 1)
+        flow, _ = self.container.store.read_online_match_flow_events(host["matchId"], 1)
         self.assertEqual(flow, [])
 
     def test_final_flow_exposes_opponent_restart_count_in_dashboard(self):
@@ -878,15 +862,14 @@ class OnlineRoomTests(unittest.TestCase):
             "rows": SOLVABLE_ROWS_A,
             "diff": [],
         }
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            self.assertEqual(
-                self.client.post(
-                    "/online/rooms/" + host["matchId"] + "/cocreation-events",
-                    json=final,
-                    headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
-                ).status_code,
-                200,
-            )
+        self.assertEqual(
+            self.client.post(
+                "/online/rooms/" + host["matchId"] + "/cocreation-events",
+                json=final,
+                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+            ).status_code,
+            200,
+        )
         self.assertEqual(
             self.submit_result(
                 host["matchId"], host["playerToken"], restart_count=2
@@ -924,24 +907,23 @@ class OnlineRoomTests(unittest.TestCase):
         }
 
         self.assertEqual(self.submit_first_stage(host["matchId"], 1).status_code, 200)
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            response = self.client.post(endpoint, json=final, headers=headers)
-            invalid_value = self.client.post(
-                endpoint,
-                json={**final, "eventId": "final:invalid", "coCreationDurationSeconds": 1201},
-                headers=headers,
-            )
-            invalid_event = self.client.post(
-                endpoint,
-                json={
-                    **final,
-                    "eventId": "stage:invalid-duration",
-                    "eventType": "stage",
-                    "source": "manual",
-                    "coCreationDurationSeconds": 10,
-                },
-                headers=headers,
-            )
+        response = self.client.post(endpoint, json=final, headers=headers)
+        invalid_value = self.client.post(
+            endpoint,
+            json={**final, "eventId": "final:invalid", "coCreationDurationSeconds": 1201},
+            headers=headers,
+        )
+        invalid_event = self.client.post(
+            endpoint,
+            json={
+                **final,
+                "eventId": "stage:invalid-duration",
+                "eventType": "stage",
+                "source": "manual",
+                "coCreationDurationSeconds": 10,
+            },
+            headers=headers,
+        )
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(
@@ -988,9 +970,8 @@ class OnlineRoomTests(unittest.TestCase):
             "language": "en",
             "cards": [{"type": "discussion", "text": "What should stand out?"}],
         }
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            self.assertTrue(self.client.post(endpoint, json=first_stage, headers=headers).json()["recorded"])
-            self.assertTrue(self.client.post(endpoint, json=opening, headers=headers).json()["recorded"])
+        self.assertTrue(self.client.post(endpoint, json=first_stage, headers=headers).json()["recorded"])
+        self.assertTrue(self.client.post(endpoint, json=opening, headers=headers).json()["recorded"])
 
         dashboard = self.client.get("/matchmaking-records-data").json()
         record = next(item for item in dashboard["matches"] if item["matchId"] == host["matchId"])
@@ -1004,22 +985,14 @@ class OnlineRoomTests(unittest.TestCase):
         goal = "I want my opponent to notice the route before pushing."
         self.assertEqual(self.submit_first_stage(host["matchId"], 1).status_code, 200)
 
-        with patch.object(
-            backend,
-            "COCREATION_INTENTION_SYNC_SECRET",
-            "test-sync-secret",
-        ):
-            synchronized = self.client.post(
-                "/online/rooms/"
-                + host["matchId"]
-                + "/designer-intention",
-                json={
-                    "playerNumber": host["playerNumber"],
-                    "designerIntention": goal,
-                },
-                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
-            )
-
+        synchronized = self.client.post(
+            "/online/rooms/" + host["matchId"] + "/designer-intention",
+            json={
+                "playerNumber": host["playerNumber"],
+                "designerIntention": goal,
+            },
+            headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+        )
         self.assertEqual(synchronized.status_code, 200)
 
         submitted = self.submit_challenge(
@@ -1053,7 +1026,7 @@ class OnlineRoomTests(unittest.TestCase):
         )
         self.assertNotIn(
             "competitionMode",
-            backend.ONLINE_MATCH_LOG_FILE.read_text(encoding="utf-8"),
+            self.container.paths.online_match_log_file.read_text(encoding="utf-8"),
         )
 
     def test_challenge_submission_is_idempotent_and_frozen(self):

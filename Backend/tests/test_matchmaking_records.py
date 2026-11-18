@@ -1,13 +1,12 @@
 import json
-import os
+from pathlib import Path
 import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-import Backend.app as backend
+from sokoban_backend.config import FRONTEND_DIR, ONLINE_ROOM_TTL_SECONDS
+from tests.fakes import create_test_app, create_test_container
 
 
 SOLVABLE_ROWS_A = [
@@ -40,46 +39,21 @@ SOLVABLE_ROWS_B = [
 class MatchmakingRecordTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        log_dir = Path(self.temp_dir.name)
-        self.patchers = [
-            patch.object(
-                backend,
-                "ONLINE_MATCH_LOG_FILE",
-                log_dir / "online_match_events.jsonl",
-            ),
-            patch.object(
-                backend,
-                "ONLINE_MATCH_FLOW_DIR",
-                log_dir / "matches",
-            ),
-            patch.object(
-                backend,
-                "SURVEY_LOG_FILE",
-                log_dir / "survey_responses.jsonl",
-            ),
-        ]
-
-        for patcher in self.patchers:
-            patcher.start()
-
-        with backend.ONLINE_ROOMS_LOCK:
-            backend.ONLINE_ROOMS.clear()
-
-        self.client = TestClient(backend.app)
+        self.tmp_path = Path(self.temp_dir.name)
+        self.container = create_test_container(
+            self.tmp_path,
+            cocreation_intention_sync_secret="test-sync-secret",
+            dashboard_delete_password="1234",
+        )
+        self.client = TestClient(create_test_app(self.tmp_path, container=self.container))
 
     def tearDown(self):
         self.client.close()
-
-        with backend.ONLINE_ROOMS_LOCK:
-            backend.ONLINE_ROOMS.clear()
-
-        for patcher in reversed(self.patchers):
-            patcher.stop()
-
+        self.container.close()
         self.temp_dir.cleanup()
 
     def test_match_list_uses_created_date_with_legacy_updated_date_fallback(self):
-        frontend_dir = Path(backend.FRONTEND_DIR)
+        frontend_dir = Path(FRONTEND_DIR)
         script = "\n".join(
             path.read_text(encoding="utf-8")
             for path in sorted((frontend_dir / "js").rglob("*.js"))
@@ -159,15 +133,14 @@ class MatchmakingRecordTests(unittest.TestCase):
             "rows": SOLVABLE_ROWS_A,
             "diff": [],
         }
-        with patch.object(backend, "COCREATION_INTENTION_SYNC_SECRET", "test-sync-secret"):
-            self.assertEqual(
-                self.client.post(
-                    "/online/rooms/" + host["matchId"] + "/cocreation-events",
-                    json=first_stage,
-                    headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
-                ).status_code,
-                200,
-            )
+        self.assertEqual(
+            self.client.post(
+                "/online/rooms/" + host["matchId"] + "/cocreation-events",
+                json=first_stage,
+                headers={"X-CoCreation-Sync-Secret": "test-sync-secret"},
+            ).status_code,
+            200,
+        )
         self.assertEqual(
             self.submit_challenge(
                 host,
@@ -210,18 +183,19 @@ class MatchmakingRecordTests(unittest.TestCase):
             200,
         )
 
-        events, malformed = backend.read_online_match_events()
+        events, malformed = self.container.store.read_online_match_events()
         event_types = [event["eventType"] for event in events]
         self.assertEqual(malformed, 0)
         self.assertEqual(event_types.count("room_created"), 1)
         self.assertEqual(event_types.count("player_joined"), 1)
         self.assertEqual(event_types.count("ready_changed"), 2)
         self.assertEqual(event_types.count("challenge_submitted"), 1)
-        self.assertNotIn("playerToken", backend.ONLINE_MATCH_LOG_FILE.read_text())
-        self.assertNotIn(host["playerToken"], backend.ONLINE_MATCH_LOG_FILE.read_text())
+        raw_text = self.container.paths.online_match_log_file.read_text(encoding="utf-8")
+        self.assertNotIn("playerToken", raw_text)
+        self.assertNotIn(host["playerToken"], raw_text)
 
     def test_dashboard_maps_each_challenge_to_opponent_result(self):
-        host, guest = self.complete_match()
+        host, _ = self.complete_match()
         leave_response = self.client.post(
             "/online/rooms/" + host["matchId"] + "/leave",
             headers=self.headers(host),
@@ -250,7 +224,7 @@ class MatchmakingRecordTests(unittest.TestCase):
 
     def test_legacy_competition_field_remains_raw_but_is_not_exposed(self):
         self.complete_match()
-        events, malformed = backend.read_online_match_events()
+        events, malformed = self.container.store.read_online_match_events()
         self.assertEqual(malformed, 0)
         challenge_event = next(
             event
@@ -258,9 +232,12 @@ class MatchmakingRecordTests(unittest.TestCase):
             if event.get("eventType") == "challenge_submitted"
         )
         challenge_event["competitionMode"] = "competitive"
-        backend.write_jsonl_records(backend.ONLINE_MATCH_LOG_FILE, events)
+        self.container.store.write_jsonl_records(
+            self.container.paths.online_match_log_file,
+            events,
+        )
 
-        raw_log = backend.ONLINE_MATCH_LOG_FILE.read_text(encoding="utf-8")
+        raw_log = self.container.paths.online_match_log_file.read_text(encoding="utf-8")
         payload = self.client.get("/matchmaking-records-data").json()
 
         self.assertIn("competitionMode", raw_log)
@@ -294,26 +271,30 @@ class MatchmakingRecordTests(unittest.TestCase):
 
     def test_invalid_token_does_not_create_a_tracking_event(self):
         host, _ = self.create_players()
-        before, _ = backend.read_online_match_events()
+        before, _ = self.container.store.read_online_match_events()
         response = self.client.post(
             "/online/rooms/" + host["matchId"] + "/ready",
             headers={"X-Player-Token": "invalid"},
             json={"ready": True},
         )
-        after, _ = backend.read_online_match_events()
+        after, _ = self.container.store.read_online_match_events()
         self.assertEqual(response.status_code, 401)
         self.assertEqual(len(after), len(before))
 
     def test_expired_room_and_malformed_line_are_reported(self):
         host = self.client.post("/online/rooms").json()
 
-        with backend.ONLINE_ROOMS_LOCK:
-            backend.ONLINE_ROOMS[host["matchId"]]["lastActivity"] = 100.0
-            backend.cleanup_expired_online_rooms(
-                now=100.0 + backend.ONLINE_ROOM_TTL_SECONDS
+        with self.container.room_manager.lock:
+            self.container.room_manager.rooms[host["matchId"]]["lastActivity"] = 100.0
+            self.container.room_manager.cleanup_expired_online_rooms(
+                now=100.0 + ONLINE_ROOM_TTL_SECONDS
             )
 
-        with backend.ONLINE_MATCH_LOG_FILE.open("a", encoding="utf-8") as log_file:
+        self.container.store.ensure_study_log_dir()
+        with self.container.paths.online_match_log_file.open(
+            "a",
+            encoding="utf-8",
+        ) as log_file:
             log_file.write("not-json\n")
 
         payload = self.client.get("/matchmaking-records-data").json()
@@ -323,8 +304,8 @@ class MatchmakingRecordTests(unittest.TestCase):
 
     def test_delete_and_clear_preserve_survey_records(self):
         host, _ = self.complete_match()
-        backend.write_jsonl_records(
-            backend.SURVEY_LOG_FILE,
+        self.container.store.write_jsonl_records(
+            self.container.paths.survey_log_file,
             [
                 {
                     "surveyId": "train_survey",
@@ -339,14 +320,13 @@ class MatchmakingRecordTests(unittest.TestCase):
             ],
         )
 
-        with patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": "1234"}):
-            response = self.client.post(
-                "/delete-online-match",
-                headers={"X-Delete-Password": "1234"},
-                json={"matchId": host["matchId"]},
-            )
+        response = self.client.post(
+            "/delete-online-match",
+            headers={"X-Delete-Password": "1234"},
+            json={"matchId": host["matchId"]},
+        )
         self.assertEqual(response.status_code, 200)
-        surveys, _ = backend.read_survey_response_events()
+        surveys, _ = self.container.store.read_survey_response_events()
         self.assertEqual(
             [record["responseId"] for record in surveys],
             ["train-response", "online-response"],
@@ -355,15 +335,14 @@ class MatchmakingRecordTests(unittest.TestCase):
         second_host = self.client.post("/online/rooms").json()
         self.assertTrue(second_host["matchId"])
 
-        with patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": "1234"}):
-            response = self.client.post(
-                "/clear-matchmaking-records",
-                headers={"X-Delete-Password": "1234"},
-                json={},
-            )
+        response = self.client.post(
+            "/clear-matchmaking-records",
+            headers={"X-Delete-Password": "1234"},
+            json={},
+        )
         self.assertEqual(response.status_code, 200)
-        events, _ = backend.read_online_match_events()
-        surveys, _ = backend.read_survey_response_events()
+        events, _ = self.container.store.read_online_match_events()
+        surveys, _ = self.container.store.read_survey_response_events()
         self.assertEqual(events, [])
         self.assertEqual(
             [record["responseId"] for record in surveys],

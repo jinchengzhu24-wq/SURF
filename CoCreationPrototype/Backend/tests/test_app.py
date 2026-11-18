@@ -1,9 +1,7 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-
-from fastapi.testclient import TestClient
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -11,16 +9,49 @@ REPOSITORY_ROOT = BACKEND_DIR.parents[1]
 
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
-    import cocreation  # noqa: F401
 
-import app as backend
-from level_validation import summarize_stage_changes, summarize_verified_diff
-from llm_client import LLMExecutionResult, LLMServiceError, build_chat_messages
+from cocreation.api.config_models import CreateSessionRequest, SAMPLE_ROWS
+from cocreation.api.context_and_discovery import (
+    _adaptive_revision_routing,
+    _allow_adaptive_proposal_completion,
+    _extract_conservative_map_question,
+    _extract_visible_questions,
+    _proposal_clarification_spec,
+    _proposal_discovery_from_turns,
+    _proposal_discovery_has_unique_anchor,
+    _proposal_discovery_is_sufficient,
+)
+from cocreation.api.proposal_and_challenge import (
+    _automatic_proposal_failure_execution,
+    _mark_proposal_discovery_guidance,
+    _materialize_verified_automatic_offer,
+    _relaxed_revision_suggestion_execution,
+    _verified_offer_presentation_v2,
+    _verified_recovery_suggestion_execution,
+)
+from cocreation.api.session_persistence_helpers import _translated_guidance
+from cocreation.domain.level_validation import (
+    build_stage_snapshot,
+    summarize_stage_changes,
+    summarize_verified_diff,
+    validate_and_solve,
+)
+from cocreation.llm.config_and_runtime import LLMExecutionResult, LLMServiceError
+from cocreation.llm.prompts_and_messages import build_chat_messages
+from cocreation.llm.proposal_planning import execute_revision_operations
+from cocreation.persistence.repository import map_fingerprint
+from tests.fakes import (
+    FakeClock,
+    FakeOnlineSyncGateway,
+    StubLLMService,
+    create_test_client,
+    create_test_services,
+)
 
 
 class CoCreationPrototypeApiTests(unittest.TestCase):
     def test_visible_question_extraction_excludes_orange_intent(self):
-        questions = backend._extract_visible_questions(
+        questions = _extract_visible_questions(
             "Which route should stay open? Should the first push remain direct?",
             {
                 "intentHypothesis": "Is your deeper preference a readable route?",
@@ -36,8 +67,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         ])
 
     def test_v2_presentation_freezes_origin_diff_reason_and_one_route_metrics(self):
-        validation = backend.validate_and_solve(backend.SAMPLE_ROWS)
-        presentation = backend._verified_offer_presentation_v2(
+        validation = validate_and_solve(SAMPLE_ROWS)
+        presentation = _verified_offer_presentation_v2(
             {
                 "effect": "open_route",
                 "requiredTransitions": [
@@ -80,7 +111,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             },
         )
 
-        fallback = backend._verified_offer_presentation_v2(
+        fallback = _verified_offer_presentation_v2(
             {"effect": "open_route", "requiredTransitions": []},
             validation,
             {
@@ -124,7 +155,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "body": "",
         }
 
-        localized = backend._translated_guidance(source, translated)
+        localized = _translated_guidance(source, translated)
         presentation = localized["proposalOffer"]["proposalPresentation"]
         self.assertEqual(presentation["requestText"], "\u8bf7\u6253\u5f00\u8fd9\u6761\u8def")
         self.assertEqual(
@@ -134,7 +165,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(presentation["reason"], "This makes the route clearer.")
 
     def test_automatic_candidate_is_frozen_into_actionable_purple_offer(self):
-        proposed = list(backend.SAMPLE_ROWS)
+        proposed = list(SAMPLE_ROWS)
         proposed[1] = "##.........#"
         execution = LLMExecutionResult(
             assistant_message="candidate",
@@ -169,11 +200,12 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             guidance={"move": "deliver_revision", "proposalOffer": None},
         )
 
-        frozen = backend._materialize_verified_automatic_offer(
+        frozen = _materialize_verified_automatic_offer(
             execution,
-            backend.SAMPLE_ROWS,
+            SAMPLE_ROWS,
             "zh-CN",
             {},
+            services=self.services,
         )
 
         self.assertIsNone(frozen.proposed_rows)
@@ -207,7 +239,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "rejectionRecords": [{"category": "hard_objective_not_met"}],
         }
 
-        execution = backend._automatic_proposal_failure_execution(
+        execution = _automatic_proposal_failure_execution(
             language="zh-CN",
             request_id=exception.request_id,
             exception=exception,
@@ -218,17 +250,26 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertIsNone(execution.guidance["proposalOffer"])
 
     def setUp(self):
-        self.client = TestClient(backend.app, base_url="https://testserver")
-
-    def tearDown(self):
-        self.client.close()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.clock = FakeClock()
+        self.llm = StubLLMService(clock=self.clock)
+        self.online_sync = FakeOnlineSyncGateway()
+        self.services = create_test_services(
+            self.temp_dir.name,
+            llm=self.llm,
+            online_sync=self.online_sync,
+            clock=self.clock,
+        )
+        self.client = create_test_client(self.services)
+        self.addCleanup(self.client.close)
 
     def test_adaptive_revision_routing_distinguishes_goal_from_undirected_edit(self):
-        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        snapshot = build_stage_snapshot(SAMPLE_ROWS)
         empty_claims = {"conflicts": []}
 
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848\uff0c\u6211\u60f3\u8ba9\u73a9\u5bb6\u66f4\u660e\u663e\u611f\u53d7\u7ed5\u884c\u538b\u529b",
                 empty_claims,
                 snapshot,
@@ -236,7 +277,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "proposal",
         )
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848",
                 empty_claims,
                 snapshot,
@@ -244,7 +285,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "needs_clarification",
         )
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "\u5e2e\u6211\u6539\u4e00\u4e0b",
                 empty_claims,
                 snapshot,
@@ -252,7 +293,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "needs_clarification",
         )
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "\u6211\u89c9\u5f97\u8fd9\u91cc\u4e0d\u597d\u770b\uff0c\u5e2e\u6211\u4fee\u6539\u4e00\u4e0b",
                 empty_claims,
                 snapshot,
@@ -266,7 +307,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "needs_clarification",
         )
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "\u6211\u6709\u70b9\u8ff7\u832b\uff0c\u7ed9\u6211\u4e00\u70b9\u601d\u8def",
                 empty_claims,
                 snapshot,
@@ -275,7 +316,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         )
 
     def test_model_understanding_routes_feedback_without_proposals(self):
-        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        snapshot = build_stage_snapshot(SAMPLE_ROWS)
         for message, acts, elements, expected in (
             ("我觉得外形不好看", ["evaluation"], ["outer_shell"], "none"),
             ("里面的隔断看着乱", ["evaluation"], ["internal_walls"], "none"),
@@ -289,7 +330,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 self.assertEqual(
-                    backend._adaptive_revision_routing(
+                    _adaptive_revision_routing(
                         message, {"conflicts": []}, snapshot,
                         turn_understanding={"acts": acts, "elements": elements},
                     ),
@@ -297,14 +338,14 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 )
 
     def test_new_proposal_requires_one_answer_and_never_asks_a_fourth_question(self):
-        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        snapshot = build_stage_snapshot(SAMPLE_ROWS)
         initial = {
             "status": "clarifying",
             "clarificationQuestionCount": 0,
             "userEvidence": ["Please move player P one cell to open the route."],
         }
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 initial["userEvidence"][-1], {"conflicts": []}, snapshot,
                 proposal_discovery=initial,
             ),
@@ -317,7 +358,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "userEvidence": [*initial["userEvidence"], "Keep the opening readable."],
         }
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 answered["userEvidence"][-1], {"conflicts": []}, snapshot,
                 proposal_discovery=answered,
             ),
@@ -330,7 +371,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "userEvidence": ["Make the route more deliberate.", "Not sure."],
         }
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 exhausted["userEvidence"][-1], {"conflicts": []}, snapshot,
                 proposal_discovery=exhausted,
             ),
@@ -377,12 +418,12 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "entities": [{"kind": "box"}, {"kind": "box"}],
         }
 
-        discovery = backend._proposal_discovery_from_turns(turns, "stage-2")
+        discovery = _proposal_discovery_from_turns(turns, "stage-2", services=self.services)
 
         self.assertEqual(discovery["clarificationQuestionCount"], 3)
         self.assertIn("B2", discovery["brief"])
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 turns[-1]["content"], {"conflicts": []}, snapshot,
                 proposal_discovery=discovery,
             ),
@@ -417,12 +458,13 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             ],
         }
 
-        discovery = backend._proposal_discovery_from_turns(
+        discovery = _proposal_discovery_from_turns(
             turns,
             "stage-1",
             {"proposal-request"},
+            services=self.services,
         )
-        specification = backend._proposal_clarification_spec(
+        specification = _proposal_clarification_spec(
             discovery, snapshot, "zh-CN"
         )
 
@@ -435,7 +477,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(specification["fallbackQuestion"], "")
 
     def test_sparse_region_proposal_asks_neutral_visual_or_play_question(self):
-        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        snapshot = build_stage_snapshot(SAMPLE_ROWS)
         discovery = {
             "status": "clarifying",
             "userEvidence": ["我希望左下角别那么空"],
@@ -444,10 +486,10 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         }
 
         self.assertTrue(
-            backend._proposal_discovery_has_unique_anchor(discovery, snapshot)
+            _proposal_discovery_has_unique_anchor(discovery, snapshot)
         )
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "我希望左下角别那么空",
                 {"conflicts": []},
                 snapshot,
@@ -455,7 +497,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             ),
             "needs_clarification",
         )
-        specification = backend._proposal_clarification_spec(
+        specification = _proposal_clarification_spec(
             discovery,
             snapshot,
             "zh-CN",
@@ -472,7 +514,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "askedQuestionKeys": ["experience_goal"],
         }
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "我更在意视觉上的空间平衡",
                 {"conflicts": []},
                 snapshot,
@@ -495,7 +537,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 "clarificationRecoveryMode": "deterministic_clarification",
             },
         )
-        marked = backend._mark_proposal_discovery_guidance(
+        marked = _mark_proposal_discovery_guidance(
             execution,
             {
                 "revisionRouting": "needs_clarification",
@@ -544,10 +586,10 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         }
 
         self.assertTrue(
-            backend._proposal_discovery_is_sufficient(discovery, snapshot)
+            _proposal_discovery_is_sufficient(discovery, snapshot)
         )
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "围绕 B1 调整", {"conflicts": []}, snapshot,
                 proposal_discovery=discovery,
             ),
@@ -571,7 +613,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 "clarificationRecoveryMode": "kimi_complete",
             },
         )
-        marked = backend._mark_proposal_discovery_guidance(
+        marked = _mark_proposal_discovery_guidance(
             execution,
             {
                 "revisionRouting": "needs_clarification",
@@ -612,7 +654,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "请继续", {"conflicts": []}, snapshot,
                 proposal_discovery=discovery,
             ),
@@ -628,12 +670,12 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             2,
             422,
         )
-        execution = backend._automatic_proposal_failure_execution(
+        execution = _automatic_proposal_failure_execution(
             language="zh-CN",
             request_id="automatic-proposal-failure-test",
             exception=exception,
         )
-        marked = backend._mark_proposal_discovery_guidance(
+        marked = _mark_proposal_discovery_guidance(
             execution,
             {
                 "revisionRouting": "proposal_conservative",
@@ -661,7 +703,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             provider_param="response_format",
             provider_message="response_format is unsupported",
         )
-        execution = backend._automatic_proposal_failure_execution(
+        execution = _automatic_proposal_failure_execution(
             language="zh-CN",
             request_id="automatic-provider-failure-test",
             exception=exception,
@@ -680,7 +722,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             1,
             504,
         )
-        execution = backend._automatic_proposal_failure_execution(
+        execution = _automatic_proposal_failure_execution(
             language="zh-CN",
             request_id="automatic-timeout-test",
             exception=exception,
@@ -711,7 +753,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             ],
         }
 
-        execution = backend._automatic_proposal_failure_execution(
+        execution = _automatic_proposal_failure_execution(
             language="en",
             request_id="automatic-truncated-timeout-test",
             exception=exception,
@@ -729,7 +771,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             {"id": "retry", "role": "user", "content": "请修改地图，让 B1 阻挡 B2 的通道", "sequence_number": 3, "guidance_json": None},
         ]
 
-        discovery = backend._proposal_discovery_from_turns(turns, "stage")
+        discovery = _proposal_discovery_from_turns(turns, "stage", services=self.services)
 
         self.assertEqual(discovery["status"], "revision_needed")
         self.assertEqual(discovery["topicId"], "request")
@@ -753,15 +795,15 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "entities": [{"id": "B1", "kind": "box"}, {"id": "B2", "kind": "box"}],
         }
 
-        discovery = backend._proposal_discovery_from_turns(
-            turns, "stage", {"proposal-request"}
+        discovery = _proposal_discovery_from_turns(
+            turns, "stage", {"proposal-request"}, services=self.services
         )
 
         self.assertEqual(len(discovery["answers"]), 3)
         self.assertEqual(discovery["answers"][-1]["questionKey"], "binding")
         self.assertEqual(discovery["answers"][-1]["answerText"], turns[-1]["content"])
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 turns[-1]["content"], {"conflicts": []}, snapshot,
                 proposal_discovery=discovery,
             ),
@@ -776,7 +818,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "userEvidence": ["请给方案", "作为", "绑定在一个局部节点"],
         }
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 "作为", {"conflicts": [{"kind": "stale_coordinate"}]},
                 {"identityStatus": "exact", "entities": []},
                 proposal_discovery=discovery,
@@ -806,8 +848,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             "objectivePolicy": {"hardMetricGoals": [{"metric": "solutionSteps", "direction": "increase", "minimumDelta": 5}]},
         }
         operations = [{"row": 2, "column": 2, "to": "#"}]
-        candidate_rows = backend.execute_revision_operations(
-            backend.SAMPLE_ROWS, operations, contract, 1
+        candidate_rows = execute_revision_operations(
+            SAMPLE_ROWS, operations, contract, 1
         )
         discovery = {
             "failureEnvelope": {
@@ -815,8 +857,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 "rejections": [{
                     "recoverySuggestionId": "suggestion-1",
                     "hiddenCandidate": {
-                        "baseMapFingerprint": backend.map_fingerprint(backend.SAMPLE_ROWS),
-                        "candidateMapFingerprint": backend.map_fingerprint(candidate_rows),
+                        "baseMapFingerprint": map_fingerprint(SAMPLE_ROWS),
+                        "candidateMapFingerprint": map_fingerprint(candidate_rows),
                         "operations": operations,
                         "strategyIndex": 1,
                         "revisionContract": contract,
@@ -826,8 +868,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             },
         }
 
-        execution = backend._verified_recovery_suggestion_execution(
-            discovery, "建议1", backend.SAMPLE_ROWS, "zh-CN", "recovery-test"
+        execution = _verified_recovery_suggestion_execution(
+            discovery, "建议1", SAMPLE_ROWS, "zh-CN", "recovery-test", services=self.services
         )
 
         self.assertIsNotNone(execution)
@@ -845,13 +887,13 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             {"id": "cancel", "role": "user", "content": "放弃这个，换个方向", "sequence_number": 3, "guidance_json": None},
         ]
 
-        discovery = backend._proposal_discovery_from_turns(turns, "stage")
+        discovery = _proposal_discovery_from_turns(turns, "stage", services=self.services)
 
         self.assertEqual(discovery["topicId"], "request")
         self.assertEqual(discovery["status"], "clarifying")
         self.assertIn("放弃这个", discovery["brief"])
         self.assertEqual(
-            backend._adaptive_revision_routing(
+            _adaptive_revision_routing(
                 turns[-1]["content"], {"conflicts": []},
                 {"identityStatus": "exact", "entities": []},
                 proposal_discovery=discovery,
@@ -868,7 +910,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             ],
         }
         self.assertFalse(
-            backend._allow_adaptive_proposal_completion(
+            _allow_adaptive_proposal_completion(
                 "\u6c34\u57df\u600e\u4e48\u6539",
                 {"conflicts": []},
                 snapshot,
@@ -876,7 +918,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            backend._allow_adaptive_proposal_completion(
+            _allow_adaptive_proposal_completion(
                 "\u6c34\u57df\u600e\u4e48\u6539",
                 {"conflicts": []},
                 snapshot,
@@ -884,7 +926,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            backend._allow_adaptive_proposal_completion(
+            _allow_adaptive_proposal_completion(
                 "\u5e2e\u6211\u6539\u4e00\u4e0b",
                 {"conflicts": []},
                 snapshot,
@@ -893,10 +935,10 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         )
 
     def test_clarification_budget_allows_completion_for_clear_outcome_goal(self):
-        snapshot = backend.build_stage_snapshot(backend.SAMPLE_ROWS)
+        snapshot = build_stage_snapshot(SAMPLE_ROWS)
 
         self.assertTrue(
-            backend._allow_adaptive_proposal_completion(
+            _allow_adaptive_proposal_completion(
                 "\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848\uff0c\u6211\u60f3\u8ba9\u73a9\u5bb6\u66f4\u660e\u663e\u611f\u53d7\u7ed5\u884c\u538b\u529b",
                 {"conflicts": []},
                 snapshot,
@@ -904,7 +946,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            backend._allow_adaptive_proposal_completion(
+            _allow_adaptive_proposal_completion(
                 "\u8bf7\u7ed9\u6211\u4e00\u4e2a\u65b9\u6848",
                 {"conflicts": []},
                 snapshot,
@@ -912,7 +954,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            backend._allow_adaptive_proposal_completion(
+            _allow_adaptive_proposal_completion(
                 "\u8bf7\u8c03\u6574\u7bb1\u5b50\u7684\u8def\u7ebf",
                 {"conflicts": []},
                 {
@@ -928,21 +970,21 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
 
     def test_conservative_map_question_extraction_ignores_generic_question(self):
         self.assertEqual(
-            backend._extract_conservative_map_question(
+            _extract_conservative_map_question(
                 "The route from B1 to T1 feels narrow. Should we keep this corridor?"
             ),
             "Should we keep this corridor?",
         )
         self.assertIsNone(
-            backend._extract_conservative_map_question("Would you like to continue?")
+            _extract_conservative_map_question("Would you like to continue?")
         )
         self.assertIsNone(
-            backend._extract_conservative_map_question(
+            _extract_conservative_map_question(
                 "B2 goes to (8,7), then to (8,8): is that route reachable?"
             )
         )
         self.assertEqual(
-            backend._extract_conservative_map_question(
+            _extract_conservative_map_question(
                 "The water changes the push rhythm. Should it create a visible detour or only affect push order?"
             ),
             "Should it create a visible detour or only affect push order?",
@@ -981,12 +1023,16 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
                 index_response.text,
                 rf'href="\.{escaped_path}\?v=[^"]+"',
             )
-        for asset_path in js_paths:
+        for asset_path in js_paths[:-1]:
             escaped_path = asset_path.replace(".", r"\.")
             self.assertRegex(
                 index_response.text,
-                rf'src="\.{escaped_path}\?v=[^"]+"',
+                rf'<link rel="modulepreload" href="\.{escaped_path}\?v=[^"]+"',
             )
+        self.assertRegex(
+            index_response.text,
+            r'<script type="module" src="\./js/main\.js\?v=[^"]+"></script>',
+        )
         self.assertIn("sendChallengeChoice", js_response.text)
         self.assertIn("offer.availableActions.includes(action)", js_response.text)
         self.assertEqual(index_response.headers.get("cache-control"), "no-cache, must-revalidate")
@@ -1250,7 +1296,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertNotIn("createAssessmentCard", js_response.text)
 
     def test_relaxed_revision_suggestion_names_the_lowered_requirement_before_generation(self):
-        execution = backend._relaxed_revision_suggestion_execution(
+        execution = _relaxed_revision_suggestion_execution(
             {
                 "recentGuidance": {
                     "relaxationOffer": {
@@ -1313,7 +1359,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(summary["componentCellCounts"]["player"], 2)
 
     def test_verified_proposal_summary_is_derived_from_every_actual_small_diff(self):
-        before = list(backend.SAMPLE_ROWS)
+        before = list(SAMPLE_ROWS)
         after = list(before)
         after[1] = "#.@@.......#"
 
@@ -1350,8 +1396,8 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             self.assertIn(token, cocreation_css)
 
     def test_new_session_request_defaults_to_chinese(self):
-        request = backend.CreateSessionRequest(
-            rows=list(backend.SAMPLE_ROWS),
+        request = CreateSessionRequest(
+            rows=list(SAMPLE_ROWS),
             initialDraftMethod="partial_completion",
             idempotencyKey="default-language-contract",
         )
@@ -1372,7 +1418,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         self.assertEqual(sum(row.count("t") for row in payload["rows"]), 1)
 
     def test_sample_known_solution_reaches_target(self):
-        rows = backend.SAMPLE_ROWS
+        rows = SAMPLE_ROWS
         player = find_tile(rows, "p")
         box = find_tile(rows, "s")
         target = find_tile(rows, "t")
@@ -1393,12 +1439,12 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             request_id="request-test",
         )
 
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
-            response = self.client.post(
-                "/api/chat",
-                headers={"X-Request-ID": "request-test"},
-                json={"messages": [{"role": "user", "content": "Assess the map."}]},
-            )
+        self.llm.set_handler("generate_chat_reply", execution)
+        response = self.client.post(
+            "/api/chat",
+            headers={"X-Request-ID": "request-test"},
+            json={"messages": [{"role": "user", "content": "Assess the map."}]},
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["requestId"], "request-test")
@@ -1414,17 +1460,14 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
         ]
         execution = LLMExecutionResult("It uses a short push lane.", 1, "history-test")
 
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            return_value=execution,
-        ) as mocked_generate:
-            response = self.client.post("/api/chat", json={"messages": messages})
+        self.llm.set_handler("generate_chat_reply", execution)
+        response = self.client.post("/api/chat", json={"messages": messages})
 
         self.assertEqual(response.status_code, 200)
-        forwarded_messages, forwarded_rows, _ = mocked_generate.call_args.args
+        self.assertEqual(len(self.llm.method_calls["generate_chat_reply"]), 1)
+        forwarded_messages, forwarded_rows, _ = self.llm.method_calls["generate_chat_reply"][0]["args"]
         self.assertEqual(forwarded_messages, messages)
-        self.assertEqual(forwarded_rows, backend.SAMPLE_ROWS)
+        self.assertEqual(forwarded_rows, SAMPLE_ROWS)
 
     def test_empty_conversation_is_rejected(self):
         response = self.client.post("/api/chat", json={"messages": []})
@@ -1508,12 +1551,12 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
             504,
         )
 
-        with patch.object(backend, "generate_chat_reply", side_effect=error):
-            response = self.client.post(
-                "/api/chat",
-                headers={"X-Request-ID": "timeout-test"},
-                json={"messages": [{"role": "user", "content": "Hello."}]},
-            )
+        self.llm.set_handler("generate_chat_reply", error)
+        response = self.client.post(
+            "/api/chat",
+            headers={"X-Request-ID": "timeout-test"},
+            json={"messages": [{"role": "user", "content": "Hello."}]},
+        )
 
         self.assertEqual(response.status_code, 504)
         self.assertEqual(
@@ -1541,7 +1584,7 @@ class CoCreationPrototypeApiTests(unittest.TestCase):
     def test_system_prompt_is_grounded_and_neutral(self):
         prompt_messages = build_chat_messages(
             [{"role": "user", "content": "What do you notice?"}],
-            backend.SAMPLE_ROWS,
+            SAMPLE_ROWS,
             solver_metrics={
                 "valid": True,
                 "solvable": True,

@@ -1,28 +1,27 @@
 """Offline faults through production validators and repair slots; no live Kimi."""
 import asyncio
-import copy
 import json
 import sys
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import app
-import llm_client as llm
-from component_patches import PatchError
-from conversation_evidence import build_dialogue_evidence, with_latest
-from level_validation import build_stage_snapshot
+from tests.fakes import RecordedAsyncCall, llm_scope
+from cocreation.api import config_models
+from cocreation.llm import facade as llm
+from cocreation.reliability.component_patches import PatchError
+from cocreation.domain.conversation_evidence import build_dialogue_evidence, with_latest
+from cocreation.domain.level_validation import build_stage_snapshot
 from patch_fixtures import patch_fixture
-from proposal_diagnostics import (ProposalDiagnostic, ProposalValidationError, CURRENT_PROPOSAL_DIAGNOSTIC,
+from cocreation.domain.proposal_diagnostics import (ProposalDiagnostic, ProposalValidationError, CURRENT_PROPOSAL_DIAGNOSTIC,
     proposal_phase, structural_issue)
-from proposal_understanding import validate_topic, understanding_patch_request
-from proposal_search import parse_revision_plan
+from cocreation.domain.proposal_understanding import validate_topic, understanding_patch_request
+from cocreation.domain.proposal_search import parse_revision_plan
 from reliability_report import summarize
-from reply_reliability import OptionalRepairBudget
+from cocreation.reliability.reply_reliability import OptionalRepairBudget
 
 ROWS = ["############", "#..........#", "#..p.......#", "#..s..t....#", "#..........#",
         "#..s..t....#", "#..........#", "#..........#", "#..........#", "############"]
@@ -56,8 +55,7 @@ class ProposalDiagnosticTests(unittest.TestCase):
         self.context = {"dialogueEvidence": with_latest(build_dialogue_evidence(turns, "v1"), LATEST)}
 
     def classify(self, request):
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm, "_request_completion", AsyncMock(side_effect=request)):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             return llm.classify_turn_understanding([{"role": "user", "content": LATEST}], self.snapshot,
                 "offline-request", forced_proposal=True, proposal_context=self.context,
                 _deadline=time.monotonic() + 116)
@@ -159,7 +157,7 @@ class ProposalDiagnosticTests(unittest.TestCase):
         moved = list(ROWS)
         moved[3] = "#...s.t....#"
         with self.assertRaises(ValueError):
-            app._validate_changed_proposal(ROWS, moved)
+            config_models._validate_changed_proposal(ROWS, moved)
         changed = list(ROWS)
         changed[7] = "#..@.......#"
         llm.validate_ai_edit_diff(ROWS, changed)
@@ -181,7 +179,7 @@ class ProposalDiagnosticTests(unittest.TestCase):
             "bodyValid": False, "issues": ["protected relocation suggestion"], "relation": "none",
             "conflictingHypothesisIds": []}
         state = {}
-        with patch.object(llm, "_review_intent_candidate_async", AsyncMock(return_value=reviewed)):
+        with llm_scope(intent_candidate_reviewer=RecordedAsyncCall(return_value=reviewed)):
             with self.assertRaises(llm.LowQualityModelResponse):
                 asyncio.run(llm._review_ordinary_intent_with_recovery(optional_budget=OptionalRepairBudget(time.monotonic()+116),
                     component_checks=[], component_state=state, deadline=time.monotonic()+116, body="Move the boxes to opposite corners."))

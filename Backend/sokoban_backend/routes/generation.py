@@ -1,8 +1,8 @@
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from ..config import AGENT_HANDOFF_SCHEMA_VERSION, DEFAULT_LLM_MAX_ATTEMPTS
+from ..dependencies import AppContainer, EventLogger, get_container
 from ..llm.runtime import LLMServiceError
-from ..runtime_state import call_app_hook
 from ..schemas import (
     CreativeIdeaExpansionRequest,
     DGGuideSummaryRequest,
@@ -13,16 +13,11 @@ from ..schemas import (
     PCLevelGenerationRequest,
 )
 from ..services.blueprint_planner import (
-    create_creative_idea_expansion,
-    create_ha_revision_plan_edit,
-    create_ha_revision_plans,
     normalize_generation_preferences,
     validate_client_level_plan_inputs,
     validate_ha_revision_contract,
     validate_human_adjustment_clarity_payload,
 )
-from ..services.dg_guide import create_dg_guide_summary
-from ..storage.jsonl_store import append_ha_generation_event
 
 
 router = APIRouter()
@@ -34,6 +29,7 @@ def apply_llm_execution_headers(response, execution):
 
 
 def log_agent_handoff(
+    event_logger: EventLogger,
     from_agent,
     to_agent,
     artifact_type,
@@ -43,8 +39,7 @@ def log_agent_handoff(
     request_id="",
 ):
     """Record the 8000-side structured handoff in the existing runtime log."""
-    call_app_hook(
-        "log_event",
+    event_logger.log_event(
         "INFO",
         "agent_handoff",
         requestId=request_id,
@@ -63,6 +58,7 @@ def expand_creative_idea(
     payload: CreativeIdeaExpansionRequest,
     request: Request,
     response: Response,
+    container: AppContainer = Depends(get_container),
 ):
     data = payload.model_dump()
     idea_text = str(data.get("ideaText") or "").strip()
@@ -71,7 +67,7 @@ def expand_creative_idea(
         raise HTTPException(status_code=400, detail="ideaText is required")
 
     data["ideaText"] = idea_text
-    execution = create_creative_idea_expansion(
+    execution = container.blueprint_service.create_creative_idea_expansion(
         data,
         request.state.request_id,
     )
@@ -84,6 +80,7 @@ def generate_ha_revision_plans(
     payload: HARevisionPlanRequest,
     request: Request,
     response: Response,
+    container: AppContainer = Depends(get_container),
 ):
     data = payload.model_dump()
     adjustment_text = str(data.get("adjustmentText") or "").strip()
@@ -98,15 +95,15 @@ def generate_ha_revision_plans(
     data["adjustmentText"] = adjustment_text
 
     try:
-        execution = create_ha_revision_plans(
+        execution = container.blueprint_service.create_ha_revision_plans(
             data,
             request.state.request_id,
         )
-        append_ha_generation_event(data, execution.value["options"])
+        container.store.append_ha_generation_event(data, execution.value["options"])
         apply_llm_execution_headers(response, execution)
         return execution.value
     except LLMServiceError as exception:
-        append_ha_generation_event(
+        container.store.append_ha_generation_event(
             data,
             [],
             error=exception.safe_message,
@@ -119,6 +116,7 @@ def revise_ha_revision_plan(
     payload: HARevisionPlanEditRequest,
     request: Request,
     response: Response,
+    container: AppContainer = Depends(get_container),
 ):
     data = payload.model_dump()
     edited_description = str(data.get("editedDescription") or "").strip()
@@ -144,7 +142,7 @@ def revise_ha_revision_plan(
         raise HTTPException(status_code=400, detail=str(exception)) from exception
 
     data["editedDescription"] = edited_description[:420]
-    execution = create_ha_revision_plan_edit(
+    execution = container.blueprint_service.create_ha_revision_plan_edit(
         data,
         request.state.request_id,
     )
@@ -157,14 +155,14 @@ def validate_human_adjustment_legacy(
     request: Request,
     response: Response,
     adjustmentText: str = "",
+    container: AppContainer = Depends(get_container),
 ):
     adjustment_text = str(adjustmentText or "").strip()
 
     if not adjustment_text:
         return validate_human_adjustment_clarity_payload({})
 
-    execution = call_app_hook(
-        "create_human_adjustment_clarity_check",
+    execution = container.blueprint_service.create_human_adjustment_clarity_check(
         adjustment_text,
         request.state.request_id,
     )
@@ -177,14 +175,14 @@ def validate_human_adjustment(
     payload: HumanAdjustmentValidationRequest,
     request: Request,
     response: Response,
+    container: AppContainer = Depends(get_container),
 ):
     adjustment_text = str(payload.adjustmentText or "").strip()
 
     if not adjustment_text:
         raise HTTPException(status_code=400, detail="adjustmentText is required")
 
-    execution = call_app_hook(
-        "create_human_adjustment_clarity_check",
+    execution = container.blueprint_service.create_human_adjustment_clarity_check(
         adjustment_text,
         request.state.request_id,
     )
@@ -197,6 +195,7 @@ def dg_guide_summary(
     payload: DGGuideSummaryRequest,
     request: Request,
     response: Response,
+    container: AppContainer = Depends(get_container),
 ):
     context = {
         "firstMovePreference": payload.firstMovePreference.strip(),
@@ -211,8 +210,9 @@ def dg_guide_summary(
         or context["routeRhythmPreference"] not in {"short_routes", "occasional_detours", "long_routes", "no_preference"}
     ):
         raise HTTPException(status_code=400, detail="Invalid DG neutral answer.")
-    result = create_dg_guide_summary(context, request.state.request_id)
+    result = container.dg_service.create_summary(context, request.state.request_id)
     log_agent_handoff(
+        container.event_logger,
         "draft_understanding",
         "blueprint_planning",
         "dgContext",
@@ -236,20 +236,23 @@ def generate_pc_level(
     payload: PCLevelGenerationRequest,
     request: Request,
     response: Response,
+    container: AppContainer = Depends(get_container),
 ):
     data = payload.model_dump(exclude={"maxAttempts"})
 
     try:
-        data = call_app_hook("normalize_pc_level_request", data)
+        data = container.pc_service.normalize_request(data)
     except ValueError as exception:
         raise HTTPException(status_code=400, detail=str(exception)) from exception
 
     max_attempts = max(
         1,
-        min(DEFAULT_LLM_MAX_ATTEMPTS, int(payload.maxAttempts or 1)),
+        min(
+            container.settings.llm_max_attempts,
+            int(payload.maxAttempts or 1),
+        ),
     )
-    execution = call_app_hook(
-        "create_pc_level_candidate",
+    execution = container.pc_service.create_candidate(
         data,
         request.state.request_id,
         max_attempts,
@@ -277,6 +280,7 @@ def generate_level_plan_legacy(
     previousLevelMetrics: str = "",
     selectedHAPlan: str = "",
     maxAttempts: int = DEFAULT_LLM_MAX_ATTEMPTS,
+    container: AppContainer = Depends(get_container),
 ):
     payload = LevelPlanRequest(
         ideaText=ideaText,
@@ -294,7 +298,7 @@ def generate_level_plan_legacy(
         selectedHAPlan=selectedHAPlan,
         maxAttempts=maxAttempts,
     )
-    return execute_level_plan_request(payload, request, response)
+    return execute_level_plan_request(payload, request, response, container)
 
 
 @router.post("/generate-level-plan")
@@ -302,14 +306,16 @@ def generate_level_plan(
     payload: LevelPlanRequest,
     request: Request,
     response: Response,
+    container: AppContainer = Depends(get_container),
 ):
-    return execute_level_plan_request(payload, request, response)
+    return execute_level_plan_request(payload, request, response, container)
 
 
 def execute_level_plan_request(
     payload: LevelPlanRequest,
     request: Request,
     response: Response,
+    container: AppContainer,
 ):
     data = payload.model_dump(exclude={"maxAttempts"})
 
@@ -323,15 +329,18 @@ def execute_level_plan_request(
 
     max_attempts = max(
         1,
-        min(DEFAULT_LLM_MAX_ATTEMPTS, int(payload.maxAttempts or 1)),
+        min(
+            container.settings.llm_max_attempts,
+            int(payload.maxAttempts or 1),
+        ),
     )
-    execution = call_app_hook(
-        "create_level_plan",
+    execution = container.blueprint_service.create_level_plan(
         data,
         request.state.request_id,
         max_attempts,
     )
     log_agent_handoff(
+        container.event_logger,
         "blueprint_planning",
         "unity_generator",
         "LevelDesignPlan",

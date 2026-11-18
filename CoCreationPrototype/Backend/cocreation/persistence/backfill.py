@@ -6,8 +6,8 @@ import sqlite3
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
-from component_recovery import interaction_state
-from design_context import (
+from cocreation.reliability.component_recovery import interaction_state
+from cocreation.domain.design_context import (
     add_confirmed_decision,
     add_open_question,
     add_rejected_decision,
@@ -21,7 +21,7 @@ from design_context import (
     question_dedup_key,
     set_active_disagreement,
 )
-from level_validation import (
+from cocreation.domain.level_validation import (
     build_entity_bindings,
     build_untrusted_entity_bindings,
     derive_entity_transitions,
@@ -36,6 +36,12 @@ from .database import (
     map_fingerprint,
     record_event,
 )
+
+
+def _utc_now_iso(clock=None):
+    if clock is not None:
+        return clock.utc_now()
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def load_design_context(database, session_id, version_id):
@@ -218,7 +224,7 @@ def backfill_entity_bindings(database):
             )
 
 
-def backfill_design_contexts(database):
+def backfill_design_contexts(database, *, clock=None):
     """Conservatively seed snapshots for databases created before DesignContext.
 
     This performs no model calls. Only user turns, formal decisions, and
@@ -293,7 +299,7 @@ def backfill_design_contexts(database):
                             "fromSchemaVersion": legacy_schema_version,
                             "toSchemaVersion": 6,
                         }),
-                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        _utc_now_iso(clock),
                     ),
                 )
                 changed += 1
@@ -389,14 +395,14 @@ def backfill_design_contexts(database):
                     (
                         session["id"],
                         dump_json({"versionId": version["id"], "schemaVersion": 6}),
-                        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        _utc_now_iso(clock),
                     ),
                 )
             changed += 1
     return changed
 
 
-def backfill_intent_semantics(database):
+def backfill_intent_semantics(database, *, clock=None):
     """Attach high-confidence user-authored semantic claims without rewriting history."""
     topic_subjects = {
         "water_function": {"water"},
@@ -517,7 +523,7 @@ def backfill_intent_semantics(database):
                         "sourceUserTurnId": source["id"],
                         "semanticClaims": [claim],
                     }),
-                    datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    _utc_now_iso(clock),
                 ),
             )
             changed += 1
@@ -697,7 +703,7 @@ def backfill_revision_challenges(database):
             break
 
 
-def repair_resolved_challenge_disagreements(database):
+def repair_resolved_challenge_disagreements(database, *, clock=None):
     """Clear choice-pending snapshots already resolved by a validated proposal.
 
     A short-lived routing mismatch allowed the frontend's ``continue_challenge``
@@ -838,13 +844,13 @@ def repair_resolved_challenge_disagreements(database):
                     "messageKey": message_key,
                     "reason": "validated_replacement_proposal",
                 },
-                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                _utc_now_iso(clock),
             )
             repaired += 1
     return repaired
 
 
-def repair_duplicate_progress_questions(database):
+def repair_duplicate_progress_questions(database, *, clock=None):
     """Idempotently merge duplicate visible questions in Stage snapshots."""
     versions = database.execute(
         """
@@ -891,13 +897,13 @@ def repair_duplicate_progress_questions(database):
             version["session_id"],
             "duplicate_progress_questions_repaired",
             {"versionId": version["id"], "removedCount": removed},
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            _utc_now_iso(clock),
         )
         repaired += removed
     return repaired
 
 
-def repair_answered_challenge_choice_questions(database):
+def repair_answered_challenge_choice_questions(database, *, clock=None):
     """Backfill explicit yes/no answers skipped by the legacy challenge route."""
     continuations = database.execute(
         """
@@ -994,7 +1000,7 @@ def repair_answered_challenge_choice_questions(database):
                     "userTurnId": user_turn["id"],
                     "questionIds": matching_ids,
                 },
-                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                _utc_now_iso(clock),
             )
             repaired += len(matching_ids)
     return repaired

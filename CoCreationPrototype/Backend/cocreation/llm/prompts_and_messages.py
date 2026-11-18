@@ -4,12 +4,9 @@ from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
-import os
 import re
-import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -17,7 +14,7 @@ from openai import (
     AsyncOpenAI,
     RateLimitError,
 )
-from proposal_search import (
+from cocreation.domain.proposal_search import (
     Focus,
     MetricGoal,
     ProposalSearchExhausted,
@@ -26,7 +23,7 @@ from proposal_search import (
     search_revision_plan,
     validate_revision_plan_against_map,
 )
-from level_validation import (
+from cocreation.domain.level_validation import (
     TILE_LEGEND,
     build_map_facts,
     build_stage_snapshot,
@@ -35,34 +32,77 @@ from level_validation import (
     summarize_verified_diff,
     validate_and_solve,
 )
-from design_context import validate_design_context_patch
-from repository import map_fingerprint
-from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key,
-    CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
-from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
-from conversation_evidence import CONTEXT_VERSION
-from understanding_review import review_schema, review_targets, merge_review, review_patch_request, REVIEW_VERSION
-import proposal_options
-from proposal_understanding import (
-    turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
-    engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
-    understanding_patch_request, validate_option_plan_scope,
+from cocreation.domain.design_context import validate_design_context_patch
+from cocreation.persistence.repository import map_fingerprint
+from cocreation.reliability.reply_reliability import (
+    ComponentCheck,
+    OptionalRepairBudget,
+    parse_json_object,
+    requirement_cache_key,
+    CURRENT_REPLY_TRACE,
+    REPLY_PIPELINE_VERSION,
+    trace_reply,
+    failure_reason,
 )
-from proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
-    CURRENT_PROPOSAL_DIAGNOSTIC, ProposalValidationError)
-from design_requirements import (
-    requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
-    goal_rank, tradeoff_message, protected_change_requested,
+from cocreation.reliability.component_patches import (
+    PatchRequest,
+    PatchError,
+    Target,
+    patch_response_format,
+    dependent_components,
+    restore_operation_sources,
+    PATCH_VERSION,
+)
+from cocreation.domain.conversation_evidence import CONTEXT_VERSION
+from cocreation.domain.understanding_review import (
+    review_schema,
+    review_targets,
+    merge_review,
+    review_patch_request,
+    REVIEW_VERSION,
+)
+import cocreation.domain.proposal_options as proposal_options
+from cocreation.domain.proposal_understanding import (
+    turn_schema,
+    validate_topic,
+    designer_sources,
+    critical_review_reason,
+    topic_signature,
+    validate_plan_scope,
+    engagement_schema,
+    validate_engagement,
+    MEANING_REVIEW_VERSION,
+    understanding_patch_request,
+    validate_option_plan_scope,
+)
+from cocreation.domain.proposal_diagnostics import (
+    proposal_phase,
+    trace_proposal,
+    trace_repair,
+    reason_code,
+    safe_issues,
+    CURRENT_PROPOSAL_DIAGNOSTIC,
+    ProposalValidationError,
+)
+from cocreation.domain.design_requirements import (
+    requirement_response_schema,
+    validate_requirement_record,
+    evaluate_requirements,
+    preflight_requirements,
+    goal_rank,
+    tradeoff_message,
+    protected_change_requested,
     validate_requirement_components,
-    requirement_model_view, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, INTERPRETATION_VERSION,
+    requirement_model_view,
+    REQUIREMENT_SEMANTICS,
+    REQUIREMENT_DEFINITIONS,
+    INTERPRETATION_VERSION,
 )
-from revision_workflow import (
+from cocreation.domain.revision_workflow import (
     SemanticConstraintError,
     build_revision_workflow,
     validate_semantic_constraints,
 )
-
-from ..runtime_ref import llm_attr
 from .config_and_runtime import _chat_compact_experiment_enabled, _dialogue_background_prompt, _is_human_edit_stage_opening, _is_stage_one, _proposal_clarification_compact_experiment_enabled, _visible_reply_style
 from .proposal_planning import _continuity_context_prompt, _design_context_prompt, _has_proposal_clarification, _plain_action_instruction, classify_guidance_request
 from .snapshot_grounding import _historical_stage_reference_instruction, _join_english, _localized_change_labels, _map_grounding_contract, _proposal_clarification_route_evidence, _route_evidence_for_prompt, _solver_evidence_for_prompt, _stage_snapshot_for_prompt

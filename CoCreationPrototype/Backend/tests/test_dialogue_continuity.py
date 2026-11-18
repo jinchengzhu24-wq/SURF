@@ -6,19 +6,19 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 import httpx
 from openai import APIStatusError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import llm_client as llm
+from tests.fakes import RecordedAsyncCall, llm_scope
+from cocreation.llm import facade as llm
 from patch_fixtures import patch_fixture
 import test_llm_client as llm_tests
-from conversation_evidence import build_dialogue_evidence, with_latest
-from level_validation import build_stage_snapshot
-from proposal_understanding import designer_sources, validate_topic
-from reply_reliability import OptionalRepairBudget
+from cocreation.domain.conversation_evidence import build_dialogue_evidence, with_latest
+from cocreation.domain.level_validation import build_stage_snapshot
+from cocreation.domain.proposal_understanding import designer_sources, validate_topic
+from cocreation.reliability.reply_reliability import OptionalRepairBudget
 
 ROWS = llm_tests.OPERATION_BASE_ROWS
 
@@ -58,8 +58,8 @@ class DialogueEvidenceTests(unittest.TestCase):
         latest = "那你觉得可以怎么改"
         evidence = build_dialogue_evidence([{"id": "u1", "role": "user", "content": "不好看"}], "v1")
         context = {"dialogueEvidence": with_latest(evidence, latest)}
-        request = AsyncMock(return_value=completion(interpretation(latest, visual_topic())))
-        with patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), patch.object(llm, "_request_completion", request):
+        request = RecordedAsyncCall(return_value=completion(interpretation(latest, visual_topic())))
+        with llm_scope(completion_requester=request):
             result = llm.classify_turn_understanding([
                 {"role": "user", "content": "不好看"}, {"role": "user", "content": latest}], self.snapshot, "r", proposal_context=context)
         self.assertEqual(result["proposalUnderstanding"]["goals"][0]["sourceTurnId"], "u1")
@@ -70,8 +70,8 @@ class DialogueEvidenceTests(unittest.TestCase):
     def test_bad_optional_topic_does_not_block_ordinary_understanding(self):
         latest = "不好看"
         candidate = {**interpretation(latest, {"broken": True}), "acts": ["evaluation"]}
-        request = AsyncMock(return_value=completion(candidate))
-        with patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), patch.object(llm, "_request_completion", request):
+        request = RecordedAsyncCall(return_value=completion(candidate))
+        with llm_scope(completion_requester=request):
             result = llm.classify_turn_understanding([{"role": "user", "content": latest}], self.snapshot, "r")
         self.assertIsNone(result["proposalUnderstanding"])
         self.assertEqual(result["acts"], ["evaluation"])
@@ -86,8 +86,8 @@ class DialogueEvidenceTests(unittest.TestCase):
             if kwargs["task"] == "turn_understanding":
                 return completion(interpretation(latest, wrong))
             return completion(patch_fixture(args[3][-1]["content"], {"understanding": {"proposalUnderstanding": visual_topic()}}))
-        request = AsyncMock(side_effect=request_value)
-        with patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), patch.object(llm, "_request_completion", request):
+        request = RecordedAsyncCall(side_effect=request_value)
+        with llm_scope(completion_requester=request):
             result = llm.classify_turn_understanding([{"role": "user", "content": latest}], self.snapshot, "r", proposal_context=context)
         self.assertEqual(result["acts"], ["revision_request"])
         self.assertEqual(request.await_count, 2)
@@ -129,9 +129,9 @@ class ConversationalDeliveryTests(unittest.TestCase):
                 self.assertIn(body, result.assistant_message)
 
     def test_intent_review_failure_with_confirmed_memory_keeps_short_body(self):
-        review = AsyncMock(side_effect=ValueError("bad optional metadata"))
+        review = RecordedAsyncCall(side_effect=ValueError("bad optional metadata"))
         checks = []
-        with patch.object(llm, "_review_intent_candidate_async", review):
+        with llm_scope(intent_candidate_reviewer=review):
             result = asyncio.run(llm._review_ordinary_intent_with_recovery(
                 optional_budget=OptionalRepairBudget(time.monotonic() + 60), component_checks=checks,
                 api_key="fake", base_url="fake", user_text="少一些", body="我倾向减少水面。",
@@ -143,7 +143,10 @@ class ConversationalDeliveryTests(unittest.TestCase):
 
     def test_verified_semantic_body_defect_still_requires_repair(self):
         review = {"classification": "none", "bodyValid": False, "issues": ["The reply does not answer the question."]}
-        with patch.object(llm, "_review_intent_candidate_async", AsyncMock(return_value=review)), self.assertRaises(llm.LowQualityModelResponse):
+        with (
+            llm_scope(intent_candidate_reviewer=RecordedAsyncCall(return_value=review)),
+            self.assertRaises(llm.LowQualityModelResponse),
+        ):
             asyncio.run(llm._review_ordinary_intent_with_recovery(
                 optional_budget=OptionalRepairBudget(time.monotonic() + 60), component_checks=[],
                 api_key="fake", base_url="fake", user_text="What is T?", body="Hello there.",
@@ -153,7 +156,7 @@ class ConversationalDeliveryTests(unittest.TestCase):
     def test_optional_review_provider_failure_preserves_body(self):
         error = APIStatusError("upstream unavailable", response=httpx.Response(502,
             request=httpx.Request("POST", "https://example.invalid")), body={})
-        with patch.object(llm, "_review_intent_candidate_async", AsyncMock(side_effect=error)):
+        with llm_scope(intent_candidate_reviewer=RecordedAsyncCall(side_effect=error)):
             result = asyncio.run(llm._review_ordinary_intent_with_recovery(
                 optional_budget=OptionalRepairBudget(time.monotonic() + 60), component_checks=[],
                 api_key="fake", base_url="fake", user_text="What is T?", body="T marks a target.",

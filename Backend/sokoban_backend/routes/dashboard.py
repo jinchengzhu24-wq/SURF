@@ -1,12 +1,7 @@
-from pathlib import Path
-import shutil
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
-from ..config import require_delete_password
-from ..llm.runtime import readiness_payload
-from ..runtime_state import app_attr
+from ..dependencies import AppContainer, get_container, require_delete_password
 from ..schemas import (
     DeleteCreativeIdeaRequest,
     DeleteExpansionChoiceRequest,
@@ -40,47 +35,17 @@ from ..services.dashboard_projections import (
     normalize_survey_identifier,
     render_level_records_view,
 )
-from ..services.online_rooms import ONLINE_ROOMS, ONLINE_ROOMS_LOCK, online_match_flow_directory
 from ..storage.jsonl_store import (
-    append_creative_idea_record,
-    append_expansion_choice_record,
-    append_ha_plan_event,
-    append_journey_event,
-    append_level_record,
-    append_survey_record,
+    StudyLogStore,
     build_expansion_choice_identifier,
     build_ha_plan_event_identifier,
     build_journey_event_identifier,
-    ensure_study_log_dir,
     normalize_creative_idea_identifier,
     normalize_expansion_choice_identifier,
-    read_creative_idea_events,
-    read_expansion_choice_events,
-    read_ha_plan_events,
-    read_journey_events,
-    read_level_record_events,
-    read_online_match_events,
-    read_raw_jsonl_text,
-    read_survey_response_events,
-    study_record_lock,
-    write_jsonl_records,
 )
 
 
 router = APIRouter()
-
-
-def _record_lock():
-    return app_attr("study_record_lock") or study_record_lock
-
-
-def _rooms_lock():
-    return app_attr("ONLINE_ROOMS_LOCK") or ONLINE_ROOMS_LOCK
-
-
-def _rooms():
-    rooms = app_attr("ONLINE_ROOMS")
-    return ONLINE_ROOMS if rooms is None else rooms
 
 
 @router.post("/verify-dashboard-password")
@@ -95,8 +60,8 @@ def health():
 
 
 @router.get("/ready")
-def ready():
-    payload = readiness_payload()
+def ready(container: AppContainer = Depends(get_container)):
+    payload = container.llm_gateway.readiness_payload()
     return JSONResponse(
         status_code=200 if payload["status"] == "ready" else 503,
         content=payload,
@@ -104,76 +69,111 @@ def ready():
 
 
 @router.post("/record-level-start")
-async def record_level_start(request: Request):
-    return await append_level_record(request, "level-start")
+async def record_level_start(
+    request: Request,
+    container: AppContainer = Depends(get_container),
+):
+    return await container.store.append_level_record(request, "level-start")
 
 
 @router.post("/record-level-end")
-async def record_level_end(request: Request):
-    return await append_level_record(request, "level-end")
+async def record_level_end(
+    request: Request,
+    container: AppContainer = Depends(get_container),
+):
+    return await container.store.append_level_record(request, "level-end")
 
 
 @router.post("/record-survey-response")
-async def record_survey_response(request: Request):
-    return await append_survey_record(request)
+async def record_survey_response(
+    request: Request,
+    container: AppContainer = Depends(get_container),
+):
+    return await container.store.append_survey_record(request)
 
 
 @router.post("/record-creative-idea")
-async def record_creative_idea(request: Request):
-    return await append_creative_idea_record(request)
+async def record_creative_idea(
+    request: Request,
+    container: AppContainer = Depends(get_container),
+):
+    return await container.store.append_creative_idea_record(request)
 
 
 @router.post("/record-expansion-choice")
-async def record_expansion_choice(request: Request):
-    return await append_expansion_choice_record(request)
+async def record_expansion_choice(
+    request: Request,
+    container: AppContainer = Depends(get_container),
+):
+    return await container.store.append_expansion_choice_record(request)
 
 
 @router.post("/record-ha-plan-choice")
-async def record_ha_plan_choice(request: Request):
-    return await append_ha_plan_event(request, "ha-plan-choice")
+async def record_ha_plan_choice(
+    request: Request,
+    container: AppContainer = Depends(get_container),
+):
+    return await container.store.append_ha_plan_event(request, "ha-plan-choice")
 
 
 @router.post("/record-journey-event")
-async def record_journey_event(request: Request):
-    return await append_journey_event(request)
+async def record_journey_event(
+    request: Request,
+    container: AppContainer = Depends(get_container),
+):
+    return await container.store.append_journey_event(request)
 
 
 @router.get("/level-records", response_class=PlainTextResponse)
-def get_level_records():
-    return read_raw_jsonl_text(app_attr("STUDY_LOG_FILE"))
+def get_level_records(container: AppContainer = Depends(get_container)):
+    return container.store.read_raw_jsonl_text(container.paths.study_log_file)
 
 
 @router.get("/survey-records", response_class=PlainTextResponse)
-def get_survey_records():
-    return read_raw_jsonl_text(app_attr("SURVEY_LOG_FILE"))
+def get_survey_records(container: AppContainer = Depends(get_container)):
+    return container.store.read_raw_jsonl_text(container.paths.survey_log_file)
 
 
 @router.get("/matchmaking-records", response_class=PlainTextResponse)
-def get_matchmaking_records():
-    return read_raw_jsonl_text(app_attr("ONLINE_MATCH_LOG_FILE"))
+def get_matchmaking_records(container: AppContainer = Depends(get_container)):
+    return container.store.read_raw_jsonl_text(container.paths.online_match_log_file)
 
 
 @router.get("/creative-ideas", response_class=PlainTextResponse)
-def get_creative_ideas():
-    return read_raw_jsonl_text(app_attr("CREATIVE_IDEA_LOG_FILE"))
+def get_creative_ideas(container: AppContainer = Depends(get_container)):
+    return container.store.read_raw_jsonl_text(container.paths.creative_idea_log_file)
 
 
 @router.get("/survey-records-data")
-def get_survey_records_data():
-    responses, malformed_count = read_survey_response_events()
-    return build_survey_records_payload(responses, malformed_count)
+def get_survey_records_data(container: AppContainer = Depends(get_container)):
+    responses, malformed_count = container.store.read_survey_response_events()
+    return build_survey_records_payload(
+        responses,
+        malformed_count,
+        paths=container.paths,
+        clock=container.clock,
+    )
 
 
 @router.get("/matchmaking-records-data")
-def get_matchmaking_records_data():
-    events, malformed_count = read_online_match_events()
-    return build_matchmaking_records_payload(events, malformed_count)
+def get_matchmaking_records_data(container: AppContainer = Depends(get_container)):
+    events, malformed_count = container.store.read_online_match_events()
+    return build_matchmaking_records_payload(
+        events,
+        malformed_count,
+        store=container.store,
+    )
 
 
 @router.get("/creative-ideas-data")
-def get_creative_ideas_data():
-    ideas, malformed_count = read_creative_idea_events()
-    return build_creative_ideas_payload(ideas, malformed_count)
+def get_creative_ideas_data(container: AppContainer = Depends(get_container)):
+    ideas, malformed_count = container.store.read_creative_idea_events()
+    return build_creative_ideas_payload(
+        ideas,
+        malformed_count,
+        paths=container.paths,
+        clock=container.clock,
+    )
 
 
 @router.get("/level-records-view", response_class=HTMLResponse)
@@ -193,52 +193,74 @@ def get_level_records_dashboard(cleared: int = 0):
 
 
 @router.get("/level-records-data")
-def get_level_records_data():
-    events, malformed_count = read_level_record_events()
+def get_level_records_data(container: AppContainer = Depends(get_container)):
+    events, malformed_count = container.store.read_level_record_events()
     events = filter_frontend_records(events)
     levels = merge_level_records(events)
-    payload = build_level_records_payload(events, levels, malformed_count)
-    survey_responses, survey_malformed_count = read_survey_response_events()
+    payload = build_level_records_payload(
+        events,
+        levels,
+        malformed_count,
+        paths=container.paths,
+        clock=container.clock,
+    )
+    survey_responses, survey_malformed_count = container.store.read_survey_response_events()
     survey_responses = filter_frontend_records(survey_responses)
     survey_payload = build_survey_records_payload(
         survey_responses,
         survey_malformed_count,
+        paths=container.paths,
+        clock=container.clock,
     )
     payload["surveySummary"] = survey_payload["summary"]
     payload["surveyResponses"] = survey_payload["responses"]
     payload["surveyMalformedCount"] = survey_payload["malformedCount"]
-    creative_ideas, creative_malformed_count = read_creative_idea_events()
+
+    creative_ideas, creative_malformed_count = container.store.read_creative_idea_events()
     creative_ideas = filter_frontend_records(creative_ideas)
     creative_payload = build_creative_ideas_payload(
         creative_ideas,
         creative_malformed_count,
+        paths=container.paths,
+        clock=container.clock,
     )
     payload["creativeIdeaSummary"] = creative_payload["summary"]
     payload["creativeIdeas"] = creative_payload["ideas"]
     payload["creativeIdeaMalformedCount"] = creative_payload["malformedCount"]
-    expansion_choices, expansion_malformed_count = read_expansion_choice_events()
+
+    expansion_choices, expansion_malformed_count = (
+        container.store.read_expansion_choice_events()
+    )
     expansion_choices = filter_frontend_records(expansion_choices)
     expansion_payload = build_expansion_choices_payload(
         expansion_choices,
         expansion_malformed_count,
+        paths=container.paths,
+        clock=container.clock,
     )
     payload["creativeExpansionChoiceSummary"] = expansion_payload["summary"]
     payload["creativeExpansionChoices"] = expansion_payload["choices"]
     payload["creativeExpansionChoiceMalformedCount"] = expansion_payload["malformedCount"]
-    ha_plan_events, ha_plan_malformed_count = read_ha_plan_events()
+
+    ha_plan_events, ha_plan_malformed_count = container.store.read_ha_plan_events()
     ha_plan_events = filter_frontend_ha_plan_records(ha_plan_events)
     ha_plan_payload = build_ha_plan_events_payload(
         ha_plan_events,
         ha_plan_malformed_count,
+        paths=container.paths,
+        clock=container.clock,
     )
     payload["haPlanSummary"] = ha_plan_payload["summary"]
     payload["haPlanEvents"] = ha_plan_payload["events"]
     payload["haPlanMalformedCount"] = ha_plan_payload["malformedCount"]
-    journey_events, journey_malformed_count = read_journey_events()
+
+    journey_events, journey_malformed_count = container.store.read_journey_events()
     journey_events = filter_frontend_records(journey_events)
     journey_payload = build_journey_events_payload(
         journey_events,
         journey_malformed_count,
+        paths=container.paths,
+        clock=container.clock,
     )
     payload["journeyEventSummary"] = journey_payload["summary"]
     payload["journeyEvents"] = journey_payload["events"]
@@ -247,14 +269,26 @@ def get_level_records_data():
 
 
 @router.get("/level-records-legacy", response_class=HTMLResponse)
-def get_level_records_legacy(cleared: int = 0):
-    events, malformed_count = read_level_record_events()
+def get_level_records_legacy(
+    cleared: int = 0,
+    container: AppContainer = Depends(get_container),
+):
+    events, malformed_count = container.store.read_level_record_events()
     levels = merge_level_records(events)
-    return render_level_records_view(events, levels, malformed_count, cleared == 1)
+    return render_level_records_view(
+        events,
+        levels,
+        malformed_count,
+        cleared == 1,
+        paths=container.paths,
+    )
 
 
 @router.post("/rename-round")
-def rename_round(request: RenameRoundRequest):
+def rename_round(
+    request: RenameRoundRequest,
+    container: AppContainer = Depends(get_container),
+):
     round_id = normalize_round_id(request.roundId)
     display_name = normalize_round_display_name(request.displayName)
 
@@ -267,10 +301,10 @@ def rename_round(request: RenameRoundRequest):
     if not display_name:
         raise HTTPException(status_code=400, detail="displayName is required")
 
-    ensure_study_log_dir()
+    container.store.ensure_study_log_dir()
 
-    with _record_lock():
-        records, _ = read_level_record_events()
+    with container.store.record_lock:
+        records, _ = container.store.read_level_record_events()
         matched_count = 0
 
         for record in records:
@@ -281,7 +315,7 @@ def rename_round(request: RenameRoundRequest):
         if matched_count == 0:
             raise HTTPException(status_code=404, detail="Round not found")
 
-        write_jsonl_records(app_attr("STUDY_LOG_FILE"), records)
+        container.store.write_jsonl_records(container.paths.study_log_file, records)
 
     return {
         "status": "ok",
@@ -292,7 +326,10 @@ def rename_round(request: RenameRoundRequest):
 
 
 @router.post("/rename-level-run")
-def rename_level_run(request: RenameLevelRunRequest):
+def rename_level_run(
+    request: RenameLevelRunRequest,
+    container: AppContainer = Depends(get_container),
+):
     level_run_id = normalize_level_run_id(request.levelRunId)
     display_name = normalize_level_display_name(request.displayName)
 
@@ -302,10 +339,10 @@ def rename_level_run(request: RenameLevelRunRequest):
     if not display_name:
         raise HTTPException(status_code=400, detail="displayName is required")
 
-    ensure_study_log_dir()
+    container.store.ensure_study_log_dir()
 
-    with _record_lock():
-        records, _ = read_level_record_events()
+    with container.store.record_lock:
+        records, _ = container.store.read_level_record_events()
         matched_count = 0
 
         for record in records:
@@ -318,7 +355,7 @@ def rename_level_run(request: RenameLevelRunRequest):
         if matched_count == 0:
             raise HTTPException(status_code=404, detail="Level run not found")
 
-        write_jsonl_records(app_attr("STUDY_LOG_FILE"), records)
+        container.store.write_jsonl_records(container.paths.study_log_file, records)
 
     return {
         "status": "ok",
@@ -328,9 +365,15 @@ def rename_level_run(request: RenameLevelRunRequest):
     }
 
 
-def _filter_records_or_404(path, reader, predicate, not_found_message):
-    ensure_study_log_dir()
-    with _record_lock():
+def _filter_records_or_404(
+    store: StudyLogStore,
+    path,
+    reader,
+    predicate,
+    not_found_message: str,
+) -> int:
+    store.ensure_study_log_dir()
+    with store.record_lock:
         records, _ = reader()
         remaining_records = []
         deleted_count = 0
@@ -344,19 +387,23 @@ def _filter_records_or_404(path, reader, predicate, not_found_message):
         if deleted_count == 0:
             raise HTTPException(status_code=404, detail=not_found_message)
 
-        write_jsonl_records(path, remaining_records)
+        store.write_jsonl_records(path, remaining_records)
     return deleted_count
 
 
 @router.post("/delete-round", dependencies=[Depends(require_delete_password)])
-def delete_round(request: RoundRequest):
+def delete_round(
+    request: RoundRequest,
+    container: AppContainer = Depends(get_container),
+):
     round_id = normalize_round_id(request.roundId)
     if not round_id:
         raise HTTPException(status_code=400, detail="roundId is required")
 
     deleted_count = _filter_records_or_404(
-        app_attr("STUDY_LOG_FILE"),
-        read_level_record_events,
+        container.store,
+        container.paths.study_log_file,
+        container.store.read_level_record_events,
         lambda record: is_level_event_in_round(record, round_id),
         "Round not found",
     )
@@ -368,14 +415,18 @@ def delete_round(request: RoundRequest):
 
 
 @router.post("/delete-level-run", dependencies=[Depends(require_delete_password)])
-def delete_level_run(request: DeleteLevelRunRequest):
+def delete_level_run(
+    request: DeleteLevelRunRequest,
+    container: AppContainer = Depends(get_container),
+):
     level_run_id = normalize_level_run_id(request.levelRunId)
     if not level_run_id:
         raise HTTPException(status_code=400, detail="levelRunId is required")
 
     deleted_count = _filter_records_or_404(
-        app_attr("STUDY_LOG_FILE"),
-        read_level_record_events,
+        container.store,
+        container.paths.study_log_file,
+        container.store.read_level_record_events,
         lambda record: normalize_level_run_id(record.get("levelRunId")) == level_run_id,
         "Level run not found",
     )
@@ -390,7 +441,10 @@ def delete_level_run(request: DeleteLevelRunRequest):
     "/delete-survey-response",
     dependencies=[Depends(require_delete_password)],
 )
-def delete_survey_response(request: DeleteSurveyResponseRequest):
+def delete_survey_response(
+    request: DeleteSurveyResponseRequest,
+    container: AppContainer = Depends(get_container),
+):
     response_id = normalize_survey_identifier(request.responseId)
     player_nickname = normalize_survey_identifier(request.playerNickname)
 
@@ -400,10 +454,10 @@ def delete_survey_response(request: DeleteSurveyResponseRequest):
             detail="responseId or playerNickname is required",
         )
 
-    ensure_study_log_dir()
+    container.store.ensure_study_log_dir()
 
-    with _record_lock():
-        records, _ = read_survey_response_events()
+    with container.store.record_lock:
+        records, _ = container.store.read_survey_response_events()
         remaining_records = []
         deleted_count = 0
 
@@ -442,7 +496,10 @@ def delete_survey_response(request: DeleteSurveyResponseRequest):
             ]
             deleted_count = 1
 
-        write_jsonl_records(app_attr("SURVEY_LOG_FILE"), remaining_records)
+        container.store.write_jsonl_records(
+            container.paths.survey_log_file,
+            remaining_records,
+        )
 
     return {
         "status": "ok",
@@ -454,14 +511,18 @@ def delete_survey_response(request: DeleteSurveyResponseRequest):
     "/delete-creative-idea",
     dependencies=[Depends(require_delete_password)],
 )
-def delete_creative_idea(request: DeleteCreativeIdeaRequest):
+def delete_creative_idea(
+    request: DeleteCreativeIdeaRequest,
+    container: AppContainer = Depends(get_container),
+):
     idea_id = normalize_creative_idea_identifier(request.ideaId)
     if not idea_id:
         raise HTTPException(status_code=400, detail="ideaId is required")
 
     deleted_count = _filter_records_or_404(
-        app_attr("CREATIVE_IDEA_LOG_FILE"),
-        read_creative_idea_events,
+        container.store,
+        container.paths.creative_idea_log_file,
+        container.store.read_creative_idea_events,
         lambda record: normalize_creative_idea_identifier(
             record.get("ideaId") or record.get("id")
         ) == idea_id,
@@ -478,14 +539,18 @@ def delete_creative_idea(request: DeleteCreativeIdeaRequest):
     "/delete-expansion-choice",
     dependencies=[Depends(require_delete_password)],
 )
-def delete_expansion_choice(request: DeleteExpansionChoiceRequest):
+def delete_expansion_choice(
+    request: DeleteExpansionChoiceRequest,
+    container: AppContainer = Depends(get_container),
+):
     choice_id = normalize_expansion_choice_identifier(request.choiceId)
     if not choice_id:
         raise HTTPException(status_code=400, detail="choiceId is required")
 
     deleted_count = _filter_records_or_404(
-        app_attr("CREATIVE_EXPANSION_CHOICE_LOG_FILE"),
-        read_expansion_choice_events,
+        container.store,
+        container.paths.creative_expansion_choice_log_file,
+        container.store.read_expansion_choice_events,
         lambda record: (
             normalize_expansion_choice_identifier(record.get("choiceId"))
             or build_expansion_choice_identifier(record)
@@ -503,14 +568,18 @@ def delete_expansion_choice(request: DeleteExpansionChoiceRequest):
     "/delete-ha-plan-event",
     dependencies=[Depends(require_delete_password)],
 )
-def delete_ha_plan_event(request: DeleteHAPlanEventRequest):
+def delete_ha_plan_event(
+    request: DeleteHAPlanEventRequest,
+    container: AppContainer = Depends(get_container),
+):
     ha_event_id = normalize_expansion_choice_identifier(request.haEventId)
     if not ha_event_id:
         raise HTTPException(status_code=400, detail="haEventId is required")
 
     deleted_count = _filter_records_or_404(
-        app_attr("HA_PLAN_EVENT_LOG_FILE"),
-        read_ha_plan_events,
+        container.store,
+        container.paths.ha_plan_event_log_file,
+        container.store.read_ha_plan_events,
         lambda record: build_ha_plan_event_identifier(record) == ha_event_id,
         "HA plan event not found",
     )
@@ -525,14 +594,18 @@ def delete_ha_plan_event(request: DeleteHAPlanEventRequest):
     "/delete-journey-event",
     dependencies=[Depends(require_delete_password)],
 )
-def delete_journey_event(request: DeleteJourneyEventRequest):
+def delete_journey_event(
+    request: DeleteJourneyEventRequest,
+    container: AppContainer = Depends(get_container),
+):
     journey_event_id = normalize_expansion_choice_identifier(request.journeyEventId)
     if not journey_event_id:
         raise HTTPException(status_code=400, detail="journeyEventId is required")
 
     deleted_count = _filter_records_or_404(
-        app_attr("JOURNEY_EVENT_LOG_FILE"),
-        read_journey_events,
+        container.store,
+        container.paths.journey_event_log_file,
+        container.store.read_journey_events,
         lambda record: build_journey_event_identifier(record) == journey_event_id,
         "Journey event not found",
     )
@@ -547,20 +620,23 @@ def delete_journey_event(request: DeleteJourneyEventRequest):
     "/delete-idea-records",
     dependencies=[Depends(require_delete_password)],
 )
-def delete_idea_records(request: DeleteIdeaRecordsRequest):
+def delete_idea_records(
+    request: DeleteIdeaRecordsRequest,
+    container: AppContainer = Depends(get_container),
+):
     idea_id = normalize_creative_idea_identifier(request.ideaId)
     if not idea_id:
         raise HTTPException(status_code=400, detail="ideaId is required")
 
-    ensure_study_log_dir()
+    container.store.ensure_study_log_dir()
 
-    with _record_lock():
-        level_records, _ = read_level_record_events()
-        idea_records, _ = read_creative_idea_events()
-        choice_records, _ = read_expansion_choice_events()
-        ha_plan_records, _ = read_ha_plan_events()
-        journey_records, _ = read_journey_events()
-        survey_records, _ = read_survey_response_events()
+    with container.store.record_lock:
+        level_records, _ = container.store.read_level_record_events()
+        idea_records, _ = container.store.read_creative_idea_events()
+        choice_records, _ = container.store.read_expansion_choice_events()
+        ha_plan_records, _ = container.store.read_ha_plan_events()
+        journey_records, _ = container.store.read_journey_events()
+        survey_records, _ = container.store.read_survey_response_events()
         paired_survey_session_ids = {
             normalize_survey_identifier(record.get("sessionId"))
             for record in survey_records
@@ -613,15 +689,30 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
         ):
             raise HTTPException(status_code=404, detail="Idea records not found")
 
-        write_jsonl_records(app_attr("STUDY_LOG_FILE"), remaining_level_records)
-        write_jsonl_records(app_attr("CREATIVE_IDEA_LOG_FILE"), remaining_idea_records)
-        write_jsonl_records(
-            app_attr("CREATIVE_EXPANSION_CHOICE_LOG_FILE"),
+        container.store.write_jsonl_records(
+            container.paths.study_log_file,
+            remaining_level_records,
+        )
+        container.store.write_jsonl_records(
+            container.paths.creative_idea_log_file,
+            remaining_idea_records,
+        )
+        container.store.write_jsonl_records(
+            container.paths.creative_expansion_choice_log_file,
             remaining_choice_records,
         )
-        write_jsonl_records(app_attr("SURVEY_LOG_FILE"), remaining_survey_records)
-        write_jsonl_records(app_attr("HA_PLAN_EVENT_LOG_FILE"), remaining_ha_plan_records)
-        write_jsonl_records(app_attr("JOURNEY_EVENT_LOG_FILE"), remaining_journey_records)
+        container.store.write_jsonl_records(
+            container.paths.survey_log_file,
+            remaining_survey_records,
+        )
+        container.store.write_jsonl_records(
+            container.paths.ha_plan_event_log_file,
+            remaining_ha_plan_records,
+        )
+        container.store.write_jsonl_records(
+            container.paths.journey_event_log_file,
+            remaining_journey_records,
+        )
 
     return {
         "status": "ok",
@@ -639,79 +730,37 @@ def delete_idea_records(request: DeleteIdeaRecordsRequest):
     "/delete-online-match",
     dependencies=[Depends(require_delete_password)],
 )
-def delete_online_match(request: DeleteOnlineMatchRequest):
-    match_id = normalize_survey_identifier(request.matchId)
-
-    if not match_id:
-        raise HTTPException(status_code=400, detail="matchId is required")
-
-    ensure_study_log_dir()
-
-    with _rooms_lock():
-        with _record_lock():
-            match_events, _ = read_online_match_events()
-            remaining_events = [
-                event
-                for event in match_events
-                if normalize_survey_identifier(event.get("matchId")) != match_id
-            ]
-            deleted_event_count = len(match_events) - len(remaining_events)
-
-            flow_directory = online_match_flow_directory(match_id)
-            flow_exists = flow_directory.exists()
-
-            if deleted_event_count == 0 and not flow_exists and match_id not in _rooms():
-                raise HTTPException(status_code=404, detail="Online match not found")
-
-            _rooms().pop(match_id, None)
-            write_jsonl_records(app_attr("ONLINE_MATCH_LOG_FILE"), remaining_events)
-            if flow_exists:
-                shutil.rmtree(flow_directory)
-
-    return {
-        "status": "ok",
-        "matchId": match_id,
-        "deletedEventCount": deleted_event_count,
-    }
+def delete_online_match(
+    request: DeleteOnlineMatchRequest,
+    container: AppContainer = Depends(get_container),
+):
+    return container.room_manager.delete_online_match(request.matchId)
 
 
 @router.post(
     "/clear-matchmaking-records",
     dependencies=[Depends(require_delete_password)],
 )
-def clear_matchmaking_records():
-    ensure_study_log_dir()
-
-    with _rooms_lock():
-        with _record_lock():
-            _rooms().clear()
-            write_jsonl_records(app_attr("ONLINE_MATCH_LOG_FILE"), [])
-            flow_dir = Path(app_attr("ONLINE_MATCH_FLOW_DIR"))
-            if flow_dir.exists():
-                shutil.rmtree(flow_dir)
-
-    return {
-        "status": "ok",
-        "cleared": True,
-    }
+def clear_matchmaking_records(container: AppContainer = Depends(get_container)):
+    return container.room_manager.clear_matchmaking_records()
 
 
 @router.post(
     "/clear-level-records",
     dependencies=[Depends(require_delete_password)],
 )
-def clear_level_records():
-    ensure_study_log_dir()
+def clear_level_records(container: AppContainer = Depends(get_container)):
+    container.store.ensure_study_log_dir()
 
-    with _record_lock():
-        for key in (
-            "STUDY_LOG_FILE",
-            "SURVEY_LOG_FILE",
-            "CREATIVE_IDEA_LOG_FILE",
-            "CREATIVE_EXPANSION_CHOICE_LOG_FILE",
-            "HA_PLAN_EVENT_LOG_FILE",
-            "JOURNEY_EVENT_LOG_FILE",
+    with container.store.record_lock:
+        for path in (
+            container.paths.study_log_file,
+            container.paths.survey_log_file,
+            container.paths.creative_idea_log_file,
+            container.paths.creative_expansion_choice_log_file,
+            container.paths.ha_plan_event_log_file,
+            container.paths.journey_event_log_file,
         ):
-            write_jsonl_records(app_attr(key), [])
+            container.store.write_jsonl_records(path, [])
 
     return RedirectResponse("/level-records-view?cleared=1", status_code=303)

@@ -4,7 +4,7 @@ import json
 import time
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from proposal_diagnostics import safe_issues
+from cocreation.domain.proposal_diagnostics import safe_issues
 
 
 REPLY_PIPELINE_VERSION = "ordinary-harness-2026-10-13-v2"
@@ -36,19 +36,20 @@ def failure_reason(error):
 
 class ReplyTrace:
     """Bounded request-local diagnostics, independent of model and state decisions."""
-    def __init__(self, request_id, message_key, version_id, logger):
+    def __init__(self, request_id, message_key, version_id, logger, clock=None):
         self.identity = {"requestId": request_id, "messageKey": message_key,
                          "baseVersionId": version_id, "pipelineVersion": REPLY_PIPELINE_VERSION}
         self.steps = []
         self.started = {}
         self.logger = logger
+        self._clock = clock
 
     def record(self, stage, status, code="", **fields):
         allowed = {"attempt", "modelCalls", "repairAttempts", "optionalSpentSeconds", "optionalRemainingSeconds",
                    "classification", "relation", "source", "cardPresent", "questionCount", "answeredCount",
                    "rule", "assistantTurnId", "branch", "cacheHits", "mapChecks", "questionIds"}
         data = {key: value for key, value in fields.items() if key in allowed}
-        stamp = time.monotonic()
+        stamp = self._clock.monotonic() if self._clock is not None else time.monotonic()
         if status == "started":
             self.started[stage] = stamp
         elif stage in self.started:
@@ -82,18 +83,22 @@ class ComponentCheck:
 
 class OptionalRepairBudget:
     """Optional presentation work must never consume the recovery reserve."""
-    def __init__(self, deadline):
+    def __init__(self, deadline, clock=None):
         self.deadline = deadline
         self.spent = 0.0
+        self._clock = clock
+
+    def _monotonic(self):
+        return self._clock.monotonic() if self._clock is not None else time.monotonic()
 
     def timeout(self):
-        remaining = self.deadline - time.monotonic()
+        remaining = self.deadline - self._monotonic()
         if remaining < 20.0:
             return 0.0
         return max(0.0, min(10.0 - self.spent, remaining - 20.0))
 
     def record(self, started):
-        self.spent += max(0.0, time.monotonic() - started)
+        self.spent += max(0.0, self._monotonic() - started)
 
 
 def parse_json_object(content):

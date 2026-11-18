@@ -1,24 +1,22 @@
 """Offline provider boundary: fixtures must obey the actual outbound schema."""
 import asyncio
-import copy
 import json
 import sys
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import httpx
 from openai import APIStatusError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import llm_client as llm
-import proposal_options as options
-import app as backend
-from proposal_diagnostics import ProposalDiagnostic, CURRENT_PROPOSAL_DIAGNOSTIC
-from reply_reliability import failure_reason
+from tests.fakes import FakeAsyncOpenAIClient, llm_scope
+from cocreation.llm import facade as llm
+from cocreation.domain import proposal_options as options
+from cocreation.api import config_models
+from cocreation.domain.proposal_diagnostics import ProposalDiagnostic, CURRENT_PROPOSAL_DIAGNOSTIC
+from cocreation.reliability.reply_reliability import failure_reason
 from option_fixtures import envelope
 from patch_fixtures import patch_fixture
 import test_proposal_options as option_tests
@@ -64,31 +62,24 @@ class WireContracts(unittest.TestCase):
         self.context = case.context
         self.calls = []
 
+    def client_for(self, handler):
+        def respond(request, number):
+            payload = handler(request, number)
+            fmt = request.get("response_format") or {}
+            if fmt.get("type") == "json_schema" and not isinstance(payload, (tuple, BaseException)):
+                assert_schema(payload, fmt["json_schema"]["schema"])
+            return payload
+
+        client = FakeAsyncOpenAIClient(respond)
+        self.calls = client.calls
+        return client
+
     def provider(self, handler):
-        owner = self
-        class Client:
-            def __init__(self):
-                self.chat = SimpleNamespace(completions=self)
-            async def create(self, **kwargs):
-                owner.calls.append(kwargs)
-                result = handler(kwargs, len(owner.calls))
-                if isinstance(result, BaseException):
-                    raise result
-                if isinstance(result, tuple):
-                    # Explicit fault injection for provider violations/truncation.
-                    value, finish = result
-                    return SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish,
-                        message=SimpleNamespace(content=value if isinstance(value, str) else json.dumps(value)))])
-                fmt = kwargs.get("response_format") or {}
-                if fmt.get("type") == "json_schema":
-                    assert_schema(result, fmt["json_schema"]["schema"])
-                return response(result)
-            async def close(self):
-                pass
-        return patch.object(llm, "_create_async_client", side_effect=lambda *args: Client())
+        client = self.client_for(handler)
+        return llm_scope(client_factory=lambda *args: client)
 
     def generate(self, handler, language="en"):
-        with self.provider(handler), patch.object(llm, "_llm_credentials", return_value=("offline", "offline")):
+        with self.provider(handler):
             return llm.generate_chat_reply([{"role": "user", "content": "How can this be easier?"}],
                 ROWS, "wire-contract", language=language, stage_context=self.context,
                 _deadline=time.monotonic() + 116)
@@ -108,14 +99,14 @@ class WireContracts(unittest.TestCase):
 
     def test_old_schema_reproduces_incident_with_protocol_compliant_provider(self):
         legacy = llm._structured_response_format("proposal_clarification")
+        fields = legacy["json_schema"]["schema"]["properties"]
+
         def model(call, number):
-            allowed = call["response_format"]["json_schema"]["schema"]["properties"]
-            return {key: value for key, value in envelope().items() if key in allowed}
-        # Disabling the new selection recreates the old production boundary.
-        with patch.object(options, "clarification_response_format", return_value=legacy), \
-                patch.object(llm, "_clarification_envelope_patch", return_value=None):
-            with self.assertRaises(llm.LLMServiceError) as caught:
-                self.generate(model)
+            # A provider returning only legacy fields violates the current option (or repair) schema.
+            return {key: value for key, value in envelope().items() if key in fields}, "stop"
+
+        with self.assertRaises(llm.LLMServiceError) as caught:
+            self.generate(model)
         self.assertEqual(caught.exception.code, "MODEL_RESPONSE_INVALID")
         self.assertEqual(len(self.calls), 2)
 
@@ -188,11 +179,11 @@ class WireContracts(unittest.TestCase):
                     ({"patches": []}, "stop"))
         finally:
             CURRENT_PROPOSAL_DIAGNOSTIC.reset(token)
-        details = backend._llm_failure_details(caught.exception)
+        details = config_models._llm_failure_details(caught.exception)
         self.assertIn("proposalDiagnostic", details)
         self.assertEqual(details["proposalDiagnostic"]["firstFailure"]["reasonCode"], "OPTION_FIELD_INVALID")
         self.assertNotIn("How can this", json.dumps(details))
-        from proposal_diagnostics import ProposalValidationError, structural_issue
+        from cocreation.domain.proposal_diagnostics import ProposalValidationError, structural_issue
         self.assertEqual(failure_reason(ProposalValidationError([structural_issue("options", "OPTION_SET_INVALID")])), "OPTION_SET_INVALID")
 
     def test_schema_rejection_fallback_keeps_same_option_contract_and_review(self):

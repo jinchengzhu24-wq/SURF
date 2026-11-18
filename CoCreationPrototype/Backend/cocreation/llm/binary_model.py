@@ -3,19 +3,46 @@ import asyncio
 import copy
 import json
 import re
-import time
 
-import binary_discovery as binary
-from component_patches import PatchRequest, Target
-from proposal_search import ProposalSearchExhausted
+import cocreation.domain.binary_discovery as binary
+from cocreation.domain.design_requirements import REQUIREMENT_SEMANTICS, validate_requirement_record
+from cocreation.domain.proposal_search import ProposalSearchExhausted
+from cocreation.reliability.component_patches import PatchRequest, Target
+from cocreation.reliability.reply_reliability import parse_json_object
+
+from .config_and_runtime import (
+    APIConnectionError,
+    APIStatusError,
+    LLMServiceError,
+    PLAIN_CHAT_MAX_TOKENS,
+    _current_service,
+    _request_completion,
+    _request_component_patch,
+    classify_exception,
+)
+from .snapshot_grounding import _assert_visible_output_language, _validate_map_grounding_texts
 
 
-def generate(topic, context, validator, strategy_validator, request_id, deadline, preflight_budget=20.0):
-    import llm_client as llm
-    from design_requirements import REQUIREMENT_SEMANTICS, validate_requirement_record
-    api_key, base_url = llm._llm_credentials()
+def generate(topic, context, validator, strategy_validator, request_id, deadline, preflight_budget=20.0, *, service=None):
+    svc = _current_service(service)
+    with svc.activated():
+        return _generate_with_service(
+            svc,
+            topic,
+            context,
+            validator,
+            strategy_validator,
+            request_id,
+            deadline,
+            preflight_budget=preflight_budget,
+        )
+
+
+def _generate_with_service(svc, topic, context, validator, strategy_validator, request_id, deadline, preflight_budget=20.0):
+    api_key, base_url = svc.credentials()
     if not api_key:
-        raise llm.LLMServiceError("CONFIGURATION_ERROR", "Kimi is unavailable.", request_id, False, 0, 503)
+        raise LLMServiceError("CONFIGURATION_ERROR", "Kimi is unavailable.", request_id, False, 0, 503)
+    model = svc.config.model
     stage = context["stageContext"]
     projection = {key: topic.get(key) for key in ("initialRequest", "questionCount", "understanding")}
     projection["selectedChoices"] = [{**{key: choice[key] for key in ("question", "note", "label", "promise")},
@@ -102,20 +129,20 @@ def generate(topic, context, validator, strategy_validator, request_id, deadline
     last_error = None
     for attempt in (1, 2):
         try:
-            timeout = min(70.0, deadline - time.monotonic() - 20.0)
+            timeout = min(70.0, deadline - svc.clock.monotonic() - 20.0)
             if timeout <= 0:
                 raise TimeoutError()
             if patch is not None:
-                candidate = asyncio.run(llm._request_component_patch(api_key, base_url, patch, messages,
-                    request_id, deadline, "proposal_clarification", max_tokens=llm.PLAIN_CHAT_MAX_TOKENS,
+                candidate = asyncio.run(_request_component_patch(api_key, base_url, patch, messages,
+                    request_id, deadline, "proposal_clarification", max_tokens=PLAIN_CHAT_MAX_TOKENS,
                     timeout_limit=timeout))
             else:
-                response = asyncio.run(asyncio.wait_for(llm._request_completion(api_key, base_url,
-                    llm.KIMI_MODEL, messages, llm.PLAIN_CHAT_MAX_TOKENS, timeout,
+                response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url,
+                    model, messages, PLAIN_CHAT_MAX_TOKENS, timeout,
                     task="proposal_clarification", response_format_override=binary.response_format()), timeout=timeout))
                 if response.choices[0].finish_reason == "length":
                     raise binary.BinaryError("BINARY_RESPONSE_TRUNCATED", "envelope")
-                candidate = llm.parse_json_object(response.choices[0].message.content)
+                candidate = parse_json_object(response.choices[0].message.content)
             step = binary.parse_step(copy.deepcopy(candidate), topic["questionCount"])
             previous_promises = {binary.signature(choice["promise"]) for choice in topic.get("choices", [])}
             if any(binary.signature(b["promise"]) in previous_promises for b in step["branches"]):
@@ -132,14 +159,14 @@ def generate(topic, context, validator, strategy_validator, request_id, deadline
             # Request-local candidate only; persisted as verified solely after independent review succeeds.
             stage["requirementRecord"] = initial_record
             for text in (step["question"], step["note"], *[b["label"] for b in step["branches"]]):
-                llm._assert_visible_output_language(context["language"], text)
-                llm._validate_map_grounding_texts([text], context["rows"], entity_bindings=stage.get("entityBindings"))
-            preflight_started = time.monotonic()
+                _assert_visible_output_language(context["language"], text)
+                _validate_map_grounding_texts([text], context["rows"], entity_bindings=stage.get("entityBindings"))
+            preflight_started = svc.clock.monotonic()
             try:
                 caches = binary.preflight(step, topic, context["rows"], stage["stageSnapshot"], validator,
-                    deadline, strategy_validator, preflight_budget)
+                    deadline, strategy_validator, preflight_budget, clock=svc.clock)
             finally:
-                preflight_budget -= time.monotonic() - preflight_started
+                preflight_budget -= svc.clock.monotonic() - preflight_started
             review_input = {"evidence": evidence, "initialRequirementInterpretation": initial_record,
                 "step": {k: v for k, v in step.items() if k != "initialRequirements"},
                 "validatedBranchDiffs": [{"promiseResults": cache["promiseResults"],
@@ -170,16 +197,16 @@ def generate(topic, context, validator, strategy_validator, request_id, deadline
                 "do not reject them for having no question/options. For plan, judge readiness from initial evidence, "
                 "the explicit selections and selectedFeasibility. An already selected feasible action answering a simple "
                 "request can proceed without another preference. blocked cannot invent infeasibility. " + REQUIREMENT_SEMANTICS)
-            review_deadline = min(deadline - 20.0, time.monotonic() + 10.0)
-            remaining = min(8.0, review_deadline - time.monotonic())
+            review_deadline = min(deadline - 20.0, svc.clock.monotonic() + 10.0)
+            remaining = min(8.0, review_deadline - svc.clock.monotonic())
             if remaining <= 0:
                 raise TimeoutError()
             try:
-                response = asyncio.run(asyncio.wait_for(llm._request_completion(api_key, base_url, llm.KIMI_MODEL,
+                response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model,
                     review_messages, 1000, remaining, task="proposal_clarification_review",
                     response_format_override=binary.review_format()), timeout=remaining))
-                verdict = llm.parse_json_object(response.choices[0].message.content) if response.choices[0].finish_reason != "length" else {}
-            except (ValueError, TimeoutError, llm.APIConnectionError, llm.APIStatusError):
+                verdict = parse_json_object(response.choices[0].message.content) if response.choices[0].finish_reason != "length" else {}
+            except (ValueError, TimeoutError, APIConnectionError, APIStatusError):
                 verdict = {}
             if not isinstance(verdict, dict) or set(verdict) - {"accepted", "issues"}:
                 raise binary.BinaryError("BINARY_REVIEW_INVALID", "review")
@@ -191,22 +218,22 @@ def generate(topic, context, validator, strategy_validator, request_id, deadline
                     [Target(key, (key,), (bool,) if key == "accepted" else (list,))
                         for key in ("accepted", "issues") if key not in valid], {"review_source": review_input})
                 try:
-                    verdict = asyncio.run(llm._request_component_patch(api_key, base_url, repair, review_messages,
+                    verdict = asyncio.run(_request_component_patch(api_key, base_url, repair, review_messages,
                         request_id, review_deadline, "proposal_clarification_review", max_tokens=1000, timeout_limit=2.0))
                     if (type(verdict["accepted"]) is not bool or not isinstance(verdict["issues"], list)
                             or any(not isinstance(x, str) for x in verdict["issues"])):
                         raise ValueError()
-                except (ValueError, TimeoutError, llm.APIConnectionError, llm.APIStatusError):
+                except (ValueError, TimeoutError, APIConnectionError, APIStatusError):
                     raise binary.BinaryError("BINARY_REVIEW_INVALID", "review")
             if verdict["accepted"] is not True or verdict["issues"]:
                 error = binary.BinaryError("BINARY_SEMANTIC_REJECTED", "review")
                 error.issue_codes = [x for x in verdict["issues"] if re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", x)][:8]
                 raise error
             return step, caches
-        except llm.LLMServiceError:
+        except LLMServiceError:
             raise
-        except (llm.APIConnectionError, llm.APIStatusError) as error:
-            failure = llm.classify_exception(error, request_id, attempt)
+        except (APIConnectionError, APIStatusError) as error:
+            failure = classify_exception(error, request_id, attempt)
             if not failure.retryable or attempt == 2:
                 failure.details = {"task": "proposal_clarification", "failureStage": "upstream", "failureKind": "upstream"}
                 raise failure from error
@@ -237,7 +264,7 @@ def generate(topic, context, validator, strategy_validator, request_id, deadline
     code = ("BINARY_PREFLIGHT_BUDGET" if isinstance(last_error, TimeoutError) else
             "BINARY_PREFLIGHT_NOT_FOUND" if isinstance(last_error, ProposalSearchExhausted) else
             getattr(last_error, "code", "BINARY_CANDIDATE_INVALID"))
-    failure = llm.LLMServiceError(code, "The two verified directions could not be prepared. Retry or cancel this proposal.",
+    failure = LLMServiceError(code, "The two verified directions could not be prepared. Retry or cancel this proposal.",
         request_id, True, attempt, 502)
     failure.details = {"task": "proposal_clarification", "failureStage": "binary_review" if getattr(last_error, "field", None) == "review" else "binary_preflight",
         "failureKind": "budget" if code == "BINARY_PREFLIGHT_BUDGET" else "validation", "maximumAttempts": 2,

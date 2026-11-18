@@ -6,18 +6,18 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import llm_client as llm
+from tests.fakes import RecordedAsyncCall, llm_scope
+from cocreation.llm import facade as llm
 from patch_fixtures import patch_fixture
-from design_requirements import (
+from cocreation.domain.design_requirements import (
     INTERPRETATION_VERSION, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, evaluate_requirements,
     requirement_model_view, validate_requirement_record,
 )
-from level_validation import build_stage_snapshot, validate_and_solve, LevelValidationError
-from proposal_search import (
+from cocreation.domain.level_validation import build_stage_snapshot, validate_and_solve, LevelValidationError
+from cocreation.domain.proposal_search import (
     _generate_primitives,
     parse_revision_plan, search_revision_plan,
 )
@@ -204,7 +204,10 @@ class RevisionFlowOptimizationTests(unittest.TestCase):
             return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",
                 message=SimpleNamespace(content="{illegal json}"))])
         context = {"stageSnapshot": self.snapshot, "requirementUserTurns": self.sources}
-        with patch.object(llm, "_request_completion", side_effect=request), self.assertRaises(llm.LLMServiceError) as caught:
+        with (
+            llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)),
+            self.assertRaises(llm.LLMServiceError) as caught,
+        ):
             llm._review_proposal_requirements("offline", "offline", context, "request", time.monotonic() + 116)
         self.assertEqual(caught.exception.details["failureKind"], "invalid_json")
         self.assertEqual(caught.exception.attempts_used, 2)
@@ -222,7 +225,7 @@ class RevisionFlowOptimizationTests(unittest.TestCase):
         async def request(*args, **kwargs):
             calls.append(args[3])
             return completion(next(responses))
-        with patch.object(llm, "_request_completion", side_effect=request):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             result = llm._review_proposal_requirements("offline", "offline", context, "request", time.monotonic() + 116)
         for messages in calls:
             self.assertIn(REQUIREMENT_SEMANTICS, messages[0]["content"])
@@ -244,7 +247,7 @@ class RevisionFlowOptimizationTests(unittest.TestCase):
         async def request(*args, **kwargs):
             calls.append(args[3])
             return completion(next(responses))
-        with patch.object(llm, "_request_completion", side_effect=request):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             result = llm._review_proposal_requirements("offline", "offline", context, "request", time.monotonic() + 116)
         self.assertEqual(len(json.loads(calls[1][1]["content"])["inheritedVerifiedRequirements"]), 2)
         self.assertEqual(result["requirements"][0]["property"], "appearance")
@@ -264,12 +267,15 @@ class RevisionFlowOptimizationTests(unittest.TestCase):
             value = next(responses)
             return completion(patch_fixture(args[3][-1]["content"], value) if kwargs["task"].endswith("_patch") else value)
         context = {"stageSnapshot": self.snapshot, "requirementUserTurns": self.sources}
-        with patch.object(llm, "_request_completion", side_effect=request):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             llm._review_proposal_requirements("offline", "offline", context, "request", time.monotonic() + 116)
         self.assertEqual(json.loads(calls[2][-3]["content"])["structuredIssues"], [issue])
         async def timeout(*args, **kwargs):
             raise asyncio.TimeoutError()
-        with patch.object(llm, "_request_completion", side_effect=timeout), self.assertRaises(llm.LLMServiceError) as caught:
+        with (
+            llm_scope(completion_requester=RecordedAsyncCall(side_effect=timeout)),
+            self.assertRaises(llm.LLMServiceError) as caught,
+        ):
             llm._review_proposal_requirements("offline", "offline", context, "request", time.monotonic() + 116)
         self.assertEqual(caught.exception.details["failureKind"], "timeout")
         self.assertEqual(caught.exception.attempts_used, 2)
@@ -279,6 +285,9 @@ class RevisionFlowOptimizationTests(unittest.TestCase):
             return completion(requirement_model_view(self.record(requirement())) if kwargs["task"] == "revision_requirements"
                 else {"accepted": True, "issues": []}, "stop" if kwargs["task"] == "revision_requirements" else "length")
         context = {"stageSnapshot": self.snapshot, "requirementUserTurns": self.sources}
-        with patch.object(llm, "_request_completion", side_effect=request), self.assertRaises(llm.LLMServiceError) as caught:
+        with (
+            llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)),
+            self.assertRaises(llm.LLMServiceError) as caught,
+        ):
             llm._review_proposal_requirements("offline", "offline", context, "request", time.monotonic() + 116)
         self.assertEqual(caught.exception.details["failureKind"], "truncated_json")

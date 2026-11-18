@@ -4,8 +4,9 @@ import hashlib
 import json
 import time
 
-from level_validation import WALKABLE_TILES, validate_and_solve
-from proposal_search import RevisionPlan, _map_fingerprint, parse_revision_plan, search_revision_plan, PRESERVE_COMPONENTS
+from cocreation.domain.design_requirements import requirement_response_schema
+from cocreation.domain.level_validation import WALKABLE_TILES, validate_and_solve
+from cocreation.domain.proposal_search import RevisionPlan, _map_fingerprint, parse_revision_plan, search_revision_plan, PRESERVE_COMPONENTS
 
 POLICY_VERSION = 2
 PROMISE_VERSION = 1
@@ -35,7 +36,6 @@ def path_signature(choices):
 
 
 def response_format():
-    from design_requirements import requirement_response_schema
     focus = {"type": ["object", "null"], "additionalProperties": False,
         "properties": {"row": {"type": "integer"}, "column": {"type": "integer"}, "radius": {"type": "integer"}},
         "required": ["row", "column", "radius"]}
@@ -190,23 +190,27 @@ def check_promises(base, candidate, promises, baseline=None, validation=None):
     return outcomes
 
 
-def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validator=None, budget_seconds=20.0):
+def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validator=None, budget_seconds=20.0, clock=None):
     """At most twenty seconds total, fair per-branch shares, original base/edit budget."""
     if step["action"] != "ask":
         return []
-    preflight_deadline = min(deadline - 20.0, time.monotonic() + max(0, budget_seconds))
-    if preflight_deadline <= time.monotonic():
+    monotonic = clock.monotonic if clock is not None else time.monotonic
+    preflight_deadline = min(deadline - 20.0, monotonic() + max(0, budget_seconds))
+    if preflight_deadline <= monotonic():
         raise BinaryError("BINARY_PREFLIGHT_BUDGET")
-    baseline = validate_and_solve(rows, deadline=preflight_deadline)
+    solve_kwargs = {"deadline": preflight_deadline}
+    if clock is not None:
+        solve_kwargs["clock"] = clock
+    baseline = validate_and_solve(rows, **solve_kwargs)
     prior = [item["promise"] for item in topic.get("choices", [])]
     caches = []
     for index, branch in enumerate(step["branches"]):
-        now = time.monotonic()
+        now = monotonic()
         branch_deadline = now + max(0.0, preflight_deadline - now) / (2 - index)
         promises = [*prior, branch["promise"]]
         evidence = {}
         def validate(candidate):
-            if time.monotonic() >= branch_deadline:
+            if monotonic() >= branch_deadline:
                 raise TimeoutError()
             result = validator(candidate, branch_deadline)
             if strategy_validator is not None:
@@ -227,17 +231,19 @@ def preflight(step, topic, rows, snapshot, validator, deadline, strategy_validat
         if result is None:
             search_kwargs = {"baseline_metrics": baseline.as_dict(), "deadline": branch_deadline,
                 "entity_bindings": snapshot.get("entityBindings"), "maximum_valid_candidates": 1}
+            if clock is not None:
+                search_kwargs["clock"] = clock
             if used_fingerprints:
                 search_kwargs["excluded_map_fingerprints"] = used_fingerprints
             try:
                 found = search_revision_plan(rows, plan, validate, **search_kwargs)
             except ValueError as error:
-                code = "BINARY_PREFLIGHT_BUDGET" if time.monotonic() >= branch_deadline else "BINARY_PREFLIGHT_NOT_FOUND"
+                code = "BINARY_PREFLIGHT_BUDGET" if monotonic() >= branch_deadline else "BINARY_PREFLIGHT_NOT_FOUND"
                 raise BinaryError(code, "branch-" + str(index + 1)) from error
             result = (list(found.rows), found.validation)
         candidate, validation = result
         caches.append({"rows": list(candidate), "strategy": branch["strategy"], "promise": branch["promise"],
-            "preflightMs": int((time.monotonic() - now) * 1000),
+            "preflightMs": int((monotonic() - now) * 1000),
             "validation": validation.as_dict(), "promiseResults": evidence[signature(candidate)],
             "topicBinding": topic["binding"], "prefix": path_signature(topic.get("choices", [])),
             "policyVersion": POLICY_VERSION, "promiseVersion": PROMISE_VERSION})

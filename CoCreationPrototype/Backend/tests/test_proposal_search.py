@@ -9,8 +9,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
     import cocreation  # noqa: F401
 
-from level_validation import validate_and_solve
-from proposal_search import (
+from cocreation.domain.level_validation import build_entity_bindings, validate_and_solve
+from cocreation.domain.proposal_search import (
     MAX_CONSTRUCTED_CANDIDATES,
     ProposalSearchExhausted,
     RevisionPlanError,
@@ -18,7 +18,6 @@ from proposal_search import (
     parse_revision_plan,
     search_revision_plan,
 )
-from level_validation import build_entity_bindings
 
 
 BASE_ROWS = [

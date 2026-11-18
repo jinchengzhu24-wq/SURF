@@ -1,13 +1,11 @@
 import asyncio
 import json
-import os
 import re
 import sys
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
 from openai import APIStatusError, APITimeoutError
@@ -18,10 +16,11 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
     import cocreation  # noqa: F401
+from tests.fakes import RecordedAsyncCall, RecordedCall, TEST_LLM_ENV, llm_scope
 
-import llm_client
+from cocreation.llm import facade as llm_client
 from patch_fixtures import patch_fixture
-from level_validation import build_entity_bindings, validate_and_solve
+from cocreation.domain.level_validation import build_entity_bindings, validate_and_solve
 
 
 OPERATION_BASE_ROWS = [
@@ -509,9 +508,7 @@ class LLMClientTests(unittest.TestCase):
             "conflictingHypothesisIds": [], "explanation": None, "issues": [],
             "reviewedActiveClaims": [], "reviewVersion": "test-v1",
         }
-        with patch.object(
-            llm_client, "_review_intent_candidate_async", new=AsyncMock(return_value=review),
-        ):
+        with llm_scope(intent_candidate_reviewer=RecordedAsyncCall(return_value=review)):
             result, client = self.execute(
                 [f"{body}\n<GUIDANCE>INTENT_DECISION: {decision} || INTENT: {card}</GUIDANCE>"],
                 language="zh-CN",
@@ -533,9 +530,7 @@ class LLMClientTests(unittest.TestCase):
             finish_reason="stop",
             message=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False)),
         )])
-        with patch.object(
-            llm_client, "_request_completion", new=AsyncMock(return_value=response),
-        ):
+        with llm_scope(completion_requester=RecordedAsyncCall(return_value=response)):
             result = asyncio.run(llm_client._review_intent_candidate_async(
                 api_key="test", base_url="https://example.invalid",
                 user_text="你觉得这张地图好看吗", body="地图轮廓清楚。",
@@ -565,9 +560,7 @@ class LLMClientTests(unittest.TestCase):
             finish_reason="stop",
             message=SimpleNamespace(content=json.dumps(payload, ensure_ascii=False)),
         )])
-        with patch.object(
-            llm_client, "_request_completion", new=AsyncMock(return_value=response),
-        ):
+        with llm_scope(completion_requester=RecordedAsyncCall(return_value=response)):
             result = asyncio.run(llm_client._review_intent_candidate_async(
                 api_key="test", base_url="https://example.invalid",
                 user_text="我觉得水域太少了", body="当前水域集中在中央。",
@@ -654,7 +647,7 @@ class LLMClientTests(unittest.TestCase):
             "comparison": comparison,
         })])
 
-        with patch.object(llm_client, "_create_async_client", return_value=client):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.classify_challenge_reason(
                 "The left side is visually crowded.",
                 {"primary": "The mechanism may fail.", "secondary": "The route may lose tension."},
@@ -677,7 +670,7 @@ class LLMClientTests(unittest.TestCase):
             "merit": "reasonable",
             "comparison": "我同意你的理由，因为当前第一步可能过于直接，玩家缺少明确的路线判断。原方案更侧重增加绕行，我们需要在这两种体验之间作出选择。",
         })])
-        with patch.object(llm_client, "_create_async_client", return_value=client):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.classify_challenge_reason(
                 "第一步判断太直接。", {}, "增加局部绕行。", "simple-challenge-review", simple=True,
             )
@@ -689,7 +682,7 @@ class LLMClientTests(unittest.TestCase):
     def test_challenge_reason_classifier_requires_substantive_kimi_comparison(self):
         payload = json.dumps({"relation": "different", "merit": "reasonable", "comparison": "Too short."})
         client = FakeClient([payload, payload])
-        with patch.object(llm_client, "_create_async_client", return_value=client):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             with self.assertRaises(llm_client.LLMServiceError) as failed:
                 llm_client.classify_challenge_reason(
                     "Only changing one water tile is too little.",
@@ -942,20 +935,6 @@ class LLMClientTests(unittest.TestCase):
             )
         self.assertIn("earlier attempt", str(raised.exception))
 
-    def setUp(self):
-        self.kimi_environment = patch.dict(
-            os.environ,
-            {
-                "COCREATION_LLM_PROVIDER": "kimi",
-                "COCREATION_LLM_MODEL": "kimi-k2.6",
-                "COCREATION_LLM_BASE_URL": "https://api.moonshot.cn/v1",
-                "KIMI_API_KEY": "test-kimi-key",
-            },
-            clear=False,
-        )
-        self.kimi_environment.start()
-        self.addCleanup(self.kimi_environment.stop)
-
     def execute(self, outcomes, rows=None, **reply_kwargs):
         client = FakeClient(outcomes)
         conversation = reply_kwargs.pop(
@@ -963,10 +942,7 @@ class LLMClientTests(unittest.TestCase):
             [{"role": "user", "content": "Assess the level."}],
         )
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 conversation,
                 rows or ["############"] * 10,
@@ -1001,19 +977,7 @@ class LLMClientTests(unittest.TestCase):
     def test_model_environment_overrides_are_ignored(self):
         client = FakeClient(["The verified route remains readable."])
 
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "DEEPSEEK_API_KEY": "test-key",
-                    "DEEPSEEK_MODEL": "deepseek-v4-pro",
-                    "DEEPSEEK_PROPOSAL_MODEL": "some-other-model",
-                    "DEEPSEEK_FALLBACK_MODEL": "another-model",
-                },
-                clear=False,
-            ),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client), env={**TEST_LLM_ENV, **{'DEEPSEEK_API_KEY': 'test-key', 'DEEPSEEK_MODEL': 'deepseek-v4-pro', 'DEEPSEEK_PROPOSAL_MODEL': 'some-other-model', 'DEEPSEEK_FALLBACK_MODEL': 'another-model'}}):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Assess the route."}],
                 ["############"] * 10,
@@ -1027,18 +991,7 @@ class LLMClientTests(unittest.TestCase):
         )
 
     def test_missing_kimi_key_does_not_fall_back_to_deepseek(self):
-        with patch.dict(
-            os.environ,
-            {
-                "COCREATION_LLM_PROVIDER": "kimi",
-                "COCREATION_LLM_API_KEY": "",
-                "COCREATION_LLM_BASE_URL": "https://api.moonshot.cn/v1",
-                "KIMI_API_KEY": "",
-                "DEEPSEEK_API_KEY": "legacy-deepseek-key",
-                "DEEPSEEK_MODEL": "deepseek-v4-flash",
-            },
-            clear=True,
-        ):
+        with llm_scope(env={'COCREATION_LLM_PROVIDER': 'kimi', 'COCREATION_LLM_API_KEY': '', 'COCREATION_LLM_BASE_URL': 'https://api.moonshot.cn/v1', 'KIMI_API_KEY': '', 'DEEPSEEK_API_KEY': 'legacy-deepseek-key', 'DEEPSEEK_MODEL': 'deepseek-v4-flash'}):
             with self.assertRaises(llm_client.LLMServiceError) as raised:
                 llm_client.generate_chat_reply(
                     [{"role": "user", "content": "Assess the route."}],
@@ -1051,19 +1004,8 @@ class LLMClientTests(unittest.TestCase):
 
     def test_kimi_provider_uses_kimi_k26_configuration(self):
         client = FakeClient(["The verified route remains readable."])
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "COCREATION_LLM_PROVIDER": "kimi",
-                    "COCREATION_LLM_MODEL": "kimi-k2.6",
-                    "COCREATION_LLM_BASE_URL": "https://api.moonshot.cn/v1",
-                    "KIMI_API_KEY": "test-kimi-key",
-                },
-                clear=False,
-            ),
-            patch.object(llm_client, "_create_async_client", return_value=client) as create_client,
-        ):
+        create_client = RecordedCall(return_value=client)
+        with llm_scope(client_factory=create_client, env={**TEST_LLM_ENV, **{'COCREATION_LLM_PROVIDER': 'kimi', 'COCREATION_LLM_MODEL': 'kimi-k2.6', 'COCREATION_LLM_BASE_URL': 'https://api.moonshot.cn/v1', 'KIMI_API_KEY': 'test-kimi-key'}}):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Assess the route."}],
                 ["############"] * 10,
@@ -1078,9 +1020,8 @@ class LLMClientTests(unittest.TestCase):
             {"thinking": {"type": "disabled"}},
         )
         self.assertEqual(create_client.call_count, 2)
-        create_client.assert_any_call(
-            "test-kimi-key", "https://api.moonshot.cn/v1", ANY,
-        )
+        self.assertTrue(any(call.args[:2] == ("test-kimi-key", "https://api.moonshot.cn/v1")
+                            for call in create_client.call_args_list))
 
     def test_visible_output_removes_prompt_only_field_names(self):
         payload = {
@@ -2186,17 +2127,7 @@ class LLMClientTests(unittest.TestCase):
             "B1 is at (1,1), so the lower-left cluster is the key design issue."
         ] * 3)
         with (
-            patch.object(llm_client, "_create_async_client", return_value=client),
-            patch.object(
-                llm_client,
-                "_server_snapshot_fallback_message",
-                side_effect=AssertionError("ordinary chat used snapshot prose"),
-            ),
-            patch.object(
-                llm_client,
-                "_safe_grounding_chat_reply",
-                side_effect=AssertionError("ordinary chat used grounding prose"),
-            ),
+            llm_scope(client_factory=RecordedCall(return_value=client), handlers={'server_snapshot_fallback_message': RecordedCall(side_effect=AssertionError('ordinary chat used snapshot prose')), 'safe_grounding_chat_reply': RecordedCall(side_effect=AssertionError('ordinary chat used grounding prose'))}),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -2222,19 +2153,7 @@ class LLMClientTests(unittest.TestCase):
             "B1 is at (1,1), so the left side feels crowded.",
             "我也会把重点放在左侧的空间密度上。目标、水域和箱子的视觉重量集中在同一区域，可能让玩家难以迅速分出主次。",
         ])
-        with (
-            patch.object(llm_client, "_create_async_client", return_value=client),
-            patch.object(
-                llm_client,
-                "_server_snapshot_fallback_message",
-                side_effect=AssertionError("ordinary chat used snapshot prose"),
-            ),
-            patch.object(
-                llm_client,
-                "_safe_grounding_chat_reply",
-                side_effect=AssertionError("ordinary chat used grounding prose"),
-            ),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client), handlers={'server_snapshot_fallback_message': RecordedCall(side_effect=AssertionError('ordinary chat used snapshot prose')), 'safe_grounding_chat_reply': RecordedCall(side_effect=AssertionError('ordinary chat used grounding prose'))}):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "我还是感觉左侧要素太多"}],
                 ENTITY_ROUTE_ROWS,
@@ -2433,18 +2352,13 @@ class LLMClientTests(unittest.TestCase):
                 validation_mode="edit_request",
             )[0]["content"]
 
-        with patch.dict(os.environ, {}, clear=True):
+        with llm_scope(env={}):
             disabled = prompt()
-        with patch.dict(os.environ, {llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "on"}, clear=True):
+        with llm_scope(env={llm_client.CHAT_COMPACT_EXPERIMENT_ENV: 'on'}):
             old_switch_only = prompt()
-        with patch.dict(os.environ, {
-            llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: "true",
-        }, clear=True):
+        with llm_scope(env={llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: 'true'}):
             enabled = prompt()
-        with patch.dict(os.environ, {
-            llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: "true",
-            llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "on",
-        }, clear=True):
+        with llm_scope(env={llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: 'true', llm_client.CHAT_COMPACT_EXPERIMENT_ENV: 'on'}):
             both_switches = prompt()
 
         self.assertEqual(disabled, old_switch_only)
@@ -2474,13 +2388,11 @@ class LLMClientTests(unittest.TestCase):
         )
         for kwargs in cases:
             with self.subTest(kwargs=kwargs):
-                with patch.dict(os.environ, {}, clear=True):
+                with llm_scope(env={}):
                     baseline = llm_client.build_plain_chat_messages(
                         conversation, OPERATION_BASE_ROWS, **kwargs
                     )[0]["content"]
-                with patch.dict(os.environ, {
-                    llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: "1",
-                }, clear=True):
+                with llm_scope(env={llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: '1'}):
                     experimental = llm_client.build_plain_chat_messages(
                         conversation, OPERATION_BASE_ROWS, **kwargs
                     )[0]["content"]
@@ -2518,9 +2430,7 @@ class LLMClientTests(unittest.TestCase):
             "conversation": [{"role": "user", "content": "I want longer box transport."}],
             "stage_context": context,
         }
-        with patch.dict(os.environ, {
-            llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: "1",
-        }):
+        with llm_scope(env={**TEST_LLM_ENV, **{llm_client.PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV: '1'}}):
             result, client = self.execute([valid], **kwargs)
             repaired, retry_client = self.execute([wrong_dimension, valid], **kwargs)
             filtered, _ = self.execute([coordinate_request, coordinate_request], **kwargs)
@@ -2856,10 +2766,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIsNone(result.guidance["followUpQuestion"])
 
         client = FakeClient(["当然，我们可以先聊点别的。"])
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             off_topic = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "这个与地图无关，我们换个话题。"}],
                 ["############"] * 10,
@@ -2884,10 +2791,7 @@ class LLMClientTests(unittest.TestCase):
             {"role": "user", "content": "展开讲讲"},
         ]
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 conversation,
                 ["############"] * 10,
@@ -3037,10 +2941,7 @@ class LLMClientTests(unittest.TestCase):
             }
         }
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Yes, do that."}],
                 ["############"] * 10,
@@ -3082,13 +2983,13 @@ class LLMClientTests(unittest.TestCase):
 
     def test_chat_compact_experiment_is_opt_in_for_ordinary_chat(self):
         conversation = [{"role": "user", "content": "What does the opening ask the player to notice?"}]
-        with patch.dict(os.environ, {}, clear=True):
+        with llm_scope(env={}):
             disabled = llm_client.build_plain_chat_messages(
                 conversation, OPERATION_BASE_ROWS, validation_mode="ordinary_chat"
             )[0]["content"]
         self.assertNotIn("Compact-chat experiment:", disabled)
 
-        with patch.dict(os.environ, {llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "1"}, clear=True):
+        with llm_scope(env={llm_client.CHAT_COMPACT_EXPERIMENT_ENV: '1'}):
             enabled = llm_client.build_plain_chat_messages(
                 conversation, OPERATION_BASE_ROWS, validation_mode="ordinary_chat"
             )[0]["content"]
@@ -3098,7 +2999,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_chat_compact_experiment_keeps_route_discussion_grounding_rules(self):
         conversation = [{"role": "user", "content": "How does the route from B1 to T1 shape the first push?"}]
-        with patch.dict(os.environ, {llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "true"}, clear=True):
+        with llm_scope(env={llm_client.CHAT_COMPACT_EXPERIMENT_ENV: 'true'}):
             prompt = llm_client.build_plain_chat_messages(
                 conversation, ENTITY_ROUTE_ROWS, validation_mode="route_discussion"
             )[0]["content"]
@@ -3108,7 +3009,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertIn("authoritative endpoints", prompt)
 
     def test_chat_compact_experiment_does_not_change_protected_prompt_branches(self):
-        with patch.dict(os.environ, {llm_client.CHAT_COMPACT_EXPERIMENT_ENV: "on"}, clear=True):
+        with llm_scope(env={llm_client.CHAT_COMPACT_EXPERIMENT_ENV: 'on'}):
             opening = llm_client.build_plain_chat_messages(
                 [], OPERATION_BASE_ROWS, stage_opening=True, validation_mode="ordinary_chat"
             )[0]["content"]
@@ -3200,10 +3101,7 @@ class LLMClientTests(unittest.TestCase):
             "Would you like a different direction?",
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             with self.assertRaises(llm_client.LLMServiceError) as raised:
                 llm_client.generate_chat_reply(
                     [{"role": "user", "content": "Assess the level."}],
@@ -3226,10 +3124,7 @@ class LLMClientTests(unittest.TestCase):
             "That would make the opening commitment more legible. What else do you prefer?"
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Keep it compact, but make the first push consequential."}],
                 ["############"] * 10,
@@ -3250,10 +3145,7 @@ class LLMClientTests(unittest.TestCase):
             "judge the opening's readability?"
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Keep it compact, but make the first push consequential."}],
                 ["############"] * 10,
@@ -3409,10 +3301,7 @@ class LLMClientTests(unittest.TestCase):
             {"role": "user", "content": "The upper route."},
         ]
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 conversation,
                 ["############"] * 10,
@@ -3447,10 +3336,7 @@ class LLMClientTests(unittest.TestCase):
     def test_clear_first_person_evaluation_gets_an_intent_card_when_model_omits_one(self):
         client = FakeClient([DETAILED_INTENT_BODY_ZH])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "我觉得水域现在只是摆设。"}],
                 ["############"] * 10,
@@ -4143,10 +4029,7 @@ class LLMClientTests(unittest.TestCase):
             "你还想改别的区域吗？要不要扩大水域？"
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [
                     {"role": "user", "content": "我认为水域纯摆设"},
@@ -4171,10 +4054,7 @@ class LLMClientTests(unittest.TestCase):
             "When the box enters that corridor, which route should read first?",
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [],
                 ["############"] * 10,
@@ -4237,10 +4117,7 @@ class LLMClientTests(unittest.TestCase):
         })
 
         client = FakeClient([payload])
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [],
                 ["############"] * 10,
@@ -4285,7 +4162,7 @@ class LLMClientTests(unittest.TestCase):
         })
         client = FakeClient([payload])
 
-        with patch.object(llm_client, "_create_async_client", return_value=client):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [],
                 ENTITY_ROUTE_ROWS,
@@ -4339,10 +4216,7 @@ class LLMClientTests(unittest.TestCase):
         })
 
         client = FakeClient([payload])
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [],
                 ["############"] * 10,
@@ -4405,10 +4279,7 @@ class LLMClientTests(unittest.TestCase):
                 "The water still creates a meaningful pause before the first push."
             ),
         ])
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [],
                 ENTITY_ROUTE_ROWS,
@@ -4426,13 +4297,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_stage_fallback_skips_plain_request_when_remaining_budget_is_too_short(self):
         client = FakeClient(["not valid JSON"])
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            # Exhaust the budget after the first response, independent of CPU scheduling.
-            patch.object(llm_client, "_remaining_until", side_effect=lambda deadline:
-                30.0 if not client.chat.completions.calls else 0.01),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(remaining_until_fn=RecordedCall(side_effect=lambda deadline: 30.0 if not client.chat.completions.calls else 0.01), client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [],
                 ["############"] * 10,
@@ -4477,7 +4342,7 @@ class LLMClientTests(unittest.TestCase):
         })
         client = FakeClient([classification, payload])
 
-        with patch.object(llm_client, "_create_async_client", return_value=client):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [],
                 OPERATION_BASE_ROWS,
@@ -4768,8 +4633,7 @@ class LLMClientTests(unittest.TestCase):
         client = FakeClient([legacy_payload, legacy_payload])
 
         with (
-            patch.object(llm_client, "_llm_credentials", return_value=("test-key", "https://example.test")),
-            patch.object(llm_client, "_create_async_client", return_value=client),
+            llm_scope(client_factory=RecordedCall(return_value=client)),
             self.assertRaises(llm_client.LLMServiceError) as captured,
         ):
             llm_client._classify_manual_edit_conflict(
@@ -4997,7 +4861,7 @@ class LLMClientTests(unittest.TestCase):
                 }],
             },
         }
-        with patch.object(llm_client, "_create_async_client", return_value=client):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [], OPERATION_BASE_ROWS, "en",
                 {"solvable": True, "solutionSteps": 21, "solutionPushes": 11},
@@ -5118,7 +4982,7 @@ class LLMClientTests(unittest.TestCase):
             },
         }
 
-        with patch.object(llm_client, "_create_async_client", return_value=client):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [], current_rows, "en",
                 {"solvable": True, "solutionSteps": 29, "solutionPushes": 14},
@@ -5313,10 +5177,7 @@ class LLMClientTests(unittest.TestCase):
         })
 
         client = FakeClient([payload])
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_stage_assessment(
                 [],
                 ["############"] * 10,
@@ -5342,10 +5203,7 @@ class LLMClientTests(unittest.TestCase):
         valid = "A grounded fallback response."
         client = FakeClient([truncated, valid])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Assess the route."}],
                 ["############"] * 10,
@@ -5365,8 +5223,7 @@ class LLMClientTests(unittest.TestCase):
         client = FakeClient([truncated, truncated, truncated])
 
         with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
+            llm_scope(client_factory=RecordedCall(return_value=client)),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -5401,10 +5258,7 @@ class LLMClientTests(unittest.TestCase):
         )
         client = FakeClient([long_route])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Explain the map design."}],
                 ENTITY_ROUTE_ROWS,
@@ -5462,10 +5316,7 @@ class LLMClientTests(unittest.TestCase):
         response = revision_plan_payload()
         client = FakeClient([response, operation_payload(TARGET_SHIFT_OPERATIONS)])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             llm_client.generate_chat_reply(
                 [
                     {"role": "assistant", "content": "Move the lower target beside the water route."},
@@ -5499,10 +5350,7 @@ class LLMClientTests(unittest.TestCase):
         )
         client = FakeClient([response, operation_payload(WATER_ADD_OPERATIONS)])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [
                     {"role": "assistant", "content": "我建议让水域贴近右侧推动路线。"},
@@ -5557,10 +5405,7 @@ class LLMClientTests(unittest.TestCase):
             },
         }
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "请按紫卡生成这个方案"}],
                 OPERATION_BASE_ROWS,
@@ -5624,10 +5469,7 @@ class LLMClientTests(unittest.TestCase):
             {"role": "user", "content": "三格可以"},
         ]
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 conversation,
                 OPERATION_BASE_ROWS,
@@ -5663,10 +5505,7 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(state, "authorized")
         self.assertIn("第7行第6到第8列", brief)
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 conversation,
                 OPERATION_BASE_ROWS,
@@ -5852,8 +5691,8 @@ class LLMClientTests(unittest.TestCase):
             }),
         ))])
         snapshot = {"rows": OPERATION_BASE_ROWS, "versionId": "current"}
-        with patch.object(llm_client, "_llm_credentials", return_value=("test-key", "test-url")), \
-                patch.object(llm_client, "_request_completion", new_callable=AsyncMock, return_value=response) as request:
+        request = RecordedAsyncCall(return_value=response)
+        with llm_scope(completion_requester=request):
             result = llm_client.classify_turn_understanding(
                 [{"role": "user", "content": message}], snapshot, "understanding-test",
             )
@@ -5902,8 +5741,7 @@ class LLMClientTests(unittest.TestCase):
         client = FakeClient([text_only, text_only])
 
         with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
+            llm_scope(client_factory=RecordedCall(return_value=client)),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -5930,10 +5768,7 @@ class LLMClientTests(unittest.TestCase):
             operation_payload(TARGET_SHIFT_OPERATIONS),
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [
                     {"role": "assistant", "content": "Move the lower target beside the water route."},
@@ -5960,10 +5795,7 @@ class LLMClientTests(unittest.TestCase):
             operation_payload(TARGET_SHIFT_OPERATIONS),
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Move the target and revise the map."}],
                 OPERATION_BASE_ROWS,
@@ -5983,10 +5815,7 @@ class LLMClientTests(unittest.TestCase):
             operation_payload(TARGET_SHIFT_OPERATIONS),
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [
                     {"role": "user", "content": "Move the target one cell to the right and revise the map."},
@@ -6092,10 +5921,7 @@ class LLMClientTests(unittest.TestCase):
             operation_payload(TARGET_SHIFT_OPERATIONS),
         ])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [
                     {"role": "user", "content": "Move the target one cell to the right and revise the map."},
@@ -6206,10 +6032,7 @@ class LLMClientTests(unittest.TestCase):
                 {"row": 3, "column": 2, "to": "#"},
             ]),
         ])
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Narrow the upper-left route and revise the map."}],
                 OPERATION_BASE_ROWS,
@@ -6221,10 +6044,7 @@ class LLMClientTests(unittest.TestCase):
     def test_flash_empty_response_falls_back_to_pro(self):
         client = FakeClient(["   \n ", "A grounded fallback response."])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Assess the route."}],
                 ["############"] * 10,
@@ -6260,14 +6080,10 @@ class LLMClientTests(unittest.TestCase):
         self.assertNotIn("assistantMessage", reason)
 
     def test_wall_clock_limit_cancels_slow_models(self):
-        started_at = llm_client.time.monotonic()
+        started_at = time.monotonic()
 
         with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "LLM_INTERNAL_DEADLINE_SECONDS", 0.06),
-            patch.object(llm_client, "PLAIN_CHAT_TIMEOUT_SECONDS", 0.06),
-            patch.object(llm_client, "PLAIN_PRIMARY_TIMEOUT_SECONDS", 0.02),
-            patch.object(llm_client, "_create_async_client", return_value=SlowClient()),
+            llm_scope(client_factory=RecordedCall(return_value=SlowClient()), config={'llm_internal_deadline_seconds': 0.06, 'plain_chat_timeout_seconds': 0.06, 'plain_primary_timeout_seconds': 0.02}),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -6278,12 +6094,12 @@ class LLMClientTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "UPSTREAM_TIMEOUT")
         self.assertEqual(raised.exception.attempts_used, 1)
-        self.assertLess(llm_client.time.monotonic() - started_at, 1.0)
+        self.assertLess(time.monotonic() - started_at, 1.0)
 
     def test_retry_budget_helper_skips_a_short_remaining_window(self):
         self.assertFalse(
             llm_client._retry_budget_available(
-                llm_client.time.monotonic() + 0.01,
+                time.monotonic() + 0.01,
                 request_id="retry-budget-test",
                 task="chat",
                 attempt=1,
@@ -6296,8 +6112,7 @@ class LLMClientTests(unittest.TestCase):
         client = FakeClient(["   ", "\n\t", " "])
 
         with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
+            llm_scope(client_factory=RecordedCall(return_value=client)),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -6317,8 +6132,7 @@ class LLMClientTests(unittest.TestCase):
         client = FakeClient([timeout, timeout])
 
         with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
+            llm_scope(client_factory=RecordedCall(return_value=client)),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -6352,7 +6166,7 @@ class LLMClientTests(unittest.TestCase):
 
     def test_missing_api_key_fails_without_model_call(self):
         with (
-            patch.dict(os.environ, {"KIMI_API_KEY": ""}),
+            llm_scope(env={**TEST_LLM_ENV, **{'KIMI_API_KEY': ''}}),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -6440,11 +6254,8 @@ class LLMClientTests(unittest.TestCase):
             attempts_used=0,
             request_id="proposal-routing-test",
         )
-        with patch.object(
-            llm_client,
-            "_generate_revision_search_proposal_sync",
-            return_value=expected,
-        ) as generate_proposal:
+        generate_proposal = RecordedCall(return_value=expected)
+        with llm_scope(revision_search_generator=generate_proposal):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "Please give me one plan."}],
                 ENTITY_ROUTE_ROWS,
@@ -6467,7 +6278,7 @@ class LLMClientTests(unittest.TestCase):
         plain_client = FakeClient(["{}"])
         intent_client = FakeClient(["{}"])
 
-        with patch.object(llm_client, "_create_async_client", return_value=revision_client):
+        with llm_scope(client_factory=RecordedCall(return_value=revision_client)):
             asyncio.run(llm_client._request_completion(
                 "test-kimi-key",
                 "https://api.moonshot.cn/v1",
@@ -6478,7 +6289,7 @@ class LLMClientTests(unittest.TestCase):
                 structured=False,
                 task="revision_plan",
             ))
-        with patch.object(llm_client, "_create_async_client", return_value=operation_client):
+        with llm_scope(client_factory=RecordedCall(return_value=operation_client)):
             asyncio.run(llm_client._request_completion(
                 "test-kimi-key",
                 "https://api.moonshot.cn/v1",
@@ -6489,7 +6300,7 @@ class LLMClientTests(unittest.TestCase):
                 structured=False,
                 task="operation_candidates",
             ))
-        with patch.object(llm_client, "_create_async_client", return_value=plain_client):
+        with llm_scope(client_factory=RecordedCall(return_value=plain_client)):
             asyncio.run(llm_client._request_completion(
                 "test-kimi-key",
                 "https://api.moonshot.cn/v1",
@@ -6500,7 +6311,7 @@ class LLMClientTests(unittest.TestCase):
                 structured=False,
                 task="plain_chat",
             ))
-        with patch.object(llm_client, "_create_async_client", return_value=intent_client):
+        with llm_scope(client_factory=RecordedCall(return_value=intent_client)):
             asyncio.run(llm_client._request_completion(
                 "test-kimi-key",
                 "https://api.moonshot.cn/v1",
@@ -6538,7 +6349,7 @@ class LLMClientTests(unittest.TestCase):
         revision_client = FakeClient(["{}"])
         plain_client = FakeClient(["{}"])
 
-        with patch.object(llm_client, "_create_async_client", return_value=revision_client):
+        with llm_scope(client_factory=RecordedCall(return_value=revision_client)):
             asyncio.run(llm_client._request_completion(
                 "test-kimi-key",
                 "https://api.moonshot.cn/v1",
@@ -6549,7 +6360,7 @@ class LLMClientTests(unittest.TestCase):
                 structured=False,
                 task="revision_plan",
             ))
-        with patch.object(llm_client, "_create_async_client", return_value=plain_client):
+        with llm_scope(client_factory=RecordedCall(return_value=plain_client)):
             asyncio.run(llm_client._request_completion(
                 "test-kimi-key",
                 "https://api.moonshot.cn/v1",
@@ -6570,10 +6381,7 @@ class LLMClientTests(unittest.TestCase):
                 {"questionId": "q2", "status": "unanswered"},
             ]
         })])
-        with (
-            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client), env={**TEST_LLM_ENV, **{'KIMI_API_KEY': 'test-kimi-key'}}):
             result = llm_client.review_question_answers(
                 [
                     {"questionId": "q1", "question": "Which route stays open?"},
@@ -6601,10 +6409,7 @@ class LLMClientTests(unittest.TestCase):
             "supersedesHypothesisIds": [],
             "conflictingHypothesisIds": ["intent-old"],
         })])
-        with (
-            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client), env={**TEST_LLM_ENV, **{'KIMI_API_KEY': 'test-kimi-key'}}):
             result = llm_client.review_intent_feedback(
                 "I prefer the opening choice to remain hidden.",
                 [{
@@ -6639,10 +6444,7 @@ class LLMClientTests(unittest.TestCase):
                 "conflictingHypothesisIds": ["intent-old"],
             }),
         ])
-        with (
-            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client), env={**TEST_LLM_ENV, **{'KIMI_API_KEY': 'test-kimi-key'}}):
             result = llm_client.review_intent_feedback(
                 "I prefer difficulty to come from a longer route.",
                 [{
@@ -6661,10 +6463,7 @@ class LLMClientTests(unittest.TestCase):
             "detailedText": "This extra explanation is not part of an inclination record.",
             "summaryText": "Prefer planning order over route length.",
         })])
-        with (
-            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client), env={**TEST_LLM_ENV, **{'KIMI_API_KEY': 'test-kimi-key'}}):
             result = llm_client.rewrite_intent_progress(
                 "inclination",
                 "I read your inclination as preferring planning order over route length.",
@@ -6685,10 +6484,7 @@ class LLMClientTests(unittest.TestCase):
                 "summaryText": "Prefer planning order over route length.",
             }),
         ])
-        with (
-            patch.dict(os.environ, {"KIMI_API_KEY": "test-kimi-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client), env={**TEST_LLM_ENV, **{'KIMI_API_KEY': 'test-kimi-key'}}):
             result = llm_client.rewrite_intent_progress(
                 "inclination",
                 canonical,
@@ -6903,8 +6699,7 @@ class LLMClientTests(unittest.TestCase):
             raise ValueError("The proposed map is unsolvable.")
 
         with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
+            llm_scope(client_factory=RecordedCall(return_value=client)),
             self.assertRaises(llm_client.LLMServiceError) as raised,
         ):
             llm_client.generate_chat_reply(
@@ -7622,10 +7417,7 @@ class LLMClientTests(unittest.TestCase):
     def test_later_turn_in_stage_one_may_still_ask_a_concrete_question(self):
         client = FakeClient([DETAILED_INTENT_BODY_ZH])
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(llm_client, "_create_async_client", return_value=client),
-        ):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             result = llm_client.generate_chat_reply(
                 [{"role": "user", "content": "我觉得水域现在只是摆设。"}],
                 ["############"] * 10,
@@ -8218,9 +8010,7 @@ class LLMClientTests(unittest.TestCase):
             "issues": ["卡片丢失了布局拥挤语义。"], "reviewedActiveClaims": [],
             "reviewVersion": "test-v1",
         }
-        with patch.object(
-            llm_client, "_review_intent_candidate_async", new=AsyncMock(return_value=review),
-        ):
+        with llm_scope(intent_candidate_reviewer=RecordedAsyncCall(return_value=review)):
             result, client = self.execute(
                 [generic_body + "\n<GUIDANCE>INTENT: " + generic_card + "</GUIDANCE>"],
                 language="zh-CN",

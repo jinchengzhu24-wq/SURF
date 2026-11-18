@@ -1,4 +1,141 @@
-"use strict";
+import { GUIDANCE_CUE_LABELS, LLM_REQUEST_TIMEOUT_MS, REQUEST_COPY } from "./i18n.js?v=binary-discovery-20261118-esm";
+import { tileName } from "./map-editor.js?v=binary-discovery-20261118-esm";
+import { setButtonDisabled } from "./state-storage.js?v=binary-discovery-20261118-esm";
+
+export function isInternalProposalFailureCue(cue) {
+    if (!cue || cue.type !== "clarification") return false;
+    const text = String(cue.text || "").toLowerCase();
+    return text.includes("无法形成")
+        || text.includes("可验证的方案")
+        || text.includes("could not form a proposal")
+        || text.includes("fully consistent with the saved map");
+}
+
+export function assistantBodyWithoutCues(content, uiCues, question) {
+    let body = String(content || "").trimEnd();
+    const suffixes = [
+        ...uiCues.map(cue => String(cue?.text || "").trim()).filter(Boolean),
+        question
+    ].filter(Boolean);
+
+    suffixes.reverse().forEach(suffix => {
+        if (body.endsWith(suffix)) {
+            body = body.slice(0, -suffix.length).trimEnd();
+        }
+    });
+
+    return body;
+}
+
+const coordinateRouteDirections = [
+    [-1, 0],
+    [1, 0],
+    [0, -1],
+    [0, 1]
+];
+
+export function formatCoordinatePoint(point) {
+    return `row ${point?.row}, column ${point?.column}`;
+}
+
+export function normalizedCoordinatePoint(point) {
+    if (!point || !Number.isInteger(point.row) || !Number.isInteger(point.column)) return null;
+    if (point.row < 1 || point.row > 10 || point.column < 1 || point.column > 12) return null;
+    return { row: point.row, column: point.column };
+}
+
+export function findCoordinateRoute(rows, from, to) {
+    if (!Array.isArray(rows) || rows.length !== 10 || rows.some(row => typeof row !== "string" || row.length !== 12)) {
+        return null;
+    }
+    const source = normalizedCoordinatePoint(from);
+    const destination = normalizedCoordinatePoint(to);
+    if (!source || !destination || (source.row === destination.row && source.column === destination.column)) {
+        return null;
+    }
+
+    const start = [source.row - 1, source.column - 1];
+    const end = [destination.row - 1, destination.column - 1];
+    const startKey = `${start[0]},${start[1]}`;
+    const endKey = `${end[0]},${end[1]}`;
+    const isOpen = (row, column) => {
+        if (row < 0 || row >= rows.length || column < 0 || column >= rows[row].length) return false;
+        const tile = rows[row][column];
+        if (tile === " " || tile === "#" || tile === "@") return false;
+        const key = `${row},${column}`;
+        return tile !== "s" || key === startKey || key === endKey;
+    };
+
+    if (!isOpen(start[0], start[1]) || !isOpen(end[0], end[1])) return null;
+
+    const queue = [start];
+    const previous = new Map([[startKey, null]]);
+    let queueIndex = 0;
+    while (queueIndex < queue.length) {
+        const [row, column] = queue[queueIndex++];
+        const currentKey = `${row},${column}`;
+        if (currentKey === endKey) break;
+
+        coordinateRouteDirections.forEach(([rowDelta, columnDelta]) => {
+            const nextRow = row + rowDelta;
+            const nextColumn = column + columnDelta;
+            const nextKey = `${nextRow},${nextColumn}`;
+            if (!isOpen(nextRow, nextColumn) || previous.has(nextKey)) return;
+            previous.set(nextKey, currentKey);
+            queue.push([nextRow, nextColumn]);
+        });
+    }
+
+    if (!previous.has(endKey)) return null;
+    const path = [];
+    let key = endKey;
+    while (key !== null) {
+        const [row, column] = key.split(",").map(Number);
+        path.push({ row: row + 1, column: column + 1 });
+        key = previous.get(key);
+    }
+    return path.reverse();
+}
+
+const defaultAssistantBodyWithoutCues = assistantBodyWithoutCues;
+
+export function createChatCards(ctx) {
+    const { state, elements, window, document, localStorage, setTimeout, requestAnimationFrame, ports } = ctx;
+
+    const t = (...args) => ports.t(...args);
+    const recordReplyDiagnostic = (...args) => ports.recordReplyDiagnostic(...args);
+    const turnReplyIdentity = (...args) => ports.turnReplyIdentity(...args);
+    const progressPanelKey = (...args) => ports.progressPanelKey(...args);
+    const progressPanelStorageKey = (...args) => ports.progressPanelStorageKey(...args);
+    const makeButton = (...args) => ports.makeButton(...args);
+    const uniqueId = (...args) => ports.uniqueId(...args);
+    const api = (...args) => ports.api(...args);
+    const withBusy = (...args) => ports.withBusy(...args);
+    const showError = (...args) => ports.showError(...args);
+    const escapeHtml = (...args) => ports.escapeHtml(...args);
+    const persistPendingMessage = (...args) => ports.persistPendingMessage(...args);
+    const handleComposerInput = (...args) => ports.handleComposerInput(...args);
+    const canEditSelected = (...args) => ports.canEditSelected(...args);
+    const drawActiveCoordinateRoute = (...args) => ports.drawActiveCoordinateRoute(...args);
+    const currentPendingProposal = (...args) => ports.currentPendingProposal(...args);
+    const createMiniMap = (...args) => ports.createMiniMap(...args);
+    const selectVersion = (...args) => ports.selectVersion(...args);
+    const selectedVersion = (...args) => ports.selectedVersion(...args);
+    const activeChallengeComposerState = (...args) => ports.activeChallengeComposerState(...args);
+    const submitPendingMessage = (...args) => ports.submitPendingMessage(...args);
+    const decideProposal = (...args) => ports.decideProposal(...args);
+    const submitBinaryAction = (...args) => ports.submitBinaryAction(...args);
+    const render = (...args) => ports.render(...args);
+    const updateControls = (...args) => ports.updateControls(...args);
+    const deadlineExpired = (...args) => ports.deadlineExpired(...args);
+    const showReplyNotice = (...args) => ports.showReplyNotice(...args);
+    const renderTranslationStatus = (...args) => ports.renderTranslationStatus(...args);
+    const localizedAssistantTurn = (...args) => ports.localizedAssistantTurn(...args);
+    const proposalForTurn = (...args) => ports.proposalForTurn(...args);
+    const renderAssistantBody = (...args) => ports.renderAssistantBody(...args);
+    const assistantBodyWithoutCues = (...args) => ports.assistantBodyWithoutCues(...args);
+    const isLatestRevisionOfferTurn = (...args) => ports.isLatestRevisionOfferTurn(...args);
+    const ensureVisibleTranslations = (...args) => ports.ensureVisibleTranslations(...args);
 
 function renderProgressContext() {
     if (!elements.progressPanel) return;
@@ -147,7 +284,7 @@ function updateProgressPanelMaxHeight() {
         ? elements.progressPanel.getBoundingClientRect().height
         : 0;
     const summaryHeight = elements.progressSummary?.getBoundingClientRect().height || 0;
-    const referenceHeight = window.matchMedia("(min-width: 1201px)").matches
+    const referenceHeight = window.matchMedia?.("(min-width: 1201px)")?.matches
         ? panelHeight
         : panelHeight - Math.max(0, progressHeight - summaryHeight);
     const progressMaxHeight = Math.max(
@@ -541,7 +678,7 @@ function latestRevisionOfferTurn() {
     return selectedStageTurns().slice().reverse().find(isRevisionOfferTurn) || null;
 }
 
-function isLatestRevisionOfferTurn(turn) {
+function isLatestRevisionOfferTurnImpl(turn) {
     return latestRevisionOfferTurn()?.turnId === turn?.turnId;
 }
 
@@ -578,15 +715,6 @@ function guidanceForDisplay(source, proposal = null) {
     }
     guidance.uiCues = warning ? [warning] : [];
     return guidance;
-}
-
-function isInternalProposalFailureCue(cue) {
-    if (!cue || cue.type !== "clarification") return false;
-    const text = String(cue.text || "").toLowerCase();
-    return text.includes("无法形成")
-        || text.includes("可验证的方案")
-        || text.includes("could not form a proposal")
-        || text.includes("fully consistent with the saved map");
 }
 
 function proposalCompanionManualText(pendingProposal) {
@@ -676,30 +804,7 @@ function sendChallengeChoice(challengeId, choice) {
     void submitPendingMessage();
 }
 
-function assistantBodyWithoutCues(content, uiCues, question) {
-    let body = String(content || "").trimEnd();
-    const suffixes = [
-        ...uiCues.map(cue => String(cue?.text || "").trim()).filter(Boolean),
-        question
-    ].filter(Boolean);
-
-    suffixes.reverse().forEach(suffix => {
-        if (body.endsWith(suffix)) {
-            body = body.slice(0, -suffix.length).trimEnd();
-        }
-    });
-
-    return body;
-}
-
-const coordinateRouteDirections = [
-    [-1, 0],
-    [1, 0],
-    [0, -1],
-    [0, 1]
-];
-
-function renderAssistantBody(node, body, links, turn) {
+function renderAssistantBodyImpl(node, body, links, turn) {
     const text = String(body || "");
     const candidates = [];
     const occupiedRanges = [];
@@ -764,69 +869,6 @@ function renderAssistantBody(node, body, links, turn) {
     if (cursor < text.length) node.appendChild(document.createTextNode(text.slice(cursor)));
 }
 
-function formatCoordinatePoint(point) {
-    return `row ${point?.row}, column ${point?.column}`;
-}
-
-function normalizedCoordinatePoint(point) {
-    if (!point || !Number.isInteger(point.row) || !Number.isInteger(point.column)) return null;
-    if (point.row < 1 || point.row > 10 || point.column < 1 || point.column > 12) return null;
-    return { row: point.row, column: point.column };
-}
-
-function findCoordinateRoute(rows, from, to) {
-    if (!Array.isArray(rows) || rows.length !== 10 || rows.some(row => typeof row !== "string" || row.length !== 12)) {
-        return null;
-    }
-    const source = normalizedCoordinatePoint(from);
-    const destination = normalizedCoordinatePoint(to);
-    if (!source || !destination || (source.row === destination.row && source.column === destination.column)) {
-        return null;
-    }
-
-    const start = [source.row - 1, source.column - 1];
-    const end = [destination.row - 1, destination.column - 1];
-    const startKey = `${start[0]},${start[1]}`;
-    const endKey = `${end[0]},${end[1]}`;
-    const isOpen = (row, column) => {
-        if (row < 0 || row >= rows.length || column < 0 || column >= rows[row].length) return false;
-        const tile = rows[row][column];
-        if (tile === " " || tile === "#" || tile === "@") return false;
-        const key = `${row},${column}`;
-        return tile !== "s" || key === startKey || key === endKey;
-    };
-
-    if (!isOpen(start[0], start[1]) || !isOpen(end[0], end[1])) return null;
-
-    const queue = [start];
-    const previous = new Map([[startKey, null]]);
-    let queueIndex = 0;
-    while (queueIndex < queue.length) {
-        const [row, column] = queue[queueIndex++];
-        const currentKey = `${row},${column}`;
-        if (currentKey === endKey) break;
-
-        coordinateRouteDirections.forEach(([rowDelta, columnDelta]) => {
-            const nextRow = row + rowDelta;
-            const nextColumn = column + columnDelta;
-            const nextKey = `${nextRow},${nextColumn}`;
-            if (!isOpen(nextRow, nextColumn) || previous.has(nextKey)) return;
-            previous.set(nextKey, currentKey);
-            queue.push([nextRow, nextColumn]);
-        });
-    }
-
-    if (!previous.has(endKey)) return null;
-    const path = [];
-    let key = endKey;
-    while (key !== null) {
-        const [row, column] = key.split(",").map(Number);
-        path.push({ row: row + 1, column: column + 1 });
-        key = previous.get(key);
-    }
-    return path.reverse();
-}
-
 function toggleCoordinateLink(turn, linkIndex, link) {
     const active = state.activeCoordinateLink;
     const sameLink = active
@@ -849,7 +891,7 @@ function toggleCoordinateLink(turn, linkIndex, link) {
     drawActiveCoordinateRoute();
 }
 
-function proposalForTurn(turnId) {
+function proposalForTurnImpl(turnId) {
     return state.session.proposals.find(proposal => proposal.assistantTurnId === turnId);
 }
 
@@ -1419,7 +1461,7 @@ function selectedStageTurns() {
     return [openingTurn, ...directTurns];
 }
 
-function localizedAssistantTurn(turn) {
+function localizedAssistantTurnImpl(turn) {
     if (turn.role === "assistant" && proposalForTurn(turn.turnId)) {
         return {
             ...turn,
@@ -1537,7 +1579,7 @@ async function translateVisibleBatch(batch, targetLanguage) {
             }
         });
         if (shouldScheduleRetry && state.translationRetryTimerId === null) {
-            state.translationRetryTimerId = window.setTimeout(() => {
+            state.translationRetryTimerId = setTimeout(() => {
                 state.translationRetryTimerId = null;
                 ensureVisibleTranslations();
             }, 5000);
@@ -1549,7 +1591,7 @@ async function translateVisibleBatch(batch, targetLanguage) {
     }
 }
 
-async function ensureVisibleTranslations() {
+async function ensureVisibleTranslationsImpl() {
     if (!state.session) return;
     if (state.translationInProgress) {
         state.translationPendingRerun = true;
@@ -1599,5 +1641,61 @@ async function ensureVisibleTranslations() {
             void ensureVisibleTranslations();
         }
     }
+}
+
+    return {
+        renderProgressContext,
+        renderQuestionRecords,
+        submitQuestionFeedback,
+        updateProgressPanelMaxHeight,
+        renderProgressItems,
+        renderDesignInclinations,
+        formatProgressTime,
+        renderMessages,
+        renderAssistantBubble,
+        renderAssistantBubbleContent,
+        proposalStateMessage,
+        selectedStageHasActiveDisagreement,
+        selectedStageHasPendingIntentConflict,
+        isRevisionOfferTurn,
+        latestRevisionOfferTurn,
+        isLatestRevisionOfferTurn: isLatestRevisionOfferTurnImpl,
+        guidanceForDisplay,
+        isInternalProposalFailureCue,
+        proposalCompanionManualText,
+        createDiscussionFocus,
+        createDisagreementCard,
+        canUseChallengeChoice,
+        sendChallengeChoice,
+        assistantBodyWithoutCues: defaultAssistantBodyWithoutCues,
+        renderAssistantBody: renderAssistantBodyImpl,
+        formatCoordinatePoint,
+        normalizedCoordinatePoint,
+        findCoordinateRoute,
+        toggleCoordinateLink,
+        proposalForTurn: proposalForTurnImpl,
+        createGuidanceCue,
+        createIntentGuidanceCue,
+        createIntentConflictChoiceCue,
+        submitIntentFeedback,
+        proposalPresentationTileLabel,
+        proposalPreservedLabel,
+        createProposalPresentation,
+        createProposalPresentationV2,
+        prefillProposalConsent,
+        sendRevisionCardAction,
+        renderProposal,
+        proposalFlowActive,
+        binaryFlowActive,
+        canChooseBinary,
+        renderBinaryQuestion,
+        selectedStageTurns,
+        localizedAssistantTurn: localizedAssistantTurnImpl,
+        localizedProposalSummary,
+        verifiedProposalMessage,
+        verifiedProposalSummary,
+        translateVisibleBatch,
+        ensureVisibleTranslations: ensureVisibleTranslationsImpl,
+    };
 }
 

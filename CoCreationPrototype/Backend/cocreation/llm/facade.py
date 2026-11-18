@@ -1,9 +1,11 @@
 from . import (
+    binary_model,
     chat_generation,
     config_and_runtime,
     intent_and_review,
     prompts_and_messages,
     proposal_planning,
+    service,
     snapshot_grounding,
     translations,
 )
@@ -15,6 +17,7 @@ _EXPORT_MODULES = (
     prompts_and_messages,
     chat_generation,
     translations,
+    service,
 )
 for _mod in _EXPORT_MODULES:
     for _k, _v in vars(_mod).items():

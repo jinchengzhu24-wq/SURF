@@ -5,12 +5,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import cocreation  # noqa: F401
-import semantic_eval as evaluation
-import llm_client as llm
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from cocreation.llm.config_and_runtime import LLMConfig, LLMServiceError
+from cocreation.tools import semantic_eval_runner as evaluation
+from tests.fakes import StubLLMService
 
 
 class SemanticEvaluationTests(unittest.TestCase):
@@ -88,7 +90,12 @@ class SemanticEvaluationTests(unittest.TestCase):
     def test_cli_requires_live_flag_before_any_model_call(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "runs.json"
-            completed = subprocess.run([sys.executable, str(Path(evaluation.__file__)), "run", "--output", str(output)], capture_output=True, text=True)
+            completed = subprocess.run(
+                [sys.executable, "-m", "cocreation.tools.semantic_eval_runner", "run", "--output", str(output)],
+                cwd=str(BACKEND_DIR),
+                capture_output=True,
+                text=True,
+            )
             self.assertEqual(completed.returncode, 2)
             self.assertIn("requires --live", completed.stderr)
             self.assertFalse(output.exists())
@@ -98,16 +105,27 @@ class SemanticEvaluationTests(unittest.TestCase):
         suite["cases"] = [self.case()]
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "runs.json"
-            with patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), \
-                    patch.object(llm, "classify_turn_understanding", side_effect=[self.result(), llm.LLMServiceError("UPSTREAM_TIMEOUT", "test", "r", True, 1, 504)]) as classify:
-                captures = evaluation.run_live(suite, output, 2)
-            self.assertEqual(classify.call_count, 2)
+            stub_llm = StubLLMService(
+                config=LLMConfig(api_key="fake", base_url="https://example.invalid"),
+                handlers={
+                    "classify_turn_understanding": [
+                        self.result(),
+                        LLMServiceError("UPSTREAM_TIMEOUT", "test", "r", True, 1, 504),
+                    ]
+                },
+            )
+            captures = evaluation.run_live(suite, output, 2, llm_service=stub_llm)
+            self.assertEqual(len(stub_llm.method_calls["classify_turn_understanding"]), 2)
             self.assertEqual(captures["runs"][1]["errorCode"], "UPSTREAM_TIMEOUT")
             self.assertEqual(json.loads(output.read_text(encoding="utf-8")), captures)
             self.assertEqual(evaluation.score(suite, captures)["inconsistentCases"], 1)
-            with self.assertRaises(FileExistsError), patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), patch.object(llm, "classify_turn_understanding") as classify:
-                evaluation.run_live(suite, output)
-            classify.assert_not_called()
+
+            stub_llm_empty = StubLLMService(
+                config=LLMConfig(api_key="fake", base_url="https://example.invalid")
+            )
+            with self.assertRaises(FileExistsError):
+                evaluation.run_live(suite, output, llm_service=stub_llm_empty)
+            self.assertEqual(len(stub_llm_empty.method_calls["classify_turn_understanding"]), 0)
 
 
 if __name__ == "__main__":

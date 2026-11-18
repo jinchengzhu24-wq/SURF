@@ -7,17 +7,16 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import llm_client as llm
-import app as backend
-import repository
+from tests.fakes import FakeClock, RecordedAsyncCall, RecordedCall, SessionTestCase, llm_scope
+from cocreation.llm import facade as llm
+from cocreation.persistence import repository
 import test_sessions
 import test_llm_client
 OPERATION_BASE_ROWS = test_llm_client.OPERATION_BASE_ROWS
-from reply_reliability import CURRENT_REPLY_TRACE, ReplyTrace, OptionalRepairBudget, REPLY_PIPELINE_VERSION
+from cocreation.reliability.reply_reliability import CURRENT_REPLY_TRACE, ReplyTrace, OptionalRepairBudget, REPLY_PIPELINE_VERSION
 from reliability_report import summarize
 
 USER = "The right side looks too cramped; I prefer more open spacing."
@@ -43,7 +42,8 @@ def completion(value, finish="stop"):
 class JointReviewTests(unittest.TestCase):
     def review(self, payload, state=None, finish="stop"):
         state = state if state is not None else {}
-        with patch.object(llm, "_request_completion", AsyncMock(return_value=completion(payload, finish))) as call:
+        call = RecordedAsyncCall(return_value=completion(payload, finish))
+        with llm_scope(completion_requester=call):
             result = asyncio.run(llm._review_intent_candidate_async(api_key="offline", base_url="offline",
                 user_text=USER, body=BODY, decision={"classification": "none", "claims": [], "cardText": ""},
                 active_inclinations=[], language="en", request_id="r", deadline=time.monotonic() + 30,
@@ -96,7 +96,8 @@ class JointReviewTests(unittest.TestCase):
         self.assertIsNotNone(llm._intent_hypothesis_detail_issue("This proves you definitely prefer it.", "en", semantic_reviewed=True))
 
     def test_single_field_card_repair_preserves_body_and_model_settings(self):
-        with patch.object(llm, "_request_completion", AsyncMock(return_value=completion({"cardText": CARD}))) as call:
+        call = RecordedAsyncCall(return_value=completion({'cardText': CARD}))
+        with llm_scope(completion_requester=call):
             body, card = asyncio.run(llm._repair_intent_components_async(api_key="offline", base_url="offline",
                 user_text=USER, body=BODY, card_text="bad", claims=[CLAIM], issues=[], repair_body=False,
                 repair_card=True, map_facts="{}", language="en", request_id="r", deadline=time.monotonic() + 30))
@@ -110,7 +111,8 @@ class JointReviewTests(unittest.TestCase):
         budget = OptionalRepairBudget(time.monotonic() + 60)
         budget.spent = 10
         try:
-            with patch.object(llm, "_repair_intent_components_async", AsyncMock()) as repair:
+            repair = RecordedAsyncCall()
+            with llm_scope(intent_component_repairer=repair):
                 result = asyncio.run(llm._repair_reviewed_intent_presentation(repair_body=False, repair_card=True,
                     body=BODY, card_text="bad", deadline=budget.deadline, optional_budget=budget,
                     card_required=False, component_checks=[]))
@@ -137,8 +139,9 @@ class DeliveryTests(unittest.TestCase):
 
     def test_answered_question_does_not_veto_card_or_invent_keyword_card(self):
         payload = verdict(answeredQuestionIds=[])
-        with patch.object(llm, "_review_intent_candidate_async", AsyncMock(return_value={**payload, "reviewVersion": "test"})) as review, \
-                patch.object(llm, "_apply_deterministic_guidance_fallback", wraps=llm._apply_deterministic_guidance_fallback) as guidance_helper:
+        review = RecordedAsyncCall(return_value={**payload, 'reviewVersion': 'test'})
+        guidance_helper = RecordedCall(side_effect=llm._apply_deterministic_guidance_fallback)
+        with llm_scope(intent_candidate_reviewer=review, handlers={'apply_deterministic_guidance_fallback': guidance_helper}):
             result, _ = self.execute([BODY], rows=OPERATION_BASE_ROWS, conversation=[{"role": "user", "content": USER}],
                 stage_context={"answeredVisibleQuestion": True, "conversationBranch": "ordinary"})
         self.assertEqual(review.await_count, 1)
@@ -147,8 +150,7 @@ class DeliveryTests(unittest.TestCase):
 
     def test_card_failure_retains_reviewed_candidate_and_body(self):
         review = verdict(cardText="This proves you definitely want this.", cardTextValid=False, answeredQuestionIds=[], reviewVersion="test")
-        with patch.object(llm, "_review_intent_candidate_async", AsyncMock(return_value=review)), \
-                patch.object(llm, "_repair_intent_components_async", AsyncMock(side_effect=ValueError("bad expression"))):
+        with llm_scope(intent_candidate_reviewer=RecordedAsyncCall(return_value=review), intent_component_repairer=RecordedAsyncCall(side_effect=ValueError('bad expression'))):
             result, _ = self.execute([BODY], rows=OPERATION_BASE_ROWS, conversation=[{"role": "user", "content": USER}])
         self.assertEqual(result.assistant_message, BODY)
         self.assertIsNone(result.guidance["intentHypothesis"])
@@ -160,12 +162,12 @@ class DeliveryTests(unittest.TestCase):
         memo = {"passed": set(), "hits": 0, "checks": 0}
         token = llm._GROUNDING_MEMO.set(memo)
         try:
-            with patch.object(llm, "_check_map_grounding_texts") as validate:
-                llm._validate_map_grounding_texts(inputs, OPERATION_BASE_ROWS)
-                llm._validate_map_grounding_texts(inputs, OPERATION_BASE_ROWS)
-                llm._validate_map_grounding_texts(["Changed text."], OPERATION_BASE_ROWS)
-                llm._validate_map_grounding_texts(inputs, OPERATION_BASE_ROWS, entity_bindings={"changed": True})
-                self.assertEqual(validate.call_count, 3)
+            llm._validate_map_grounding_texts(inputs, OPERATION_BASE_ROWS)
+            llm._validate_map_grounding_texts(inputs, OPERATION_BASE_ROWS)
+            llm._validate_map_grounding_texts(["Changed text."], OPERATION_BASE_ROWS)
+            llm._validate_map_grounding_texts(inputs, OPERATION_BASE_ROWS, entity_bindings={"changed": True})
+            self.assertEqual(memo["checks"], 3)
+            self.assertEqual(memo["hits"], 1)
         finally:
             llm._GROUNDING_MEMO.reset(token)
         self.assertIsNone(llm._GROUNDING_MEMO.get())
@@ -173,22 +175,20 @@ class DeliveryTests(unittest.TestCase):
     def test_body_retry_reuses_semantics_and_card_without_optional_budget_reset(self):
         state = {}
         tasks = []
+        clock = FakeClock(time.monotonic())
         async def model(*args, **kwargs):
             tasks.append(kwargs["task"])
             if kwargs["task"] == "plain_chat":
                 return completion(BODY)
             if kwargs["task"] == "intent_body_repair":
                 # Technical fault in the original corrective slot.
+                clock.advance(10)
                 raise ValueError("PATCH_TYPE_INVALID")
             if kwargs.get("response_format_override"):
                 return completion({"bodyValid": True, "issues": []})
             # The first review is verified, but identifies a mandatory body defect.
             return completion(verdict(bodyValid=False, issues=["The body does not address the spatial judgment."]))
-        def exhaust_optional(budget, started):
-            budget.spent = 10
-        with patch.object(llm, "_request_completion", side_effect=model), \
-                patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(OptionalRepairBudget, "record", new=exhaust_optional):
+        with llm_scope(completion_requester=model, clock=clock):
             result = llm.generate_chat_reply([{"role": "user", "content": USER}], OPERATION_BASE_ROWS, "r",
                 stage_context={"_reliabilityState": state, "ordinaryOpenQuestions": [{"questionId": "q1", "question": "Which spacing?"}]})
         self.assertEqual(result.attempts_used, 2)
@@ -198,26 +198,18 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(state["lockedIntentReview"]["claims"], [CLAIM])
 
 
-class JointHttpTests(unittest.TestCase):
+class JointHttpTests(SessionTestCase):
     def setUp(self):
-        self.old_path = repository.DATABASE_PATH
         self.fixture = test_sessions.CoCreationSessionTests()
-        self.fixture.setUpClass()
+        self.addCleanup(self.fixture.doCleanups)
         self.fixture.setUp()
-        self.addCleanup(self.cleanup_fixture)
-
-    def cleanup_fixture(self):
-        self.fixture.tearDown()
-        self.fixture.doCleanups()
-        self.fixture.tearDownClass()
-        repository.DATABASE_PATH = self.old_path
 
     def test_joint_results_commit_once_and_hidden_review_stays_private(self):
         fixture = self.fixture
         version = fixture.read_session()["currentVersionId"]
-        with repository.connect(immediate=True) as database:
+        with self.fixture.services.connect(immediate=True) as database:
             session = repository.get_session(database, fixture.session_id)
-            backend.insert_turn(database, session, "assistant", "Which spacing would you prefer?", version, "opening", None)
+            self.fixture.services.insert_turn(database, session, "assistant", "Which spacing would you prefer?", version, "opening", None)
             context = repository.load_design_context(database, fixture.session_id, version)
             context["openQuestions"] = [{"id": "q1", "question": "Which spacing would you prefer?", "status": "open",
                 "sourceKind": "visible_output", "sourceStageId": version}]
@@ -227,9 +219,10 @@ class JointHttpTests(unittest.TestCase):
             calls.append(kwargs["task"])
             return completion(BODY if kwargs["task"] == "plain_chat" else verdict())
         payload = {"content": USER, "baseVersionId": version, "idempotencyKey": "joint-http"}
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm, "_request_completion", side_effect=model), \
-                patch.object(backend, "review_question_answers", side_effect=AssertionError("extra question call")):
+        with self.fixture.using_dependencies(
+            llm_handlers={"review_question_answers": AssertionError('extra question call')},
+            llm_options={"completion_requester": RecordedAsyncCall(side_effect=model)},
+        ):
             response = fixture.client.post(f"/api/sessions/{fixture.session_id}/messages", json=payload)
             replay = fixture.client.post(f"/api/sessions/{fixture.session_id}/messages", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
@@ -240,7 +233,7 @@ class JointHttpTests(unittest.TestCase):
         self.assertEqual(calls, ["plain_chat", "intent_candidate_review"])
         self.assertEqual(response.json()["turns"], replay.json()["turns"])
         self.assertEqual(response.headers["X-Reply-Pipeline-Version"], REPLY_PIPELINE_VERSION)
-        with repository.connect() as database:
+        with self.fixture.services.connect() as database:
             context = repository.load_design_context(database, fixture.session_id, version)
             self.assertEqual(context["openQuestions"][0]["status"], "answered")
             events = database.execute("SELECT payload_json FROM audit_events WHERE event_type='reply_pipeline_diagnostic'").fetchall()

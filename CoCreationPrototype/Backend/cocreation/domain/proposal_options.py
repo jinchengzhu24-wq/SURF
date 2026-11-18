@@ -3,7 +3,7 @@ import copy
 import hashlib
 import json
 
-from proposal_diagnostics import ProposalValidationError, structural_issue
+from cocreation.domain.proposal_diagnostics import ProposalValidationError, structural_issue
 
 
 VERSION = 1

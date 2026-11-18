@@ -9,8 +9,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
     import cocreation  # noqa: F401
 
-from demo_level_generator import generate_demo_level
-from level_validation import HEIGHT, WIDTH, validate_and_solve
+from cocreation.domain.demo_level_generator import generate_demo_level
+from cocreation.domain.level_validation import HEIGHT, WIDTH, validate_and_solve
 
 
 class DemoLevelGeneratorTests(unittest.TestCase):

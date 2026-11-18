@@ -6,7 +6,7 @@ import re
 import time
 from itertools import combinations
 
-from level_validation import build_map_facts, minimum_pushes
+from cocreation.domain.level_validation import build_map_facts, minimum_pushes
 
 
 WIDTH = 12
@@ -592,8 +592,10 @@ def search_revision_plan(
     entity_bindings=None,
     excluded_map_fingerprints=None,
     maximum_valid_candidates=MAX_VALID_CANDIDATES,
+    clock=None,
 ):
-    search_started_at = time.monotonic()
+    monotonic = clock.monotonic if clock is not None else time.monotonic
+    search_started_at = monotonic()
     base_rows = tuple(base_rows)
     validate_revision_plan_against_map(base_rows, plan, entity_bindings)
     baseline_metrics = baseline_metrics or {}
@@ -627,7 +629,7 @@ def search_revision_plan(
 
     for strategy_index, strategy in enumerate(plan.strategies, start=1):
         seen_maps = {base_rows}
-        if _deadline_reached(deadline):
+        if _deadline_reached(deadline, clock=clock):
             diagnostics["deadlineReached"] = True
             break
         primitives = _generate_primitives(
@@ -652,7 +654,7 @@ def search_revision_plan(
             for state in beam:
                 if diagnostics["constructedCandidates"] >= MAX_CONSTRUCTED_CANDIDATES:
                     break
-                if _deadline_reached(deadline):
+                if _deadline_reached(deadline, clock=clock):
                     diagnostics["deadlineReached"] = True
                     break
                 if state.rows not in seen_maps:
@@ -677,6 +679,7 @@ def search_revision_plan(
                             else strategy.required_transitions
                         ),
                         deadline=deadline,
+                        clock=clock,
                     )
                     if len(verified) >= maximum_valid_candidates:
                         break
@@ -710,7 +713,7 @@ def search_revision_plan(
             break
 
     diagnostics["validCandidates"] = len(verified)
-    diagnostics["elapsedMs"] = int((time.monotonic() - search_started_at) * 1000)
+    diagnostics["elapsedMs"] = int((monotonic() - search_started_at) * 1000)
     if not verified:
         raise ProposalSearchExhausted(diagnostics)
     candidate_rank = getattr(proposal_validator, "candidate_rank", None)
@@ -1002,6 +1005,7 @@ def _evaluate_state(
     verified,
     required_transitions=(),
     deadline=None,
+    clock=None,
 ):
     if not _state_realizes_required_transitions(
         state.rows,
@@ -1027,7 +1031,7 @@ def _evaluate_state(
         _count_failure(diagnostics, _safe_failure_code(exception))
         return
     operators = tuple(sorted(state.operators))
-    metric_matches = _metric_matches(strategy.metric_goals, baseline_metrics, validation, deadline=deadline)
+    metric_matches = _metric_matches(strategy.metric_goals, baseline_metrics, validation, deadline=deadline, clock=clock)
     if metric_matches != len(strategy.metric_goals):
         _count_failure(diagnostics, "metric_goal_not_met")
         return
@@ -1082,7 +1086,7 @@ def _cheap_structure_valid(rows):
     return player_count == 1 and 1 <= box_count <= 2 and target_count == box_count
 
 
-def _metric_matches(goals, baseline, validation, deadline=None):
+def _metric_matches(goals, baseline, validation, deadline=None, clock=None):
     matches = 0
     values = {
         "solutionSteps": getattr(validation, "solution_steps", None),
@@ -1094,7 +1098,7 @@ def _metric_matches(goals, baseline, validation, deadline=None):
         before = baseline.get(goal.metric)
         if goal.metric == "minimumPushes":
             try:
-                values[goal.metric] = minimum_pushes(validation.rows, deadline=deadline)
+                values[goal.metric] = minimum_pushes(validation.rows, deadline=deadline, clock=clock)
             except TimeoutError:
                 raise
             except Exception:
@@ -1183,8 +1187,9 @@ def _primitive_key(primitive):
     return (primitive.operator, primitive.changes)
 
 
-def _deadline_reached(deadline):
-    return time.monotonic() >= deadline
+def _deadline_reached(deadline, clock=None):
+    monotonic = clock.monotonic if clock is not None else time.monotonic
+    return monotonic() >= deadline
 
 
 def _map_fingerprint(rows):

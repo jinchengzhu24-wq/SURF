@@ -7,10 +7,10 @@ import copy
 import hashlib
 import json
 import re
-from conversation_evidence import CONTEXT_VERSION, user_sources, evidence_signature
-from proposal_diagnostics import ProposalValidationError, structural_issue
-from component_patches import PatchRequest, Target
-from proposal_options import decision_schema, current_set, planning_projection
+from cocreation.domain.conversation_evidence import CONTEXT_VERSION, user_sources, evidence_signature
+from cocreation.domain.proposal_diagnostics import ProposalValidationError, structural_issue
+from cocreation.reliability.component_patches import PatchRequest, Target
+from cocreation.domain.proposal_options import decision_schema, current_set, planning_projection
 
 
 POLICY_VERSION = 1

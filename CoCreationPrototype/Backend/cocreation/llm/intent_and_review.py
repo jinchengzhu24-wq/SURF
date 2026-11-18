@@ -4,12 +4,9 @@ from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
-import os
 import re
-import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -17,7 +14,7 @@ from openai import (
     AsyncOpenAI,
     RateLimitError,
 )
-from proposal_search import (
+from cocreation.domain.proposal_search import (
     Focus,
     MetricGoal,
     ProposalSearchExhausted,
@@ -26,7 +23,7 @@ from proposal_search import (
     search_revision_plan,
     validate_revision_plan_against_map,
 )
-from level_validation import (
+from cocreation.domain.level_validation import (
     TILE_LEGEND,
     build_map_facts,
     build_stage_snapshot,
@@ -35,35 +32,79 @@ from level_validation import (
     summarize_verified_diff,
     validate_and_solve,
 )
-from design_context import validate_design_context_patch
-from repository import map_fingerprint
-from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key,
-    CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
-from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
-from conversation_evidence import CONTEXT_VERSION
-from understanding_review import review_schema, review_targets, merge_review, review_patch_request, REVIEW_VERSION
-import proposal_options
-from proposal_understanding import (
-    turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
-    engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
-    understanding_patch_request, validate_option_plan_scope,
+from cocreation.domain.design_context import validate_design_context_patch
+from cocreation.persistence.repository import map_fingerprint
+from cocreation.reliability.reply_reliability import (
+    ComponentCheck,
+    OptionalRepairBudget,
+    parse_json_object,
+    requirement_cache_key,
+    CURRENT_REPLY_TRACE,
+    REPLY_PIPELINE_VERSION,
+    trace_reply,
+    failure_reason,
 )
-from proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
-    CURRENT_PROPOSAL_DIAGNOSTIC, ProposalValidationError)
-from design_requirements import (
-    requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
-    goal_rank, tradeoff_message, protected_change_requested,
+from cocreation.reliability.component_patches import (
+    PatchRequest,
+    PatchError,
+    Target,
+    patch_response_format,
+    dependent_components,
+    restore_operation_sources,
+    PATCH_VERSION,
+)
+from cocreation.domain.conversation_evidence import CONTEXT_VERSION
+from cocreation.domain.understanding_review import (
+    review_schema,
+    review_targets,
+    merge_review,
+    review_patch_request,
+    REVIEW_VERSION,
+)
+import cocreation.domain.proposal_options as proposal_options
+from cocreation.domain.proposal_understanding import (
+    turn_schema,
+    validate_topic,
+    designer_sources,
+    critical_review_reason,
+    topic_signature,
+    validate_plan_scope,
+    engagement_schema,
+    validate_engagement,
+    MEANING_REVIEW_VERSION,
+    understanding_patch_request,
+    validate_option_plan_scope,
+)
+from cocreation.domain.proposal_diagnostics import (
+    proposal_phase,
+    trace_proposal,
+    trace_repair,
+    reason_code,
+    safe_issues,
+    CURRENT_PROPOSAL_DIAGNOSTIC,
+    ProposalValidationError,
+)
+from cocreation.domain.design_requirements import (
+    requirement_response_schema,
+    validate_requirement_record,
+    evaluate_requirements,
+    preflight_requirements,
+    goal_rank,
+    tradeoff_message,
+    protected_change_requested,
     validate_requirement_components,
-    requirement_model_view, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, INTERPRETATION_VERSION,
+    requirement_model_view,
+    REQUIREMENT_SEMANTICS,
+    REQUIREMENT_DEFINITIONS,
+    INTERPRETATION_VERSION,
 )
-from revision_workflow import (
+from cocreation.domain.revision_workflow import (
     SemanticConstraintError,
     build_revision_workflow,
     validate_semantic_constraints,
 )
 
-from ..runtime_ref import llm_attr
-from .config_and_runtime import DISAGREEMENT_RESOLUTIONS, DISAGREEMENT_STATUSES, DISAGREEMENT_SUBJECTS, EmptyModelResponse, INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS, INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS, INTENT_REVIEW_VERSION, KIMI_MODEL, LLMServiceError, LowQualityModelResponse, MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS, MANUAL_EDIT_DIRECTION_KINDS, MANUAL_EDIT_EFFECT_EVIDENCE_KINDS, MIN_RETRY_BUDGET_SECONDS, QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS, _clean_text, _content_block_sentences, _dialogue_background_prompt, _latest_role_content, _log_llm_event, _request_component_patch, _request_deadline, _safe_validation_reason, _visible_reply_style, classify_exception
+from .config_and_runtime import DISAGREEMENT_RESOLUTIONS, DISAGREEMENT_STATUSES, DISAGREEMENT_SUBJECTS, EmptyModelResponse, INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS, INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS, INTENT_REVIEW_VERSION, KIMI_MODEL, LLMServiceError, LowQualityModelResponse, MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS, MANUAL_EDIT_DIRECTION_KINDS, MANUAL_EDIT_EFFECT_EVIDENCE_KINDS, MIN_RETRY_BUDGET_SECONDS, QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS, _clean_text, _content_block_sentences, _current_service, _dialogue_background_prompt, _latest_role_content, _log_llm_event, _request_completion, _request_component_patch, _request_deadline, _safe_validation_reason, _visible_reply_style, classify_exception
 from .snapshot_grounding import _assert_visible_output_language, _guidance_reuses_visible_sentence, _guidance_text_matches, _intent_sentence_count, _normalize_response_paragraphs, _normalize_single_level_language, _validate_map_grounding_texts
 
 
@@ -182,12 +223,13 @@ def _validate_manual_edit_conflict_classification(payload, evidence):
     return {'verdict': verdict, 'decisionSource': 'kimi_adjudication', 'confirmedDirectionIds': direction_ids, 'effectEvidenceIds': effect_ids, 'relation': '\n'.join((item['explanation'] for item in relevant))[:1600], 'solverDelta': _manual_edit_solver_delta(evidence), 'comparisons': comparisons}
 
 def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
-    started_at = time.monotonic()
+    svc = _current_service()
+    started_at = svc.clock.monotonic()
     directions = _manual_edit_direction_evidence(evidence)
     effect_evidence = _manual_edit_effect_evidence(evidence)
     if not directions or not effect_evidence:
         return {'verdict': 'unrelated', 'decisionSource': 'deterministic_no_comparable_evidence', 'confirmedDirectionIds': [], 'effectEvidenceIds': [], 'relation': 'no_comparable_confirmed_direction_and_effect', 'solverDelta': _manual_edit_solver_delta(evidence), 'comparisons': []}
-    api_key, base_url = llm_attr('_llm_credentials')()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
     response_language = 'Simplified Chinese' if language == 'zh-CN' else 'English'
@@ -195,32 +237,33 @@ def _classify_manual_edit_conflict(evidence, language, request_id, deadline):
     effect_facts = [{'kind': item.get('kind'), 'fact': item.get('fact')} for item in effect_evidence]
     messages = [{'role': 'system', 'content': f'You are the Kimi K2.6 manual-edit conflict adjudicator. Decide only whether the verified edit conflicts with each active explicit/confirmed design direction. Fill exactly the server-provided direction slots, with no omissions or additional slots. You—not the server—judge whether each relationship is conflict, aligned, tradeoff, unrelated, or unclear. Do not return direction IDs or evidence IDs; the server owns those bindings. Judge only from the eligible effect evidence supplied below. The map legend is: # wall, . floor, @ water, p player, s box, t target. Never apply conventional Sokoban glyph meanings to this project. Treat verified_change_summary as the authoritative semantic description of changed tile types when it is present. Use conflict when the edit directly reverses a confirmed direction, even if it improves another metric; reserve tradeoff for competing effects without a direct reversal. Aesthetic difference alone is not conflict. Solver improvement may coexist with conflict and must not erase a directional contradiction. Use unclear when evidence is insufficient. Write each explanation in {response_language}. Direction slots:\n' + json.dumps(direction_slots, ensure_ascii=False, separators=(',', ':')) + '\nEligible effect evidence:\n' + json.dumps(effect_facts, ensure_ascii=False, separators=(',', ':'))}]
     last_error = None
+    model = svc.config.model
     for attempt, cap in enumerate((25.0, 15.0), start=1):
         raw_content = None
-        remaining = llm_attr('_remaining_until')(deadline)
-        if remaining < MIN_RETRY_BUDGET_SECONDS:
+        remaining = svc.remaining_until(deadline)
+        if remaining < svc.config.min_retry_budget_seconds:
             break
         timeout_seconds = min(cap, remaining)
-        _log_llm_event('llm_attempt_started', requestId=request_id, task='manual_edit_conflict_classification', model=KIMI_MODEL, attempt=attempt, maxAttempts=2, timeoutSeconds=round(timeout_seconds, 3), responseMode='json_schema')
+        _log_llm_event('llm_attempt_started', requestId=request_id, task='manual_edit_conflict_classification', model=model, attempt=attempt, maxAttempts=2, timeoutSeconds=round(timeout_seconds, 3), responseMode='json_schema')
         try:
-            response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS, timeout_seconds, task='manual_edit_conflict_classification', manual_edit_direction_count=len(directions)), timeout=timeout_seconds))
+            response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model, messages, MANUAL_EDIT_CONFLICT_MAX_COMPLETION_TOKENS, timeout_seconds, task='manual_edit_conflict_classification', manual_edit_direction_count=len(directions)), timeout=timeout_seconds))
             choice = response.choices[0]
             if str(getattr(choice, 'finish_reason', '') or '') == 'length':
                 raise ValueError('The manual-edit conflict classification reached its output limit.')
             raw_content = str(choice.message.content or '')
             decision = _validate_manual_edit_conflict_classification(json.loads(raw_content), evidence)
-            _log_llm_event('llm_request_completed', requestId=request_id, task='manual_edit_conflict_classification', outcome='success', model=KIMI_MODEL, attemptsUsed=attempt, latencyMs=int((time.monotonic() - started_at) * 1000), verdict=decision.get('verdict'), comparisonCount=len(decision.get('comparisons') or []))
+            _log_llm_event('llm_request_completed', requestId=request_id, task='manual_edit_conflict_classification', outcome='success', model=model, attemptsUsed=attempt, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), verdict=decision.get('verdict'), comparisonCount=len(decision.get('comparisons') or []))
             return decision
         except asyncio.TimeoutError:
             last_error = LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not complete the manual-edit conflict classification in time.', request_id, True, attempt, 504)
-            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_conflict_classification', model=KIMI_MODEL, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((time.monotonic() - started_at) * 1000), validationReason='The Kimi request exceeded the classification time budget.')
+            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_conflict_classification', model=model, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason='The Kimi request exceeded the classification time budget.')
         except LLMServiceError as exception:
-            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_conflict_classification', model=KIMI_MODEL, attempt=attempt, maxAttempts=2, code=exception.code, retryable=exception.retryable, latencyMs=int((time.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception))
+            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_conflict_classification', model=model, attempt=attempt, maxAttempts=2, code=exception.code, retryable=exception.retryable, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception))
             raise
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
             last_error.retryable = True
-            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_conflict_classification', model=KIMI_MODEL, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((time.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception))
+            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_conflict_classification', model=model, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception))
             if raw_content and attempt < 2:
                 messages.extend([{'role': 'assistant', 'content': raw_content}, {'role': 'user', 'content': f'Your classification failed server validation: {exception}. Return a corrected JSON object with exactly the supplied direction slots, one valid relation and one non-empty explanation per slot, and no direction IDs, evidence IDs, omissions, or additional fields.'}])
     if last_error is not None:
@@ -244,11 +287,12 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     This is semantic routing only. The snapshot, proposal authorization, and
     executable tile transitions remain server-owned.
     """
+    svc = _current_service()
     latest = _latest_role_content(conversation, 'user').strip()
-    _deadline = _deadline or _request_deadline(time.monotonic())
+    _deadline = _deadline or _request_deadline(svc.clock.monotonic())
     if not latest:
         raise ValueError('A user message is required for turn understanding.')
-    api_key, base_url = llm_attr('_llm_credentials')()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
     previous_user_wording = [str(item.get('content') or '')[:400] for item in conversation[:-1] if item.get('role') == 'user'][-3:]
@@ -269,16 +313,16 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
     for attempt in range(1, 3):
         try:
             phase = 'understanding'
-            timeout = min(15.0, llm_attr('_remaining_until')(_deadline)) if _deadline is not None else 15.0
+            timeout = min(15.0, svc.remaining_until(_deadline)) if _deadline is not None else 15.0
             if timeout <= 0:
                 raise asyncio.TimeoutError()
             if review_repair_request is not None or review_cold_retry:
                 pass
             elif repair_request is not None:
-                merged = asyncio.run(_request_component_patch(api_key, base_url, repair_request, messages, request_id, _deadline or time.monotonic() + timeout, 'turn_understanding', max_tokens=1800, timeout_limit=timeout))
+                merged = asyncio.run(_request_component_patch(api_key, base_url, repair_request, messages, request_id, _deadline or svc.clock.monotonic() + timeout, 'turn_understanding', max_tokens=1800, timeout_limit=timeout))
                 payload = merged['understanding']
             else:
-                response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, 1800, timeout, task='turn_understanding'), timeout=timeout))
+                response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 1800, timeout, task='turn_understanding'), timeout=timeout))
                 if not getattr(response, 'choices', None):
                     raise EmptyModelResponse('The model returned no completion choices.')
                 if str(getattr(response.choices[0], 'finish_reason', '')) == 'length':
@@ -302,15 +346,15 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 phase = 'understanding_review'
                 trace_proposal(phase, 'understanding_review', 'started', attempt=attempt)
                 verdict = {}
-                review_started = time.monotonic()
-                remaining = min(12.0, llm_attr('_remaining_until')(_deadline)) if _deadline is not None else 12.0
+                review_started = svc.clock.monotonic()
+                remaining = min(12.0, svc.remaining_until(_deadline)) if _deadline is not None else 12.0
                 if remaining <= 0:
                     raise asyncio.TimeoutError()
                 review_messages = [{'role': 'system', 'content': "Independently check the candidate understanding against designer evidence and its bound question. Return exactly decision, issues, corrections. APPROVE means every conclusion is reliable: issues=[] and corrections=[], do not copy or rewrite the understanding. CORRECT means you independently verify the FINAL understanding after all necessary corrections: issues=[]; each correction has a server targetId, a specific semantic reason, value containing the native JSON replacement (or list of appended items), and evidenceRefs using supplied user:<sourceTurnId> IDs. Select only supplied targets. Correct only actual defects, never rephrase valid items. Existing goals/preserve items cannot be deleted or reordered; no whole-object or collection replacement. If safe correction is impossible, return REJECT with issues and corrections=[]. Never approve a candidate with unresolved semantic errors. Copy evidenceSpan verbatim as a nonempty contiguous substring of its bound designerTurns content, including punctuation/newlines; A substring may omit punctuation outside its selected boundaries: that is valid, not a reason to rephrase or expand the quote. value must match the target's value type: replace an evidence item with its complete object, never just a quote string. do not add server protections as designer preservation requirements. A region/focus is not an entity move. Preserve earlier edit scope unless the latest designer clearly corrects it. Distinguish mention/preserve/change; protected position/count/layout/shape edits require an actual designer request, not a label or assistant option. Each change needs exact latest-user evidence; topic items need exact evidence and IDs from designerTurns. Check coverage of all active goals and locks, numerical inventions, visual versus gameplay meaning, and short-answer binding. Assistant claims and solver counts cannot create user requirements. Current map facts use only Current Stage Snapshot. Do not judge feasibility here. When proposalContext has optionSet, independently verify optionDecision against the latest answer and the displayed optionQuestion. Preserve previously rejected options unless the user withdraws that rejection. Distinguish explicit choice from inferred planning preference; AI alternatives never establish hidden designer constraints."}, {'role': 'user', 'content': json.dumps({'source': json.loads(messages[1]['content']), 'candidate': candidate, 'reviewReason': review_reason, 'correctionTargets': review_targets(candidate), 'reviewVersion': REVIEW_VERSION}, ensure_ascii=False)}]
                 if review_repair_request is not None:
-                    verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request, review_messages, request_id, _deadline or time.monotonic() + remaining, 'turn_understanding_review', max_tokens=2000, timeout_limit=remaining))
+                    verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request, review_messages, request_id, _deadline or svc.clock.monotonic() + remaining, 'turn_understanding_review', max_tokens=2000, timeout_limit=remaining))
                 else:
-                    reviewed = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, review_messages, 2000, remaining, task='turn_understanding_review'), timeout=remaining))
+                    reviewed = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, review_messages, 2000, remaining, task='turn_understanding_review'), timeout=remaining))
                     if not getattr(reviewed, 'choices', None):
                         raise EmptyModelResponse('The model returned no review completion choices.')
                     if str(getattr(reviewed.choices[0], 'finish_reason', '')) == 'length':
@@ -328,7 +372,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 corrected.pop('humanEditEngagement', None)
                 if candidate.get('humanEditEngagement'):
                     corrected['humanEditEngagement'] = candidate['humanEditEngagement']
-                corrected['criticalReview'] = {'verified': True, 'reason': review_reason, 'policyVersion': MEANING_REVIEW_VERSION, 'corrected': corrected != candidate, 'attempt': attempt, 'latencyMs': int((time.monotonic() - review_started) * 1000), 'initialChanges': candidate.get('changes') or []}
+                corrected['criticalReview'] = {'verified': True, 'reason': review_reason, 'policyVersion': MEANING_REVIEW_VERSION, 'corrected': corrected != candidate, 'attempt': attempt, 'latencyMs': int((svc.clock.monotonic() - review_started) * 1000), 'initialChanges': candidate.get('changes') or []}
                 changed_targets = [x['targetId'] for x in verdict['corrections']]
                 trace_proposal(phase, 'understanding_review', 'merged', reviewVersion=REVIEW_VERSION, reviewDecision=verdict['decision'], correctionCount=len(changed_targets), targetIds=changed_targets, bindingSignature=hashlib.sha256(json.dumps(candidate, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
                 candidate = corrected
@@ -343,7 +387,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
                 candidate['optionContextSignature'] = proposal_options.context_signature(proposal_context)
             return candidate
         except LLMServiceError as exception:
-            if not exception.retryable or attempt >= 2 or llm_attr('_remaining_until')(_deadline) <= 1.0:
+            if not exception.retryable or attempt >= 2 or svc.remaining_until(_deadline) <= 1.0:
                 if not getattr(exception, 'details', None):
                     exception.details = {'task': 'turn_understanding', 'failureStage': phase, 'reasonCode': exception.code, 'issues': [], 'failureKind': 'upstream', 'maximumAttempts': 2}
                     diagnostic = CURRENT_PROPOSAL_DIAGNOSTIC.get()
@@ -363,7 +407,7 @@ def classify_turn_understanding(conversation, snapshot, request_id, *, forced_pr
             )
             last_error = upstream_error
             _log_llm_event('proposal_understanding_rejected', requestId=request_id, attempt=attempt, reason=upstream_error.code, issues=[], issuesTruncated=False, issueCount=0)
-            if not upstream_error.retryable or attempt >= 2 or llm_attr('_remaining_until')(_deadline) <= 1.0:
+            if not upstream_error.retryable or attempt >= 2 or svc.remaining_until(_deadline) <= 1.0:
                 upstream_error.details = {
                     'task': 'turn_understanding',
                     'failureStage': phase,
@@ -475,11 +519,12 @@ def classify_challenge_reason(user_reason, hypotheses, proposal_summary, request
     reason = str(user_reason or '').strip()
     if not reason or (not simple and (not primary or not secondary)):
         raise LLMServiceError('MODEL_RESPONSE_INVALID', 'The challenge reason could not be compared with the two saved hypotheses.', request_id, True, 0, 502)
-    api_key, base_url = llm_attr('_llm_credentials')()
+    svc = _current_service()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
-    deadline = _deadline or time.monotonic() + llm_attr('LLM_INTERNAL_DEADLINE_SECONDS')
-    timeout_seconds = min(20.0, llm_attr('_remaining_until')(deadline))
+    deadline = _deadline or svc.clock.monotonic() + svc.config.llm_internal_deadline_seconds
+    timeout_seconds = min(20.0, svc.remaining_until(deadline))
     if timeout_seconds <= 0:
         raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not classify the challenge reason before the request deadline.', request_id, True, 0, 504)
     simple_instruction = f"Review the designer's reason for challenging the original proposal. Return JSON only with relation='different', merit, and comparison. merit is reasonable, not_yet_reasonable, or unclear. comparison must be one or two concise first-person sentences in the designer's language: state whether the reason is persuasive, give the concrete reason, and contrast its priority with the original proposal. Do not mention tentative guesses or claim any map change. Do not invent map facts.\n\nProposal summary: {str(proposal_summary or '')[:500]}\nLatest designer reason: {reason[:1200]}"
@@ -489,13 +534,13 @@ def classify_challenge_reason(user_reason, hypotheses, proposal_summary, request
         messages[0]['content'] += '\nOnly this current StageSnapshot is map evidence. The cited proposal describes a proposed change, never a current map fact:\n' + json.dumps(stage_snapshot, ensure_ascii=False)
     attempts_used = 0
     for attempt in range(1, 3):
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         if remaining <= 0:
             break
         attempt_timeout = min(20.0, remaining)
         attempts_used = attempt
         try:
-            response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, 640, attempt_timeout, task='challenge_reason_classification'), timeout=attempt_timeout))
+            response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 640, attempt_timeout, task='challenge_reason_classification'), timeout=attempt_timeout))
             if not getattr(response, 'choices', None):
                 raise EmptyModelResponse('The model returned no completion choices.')
             if str(getattr(response.choices[0], 'finish_reason', '') or '') == 'length':
@@ -511,7 +556,7 @@ def classify_challenge_reason(user_reason, hypotheses, proposal_summary, request
             if merit not in {'reasonable', 'not_yet_reasonable', 'unclear'}:
                 raise ValueError('challenge reason merit is invalid')
             if relation != 'unclear' and merit != 'unclear' and (len(comparison) < (16 if simple else 40)):
-                if attempt < 2 and llm_attr('_remaining_until')(deadline) > 1.0:
+                if attempt < 2 and svc.remaining_until(deadline) > 1.0:
                     messages.append({'role': 'system', 'content': 'Your semantic labels were usable, but comparison was missing or too short. Return the same JSON contract and provide a concrete two-to-four-sentence comparison.'})
                     continue
                 raise ValueError('No substantive Kimi comparison was returned.')
@@ -526,7 +571,7 @@ def classify_challenge_reason(user_reason, hypotheses, proposal_summary, request
             _log_llm_event('llm_component_rejected', requestId=request_id, task='challenge_review', attempt=attempt, component='comparison', failureCode=classified.code if isinstance(classified, LLMServiceError) else ('MAP_GROUNDING_INVALID' if 'MAP_GROUNDING_INVALID' in str(exception) else 'MODEL_RESPONSE_INVALID'))
             if isinstance(classified, LLMServiceError) and not classified.retryable:
                 break
-            if attempt < 2 and llm_attr('_remaining_until')(deadline) > 1.0:
+            if attempt < 2 and svc.remaining_until(deadline) > 1.0:
                 if not isinstance(classified, (TimeoutError, asyncio.TimeoutError, LLMServiceError)):
                     messages.append({'role': 'system', 'content': "Repair the failed comparison against the current snapshot while preserving the designer's reason. Return the complete JSON contract. Issue: " + str(exception)[:400]})
                 continue
@@ -534,7 +579,7 @@ def classify_challenge_reason(user_reason, hypotheses, proposal_summary, request
     if isinstance(last_exception, LLMServiceError):
         last_exception.attempts_used = attempts_used
         raise last_exception
-    if isinstance(last_exception, asyncio.TimeoutError) or llm_attr('_remaining_until')(deadline) <= 0:
+    if isinstance(last_exception, asyncio.TimeoutError) or svc.remaining_until(deadline) <= 0:
         raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not classify the challenge reason before the request deadline.', request_id, True, attempts_used, 504) from last_exception
     error = classify_exception(last_exception or ValueError('empty challenge review'), request_id, attempts_used)
     error.retryable = True
@@ -555,20 +600,21 @@ def review_intent_feedback(candidate, active_inclinations, evidence_summary, lan
     evidence = [re.sub('\\s+', ' ', str(item or '')).strip()[:500] for item in evidence_summary or [] if str(item or '').strip()][:8]
     if len(candidate) < 4:
         raise LLMServiceError('INVALID_INTENT_FEEDBACK', 'The revised design inclination is too short to review.', request_id, False, 0, 400)
-    api_key, base_url = llm_attr('_llm_credentials')()
+    svc = _current_service()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
-    deadline = _deadline or time.monotonic() + llm_attr('LLM_INTERNAL_DEADLINE_SECONDS')
+    deadline = _deadline or svc.clock.monotonic() + svc.config.llm_internal_deadline_seconds
     response_language = 'Simplified Chinese' if language == 'zh-CN' else 'English'
     messages = [{'role': 'system', 'content': f'You review one designer-authored candidate for long-term semantic memory. Return JSON only. verdict is compatible when the candidate is a clear, meaningful design inclination and can coexist with every active inclination. Never infer or authorize replacement of an active inclination. verdict is conflict when it contradicts an active inclination or combines mutually incompatible priorities. verdict is unclear when it is vague, meaningless, merely an action acknowledgement, or not a design inclination. explanation must be null for compatible. For conflict or unclear, explanation must be a concise, warm first-person explanation in {response_language}. For conflict, write two to four detailed sentences that name the candidate direction, name the conflicting prior direction, and explain exactly why they cannot both guide the same design decision. Do not ask the designer to revise, compromise, or accept a recommendation. For unclear, explain the missing meaning and ask for clarification. Do not propose a map edit, invent map facts, mention prompts or internal fields, or claim the candidate was saved. Return the exact IDs of directly contradictory prior inclinations in conflictingHypothesisIds only when verdict is conflict. supersedesHypothesisIds must always be empty; choosing what to retain belongs exclusively to the designer. Evidence entries are observations only and cannot establish intention by themselves.\n\nCandidate inclination: {candidate}\nCandidate server-extracted semantic claims:\n' + json.dumps(candidate_claims or [], ensure_ascii=False, separators=(',', ':')) + '\nActive confirmed inclinations:\n' + json.dumps(active, ensure_ascii=False, separators=(',', ':')) + '\nRelevant audit evidence:\n' + json.dumps(evidence, ensure_ascii=False, separators=(',', ':'))}]
     last_error = None
     for attempt in range(1, 3):
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         timeout_seconds = min(45.0 if attempt == 1 else remaining, remaining)
         if timeout_seconds <= 0:
             break
         try:
-            response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS, timeout_seconds, task='intent_feedback_review'), timeout=timeout_seconds))
+            response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_FEEDBACK_REVIEW_MAX_COMPLETION_TOKENS, timeout_seconds, task='intent_feedback_review'), timeout=timeout_seconds))
             choice = response.choices[0]
             if str(getattr(choice, 'finish_reason', '') or '') == 'length':
                 raise ValueError('The intent review reached its output limit.')
@@ -635,20 +681,21 @@ def review_question_answers(questions, user_reply, language, request_id, *, _dea
     reply = re.sub('\\s+', ' ', str(user_reply or '')).strip()[:2000]
     if not safe_questions or not reply:
         return {'answeredQuestionIds': [], 'results': []}
-    api_key, base_url = llm_attr('_llm_credentials')()
+    svc = _current_service()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
     response_language = 'Simplified Chinese' if language == 'zh-CN' else 'English'
     messages = [{'role': 'system', 'content': f"Review whether the designer's latest reply genuinely answers each previously visible assistant question. Return every supplied questionId exactly once. Use answered only when the reply gives a position, choice, concrete information, or explicitly closes that issue. A tangential reply, vague acknowledgement, or merely saying they do not know remains unanswered. Do not infer intent, discuss the map, or add prose. The interface language is {response_language}.\nQuestions:\n" + json.dumps(safe_questions, ensure_ascii=False, separators=(',', ':')) + '\nLatest designer reply:\n' + reply}]
-    deadline = _deadline or time.monotonic() + llm_attr('LLM_INTERNAL_DEADLINE_SECONDS')
+    deadline = _deadline or svc.clock.monotonic() + svc.config.llm_internal_deadline_seconds
     last_error = None
     for attempt in range(1, 3):
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         timeout_seconds = min(35.0, remaining)
         if timeout_seconds <= 0:
             break
         try:
-            response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS, timeout_seconds, task='question_answer_review'), timeout=timeout_seconds))
+            response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, QUESTION_ANSWER_REVIEW_MAX_COMPLETION_TOKENS, timeout_seconds, task='question_answer_review'), timeout=timeout_seconds))
             payload = parse_json_object(response.choices[0].message.content)
             if set(payload) != {'results'} or not isinstance(payload['results'], list):
                 raise ValueError('Question review has an invalid envelope.')
@@ -686,22 +733,24 @@ def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, reque
     evidence = [re.sub('\\s+', ' ', str(item or '')).strip()[:700] for item in safe_evidence or [] if str(item or '').strip()][:12]
     if not canonical:
         raise ValueError('Intent progress rewrite requires canonical text.')
-    api_key, base_url = llm_attr('_llm_credentials')()
+    svc = _current_service()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
     response_language = 'Simplified Chinese' if language == 'zh-CN' else 'English'
     detail_rule = 'For manual_edit, detailedText must be two to five factual sentences and summaryText one or two information-dense sentences. For other kinds detailedText must be null. '
     messages = [{'role': 'system', 'content': 'Rewrite one co-creation progress record for display. Use only the supplied canonical text and evidence. Preserve uncertainty and never add motives, map facts, coordinates, metrics, or causal claims. Do not mention internal fields. ' + detail_rule + f'Write in {response_language}.\nKind: {kind}\nCanonical text: {canonical}' + '\nSafe evidence:\n' + json.dumps(evidence, ensure_ascii=False, separators=(',', ':'))}]
-    deadline = _deadline or time.monotonic() + llm_attr('LLM_INTERNAL_DEADLINE_SECONDS')
+    deadline = _deadline or svc.clock.monotonic() + svc.config.llm_internal_deadline_seconds
+    model = svc.config.model
     last_error = None
     for attempt in range(1, 3):
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         if remaining <= 0:
             break
         timeout_seconds = min(40.0 if attempt == 1 else remaining, remaining)
         validation_feedback = None
         try:
-            response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS, timeout_seconds, task='intent_progress_rewrite'), timeout=timeout_seconds))
+            response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model, messages, INTENT_PROGRESS_REWRITE_MAX_COMPLETION_TOKENS, timeout_seconds, task='intent_progress_rewrite'), timeout=timeout_seconds))
             payload = parse_json_object(response.choices[0].message.content)
             if set(payload) != {'detailedText', 'summaryText'}:
                 raise ValueError('Progress rewrite has unexpected fields.')
@@ -723,7 +772,7 @@ def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, reque
             output_tokens = {token.casefold() for token in re.findall('(?<![A-Za-z0-9_])(?:B\\d+|T\\d+|P|\\d+(?:\\.\\d+)?)(?![A-Za-z0-9_])', (detail or '') + ' ' + summary)}
             if not output_tokens.issubset(source_tokens):
                 raise ValueError('Progress rewrite introduced an unsupported map fact or number.')
-            return {'detailedText': detail, 'summaryText': summary, 'model': KIMI_MODEL}
+            return {'detailedText': detail, 'summaryText': summary, 'model': model}
         except asyncio.TimeoutError:
             last_error = LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not rewrite progress before the deadline.', request_id, True, attempt, 504)
         except LLMServiceError as exception:
@@ -743,15 +792,16 @@ def rewrite_intent_progress(kind, canonical_text, safe_evidence, language, reque
 
 async def _review_intent_candidate_async(*, api_key, base_url, user_text, body, decision, active_inclinations, language, request_id, deadline, discussion_background='', visible_questions=None, component_state=None, locked_review=None):
     """One independent call; intent, presentation and question results validate separately."""
+    svc = _current_service()
     safe_questions = _ordinary_review_questions(visible_questions)
     if locked_review is not None:
-        timeout = min(30.0, llm_attr('_remaining_until')(deadline))
+        timeout = min(30.0, svc.remaining_until(deadline))
         if timeout <= 0:
             raise asyncio.TimeoutError()
         schema = {'type': 'json_schema', 'json_schema': {'name': 'cocreation_intent_body_review', 'strict': True, 'schema': {'type': 'object', 'additionalProperties': False, 'properties': {'bodyValid': {'type': 'boolean'}, 'issues': {'type': 'array', 'items': {'type': 'string'}}}, 'required': ['bodyValid', 'issues']}}}
         messages = [{'role': 'system', 'content': 'Independently review ONLY the changed BODY against exact user evidence and LOCKED CLAIMS. Return JSON bodyValid and concise issues. Reject irrelevant prose, invented user purposes, claim contradictions or unfinished prose; length, sentence count and stylistic depth are advisory. Reject design suggestions to relocate/reconfigure boxes, targets, player start or outer shell; only water/internal walls may be edited. Normal pushing during play is not a design edit. Map facts are checked by the server. Do not generate or reclassify intent, a card, question progress, permission or state. The locked semantic result remains authoritative.'}, {'role': 'user', 'content': json.dumps({'userEvidence': user_text, 'body': body, 'lockedClaims': locked_review['claims']}, ensure_ascii=False)}]
         trace_reply('body_review', 'started', modelCalls=1)
-        response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, 900, timeout, task='intent_candidate_review', response_format_override=schema), timeout=timeout)
+        response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 900, timeout, task='intent_candidate_review', response_format_override=schema), timeout=timeout)
         choice = response.choices[0]
         if str(getattr(choice, 'finish_reason', '')) == 'length':
             raise ValueError('Body review was truncated.')
@@ -774,10 +824,10 @@ async def _review_intent_candidate_async(*, api_key, base_url, user_text, body, 
     messages[0]['content'] += discussion_background
     messages[0]['content'] += '\nAlso independently judge which OPEN QUESTIONS the current user actually answers. Return answeredQuestionIds only from the supplied IDs, once each; use [] when none. A concrete position, choice, information or explicit closure answers a question; vague acknowledgement or not knowing does not. An answer can ALSO express a candidate inclination. Question progress never confirms intent, clears disagreement or authorizes an edit.\nOPEN QUESTIONS:\n' + json.dumps(safe_questions, ensure_ascii=False, separators=(',', ':'))
     trace_reply('joint_review', 'started', modelCalls=1, questionCount=len(safe_questions))
-    remaining = llm_attr('_remaining_until')(deadline)
+    remaining = svc.remaining_until(deadline)
     if remaining <= 0:
         raise asyncio.TimeoutError()
-    response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS, min(30.0, remaining), task='intent_candidate_review'), timeout=min(30.0, remaining))
+    response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_CANDIDATE_REVIEW_MAX_COMPLETION_TOKENS, min(30.0, remaining), task='intent_candidate_review'), timeout=min(30.0, remaining))
     choice = response.choices[0]
     if str(getattr(choice, 'finish_reason', '') or '') == 'length':
         raise ValueError('The intent candidate review reached its output limit.')
@@ -882,14 +932,15 @@ def _validate_intent_review_payload(payload, user_text, active, language):
 
 async def _repair_intent_components_async(*, api_key, base_url, user_text, body, card_text, claims, issues, repair_body, repair_card, map_facts, language, request_id, deadline, discussion_background=''):
     """Repair only rejected intent presentation components under locked semantics."""
+    svc = _current_service()
     if not repair_body and (not repair_card):
         return (body, card_text)
     if repair_body and (not repair_card):
-        timeout = min(30.0, llm_attr('_remaining_until')(deadline))
+        timeout = min(30.0, svc.remaining_until(deadline))
         if timeout <= 0:
             raise asyncio.TimeoutError()
         messages = [{'role': 'system', 'content': 'Repair ONLY the rejected body, preserving locked claims and exact user evidence. Only water/internal walls may be edited; never propose rearranging boxes/targets/player/shell. Normal Sokoban pushes during play may be discussed. Return JSON with only bodyParagraphs, a non-empty array of complete paragraphs. Fix the specified relevance or semantic defect; add no user purpose, authorization, state success or map changes. Use the supplied Stage facts only. Keep concise natural prose without a fixed sentence count. Write in ' + ('Simplified Chinese.' if language == 'zh-CN' else 'English.') + '\n\n' + _visible_reply_style('repair') + '\nLOCKED CLAIMS:\n' + json.dumps(claims, ensure_ascii=False) + '\n\nAUTHORITATIVE STAGE FACTS:\n' + str(map_facts or '')[:8000] + '\n\nCURRENT BODY:\n' + str(body or '')[:5000] + '\n\nCURRENT CARD:\n' + str(card_text or '')[:1200] + '\n\nREVIEW ISSUES:\n' + json.dumps(issues or [], ensure_ascii=False) + '\nREPAIR BODY: yes\nREPAIR CARD: no' + discussion_background}, {'role': 'user', 'content': str(user_text or '')[:2000]}]
-        response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, timeout, task='intent_body_repair'), timeout=timeout)
+        response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, timeout, task='intent_body_repair'), timeout=timeout)
         choice = response.choices[0]
         if str(getattr(choice, 'finish_reason', '')) == 'length':
             raise ValueError('Intent body repair was truncated.')
@@ -901,11 +952,11 @@ async def _repair_intent_components_async(*, api_key, base_url, user_text, body,
         _assert_visible_output_language(language, repaired)
         return (repaired, card_text)
     if repair_card and (not repair_body):
-        timeout = min(30.0, llm_attr('_remaining_until')(deadline))
+        timeout = min(30.0, svc.remaining_until(deadline))
         if timeout <= 0:
             raise asyncio.TimeoutError()
         messages = [{'role': 'system', 'content': 'Repair only the tentative intent card. Return JSON with only cardText. Keep every locked claim and exact user evidence, remain tentative and explicitly correctable; add no purpose, certainty, permission or state conclusion. Use Simplified Chinese.' if language == 'zh-CN' else 'Repair only the tentative intent card. Return JSON with only cardText. Keep every locked claim and exact user evidence, remain tentative and explicitly correctable; add no purpose, certainty, permission or state conclusion. Use English.'}, {'role': 'user', 'content': json.dumps({'userEvidence': user_text, 'lockedClaims': claims, 'currentCard': card_text, 'stageFacts': map_facts, 'issues': issues, 'discussionBackground': discussion_background}, ensure_ascii=False)}]
-        response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, timeout, task='intent_card_repair'), timeout=timeout)
+        response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, INTENT_COMPONENT_REPAIR_MAX_COMPLETION_TOKENS, timeout, task='intent_card_repair'), timeout=timeout)
         choice = response.choices[0]
         if str(getattr(choice, 'finish_reason', '')) == 'length':
             raise ValueError('Intent card repair was truncated.')
@@ -921,6 +972,7 @@ async def _repair_intent_components_async(*, api_key, base_url, user_text, body,
     raise ValueError('Repair one rejected presentation component at a time.')
 
 async def _review_ordinary_intent_with_recovery(*, optional_budget, component_checks, **kwargs):
+    svc = _current_service()
     state = kwargs.get('component_state')
     if state is None:
         state = {}
@@ -928,14 +980,14 @@ async def _review_ordinary_intent_with_recovery(*, optional_budget, component_ch
     optional = not bool(locked and state.get('bodyReviewRequired'))
     if not optional:
         kwargs['locked_review'] = locked
-    started = time.monotonic()
+    started = svc.clock.monotonic()
     try:
         if optional:
             timeout = optional_budget.timeout()
             if timeout <= 0:
                 raise asyncio.TimeoutError()
             kwargs['deadline'] = min(kwargs['deadline'], started + timeout)
-        result = await llm_attr('_review_intent_candidate_async')(**kwargs)
+        result = await svc.review_intent_candidate_async(**kwargs)
         if not result['bodyValid'] and (result['classification'] == 'candidate' or result.get('issues')):
             state['lockedIntentReview'] = copy.deepcopy(result)
             state['bodyReviewRequired'] = True
@@ -964,16 +1016,18 @@ def _engagement_source(latest_user, stage_context):
     return {'latestUserMessage': latest_user, 'activeDisagreement': (stage_context or {}).get('activeDisagreement'), 'discussionBackground': _dialogue_background_prompt(stage_context), 'currentStageSnapshot': (stage_context or {}).get('stageSnapshot')}
 
 async def _request_engagement_decision(source, api_key, base_url, timeout, task):
-    response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, [{'role': 'system', 'content': 'Judge only human-edit discussion engagement. Return JSON decision engage/unchanged/unclear and evidenceSpan. Engage means the source designer explicitly agrees to discuss, explain, adjust or re-edit, not consensus, map acceptance or permission. Bind short answers to the original assistant question, whose suggestions are not designer consent. Use unchanged for unrelated/negative wording, unclear for genuine ambiguity. Engage needs an exact substring of latestUserMessage/originalUserMessage. Empty evidence is allowed otherwise. In delayed replay also check every subsequent USER message: a withdrawal, correction or replacement invalidates earlier engagement. Only original source consent may engage, not later consent. Map evidence uses only currentStageSnapshot. Never repair ambiguity into agreement.'}, {'role': 'user', 'content': json.dumps(source, ensure_ascii=False)}], 250, timeout, task=task), timeout=timeout)
+    svc = _current_service()
+    response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, [{'role': 'system', 'content': 'Judge only human-edit discussion engagement. Return JSON decision engage/unchanged/unclear and evidenceSpan. Engage means the source designer explicitly agrees to discuss, explain, adjust or re-edit, not consensus, map acceptance or permission. Bind short answers to the original assistant question, whose suggestions are not designer consent. Use unchanged for unrelated/negative wording, unclear for genuine ambiguity. Engage needs an exact substring of latestUserMessage/originalUserMessage. Empty evidence is allowed otherwise. In delayed replay also check every subsequent USER message: a withdrawal, correction or replacement invalidates earlier engagement. Only original source consent may engage, not later consent. Map evidence uses only currentStageSnapshot. Never repair ambiguity into agreement.'}, {'role': 'user', 'content': json.dumps(source, ensure_ascii=False)}], 250, timeout, task=task), timeout=timeout)
     if str(getattr(response.choices[0], 'finish_reason', '')) == 'length':
         raise ValueError('Engagement decision was truncated.')
     return validate_engagement(parse_json_object(response.choices[0].message.content), source.get('latestUserMessage', source.get('originalUserMessage', '')))
 
 def recover_human_edit_engagement(source, request_id, deadline):
-    api_key, base_url = llm_attr('_llm_credentials')()
+    svc = _current_service()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'LLM is unavailable.', request_id, True, 0, 503)
-    timeout = min(8.0, max(0.0, deadline - time.monotonic() - 2.0))
+    timeout = min(8.0, max(0.0, deadline - svc.clock.monotonic() - 2.0))
     if timeout <= 0:
         raise TimeoutError('Recovery deadline exceeded.')
     try:
@@ -983,7 +1037,8 @@ def recover_human_edit_engagement(source, request_id, deadline):
 
 async def _repair_human_edit_engagement(content, latest_user, stage_context, disagreement, optional_budget, component_checks, api_key, base_url, request_id):
     """Repair only one state signal, with the same bound conversational evidence."""
-    started = time.monotonic()
+    svc = _current_service()
+    started = svc.clock.monotonic()
     active = {**((stage_context or {}).get('activeDisagreement') or {}), 'displayCard': False}
     try:
         timeout = optional_budget.timeout()
@@ -1004,18 +1059,19 @@ def _strip_unverified_state_claims(body):
     return ' '.join((sentence for sentence in _content_block_sentences(body) if not re.search('(?:分歧|冲突).{0,10}(?:已经|已|现已)(?:解除|解决|结束)|(?:已经|已)(?:确认|接受|选定|撤回).{0,15}(?:方案|立场|倾向)|(?:disagreement|conflict) (?:is|has been) (?:resolved|cleared)|(?:I have|we have|you have) (?:accepted|confirmed|chosen)|(?:现在|已经|现已|已).{0,8}(?:可以|能够|允许|解锁).{0,10}(?:执行|应用|批准).{0,8}(?:方案|修改)|\\b(?:now|already)\\b.{0,15}\\b(?:execute|apply|approved|unlocked)\\b', sentence, re.I)))
 
 async def _repair_reviewed_intent_presentation(*, repair_body, repair_card, body, card_text, deadline, optional_budget, card_required, component_checks, rows=None, entity_bindings=None, **kwargs):
+    svc = _current_service()
     if repair_body:
-        body, _ = await llm_attr('_repair_intent_components_async')(body=body, card_text=card_text, repair_body=True, repair_card=False, deadline=deadline, **kwargs)
+        body, _ = await svc.repair_intent_components_async(body=body, card_text=card_text, repair_body=True, repair_card=False, deadline=deadline, **kwargs)
         component_checks.append(ComponentCheck('body', 'repaired', repairable=True))
     if not repair_card:
         return (body, card_text)
-    timeout = llm_attr('_remaining_until')(deadline) if card_required else optional_budget.timeout()
-    started = time.monotonic()
+    timeout = svc.remaining_until(deadline) if card_required else optional_budget.timeout()
+    started = svc.clock.monotonic()
     trace_reply('card_repair', 'started', repairAttempts=int(timeout > 0), optionalRemainingSeconds=round(timeout, 3))
     try:
         if timeout <= 0:
             raise asyncio.TimeoutError()
-        _, card_text = await llm_attr('_repair_intent_components_async')(body=body, card_text=card_text, repair_body=False, repair_card=True, deadline=min(deadline, started + timeout), **kwargs)
+        _, card_text = await svc.repair_intent_components_async(body=body, card_text=card_text, repair_body=False, repair_card=True, deadline=min(deadline, started + timeout), **kwargs)
         if rows:
             _validate_map_grounding_texts([card_text], rows, entity_bindings=entity_bindings)
         component_checks.append(ComponentCheck('intent_card', 'repaired', repairable=True))

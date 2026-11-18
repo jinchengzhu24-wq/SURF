@@ -1,15 +1,17 @@
+from __future__ import annotations
+
 import asyncio
 import copy
+from collections.abc import Mapping
 from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
 import os
 import re
-import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from typing import Any
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -17,7 +19,8 @@ from openai import (
     AsyncOpenAI,
     RateLimitError,
 )
-from proposal_search import (
+from cocreation.clock import Clock, SYSTEM_CLOCK
+from cocreation.domain.proposal_search import (
     Focus,
     MetricGoal,
     ProposalSearchExhausted,
@@ -26,7 +29,7 @@ from proposal_search import (
     search_revision_plan,
     validate_revision_plan_against_map,
 )
-from level_validation import (
+from cocreation.domain.level_validation import (
     TILE_LEGEND,
     build_map_facts,
     build_stage_snapshot,
@@ -35,34 +38,32 @@ from level_validation import (
     summarize_verified_diff,
     validate_and_solve,
 )
-from design_context import validate_design_context_patch
-from repository import map_fingerprint
-from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key,
+from cocreation.domain.design_context import validate_design_context_patch
+from cocreation.persistence.repository import map_fingerprint
+from cocreation.reliability.reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key,
     CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
-from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
-from conversation_evidence import CONTEXT_VERSION
-from understanding_review import review_schema, review_targets, merge_review, review_patch_request, REVIEW_VERSION
-import proposal_options
-from proposal_understanding import (
+from cocreation.reliability.component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
+from cocreation.domain.conversation_evidence import CONTEXT_VERSION
+from cocreation.domain.understanding_review import review_schema, review_targets, merge_review, review_patch_request, REVIEW_VERSION
+from cocreation.domain import proposal_options
+from cocreation.domain.proposal_understanding import (
     turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
     engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
     understanding_patch_request, validate_option_plan_scope,
 )
-from proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
+from cocreation.domain.proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
     CURRENT_PROPOSAL_DIAGNOSTIC, ProposalValidationError)
-from design_requirements import (
+from cocreation.domain.design_requirements import (
     requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
     goal_rank, tradeoff_message, protected_change_requested,
     validate_requirement_components,
     requirement_model_view, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, INTERPRETATION_VERSION,
 )
-from revision_workflow import (
+from cocreation.domain.revision_workflow import (
     SemanticConstraintError,
     build_revision_workflow,
     validate_semantic_constraints,
 )
-
-from ..runtime_ref import llm_attr
 
 
 KIMI_MODEL = 'kimi-k2.6'
@@ -237,42 +238,139 @@ def _structured_response_format(task=None, manual_edit_direction_count=None):
         name = 'cocreation_stage_assessment' if task == 'stage_assessment' else 'cocreation_chat'
     return {'type': 'json_schema', 'json_schema': {'name': name, 'strict': True, 'schema': schema}}
 
-def _unified_model_attempts(count):
+@dataclass(frozen=True)
+class LLMConfig:
+    """Immutable 8010 configuration for the Kimi provider."""
+
+    api_key: str = ''
+    base_url: str = KIMI_BASE_URL
+    model: str = KIMI_MODEL
+    chat_compact_experiment: bool = False
+    proposal_clarification_compact_experiment: bool = False
+    llm_internal_deadline_seconds: float = LLM_INTERNAL_DEADLINE_SECONDS
+    backend_request_timeout_seconds: float = BACKEND_REQUEST_TIMEOUT_SECONDS
+    primary_attempt_timeout_seconds: float = PRIMARY_ATTEMPT_TIMEOUT_SECONDS
+    min_retry_budget_seconds: float = MIN_RETRY_BUDGET_SECONDS
+    plain_chat_timeout_seconds: float = PLAIN_CHAT_TIMEOUT_SECONDS
+    plain_primary_timeout_seconds: float = PLAIN_PRIMARY_TIMEOUT_SECONDS
+    ordinary_chat_attempt_timeouts: tuple[float, ...] = ORDINARY_CHAT_ATTEMPT_TIMEOUTS
+    proposal_request_timeout_seconds: float = PROPOSAL_REQUEST_TIMEOUT_SECONDS
+    proposal_internal_deadline_seconds: float = PROPOSAL_INTERNAL_DEADLINE_SECONDS
+    proposal_plan_primary_timeout_seconds: float = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
+    proposal_plan_retry_timeout_seconds: float = PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS
+    proposal_llm_phase_timeout_seconds: float = PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS
+    proposal_search_deadline_seconds: float = PROPOSAL_SEARCH_DEADLINE_SECONDS
+    proposal_operation_attempt_timeout_seconds: float = PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS
+    ordinary_chat_max_attempts: int = ORDINARY_CHAT_MAX_ATTEMPTS
+    chat_max_attempts: int = CHAT_MAX_ATTEMPTS
+    proposal_generation_attempts: int = PROPOSAL_GENERATION_ATTEMPTS
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> LLMConfig:
+        source = os.environ if env is None else env
+        provider = str(source.get('COCREATION_LLM_PROVIDER', '')).strip().lower()
+        if provider not in {'', 'kimi', 'moonshot'}:
+            api_key = ''
+        else:
+            api_key = (
+                str(source.get('COCREATION_LLM_API_KEY', '')).strip()
+                or str(source.get('KIMI_API_KEY', '')).strip()
+                or str(source.get('MOONSHOT_API_KEY', '')).strip()
+            )
+        base_url = (
+            str(source.get('COCREATION_LLM_BASE_URL', '')).strip()
+            or str(source.get('KIMI_BASE_URL', '')).strip()
+            or str(source.get('MOONSHOT_BASE_URL', '')).strip()
+            or KIMI_BASE_URL
+        )
+        model = (
+            str(source.get('COCREATION_LLM_MODEL', '')).strip()
+            or str(source.get('KIMI_MODEL', '')).strip()
+            or str(source.get('MOONSHOT_MODEL', '')).strip()
+            or KIMI_MODEL
+        )
+        chat_compact = str(source.get(CHAT_COMPACT_EXPERIMENT_ENV, '')).strip().casefold() in {'1', 'true', 'yes', 'on'}
+        clarification_compact = str(source.get(PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV, '')).strip().casefold() in {'1', 'true', 'yes', 'on'}
+        return cls(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            chat_compact_experiment=chat_compact,
+            proposal_clarification_compact_experiment=clarification_compact,
+        )
+
+
+_ACTIVE_LLM_SERVICE: ContextVar[Any] = ContextVar('cocreation_active_llm_service', default=None)
+_FALLBACK_INERT_SERVICE: Any = None
+
+
+def _current_service(service: Any = None):
+    global _FALLBACK_INERT_SERVICE
+    if service is not None:
+        return service
+    active = _ACTIVE_LLM_SERVICE.get()
+    if active is not None:
+        return active
+    if _FALLBACK_INERT_SERVICE is None:
+        from .service import CoCreationLLMService
+        _FALLBACK_INERT_SERVICE = CoCreationLLMService(LLMConfig())
+    return _FALLBACK_INERT_SERVICE
+
+
+def _active_config(service: Any = None) -> LLMConfig:
+    return _current_service(service).config
+
+
+def _active_clock(service: Any = None) -> Clock:
+    return _current_service(service).clock
+
+
+def _monotonic(service: Any = None) -> float:
+    return _active_clock(service).monotonic()
+
+
+def _solve_stage(rows, *args, _service: Any = None, **kwargs):
+    return _current_service(_service).solve_stage(rows, *args, **kwargs)
+
+
+def _unified_model_attempts(count, _service: Any = None):
     """Return bounded attempts for the one production model used by 8010."""
-    return [KIMI_MODEL] * max(1, int(count))
+    return [_active_config(_service).model] * max(1, int(count))
 
-def _llm_credentials():
-    """Resolve only the 8010 Kimi credentials."""
-    provider = os.getenv('COCREATION_LLM_PROVIDER', '').strip().lower()
-    generic_key = os.getenv('COCREATION_LLM_API_KEY', '').strip()
-    kimi_key = os.getenv('KIMI_API_KEY', '').strip()
-    if provider not in {'', 'kimi'}:
-        return ('', KIMI_BASE_URL)
-    api_key = generic_key or kimi_key
-    base_url = os.getenv('COCREATION_LLM_BASE_URL', '').strip() or os.getenv('KIMI_BASE_URL', '').strip() or KIMI_BASE_URL
-    return (api_key, base_url)
 
-def _request_deadline(started_at=None, budget_seconds=None):
-    base = time.monotonic() if started_at is None else started_at
-    budget = llm_attr('LLM_INTERNAL_DEADLINE_SECONDS') if budget_seconds is None else float(budget_seconds)
+def _llm_credentials(_service: Any = None):
+    """Resolve only the 8010 Kimi credentials from the injected LLMConfig."""
+    return _current_service(_service).credentials()
+
+
+def _request_deadline(started_at=None, budget_seconds=None, _service: Any = None):
+    svc = _current_service(_service)
+    base = svc.clock.monotonic() if started_at is None else started_at
+    budget = svc.config.llm_internal_deadline_seconds if budget_seconds is None else float(budget_seconds)
     return base + budget
 
-def _chat_compact_experiment_enabled():
-    """Read the opt-in presentation experiment at request-build time."""
-    return os.getenv(CHAT_COMPACT_EXPERIMENT_ENV, '').strip().casefold() in {'1', 'true', 'yes', 'on'}
 
-def _proposal_clarification_compact_experiment_enabled():
-    return os.getenv(PROPOSAL_CLARIFICATION_COMPACT_EXPERIMENT_ENV, '').strip().casefold() in {'1', 'true', 'yes', 'on'}
+def _chat_compact_experiment_enabled(_service: Any = None):
+    """Read the opt-in presentation experiment from the injected LLMConfig."""
+    return bool(_active_config(_service).chat_compact_experiment)
 
-def _remaining_until(deadline):
-    return max(0.0, float(deadline) - time.monotonic())
 
-def _retry_budget_available(deadline, *, request_id, task, attempt, max_attempts, response_mode, fallback_reason=None, minimum_seconds=MIN_RETRY_BUDGET_SECONDS):
+def _proposal_clarification_compact_experiment_enabled(_service: Any = None):
+    return bool(_active_config(_service).proposal_clarification_compact_experiment)
+
+
+def _remaining_until(deadline, _service: Any = None):
+    return _current_service(_service).remaining_until(deadline)
+
+
+def _retry_budget_available(deadline, *, request_id, task, attempt, max_attempts, response_mode, fallback_reason=None, minimum_seconds=None, _service: Any = None):
     """Prevent a retry that cannot realistically finish before the public deadline."""
-    remaining = llm_attr('_remaining_until')(deadline)
-    if remaining >= minimum_seconds:
+    svc = _current_service(_service)
+    min_budget = svc.config.min_retry_budget_seconds if minimum_seconds is None else minimum_seconds
+    remaining = svc.remaining_until(deadline)
+    if remaining >= min_budget:
         return True
-    _log_llm_event('llm_retry_skipped', requestId=request_id, task=task, attempt=attempt, maxAttempts=max_attempts, responseMode=response_mode, remainingSeconds=round(remaining, 3), retrySkippedReason='insufficient_remaining_budget', fallbackReason=fallback_reason)
+    svc.log_event('llm_retry_skipped', requestId=request_id, task=task, attempt=attempt, maxAttempts=max_attempts, responseMode=response_mode, remainingSeconds=round(remaining, 3), retrySkippedReason='insufficient_remaining_budget', fallbackReason=fallback_reason)
     return False
 
 @dataclass(frozen=True)
@@ -367,6 +465,10 @@ def _safe_validation_reason(exception):
     return None
 
 async def _request_completion(*args, **kwargs):
+    return await _current_service().request_completion(*args, **kwargs)
+
+
+async def _default_request_completion(*args, **kwargs):
     task = kwargs.get('task') or 'unspecified'
     stage = 'body_generation' if task == 'plain_chat' else 'model_' + task
     trace_reply(stage, 'started', modelCalls=1)
@@ -386,11 +488,15 @@ async def _request_completion(*args, **kwargs):
             trace_proposal('model_generation', task, 'failed', reason_code(error))
         raise
 
-async def _request_completion_impl(api_key, base_url, model, messages, max_completion_tokens, timeout_seconds, structured=True, task=None, manual_edit_direction_count=None, response_format_override=None):
-    client = llm_attr('_create_async_client')(api_key, base_url, timeout_seconds)
-    request_options = {'model': model, 'messages': messages, 'temperature': 0.6, 'max_completion_tokens': max_completion_tokens, 'stream': False, 'extra_body': {'thinking': {'type': 'disabled'}}}
-    if structured:
-        request_options['response_format'] = response_format_override or _structured_response_format(task, manual_edit_direction_count=manual_edit_direction_count)
+
+async def _request_completion_impl(api_key, base_url, model, messages, max_completion_tokens, timeout_seconds, structured=True, task=None, manual_edit_direction_count=None, response_format_override=None, temperature=0.6):
+    svc = _current_service()
+    client = svc.create_async_client(api_key, base_url, timeout_seconds)
+    request_options = {'model': model, 'messages': messages, 'temperature': temperature, 'max_completion_tokens': max_completion_tokens, 'stream': False, 'extra_body': {'thinking': {'type': 'disabled'}}}
+    if response_format_override is not None:
+        request_options['response_format'] = response_format_override
+    elif structured:
+        request_options['response_format'] = _structured_response_format(task, manual_edit_direction_count=manual_edit_direction_count)
 
     async def create_completion():
         trace_reply('provider_call', 'started', modelCalls=1)
@@ -406,7 +512,7 @@ async def _request_completion_impl(api_key, base_url, model, messages, max_compl
             return await create_completion()
         except APIStatusError as exception:
             status_code = getattr(exception, 'status_code', None)
-            if structured and str(model).lower() == KIMI_MODEL and (status_code in {400, 404, 422}):
+            if structured and str(model).lower() == svc.config.model.lower() and (status_code in {400, 404, 422}):
                 request_options['response_format'] = {'type': 'json_object'}
                 return await create_completion()
             raise
@@ -472,16 +578,17 @@ def _is_length_failure(exception, validation_feedback=None):
 @proposal_phase('component_repair', 'patch')
 async def _request_component_patch(api_key, base_url, patch_request, messages, request_id, deadline, task, max_tokens=1600, timeout_limit=20.0):
     """Use one existing corrective slot, never open a new retry loop."""
+    svc = _current_service()
     diagnostic = CURRENT_PROPOSAL_DIAGNOSTIC.get()
     if diagnostic is None or patch_request.component not in diagnostic.pending_repairs:
         trace_repair(patch_request.component, 'proposed')
-    remaining = min(timeout_limit, llm_attr('_remaining_until')(deadline))
+    remaining = min(timeout_limit, svc.remaining_until(deadline))
     if remaining <= 0:
         raise asyncio.TimeoutError()
     patch_messages = [dict(message) for message in messages]
     patch_messages.append({'role': 'system', 'content': 'This corrective attempt returns ONLY the component patch schema; it supersedes earlier full-envelope output instructions. All original evidence, semantic scope, permissions and map rules still apply. Frozen candidate text is not new designer evidence. Preserve locked content exactly. Return exactly one patches item for EVERY targets entry, including targets whose repaired value is an empty list. field must be the exact target name, valueJson a JSON-encoded value of its targetTypes, and evidenceRefs a nonempty list of keys from evidence. A patch is only a candidate repair, never proof, consent or a committed action.'})
     patch_messages.append({'role': 'user', 'content': json.dumps(patch_request.prompt(), ensure_ascii=False)})
-    response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, patch_messages, max_tokens, remaining, task=task + '_patch'), timeout=remaining)
+    response = await asyncio.wait_for(svc.request_completion(api_key, base_url, svc.config.model, patch_messages, max_tokens, remaining, task=task + '_patch'), timeout=remaining)
     if not getattr(response, 'choices', None):
         raise PatchError('PATCH_EMPTY_RESPONSE')
     choice = response.choices[0]
@@ -489,7 +596,7 @@ async def _request_component_patch(api_key, base_url, patch_request, messages, r
         raise PatchError('PATCH_TRUNCATED')
     merged = patch_request.merge(parse_json_object(choice.message.content))
     trace_repair(patch_request.component, 'merged')
-    _log_llm_event('llm_component_patched', requestId=request_id, component=patch_request.component, fields=list(patch_request.targets), patchVersion=PATCH_VERSION, invalidatedComponents=dependent_components(patch_request.component))
+    svc.log_event('llm_component_patched', requestId=request_id, component=patch_request.component, fields=list(patch_request.targets), patchVersion=PATCH_VERSION, invalidatedComponents=dependent_components(patch_request.component))
     return merged
 
 def _is_map_grounding_failure(exception, validation_feedback=None):
@@ -616,9 +723,18 @@ def _clean_optional_text(value, field_name):
         return None
     return _clean_text(value, field_name)
 
-def _create_async_client(api_key, base_url, timeout_seconds):
+def _default_create_async_client(api_key, base_url, timeout_seconds):
     return AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout_seconds, max_retries=0)
 
-def _log_llm_event(event, **fields):
-    payload = {'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'), 'level': 'INFO', 'event': event, **fields}
+
+def _create_async_client(api_key, base_url, timeout_seconds):
+    return _current_service().create_async_client(api_key, base_url, timeout_seconds)
+
+
+def _default_log_llm_event(clock: Clock, event: str, **fields):
+    payload = {'timestamp': clock.utc_now(), 'level': 'INFO', 'event': event, **fields}
     print(json.dumps(payload, ensure_ascii=True, separators=(',', ':')), flush=True)
+
+
+def _log_llm_event(event, **fields):
+    _current_service().log_event(event, **fields)

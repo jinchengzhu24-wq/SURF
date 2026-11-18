@@ -4,17 +4,18 @@ import json
 import sys
 import time
 import unittest
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import llm_client as llm
+from tests.fakes import FakeClock, RecordedAsyncCall, RecordedCall, create_test_services, llm_scope
+from cocreation.llm import facade as llm
 from patch_fixtures import patch_fixture
-from design_requirements import validate_requirement_record, validate_requirement_components
-from level_validation import build_stage_snapshot
-from reply_reliability import OptionalRepairBudget, parse_json_object, requirement_cache_key
+from cocreation.domain.design_requirements import validate_requirement_record, validate_requirement_components
+from cocreation.domain.level_validation import build_stage_snapshot
+from cocreation.reliability.reply_reliability import OptionalRepairBudget, parse_json_object, requirement_cache_key
 from reliability_report import summarize
 
 ROWS = ["############", "#..........#", "#..........#", "#..........#", "#...p......#",
@@ -49,13 +50,13 @@ class ReplyReliabilityTests(unittest.TestCase):
                 parse_json_object(value)
 
     def test_optional_work_keeps_reserve_and_total_cap(self):
-        with patch("reply_reliability.time.monotonic", return_value=100):
-            budget = OptionalRepairBudget(150)
-            self.assertEqual(budget.timeout(), 10)
-            budget.record(94)
-            self.assertEqual(budget.timeout(), 4)
-        with patch("reply_reliability.time.monotonic", return_value=132):
-            self.assertEqual(budget.timeout(), 0)
+        clock = FakeClock(initial_monotonic=100)
+        budget = OptionalRepairBudget(150, clock=clock)
+        self.assertEqual(budget.timeout(), 10)
+        budget.record(94)
+        self.assertEqual(budget.timeout(), 4)
+        clock.advance(32)
+        self.assertEqual(budget.timeout(), 0)
 
     def repair(self, payload, *, body=True, card=False):
         async def request(*args, **kwargs):
@@ -64,7 +65,8 @@ class ReplyReliabilityTests(unittest.TestCase):
             if kwargs.get("task") == "intent_card_repair":
                 return completion({"cardText": " ".join(payload.get("cardSentences") or [])})
             return completion(patch_fixture(args[3][-1]["content"], payload))
-        with patch.object(llm, "_request_completion", side_effect=request) as mocked:
+        mocked = RecordedAsyncCall(side_effect=request)
+        with llm_scope(completion_requester=mocked):
             result = asyncio.run(llm._repair_intent_components_async(api_key="fake", base_url="fake",
                 user_text="Make the route clearer.", body="Verified body.", card_text="Verified card.",
                 claims=[], issues=[], repair_body=body, repair_card=card, map_facts="{}",
@@ -89,7 +91,7 @@ class ReplyReliabilityTests(unittest.TestCase):
         checks = []
         async def invalid(**kwargs):
             raise ValueError("bad card")
-        with patch.object(llm, "_repair_intent_components_async", side_effect=invalid):
+        with llm_scope(intent_component_repairer=RecordedAsyncCall(side_effect=invalid)):
             result = asyncio.run(llm._repair_reviewed_intent_presentation(
                 repair_body=False, repair_card=True, body="Verified body.", card_text="bad",
                 deadline=time.monotonic() + 60, optional_budget=OptionalRepairBudget(time.monotonic() + 60),
@@ -100,7 +102,10 @@ class ReplyReliabilityTests(unittest.TestCase):
     def test_required_conflict_card_failure_is_not_hidden(self):
         async def invalid(**kwargs):
             raise ValueError("bad required card")
-        with patch.object(llm, "_repair_intent_components_async", side_effect=invalid), self.assertRaises(ValueError):
+        with (
+            llm_scope(intent_component_repairer=RecordedAsyncCall(side_effect=invalid)),
+            self.assertRaises(ValueError),
+        ):
             asyncio.run(llm._repair_reviewed_intent_presentation(
                 repair_body=False, repair_card=True, body="Verified body.", card_text="bad",
                 deadline=time.monotonic() + 60, optional_budget=OptionalRepairBudget(time.monotonic() + 60),
@@ -125,7 +130,8 @@ class ReplyReliabilityTests(unittest.TestCase):
         async def request(*args, **kwargs):
             value = next(responses)
             return completion(patch_fixture(args[3][-1]["content"], value) if kwargs["task"].endswith("_patch") else value)
-        with patch.object(llm, "_request_completion", side_effect=request) as mocked:
+        mocked = RecordedAsyncCall(side_effect=request)
+        with llm_scope(completion_requester=mocked):
             result = llm._review_proposal_requirements("fake", "fake", self.context, "r", time.monotonic() + 100)
         self.assertEqual(len(result["requirements"]), 2)
         repair = json.loads(mocked.call_args_list[2].args[3][-1]["content"])
@@ -137,7 +143,8 @@ class ReplyReliabilityTests(unittest.TestCase):
         raw = {"requirements": [requirement()], "automaticBindings": [], "exactTransitions": []}
         async def request(*args, **kwargs):
             return completion(raw if kwargs["task"] == "revision_requirements" else {"accepted": True, "issues": []})
-        with patch.object(llm, "_request_completion", side_effect=request) as mocked:
+        mocked = RecordedAsyncCall(side_effect=request)
+        with llm_scope(completion_requester=mocked):
             llm._review_proposal_requirements("fake", "fake", self.context, "r", time.monotonic() + 100)
             self.context["verifiedRequirementCache"] = [self.context["_reliabilityState"]["verifiedRequirements"]]
             llm._review_proposal_requirements("fake", "fake", self.context, "retry", time.monotonic() + 100)
@@ -153,7 +160,7 @@ class ReplyReliabilityTests(unittest.TestCase):
             {"relation": "different", "merit": "reasonable", "comparison": "I agree that a single change may not address your concern about the route's planning demands."}])
         async def request(*args, **kwargs):
             return completion(next(responses))
-        with patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), patch.object(llm, "_request_completion", side_effect=request):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             result = llm.classify_challenge_reason("One tile is insufficient.", {}, "A local wall change.", "r", simple=True,
                 stage_snapshot=self.snapshot,
                 comparison_validator=lambda text: llm._strip_invalid_grounding_sentences(text, ROWS)[0])
@@ -174,7 +181,7 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.context["_reliabilityState"]["verifiedRequirements"] = {"record": {"requirements": [requirement()]}}
         async def request(*a, **kw):
             return completion({"body": "I could not verify a solvable candidate for this direction. I would reconsider which local route relationship should change, while retaining your original goal and preserving the current Stage."})
-        with patch.object(llm, "_request_completion", side_effect=request):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             result = llm._generate_verified_proposal_failure_analysis(*args)
         self.assertTrue(result.proposal_diagnostics["verifiedFailureAnalysis"])
         self.assertIsNone(result.proposed_rows)
@@ -209,17 +216,21 @@ class ReplyReliabilityTests(unittest.TestCase):
             body="The route asks the player to inspect the next pushing position before committing. I would compare that choice with the available walking space.",
             decision={"classification": "none"}, active_inclinations=[], language="en",
             request_id="r", deadline=time.monotonic() + 60)
-        with patch.object(llm, "_review_intent_candidate_async", side_effect=ValueError("bad auxiliary JSON")):
+        with llm_scope(intent_candidate_reviewer=RecordedAsyncCall(side_effect=ValueError('bad auxiliary JSON'))):
             result = asyncio.run(llm._review_ordinary_intent_with_recovery(
                 optional_budget=OptionalRepairBudget(kwargs["deadline"]), component_checks=[], **kwargs))
         self.assertTrue(result["omitted"])
         invalid = {"classification": "none", "bodyValid": False, "issues": ["The body does not answer the user's route question."]}
-        with patch.object(llm, "_review_intent_candidate_async", return_value=invalid), self.assertRaises(llm.LowQualityModelResponse):
+        with (
+            llm_scope(intent_candidate_reviewer=RecordedAsyncCall(return_value=invalid)),
+            self.assertRaises(llm.LowQualityModelResponse),
+        ):
             asyncio.run(llm._review_ordinary_intent_with_recovery(
                 optional_budget=OptionalRepairBudget(kwargs["deadline"]), component_checks=[], **kwargs))
 
     def test_expired_auxiliary_deadline_does_not_start_a_new_budget(self):
-        with patch.object(llm, "_review_intent_candidate_async") as review:
+        review = RecordedAsyncCall(side_effect=AssertionError("Unexpected intent_candidate_reviewer call"))
+        with llm_scope(intent_candidate_reviewer=review):
             result = asyncio.run(llm._review_ordinary_intent_with_recovery(
                 optional_budget=OptionalRepairBudget(time.monotonic() - 1), component_checks=[],
                 api_key="fake", base_url="fake", user_text="Discuss the route.",
@@ -252,11 +263,13 @@ class ReplyReliabilityTests(unittest.TestCase):
         self.assertIn("saved Stage", result.assistant_message)
 
     def test_server_receipt_and_snapshot_opening_are_not_model_generation(self):
-        import app as backend
+        from cocreation.api import proposal_and_challenge
         for model, fallback in (("server", False), ("kimi-k2.6-safe-opening", True), ("kimi-k2.6", False)):
-            with patch.object(backend, "record_event") as event:
-                backend._record_reply_outcome(None, "s", "key", "v", llm.LLMExecutionResult(
-                    "A verified reply.", 1, "r", model=model, guidance={}), "message")
+            event = RecordedCall()
+            with tempfile.TemporaryDirectory() as directory:
+                services = create_test_services(directory, record_event_fn=event)
+                proposal_and_challenge._record_reply_outcome(None, "s", "key", "v", llm.LLMExecutionResult(
+                    "A verified reply.", 1, "r", model=model, guidance={}), "message", services=services)
             payload = event.call_args.args[3]
             self.assertEqual(payload["snapshotFallback"], fallback)
             self.assertEqual(payload["modelGenerationSucceeded"], model == "kimi-k2.6")

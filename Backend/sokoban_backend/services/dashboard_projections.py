@@ -1,15 +1,17 @@
 import html
-import json
 
-from ..runtime_state import app_attr, utc_timestamp
+from ..config import Clock, STUDY_LOG_DIR, StudyLogPaths
 from ..storage.jsonl_store import (
+    StudyLogStore,
+    build_expansion_choice_identifier,
     build_ha_plan_event_identifier,
     build_journey_event_identifier,
     normalize_creative_idea_identifier,
     normalize_expansion_choice_identifier,
     normalize_identifier,
 )
-from .online_rooms import read_online_match_flow_events
+
+_DEFAULT_PATHS = StudyLogPaths(STUDY_LOG_DIR)
 
 
 def aggregate_dashboard_node_events(events):
@@ -43,7 +45,13 @@ def aggregate_dashboard_node_events(events):
 def build_matchmaking_records_payload(
     events,
     malformed_count,
+    *,
+    store: StudyLogStore | None = None,
+    paths: StudyLogPaths | None = None,
+    clock: Clock | None = None,
 ):
+    resolved_paths = paths or (store.paths if store is not None else _DEFAULT_PATHS)
+    resolved_clock = clock or (store.clock if store is not None else Clock())
     matches = {}
     allowed_event_fields = {
         "eventId",
@@ -197,10 +205,13 @@ def build_matchmaking_records_payload(
         players = match_record["players"]
 
         for player_number in (1, 2):
-            flow_events, flow_malformed_count = read_online_match_flow_events(
-                match_record["matchId"],
-                player_number,
-            )
+            if store is not None:
+                flow_events, flow_malformed_count = store.read_online_match_flow_events(
+                    match_record["matchId"],
+                    player_number,
+                )
+            else:
+                flow_events, flow_malformed_count = [], 0
             malformed_count += flow_malformed_count
             has_first_stage = any(
                 isinstance(event, dict) and event.get("eventType") == "first_stage"
@@ -353,8 +364,8 @@ def build_matchmaking_records_payload(
         },
         "matches": result_records,
         "malformedCount": int(malformed_count or 0),
-        "logFile": str(app_attr("ONLINE_MATCH_LOG_FILE")),
-        "generatedAt": utc_timestamp(),
+        "logFile": str(resolved_paths.online_match_log_file),
+        "generatedAt": resolved_clock.utc_timestamp(),
     }
 
 
@@ -422,7 +433,16 @@ def merge_level_records(events):
     )
 
 
-def build_level_records_payload(events, levels, malformed_count):
+def build_level_records_payload(
+    events,
+    levels,
+    malformed_count,
+    *,
+    paths: StudyLogPaths | None = None,
+    clock: Clock | None = None,
+):
+    resolved_paths = paths or _DEFAULT_PATHS
+    resolved_clock = clock or Clock()
     session_ids = {
         event.get("sessionId")
         for event in events
@@ -494,8 +514,8 @@ def build_level_records_payload(events, levels, malformed_count):
         "levels": levels,
         "rounds": rounds,
         "malformedCount": malformed_count,
-        "logFile": str(app_attr("STUDY_LOG_FILE")),
-        "generatedAt": utc_timestamp(),
+        "logFile": str(resolved_paths.study_log_file),
+        "generatedAt": resolved_clock.utc_timestamp(),
     }
 
 
@@ -622,7 +642,15 @@ def build_round_records(levels):
     )
 
 
-def build_survey_records_payload(responses, malformed_count):
+def build_survey_records_payload(
+    responses,
+    malformed_count,
+    *,
+    paths: StudyLogPaths | None = None,
+    clock: Clock | None = None,
+):
+    resolved_paths = paths or _DEFAULT_PATHS
+    resolved_clock = clock or Clock()
     session_ids = {
         response.get("sessionId")
         for response in responses
@@ -676,12 +704,20 @@ def build_survey_records_payload(responses, malformed_count):
         },
         "responses": sorted_responses,
         "malformedCount": malformed_count,
-        "logFile": str(app_attr("SURVEY_LOG_FILE")),
-        "generatedAt": utc_timestamp(),
+        "logFile": str(resolved_paths.survey_log_file),
+        "generatedAt": resolved_clock.utc_timestamp(),
     }
 
 
-def build_creative_ideas_payload(ideas, malformed_count):
+def build_creative_ideas_payload(
+    ideas,
+    malformed_count,
+    *,
+    paths: StudyLogPaths | None = None,
+    clock: Clock | None = None,
+):
+    resolved_paths = paths or _DEFAULT_PATHS
+    resolved_clock = clock or Clock()
     session_ids = {
         idea.get("sessionId")
         for idea in ideas
@@ -705,12 +741,20 @@ def build_creative_ideas_payload(ideas, malformed_count):
         },
         "ideas": sorted_ideas,
         "malformedCount": malformed_count,
-        "logFile": str(app_attr("CREATIVE_IDEA_LOG_FILE")),
-        "generatedAt": utc_timestamp(),
+        "logFile": str(resolved_paths.creative_idea_log_file),
+        "generatedAt": resolved_clock.utc_timestamp(),
     }
 
 
-def build_expansion_choices_payload(choices, malformed_count):
+def build_expansion_choices_payload(
+    choices,
+    malformed_count,
+    *,
+    paths: StudyLogPaths | None = None,
+    clock: Clock | None = None,
+):
+    resolved_paths = paths or _DEFAULT_PATHS
+    resolved_clock = clock or Clock()
     session_ids = {
         choice.get("sessionId")
         for choice in choices
@@ -734,12 +778,20 @@ def build_expansion_choices_payload(choices, malformed_count):
         },
         "choices": sorted_choices,
         "malformedCount": malformed_count,
-        "logFile": str(app_attr("CREATIVE_EXPANSION_CHOICE_LOG_FILE")),
-        "generatedAt": utc_timestamp(),
+        "logFile": str(resolved_paths.creative_expansion_choice_log_file),
+        "generatedAt": resolved_clock.utc_timestamp(),
     }
 
 
-def build_ha_plan_events_payload(events, malformed_count):
+def build_ha_plan_events_payload(
+    events,
+    malformed_count,
+    *,
+    paths: StudyLogPaths | None = None,
+    clock: Clock | None = None,
+):
+    resolved_paths = paths or _DEFAULT_PATHS
+    resolved_clock = clock or Clock()
     normalized_events = [
         normalize_ha_plan_event(event)
         for event in events
@@ -767,12 +819,20 @@ def build_ha_plan_events_payload(events, malformed_count):
         },
         "events": sorted_events,
         "malformedCount": malformed_count,
-        "logFile": str(app_attr("HA_PLAN_EVENT_LOG_FILE")),
-        "generatedAt": utc_timestamp(),
+        "logFile": str(resolved_paths.ha_plan_event_log_file),
+        "generatedAt": resolved_clock.utc_timestamp(),
     }
 
 
-def build_journey_events_payload(events, malformed_count):
+def build_journey_events_payload(
+    events,
+    malformed_count,
+    *,
+    paths: StudyLogPaths | None = None,
+    clock: Clock | None = None,
+):
+    resolved_paths = paths or _DEFAULT_PATHS
+    resolved_clock = clock or Clock()
     normalized_events = [
         normalize_journey_event(event)
         for event in events
@@ -795,8 +855,8 @@ def build_journey_events_payload(events, malformed_count):
         },
         "events": sorted_events,
         "malformedCount": malformed_count,
-        "logFile": str(app_attr("JOURNEY_EVENT_LOG_FILE")),
-        "generatedAt": utc_timestamp(),
+        "logFile": str(resolved_paths.journey_event_log_file),
+        "generatedAt": resolved_clock.utc_timestamp(),
     }
 
 
@@ -921,7 +981,15 @@ def get_survey_player_name(response):
     )
 
 
-def render_level_records_view(events, levels, malformed_count, cleared):
+def render_level_records_view(
+    events,
+    levels,
+    malformed_count,
+    cleared,
+    *,
+    paths: StudyLogPaths | None = None,
+):
+    resolved_paths = paths or _DEFAULT_PATHS
     rounds = build_round_records(levels)
     completed_count = sum(1 for level in levels if get_level_end(level) and get_level_end(level).get("completed"))
     missing_end_count = sum(1 for level in levels if not get_level_end(level))
@@ -939,7 +1007,7 @@ def render_level_records_view(events, levels, malformed_count, cleared):
     if cleared:
         notice_html = '<div class="notice">Records cleared.</div>'
 
-    study_file = str(app_attr("STUDY_LOG_FILE"))
+    study_file = str(resolved_paths.study_log_file)
     return f"""<!doctype html>
 <html lang="en">
 <head>

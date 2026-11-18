@@ -1,93 +1,189 @@
 from collections import deque
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from ..config import (
+    BackendSettings,
+    Clock,
     DEFAULT_LLM_MAX_ATTEMPTS,
     PC_DESIGN_MIN_ACTIVITY_AREA,
     PC_FALLBACK_MIN_INTERNAL_WALLS,
     PC_FEASIBILITY_MAX_SEARCH_STATES,
     PC_INTERMEDIATE_INTERNAL_WALLS,
     PC_LAYOUT_MAX_WATER_CHECKS,
+    PC_LAYOUT_PREFILTER_MAX_SEARCH_STATES,
     PC_LAYOUT_PREFILTER_SECONDS,
-    PC_LEVEL_LLM_TIMEOUT_SECONDS,
     PC_MAX_LAYOUT_CANDIDATES,
     PC_MAX_WATER_AREA_CANDIDATES,
     PC_PRIMARY_INTERNAL_WALLS,
-    env_float,
 )
 from ..llm.prompts import build_pc_level_generation_messages
-from ..llm.runtime import LLMExecutionResult, LLMServiceError, safe_log_text
-from ..runtime_state import app_attr, call_app_hook, current_perf_counter
+from ..llm.runtime import (
+    EventLogger,
+    LLMExecutionResult,
+    LLMGateway,
+    LLMServiceError,
+    redact_log_text,
+)
 from ..schemas import PCSolvabilityError
 
+if TYPE_CHECKING:
+    from .blueprint_planner import BlueprintPlannerService
 
-def create_pc_level_candidate(
-    context,
-    request_id="",
-    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
-    context_is_normalized=False,
-):
-    if not context_is_normalized:
-        context = call_app_hook("normalize_pc_level_request", context)
 
-    def validate_candidate(payload):
-        layout_candidate_id = parse_pc_layout_candidate_selection(payload)
-        candidate = next(
-            (
-                item
-                for item in context.get("layoutCandidates", [])
-                if item["id"] == layout_candidate_id
-            ),
-            None,
+class PCLevelGenerationService:
+    def __init__(
+        self,
+        blueprint_service: "BlueprintPlannerService | None" = None,
+        settings: BackendSettings | None = None,
+        *,
+        llm_gateway: LLMGateway | None = None,
+        clock: Clock | None = None,
+        event_logger: EventLogger | None = None,
+        request_normalizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        candidate_factory: Callable[..., LLMExecutionResult] | None = None,
+        solvability_validator: Callable[..., int] | None = None,
+    ) -> None:
+        self.blueprint_service = blueprint_service
+        self.llm_gateway = llm_gateway or (
+            blueprint_service.llm_gateway if blueprint_service is not None else None
+        )
+        self.settings = settings or (
+            self.llm_gateway.settings
+            if self.llm_gateway is not None
+            else BackendSettings()
+        )
+        self.clock = clock or (
+            self.llm_gateway.clock if self.llm_gateway is not None else Clock()
+        )
+        self.event_logger = event_logger or (
+            self.llm_gateway.event_logger
+            if self.llm_gateway is not None
+            else EventLogger(
+                settings=self.settings,
+                clock=self.clock,
+                stream=None,
+                enable_file_handler=False,
+            )
+        )
+        self.request_normalizer = request_normalizer or self._default_normalize_request
+        self.candidate_factory = candidate_factory or self._default_create_candidate
+        self.solvability_validator = (
+            solvability_validator or validate_pc_completed_level_solvability
         )
 
-        if candidate is None:
-            raise ValueError(
-                f"layoutCandidateId {layout_candidate_id} is not available"
+    def _default_normalize_request(self, context: dict[str, Any]) -> dict[str, Any]:
+        return normalize_pc_level_request(
+            context,
+            settings=self.settings,
+            clock=self.clock,
+            event_logger=self.event_logger,
+        )
+
+    def normalize_request(self, context: dict[str, Any]) -> dict[str, Any]:
+        return self.request_normalizer(context)
+
+    def _default_create_candidate(
+        self,
+        context: dict[str, Any],
+        request_id: str = "",
+        max_attempts: int = DEFAULT_LLM_MAX_ATTEMPTS,
+        context_is_normalized: bool = False,
+    ) -> LLMExecutionResult:
+        if not context_is_normalized:
+            context = self.normalize_request(context)
+
+        if self.llm_gateway is None:
+            raise RuntimeError("PCLevelGenerationService requires an LLMGateway")
+
+        def validate_candidate(payload):
+            layout_candidate_id = parse_pc_layout_candidate_selection(payload)
+            candidate = next(
+                (
+                    item
+                    for item in context.get("layoutCandidates", [])
+                    if item["id"] == layout_candidate_id
+                ),
+                None,
+            )
+            if candidate is None:
+                raise ValueError(
+                    f"layoutCandidateId {layout_candidate_id} is not available"
+                )
+            return {
+                "rows": list(candidate["rows"]),
+            }
+
+        fallback_candidate = context["layoutCandidates"][0]
+
+        try:
+            return self.llm_gateway.execute_json_request(
+                task="pc_level_generation",
+                messages=build_pc_level_generation_messages(context),
+                validator=validate_candidate,
+                temperature=self.settings.deepseek_pc_level_temperature,
+                timeout_seconds=self.settings.deepseek_pc_level_timeout_seconds,
+                max_attempts=1,
+                thinking_mode="disabled",
+                retry_error_codes=set(),
+                request_id=request_id,
+                validation_stage="pc_level_validation",
+            )
+        except LLMServiceError as exception:
+            self.event_logger.log_event(
+                "INFO",
+                "pc_layout_fallback_used",
+                requestId=request_id or exception.request_id,
+                reasonCode=exception.code,
+                stage=exception.stage,
+                layoutCandidateId=fallback_candidate["id"],
+                internalWallCount=len(
+                    fallback_candidate["internalWallCellIds"]
+                ),
+            )
+            return LLMExecutionResult(
+                {"rows": list(fallback_candidate["rows"])},
+                max(1, exception.attempts_used),
+                request_id or exception.request_id,
             )
 
-        return {
-            "rows": list(candidate["rows"]),
-        }
+    def create_candidate(
+        self,
+        context: dict[str, Any],
+        request_id: str = "",
+        max_attempts: int = DEFAULT_LLM_MAX_ATTEMPTS,
+        context_is_normalized: bool = False,
+    ) -> LLMExecutionResult:
+        if not context_is_normalized:
+            context = self.normalize_request(context)
+        return self.candidate_factory(
+            context,
+            request_id,
+            max_attempts,
+            context_is_normalized=True,
+        )
 
-    fallback_candidate = context["layoutCandidates"][0]
-
-    try:
-        return call_app_hook(
-            "execute_json_request",
-            task="pc_level_generation",
-            messages=build_pc_level_generation_messages(context),
-            validator=validate_candidate,
-            temperature=env_float("DEEPSEEK_PC_LEVEL_TEMPERATURE", 0.15, 0.0, 2.0),
-            timeout_seconds=env_float(
-                "DEEPSEEK_PC_LEVEL_TIMEOUT_SECONDS",
-                PC_LEVEL_LLM_TIMEOUT_SECONDS,
-                0.5,
-                120.0,
-            ),
-            max_attempts=1,
-            thinking_mode="disabled",
-            retry_error_codes=set(),
+    def build_candidate(
+        self,
+        layout: dict[str, Any],
+        context: dict[str, Any],
+        request_id: str = "",
+        minimum_internal_walls: int = 0,
+        minimum_water_areas: int = 0,
+    ) -> dict[str, Any]:
+        return build_pc_level_candidate(
+            layout,
+            context,
             request_id=request_id,
-            validation_stage="pc_level_validation",
+            minimum_internal_walls=minimum_internal_walls,
+            minimum_water_areas=minimum_water_areas,
+            solvability_validator=self.solvability_validator,
+            event_logger=self.event_logger,
         )
-    except LLMServiceError as exception:
-        call_app_hook(
-            "log_event",
-            "INFO",
-            "pc_layout_fallback_used",
-            requestId=request_id or exception.request_id,
-            reasonCode=exception.code,
-            stage=exception.stage,
-            layoutCandidateId=fallback_candidate["id"],
-            internalWallCount=len(
-                fallback_candidate["internalWallCellIds"]
-            ),
-        )
-        return LLMExecutionResult(
-            {"rows": list(fallback_candidate["rows"])},
-            max(1, exception.attempts_used),
-            request_id or exception.request_id,
-        )
+
+    normalize_pc_level_request = normalize_request
+    create_pc_level_candidate = create_candidate
+    build_pc_level_candidate = build_candidate
 
 
 def parse_pc_layout_candidate_selection(payload):
@@ -113,6 +209,9 @@ def build_pc_level_candidate(
     request_id="",
     minimum_internal_walls=0,
     minimum_water_areas=0,
+    *,
+    solvability_validator=None,
+    event_logger: EventLogger | None = None,
 ):
     water_area_id, player_cell_id, internal_wall_cell_ids = (
         parse_pc_indexed_layout(layout)
@@ -228,9 +327,9 @@ def build_pc_level_candidate(
         minimum_internal_walls,
         minimum_water_areas,
     )
+    validator_fn = solvability_validator or validate_pc_completed_level_solvability
     try:
-        call_app_hook(
-            "validate_pc_completed_level_solvability",
+        validator_fn(
             candidate["rows"],
             width,
             height,
@@ -242,19 +341,25 @@ def build_pc_level_candidate(
             candidate["rows"],
             exception,
         )
+        detail_text = (
+            event_logger.safe_log_text(feedback)
+            if event_logger is not None
+            else redact_log_text(feedback)
+        )
         fields = {
             "reasonCode": exception.reason_code,
             "waterAreaId": water_area_id,
             "playerCellId": player_cell_id,
             "internalWallCellIds": internal_wall_cell_ids,
             "searchedStates": exception.searched_states,
-            "detail": safe_log_text(feedback),
+            "detail": detail_text,
         }
 
         if request_id:
             fields["requestId"] = request_id
 
-        call_app_hook("log_event", "INFO", "pc_candidate_rejected", **fields)
+        if event_logger is not None:
+            event_logger.log_event("INFO", "pc_candidate_rejected", **fields)
         raise ValueError(feedback) from exception
 
     return candidate
@@ -424,7 +529,15 @@ def parse_pc_integer(value, label):
     return value
 
 
-def normalize_pc_level_request(context):
+def normalize_pc_level_request(
+    context,
+    *,
+    settings: BackendSettings | None = None,
+    clock: Clock | None = None,
+    event_logger: EventLogger | None = None,
+):
+    resolved_settings = settings or BackendSettings()
+    resolved_clock = clock or Clock()
     context = dict(context or {})
     width = context.get("width")
     height = context.get("height")
@@ -588,6 +701,10 @@ def normalize_pc_level_request(context):
             previous_rows,
             width,
             height,
+            max_search_states=resolved_settings.pc_layout_prefilter_max_search_states,
+            prefilter_seconds=resolved_settings.pc_layout_prefilter_seconds,
+            clock=resolved_clock,
+            event_logger=event_logger,
         )
     )
 
@@ -597,15 +714,15 @@ def normalize_pc_level_request(context):
             "walls and one water area"
         )
 
-    call_app_hook(
-        "log_event",
-        "INFO",
-        "pc_layout_prefilter_completed",
-        checkedWaterAreas=checked_water_areas,
-        layoutCandidateCount=len(layout_candidates),
-        searchedStates=searched_states,
-        preferredWallCount=len(layout_candidates[0]["internalWallCellIds"]),
-    )
+    if event_logger is not None:
+        event_logger.log_event(
+            "INFO",
+            "pc_layout_prefilter_completed",
+            checkedWaterAreas=checked_water_areas,
+            layoutCandidateCount=len(layout_candidates),
+            searchedStates=searched_states,
+            preferredWallCount=len(layout_candidates[0]["internalWallCellIds"]),
+        )
 
     return {
         "width": width,
@@ -1107,16 +1224,20 @@ def build_pc_safe_layout_candidates(
     previous_rows,
     width,
     height,
+    *,
+    max_search_states: int = PC_LAYOUT_PREFILTER_MAX_SEARCH_STATES,
+    prefilter_seconds: float = PC_LAYOUT_PREFILTER_SECONDS,
+    clock: Clock | None = None,
+    event_logger: EventLogger | None = None,
 ):
-    started = current_perf_counter()
-    max_states = int(
-        app_attr("PC_LAYOUT_PREFILTER_MAX_SEARCH_STATES")
-        or PC_LAYOUT_PREFILTER_MAX_SEARCH_STATES
-    )
+    resolved_clock = clock or Clock()
+    started = resolved_clock.perf_counter()
+    max_states = max(1, int(max_search_states))
     budget = {
-        "deadline": started + PC_LAYOUT_PREFILTER_SECONDS,
+        "deadline": started + float(prefilter_seconds),
         "remainingStates": max_states,
         "searchedStates": 0,
+        "perfCounter": resolved_clock.perf_counter,
     }
     editable_by_id = {
         cell["id"]: cell
@@ -1130,7 +1251,7 @@ def build_pc_safe_layout_candidates(
     for area in allowed_water_areas[:PC_LAYOUT_MAX_WATER_CHECKS]:
         if (
             len(candidates) >= PC_MAX_LAYOUT_CANDIDATES
-            or current_perf_counter() >= budget["deadline"]
+            or resolved_clock.perf_counter() >= budget["deadline"]
             or budget["remainingStates"] <= 0
         ):
             break
@@ -1271,20 +1392,20 @@ def build_pc_safe_layout_candidates(
     for index, candidate in enumerate(candidates):
         candidate["id"] = index
 
-    elapsed_ms = round((current_perf_counter() - started) * 1000)
-    call_app_hook(
-        "log_event",
-        "INFO",
-        "pc_layout_prefilter_timing",
-        elapsedMs=elapsed_ms,
-        checkedWaterAreas=checked_water_areas,
-        layoutCandidateCount=len(candidates),
-        searchedStates=budget["searchedStates"],
-        budgetExhausted=(
-            current_perf_counter() >= budget["deadline"]
-            or budget["remainingStates"] <= 0
-        ),
-    )
+    elapsed_ms = round((resolved_clock.perf_counter() - started) * 1000)
+    if event_logger is not None:
+        event_logger.log_event(
+            "INFO",
+            "pc_layout_prefilter_timing",
+            elapsedMs=elapsed_ms,
+            checkedWaterAreas=checked_water_areas,
+            layoutCandidateCount=len(candidates),
+            searchedStates=budget["searchedStates"],
+            budgetExhausted=(
+                resolved_clock.perf_counter() >= budget["deadline"]
+                or budget["remainingStates"] <= 0
+            ),
+        )
     return candidates, checked_water_areas, budget["searchedStates"]
 
 
@@ -1360,10 +1481,12 @@ def search_pc_solution_trace(
     open_states = deque([start_state])
     parents = {start_state: None}
 
+    perf_counter = budget.get("perfCounter") or Clock().perf_counter
+
     while open_states:
         if (
             budget["remainingStates"] <= 0
-            or current_perf_counter() >= budget["deadline"]
+            or perf_counter() >= budget["deadline"]
         ):
             raise PCSolvabilityError(
                 "SEARCH_BUDGET_EXCEEDED",

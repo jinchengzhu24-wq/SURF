@@ -6,19 +6,18 @@ import time
 import unittest
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import llm_client as llm
+from tests.fakes import RecordedAsyncCall
+from cocreation.llm import facade as llm
 import test_wire_contracts as wire
 from test_proposal_understanding import ROWS, topic, item, understanding
 from patch_fixtures import patch_fixture
-from level_validation import build_stage_snapshot
-from understanding_review import review_targets, merge_review
-from proposal_diagnostics import ProposalValidationError, ProposalDiagnostic, CURRENT_PROPOSAL_DIAGNOSTIC
+from cocreation.domain.level_validation import build_stage_snapshot
+from cocreation.domain.understanding_review import review_targets, merge_review
+from cocreation.domain.proposal_diagnostics import ProposalValidationError, ProposalDiagnostic, CURRENT_PROPOSAL_DIAGNOSTIC
 
 
 APPROVE = {"decision": "APPROVE", "issues": [], "corrections": []}
@@ -38,7 +37,7 @@ class UnderstandingReviewTests(unittest.TestCase):
             "sufficient": True, "nextQuestionDimension": "none"}, "water", "change", ["revision_request"])
 
     def run_classify(self, model, deadline=None):
-        with self.wire.provider(model), patch.object(llm, "_llm_credentials", return_value=("offline", "offline")):
+        with self.wire.provider(model):
             return llm.classify_turn_understanding([{"role": "user", "content": self.latest}],
                 self.snapshot, "synthetic-review", forced_proposal=True,
                 proposal_context=self.context, _deadline=deadline or time.monotonic() + 116)
@@ -184,7 +183,7 @@ class UnderstandingReviewTests(unittest.TestCase):
                 ("保留右侧的墙玩家", "latest", False)):
             candidate = copy.deepcopy(base)
             candidate["proposalUnderstanding"]["preserve"] = [item("Preserve", source=source, span=quote)]
-            from proposal_understanding import validate_topic
+            from cocreation.domain.proposal_understanding import validate_topic
             if valid:
                 validate_topic(candidate["proposalUnderstanding"], sources, self.snapshot)
             else:
@@ -232,8 +231,8 @@ class UnderstandingReviewTests(unittest.TestCase):
         self.assertNotIn(self.latest, json.dumps(diagnostic.snapshot(), ensure_ascii=False))
 
     def test_probe_cap_counts_actual_transport_calls_including_errors(self):
-        from understanding_review_probe import bounded_factory
-        transport = AsyncMock(side_effect=[RuntimeError("provider error"), SimpleNamespace(
+        from cocreation.tools.understanding_review_probe import bounded_factory
+        transport = RecordedAsyncCall(side_effect=[RuntimeError("provider error"), SimpleNamespace(
             choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="{}"))])])
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=transport)))
         calls = []
@@ -278,7 +277,7 @@ class UnderstandingReviewTests(unittest.TestCase):
         self.assertEqual(len(self.wire.calls), 2)
 
     def test_failed_existing_item_does_not_unlock_unrelated_append_correction(self):
-        from understanding_review import review_patch_request
+        from cocreation.domain.understanding_review import review_patch_request
         base = {**self.candidate, "optionDecision": None}
         targets = review_targets(base)
         corrections = []
@@ -293,8 +292,8 @@ class UnderstandingReviewTests(unittest.TestCase):
         self.assertEqual(list(request.targets), ["corrections[0].value.evidenceSpan"])
 
     def test_probe_cumulative_cap_includes_previous_run(self):
-        from understanding_review_probe import bounded_factory
-        transport = AsyncMock(return_value=SimpleNamespace(
+        from cocreation.tools.understanding_review_probe import bounded_factory
+        transport = RecordedAsyncCall(return_value=SimpleNamespace(
             choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="{}"))]))
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=transport)))
         calls = []

@@ -7,9 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from unittest.mock import patch
-
-from fastapi.testclient import TestClient
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -17,20 +14,26 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
     import cocreation  # noqa: F401
+from tests.fakes import RecordedAsyncCall, RecordedCall, SessionTestCase
 
-import app as backend
-import llm_client
-import repository
-import proposal_options
+from cocreation.api import config_models
+from cocreation.api import context_and_discovery
+from cocreation.api import online_sync_and_dashboard
+from cocreation.api import proposal_and_challenge
+from cocreation.api import routes_sessions
+from cocreation.api import session_persistence_helpers
+from cocreation.llm import facade as llm_client
+from cocreation.persistence import repository
+from cocreation.domain import proposal_options
 from option_fixtures import with_options
-from llm_client import (
+from cocreation.llm.facade import (
     LLMExecutionResult,
     LLMServiceError,
     TranslationExecutionResult,
 )
 
 
-SAMPLE_ROWS = list(backend.SAMPLE_ROWS)
+SAMPLE_ROWS = list(config_models.SAMPLE_ROWS)
 EDITED_ROWS = list(SAMPLE_ROWS)
 EDITED_ROWS[4] = "#..p.......#"
 TARGET_SHIFT_ROWS = list(SAMPLE_ROWS)
@@ -131,29 +134,31 @@ WATER_RIGHT_CONTRACT["strategies"][0]["requiredTransitions"] = WATER_RIGHT_BRIEF
 WATER_RIGHT_CONTRACT["revisionPlan"]["strategies"][0]["requiredTransitions"] = WATER_RIGHT_BRIEF["requiredTransitions"]
 
 
-class CoCreationSessionTests(unittest.TestCase):
+class CoCreationSessionTests(SessionTestCase):
 
     def test_active_topic_understanding_failure_keeps_each_question_boundary_and_original_key(self):
         for count in (1, 2, 3):
             with self.subTest(question_count=count):
                 self.session_id, _ = self.create_and_open_session(f"option-failure-{count}")
                 version_id = self.read_session()["currentVersionId"]
-                with repository.connect(immediate=True) as database:
+                with self.services.connect(immediate=True) as database:
                     session = repository.get_session(database, self.session_id)
-                    topic_id = backend.insert_turn(database, session, "user", "Please change the water layout.",
+                    topic_id = self.services.insert_turn(database, session, "user", "Please change the water layout.",
                         version_id, f"topic-{count}", None)
                     repository.record_event(database, self.session_id, "proposal_request_requested",
-                        {"messageKey": f"topic-{count}", "turnId": topic_id, "baseVersionId": version_id}, backend.utc_now())
+                        {"messageKey": f"topic-{count}", "turnId": topic_id, "baseVersionId": version_id}, self.services.utc_now())
                     question = "Would you prefer the grouped contour or open spacing?"
                     reply = LLMExecutionResult(question, 1, "entry", guidance={"proposalDiscovery": {
                         "topicId": topic_id, "status": "clarifying", "clarificationQuestionCount": count}})
-                    backend.insert_turn(database, session, "assistant", question, version_id, f"ask-{count}", reply)
+                    self.services.insert_turn(database, session, "assistant", question, version_id, f"ask-{count}", reply)
                 before = self.read_session()["turns"]
                 payload = {"content": "More open spacing", "baseVersionId": version_id,
                     "idempotencyKey": f"bound-answer-{count}", "requestProposal": False}
                 error = LLMServiceError("MODEL_RESPONSE_INVALID", "private model content", "offline", True, 2, 502)
-                with patch.object(backend, "classify_turn_understanding", side_effect=error), \
-                        patch.object(backend, "generate_chat_reply") as forbidden:
+                forbidden = RecordedCall(side_effect=AssertionError("Unexpected generate_chat_reply call"))
+                with self.using_dependencies(
+                    llm_handlers={"classify_turn_understanding": error, "generate_chat_reply": forbidden},
+                ):
                     failed = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
                 self.assertEqual(failed.status_code, 502, failed.text)
                 forbidden.assert_not_called()
@@ -164,7 +169,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 def reply(*args, **kwargs):
                     value = LLMExecutionResult("I cannot yet validate the requested direction.", 1, "retry")
                     return with_options(value, kwargs["stage_context"]) if kwargs["stage_context"]["revisionRouting"] == "needs_clarification" else value
-                with patch.object(backend, "generate_chat_reply", side_effect=reply):
+                with self.using_dependencies(llm_handlers={"generate_chat_reply": reply}):
                     recovered = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
                     repeat = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
                 self.assertEqual(recovered.status_code, 200, recovered.text)
@@ -176,7 +181,6 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_proposal_entry_failure_and_original_key_retry_have_exact_private_safe_diagnostics(self):
         from types import SimpleNamespace
-        from unittest.mock import AsyncMock
         from patch_fixtures import patch_fixture
         version_id = self.read_session()["currentVersionId"]
         content = "怎么把右边的元素分散一下"
@@ -193,9 +197,11 @@ class CoCreationSessionTests(unittest.TestCase):
         payload = {"content": content, "baseVersionId": version_id, "requestProposal": True,
                    "idempotencyKey": "proposal-diagnostic-retry"}
         before = self.read_session()["turns"]
-        with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
-                patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm_client, "_request_completion", AsyncMock(side_effect=model)) as calls:
+        calls = RecordedAsyncCall(side_effect=model)
+        with self.using_dependencies(
+            llm_handlers={"classify_turn_understanding": llm_client.classify_turn_understanding},
+            llm_options={"completion_requester": calls},
+        ):
             for _ in range(2):
                 response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
                 self.assertEqual(response.status_code, 502, response.text)
@@ -207,7 +213,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(session["currentVersionId"], version_id)
         self.assertEqual(session["turns"], before)
         self.assertEqual(session["lastMessageFailure"]["messageKey"], payload["idempotencyKey"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             records = database.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='reply_pipeline_diagnostic'",
                 (self.session_id,)).fetchall()
         failures = [repository.load_json(row["payload_json"]) for row in records
@@ -219,13 +225,17 @@ class CoCreationSessionTests(unittest.TestCase):
     def test_acceptance_rechecks_platform_permissions_and_audits_without_creating_stage(self):
         version_id = self.read_session()["currentVersionId"]
         offer = self.offer_bound_revision(WATER_RESHAPE_BRIEF, summary="Adjust water distribution", message_key="permission-offer")
-        with patch.object(llm_client, "_create_async_client", side_effect=AssertionError("No Kimi for frozen execution")):
+        with self.using_dependencies(
+            llm_options={
+                "client_factory": RecordedCall(side_effect=AssertionError('No Kimi for frozen execution')),
+            },
+        ):
             executed = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": "Execute this water plan", "baseVersionId": version_id, "idempotencyKey": "permission-execute",
                 "action": "execute_revision", "sourceTurnId": offer["turnId"]})
         self.assertEqual(executed.status_code, 200, executed.text)
         proposal = executed.json()["proposals"][0]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute("UPDATE change_proposals SET proposed_rows_json=? WHERE id=?",
                 (repository.dump_json(EDITED_ROWS), proposal["proposalId"]))
         response = self.client.post(f"/api/sessions/{self.session_id}/proposals/{proposal['proposalId']}/decision", json={
@@ -237,7 +247,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(self.read_session()["currentVersionId"], version_id)
         self.assertEqual(len(self.read_session()["versions"]), 1)
         self.assertEqual(self.read_session()["proposals"][0]["status"], "pending")
-        with repository.connect() as database:
+        with self.services.connect() as database:
             record = database.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='reply_pipeline_diagnostic' "
                 "AND json_extract(payload_json,'$.messageKey')='permission-accept'", (self.session_id,)).fetchone()
         self.assertEqual(repository.load_json(record["payload_json"])["proposalDiagnostic"]["requestOutcome"], "failed")
@@ -248,8 +258,11 @@ class CoCreationSessionTests(unittest.TestCase):
         error = LLMServiceError("MODEL_RESPONSE_INVALID", "private model prose", "understanding-failure", True, 2, 502)
         reply = LLMExecutionResult("I would first compare visual balance and playable rhythm.", 1, "conversation-recovery",
                                    guidance={"proposalOffer": None, "uiCues": []})
-        with patch.object(backend, "classify_turn_understanding", side_effect=error) as classify, \
-                patch.object(backend, "generate_chat_reply", return_value=reply) as generate:
+        classify = RecordedCall(side_effect=error)
+        generate = RecordedCall(return_value=reply)
+        with self.using_dependencies(
+            llm_handlers={"classify_turn_understanding": classify, "generate_chat_reply": generate},
+        ):
             first = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
             retry = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
         self.assertEqual(first.status_code, 200, first.text)
@@ -269,7 +282,7 @@ class CoCreationSessionTests(unittest.TestCase):
                    "idempotencyKey": "pre-turn-failure", "requestProposal": True}
         error = LLMServiceError("MODEL_RESPONSE_INVALID", "private provider prose", "classification-request", True, 2, 502)
         before = self.read_session()["turns"]
-        with patch.object(backend, "classify_turn_understanding", side_effect=error):
+        with self.using_dependencies(llm_handlers={"classify_turn_understanding": error}):
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
         self.assertEqual(response.status_code, 502)
         session = self.read_session()
@@ -277,7 +290,8 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(session["lastMessageFailure"]["messageKey"], payload["idempotencyKey"])
         self.assertEqual(session["lastMessageFailure"]["details"]["task"], "turn_understanding")
         self.assertNotIn("private provider prose", json.dumps(session["lastMessageFailure"]))
-        with patch.object(backend, "classify_turn_understanding") as forbidden:
+        forbidden = RecordedCall(side_effect=AssertionError("Unexpected classify_turn_understanding call"))
+        with self.using_dependencies(llm_handlers={"classify_turn_understanding": forbidden}):
             conflict = self.client.post(f"/api/sessions/{self.session_id}/messages", json={**payload, "content": "different"})
         self.assertEqual(conflict.status_code, 409)
         forbidden.assert_not_called()
@@ -289,26 +303,33 @@ class CoCreationSessionTests(unittest.TestCase):
         version_id = self.read_session()["currentVersionId"]
         before = self.read_session()
         tables = ("conversation_turns", "level_versions", "change_proposals", "designer_decisions", "designer_intentions")
-        with repository.connect() as database:
+        with self.services.connect() as database:
             counts = {table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
         def model(call, number):
             if number == 1:
                 return fixture.candidate_wire()
             return fixture.correction(call, ["proposalUnderstanding", "preserve", 0], {
                 "statement": "保留右侧的墙", "sourceTurnId": "latest", "evidenceSpan": "fabricated quotation"})
-        with fixture.wire.provider(model), patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(backend, "classify_turn_understanding", llm_client.classify_turn_understanding), \
-                patch.object(backend, "generate_chat_reply") as forbidden:
+        forbidden = RecordedCall(side_effect=AssertionError("Unexpected generate_chat_reply call"))
+        provider = fixture.wire.client_for(model)
+        with self.using_dependencies(llm_options={
+            "client_factory": lambda *args: provider,
+            "handlers": {
+                "classify_turn_understanding": llm_client.classify_turn_understanding,
+                "generate_chat_reply": forbidden,
+            },
+        }):
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": fixture.latest, "baseVersionId": version_id, "idempotencyKey": "delta-review-failure", "requestProposal": True})
         self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(len(fixture.wire.calls), 3)
         forbidden.assert_not_called()
         after = self.read_session()
         self.assertEqual(after["currentVersionId"], version_id)
         self.assertEqual(after["turns"], before["turns"])
         self.assertEqual(after["versions"], before["versions"])
         self.assertEqual(after["lastMessageFailure"]["details"]["recoveryState"], "retry_pending")
-        with repository.connect() as database:
+        with self.services.connect() as database:
             self.assertEqual(counts, {table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables})
 
     def test_quote_repair_attacks_keep_stage_and_research_business_rows_unchanged(self):
@@ -322,7 +343,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 fixture.candidate["proposalUnderstanding"]["preserve"][0]["statement"] = "允许删除右侧的墙"
                 before = self.read_session()
                 tables = ("conversation_turns", "level_versions", "change_proposals", "designer_decisions", "designer_intentions")
-                with repository.connect() as database:
+                with self.services.connect() as database:
                     counts = {table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
                 def model(call, number):
                     if number == 1:
@@ -338,9 +359,15 @@ class CoCreationSessionTests(unittest.TestCase):
                         else [item("玩家不变", span="玩家、箱子和目标位置保持不变")])
                     return {"patches": [{"componentId": "understanding_review", "field": "corrections[0].value",
                         "valueJson": json.dumps(frozen["corrections"][0]["value"], ensure_ascii=False), "evidenceRefs": ["user:latest"]}]}
-                with fixture.wire.provider(model), patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
-                        patch.object(backend, "classify_turn_understanding", llm_client.classify_turn_understanding), \
-                        patch.object(backend, "generate_chat_reply") as forbidden:
+                forbidden = RecordedCall(side_effect=AssertionError("Unexpected generate_chat_reply call"))
+                provider = fixture.wire.client_for(model)
+                with self.using_dependencies(llm_options={
+                    "client_factory": lambda *args: provider,
+                    "handlers": {
+                        "classify_turn_understanding": llm_client.classify_turn_understanding,
+                        "generate_chat_reply": forbidden,
+                    },
+                }):
                     response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                         "content": fixture.latest, "baseVersionId": before["currentVersionId"],
                         "idempotencyKey": "quote-safety-" + attack, "requestProposal": True})
@@ -352,7 +379,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 self.assertEqual(after["currentVersionId"], before["currentVersionId"])
                 self.assertEqual(after["turns"], before["turns"])
                 self.assertEqual(after["versions"], before["versions"])
-                with repository.connect() as database:
+                with self.services.connect() as database:
                     self.assertEqual(counts, {table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables})
 
     def test_unverified_human_edit_engagement_commits_body_and_keeps_proposal_block(self):
@@ -361,7 +388,7 @@ class CoCreationSessionTests(unittest.TestCase):
         disagreement = {"status": "active", "subject": "human_edit", "userPosition": "Keep the denser region.",
                         "aiPosition": "Preserve more recovery space.", "coreDisagreement": "Which direction should lead?",
                         "nextQuestion": "Would you like to discuss it?", "resolution": None, "displayCard": False}
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             context = repository.load_design_context(database, self.session_id, version_id)
             context["activeDisagreement"] = disagreement
             repository.save_design_context(database, version_id, context)
@@ -370,8 +397,7 @@ class CoCreationSessionTests(unittest.TestCase):
                     if kwargs["task"] == "plain_chat" else '{"bad":true}')
             return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=text))])
         payload = {"content": "Please explain the comparison.", "baseVersionId": version_id, "idempotencyKey": "state-deferred"}
-        with patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm_client, "_request_completion", side_effect=model):
+        with self.using_dependencies(llm_options={"completion_requester": RecordedAsyncCall(side_effect=model)}):
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         turn = response.json()["turns"][-1]
@@ -380,7 +406,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertIsNone(turn["guidance"]["proposalOffer"])
         self.assertFalse(turn["guidance"]["disagreement"]["displayCard"])
         self.assertNotIn("_stateTransitionDeferred", turn["guidance"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             context = repository.load_design_context(database, self.session_id, version_id)
         self.assertEqual(context["activeDisagreement"]["status"], "active")
         self.assertEqual(context["confirmedDecisions"], [])
@@ -388,9 +414,9 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_new_topic_pins_real_preceding_evaluation_and_preserves_initial_request(self):
         version_id = self.read_session()["currentVersionId"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             session = database.execute("SELECT * FROM design_sessions WHERE id=?", (self.session_id,)).fetchone()
-            older = backend.insert_turn(database, session, "user", "不好看", version_id, "prior-evaluation", None)
+            older = self.services.insert_turn(database, session, "user", "不好看", version_id, "prior-evaluation", None)
         latest = "那你觉得可以怎么改"
         source = {"statement": "改善外观", "sourceTurnId": older, "evidenceSpan": "不好看"}
         understood = {"acts": ["revision_request"], "elements": ["unknown"], "evidenceSpan": latest,
@@ -398,8 +424,10 @@ class CoCreationSessionTests(unittest.TestCase):
                       "proposalUnderstanding": {"aspect": "visual", "goals": [source], "editScope": [], "focus": [],
                                                "preserve": [], "sufficient": False, "nextQuestionDimension": "edit_scope"}}
         reply = LLMExecutionResult("Would you like to focus on water or interior walls?", 1, "r", guidance={"proposalOffer": None, "uiCues": []})
-        with patch.object(backend, "classify_turn_understanding", return_value=understood), \
-                patch.object(backend, "generate_chat_reply", side_effect=lambda *a, **kw: with_options(reply, kw["stage_context"])) as generate:
+        generate = RecordedCall(side_effect=lambda *a, **kw: with_options(reply, kw['stage_context']))
+        with self.using_dependencies(
+            llm_handlers={"classify_turn_understanding": understood, "generate_chat_reply": generate},
+        ):
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": latest, "baseVersionId": version_id, "idempotencyKey": "referential-proposal"})
         self.assertEqual(response.status_code, 200, response.text)
@@ -413,10 +441,10 @@ class CoCreationSessionTests(unittest.TestCase):
         version_id = self.read_session()["currentVersionId"]
         base = list(SAMPLE_ROWS)
         base[2] = "#.......@@.#"
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute("UPDATE level_versions SET rows_json = ?, validation_json = ?, entity_bindings_json = ? WHERE id = ?",
-                (repository.dump_json(base), repository.dump_json(backend.validate_and_solve(base).as_dict()),
-                 repository.dump_json(backend.build_entity_bindings(base)), version_id))
+                (repository.dump_json(base), repository.dump_json(config_models.validate_and_solve(base).as_dict()),
+                 repository.dump_json(session_persistence_helpers.build_entity_bindings(base)), version_id))
         initial = "我觉得这样不好看，让水面分散一些，帮我改一下"
         reason = "你只是增加了水域，原来的水域也得减少一些"
         replanning = False
@@ -453,7 +481,7 @@ class CoCreationSessionTests(unittest.TestCase):
                         {"row": 2, "column": 3, "from": ".", "to": "@"}]
                 return complete({"candidates": [{"strategyIndex": 1, "operations": operations}]})
             raise AssertionError("Unexpected live model task: " + task)
-        real_generate = backend.generate_chat_reply
+        real_generate = llm_client.generate_chat_reply
         def generate(conversation, rows, request_id, **kwargs):
             if kwargs["stage_context"].get("deterministicExactExecution"):
                 return real_generate(conversation, rows, request_id, **kwargs)
@@ -464,7 +492,10 @@ class CoCreationSessionTests(unittest.TestCase):
         def send(payload):
             return self.client.post(f"/api/sessions/{self.session_id}/messages",
                 json={"baseVersionId": version_id, **payload})
-        with patch.object(llm_client, "_request_completion", side_effect=model), patch.object(backend, "generate_chat_reply", side_effect=generate):
+        with self.using_dependencies(
+            llm_handlers={"generate_chat_reply": generate},
+            llm_options={"completion_requester": RecordedAsyncCall(side_effect=model)},
+        ):
             evidence = {"statement": initial, "sourceTurnId": "latest", "evidenceSpan": initial}
             understanding = {"acts": ["revision_request"], "elements": ["water"], "evidenceSpan": initial,
                 "directionSufficient": True, "mapRelated": True,
@@ -472,7 +503,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalUnderstanding": {"aspect": "visual", "goals": [evidence],
                     "editScope": [{**evidence, "component": "water"}], "focus": [], "preserve": [],
                     "sufficient": True, "nextQuestionDimension": "none"}}
-            with patch.object(backend, "classify_turn_understanding", return_value=understanding):
+            with self.using_dependencies(llm_handlers={"classify_turn_understanding": understanding}):
                 offered = send({"content": initial, "idempotencyKey": "visual-offer", "requestProposal": True})
             self.assertEqual(offered.status_code, 200, offered.text)
             source = offered.json()["turns"][-1]
@@ -480,8 +511,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 "action": "challenge_revision", "sourceTurnId": source["turnId"]})
             self.assertEqual(challenged.status_code, 200, challenged.text)
             challenge_id = challenged.json()["turns"][-1]["guidance"]["challengeState"]["challengeId"]
-            with patch.object(backend, "classify_challenge_reason", return_value={"relation": "different",
-                    "merit": "reasonable", "comparison": "I understand that the original water tiles should also be reduced.", "attemptsUsed": 1}):
+            with self.using_dependencies(
+                llm_handlers={
+                    "classify_challenge_reason": {'relation': 'different', 'merit': 'reasonable', 'comparison': 'I understand that the original water tiles should also be reduced.', 'attemptsUsed': 1},
+                },
+            ):
                 reviewed = send({"content": reason, "idempotencyKey": "visual-reason"})
             self.assertEqual(reviewed.status_code, 200, reviewed.text)
             replanning = True
@@ -490,7 +524,7 @@ class CoCreationSessionTests(unittest.TestCase):
             replaced = send(choice)
             self.assertEqual(replaced.status_code, 200, replaced.text)
             replacement = replaced.json()["turns"][-1]
-            with repository.connect() as database:
+            with self.services.connect() as database:
                 binding = database.execute("SELECT proposal_binding_json FROM conversation_turns WHERE id = ?",
                     (replacement["turnId"],)).fetchone()
             brief = repository.load_json(binding["proposal_binding_json"])["executionBrief"]
@@ -524,7 +558,7 @@ class CoCreationSessionTests(unittest.TestCase):
         error = LLMServiceError("REQUIREMENT_INTERPRETATION_INVALID", "private provider prose", "failure-request", True, 2, 502)
         error.details = {"task": "revision_requirements", "failureStage": "review", "failureKind": "truncated_json"}
         payload = {"content": "请帮我减少原来的水域", "baseVersionId": version_id, "idempotencyKey": "diagnostic-message"}
-        with patch.object(backend, "generate_chat_reply", side_effect=error):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": error}):
             failed = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
         self.assertEqual(failed.status_code, 502, failed.text)
         session = self.read_session()
@@ -533,21 +567,20 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(diagnostic["details"]["failureKind"], "truncated_json")
         self.assertEqual(diagnostic["requestId"], "failure-request")
         self.assertNotIn("private provider prose", json.dumps(diagnostic))
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             repository.record_event(database, self.session_id, "message_generation_failed",
-                {"baseVersionId": "other-stage", "messageKey": payload["idempotencyKey"], "code": "WRONG"}, backend.utc_now())
+                {"baseVersionId": "other-stage", "messageKey": payload["idempotencyKey"], "code": "WRONG"}, self.services.utc_now())
         self.assertEqual(self.read_session()["lastMessageFailure"]["code"], error.code)
         reply = LLMExecutionResult("I have not found a verified replacement; the original direction remains available.",
             1, "recovered", model="mock-model", guidance={"proposalOffer": None, "uiCues": []},
             proposal_diagnostics={"verifiedFailureAnalysis": True, "proposalStatus": "revision_needed"})
-        with patch.object(backend, "generate_chat_reply", return_value=reply):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": reply}):
             retried = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
         self.assertEqual(retried.status_code, 200, retried.text)
         self.assertIsNone(retried.json()["lastMessageFailure"])
 
     def test_proposal_semantics_bind_focus_and_persist_real_turn_ids_on_http_retry(self):
         from types import SimpleNamespace
-        from unittest.mock import AsyncMock
         def item(statement, source="latest", **extra):
             return {"statement": statement, "sourceTurnId": source, "evidenceSpan": statement, **extra}
         def response(payload):
@@ -565,18 +598,21 @@ class CoCreationSessionTests(unittest.TestCase):
                 for x in ("water", "internal_walls")], "proposalUnderstanding": record}
         clarify = LLMExecutionResult("I would try repeating the boundary rhythm. Which area should carry it?", 1, "test",
             proposal_diagnostics={"clarificationQuestion": "Which area should carry it?"})
-        call = AsyncMock(return_value=response(first))
-        with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
-                patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm_client, "_request_completion", call), \
-                patch.object(backend, "generate_chat_reply", side_effect=lambda *a, **kw: with_options(clarify, kw["stage_context"])):
+        call = RecordedAsyncCall(return_value=response(first))
+        with self.using_dependencies(
+            llm_handlers={
+                "classify_turn_understanding": llm_client.classify_turn_understanding,
+                "generate_chat_reply": lambda *a, **kw: with_options(clarify, kw['stage_context']),
+            },
+            llm_options={"completion_requester": call},
+        ):
             saved = self.client.post(f"/api/sessions/{self.session_id}/messages", json={"content": initial,
                 "baseVersionId": version_id, "idempotencyKey": "semantic-start", "requestProposal": True})
         self.assertEqual(saved.status_code, 200, saved.text)
         user_id = next(x["turnId"] for x in saved.json()["turns"] if x["role"] == "user" and x["content"] == initial)
-        with repository.connect() as database:
+        with self.services.connect() as database:
             current = repository.get_current_version(database, repository.get_session(database, self.session_id))
-            option_set = backend.build_llm_context(database, self.session_id, current)["stageContext"]["proposalDiscovery"]["optionSet"]
+            option_set = context_and_discovery.build_llm_context(database, self.session_id, current, services=self.services)["stageContext"]["proposalDiscovery"]["optionSet"]
         record = {**record, "goals": [item(initial, user_id)],
             "editScope": [item(initial, user_id, component=x) for x in ("water", "internal_walls")],
             "focus": [item(answer, entities=["T1"])], "sufficient": True, "nextQuestionDimension": "none"}
@@ -589,29 +625,37 @@ class CoCreationSessionTests(unittest.TestCase):
         corrected = {**wrong, "acts": ["intent"], "changes": [{**wrong["changes"][0], "operation": "mention"}]}
         payload = {"content": answer, "baseVersionId": version_id, "idempotencyKey": "semantic-answer", "requestProposal": True}
         rejected = {"decision": "REJECT", "issues": ["Unclear whether this is a focus or a move"], "corrections": []}
-        failed_call = AsyncMock(side_effect=[response(wrong), response(rejected)] * 2)
-        with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
-                patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm_client, "_request_completion", failed_call), \
-                patch.object(backend, "generate_chat_reply") as forbidden_generate:
+        failed_call = RecordedAsyncCall(side_effect=[response(wrong), response(rejected)] * 2)
+        forbidden_generate = RecordedCall(side_effect=AssertionError("Unexpected generate_chat_reply call"))
+        with self.using_dependencies(
+            llm_handlers={
+                "classify_turn_understanding": llm_client.classify_turn_understanding,
+                "generate_chat_reply": forbidden_generate,
+            },
+            llm_options={"completion_requester": failed_call},
+        ):
             failed = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
         self.assertEqual(failed.status_code, 502, failed.text)
         forbidden_generate.assert_not_called()
         self.assertEqual(len(self.read_session()["turns"]), len(saved.json()["turns"]))
-        with repository.connect() as database:
+        with self.services.connect() as database:
             session = database.execute("SELECT * FROM design_sessions WHERE id=?", (self.session_id,)).fetchone()
             current = repository.get_current_version(database, session)
-            pending = backend.build_llm_context(database, self.session_id, current)["stageContext"]["proposalDiscovery"]
+            pending = context_and_discovery.build_llm_context(database, self.session_id, current, services=self.services)["stageContext"]["proposalDiscovery"]
             self.assertEqual(pending["clarificationQuestionCount"], 1)
             self.assertEqual(pending["initialRequest"], initial)
         from review_fixtures import review_fixture
-        call = AsyncMock(side_effect=[response(wrong), response(review_fixture(wrong, corrected))])
+        call = RecordedAsyncCall(side_effect=[response(wrong), response(review_fixture(wrong, corrected))])
         plan_reply = LLMExecutionResult("I would frame that area with the editable water/wall boundary.", 1, "test")
-        with patch.object(backend, "classify_turn_understanding", side_effect=llm_client.classify_turn_understanding), \
-                patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm_client, "_request_completion", call), \
-                patch.object(backend, "review_question_answers", return_value={"answeredQuestionIds": [], "results": []}), \
-                patch.object(backend, "generate_chat_reply", return_value=plan_reply) as generate:
+        generate = RecordedCall(return_value=plan_reply)
+        with self.using_dependencies(
+            llm_handlers={
+                "classify_turn_understanding": llm_client.classify_turn_understanding,
+                "review_question_answers": {'answeredQuestionIds': [], 'results': []},
+                "generate_chat_reply": generate,
+            },
+            llm_options={"completion_requester": call},
+        ):
             planned = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
             retry = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
         self.assertEqual(planned.status_code, 200, planned.text)
@@ -624,7 +668,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertNotEqual(focus["sourceTurnId"], "latest")
         self.assertEqual(planned.json()["currentVersionId"], version_id)
         self.assertEqual(len(planned.json()["turns"]), len(retry.json()["turns"]))
-        with repository.connect() as database:
+        with self.services.connect() as database:
             audit = database.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='proposal_understanding_reviewed'", (self.session_id,)).fetchone()
             self.assertTrue(json.loads(audit["payload_json"])["corrected"])
 
@@ -651,9 +695,13 @@ class CoCreationSessionTests(unittest.TestCase):
                 understanding["changes"] = [{"component": "outer_shell", "property": "shape",
                     "operation": "change", "evidenceSpan": content}]
                 understanding["criticalReview"] = {"verified": True, "reason": "protected_change"}
-            with patch.object(
-                backend, "classify_turn_understanding", return_value=understanding,
-            ), patch.object(backend, "generate_chat_reply", return_value=reply) as generate:
+            generate = RecordedCall(return_value=reply)
+            with self.using_dependencies(
+                llm_handlers={
+                    "classify_turn_understanding": understanding,
+                    "generate_chat_reply": generate,
+                },
+            ):
                 response = self.client.post(
                     f"/api/sessions/{self.session_id}/messages",
                     json={"content": content, "baseVersionId": version_id,
@@ -713,47 +761,48 @@ class CoCreationSessionTests(unittest.TestCase):
             "scopeType": "stage", "scopeText": "stage", "evidenceSpan": "more water",
             "semanticSource": "kimi_reviewed",
         }]
-        self.assertIsNotNone(backend._deterministic_intent_conflict(increase, decrease))
+        self.assertIsNotNone(context_and_discovery._deterministic_intent_conflict(increase, decrease))
         legacy = [dict(decrease[0], semanticSource="legacy_unverified")]
-        self.assertIsNone(backend._deterministic_intent_conflict(increase, legacy))
+        self.assertIsNone(context_and_discovery._deterministic_intent_conflict(increase, legacy))
         visual = [dict(increase[0], aspect="visual")]
         gameplay = [dict(decrease[0], aspect="gameplay")]
-        self.assertIsNone(backend._deterministic_intent_conflict(visual, gameplay))
+        self.assertIsNone(context_and_discovery._deterministic_intent_conflict(visual, gameplay))
         right = [dict(increase[0], scope="右侧", scopeType="region", scopeText="右侧")]
-        self.assertIsNone(backend._deterministic_intent_conflict(right, decrease))
+        self.assertIsNone(context_and_discovery._deterministic_intent_conflict(right, decrease))
 
     def test_screenshot_topic_persists_beyond_recent_context_and_retry(self):
         version_id = self.read_session()["currentVersionId"]
         request_texts = ["给我一个方案想想怎么让玩家花费更多时间", "增加箱子之间的切换频率来制造碎片化思考", "策略性必须", "打断B1的连续推动"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             session = repository.get_session(database, self.session_id)
             topic_id = None
             for index, content in enumerate(request_texts):
-                turn_id = backend.insert_turn(database, session, "user", content, version_id, f"shot-u{index}", None)
+                turn_id = self.services.insert_turn(database, session, "user", content, version_id, f"shot-u{index}", None)
                 if topic_id is None:
                     topic_id = turn_id
-                    backend.record_event(database, self.session_id, "proposal_request_requested", {"messageKey": "shot-u0", "turnId": topic_id, "baseVersionId": version_id}, backend.utc_now())
-                backend.record_event(database, self.session_id, "turn_understanding", {"messageKey": f"shot-u{index}", "result": {
+                    config_models.record_event(database, self.session_id, "proposal_request_requested", {"messageKey": "shot-u0", "turnId": topic_id, "baseVersionId": version_id}, self.services.utc_now())
+                config_models.record_event(database, self.session_id, "turn_understanding", {"messageKey": f"shot-u{index}", "result": {
                     "acts": ["revision_request"], "elements": ["boxes"] if index in {1, 3} else ["unknown"],
-                    "evidenceSpan": content, "directionSufficient": False, "mapRelated": True}}, backend.utc_now())
+                    "evidenceSpan": content, "directionSufficient": False, "mapRelated": True}}, self.services.utc_now())
                 if index < 3:
                     question = f"Preference {index + 1}?"
                     execution = LLMExecutionResult(question, 0, f"shot-a{index}", guidance={"proposalDiscovery": {
                         "topicId": topic_id, "status": "clarifying", "clarificationQuestionCount": [1, 1, 2][index]}, "uiCues": []})
-                    backend.insert_turn(database, session, "assistant", question, version_id, f"shot-a{index}", execution)
+                    self.services.insert_turn(database, session, "assistant", question, version_id, f"shot-a{index}", execution)
             for index in range(30):
                 execution = LLMExecutionResult("A saved design observation.", 0, f"later{index}", guidance={"uiCues": []})
-                backend.insert_turn(database, session, "assistant", execution.assistant_message, version_id, f"later{index}", execution)
-        with repository.connect() as database:
-            current = backend.get_current_version(database, repository.get_session(database, self.session_id))
-            context = backend.build_llm_context(database, self.session_id, current)
+                self.services.insert_turn(database, session, "assistant", execution.assistant_message, version_id, f"later{index}", execution)
+        with self.services.connect() as database:
+            current = routes_sessions.get_current_version(database, repository.get_session(database, self.session_id))
+            context = context_and_discovery.build_llm_context(database, self.session_id, current, services=self.services)
         discovery = context["stageContext"]["proposalDiscovery"]
         self.assertEqual(discovery["topicId"], topic_id)
         self.assertEqual(discovery["clarificationQuestionCount"], 3)
         self.assertEqual(discovery["userTurns"][0]["content"], request_texts[0])
         failure = LLMServiceError("PROPOSAL_SEARCH_EXHAUSTED", "No candidate", "shot-last", False, 2, 422)
         payload = {"content": "早期吧", "baseVersionId": version_id, "idempotencyKey": "shot-last"}
-        with patch.object(backend, "generate_chat_reply", side_effect=failure) as generate:
+        generate = RecordedCall(side_effect=failure)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": generate}):
             first = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
             second = self.client.post(f"/api/sessions/{self.session_id}/messages", json=payload)
         self.assertEqual(first.status_code, 200, first.text)
@@ -761,58 +810,21 @@ class CoCreationSessionTests(unittest.TestCase):
         generate.assert_called_once()
         self.assertIn(generate.call_args.kwargs["stage_context"]["revisionRouting"], {"proposal", "proposal_conservative"})
         self.assertEqual(first.json()["currentVersionId"], version_id)
-        self.assertEqual(backend._visible_proposal_questions(first.json()["turns"][-1]["content"]), [])
-
-    @classmethod
-    def setUpClass(cls):
-        cls.temp_directory = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        repository.DATABASE_PATH = Path(cls.temp_directory.name) / "test.sqlite3"
-        repository.initialize_database()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temp_directory.cleanup()
+        self.assertEqual(context_and_discovery._visible_proposal_questions(first.json()["turns"][-1]["content"]), [])
 
     def setUp(self):
-        # These fixtures exercise immutable legacy-topic behavior. V2 has its own HTTP/provider tests.
-        legacy_discovery = patch("binary_routes.should_start", return_value=False)
-        legacy_discovery.start()
-        self.addCleanup(legacy_discovery.stop)
-        understanding_patch = patch.object(
-            backend, "classify_turn_understanding",
-            side_effect=self._fake_turn_understanding,
+        # These fixtures exercise legacy discovery. Policy 2 has separate HTTP tests.
+        self.open_workspace(
+            settings_overrides={"binary_discovery_enabled": False},
+            llm_handlers={"classify_turn_understanding": self._fake_turn_understanding},
         )
-        understanding_patch.start()
-        self.addCleanup(understanding_patch.stop)
-        with repository.connect(immediate=True) as database:
-            for table in (
-                "challenge_review_requests",
-                "challenge_reason_reviews",
-                "revision_challenges",
-                "audit_events",
-                "designer_intentions",
-                "play_attempts",
-                "designer_decisions",
-                "change_proposals",
-                "llm_assessments",
-                "turn_translations",
-                "conversation_turns",
-                "level_versions",
-                "design_sessions",
-            ):
-                database.execute(f"DELETE FROM {table}")
-
-        self.client = TestClient(backend.app, base_url="https://testserver")
         self.session_id, self.integration_token = self.create_and_open_session()
-
-    def tearDown(self):
-        self.client.close()
 
     def test_newer_user_evidence_keeps_body_but_does_not_commit_old_optional_updates(self):
         def reply(*args, **kwargs):
-            with repository.connect(immediate=True) as database:
+            with self.services.connect(immediate=True) as database:
                 session = repository.get_session(database, self.session_id)
-                backend.insert_turn(database, session, "user", "Keep the current water unchanged.",
+                self.services.insert_turn(database, session, "user", "Keep the current water unchanged.",
                                     session["current_version_id"], "later-user-evidence", None)
             return LLMExecutionResult(assistant_message="I can discuss the visual balance with you.",
                 model="kimi-k2.6", request_id="bound-request", attempts_used=1,
@@ -820,7 +832,7 @@ class CoCreationSessionTests(unittest.TestCase):
                           "proposalOffer": None, "followUpQuestion": "Which area should we discuss next?", "uiCues": []})
         session = self.client.get(f"/api/sessions/{self.session_id}").json()
         version = session["currentVersionId"]
-        with patch.object(backend, "generate_chat_reply", side_effect=reply):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": reply}):
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": "Discuss the map", "baseVersionId": version, "idempotencyKey": "bound-original"})
         self.assertEqual(response.status_code, 200, response.text)
@@ -829,7 +841,8 @@ class CoCreationSessionTests(unittest.TestCase):
         original_reply = next(turn for turn in delivered["turns"] if turn["role"] == "assistant" and turn["requestId"] == "bound-original")
         self.assertEqual(original_reply["content"], "I can discuss the visual balance with you.")
         self.assertIsNone(original_reply["guidance"].get("followUpQuestion"))
-        with patch.object(backend, "generate_chat_reply") as repeated:
+        repeated = RecordedCall(side_effect=AssertionError("Unexpected generate_chat_reply call"))
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": repeated}):
             retry = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": "Discuss the map", "baseVersionId": version, "idempotencyKey": "bound-original"})
         self.assertEqual(retry.status_code, 200, retry.text)
@@ -838,17 +851,17 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_new_http_receipt_before_turn_keeps_canonical_state(self):
         def reply(*args, **kwargs):
-            with repository.connect(immediate=True) as database:
+            with self.services.connect(immediate=True) as database:
                 session = repository.get_session(database, self.session_id)
                 repository.record_event(database, self.session_id, "interaction_message_guard", {
                     "guardId": "later-http-receipt", "versionId": session["current_version_id"],
-                    "messageKey": "incoming-message", "status": "started"}, backend.utc_now())
+                    "messageKey": "incoming-message", "status": "started"}, self.services.utc_now())
             return LLMExecutionResult(assistant_message="I would compare the water and the walking space.",
                 model="kimi-k2.6", request_id="receipt-request", attempts_used=1,
                 guidance={"move": "offer_perspective", "intentHypothesis": None, "intentConfidence": None,
                           "proposalOffer": None, "followUpQuestion": "Which area matters?", "uiCues": []})
         version = self.client.get(f"/api/sessions/{self.session_id}").json()["currentVersionId"]
-        with patch.object(backend, "generate_chat_reply", side_effect=reply):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": reply}):
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": "Discuss the map", "baseVersionId": version, "idempotencyKey": "receipt-original"})
         self.assertEqual(response.status_code, 200, response.text)
@@ -920,7 +933,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": f"{key}-opening"[:64]},
@@ -984,13 +997,8 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             },
         )
-        with (
-            patch.object(backend, "generate_chat_reply", return_value=execution),
-            patch.object(
-                backend,
-                "review_intent_feedback",
-                return_value=intent_review,
-            ),
+        with self.using_dependencies(
+            llm_handlers={"generate_chat_reply": execution, "review_intent_feedback": intent_review},
         ):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -1011,7 +1019,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "intent-reject-card",
         )
         state = turn["guidance"]["intentState"]
-        with patch.object(backend, "review_intent_feedback") as mocked:
+        mocked = RecordedCall(side_effect=AssertionError("Unexpected review_intent_feedback call"))
+        with self.using_dependencies(llm_handlers={"review_intent_feedback": mocked}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/intent-hypotheses/{state['hypothesisId']}/feedback",
                 json={
@@ -1175,7 +1184,7 @@ class CoCreationSessionTests(unittest.TestCase):
             [item["evidenceText"] for item in second_state["conflictChoice"]["options"]],
             ["我觉得水域太少了", "我觉得水域太多了"],
         )
-        with repository.connect() as database:
+        with self.services.connect() as database:
             event = database.execute(
                 "SELECT payload_json FROM audit_events WHERE session_id = ? AND event_type = 'intent_conflict_presented' ORDER BY id DESC LIMIT 1",
                 (self.session_id,),
@@ -1260,7 +1269,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "supersedesHypothesisIds": [],
             "conflictingHypothesisIds": [],
         }
-        with patch.object(backend, "review_intent_feedback", return_value=compatible):
+        with self.using_dependencies(llm_handlers={"review_intent_feedback": compatible}):
             second_confirm = self.client.post(
                 f"/api/sessions/{self.session_id}/intent-hypotheses/{second_state['hypothesisId']}/feedback",
                 json={
@@ -1351,7 +1360,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "explanation": None,
             "supersedesHypothesisIds": [],
         }
-        with patch.object(backend, "review_intent_feedback", return_value=compatible):
+        with self.using_dependencies(llm_handlers={"review_intent_feedback": compatible}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/intent-hypotheses/{child_state['hypothesisId']}/feedback",
                 json={
@@ -1395,7 +1404,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -1410,13 +1419,13 @@ class CoCreationSessionTests(unittest.TestCase):
     def seed_answered_proposal_topic(self, initial_request, answer, *, key):
         """Create the mandatory first question/answer without consuming an LLM mock."""
         version_id = self.read_session()["currentVersionId"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             session = repository.get_session(database, self.session_id)
-            topic_id = backend.insert_turn(
+            topic_id = self.services.insert_turn(
                 database, session, "user", initial_request, version_id,
                 f"{key}-request", None,
             )
-            backend.record_event(
+            config_models.record_event(
                 database,
                 self.session_id,
                 "proposal_request_requested",
@@ -1425,7 +1434,7 @@ class CoCreationSessionTests(unittest.TestCase):
                     "turnId": topic_id,
                     "baseVersionId": version_id,
                 },
-                backend.utc_now(),
+                self.services.utc_now(),
             )
             question = "What should this change preserve in the play experience?"
             question_execution = LLMExecutionResult(
@@ -1449,11 +1458,11 @@ class CoCreationSessionTests(unittest.TestCase):
                     },
                 },
             )
-            backend.insert_turn(
+            self.services.insert_turn(
                 database, session, "assistant", question, version_id,
                 f"{key}-question", question_execution,
             )
-            backend.insert_turn(
+            self.services.insert_turn(
                 database, session, "user", answer, version_id,
                 f"{key}-answer", None,
             )
@@ -1467,7 +1476,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
         second = self.client.post(
             f"/api/sessions/{self.session_id}/browser-access",
-            json={"bootstrapToken": backend.derive_token("bootstrap", self.session_id)},
+            json={"bootstrapToken": self.services.derive_token("bootstrap", self.session_id)},
         )
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json()["code"], "BOOTSTRAP_TOKEN_USED")
@@ -1503,7 +1512,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -1532,7 +1541,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertIn("boxes", presentation["preserved"])
 
-        with repository.connect() as database:
+        with self.services.connect() as database:
             stored = database.execute(
                 "SELECT proposal_binding_json FROM conversation_turns WHERE id = ?",
                 (turn["turnId"],),
@@ -1545,14 +1554,15 @@ class CoCreationSessionTests(unittest.TestCase):
             [{"row": 2, "column": 2, "from": ".", "to": "#"}],
         )
 
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             changed = dict(binding)
             changed["mapFingerprint"] = "changed-map"
             database.execute(
                 "UPDATE conversation_turns SET proposal_binding_json = ? WHERE id = ?",
                 (repository.dump_json(changed), turn["turnId"]),
             )
-        with patch.object(backend, "generate_chat_reply") as generate_reply:
+        generate_reply = RecordedCall(side_effect=AssertionError("Unexpected generate_chat_reply call"))
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": generate_reply}):
             stale = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -1591,17 +1601,17 @@ class CoCreationSessionTests(unittest.TestCase):
             source_turn["guidance"]["proposalOffer"]["summary"],
             "Add a wall at (2,2)",
         )
-        with repository.connect() as database:
+        with self.services.connect() as database:
             stored = database.execute(
                 "SELECT guidance_json FROM conversation_turns WHERE id = ?",
                 (source_turn["turnId"],),
             ).fetchone()
         self.assertIn("Add a wall\\nat", stored["guidance_json"])
 
-        with patch.object(
-            llm_client,
-            "_create_async_client",
-            side_effect=AssertionError("frozen execution must not call Kimi"),
+        with self.using_dependencies(
+            llm_options={
+                "client_factory": RecordedCall(side_effect=AssertionError('frozen execution must not call Kimi')),
+            },
         ):
             executed = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -1629,10 +1639,10 @@ class CoCreationSessionTests(unittest.TestCase):
             message_key="exact-player-offer-001",
         )
 
-        with patch.object(
-            llm_client,
-            "_create_async_client",
-            side_effect=AssertionError("frozen execution must not call Kimi"),
+        with self.using_dependencies(
+            llm_options={
+                "client_factory": RecordedCall(side_effect=AssertionError('frozen execution must not call Kimi')),
+            },
         ):
             executed = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -1684,7 +1694,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -1698,7 +1708,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
         changed_rows = list(SAMPLE_ROWS)
         changed_rows[1] = "##.........#"
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             binding_row = database.execute(
                 "SELECT proposal_binding_json FROM conversation_turns WHERE id = ?",
                 (source_turn_id,),
@@ -1714,7 +1724,8 @@ class CoCreationSessionTests(unittest.TestCase):
                 (repository.dump_json(binding), source_turn_id),
             )
 
-        with patch.object(backend, "generate_chat_reply") as generate_reply:
+        generate_reply = RecordedCall(side_effect=AssertionError("Unexpected generate_chat_reply call"))
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": generate_reply}):
             satisfied = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -1731,7 +1742,7 @@ class CoCreationSessionTests(unittest.TestCase):
         generate_reply.assert_not_called()
 
     def test_formal_session_records_blueprint_to_cocreation_handoff(self):
-        with repository.connect() as database:
+        with self.services.connect() as database:
             event = database.execute(
                 """
                 SELECT payload_json FROM audit_events
@@ -1755,7 +1766,8 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(payload["evidence"][0]["type"], "deterministic_solver")
 
     def test_demo_session_has_no_deadline_and_skips_online_sync(self):
-        with patch.object(backend, "synchronize_version_with_online_match") as sync:
+        sync = RecordedCall()
+        with self.using_dependencies(online_handlers={"version": sync}):
             demo_session_id = self.create_and_open_demo_session("demo_no_deadline_001")
             preview = self.client.get(f"/api/sessions/{demo_session_id}").json()
             self.assertEqual(preview["versions"], [])
@@ -1782,7 +1794,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(len(session["versions"]), 1)
         self.assertEqual(session["versions"][0]["source"], "initial")
 
-        with repository.connect() as database:
+        with self.services.connect() as database:
             events = [
                 row
                 for row in database.execute(
@@ -1801,7 +1813,8 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertIn("waterAreas", audit_payload["generationSummary"])
 
     def test_formal_draft_preview_promotes_only_on_entry_and_starts_deadline_then(self):
-        with patch.object(backend, "synchronize_version_with_online_match") as sync:
+        sync = RecordedCall()
+        with self.using_dependencies(online_handlers={"version": sync}):
             created = self.client.post(
                 "/api/sessions",
                 json={
@@ -2025,7 +2038,7 @@ class CoCreationSessionTests(unittest.TestCase):
             f"/api/sessions/{created['sessionId']}/draft-regenerations",
             json={"idempotencyKey": "pending_lease_request_001"},
         )
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute(
                 "UPDATE design_sessions SET draft_regeneration_requested_at = ? WHERE id = ?",
                 ("2020-01-01T00:00:00Z", created["sessionId"]),
@@ -2061,14 +2074,14 @@ class CoCreationSessionTests(unittest.TestCase):
             f"/api/integrations/sessions/{created['sessionId']}/draft-regenerations/{request_id}/claim",
             headers=headers,
         )
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute(
                 "UPDATE design_sessions SET draft_regeneration_updated_at = ? WHERE id = ?",
                 ("2020-01-01T00:00:00Z", created["sessionId"]),
             )
 
-        self.assertEqual(backend.sweep_expired_draft_regenerations(), 1)
-        with repository.connect() as database:
+        self.assertEqual(session_persistence_helpers.sweep_expired_draft_regenerations(services=self.services), 1)
+        with self.services.connect() as database:
             session = repository.get_session(database, created["sessionId"])
             self.assertEqual(session["draft_regeneration_status"], "timed_out")
             self.assertEqual(session["draft_regeneration_failure_code"], "generation_timed_out")
@@ -2079,10 +2092,10 @@ class CoCreationSessionTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(events["total"], 1)
 
-        self.assertEqual(backend.sweep_expired_draft_regenerations(), 0)
+        self.assertEqual(session_persistence_helpers.sweep_expired_draft_regenerations(services=self.services), 0)
 
     def test_claimed_regeneration_gets_a_fresh_execution_lease(self):
-        self.assertEqual(backend.DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS, 120)
+        self.assertEqual(config_models.DRAFT_REGENERATION_CLAIMED_TIMEOUT_SECONDS, 120)
         created = self.client.post(
             "/api/sessions",
             json={
@@ -2102,7 +2115,7 @@ class CoCreationSessionTests(unittest.TestCase):
             json={"idempotencyKey": "claimed_lease_request_001"},
         ).json()
         request_id = requested["draftPreview"]["regenerationRequestId"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute(
                 "UPDATE design_sessions SET draft_regeneration_requested_at = ? WHERE id = ?",
                 ("2020-01-01T00:00:00Z", created["sessionId"]),
@@ -2127,7 +2140,7 @@ class CoCreationSessionTests(unittest.TestCase):
         active = self.client.get(f"/api/sessions/{created['sessionId']}").json()
         self.assertEqual(active["draftPreview"]["regenerationStatus"], "claimed")
 
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute(
                 "UPDATE design_sessions SET draft_regeneration_updated_at = ? WHERE id = ?",
                 ("2020-01-01T00:00:00Z", created["sessionId"]),
@@ -2154,7 +2167,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_new_demo_session_removes_only_previous_demo_data(self):
         first_demo_id = self.create_and_open_demo_session("demo_cleanup_001")
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             repository.record_event(
                 database,
                 first_demo_id,
@@ -2166,7 +2179,7 @@ class CoCreationSessionTests(unittest.TestCase):
         second_demo_id = self.create_and_open_demo_session("demo_cleanup_002")
         self.assertNotEqual(first_demo_id, second_demo_id)
 
-        with repository.connect() as database:
+        with self.services.connect() as database:
             old_session = database.execute(
                 "SELECT id FROM design_sessions WHERE id = ?",
                 (first_demo_id,),
@@ -2191,16 +2204,15 @@ class CoCreationSessionTests(unittest.TestCase):
     def test_demo_generation_failure_keeps_previous_demo_session(self):
         first_demo_id = self.create_and_open_demo_session("demo_failure_001")
 
-        with patch.object(backend, "generate_demo_level", side_effect=RuntimeError("generation failed")):
-            with self.assertRaises(RuntimeError):
-                backend.create_demo_session(
-                    backend.DemoSessionRequest(
-                        language="en",
-                        idempotencyKey="demo_failure_002",
-                    )
-                )
+        with self.using_dependencies(
+            demo_level_generator=RecordedCall(side_effect=RuntimeError('generation failed')),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "generation failed"):
+                self.client.post("/api/demo-sessions", json={
+                    "language": "en", "idempotencyKey": "demo_failure_002",
+                })
 
-        with repository.connect() as database:
+        with self.services.connect() as database:
             retained = database.execute(
                 "SELECT id FROM design_sessions WHERE id = ? AND demo_mode = 1",
                 (first_demo_id,),
@@ -2244,11 +2256,8 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(
-            backend,
-            "generate_stage_assessment",
-            return_value=execution,
-        ) as mocked:
+        mocked = RecordedCall(return_value=execution)
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": mocked}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "opening_001"},
@@ -2280,11 +2289,7 @@ class CoCreationSessionTests(unittest.TestCase):
             502,
         )
 
-        with patch.object(
-            backend,
-            "generate_stage_assessment",
-            side_effect=failure,
-        ):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": failure}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "failed-opening-key"},
@@ -2292,7 +2297,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 502, response.text)
         self.assertEqual(response.json()["code"], "MODEL_RESPONSE_INVALID")
-        with repository.connect() as database:
+        with self.services.connect() as database:
             assessment_count = database.execute(
                 "SELECT COUNT(*) FROM llm_assessments WHERE version_id = ?",
                 (version_id,),
@@ -2352,13 +2357,13 @@ class CoCreationSessionTests(unittest.TestCase):
                 "_intentCandidateReview": {"classification": "candidate", "claims": [claim], "cardTextValid": True, "bodyValid": True, "relation": "none", "conflictingHypothesisIds": [], "explanation": None, "issues": [], "reviewedActiveClaims": [], "reviewVersion": "test-v1"},
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "intent-opening-key"},
             )
         self.assertEqual(assessed.status_code, 200, assessed.text)
-        with patch.object(backend, "generate_chat_reply", return_value=reply):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": reply}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -2369,7 +2374,7 @@ class CoCreationSessionTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn("_intentHypothesisId", response.text)
-        with repository.connect() as database:
+        with self.services.connect() as database:
             context = repository.load_design_context(database, self.session_id, version_id)
             hypotheses = context["intentHypotheses"]
             evidence = database.execute(
@@ -2405,7 +2410,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "target-synonym-opening"},
@@ -2442,7 +2447,7 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(backend, "generate_chat_reply", return_value=reply):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": reply}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -2471,7 +2476,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         child_id = response.json()["currentVersionId"]
-        with repository.connect() as database:
+        with self.services.connect() as database:
             context = repository.load_design_context(database, self.session_id, child_id)
             row = database.execute(
                 """
@@ -2496,7 +2501,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "resolution": None,
             "displayCard": True,
         }
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             context = repository.load_design_context(
                 database, self.session_id, version_id
             )
@@ -2515,7 +2520,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         child_id = response.json()["currentVersionId"]
-        with repository.connect() as database:
+        with self.services.connect() as database:
             parent_context = repository.load_design_context(
                 database, self.session_id, version_id
             )
@@ -2568,17 +2573,10 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(
-            backend,
-            "synchronize_cocreation_event_with_online_match",
-        ) as sync, patch.object(
-            backend,
-            "generate_stage_assessment",
-            return_value=opening,
-        ), patch.object(
-            backend,
-            "generate_chat_reply",
-            return_value=reply,
+        sync = RecordedCall()
+        with self.using_dependencies(
+            llm_handlers={"generate_stage_assessment": opening, "generate_chat_reply": reply},
+            online_handlers={"event": sync},
         ):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
@@ -2623,29 +2621,15 @@ class CoCreationSessionTests(unittest.TestCase):
         )
 
     def test_legacy_database_receives_nullable_guidance_column(self):
-        original_path = repository.DATABASE_PATH
+        from cocreation.persistence.database import SQLiteRepository
 
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             legacy_path = Path(directory) / "legacy.sqlite3"
-            database = sqlite3.connect(legacy_path)
-            database.executescript(
-                repository.SCHEMA.replace("    guidance_json TEXT,\n", "", 1)
-            )
+            with sqlite3.connect(legacy_path) as database:
+                database.executescript(repository.SCHEMA.replace("    guidance_json TEXT,\n", "", 1))
             database.close()
-
-            try:
-                repository.DATABASE_PATH = legacy_path
-                repository.initialize_database()
-                database = sqlite3.connect(legacy_path)
-                columns = {
-                    row[1]
-                    for row in database.execute(
-                        "PRAGMA table_info(conversation_turns)"
-                    ).fetchall()
-                }
-                database.close()
-            finally:
-                repository.DATABASE_PATH = original_path
+            with SQLiteRepository(legacy_path).connect() as database:
+                columns = {row[1] for row in database.execute("PRAGMA table_info(conversation_turns)")}
 
         self.assertIn("guidance_json", columns)
 
@@ -2774,11 +2758,8 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(
-            backend,
-            "generate_stage_assessment",
-            return_value=execution,
-        ) as mocked:
+        mocked = RecordedCall(return_value=execution)
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": mocked}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{stage_two}/assessments",
                 json={"idempotencyKey": "manual_assessment_001"},
@@ -2842,7 +2823,8 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(backend, "generate_chat_reply", return_value=execution) as mocked:
+        mocked = RecordedCall(return_value=execution)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": mocked}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -2899,11 +2881,8 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            side_effect=[first_execution, second_execution],
-        ) as mocked:
+        mocked = RecordedCall(side_effect=[first_execution, second_execution])
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": mocked}):
             first = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -3011,11 +2990,8 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            side_effect=[first_execution, second_execution],
-        ) as mocked:
+        mocked = RecordedCall(side_effect=[first_execution, second_execution])
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": mocked}):
             for content, request_key in (
                 ("The water feels decorative.", "guidance_context_1"),
                 ("Make it part of the route.", "guidance_context_2"),
@@ -3056,7 +3032,7 @@ class CoCreationSessionTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            backend._latest_substantive_design_direction(turns),
+            context_and_discovery._latest_substantive_design_direction(turns),
             "我希望水域参与箱子的推进路线。",
         )
 
@@ -3096,11 +3072,8 @@ class CoCreationSessionTests(unittest.TestCase):
                 raise value
             return with_options(value, kwargs["stage_context"])
 
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            side_effect=reply,
-        ) as mocked:
+        mocked = RecordedCall(side_effect=reply)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": mocked}):
             failed = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json=request_payload,
@@ -3163,11 +3136,8 @@ class CoCreationSessionTests(unittest.TestCase):
         def reply(*args, **kwargs):
             return with_options(next(replies), kwargs["stage_context"])
 
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            side_effect=reply,
-        ) as mocked:
+        mocked = RecordedCall(side_effect=reply)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": mocked}):
             started = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -3219,7 +3189,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", side_effect=lambda *a, **kw: with_options(execution, kw["stage_context"])):
+        with self.using_dependencies(
+            llm_handlers={
+                "generate_chat_reply": lambda *a, **kw: with_options(execution, kw['stage_context']),
+            },
+        ):
             started = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -3241,8 +3215,11 @@ class CoCreationSessionTests(unittest.TestCase):
             "answeredQuestionIds": [first_question_id],
             "results": [{"questionId": first_question_id, "answered": True}],
         }
-        with patch.object(backend, "review_question_answers", return_value=answer_review), patch.object(
-            backend, "generate_chat_reply", side_effect=lambda *a, **kw: with_options(execution, kw["stage_context"])
+        with self.using_dependencies(
+            llm_handlers={
+                "review_question_answers": answer_review,
+                "generate_chat_reply": lambda *a, **kw: with_options(execution, kw['stage_context']),
+            },
         ):
             continued = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -3280,14 +3257,14 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "historical-question-opening"},
             )
         self.assertEqual(assessed.status_code, 200, assessed.text)
         question_id = "legacy-question-001"
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             version = repository.get_version(database, self.session_id, version_id)
             design_context = repository.load_json(version["design_context_json"])
             design_context["openQuestions"] = [{
@@ -3316,16 +3293,11 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with (
-            patch.object(backend, "generate_chat_reply", return_value=execution),
-            patch.object(
-                backend,
-                "review_question_answers",
-                return_value={
-                    "results": [{"questionId": question_id, "status": "answered"}],
-                    "answeredQuestionIds": [question_id],
-                },
-            ),
+        with self.using_dependencies(
+            llm_handlers={
+                "generate_chat_reply": execution,
+                "review_question_answers": {'results': [{'questionId': question_id, 'status': 'answered'}], 'answeredQuestionIds': [question_id]},
+            },
         ):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -3368,11 +3340,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "failureReasons": {"UNSOLVABLE_LEVEL": 64},
         }
 
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            side_effect=invalid,
-        ) as mocked:
+        mocked = RecordedCall(side_effect=invalid)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": mocked}):
             failed_generation = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json=request_payload,
@@ -3407,7 +3376,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(repeated.json()["proposals"], [])
         self.assertEqual(mocked.call_count, 1)
         self.assertEqual(repeated.json()["turns"], failed_generation.json()["turns"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             event_types = [
                 row[0]
                 for row in database.execute(
@@ -3439,11 +3408,7 @@ class CoCreationSessionTests(unittest.TestCase):
             3,
             504,
         )
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            side_effect=timeout,
-        ):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": timeout}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json=request_payload,
@@ -3460,7 +3425,7 @@ class CoCreationSessionTests(unittest.TestCase):
             if turn["requestId"] == request_payload["idempotencyKey"]
         ]
         self.assertEqual([turn["role"] for turn in matching], ["user"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             count = database.execute(
                 """
                 SELECT COUNT(*) FROM audit_events
@@ -3488,17 +3453,10 @@ class CoCreationSessionTests(unittest.TestCase):
             502,
         )
 
-        with (
-            patch.object(
-                backend,
-                "generate_chat_reply",
-                side_effect=empty_response,
-            ) as mocked,
-            patch.object(
-                backend,
-                "_retry_exhausted_execution",
-                side_effect=AssertionError("ordinary chat used retry-exhausted prose"),
-            ),
+        mocked = RecordedCall(side_effect=empty_response)
+        with self.using_dependencies(
+            retry_exhausted_execution_fn=RecordedCall(side_effect=AssertionError('ordinary chat used retry-exhausted prose')),
+            llm_handlers={"generate_chat_reply": mocked},
         ):
             first = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -3522,7 +3480,7 @@ class CoCreationSessionTests(unittest.TestCase):
             if turn["requestId"] == request_payload["idempotencyKey"]
         ]
         self.assertEqual([turn["role"] for turn in matching_turns], ["user"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             retry_event_count = database.execute(
                 """
                 SELECT COUNT(*) FROM audit_events
@@ -3551,7 +3509,7 @@ class CoCreationSessionTests(unittest.TestCase):
             504,
         )
 
-        execution = backend._retry_exhausted_execution("zh-CN", failure)
+        execution = proposal_and_challenge._retry_exhausted_execution("zh-CN", failure)
 
         self.assertEqual(
             execution.assistant_message,
@@ -3575,7 +3533,7 @@ class CoCreationSessionTests(unittest.TestCase):
             502,
         )
 
-        with patch.object(backend, "generate_chat_reply", side_effect=error):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": error}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json=request_payload,
@@ -3605,7 +3563,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "idempotencyKey": "conflict_message_001",
         }
 
-        with patch.object(backend, "generate_chat_reply", side_effect=timeout) as mocked:
+        mocked = RecordedCall(side_effect=timeout)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": mocked}):
             failed = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json=original,
@@ -3753,7 +3712,9 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(backend, "generate_chat_reply", side_effect=[offer_execution, execution]):
+        with self.using_dependencies(
+            llm_handlers={"generate_chat_reply": RecordedCall(side_effect=[offer_execution, execution])},
+        ):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -3800,7 +3761,7 @@ class CoCreationSessionTests(unittest.TestCase):
             [cue["type"] for cue in proposal_turn_before_acceptance["guidance"]["uiCues"]],
             ["manual_edit"],
         )
-        with repository.connect() as database:
+        with self.services.connect() as database:
             search_event = database.execute(
                 """
                 SELECT payload_json FROM audit_events
@@ -3827,7 +3788,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(repeated.status_code, 200, repeated.text)
         self.assertEqual(len(repeated.json()["proposals"]), 1)
-        with repository.connect() as database:
+        with self.services.connect() as database:
             search_event_count = database.execute(
                 """
                 SELECT COUNT(*) AS count FROM audit_events
@@ -3860,7 +3821,8 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(stage_two["openingTurnId"], proposal_turn["turnId"])
         self.assertEqual(stage_two["openingProposalId"], proposal_id)
 
-        with patch.object(backend, "generate_stage_assessment") as assessment_mock:
+        assessment_mock = RecordedCall(side_effect=AssertionError("Unexpected generate_stage_assessment call"))
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": assessment_mock}):
             opening = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{stage_two['versionId']}/assessments",
                 json={"idempotencyKey": "accepted_opening_001"},
@@ -3897,9 +3859,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": None,
             },
         )
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             session_row = repository.get_session(database, self.session_id)
-            legacy_turn_id = backend.insert_turn(
+            legacy_turn_id = self.services.insert_turn(
                 database,
                 session_row,
                 "assistant",
@@ -3922,7 +3884,7 @@ class CoCreationSessionTests(unittest.TestCase):
                     legacy_turn_id,
                     repository.dump_json(legacy_assessment.assessment),
                     "legacy-prompt",
-                    backend.utc_now(),
+                    self.services.utc_now(),
                 ),
             )
 
@@ -3939,11 +3901,8 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": None,
             },
         )
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            return_value=follow_up_execution,
-        ) as chat_mock:
+        chat_mock = RecordedCall(return_value=follow_up_execution)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": chat_mock}):
             continued = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -4015,7 +3974,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", side_effect=[offer_execution, execution]):
+        with self.using_dependencies(
+            llm_handlers={"generate_chat_reply": RecordedCall(side_effect=[offer_execution, execution])},
+        ):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -4049,7 +4010,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(rejected.status_code, 200, rejected.text)
 
-        with repository.connect() as database:
+        with self.services.connect() as database:
             chat_handoff = database.execute(
                 """
                 SELECT payload_json FROM audit_events
@@ -4078,10 +4039,10 @@ class CoCreationSessionTests(unittest.TestCase):
                 database,
                 repository.get_session(database, self.session_id),
             )
-            llm_context = backend.build_llm_context(
+            llm_context = context_and_discovery.build_llm_context(
                 database,
                 self.session_id,
-                current_version,
+                current_version, services=self.services,
             )
 
         self.assertIsNotNone(handoff)
@@ -4152,10 +4113,10 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            side_effect=[offer_execution, unchanged_execution],
+        with self.using_dependencies(
+            llm_handlers={
+                "generate_chat_reply": RecordedCall(side_effect=[offer_execution, unchanged_execution]),
+            },
         ):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -4230,7 +4191,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", side_effect=[offer_execution, execution]):
+        with self.using_dependencies(
+            llm_handlers={"generate_chat_reply": RecordedCall(side_effect=[offer_execution, execution])},
+        ):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -4254,7 +4217,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(proposed.status_code, 200, proposed.text)
         proposal_id = proposed.json()["proposals"][0]["proposalId"]
 
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute(
                 """
                 UPDATE change_proposals
@@ -4332,7 +4295,8 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 200, saved.text)
         stage_two = saved.json()["currentVersionId"]
 
-        with patch.object(backend, "synchronize_cocreation_event_with_online_match") as sync:
+        sync = RecordedCall()
+        with self.using_dependencies(online_handlers={"version_event": sync}):
             finalized = self.client.post(
                 f"/api/sessions/{self.session_id}/finalize",
                 json={
@@ -4377,7 +4341,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(saved.status_code, 200, saved.text)
         stage_two = saved.json()["currentVersionId"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute(
                 """
                 INSERT INTO change_proposals(
@@ -4393,10 +4357,10 @@ class CoCreationSessionTests(unittest.TestCase):
                     repository.dump_json(EDITED_ROWS),
                     "Pending later-Stage proposal",
                     "[]",
-                    repository.dump_json(backend.validate_and_solve(EDITED_ROWS).as_dict()),
+                    repository.dump_json(config_models.validate_and_solve(EDITED_ROWS).as_dict()),
                     "historical-final-pending-turn",
                     "historical-final-pending-key",
-                    backend.utc_now(),
+                    self.services.utc_now(),
                 ),
             )
 
@@ -4410,7 +4374,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(finalized.status_code, 200, finalized.text)
         self.assertEqual(finalized.json()["finalVersionId"], stage_one)
         self.assertEqual(finalized.json()["proposals"][0]["status"], "superseded")
-        with repository.connect() as database:
+        with self.services.connect() as database:
             event = database.execute(
                 """
                 SELECT payload_json FROM audit_events
@@ -4451,7 +4415,8 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_manual_stage_and_final_are_synchronized_as_compact_flow_events(self):
         initial_version_id = self.read_session()["currentVersionId"]
-        with patch.object(backend, "synchronize_cocreation_event_with_online_match") as sync:
+        sync = RecordedCall()
+        with self.using_dependencies(online_handlers={"version_event": sync}):
             saved = self.client.post(
                 f"/api/sessions/{self.session_id}/versions",
                 json={
@@ -4488,7 +4453,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "finalized_at": "2026-08-26T10:13:23Z",
         }
         self.assertEqual(
-            backend.calculate_cocreation_duration_seconds(session),
+            online_sync_and_dashboard.calculate_cocreation_duration_seconds(session),
             803,
         )
 
@@ -4497,7 +4462,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "finalized_at": "2026-08-26T10:28:00Z",
         }
         self.assertEqual(
-            backend.calculate_cocreation_duration_seconds(timed_out),
+            online_sync_and_dashboard.calculate_cocreation_duration_seconds(timed_out),
             1200,
         )
 
@@ -4507,7 +4472,8 @@ class CoCreationSessionTests(unittest.TestCase):
             f"/api/sessions/{self.session_id}/finalize",
             json={"baseVersionId": version_id, "idempotencyKey": "message_final_001"},
         )
-        with patch.object(backend, "synchronize_final_intention_with_online_match") as sync:
+        sync = RecordedCall()
+        with self.using_dependencies(online_handlers={"intention": sync}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/intention",
                 json={
@@ -4516,8 +4482,8 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             )
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(sync.call_args.args[3], "message:" + self.session_id + ":message_send_001")
-        self.assertEqual(sync.call_args.args[4], self.session_id)
+        self.assertEqual(sync.call_args.kwargs["event_id"], "message:" + self.session_id + ":message_send_001")
+        self.assertEqual(sync.call_args.kwargs["session_id"], self.session_id)
 
     def test_saved_message_retry_replays_online_sync(self):
         version_id = self.read_session()["currentVersionId"]
@@ -4534,7 +4500,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": None,
             },
         )
-        saved_error = backend.ApiError(
+        saved_error = config_models.ApiError(
             503,
             "ONLINE_FLOW_SYNC_UNAVAILABLE",
             "Saved but not synchronized.",
@@ -4545,11 +4511,11 @@ class CoCreationSessionTests(unittest.TestCase):
             "baseVersionId": version_id,
             "idempotencyKey": "sync_retry_message_001",
         }
-        with patch.object(backend, "generate_chat_reply", return_value=reply), patch.object(
-            backend,
-            "synchronize_turn_with_online_match",
-            side_effect=[saved_error, None],
-        ) as sync:
+        sync = RecordedCall(side_effect=[saved_error, None])
+        with self.using_dependencies(
+            llm_handlers={"generate_chat_reply": reply},
+            online_handlers={"event": sync},
+        ):
             first = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json=request_body,
@@ -4570,7 +4536,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_saved_finalization_retry_replays_online_sync(self):
         version_id = self.read_session()["currentVersionId"]
-        saved_error = backend.ApiError(
+        saved_error = config_models.ApiError(
             503,
             "ONLINE_FLOW_SYNC_UNAVAILABLE",
             "Saved but not synchronized.",
@@ -4580,11 +4546,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "baseVersionId": version_id,
             "idempotencyKey": "sync_retry_final_001",
         }
-        with patch.object(
-            backend,
-            "synchronize_version_with_online_match",
-            side_effect=[saved_error, None],
-        ) as sync:
+        sync = RecordedCall(side_effect=[saved_error, None])
+        with self.using_dependencies(online_handlers={"version": sync}):
             first = self.client.post(
                 f"/api/sessions/{self.session_id}/finalize",
                 json=request_body,
@@ -4612,7 +4575,7 @@ class CoCreationSessionTests(unittest.TestCase):
             response=response,
         )
 
-        api_error = backend._online_sync_api_error(
+        api_error = config_models._online_sync_api_error(
             error,
             rejected_code="ONLINE_FLOW_SYNC_REJECTED",
             unavailable_code="ONLINE_FLOW_SYNC_UNAVAILABLE",
@@ -4629,7 +4592,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
 
     def test_expired_deadline_locks_edits_and_finalizes_the_current_draft(self):
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute(
                 "UPDATE design_sessions SET deadline_at = ? WHERE id = ?",
                 ("2000-01-01T00:00:00Z", self.session_id),
@@ -4706,9 +4669,9 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_translation_partial_commit_retries_only_failed_turn_with_shared_deadline(self):
         version_id = self.read_session()["currentVersionId"]
-        with backend.connect(immediate=True) as database:
-            session = backend.get_session(database, self.session_id)
-            turn_ids = [backend.insert_turn(database, session, "assistant", "I would inspect the first pushing position.",
+        with self.services.connect(immediate=True) as database:
+            session = config_models.get_session(database, self.session_id)
+            turn_ids = [self.services.insert_turn(database, session, "assistant", "I would inspect the first pushing position.",
                 version_id, "partial-source-" + str(index), LLMExecutionResult(
                     "I would inspect the first pushing position.", 1, "partial-source-" + str(index),
                     model="mock-model", guidance={"move": "offer_perspective", "uiCues": []})) for index in range(2)]
@@ -4722,7 +4685,8 @@ class CoCreationSessionTests(unittest.TestCase):
                 "turnId": source["turnId"], "body": "我会先检查第一次推动需要的站位。", "followUpQuestion": None,
                 "intentHypothesis": None, "proposalOfferSummary": None, "proposalOfferRationale": None,
                 "uiCueTexts": [], "proposalSummary": None}], 1, request_id, model="mock-model", latency_ms=1)
-        with patch.object(backend, "translate_turns", side_effect=translate) as mocked:
+        mocked = RecordedCall(side_effect=translate)
+        with self.using_dependencies(llm_handlers={"translate_turns": mocked}):
             response = self.client.post(f"/api/sessions/{self.session_id}/translations/zh-CN", json={"turnIds": turn_ids})
         self.assertEqual(response.status_code, 502, response.text)
         self.assertEqual(mocked.call_count, 2)
@@ -4733,7 +4697,8 @@ class CoCreationSessionTests(unittest.TestCase):
         translated = {turn["turnId"]: turn for turn in session["turns"]}
         self.assertIn("zh-CN", translated[turn_ids[0]]["translations"])
         self.assertNotIn("zh-CN", translated[turn_ids[1]]["translations"])
-        with patch.object(backend, "translate_turns", side_effect=translate) as retry:
+        retry = RecordedCall(side_effect=translate)
+        with self.using_dependencies(llm_handlers={"translate_turns": retry}):
             self.client.post(f"/api/sessions/{self.session_id}/translations/zh-CN", json={"turnIds": turn_ids})
         self.assertEqual(retry.call_count, 1)
         self.assertEqual(retry.call_args.args[0][0]["turnId"], turn_ids[1])
@@ -4747,8 +4712,11 @@ class CoCreationSessionTests(unittest.TestCase):
         version_id = saved.json()["currentVersionId"]
         turns_before = len(saved.json()["turns"])
         request = {"idempotencyKey": "manual-review-recovery-pair"}
-        with patch.object(backend, "generate_stage_assessment", side_effect=LLMServiceError(
-            "MODEL_RESPONSE_INVALID", "The comparison could not be validated.", "r", True, 2, 502)):
+        with self.using_dependencies(
+            llm_handlers={
+                "generate_stage_assessment": LLMServiceError('MODEL_RESPONSE_INVALID', 'The comparison could not be validated.', 'r', True, 2, 502),
+            },
+        ):
             failed = self.client.post(f"/api/sessions/{self.session_id}/versions/{version_id}/assessments", json=request)
         self.assertEqual(failed.status_code, 502, failed.text)
         self.assertEqual(self.read_session()["currentVersionId"], version_id)
@@ -4760,7 +4728,8 @@ class CoCreationSessionTests(unittest.TestCase):
         execution = replace(execution, secondary_execution=LLMExecutionResult(
             "The verified edit moves the player's start. No confirmed design conflict is established.", 2,
             "recovered-pair-review", model="mock-model", guidance={"move": "offer_perspective", "uiCues": []}))
-        with patch.object(backend, "generate_stage_assessment", return_value=execution) as generate:
+        generate = RecordedCall(return_value=execution)
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": generate}):
             recovered = self.client.post(f"/api/sessions/{self.session_id}/versions/{version_id}/assessments", json=request)
             repeated = self.client.post(f"/api/sessions/{self.session_id}/versions/{version_id}/assessments", json=request)
         self.assertEqual(recovered.status_code, 200, recovered.text)
@@ -4796,7 +4765,7 @@ class CoCreationSessionTests(unittest.TestCase):
             },
         )
 
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "translation_opening_001"},
@@ -4822,7 +4791,8 @@ class CoCreationSessionTests(unittest.TestCase):
             latency_ms=25,
         )
 
-        with patch.object(backend, "translate_turns", return_value=translated) as mocked:
+        mocked = RecordedCall(return_value=translated)
+        with self.using_dependencies(llm_handlers={"translate_turns": mocked}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/translations/zh-CN",
                 json={"turnIds": [turn["turnId"]]},
@@ -4853,7 +4823,8 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(mocked.call_count, 1)
 
-        with patch.object(backend, "translate_turns") as cached_mock:
+        cached_mock = RecordedCall(side_effect=AssertionError("Unexpected translate_turns call"))
+        with self.using_dependencies(llm_handlers={"translate_turns": cached_mock}):
             cached = self.client.post(
                 f"/api/sessions/{self.session_id}/translations/zh-CN",
                 json={"turnIds": [turn["turnId"]]},
@@ -4888,7 +4859,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "coordinateLinkTexts": ["from (5,5) to (5,7)"],
         }
 
-        result = backend._translated_guidance(source, translated)
+        result = session_persistence_helpers._translated_guidance(source, translated)
 
         self.assertEqual(
             result["coordinateLinks"][0]["from"],
@@ -4916,7 +4887,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "historical-position-opening-001"},
@@ -4942,7 +4913,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 }],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -4995,7 +4966,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "proposalSummary": None,
         }
 
-        result = backend._translated_guidance(source, translated)
+        result = session_persistence_helpers._translated_guidance(source, translated)
         presentation = result["proposalOffer"]["proposalPresentation"]
         self.assertEqual(presentation["summary"], "在（2,2）增加一道墙")
         self.assertEqual(presentation["rationale"], "缩短直接开口。")
@@ -5030,7 +5001,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=offer_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": offer_execution}):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5064,7 +5035,7 @@ class CoCreationSessionTests(unittest.TestCase):
             },
             proposed_rows=WATER_EDITED_ROWS,
         )
-        with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": challenge_execution}):
             challenged = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5091,7 +5062,7 @@ class CoCreationSessionTests(unittest.TestCase):
         # The remainder of this compatibility test exercises the independent
         # alternative and execute branches. Reactivate its fixture binding;
         # production challenge flows intentionally keep the original card paused.
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             row = database.execute(
                 "SELECT proposal_binding_json FROM conversation_turns WHERE id = ?",
                 (source_turn["turnId"],),
@@ -5121,11 +5092,8 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(
-            backend,
-            "generate_chat_reply",
-            return_value=alternative_execution,
-        ) as alternative_generator:
+        alternative_generator = RecordedCall(return_value=alternative_execution)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": alternative_generator}):
             alternative = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5171,7 +5139,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execute_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execute_execution}):
             executed = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5186,7 +5154,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(len(executed.json()["proposals"]), 1)
         self.assertEqual(executed.json()["versions"][0]["versionId"], version_id)
 
-        with repository.connect() as database:
+        with self.services.connect() as database:
             event_types = [
                 row["event_type"]
                 for row in database.execute(
@@ -5237,9 +5205,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             session = repository.get_session(database, self.session_id)
-            older_turn_id = backend.insert_turn(
+            older_turn_id = self.services.insert_turn(
                 database,
                 session,
                 "assistant",
@@ -5248,7 +5216,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 older_offer.request_id,
                 older_offer,
             )
-            latest_turn_id = backend.insert_turn(
+            latest_turn_id = self.services.insert_turn(
                 database,
                 session,
                 "assistant",
@@ -5261,7 +5229,7 @@ class CoCreationSessionTests(unittest.TestCase):
         before = self.read_session()
         before_turn_count = len(before["turns"])
         before_event_count = None
-        with repository.connect() as database:
+        with self.services.connect() as database:
             before_event_count = database.execute(
                 "SELECT COUNT(*) FROM audit_events WHERE session_id = ?",
                 (self.session_id,),
@@ -5271,7 +5239,8 @@ class CoCreationSessionTests(unittest.TestCase):
             ("execute_revision", "challenge_revision", "alternative_revision"),
             start=1,
         ):
-            with patch.object(backend, "generate_chat_reply") as generate_reply:
+            generate_reply = RecordedCall(side_effect=AssertionError("Unexpected generate_chat_reply call"))
+            with self.using_dependencies(llm_handlers={"generate_chat_reply": generate_reply}):
                 rejected = self.client.post(
                     f"/api/sessions/{self.session_id}/messages",
                     json={
@@ -5288,15 +5257,15 @@ class CoCreationSessionTests(unittest.TestCase):
 
         after = self.read_session()
         self.assertEqual(len(after["turns"]), before_turn_count)
-        with repository.connect() as database:
+        with self.services.connect() as database:
             after_event_count = database.execute(
                 "SELECT COUNT(*) FROM audit_events WHERE session_id = ?",
                 (self.session_id,),
             ).fetchone()[0]
         self.assertEqual(after_event_count, before_event_count)
 
-        with repository.connect() as database:
-            source, offer = backend._source_revision_offer(
+        with self.services.connect() as database:
+            source, offer = proposal_and_challenge._source_revision_offer(
                 database,
                 self.session_id,
                 version_id,
@@ -5344,7 +5313,9 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", side_effect=[offer, ordinary]):
+        with self.using_dependencies(
+            llm_handlers={"generate_chat_reply": RecordedCall(side_effect=[offer, ordinary])},
+        ):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5363,8 +5334,8 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             )
         self.assertEqual(ordinary_reply.status_code, 200, ordinary_reply.text)
-        with repository.connect() as database:
-            source, offer = backend._source_revision_offer(
+        with self.services.connect() as database:
+            source, offer = proposal_and_challenge._source_revision_offer(
                 database,
                 self.session_id,
                 version_id,
@@ -5389,7 +5360,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             ordinary = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5439,7 +5410,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=offer_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": offer_execution}):
             offered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5464,7 +5435,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": challenge_execution}):
             challenged = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5482,9 +5453,9 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertIsNone(challenge_guidance.get("disagreement"))
         self.assertEqual(challenge_guidance["challengeState"]["status"], "awaiting_reason")
         self.assertFalse(
-            any(card["type"] == "discussion" for card in backend._displayed_cards(challenge_guidance))
+            any(card["type"] == "discussion" for card in online_sync_and_dashboard._displayed_cards(challenge_guidance))
         )
-        with repository.connect() as database:
+        with self.services.connect() as database:
             saved_hypotheses = database.execute(
                 """
                 SELECT payload_json FROM audit_events
@@ -5527,15 +5498,13 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(
-            backend,
-            "classify_challenge_reason",
-            return_value={
-                "relation": "primary", "merit": "not_yet_reasonable",
-                "comparison": "I see why the direct opening matters. I am not yet convinced it improves the first choice.",
-                "attemptsUsed": 1,
+        active_mock = RecordedCall(return_value=active_execution)
+        with self.using_dependencies(
+            llm_handlers={
+                "classify_challenge_reason": {'relation': 'primary', 'merit': 'not_yet_reasonable', 'comparison': 'I see why the direct opening matters. I am not yet convinced it improves the first choice.', 'attemptsUsed': 1},
+                "generate_chat_reply": active_mock,
             },
-        ), patch.object(backend, "generate_chat_reply", return_value=active_execution) as active_mock:
+        ):
             still_active = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5573,7 +5542,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=resolved_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": resolved_execution}):
             resolved_response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5629,7 +5598,7 @@ class CoCreationSessionTests(unittest.TestCase):
             model="mock-model",
             guidance={"move": "offer_perspective", "proposalOffer": None, "uiCues": []},
         )
-        with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": challenge_execution}):
             challenged = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5650,7 +5619,7 @@ class CoCreationSessionTests(unittest.TestCase):
             2,
             502,
         )
-        with patch.object(backend, "classify_challenge_reason", side_effect=failure):
+        with self.using_dependencies(llm_handlers={"classify_challenge_reason": failure}):
             pending = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5670,7 +5639,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertFalse(reviews[0]["retryable"])
         reason_turn_id = reviews[0]["sourceUserTurnId"]
         user_count = len([turn for turn in pending_session["turns"] if turn["role"] == "user"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             leaked_evidence = database.execute(
                 """
                 SELECT COUNT(*) AS count FROM audit_events
@@ -5680,7 +5649,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 (self.session_id, reason_turn_id),
             ).fetchone()["count"]
         self.assertEqual(leaked_evidence, 0)
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             repository.backfill_revision_challenges(database)
             persisted_status = database.execute(
                 "SELECT status FROM revision_challenges WHERE challenge_id = ?",
@@ -5688,7 +5657,7 @@ class CoCreationSessionTests(unittest.TestCase):
             ).fetchone()["status"]
         self.assertEqual(persisted_status, "review_pending")
 
-        with patch.object(backend, "classify_challenge_reason", side_effect=failure):
+        with self.using_dependencies(llm_handlers={"classify_challenge_reason": failure}):
             duplicate_submit = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5704,7 +5673,7 @@ class CoCreationSessionTests(unittest.TestCase):
             user_count,
         )
 
-        with patch.object(backend, "classify_challenge_reason", side_effect=failure):
+        with self.using_dependencies(llm_handlers={"classify_challenge_reason": failure}):
             supplemented = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5744,8 +5713,11 @@ class CoCreationSessionTests(unittest.TestCase):
             ),
             "attemptsUsed": 1,
         }
-        with patch.object(backend, "classify_challenge_reason", return_value=classification), patch.object(
-            backend, "generate_chat_reply", return_value=active_execution
+        with self.using_dependencies(
+            llm_handlers={
+                "classify_challenge_reason": classification,
+                "generate_chat_reply": active_execution,
+            },
         ):
             retried = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -5762,7 +5734,7 @@ class CoCreationSessionTests(unittest.TestCase):
             len([turn for turn in retried_session["turns"] if turn["turnId"] == reason_turn_id]),
             1,
         )
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             challenge_status_before = database.execute(
                 "SELECT status FROM revision_challenges WHERE challenge_id = ?",
                 (challenge_id,),
@@ -5822,7 +5794,7 @@ class CoCreationSessionTests(unittest.TestCase):
             contexts.append(kwargs["stage_context"])
             return with_options(execution, kwargs["stage_context"]) if kwargs["stage_context"].get("revisionRouting") == "needs_clarification" else execution
 
-        with patch.object(backend, "generate_chat_reply", side_effect=reply):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": reply}):
             ordinary = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -5863,7 +5835,7 @@ class CoCreationSessionTests(unittest.TestCase):
             if turn["requestId"] == "proposal-button-requested" and turn["role"] == "user"
         )
         self.assertTrue(requested_user["requestProposal"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             event = database.execute(
                 """
                 SELECT 1 FROM audit_events
@@ -5911,7 +5883,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "secondary": "Secondary tentative hypothesis",
             },
         }
-        initial = backend._enforce_challenge_reason_execution(
+        initial = proposal_and_challenge._enforce_challenge_reason_execution(
             execution,
             {
                 "relation": "different",
@@ -5933,9 +5905,9 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(first["phase"], "choice_pending")
         self.assertIn("My concern is visual density", first["userPosition"])
         self.assertIn("original", first["nextQuestion"])
-        self.assertEqual(len(backend._displayed_cards(initial.guidance)), 1)
+        self.assertEqual(len(online_sync_and_dashboard._displayed_cards(initial.guidance)), 1)
 
-        continued = backend._enforce_challenge_reason_execution(
+        continued = proposal_and_challenge._enforce_challenge_reason_execution(
             execution,
             {"relation": "different", "merit": "not_yet_reasonable"},
             "The clustered colors still dominate the left side.",
@@ -5945,9 +5917,9 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         middle = continued.guidance["disagreement"]
         self.assertFalse(middle["displayCard"])
-        self.assertEqual(backend._displayed_cards(continued.guidance), [])
+        self.assertEqual(online_sync_and_dashboard._displayed_cards(continued.guidance), [])
 
-        accepted = backend._enforce_challenge_reason_execution(
+        accepted = proposal_and_challenge._enforce_challenge_reason_execution(
             execution,
             {"relation": "different", "merit": "reasonable"},
             "The clustered colors still dominate the left side.",
@@ -5958,9 +5930,9 @@ class CoCreationSessionTests(unittest.TestCase):
         final = accepted.guidance["disagreement"]
         self.assertEqual(final["phase"], "choice_pending")
         self.assertFalse(final["displayCard"])
-        self.assertEqual(len(backend._displayed_cards(accepted.guidance)), 0)
+        self.assertEqual(len(online_sync_and_dashboard._displayed_cards(accepted.guidance)), 0)
 
-        immediately_accepted = backend._enforce_challenge_reason_execution(
+        immediately_accepted = proposal_and_challenge._enforce_challenge_reason_execution(
             execution,
             {"relation": "different", "merit": "reasonable"},
             "My concern is visual density.",
@@ -5975,7 +5947,7 @@ class CoCreationSessionTests(unittest.TestCase):
         )
 
     def test_challenge_analysis_drops_only_invalid_sentence(self):
-        result = backend._salvage_challenge_analysis(
+        result = proposal_and_challenge._salvage_challenge_analysis(
             "The implementation schema says to accept it. 我理解你想让首步更有判断空间。",
             SAMPLE_ROWS,
             None,
@@ -6013,18 +5985,18 @@ class CoCreationSessionTests(unittest.TestCase):
             model="mock-model",
             guidance={},
         )
-        pending = backend._enforce_challenge_choice_execution(
+        pending = proposal_and_challenge._enforce_challenge_choice_execution(
             execution, active, None, "en"
         )
         self.assertEqual(pending.guidance["disagreement"]["status"], "active")
         self.assertFalse(pending.guidance["disagreement"]["displayCard"])
-        self.assertEqual(backend._displayed_cards(pending.guidance), [])
+        self.assertEqual(online_sync_and_dashboard._displayed_cards(pending.guidance), [])
         for answer, resolution in (("yes", "ai"), ("no", "user"), ("是", "ai"), ("否", "user")):
             self.assertEqual(
-                backend._challenge_choice(answer, "en"),
+                proposal_and_challenge._challenge_choice(answer, "en"),
                 resolution,
             )
-            resolved = backend._enforce_challenge_choice_execution(
+            resolved = proposal_and_challenge._enforce_challenge_choice_execution(
                 execution, active, resolution, "en"
             )
             self.assertEqual(
@@ -6035,7 +6007,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_proposal_request_is_rejected_while_hidden_disagreement_is_active(self):
         version_id = self.read_session()["currentVersionId"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             context = repository.load_design_context(
                 database, self.session_id, version_id
             )
@@ -6086,7 +6058,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "resolution": None,
             "displayCard": True,
         }
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             context = repository.load_design_context(database, self.session_id, version_id)
             context["activeDisagreement"] = disagreement
             repository.save_design_context(database, version_id, context)
@@ -6106,7 +6078,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "disagreement": disagreement,
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6119,8 +6091,8 @@ class CoCreationSessionTests(unittest.TestCase):
         latest = response.json()["turns"][-1]["guidance"]["disagreement"]
         self.assertEqual(latest["status"], "active")
         self.assertFalse(latest["displayCard"])
-        self.assertEqual(backend._displayed_cards(response.json()["turns"][-1]["guidance"]), [])
-        with repository.connect() as database:
+        self.assertEqual(online_sync_and_dashboard._displayed_cards(response.json()["turns"][-1]["guidance"]), [])
+        with self.services.connect() as database:
             context = repository.load_design_context(database, self.session_id, version_id)
         self.assertEqual(context["activeDisagreement"]["status"], "active")
 
@@ -6147,7 +6119,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "resolution": None,
             "displayCard": True,
         }
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             context = repository.load_design_context(database, self.session_id, version_id)
             context["activeDisagreement"] = disagreement
             repository.save_design_context(database, version_id, context)
@@ -6170,7 +6142,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "designContextPatch": {"goals": [{"goal": "Accept the AI position."}]},
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6186,7 +6158,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertNotIn("_humanEditEngagement", latest)
         self.assertIsNone(latest.get("intentHypothesis"))
         self.assertEqual(latest.get("uiCues"), [])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             context = repository.load_design_context(database, self.session_id, version_id)
             acknowledged_events = database.execute(
                 """
@@ -6220,11 +6192,11 @@ class CoCreationSessionTests(unittest.TestCase):
             "resolution": None,
             "displayCard": True,
         }
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             session = database.execute(
                 "SELECT * FROM design_sessions WHERE id = ?", (self.session_id,)
             ).fetchone()
-            backend.insert_turn(
+            self.services.insert_turn(
                 database,
                 session,
                 "assistant",
@@ -6236,7 +6208,7 @@ class CoCreationSessionTests(unittest.TestCase):
                     guidance={"move": "observe_stage"},
                 ),
             )
-            backend.insert_turn(
+            self.services.insert_turn(
                 database,
                 session,
                 "user",
@@ -6246,7 +6218,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 None,
             )
             for index in range(2):
-                backend.insert_turn(
+                self.services.insert_turn(
                     database,
                     session,
                     "assistant",
@@ -6277,7 +6249,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(len(turns), 2)
         self.assertTrue(turns[0]["guidance"]["disagreement"]["displayCard"])
         self.assertFalse(turns[1]["guidance"]["disagreement"]["displayCard"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             stored = database.execute(
                 """
                 SELECT guidance_json FROM conversation_turns
@@ -6289,7 +6261,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
     def test_choice_pending_yes_without_original_binding_is_rejected(self):
         version_id = self.read_session()["currentVersionId"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             context = repository.load_design_context(
                 database, self.session_id, version_id
             )
@@ -6333,7 +6305,8 @@ class CoCreationSessionTests(unittest.TestCase):
             revision_contract=PLAYER_MOVE_CONTRACT,
             revision_operations=PLAYER_MOVE_OPERATIONS,
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution) as generated:
+        generated = RecordedCall(return_value=execution)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": generated}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6361,7 +6334,7 @@ class CoCreationSessionTests(unittest.TestCase):
             model="mock-model",
             guidance={"move": "offer_perspective", "proposalOffer": None, "uiCues": []},
         )
-        with patch.object(backend, "generate_chat_reply", return_value=challenge_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": challenge_execution}):
             challenged = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6374,7 +6347,7 @@ class CoCreationSessionTests(unittest.TestCase):
             )
         self.assertEqual(challenged.status_code, 200, challenged.text)
         challenge_id = challenged.json()["turns"][-1]["guidance"]["challengeState"]["challengeId"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             challenge_row = database.execute(
                 "SELECT source_proposal_turn_id FROM revision_challenges WHERE session_id = ? AND challenge_id = ?",
                 (self.session_id, challenge_id),
@@ -6449,11 +6422,11 @@ class CoCreationSessionTests(unittest.TestCase):
         )
         self.assertEqual(challenged.status_code, 200, challenged.text)
         challenge_id = challenged.json()["turns"][-1]["guidance"]["challengeState"]["challengeId"]
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             database.execute("UPDATE conversation_turns SET content = ? WHERE session_id = ? AND request_id = ? AND role = 'user'",
                 ("Increase switching between boxes.", self.session_id, "choice-no-failure-source"))
             session = repository.get_session(database, self.session_id)
-            reason_id = backend.insert_turn(database, session, "user", "The direct opening needs a different first choice.",
+            reason_id = self.services.insert_turn(database, session, "user", "The direct opening needs a different first choice.",
                 version_id, "choice-no-reason", None)
             database.execute("UPDATE revision_challenges SET current_reason_turn_id = ? WHERE session_id = ? AND challenge_id = ?",
                 (reason_id, self.session_id, challenge_id))
@@ -6470,7 +6443,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "I cannot verify a different plan yet.", 1, "choice-no-failure",
             model="mock-model", guidance={"proposalOffer": None, "uiCues": []},
         )
-        with patch.object(backend, "generate_chat_reply", return_value=empty) as generate:
+        generate = RecordedCall(return_value=empty)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": generate}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6495,7 +6469,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "I have not found a verified replacement. I would revisit the first route relationship while preserving your switching goal.",
             1, "choice-no-recovered", model="mock-model", guidance={"proposalOffer": None, "uiCues": []},
             proposal_diagnostics={"verifiedFailureAnalysis": True, "proposalStatus": "revision_needed"})
-        with patch.object(backend, "generate_chat_reply", return_value=recovered):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": recovered}):
             reply = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": "否", "baseVersionId": version_id, "idempotencyKey": "choice-no-failure",
                 "action": "continue_challenge", "challengeId": challenge_id, "challengeChoice": "user"})
@@ -6510,7 +6484,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "I prepared a map proposal.", 1, "choice-copy", model="mock-model",
             guidance={"proposalOffer": None, "uiCues": []},
         )
-        reviewed = backend._enforce_challenge_reason_execution(
+        reviewed = proposal_and_challenge._enforce_challenge_reason_execution(
             execution,
             {"relation": "different", "merit": "reasonable", "comparison": "I agree " * 100},
             "墙和水域都需要改",
@@ -6543,7 +6517,7 @@ class CoCreationSessionTests(unittest.TestCase):
     def test_choice_pending_without_source_cannot_resolve_to_unverified_plan(self):
         version_id = self.read_session()["currentVersionId"]
         challenge_id = "challenge-continue-choice"
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             context = repository.load_design_context(
                 database, self.session_id, version_id
             )
@@ -6562,7 +6536,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "primaryHypothesis": "The mechanism may be too weak.",
                 "secondaryHypothesis": "The original structure may be over-preserved.",
             }
-            context = backend.add_open_question(
+            context = context_and_discovery.add_open_question(
                 context,
                 "Should we keep the original approach? Please answer yes or no.",
                 version_id,
@@ -6595,8 +6569,9 @@ class CoCreationSessionTests(unittest.TestCase):
             revision_contract=PLAYER_MOVE_CONTRACT,
             revision_operations=PLAYER_MOVE_OPERATIONS,
         )
-        with patch.object(backend, "review_question_answers") as answer_review, patch.object(
-            backend, "generate_chat_reply", return_value=execution
+        answer_review = RecordedCall(side_effect=AssertionError("Unexpected review_question_answers call"))
+        with self.using_dependencies(
+            llm_handlers={"review_question_answers": answer_review, "generate_chat_reply": execution},
         ):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
@@ -6612,7 +6587,7 @@ class CoCreationSessionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["code"], "CHALLENGE_STALE")
-        with repository.connect() as database:
+        with self.services.connect() as database:
             context = repository.load_design_context(
                 database, self.session_id, version_id
             )
@@ -6641,7 +6616,7 @@ class CoCreationSessionTests(unittest.TestCase):
             "nextQuestion": "Which play effect should the compromise preserve?",
             "resolution": None,
         }
-        cards = backend._displayed_cards({
+        cards = online_sync_and_dashboard._displayed_cards({
             "move": "offer_perspective",
             "intentHypothesis": None,
             "intentConfidence": None,
@@ -6731,7 +6706,7 @@ class CoCreationSessionTests(unittest.TestCase):
             },
             secondary_execution=review,
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": execution}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{stage_id}/assessments",
                 json={"idempotencyKey": "manual-risk-assessment-001"},
@@ -6742,7 +6717,7 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(review_turn["guidance"]["disagreement"]["status"], "active")
         self.assertTrue(review_turn["guidance"]["disagreement"]["displayCard"])
         self.assertEqual(
-            [card["type"] for card in backend._displayed_cards(review_turn["guidance"])],
+            [card["type"] for card in online_sync_and_dashboard._displayed_cards(review_turn["guidance"])],
             ["discussion"],
         )
         self.assertFalse(any(
@@ -6750,7 +6725,7 @@ class CoCreationSessionTests(unittest.TestCase):
             for cue in review_turn["guidance"].get("uiCues", [])
         ))
         self.assertEqual(assessed.json()["currentVersionId"], stage_id)
-        with repository.connect() as database:
+        with self.services.connect() as database:
             event_row = database.execute(
                 """
                 SELECT payload_json FROM audit_events
@@ -6782,7 +6757,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": None,
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "progress-opening-001"},
@@ -6807,7 +6782,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=first_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": first_execution}):
             first = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6846,7 +6821,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=second_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": second_execution}):
             second = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6882,7 +6857,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=first_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": first_execution}):
             first = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6915,7 +6890,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=second_execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": second_execution}):
             second = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -6948,7 +6923,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "fallback-question-opening-001"},
@@ -6968,7 +6943,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -7002,13 +6977,13 @@ class CoCreationSessionTests(unittest.TestCase):
                 "uiCues": [],
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "question-feedback-opening"},
             )
         question_id = "historical-visible-question"
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             version = repository.get_version(database, self.session_id, version_id)
             design_context = repository.load_json(version["design_context_json"])
             design_context["openQuestions"] = [{
@@ -7041,7 +7016,8 @@ class CoCreationSessionTests(unittest.TestCase):
         self.assertEqual(wrong_stage.status_code, 409, wrong_stage.text)
         self.assertEqual(wrong_stage.json()["code"], "VERSION_CONFLICT")
 
-        with patch.object(backend, "review_question_answers") as review:
+        review = RecordedCall(side_effect=AssertionError("Unexpected review_question_answers call"))
+        with self.using_dependencies(llm_handlers={"review_question_answers": review}):
             ignored = self.client.post(
                 f"/api/sessions/{self.session_id}/questions/{question_id}/feedback",
                 json={
@@ -7125,7 +7101,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 "proposalOffer": None,
             },
         )
-        with patch.object(backend, "generate_stage_assessment", return_value=opening):
+        with self.using_dependencies(llm_handlers={"generate_stage_assessment": opening}):
             assessed = self.client.post(
                 f"/api/sessions/{self.session_id}/versions/{version_id}/assessments",
                 json={"idempotencyKey": "disagreement-opening-001"},
@@ -7158,7 +7134,7 @@ class CoCreationSessionTests(unittest.TestCase):
                 },
             },
         )
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             response = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",
                 json={
@@ -7183,8 +7159,8 @@ class CoCreationSessionTests(unittest.TestCase):
             "answeredQuestionIds": [question_id],
             "results": [{"questionId": question_id, "answered": True}],
         }
-        with patch.object(backend, "review_question_answers", return_value=answer_review), patch.object(
-            backend, "generate_chat_reply", return_value=execution
+        with self.using_dependencies(
+            llm_handlers={"review_question_answers": answer_review, "generate_chat_reply": execution},
         ):
             answered = self.client.post(
                 f"/api/sessions/{self.session_id}/messages",

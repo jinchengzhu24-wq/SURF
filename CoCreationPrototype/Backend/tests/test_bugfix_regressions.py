@@ -6,7 +6,6 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from openai import APITimeoutError
 
@@ -15,24 +14,27 @@ TESTS_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
     import cocreation  # noqa: F401
+from tests.fakes import RecordedAsyncCall, RecordedCall, SessionTestCase, llm_scope
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
 
-import app as B
-import binary_discovery as binary
-import binary_model
-import llm_client as llm
-import repository
+from cocreation.api import config_models
+from cocreation.api import context_and_discovery
+from cocreation.api import proposal_and_challenge
+from cocreation.api import session_persistence_helpers
+from cocreation.domain import binary_discovery as binary
+from cocreation.llm import facade as llm
+from cocreation.persistence import repository
 from cocreation.api.context_and_discovery import _binary_policy_turns_and_requests
 from cocreation.llm.snapshot_grounding import (
     _entity_claim_is_non_current,
     _server_fact_text,
     _validate_coordinate_claims,
 )
-from design_requirements import validate_requirement_record
-from level_validation import analyze_user_map_claims, build_stage_snapshot, validate_and_solve
-from proposal_search import parse_revision_plan, search_revision_plan
-from understanding_review import merge_review
+from cocreation.domain.design_requirements import validate_requirement_record
+from cocreation.domain.level_validation import analyze_user_map_claims, build_stage_snapshot, validate_and_solve
+from cocreation.domain.proposal_search import parse_revision_plan, search_revision_plan
+from cocreation.domain.understanding_review import merge_review
 import test_sessions as legacy
 
 
@@ -220,7 +222,7 @@ class DomainAndLLMBugfixTests(unittest.TestCase):
         )
         self.assertEqual(result.strategy_index, 2)
 
-        from proposal_search import MetricGoal, _metric_matches
+        from cocreation.domain.proposal_search import MetricGoal, _metric_matches
 
         baseline = validate_and_solve(WATER_ROWS)
         with self.assertRaises(TimeoutError):
@@ -345,8 +347,7 @@ class DomainAndLLMBugfixTests(unittest.TestCase):
             merge_review(verdict, candidate, targets, {"latest": "减少水域并保留墙"})
 
     def test_intent_and_challenge_preserve_upstream_timeout_and_empty_choices(self):
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm, "_request_completion", side_effect=APITimeoutError(request=None)):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=APITimeoutError(request=None))):
             with self.assertRaises(llm.LLMServiceError) as caught:
                 llm.classify_turn_understanding(
                     [{"role": "user", "content": "Open the left corridor."}],
@@ -357,8 +358,7 @@ class DomainAndLLMBugfixTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "UPSTREAM_TIMEOUT")
 
         empty_choice_response = SimpleNamespace(choices=[])
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm, "_request_completion", return_value=empty_choice_response):
+        with llm_scope(completion_requester=RecordedAsyncCall(return_value=empty_choice_response)):
             with self.assertRaises(llm.LLMServiceError) as caught2:
                 llm.classify_challenge_reason(
                     "I think this detour helps",
@@ -377,8 +377,7 @@ class DomainAndLLMBugfixTests(unittest.TestCase):
             kwargs["stage_context"]["_reliabilityState"]["modelGenerationSucceeded"] = True
             return expected
 
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch("cocreation.llm.chat_generation._generate_plain_chat_sync", side_effect=fake_plain):
+        with llm_scope(handlers={'generate_plain_chat': RecordedCall(side_effect=fake_plain)}):
             llm.generate_chat_reply([{"role": "user", "content": "What do you think?"}], BASE_ROWS, "req-rel", stage_context=stage_context)
         self.assertTrue(stage_context["_reliabilityState"].get("modelGenerationSucceeded"))
 
@@ -387,11 +386,8 @@ class DomainAndLLMBugfixTests(unittest.TestCase):
         self.assertEqual(claims["conflicts"][0]["reason"], "entity_identity_unknown")
 
 
-class HttpAndPersistenceBugfixTests(unittest.TestCase):
-    setUpClass = classmethod(legacy.CoCreationSessionTests.setUpClass.__func__)
-    tearDownClass = classmethod(legacy.CoCreationSessionTests.tearDownClass.__func__)
+class HttpAndPersistenceBugfixTests(SessionTestCase):
     setUp = legacy.CoCreationSessionTests.setUp
-    tearDown = legacy.CoCreationSessionTests.tearDown
     create_and_open_session = legacy.CoCreationSessionTests.create_and_open_session
     read_session = legacy.CoCreationSessionTests.read_session
     _fake_turn_understanding = staticmethod(legacy.CoCreationSessionTests._fake_turn_understanding)
@@ -400,15 +396,15 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
         session_id, _ = self.create_and_open_session("policy-isolation")
         self.session_id = session_id
         v1 = self.read_session()["currentVersionId"]
-        with repository.connect(immediate=True) as db:
+        with self.services.connect(immediate=True) as db:
             session = repository.get_session(db, session_id)
-            u_hist = B.insert_turn(db, session, "user", "Make the first room brighter.", v1, "hist-key", None)
-            B.record_event(
+            u_hist = self.services.insert_turn(db, session, "user", "Make the first room brighter.", v1, "hist-key", None)
+            config_models.record_event(
                 db,
                 session_id,
                 "binary_discovery_state",
                 {"versionId": v1, "topicId": "binary-t1", "status": "cancelled", "userTurns": [{"id": u_hist, "content": "Make the first room brighter."}], "choices": []},
-                B.utc_now(),
+                self.services.utc_now(),
             )
             turns = db.execute("SELECT id, role, content, request_id, sequence_number, guidance_json FROM conversation_turns WHERE session_id=? AND version_id=?", (session_id, v1)).fetchall()
             turn_ids, req_ids = _binary_policy_turns_and_requests(db, session_id, turns)
@@ -417,7 +413,7 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
 
             # Test ancestor-Stage evidence DB lookup in build_llm_context
             v2_validation = validate_and_solve(legacy.WATER_EDITED_ROWS)
-            v2 = B._insert_version(db, session, v2_validation, "human_edit", "Edited", "edit-k1", B.get_version(db, session_id, v1))
+            v2 = session_persistence_helpers._insert_version(db, session, v2_validation, "human_edit", "Edited", "edit-k1", session_persistence_helpers.get_version(db, session_id, v1), services=self.services)
             ctx_v2 = repository.load_design_context(db, session_id, v2)
             ctx_v2["intentHypotheses"] = [
                 {
@@ -435,7 +431,7 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
                 }
             ]
             repository.save_design_context(db, v2, ctx_v2)
-            built = B.build_llm_context(db, session_id, B.get_version(db, session_id, v2))
+            built = context_and_discovery.build_llm_context(db, session_id, session_persistence_helpers.get_version(db, session_id, v2), services=self.services)
             hyp = built["stageContext"]["designContext"]["intentHypotheses"][0]
             self.assertEqual(hyp["evidenceTurnId"], u_hist)
             self.assertIn("brighter", hyp["evidenceText"])
@@ -446,7 +442,7 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
         v1 = self.read_session()["currentVersionId"]
 
         # Create an offer turn and execute it, verify proposal_binding_json survives _proposal_review_guidance
-        with repository.connect(immediate=True) as db:
+        with self.services.connect(immediate=True) as db:
             session = repository.get_session(db, session_id)
             offer_exec = llm.LLMExecutionResult(
                 "Offer ready.",
@@ -462,32 +458,23 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
                     },
                 },
             )
-            bound = B._bind_execution_to_stage(
+            bound = proposal_and_challenge._bind_execution_to_stage(
                 offer_exec,
                 v1,
                 BASE_ROWS,
                 language="en",
                 entity_bindings=repository.load_entity_bindings(db, session_id, v1),
             )
-            offer_turn_id = B.insert_turn(db, session, "assistant", bound.assistant_message, v1, "offer-k1", bound)
+            offer_turn_id = self.services.insert_turn(db, session, "assistant", bound.assistant_message, v1, "offer-k1", bound)
             db.execute(
                 "INSERT INTO designer_decisions(id, session_id, version_id, proposal_id, decision_type, reason, idempotency_key, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                ("dec0", session_id, None, "dummy-prop", "reject", "", "reused-key", B.utc_now()),
+                ("dec0", session_id, None, "dummy-prop", "reject", "", "reused-key", self.services.utc_now()),
             )
 
-        with patch.object(
-            B,
-            "generate_chat_reply",
-            return_value=llm.LLMExecutionResult(
-                "Verified",
-                1,
-                "exec-k1",
-                proposed_rows=legacy.WATER_EDITED_ROWS,
-                revision_contract=legacy.WATER_RESHAPE_CONTRACT,
-                revision_plan=legacy.WATER_RESHAPE_CONTRACT["revisionPlan"],
-                revision_operations=legacy.WATER_RESHAPE_OPERATIONS,
-                proposal_diagnostics={"selectedStrategyIndex": 1},
-            ),
+        with self.using_dependencies(
+            llm_handlers={
+                "generate_chat_reply": llm.LLMExecutionResult('Verified', 1, 'exec-k1', proposed_rows=legacy.WATER_EDITED_ROWS, revision_contract=legacy.WATER_RESHAPE_CONTRACT, revision_plan=legacy.WATER_RESHAPE_CONTRACT['revisionPlan'], revision_operations=legacy.WATER_RESHAPE_OPERATIONS, proposal_diagnostics={'selectedStrategyIndex': 1}),
+            },
         ):
             res = self.client.post(
                 f"/api/sessions/{session_id}/messages",
@@ -502,7 +489,7 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         proposal = res.json()["proposals"][0]
 
-        with repository.connect() as db:
+        with self.services.connect() as db:
             pturn = db.execute("SELECT proposal_binding_json FROM conversation_turns WHERE id = ?", (proposal["assistantTurnId"],)).fetchone()
             pbinding = json.loads(pturn["proposal_binding_json"])
             self.assertEqual(pbinding["sourceOfferTurnId"], offer_turn_id)
@@ -517,7 +504,7 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
         self.assertEqual(conflict.json()["code"], "IDEMPOTENCY_CONFLICT")
 
         # Tamper stored proposed_rows_json to verify accept enforces frozen EXECUTION_REPLAY_MISMATCH from proposal_binding_json
-        with repository.connect(immediate=True) as db:
+        with self.services.connect(immediate=True) as db:
             db.execute("UPDATE change_proposals SET proposed_rows_json = ? WHERE id = ?", (json.dumps(legacy.WATER_RIGHT_ROWS), proposal["proposalId"]))
         tampered = self.client.post(
             f"/api/sessions/{session_id}/proposals/{proposal['proposalId']}/decision",
@@ -565,7 +552,7 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
         session_id, _ = self.create_and_open_session("binary-details")
         self.session_id = session_id
         v1 = self.read_session()["currentVersionId"]
-        with repository.connect(immediate=True) as db:
+        with self.services.connect(immediate=True) as db:
             db.execute("UPDATE level_versions SET rows_json=?, validation_json=? WHERE id=?", (json.dumps(WATER_ROWS), json.dumps(validate_and_solve(WATER_ROWS).as_dict()), v1))
         step = {
             "action": "ask",
@@ -595,13 +582,17 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
                 "nextQuestionDimension": "visual_direction",
             },
         }
-        with patch.object(B, "classify_turn_understanding", return_value=understanding), \
-                patch("cocreation.api.binary_routes.should_start", return_value=True), \
-                patch.object(binary_model, "generate", side_effect=lambda *a, **kw: (copy.deepcopy(step), binary.preflight(binary.parse_step(copy.deepcopy(step), 0), a[0], WATER_ROWS, {}, lambda r, d=None: validate_and_solve(r, deadline=d), time.monotonic() + 30))):
+        with self.using_dependencies(
+            should_start_binary_fn=RecordedCall(return_value=True),
+            llm_handlers={
+                "classify_turn_understanding": understanding,
+                "generate_binary_step": lambda *a, **kw: (copy.deepcopy(step), binary.preflight(binary.parse_step(copy.deepcopy(step), 0), a[0], WATER_ROWS, {}, lambda r, d=None: validate_and_solve(r, deadline=d), time.monotonic() + 30)),
+            },
+        ):
             res = self.client.post(f"/api/sessions/{session_id}/messages", json={"baseVersionId": v1, "content": "Make it simpler.", "requestProposal": True, "idempotencyKey": "bin-k1"})
         self.assertEqual(res.status_code, 200, res.text)
 
-        with repository.connect() as db:
+        with self.services.connect() as db:
             tu = db.execute("SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='turn_understanding' ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
             tu_payload = json.loads(tu["payload_json"])
             self.assertNotEqual(tu_payload["result"]["proposalUnderstanding"]["goals"][0]["sourceTurnId"], "latest")
@@ -612,7 +603,7 @@ class HttpAndPersistenceBugfixTests(unittest.TestCase):
         q = res.json()["proposalFlowState"]["pendingQuestion"]
         err = llm.LLMServiceError("BINARY_PROMISE_NOT_REALIZED", "Cannot realize", "req-nr", False, 1, 422)
         err.details = {"task": "revision_plan", "failureStage": "binary_preflight", "reasonCode": "BINARY_PROMISE_NOT_REALIZED"}
-        with patch.object(binary_model, "generate", side_effect=err):
+        with self.using_dependencies(llm_handlers={"generate_binary_step": err}):
             fail_res = self.client.post(
                 f"/api/sessions/{session_id}/proposal-discovery/choices",
                 json={"baseVersionId": v1, "topicId": q["topicId"], "questionId": q["questionId"], "choiceId": q["choices"][0]["choiceId"], "displayLanguage": "en", "idempotencyKey": "bin-c1"},

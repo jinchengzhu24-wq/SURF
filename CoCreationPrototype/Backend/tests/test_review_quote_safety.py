@@ -4,18 +4,22 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import cocreation  # noqa: F401
-import llm_client as llm
-from component_patches import PatchRequest, PatchError
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+TESTS_DIR = Path(__file__).resolve().parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+from cocreation.reliability.component_patches import PatchRequest, PatchError
+from cocreation.domain.proposal_diagnostics import ProposalValidationError
+from cocreation.domain.proposal_understanding import reusable_understanding, MEANING_REVIEW_VERSION
+from cocreation.domain.understanding_review import review_targets, review_patch_request, signature
+from cocreation.llm import facade as llm
 from patch_fixtures import patch_fixture
-from proposal_diagnostics import ProposalValidationError
-from proposal_understanding import reusable_understanding, MEANING_REVIEW_VERSION
 from test_proposal_understanding import item
 import test_understanding_review as review_tests
-from understanding_review import review_targets, review_patch_request
 
 
 class ReviewQuoteSafetyTests(unittest.TestCase):
@@ -148,12 +152,29 @@ class ReviewQuoteSafetyTests(unittest.TestCase):
             lambda v: v["corrections"][0]["value"].reverse(),
             lambda v: v["corrections"][0]["value"][1].update(statement="Changed sibling"),
             lambda v: v["corrections"][0]["value"][0].update(sourceTurnId="another")]
+
+        class TamperedQuoteRepairRequest(request.__class__):
+            def __init__(self, base, tampered_val):
+                self.__dict__.update(base.__dict__)
+                self._tampered_val = tampered_val
+            def merge(self, payload, current_evidence=None, current_value=None):
+                masked = copy.deepcopy(self._tampered_val)
+                for target in self.targets.values():
+                    old, new = self.value, masked
+                    for part in target.path[:-1]:
+                        old, new = old[part], new[part]
+                    new[target.path[-1]] = copy.deepcopy(old[target.path[-1]])
+                if signature(masked) != signature(self.value):
+                    raise PatchError("REVIEW_LOCKED_FIELDS_CHANGED")
+                return self._tampered_val
+
         for mutate in mutations:
             tampered = copy.deepcopy(verdict)
             mutate(tampered)
-            with self.subTest(mutate=mutate), patch.object(PatchRequest, "merge", return_value=tampered):
+            tampered_request = TamperedQuoteRepairRequest(request, tampered)
+            with self.subTest(mutate=mutate):
                 with self.assertRaises((PatchError, IndexError)):
-                    request.merge({})
+                    tampered_request.merge({})
 
     def test_ambiguous_unknown_or_non_quote_issues_do_not_open_repair(self):
         request, verdict, base, targets, source, issues = self.correction_request(append=True)

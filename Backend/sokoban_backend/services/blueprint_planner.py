@@ -1,8 +1,8 @@
 import json
-import os
 import threading
+from typing import Any
 
-from ..config import DEFAULT_LLM_MAX_ATTEMPTS, PLAN_LLM_TIMEOUT_SECONDS, SHORT_LLM_TIMEOUT_SECONDS, env_float
+from ..config import BackendSettings, Clock
 from ..llm.prompts import (
     build_creative_idea_expansion_messages,
     build_ha_revision_plan_edit_messages,
@@ -12,8 +12,7 @@ from ..llm.prompts import (
     normalize_prompt_text,
     resolve_zero_feature_constraints,
 )
-from ..llm.runtime import LLMExecutionResult, LLMServiceError, new_request_id
-from ..runtime_state import call_app_hook, current_time
+from ..llm.runtime import EventLogger, LLMExecutionResult, LLMGateway, LLMServiceError, new_request_id
 from ..schemas import (
     CreativeIdeaExpansionOption,
     DEFAULT_PLAN,
@@ -25,48 +24,7 @@ from ..schemas import (
 )
 
 
-recent_blueprints = []
-plan_history_lock = threading.Lock()
 clean_expansion_text = normalize_prompt_text
-
-
-def create_creative_idea_expansion(
-    creative_context,
-    request_id="",
-    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
-):
-    request_id = new_request_id(request_id)
-
-    def validate_expansion(payload):
-        return {
-            "options": validate_creative_idea_expansion(payload),
-            "usedFallback": False,
-            "message": "",
-        }
-
-    try:
-        default_temp = env_float("DEEPSEEK_TEMPERATURE", 0.9, 0.0, 2.0)
-        return call_app_hook(
-            "execute_json_request",
-            task="creative_idea_expansion",
-            messages=build_creative_idea_expansion_messages(creative_context),
-            validator=validate_expansion,
-            temperature=env_float("DEEPSEEK_EXPANSION_TEMPERATURE", default_temp, 0.0, 2.0),
-            timeout_seconds=SHORT_LLM_TIMEOUT_SECONDS,
-            max_attempts=max_attempts,
-            request_id=request_id,
-            validation_stage="expansion_validation",
-        )
-    except LLMServiceError as exception:
-        fallback = fallback_creative_idea_expansion(
-            creative_context,
-            exception.safe_message,
-        )
-        return LLMExecutionResult(
-            fallback,
-            exception.attempts_used,
-            request_id,
-        )
 
 
 def validate_human_adjustment_clarity_payload(payload):
@@ -104,100 +62,6 @@ def validate_human_adjustment_clarity_payload(payload):
     }
 
 
-def create_human_adjustment_clarity_check(
-    adjustment_text,
-    request_id="",
-    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
-):
-    required_fields = {
-        "problemScore",
-        "targetScore",
-        "directionScore",
-        "detailScore",
-        "reason",
-    }
-
-    def validate_clarity(payload):
-        if not isinstance(payload, dict):
-            raise ValueError("Human clarity response must be a JSON object")
-
-        missing_fields = sorted(required_fields - set(payload))
-
-        if missing_fields:
-            raise ValueError(
-                "Human clarity response is missing fields: "
-                + ", ".join(missing_fields)
-            )
-
-        return validate_human_adjustment_clarity_payload(payload)
-
-    return call_app_hook(
-        "execute_json_request",
-        task="human_adjustment_clarity",
-        messages=build_human_adjustment_clarity_messages(adjustment_text),
-        validator=validate_clarity,
-        temperature=0.0,
-        timeout_seconds=SHORT_LLM_TIMEOUT_SECONDS,
-        max_attempts=max_attempts,
-        request_id=request_id,
-        validation_stage="clarity_validation",
-    )
-
-
-def create_ha_revision_plans(
-    context,
-    request_id="",
-    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
-):
-    def validate_options(payload):
-        options = validate_ha_revision_plan_options(
-            payload,
-            context.get("previousLevelPlan"),
-            context.get("adjustmentText"),
-        )
-        return {"options": options}
-
-    return call_app_hook(
-        "execute_json_request",
-        task="ha_revision_plans",
-        messages=build_ha_revision_plan_messages(context),
-        validator=validate_options,
-        temperature=0.2,
-        timeout_seconds=PLAN_LLM_TIMEOUT_SECONDS,
-        max_attempts=max_attempts,
-        request_id=request_id,
-        validation_stage="ha_plan_validation",
-    )
-
-
-def create_ha_revision_plan_edit(
-    context,
-    request_id="",
-    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
-):
-    def validate_option(payload):
-        option = validate_ha_revision_plan_edit(
-            payload,
-            context.get("originalOption"),
-            context.get("previousLevelPlan"),
-            context.get("adjustmentText"),
-            context.get("editedDescription"),
-        )
-        return {"option": option}
-
-    return call_app_hook(
-        "execute_json_request",
-        task="ha_revision_plan_edit",
-        messages=build_ha_revision_plan_edit_messages(context),
-        validator=validate_option,
-        temperature=0.1,
-        timeout_seconds=PLAN_LLM_TIMEOUT_SECONDS,
-        max_attempts=max_attempts,
-        request_id=request_id,
-        validation_stage="ha_plan_edit_validation",
-    )
-
-
 def parse_ha_revision_contract(value):
     if isinstance(value, str):
         contract = json.loads(value)
@@ -227,29 +91,33 @@ def parse_ha_revision_contract(value):
 
     normalized_changes = {}
 
-    for field, value in changes.items():
+    for field, field_value in changes.items():
         if field in LIMITS:
-            if isinstance(value, bool) or not isinstance(value, int):
+            if isinstance(field_value, bool) or not isinstance(field_value, int):
                 raise ValueError(f"HA contract {field} must be an integer")
 
-            if field == "minWallObstacleBlocks" and value == 3:
-                value = 2
+            if field == "minWallObstacleBlocks" and field_value == 3:
+                field_value = 2
 
             minimum, maximum = LIMITS[field]
 
-            if value < minimum or value > maximum:
+            if field_value < minimum or field_value > maximum:
                 raise ValueError(
-                    f"HA contract {field}={value} is outside {minimum}-{maximum}"
+                    f"HA contract {field}={field_value} is outside {minimum}-{maximum}"
                 )
 
-            normalized_changes[field] = value
+            normalized_changes[field] = field_value
         elif field == "corridorWidth":
-            if isinstance(value, bool) or not isinstance(value, int) or value not in {0, 1, 2}:
+            if (
+                isinstance(field_value, bool)
+                or not isinstance(field_value, int)
+                or field_value not in {0, 1, 2}
+            ):
                 raise ValueError("HA contract corridorWidth must be 0, 1, or 2")
 
-            normalized_changes[field] = value
+            normalized_changes[field] = field_value
         elif field in ENUMS:
-            clean_value = str(value or "").strip()
+            clean_value = str(field_value or "").strip()
 
             if clean_value not in ENUMS[field]:
                 raise ValueError(
@@ -258,7 +126,7 @@ def parse_ha_revision_contract(value):
 
             normalized_changes[field] = clean_value
         elif field == "style":
-            clean_value = str(value or "").strip()
+            clean_value = str(field_value or "").strip()
 
             if not clean_value:
                 raise ValueError("HA contract style cannot be empty")
@@ -703,63 +571,6 @@ def apply_selected_ha_plan(
     )
 
 
-def create_level_plan(
-    creative_context=None,
-    request_id="",
-    max_attempts=DEFAULT_LLM_MAX_ATTEMPTS,
-):
-    creative_context = dict(creative_context or {})
-    creative_context["styleDescription"] = str(
-        creative_context.get("styleDescription") or ""
-    ).strip()[:420]
-    generation_preferences = normalize_generation_preferences(
-        creative_context.get("generationPreferences")
-    )
-    creative_context["generationPreferences"] = generation_preferences
-    feature_constraints = resolve_zero_feature_constraints(creative_context)
-
-    if "minWaterAreas" in generation_preferences:
-        feature_constraints["noWater"] = (
-            generation_preferences["minWaterAreas"] == 0
-            and generation_preferences["maxWaterAreas"] == 0
-        )
-
-    if "minWallObstacleBlocks" in generation_preferences:
-        feature_constraints["noInternalWalls"] = (
-            generation_preferences["minWallObstacleBlocks"] == 0
-            and generation_preferences["maxWallObstacleBlocks"] == 0
-        )
-
-    variation_seed = int(current_time() * 1000)
-
-    def validate_level_plan(payload):
-        return apply_selected_ha_plan(
-            payload,
-            creative_context,
-            feature_constraints,
-            generation_preferences,
-        )
-
-    execution = call_app_hook(
-        "execute_json_request",
-        task="level_plan",
-        messages=build_level_plan_messages(
-            variation_seed,
-            get_recent_blueprint_hint(),
-            creative_context,
-            feature_constraints,
-        ),
-        validator=validate_level_plan,
-        temperature=env_float("DEEPSEEK_LEVEL_TEMPERATURE", 0.5, 0.0, 2.0),
-        timeout_seconds=PLAN_LLM_TIMEOUT_SECONDS,
-        max_attempts=max_attempts,
-        request_id=request_id,
-        validation_stage="blueprint_validation",
-    )
-    remember_blueprint(execution.value)
-    return execution
-
-
 def validate_plan(
     plan,
     feature_constraints=None,
@@ -939,23 +750,6 @@ def validate_creative_idea_expansion(payload):
     return validated
 
 
-def fallback_creative_idea_expansion(creative_context, reason):
-    idea_text = clean_expansion_text((creative_context or {}).get("ideaText"))
-    options = build_contextual_expansion_fallback_options(idea_text)
-
-    call_app_hook(
-        "log_event",
-        "WARNING",
-        "creative_expansion_fallback",
-        reason=str(reason or "")[:1000],
-    )
-    return {
-        "options": options,
-        "usedFallback": True,
-        "message": reason,
-    }
-
-
 def build_contextual_expansion_fallback_options(idea_text):
     tags = classify_expansion_idea(idea_text)
 
@@ -1105,27 +899,6 @@ def contains_any(text, keywords):
     return any(keyword in text for keyword in keywords)
 
 
-def remember_blueprint(plan):
-    key = get_blueprint_key(plan)
-
-    with plan_history_lock:
-        if key in recent_blueprints:
-            recent_blueprints.remove(key)
-
-        recent_blueprints.append(key)
-
-        while len(recent_blueprints) > RECENT_BLUEPRINT_LIMIT:
-            recent_blueprints.pop(0)
-
-
-def get_recent_blueprint_hint():
-    with plan_history_lock:
-        if not recent_blueprints:
-            return "none"
-
-        return "; ".join(recent_blueprints)
-
-
 def get_blueprint_key(plan):
     return "|".join(
         [
@@ -1135,3 +908,263 @@ def get_blueprint_key(plan):
             str(plan.get("waterStyle", "")),
         ]
     )
+
+
+class BlueprintPlannerService:
+    def __init__(
+        self,
+        llm_gateway: LLMGateway,
+        *,
+        settings: BackendSettings | None = None,
+        clock: Clock | None = None,
+        event_logger: EventLogger | None = None,
+    ) -> None:
+        self.llm_gateway = llm_gateway
+        self.settings = settings or llm_gateway.settings
+        self.clock = clock or llm_gateway.clock
+        self.event_logger = event_logger or llm_gateway.event_logger
+        self._recent_blueprints: list[str] = []
+        self._plan_history_lock = threading.Lock()
+
+    def remember_blueprint(self, plan: dict[str, Any]) -> None:
+        key = get_blueprint_key(plan)
+        with self._plan_history_lock:
+            if key in self._recent_blueprints:
+                self._recent_blueprints.remove(key)
+            self._recent_blueprints.append(key)
+            while len(self._recent_blueprints) > RECENT_BLUEPRINT_LIMIT:
+                self._recent_blueprints.pop(0)
+
+    def get_recent_blueprint_hint(self) -> str:
+        with self._plan_history_lock:
+            if not self._recent_blueprints:
+                return "none"
+            return "; ".join(self._recent_blueprints)
+
+    def fallback_creative_idea_expansion(
+        self,
+        creative_context: dict[str, Any] | None,
+        reason: str,
+    ) -> dict[str, Any]:
+        idea_text = clean_expansion_text((creative_context or {}).get("ideaText"))
+        options = build_contextual_expansion_fallback_options(idea_text)
+        self.event_logger.log_event(
+            "WARNING",
+            "creative_expansion_fallback",
+            reason=str(reason or "")[:1000],
+        )
+        return {
+            "options": options,
+            "usedFallback": True,
+            "message": reason,
+        }
+
+    def create_creative_idea_expansion(
+        self,
+        creative_context: dict[str, Any],
+        request_id: str = "",
+        max_attempts: int | None = None,
+    ) -> LLMExecutionResult:
+        request_id = new_request_id(request_id)
+        attempts = (
+            self.settings.llm_max_attempts
+            if max_attempts is None
+            else max_attempts
+        )
+
+        def validate_expansion(payload):
+            return {
+                "options": validate_creative_idea_expansion(payload),
+                "usedFallback": False,
+                "message": "",
+            }
+
+        try:
+            return self.llm_gateway.execute_json_request(
+                task="creative_idea_expansion",
+                messages=build_creative_idea_expansion_messages(creative_context),
+                validator=validate_expansion,
+                temperature=self.settings.deepseek_expansion_temperature,
+                timeout_seconds=self.settings.llm_timeout_seconds,
+                max_attempts=attempts,
+                request_id=request_id,
+                validation_stage="expansion_validation",
+            )
+        except LLMServiceError as exception:
+            fallback = self.fallback_creative_idea_expansion(
+                creative_context,
+                exception.safe_message,
+            )
+            return LLMExecutionResult(
+                fallback,
+                exception.attempts_used,
+                request_id,
+            )
+
+    def create_human_adjustment_clarity_check(
+        self,
+        adjustment_text: str,
+        request_id: str = "",
+        max_attempts: int | None = None,
+    ) -> LLMExecutionResult:
+        attempts = (
+            self.settings.llm_max_attempts
+            if max_attempts is None
+            else max_attempts
+        )
+        required_fields = {
+            "problemScore",
+            "targetScore",
+            "directionScore",
+            "detailScore",
+            "reason",
+        }
+
+        def validate_clarity(payload):
+            if not isinstance(payload, dict):
+                raise ValueError("Human clarity response must be a JSON object")
+
+            missing_fields = sorted(required_fields - set(payload))
+            if missing_fields:
+                raise ValueError(
+                    "Human clarity response is missing fields: "
+                    + ", ".join(missing_fields)
+                )
+
+            return validate_human_adjustment_clarity_payload(payload)
+
+        return self.llm_gateway.execute_json_request(
+            task="human_adjustment_clarity",
+            messages=build_human_adjustment_clarity_messages(adjustment_text),
+            validator=validate_clarity,
+            temperature=0.0,
+            timeout_seconds=self.settings.llm_timeout_seconds,
+            max_attempts=attempts,
+            request_id=request_id,
+            validation_stage="clarity_validation",
+        )
+
+    def create_ha_revision_plans(
+        self,
+        context: dict[str, Any],
+        request_id: str = "",
+        max_attempts: int | None = None,
+    ) -> LLMExecutionResult:
+        attempts = (
+            self.settings.llm_max_attempts
+            if max_attempts is None
+            else max_attempts
+        )
+
+        def validate_options(payload):
+            options = validate_ha_revision_plan_options(
+                payload,
+                context.get("previousLevelPlan"),
+                context.get("adjustmentText"),
+            )
+            return {"options": options}
+
+        return self.llm_gateway.execute_json_request(
+            task="ha_revision_plans",
+            messages=build_ha_revision_plan_messages(context),
+            validator=validate_options,
+            temperature=0.2,
+            timeout_seconds=self.settings.plan_llm_timeout_seconds,
+            max_attempts=attempts,
+            request_id=request_id,
+            validation_stage="ha_plan_validation",
+        )
+
+    def create_ha_revision_plan_edit(
+        self,
+        context: dict[str, Any],
+        request_id: str = "",
+        max_attempts: int | None = None,
+    ) -> LLMExecutionResult:
+        attempts = (
+            self.settings.llm_max_attempts
+            if max_attempts is None
+            else max_attempts
+        )
+
+        def validate_option(payload):
+            option = validate_ha_revision_plan_edit(
+                payload,
+                context.get("originalOption"),
+                context.get("previousLevelPlan"),
+                context.get("adjustmentText"),
+                context.get("editedDescription"),
+            )
+            return {"option": option}
+
+        return self.llm_gateway.execute_json_request(
+            task="ha_revision_plan_edit",
+            messages=build_ha_revision_plan_edit_messages(context),
+            validator=validate_option,
+            temperature=0.1,
+            timeout_seconds=self.settings.plan_llm_timeout_seconds,
+            max_attempts=attempts,
+            request_id=request_id,
+            validation_stage="ha_plan_edit_validation",
+        )
+
+    def create_level_plan(
+        self,
+        creative_context: dict[str, Any] | None = None,
+        request_id: str = "",
+        max_attempts: int | None = None,
+    ) -> LLMExecutionResult:
+        attempts = (
+            self.settings.llm_max_attempts
+            if max_attempts is None
+            else max_attempts
+        )
+        context = dict(creative_context or {})
+        context["styleDescription"] = str(
+            context.get("styleDescription") or ""
+        ).strip()[:420]
+        generation_preferences = normalize_generation_preferences(
+            context.get("generationPreferences")
+        )
+        context["generationPreferences"] = generation_preferences
+        feature_constraints = resolve_zero_feature_constraints(context)
+
+        if "minWaterAreas" in generation_preferences:
+            feature_constraints["noWater"] = (
+                generation_preferences["minWaterAreas"] == 0
+                and generation_preferences["maxWaterAreas"] == 0
+            )
+
+        if "minWallObstacleBlocks" in generation_preferences:
+            feature_constraints["noInternalWalls"] = (
+                generation_preferences["minWallObstacleBlocks"] == 0
+                and generation_preferences["maxWallObstacleBlocks"] == 0
+            )
+
+        variation_seed = int(self.clock.now() * 1000)
+
+        def validate_level_plan(payload):
+            return apply_selected_ha_plan(
+                payload,
+                context,
+                feature_constraints,
+                generation_preferences,
+            )
+
+        execution = self.llm_gateway.execute_json_request(
+            task="level_plan",
+            messages=build_level_plan_messages(
+                variation_seed,
+                self.get_recent_blueprint_hint(),
+                context,
+                feature_constraints,
+            ),
+            validator=validate_level_plan,
+            temperature=self.settings.deepseek_level_temperature,
+            timeout_seconds=self.settings.plan_llm_timeout_seconds,
+            max_attempts=attempts,
+            request_id=request_id,
+            validation_stage="blueprint_validation",
+        )
+        self.remember_blueprint(execution.value)
+        return execution

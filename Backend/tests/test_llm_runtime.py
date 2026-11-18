@@ -1,47 +1,27 @@
 import json
-import os
+from pathlib import Path
+import tempfile
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
 
-import httpx
 from fastapi.testclient import TestClient
+import httpx
 from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
-import Backend.app as backend
-import Backend.llm_runtime as runtime
-
-
-class FakeCompletions:
-    def __init__(self, outcomes):
-        self.outcomes = list(outcomes)
-        self.calls = []
-
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        outcome = self.outcomes.pop(0)
-
-        if isinstance(outcome, Exception):
-            raise outcome
-
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content=outcome),
-                )
-            ],
-            usage=None,
-        )
-
-
-class FakeClient:
-    def __init__(self, outcomes):
-        self.completions = FakeCompletions(outcomes)
-        self.chat = SimpleNamespace(completions=self.completions)
+from sokoban_backend.dependencies import BackendSettings, LLMGateway
+from sokoban_backend.llm import runtime
+from tests.fakes import (
+    FakeClock,
+    FakeLLMGateway,
+    FakeOpenAIClient,
+    RecordingBlueprintPlannerService,
+    RecordingEventLogger,
+    create_test_app,
+    create_test_container,
+)
 
 
 class LLMRuntimeTests(unittest.TestCase):
-    def execute(self, client, **overrides):
+    def execute(self, client: FakeOpenAIClient, *, api_key: str = "test-key", **overrides):
         arguments = {
             "task": "test_task",
             "messages": [{"role": "user", "content": "Return JSON."}],
@@ -54,15 +34,19 @@ class LLMRuntimeTests(unittest.TestCase):
         }
         arguments.update(overrides)
 
-        with (
-            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(runtime, "_get_client", return_value=client),
-            patch.object(runtime.time, "sleep"),
-        ):
-            return runtime.execute_json_request(**arguments)
+        clock = FakeClock()
+        settings = BackendSettings(deepseek_api_key=api_key)
+        logger = RecordingEventLogger(settings=settings, clock=clock.as_clock())
+        gateway = LLMGateway(
+            settings=settings,
+            client_factory=client.as_factory(),
+            clock=clock.as_clock(),
+            event_logger=logger,
+        )
+        return gateway.execute_json_request(**arguments)
 
     def test_invalid_json_is_repaired_once(self):
-        client = FakeClient(["not-json", '{"value": 7}'])
+        client = FakeOpenAIClient(["not-json", '{"value": 7}'])
         result = self.execute(client)
 
         self.assertEqual(result.value, {"value": 7})
@@ -73,7 +57,7 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertIn("valid JSON", repair_message)
 
     def test_thinking_mode_is_forwarded_when_configured(self):
-        client = FakeClient(['{"value": 7}'])
+        client = FakeOpenAIClient(['{"value": 7}'])
         self.execute(
             client,
             max_attempts=1,
@@ -86,7 +70,7 @@ class LLMRuntimeTests(unittest.TestCase):
         )
 
     def test_validation_error_is_included_in_repair_request(self):
-        client = FakeClient(['{"value": 18}', '{"value": 12}'])
+        client = FakeOpenAIClient(['{"value": 18}', '{"value": 12}'])
 
         def validate(payload):
             if payload["value"] > 16:
@@ -102,7 +86,7 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertIn("minPushes=18 is outside 8-16", repair_message)
 
     def test_non_english_string_is_repaired_once(self):
-        client = FakeClient(
+        client = FakeOpenAIClient(
             [
                 '{"title":"Central Maze","nested":{"promptText":"使用迷宫路线"}}',
                 '{"title":"Central Maze","nested":{"promptText":"Use a maze route"}}',
@@ -118,7 +102,7 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertIn("$.nested.promptText", repair_message)
 
     def test_common_typographic_punctuation_is_normalized(self):
-        client = FakeClient([
+        client = FakeOpenAIClient([
             '{"summary":"A wider route— with a ' + chr(0x2019) + 'friend"}',
         ])
 
@@ -127,7 +111,7 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertEqual(result.value["summary"], "A wider route- with a 'friend")
 
     def test_repeated_non_english_strings_are_rejected(self):
-        client = FakeClient(
+        client = FakeOpenAIClient(
             [
                 '{"title":"中央迷宫"}',
                 '{"title":"迷宫路线"}',
@@ -143,7 +127,7 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertEqual(len(client.completions.calls), 2)
 
     def test_model_budget_never_exceeds_requested_single_attempt(self):
-        client = FakeClient(["not-json", '{"value": 7}'])
+        client = FakeOpenAIClient(["not-json", '{"value": 7}'])
 
         with self.assertRaises(runtime.LLMServiceError) as raised:
             self.execute(client, max_attempts=1)
@@ -153,7 +137,7 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertEqual(len(client.completions.calls), 1)
 
     def test_non_retryable_internal_error_stops_immediately(self):
-        client = FakeClient([RuntimeError("unexpected"), '{"value": 7}'])
+        client = FakeOpenAIClient([RuntimeError("unexpected"), '{"value": 7}'])
 
         with self.assertRaises(runtime.LLMServiceError) as raised:
             self.execute(client)
@@ -164,7 +148,7 @@ class LLMRuntimeTests(unittest.TestCase):
 
     def test_transient_connection_error_retries_then_succeeds(self):
         request = httpx.Request("POST", "https://example.invalid/chat")
-        client = FakeClient(
+        client = FakeOpenAIClient(
             [
                 APIConnectionError(request=request),
                 '{"value": 7}',
@@ -179,7 +163,7 @@ class LLMRuntimeTests(unittest.TestCase):
 
     def test_restricted_retry_codes_do_not_repeat_timeout(self):
         request = httpx.Request("POST", "https://example.invalid/chat")
-        client = FakeClient(
+        client = FakeOpenAIClient(
             [
                 APITimeoutError(request),
                 '{"value": 7}',
@@ -200,7 +184,7 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertEqual(len(client.completions.calls), 1)
 
     def test_restricted_retry_codes_still_repair_invalid_json(self):
-        client = FakeClient(["not-json", '{"value": 7}'])
+        client = FakeOpenAIClient(["not-json", '{"value": 7}'])
 
         result = self.execute(
             client,
@@ -215,15 +199,13 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertEqual(len(client.completions.calls), 2)
 
     def test_missing_api_key_is_configuration_error(self):
-        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}):
-            with self.assertRaises(runtime.LLMServiceError) as raised:
-                runtime.execute_json_request(
-                    task="test_task",
-                    messages=[],
-                    validator=lambda payload: payload,
-                    temperature=0.5,
-                    timeout_seconds=25,
-                )
+        client = FakeOpenAIClient()
+        with self.assertRaises(runtime.LLMServiceError) as raised:
+            self.execute(
+                client,
+                api_key="",
+                messages=[],
+            )
 
         self.assertEqual(raised.exception.code, "CONFIGURATION_ERROR")
         self.assertEqual(raised.exception.status_code, 503)
@@ -278,7 +260,7 @@ class LLMRuntimeTests(unittest.TestCase):
 
         for exception, code, status_code, retryable in cases:
             with self.subTest(code=code):
-                error = runtime._classify_exception(
+                error = runtime.classify_llm_exception(
                     exception,
                     request_id="classification-test",
                     attempts_used=1,
@@ -291,12 +273,16 @@ class LLMRuntimeTests(unittest.TestCase):
 
 class LLMApiContractTests(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(backend.app)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
 
     def test_level_post_and_legacy_get_build_the_same_context(self):
         contexts = []
 
-        def create_level_plan(context, request_id, max_attempts):
+        def handle_level_plan(context, request_id, max_attempts):
             contexts.append((context, max_attempts))
             return runtime.LLMExecutionResult(
                 {"designNote": "test"},
@@ -304,6 +290,16 @@ class LLMApiContractTests(unittest.TestCase):
                 request_id,
             )
 
+        gateway = FakeLLMGateway()
+        planner = RecordingBlueprintPlannerService(
+            gateway,
+            level_plan_handler=handle_level_plan,
+        )
+        container = create_test_container(
+            self.tmp_path,
+            llm_gateway=gateway,
+            blueprint_service=planner,
+        )
         payload = {
             "ideaText": "compact puzzle",
             "ideaId": "idea-1",
@@ -312,13 +308,13 @@ class LLMApiContractTests(unittest.TestCase):
             "maxAttempts": 1,
         }
 
-        with patch.object(backend, "create_level_plan", side_effect=create_level_plan):
-            post_response = self.client.post(
+        with TestClient(create_test_app(self.tmp_path, container=container)) as client:
+            post_response = client.post(
                 "/generate-level-plan",
                 json=payload,
                 headers={"X-Request-ID": "post-request"},
             )
-            get_response = self.client.get(
+            get_response = client.get(
                 "/generate-level-plan",
                 params=payload,
                 headers={"X-Request-ID": "get-request"},
@@ -342,16 +338,23 @@ class LLMApiContractTests(unittest.TestCase):
                 request_id,
             )
 
-        with patch.object(
-            backend,
-            "create_human_adjustment_clarity_check",
-            side_effect=validate_adjustment,
-        ):
-            post_response = self.client.post(
+        gateway = FakeLLMGateway()
+        planner = RecordingBlueprintPlannerService(
+            gateway,
+            clarity_check_handler=validate_adjustment,
+        )
+        container = create_test_container(
+            self.tmp_path,
+            llm_gateway=gateway,
+            blueprint_service=planner,
+        )
+
+        with TestClient(create_test_app(self.tmp_path, container=container)) as client:
+            post_response = client.post(
                 "/validate-human-adjustment",
                 json={"adjustmentText": "reduce walls"},
             )
-            get_response = self.client.get(
+            get_response = client.get(
                 "/validate-human-adjustment",
                 params={"adjustmentText": "reduce walls"},
             )
@@ -371,9 +374,10 @@ class LLMApiContractTests(unittest.TestCase):
             2,
             502,
         )
+        app = create_test_app(self.tmp_path, llm_outcomes=[error])
 
-        with patch.object(backend, "create_level_plan", side_effect=error):
-            response = self.client.post(
+        with TestClient(app) as client:
+            response = client.post(
                 "/generate-level-plan",
                 json={"ideaText": "test"},
                 headers={

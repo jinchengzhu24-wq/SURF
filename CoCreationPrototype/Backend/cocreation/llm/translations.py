@@ -4,12 +4,9 @@ from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
-import os
 import re
-import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -17,7 +14,7 @@ from openai import (
     AsyncOpenAI,
     RateLimitError,
 )
-from proposal_search import (
+from cocreation.domain.proposal_search import (
     Focus,
     MetricGoal,
     ProposalSearchExhausted,
@@ -26,7 +23,7 @@ from proposal_search import (
     search_revision_plan,
     validate_revision_plan_against_map,
 )
-from level_validation import (
+from cocreation.domain.level_validation import (
     TILE_LEGEND,
     build_map_facts,
     build_stage_snapshot,
@@ -35,57 +32,102 @@ from level_validation import (
     summarize_verified_diff,
     validate_and_solve,
 )
-from design_context import validate_design_context_patch
-from repository import map_fingerprint
-from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key,
-    CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
-from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
-from conversation_evidence import CONTEXT_VERSION
-from understanding_review import review_schema, review_targets, merge_review, review_patch_request, REVIEW_VERSION
-import proposal_options
-from proposal_understanding import (
-    turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
-    engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
-    understanding_patch_request, validate_option_plan_scope,
+from cocreation.domain.design_context import validate_design_context_patch
+from cocreation.persistence.repository import map_fingerprint
+from cocreation.reliability.reply_reliability import (
+    ComponentCheck,
+    OptionalRepairBudget,
+    parse_json_object,
+    requirement_cache_key,
+    CURRENT_REPLY_TRACE,
+    REPLY_PIPELINE_VERSION,
+    trace_reply,
+    failure_reason,
 )
-from proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
-    CURRENT_PROPOSAL_DIAGNOSTIC, ProposalValidationError)
-from design_requirements import (
-    requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
-    goal_rank, tradeoff_message, protected_change_requested,
+from cocreation.reliability.component_patches import (
+    PatchRequest,
+    PatchError,
+    Target,
+    patch_response_format,
+    dependent_components,
+    restore_operation_sources,
+    PATCH_VERSION,
+)
+from cocreation.domain.conversation_evidence import CONTEXT_VERSION
+from cocreation.domain.understanding_review import (
+    review_schema,
+    review_targets,
+    merge_review,
+    review_patch_request,
+    REVIEW_VERSION,
+)
+import cocreation.domain.proposal_options as proposal_options
+from cocreation.domain.proposal_understanding import (
+    turn_schema,
+    validate_topic,
+    designer_sources,
+    critical_review_reason,
+    topic_signature,
+    validate_plan_scope,
+    engagement_schema,
+    validate_engagement,
+    MEANING_REVIEW_VERSION,
+    understanding_patch_request,
+    validate_option_plan_scope,
+)
+from cocreation.domain.proposal_diagnostics import (
+    proposal_phase,
+    trace_proposal,
+    trace_repair,
+    reason_code,
+    safe_issues,
+    CURRENT_PROPOSAL_DIAGNOSTIC,
+    ProposalValidationError,
+)
+from cocreation.domain.design_requirements import (
+    requirement_response_schema,
+    validate_requirement_record,
+    evaluate_requirements,
+    preflight_requirements,
+    goal_rank,
+    tradeoff_message,
+    protected_change_requested,
     validate_requirement_components,
-    requirement_model_view, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, INTERPRETATION_VERSION,
+    requirement_model_view,
+    REQUIREMENT_SEMANTICS,
+    REQUIREMENT_DEFINITIONS,
+    INTERPRETATION_VERSION,
 )
-from revision_workflow import (
+from cocreation.domain.revision_workflow import (
     SemanticConstraintError,
     build_revision_workflow,
     validate_semantic_constraints,
 )
 
-from ..runtime_ref import llm_attr
 from .chat_generation import _messages_with_validation_feedback
-from .config_and_runtime import CHAT_MAX_ATTEMPTS, CHAT_TIMEOUT_SECONDS, EmptyModelResponse, LLMServiceError, PRIMARY_ATTEMPT_TIMEOUT_SECONDS, TRANSLATION_MAX_TOKENS, TranslationExecutionResult, _empty_response_diagnostics, _log_llm_event, _provider_error_fields, _request_component_patch, _request_deadline, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _unified_model_attempts, classify_exception
+from .config_and_runtime import CHAT_MAX_ATTEMPTS, CHAT_TIMEOUT_SECONDS, EmptyModelResponse, LLMServiceError, PRIMARY_ATTEMPT_TIMEOUT_SECONDS, TRANSLATION_MAX_TOKENS, TranslationExecutionResult, _current_service, _empty_response_diagnostics, _log_llm_event, _provider_error_fields, _request_completion, _request_component_patch, _request_deadline, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _unified_model_attempts, classify_exception
 from .proposal_planning import _llm_failure_class
 from .snapshot_grounding import _assert_visible_output_language, _normalize_single_level_language, _sanitize_visible_model_text, _strip_invalid_stage_grounding_sentences, _validate_map_grounding_texts
 
 
 def translate_turns(items, target_language, request_id, *, _deadline=None):
-    api_key, base_url = llm_attr('_llm_credentials')()
+    svc = _current_service()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
     target_name = 'Simplified Chinese' if target_language == 'zh-CN' else 'English'
     prompt_items = [{key: value for key, value in item.items() if key not in {'stageRows', 'entityBindings', 'guidance'}} for item in items]
     messages = [{'role': 'system', 'content': f'Translate the supplied Sokoban co-design UI text into {target_name}. Return one complete JSON object only. Preserve meaning, uncertainty, direct first/second-person voice, paragraph breaks, and question marks. Preserve the source tone and strength of judgment. Naturally rephrase existing metaphor or humor when needed, but do not add jokes, intensify conclusions, or change the relative appeal of options. Cards and status text must remain clear. When a source has proposalQuestion, return that complete object too: translate only question, note and choices[].label, retaining all IDs, letters, counts and status. Treat its question, note and two buttons as one indivisible translation group. When a source includes proposalVerifiedActions, return and translate that entire list in the same order. Do not add advice, questions, claims, or explanations. Keep null values null and keep every turnId unchanged. Translate each uiCueTexts item in the same order. Return exactly {{"translations":[{{"turnId":"...","body":"...","followUpQuestion":null,"intentHypothesis":null,"proposalOfferSummary":null,"proposalOfferRationale":null,"proposalPresentationReason":null,"uiCueTexts":[],"proposalSummary":null,"disagreement":null}}]}}. When the source item has a disagreement object, preserve its status, subject, and resolution, and translate only its userPosition, aiPosition, coreDisagreement, and nextQuestion fields. When a source item includes coordinateLinks, return coordinateLinkTexts in the same order and translate only their text values; omit coordinateLinkTexts for items without coordinateLinks.' + (" In Simplified Chinese, use natural Chinese, preserve names and minor natural English alongside the map's visible P/B/T, B1/B2, T1/T2 labels, coordinates, and Stage in Latin characters. Never expose implementation fields. Do not reject or replace names and minor natural English." if target_language == 'zh-CN' else '')}, {'role': 'user', 'content': json.dumps({'items': prompt_items}, ensure_ascii=False)}]
-    models = _unified_model_attempts(CHAT_MAX_ATTEMPTS)
-    started_at = time.monotonic()
+    models = _unified_model_attempts(svc.config.chat_max_attempts)
+    started_at = svc.clock.monotonic()
     deadline = _deadline or _request_deadline(started_at)
-    _log_llm_event('llm_request_started', requestId=request_id, task='translation', primaryModel=models[0], fallbackModel=None, timeoutSeconds=CHAT_TIMEOUT_SECONDS, responseMode='json_object')
+    _log_llm_event('llm_request_started', requestId=request_id, task='translation', primaryModel=models[0], fallbackModel=None, timeoutSeconds=svc.config.backend_request_timeout_seconds, responseMode='json_object')
     try:
-        return asyncio.run(asyncio.wait_for(llm_attr('_translate_with_model_fallback')(api_key=api_key, base_url=base_url, models=models, messages=messages, items=items, target_language=target_language, request_id=request_id, started_at=started_at, deadline=deadline), timeout=min(CHAT_TIMEOUT_SECONDS, llm_attr('_remaining_until')(deadline))))
+        return asyncio.run(asyncio.wait_for(_current_service().translate_with_model_fallback(api_key=api_key, base_url=base_url, models=models, messages=messages, items=items, target_language=target_language, request_id=request_id, started_at=started_at, deadline=deadline), timeout=min(svc.config.backend_request_timeout_seconds, svc.remaining_until(deadline))))
     except asyncio.TimeoutError as exception:
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        _log_llm_event('llm_request_completed', requestId=request_id, task='translation', outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=min(len(models), CHAT_MAX_ATTEMPTS), latencyMs=elapsed_ms, responseMode='json_object')
-        raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not complete the translation before the 120 second limit.', request_id, True, min(len(models), CHAT_MAX_ATTEMPTS), 504) from exception
+        elapsed_ms = int((svc.clock.monotonic() - started_at) * 1000)
+        _log_llm_event('llm_request_completed', requestId=request_id, task='translation', outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=min(len(models), svc.config.chat_max_attempts), latencyMs=elapsed_ms, responseMode='json_object')
+        raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not complete the translation before the 120 second limit.', request_id, True, min(len(models), svc.config.chat_max_attempts), 504) from exception
 
 def _translation_patch_request(payload, items, target_language, locked):
     raw = payload.get('translations') if isinstance(payload, dict) else []
@@ -146,6 +188,7 @@ def prompt_translation_sources(items):
     return [{key: item[key] for key in ('turnId', 'body', 'followUpQuestion', 'intentHypothesis', 'proposalOfferSummary', 'proposalOfferRationale', 'proposalSummary', 'uiCueTexts', 'disagreement', 'proposalQuestion', 'proposalVerifiedActions') if key in item} for item in items]
 
 async def _translate_with_model_fallback(*, api_key, base_url, models, messages, items, target_language, request_id, started_at, deadline=None):
+    svc = _current_service()
     last_error = None
     validation_feedback = None
     locked_translations = {}
@@ -156,27 +199,27 @@ async def _translate_with_model_fallback(*, api_key, base_url, models, messages,
     deadline = deadline or _request_deadline(started_at)
     max_attempts = len(models)
     for attempt, model in enumerate(models[:max_attempts], start=1):
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         response_fields = _empty_response_diagnostics()
         if remaining <= 0:
             raise asyncio.TimeoutError()
-        attempt_timeout = min(PRIMARY_ATTEMPT_TIMEOUT_SECONDS if attempt == 1 else remaining, remaining)
+        attempt_timeout = min(svc.config.primary_attempt_timeout_seconds if attempt == 1 else remaining, remaining)
         _log_llm_event('llm_attempt_started', requestId=request_id, task='translation', model=model, attempt=attempt, maxAttempts=max_attempts, timeoutSeconds=round(attempt_timeout, 3), responseMode='json_object')
         try:
             if pending_option_translation is not None:
                 review_messages = [{'role': 'system', 'content': 'Independently verify a translation of proposal directions. Return only {"accepted":true} or {"accepted":false}. Preserve the original option labels, every choice/tradeoff, question, uncertainty and speaker attribution. Reject new advice or claims, omitted choices, and design relocation/addition/removal of boxes, targets, player start or shell. Only water/internal walls are editable; gameplay pushes are distinct. Judge the actual translated text against the source, never map geometry.'}, {'role': 'user', 'content': json.dumps({'sources': prompt_translation_sources(items), 'translations': pending_option_translation}, ensure_ascii=False)}]
-                timeout = min(10.0, llm_attr('_remaining_until')(deadline))
+                timeout = min(10.0, svc.remaining_until(deadline))
                 if timeout <= 0:
                     raise asyncio.TimeoutError()
-                reviewed = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, model, review_messages, 120, timeout, task='translation_permission_review'), timeout=timeout)
+                reviewed = await asyncio.wait_for(_request_completion(api_key, base_url, model, review_messages, 120, timeout, task='translation_permission_review'), timeout=timeout)
                 verdict = parse_json_object(reviewed.choices[0].message.content)
                 if str(getattr(reviewed.choices[0], 'finish_reason', '')) == 'length' or set(verdict) != {'accepted'} or verdict['accepted'] is not True:
                     raise ValueError('The proposal translation could not be independently verified.')
-                return TranslationExecutionResult(translations=pending_option_translation, attempts_used=attempt, request_id=request_id, model=model, latency_ms=int((time.monotonic() - started_at) * 1000))
+                return TranslationExecutionResult(translations=pending_option_translation, attempts_used=attempt, request_id=request_id, model=model, latency_ms=int((svc.clock.monotonic() - started_at) * 1000))
             if repair_request is not None:
                 payload = await _request_component_patch(api_key, base_url, repair_request, messages, request_id, deadline, 'translation', TRANSLATION_MAX_TOKENS, attempt_timeout)
             else:
-                response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, model, _messages_with_validation_feedback(messages, validation_feedback, 'translation'), TRANSLATION_MAX_TOKENS, attempt_timeout, task='translation'), timeout=attempt_timeout)
+                response = await asyncio.wait_for(_request_completion(api_key, base_url, model, _messages_with_validation_feedback(messages, validation_feedback, 'translation'), TRANSLATION_MAX_TOKENS, attempt_timeout, task='translation'), timeout=attempt_timeout)
                 choice = response.choices[0]
                 response_fields = _response_diagnostics(response, choice)
                 if str(getattr(choice, 'finish_reason', '') or '') == 'length':
@@ -195,7 +238,7 @@ async def _translate_with_model_fallback(*, api_key, base_url, models, messages,
                     raise ValueError('The proposal translation has no remaining verification slot.')
                 pending_option_translation = translations
                 continue
-            latency_ms = int((time.monotonic() - started_at) * 1000)
+            latency_ms = int((svc.clock.monotonic() - started_at) * 1000)
             _log_llm_event('llm_request_completed', requestId=request_id, task='translation', outcome='success', model=model, attemptsUsed=attempt, latencyMs=latency_ms, responseMode='json_object', **response_fields)
             return TranslationExecutionResult(translations=translations, attempts_used=attempt, request_id=request_id, model=model, latency_ms=latency_ms)
         except asyncio.TimeoutError as exception:
@@ -210,8 +253,8 @@ async def _translate_with_model_fallback(*, api_key, base_url, models, messages,
                 repair_request, recovered = _translation_patch_request(payload, items, target_language, locked_translations)
                 if repair_request is None and (not option_translation):
                     translations = validate_translation_response(recovered, items, target_language)
-                    return TranslationExecutionResult(translations=translations, attempts_used=attempt, request_id=request_id, model=model, latency_ms=int((time.monotonic() - started_at) * 1000))
-        failure_fields = {'requestId': request_id, 'task': 'translation', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((time.monotonic() - started_at) * 1000), 'responseMode': 'json_object', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
+                    return TranslationExecutionResult(translations=translations, attempts_used=attempt, request_id=request_id, model=model, latency_ms=int((svc.clock.monotonic() - started_at) * 1000))
+        failure_fields = {'requestId': request_id, 'task': 'translation', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'json_object', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
         if failure_reason:
             failure_fields['validationReason'] = failure_reason
         _log_llm_event('llm_attempt_failed', **failure_fields)
@@ -223,7 +266,7 @@ async def _translate_with_model_fallback(*, api_key, base_url, models, messages,
             break
     if last_error is not None:
         failure_class = _llm_failure_class(last_error, validation_feedback)
-        _log_llm_event('llm_request_completed', requestId=request_id, task='translation', outcome='error', code=last_error.code, attemptsUsed=last_error.attempts_used, latencyMs=int((time.monotonic() - started_at) * 1000), responseMode='json_object', failureClass=failure_class, salvageAction='none', remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3), **_provider_error_fields(last_error))
+        _log_llm_event('llm_request_completed', requestId=request_id, task='translation', outcome='error', code=last_error.code, attemptsUsed=last_error.attempts_used, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), responseMode='json_object', failureClass=failure_class, salvageAction='none', remainingSeconds=round(svc.remaining_until(deadline), 3), **_provider_error_fields(last_error))
         raise last_error
     raise LLMServiceError('INTERNAL_ERROR', 'The translation request ended unexpectedly.', request_id, False, 0, 500)
 

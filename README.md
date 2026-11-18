@@ -296,12 +296,12 @@ Assets/Scenes/Matchmaking/Online/Questionnaire(Online2).unity
 ```powershell
 python -m unittest discover -s Backend -p "test_*.py"
 python -m unittest discover -s CoCreationPrototype/Backend/tests -p "test_*.py"
-node --test CoCreationPrototype/Frontend/tests/*.cjs
-node --check CoCreationPrototype/Frontend/app.js
+node --test Frontend/tests/*.mjs CoCreationPrototype/Frontend/tests/*.mjs Tests/WebGLBridge/*.cjs
+Get-ChildItem Frontend/js, CoCreationPrototype/Frontend/js -Recurse -Filter *.js | ForEach-Object { node --check $_.FullName }
 python CoCreationPrototype/Backend/semantic_eval.py validate
 ```
 
-测试使用固定模型输出、临时数据库及故障注入，不要求真实 API Key。若 Unity 已生成可用的工程文件，可用 `dotnet build Assembly-CSharp.csproj -v:minimal` 辅助检查 C# 编译；它不能替代 Unity Test Runner 或 WebGL 构建验证。
+后端测试分别通过 `create_app(container)` 和 `create_app(services)` 注入测试配置、时钟、临时存储及模型和同步客户端，不要求真实 API Key。两个网页的测试直接加载原生 ES Modules。若 Unity 已生成可用的工程文件，可用 `dotnet build Assembly-CSharp.csproj -v:minimal` 辅助检查 C# 编译；它不能替代 Unity Test Runner 或 WebGL 构建验证。
 
 完整手动回归应使用 Unity `2022.3.62f2c1`，覆盖：Stage 1 rows 一致性、连续创建和恢复多个 Stage、最新/历史 Stage 试玩、完成/中断指标、意图确认、最终 rows 返回 Unity，以及在线挑战和两次问卷。
 

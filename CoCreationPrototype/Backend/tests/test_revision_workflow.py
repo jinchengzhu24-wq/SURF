@@ -1,15 +1,13 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from pathlib import Path
 
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
-BACKEND_DIR = os.path.dirname(os.path.dirname(__file__))
-if BACKEND_DIR not in sys.path:
-    sys.path.insert(0, BACKEND_DIR)
-    import cocreation  # noqa: F401
-
-from revision_workflow import (  # noqa: E402
+from cocreation.domain.revision_workflow import (
     SemanticConstraintError,
     build_revision_workflow,
     compile_semantic_constraints,
@@ -41,9 +39,14 @@ def changed(*updates):
 
 class RevisionWorkflowTests(unittest.TestCase):
     def test_modes_default_to_demo_enforce_and_formal_shadow(self):
-        with patch.dict(os.environ, {}, clear=True):
+        original = dict(os.environ)
+        try:
+            os.environ.clear()
             self.assertEqual(modification_v2_mode(True), "enforce")
             self.assertEqual(modification_v2_mode(False), "shadow")
+        finally:
+            os.environ.clear()
+            os.environ.update(original)
 
     def test_redistribution_requires_source_and_destination(self):
         workflow = build_revision_workflow(

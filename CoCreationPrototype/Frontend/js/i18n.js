@@ -1,15 +1,7 @@
-"use strict";
+export const REPLY_PIPELINE_VERSION = "ordinary-harness-2026-10-13-v2";
+export const REPLY_DIAGNOSTICS_KEY = "sokobanReplyDiagnosticsV2";
 
-const REPLY_PIPELINE_VERSION = "ordinary-harness-2026-10-13-v2";
-const REPLY_DIAGNOSTICS_KEY = "sokobanReplyDiagnosticsV2";
-const replyHttpAttempts = new Map();
-let replyDiagnostics = [];
-try {
-    const saved = JSON.parse(sessionStorage.getItem(REPLY_DIAGNOSTICS_KEY) || "[]");
-    if (Array.isArray(saved)) replyDiagnostics = saved.slice(-200).map(safeReplyDiagnostic);
-} catch (_) { /* Diagnostics never block the workbench. */ }
-
-function safeReplyDiagnostic(value) {
+export function safeReplyDiagnostic(value) {
     const allowed = ["stage", "status", "code", "requestId", "messageKey", "versionId", "assistantTurnId",
         "pipelineVersion", "frontendVersion", "receivedCard", "displayCard", "renderedCard", "turnPresent", "httpStatus", "at"];
     const result = {};
@@ -21,59 +13,21 @@ function safeReplyDiagnostic(value) {
     return result;
 }
 
-function recordReplyDiagnostic(stage, status, fields = {}) {
-    try {
-        const item = safeReplyDiagnostic({ stage, status, frontendVersion: REPLY_PIPELINE_VERSION, at: Date.now(), ...fields });
-        replyDiagnostics.push(item);
-        replyDiagnostics = replyDiagnostics.slice(-200);
-        sessionStorage.setItem(REPLY_DIAGNOSTICS_KEY, JSON.stringify(replyDiagnostics));
-    } catch (_) { /* Storage and diagnostics have no effect on delivery. */ }
-}
-
-function turnReplyIdentity(turn) {
-    const known = replyHttpAttempts.get(turn.requestId)
-        || [...replyDiagnostics].reverse().find(item => item.messageKey === turn.requestId && item.requestId) || {};
-    return { requestId: known.requestId, pipelineVersion: known.pipelineVersion,
-        messageKey: turn.requestId, versionId: turn.versionId, assistantTurnId: turn.turnId };
-}
-
-const MAX_MESSAGE_LENGTH = 2000;
-const LLM_REQUEST_TIMEOUT_MS = 120000;
-const MESSAGE_REQUEST_TIMEOUT_MS = 125000;
-const PROPOSAL_DISPLAY_LIMIT_SECONDS = 120;
-const LLM_PRIMARY_WAIT_SECONDS = 70;
-const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
-const API_PREFIX = window.location.pathname.startsWith("/cocreation")
-    ? "/cocreation"
-    : "";
-const UNITY_PLAY_BRIDGE_TIMEOUT_MS = 1500;
-const DRAFT_REGENERATION_POLL_MS = 1000;
-const DRAFT_REGENERATION_API_TIMEOUT_MS = 8000;
-const DRAFT_REGENERATION_POLL_TIMEOUT_MS = 5000;
-const DRAFT_REGENERATION_PROTOCOL_VERSION = 5;
-const COMPONENT_RECOVERY_TIMEOUT_MS = 12000;
-const componentRecovery = { timer: null, busy: false, scheduled: "", dispatched: new Set(), paused: new Set() };
-const CURRENT_ORIGIN_HOST = window.location?.hostname
-    || (window.location?.origin || "").replace(/^https?:\/\//, "").split(":")[0];
-const UNITY_ORIGINS = Array.from(new Set([
-    window.location.origin,
-    "https://sokobanaidemo.top",
-    "https://www.sokobanaidemo.top",
-    ...(["localhost", "127.0.0.1"].includes(CURRENT_ORIGIN_HOST)
-        ? ["http://127.0.0.1:8000", "http://localhost:8000"]
-        : [])
-]));
-const unityHost = {
-    targetWindow: null,
-    origin: "",
-    sessionId: "",
-    protocolVersion: 0,
-    embedded: false,
-    ready: false
-};
-const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
-const DISCUSSION_FOCUS_LABEL = "LET'S DISCUSS / 一起聊聊";
-const GUIDANCE_CUE_LABELS = {
+export const MAX_MESSAGE_LENGTH = 2000;
+export const LLM_REQUEST_TIMEOUT_MS = 120000;
+export const MESSAGE_REQUEST_TIMEOUT_MS = 125000;
+export const PROPOSAL_DISPLAY_LIMIT_SECONDS = 120;
+export const LLM_PRIMARY_WAIT_SECONDS = 70;
+export const SESSION_STORAGE_KEY = "sokobanCoCreationSession";
+export const UNITY_PLAY_BRIDGE_TIMEOUT_MS = 1500;
+export const DRAFT_REGENERATION_POLL_MS = 1000;
+export const DRAFT_REGENERATION_API_TIMEOUT_MS = 8000;
+export const DRAFT_REGENERATION_POLL_TIMEOUT_MS = 5000;
+export const DRAFT_REGENERATION_PROTOCOL_VERSION = 5;
+export const COMPONENT_RECOVERY_TIMEOUT_MS = 12000;
+export const TILE_ORDER = [".", "#", "@", "p", "s", "t", " "];
+export const DISCUSSION_FOCUS_LABEL = "LET'S DISCUSS / 一起聊聊";
+export const GUIDANCE_CUE_LABELS = {
     en: {
         manual_edit: "MANUAL EDIT / 手动编辑",
         question: "LET'S DISCUSS / 一起聊聊",
@@ -92,15 +46,10 @@ const GUIDANCE_CUE_LABELS = {
     }
 };
 
-GUIDANCE_CUE_LABELS.en.clarification = "NEEDS CLARIFICATION / 闇€瑕佹緢娓呮";
-GUIDANCE_CUE_LABELS["zh-CN"].clarification = "闇€瑕佹緢娓呮";
-
-// Keep this label readable even when older generated files contain mojibake
-// fallback labels above.
 GUIDANCE_CUE_LABELS.en.clarification = "NEEDS CLARIFICATION / \u9700\u8981\u6f84\u6e05";
 GUIDANCE_CUE_LABELS["zh-CN"].clarification = "\u9700\u8981\u6f84\u6e05";
 
-const translations = {
+export const translations = {
     en: {
         title: "Sokoban Co-Creation Lab",
         subtitle: "Persistent level design workspace",
@@ -623,7 +572,7 @@ translations["zh-CN"].deadlineWarningAnnouncement = "\u5171\u521b\u65f6\u95f4\u8
 translations["zh-CN"].deadlineCriticalAnnouncement = "\u5171\u521b\u65f6\u95f4\u8fd8\u5269\u4e00\u5206\u949f\u3002";
 translations["zh-CN"].deadlineExpiredAnnouncement = "\u65f6\u95f4\u5df2\u5230，\u8bf7\u5c06\u5f53\u524d\u5730\u56fe\u63d0\u4ea4\u4e3a\u6700\u7ec8 Stage\u3002";
 
-const chineseApiErrors = {
+export const chineseApiErrors = {
     STALE_INTENT_CARD: "\u8fd9\u5f20\u503e\u5411\u5361\u5df2\u5904\u7406\u6216\u4e0d\u518d\u662f\u5f53\u524d\u53ef\u64cd\u4f5c\u5361\u7247\u3002",
     INVALID_INTENT_FEEDBACK: "\u8bf7\u8f93\u5165 4 \u5230 1200 \u4e2a\u5b57\u7b26\u7684\u6e05\u6670\u8bbe\u8ba1\u503e\u5411\u3002",
     VERSION_CONFLICT: "当前 Stage 已发生变化，请刷新后再继续。",
@@ -689,7 +638,7 @@ Object.assign(translations.en, {
     error_CANDIDATE_UNSOLVABLE: "The candidates did not pass solvability validation. The map was not changed."
 });
 
-const LEVEL_VALIDATION_ERROR_CODES = new Set([
+export const LEVEL_VALIDATION_ERROR_CODES = new Set([
     "INVALID_LEVEL",
     "INVALID_HEIGHT",
     "INVALID_WIDTH",
@@ -702,7 +651,7 @@ const LEVEL_VALIDATION_ERROR_CODES = new Set([
     "OPEN_OUTER_WALL"
 ]);
 
-const validationTileNames = {
+export const validationTileNames = {
     " ": { en: "outer void", zh: "外围空白" },
     "#": { en: "wall (#)", zh: "墙（#）" },
     ".": { en: "floor (.)", zh: "地面（.）" },
@@ -713,11 +662,11 @@ const validationTileNames = {
 };
 
 // Button labels are presentation only. Preserve the existing request wording.
-const REQUEST_COPY = Object.fromEntries(["en", "zh-CN"].map(language => [language,
+export const REQUEST_COPY = Object.fromEntries(["en", "zh-CN"].map(language => [language,
     Object.freeze(Object.fromEntries(["executeBoundProposal", "challengeRevision", "alternativeRevision", "proposalConsent"]
         .map(key => [key, translations[language][key]])))
 ]));
-const ORIGINAL_ERROR_COPY = { en: { ...translations.en }, "zh-CN": { ...chineseApiErrors } };
+export const ORIGINAL_ERROR_COPY = { en: { ...translations.en }, "zh-CN": { ...chineseApiErrors } };
 
 // Player-facing copy; never use these new labels as action request content.
 Object.assign(translations["en"], {
@@ -965,7 +914,7 @@ Object.assign(translations["zh-CN"], {
 });
 
 // Presentation-only help. These strings never enter action payloads or model context.
-const UI_ACTION_HELP = {
+export const UI_ACTION_HELP = {
     setupChineseButton: ["选择本轮界面和对话语言；开始共创后不能更换。", "Choose the language for this session. It cannot be changed after co-creation starts."],
     setupEnglishButton: ["选择本轮界面和对话语言；开始共创后不能更换。", "Choose the language for this session. It cannot be changed after co-creation starts."],
     regenerateDraftButton: ["重新准备一张初始地图。新地图准备成功前，当前预览会保留。", "Prepare another starting map. The current preview stays until the new map is ready."],
@@ -1000,7 +949,7 @@ const UI_ACTION_HELP = {
     restoreQuestion: ["把这个问题恢复到还没聊完的话题中。", "Restore this question to the open questions."],
     challengeChoice: ["回答上方讨论中的问题。这个选择本身不会创建新 Stage。", "Answer the question in the discussion above. This choice does not itself create a new Stage."],
 };
-const UI_TILE_HELP = {
+export const UI_TILE_HELP = {
     ".": ["可以走动的地面。", "Walkable floor."],
     "#": ["挡住通路的墙。", "A wall that blocks passage."],
     "@": ["不能直接走过的水域。", "Water that the player cannot walk through."],
@@ -1017,186 +966,249 @@ Object.assign(translations["zh-CN"], {
     editorHelpTitle: "编辑说明", editorHelpBody: "悬停在工具或格子上查看说明。先选工具，再点击地图格子进行替换；改好后存档，才会成为新 Stage。",
     progressHelpBody: "这里收着还没聊完的问题，以及你确认过的点子。展开“已处理”可回看之前的问题。",
 });
-const uiHelpView = { target: null, pendingTarget: null, timer: null, previousDescription: null };
+export function createI18n(ctx) {
+    const {
+        state,
+        elements,
+        window,
+        document,
+        sessionStorage,
+        setTimeout,
+        clearTimeout,
+        ResizeObserver,
+        getComputedStyle,
+        ports,
+    } = ctx;
 
-function helpLocale(pair) { return pair?.[state.language === "zh-CN" ? 0 : 1] || ""; }
+    const replyHttpAttempts = new Map();
+    let replyDiagnostics = [];
+    try {
+        const saved = JSON.parse(sessionStorage?.getItem(REPLY_DIAGNOSTICS_KEY) || "[]");
+        if (Array.isArray(saved)) replyDiagnostics = saved.slice(-200).map(safeReplyDiagnostic);
+    } catch (_) { /* Diagnostics never block the workbench. */ }
 
-function markTileHelp(node, tile, x, y, entity, kind) {
-    node.dataset.uiHelpKind = kind;
-    node.dataset.uiHelpTile = tile;
-    node.dataset.uiHelpRow = String(y + 1);
-    node.dataset.uiHelpColumn = String(x + 1);
-    if (entity) node.dataset.uiHelpEntity = entity;
-}
-
-function uiHelpFor(target) {
-    const zh = state.language === "zh-CN";
-    const kind = target.dataset.uiHelpKind;
-    if (kind === "palette" || kind === "map" || kind === "preview") {
-        const tile = target.dataset.uiHelpTile;
-        const title = [target.dataset.uiHelpEntity, t(tileName(tile))].filter(Boolean).join(" · ");
-        const coordinates = kind === "palette" ? "" : zh
-            ? `第 ${target.dataset.uiHelpRow} 行，第 ${target.dataset.uiHelpColumn} 列。`
-            : `Row ${target.dataset.uiHelpRow}, column ${target.dataset.uiHelpColumn}. `;
-        const stagePreview = kind === "preview" && target.closest?.(".stage-card");
-        const instruction = kind === "palette" ? helpLocale(["选中这个工具后，再点击地图放置。改动需要另行保存。", "Select this tool, then click the map to place it. Save your changes separately."])
-            : stagePreview ? helpLocale(["点击缩略图可查看这一版的地图、对话和试玩记录。", "Click the thumbnail to view this version’s map, conversation, and play history."])
-                + (state.dirty ? helpLocale([" 切换会放弃未保存的修改，请先存档。", " Switching discards unsaved changes, so save them first."]) : "")
-            : kind === "preview" ? helpLocale(["这是预览中的格子，只供查看。", "This is a preview tile, for viewing only."])
-            : target.disabled ? helpLocale(["这一格当前不能编辑。", "This tile cannot be edited right now."])
-            : helpLocale([`点击会用当前选中的“${t(tileName(state.selectedTile))}”工具替换这一格。`, `Click to replace this tile with the selected ${t(tileName(state.selectedTile))} tool.`]);
-        return { title, body: coordinates + helpLocale(UI_TILE_HELP[tile]) + " " + instruction,
-            status: target.disabled ? uiHelpBlockedStatus(target, kind) : "" };
+    function recordReplyDiagnostic(stage, status, fields = {}) {
+        try {
+            const item = safeReplyDiagnostic({ stage, status, frontendVersion: REPLY_PIPELINE_VERSION, at: Date.now(), ...fields });
+            replyDiagnostics.push(item);
+            replyDiagnostics = replyDiagnostics.slice(-200);
+            sessionStorage?.setItem(REPLY_DIAGNOSTICS_KEY, JSON.stringify(replyDiagnostics));
+        } catch (_) { /* Storage and diagnostics have no effect on delivery. */ }
     }
-    if (kind === "stage") return { title: `Stage ${target.dataset.uiHelpStage}`,
-        body: helpLocale(["查看这一版的地图、对话和试玩记录。", "View this version’s map, conversation, and play history."])
-            + (state.dirty ? helpLocale([" 切换会放弃未保存的修改，请先存档。", " Switching discards unsaved changes, so save them first."]) : ""),
-        status: target.disabled ? uiHelpBlockedStatus(target, kind) : "" };
-    if (target.dataset.coordinateLinkIndex != null) return { title: helpLocale(["查看路线", "View route"]),
-        body: helpLocale(["在地图上显示这段文字对应的路线，再点一次收起。", "Show the route described by this text on the map. Click again to hide it."]), status: "" };
-    const key = target.dataset.uiHelpKey || target.id || (target.dataset.i18n === "completeSession" ? "completeSession" : "");
-    const pair = UI_ACTION_HELP[key];
-    if (!pair) return null;
-    const labelKey = ({ saveStageButton: "saveStage", discardDraftButton: "discard", playButton: "playStage", restoreStageButton: "continueFromStage", finalizeButton: "finalizeStage", confirmFinalizeButton: "confirmFinal", cancelFinalizeButton: "cancel", sendButton: "send", proposalRequestButton: "requestProposal", enterSessionButton: "enterSession", regenerateDraftButton: "regenerateDraft", returnUnityButton: "returnUnity", returnCurrentButton: "returnCurrent", retryButton: "retry", chatRetryButton: "retry", setupChineseButton: "sessionLanguage", setupEnglishButton: "sessionLanguage" })[key] || key;
-    return { title: translations[state.language]?.[labelKey] || target.textContent.trim(), body: helpLocale(pair),
-        status: target.disabled || target.getAttribute("aria-disabled") === "true" ? uiHelpBlockedStatus(target, key) : "" };
-}
 
-function uiHelpBlockedStatus(target, key) {
-    if (target.dataset.uiHelpStatus) return target.dataset.uiHelpStatus;
-    if (deadlineExpired()) return t("deadlineExpiredAnnouncement");
-    if (state.unityPlayActive) return t("playActiveHint");
-    if (state.busy) return t("busyHint");
-    const hint = ({ playButton: elements.playControlHint, saveStageButton: elements.mapControlHint,
-        sendButton: elements.chatControlHint, finalizeButton: elements.finalizeControlHint })[key];
-    if (hint?.textContent) return hint.textContent;
-    if (key === "saveStageButton" && !state.dirty) return t("noChangesHint");
-    if (key === "discardDraftButton" && !state.dirty) return t("noChangesHint");
-    if (key === "sendButton" && !elements.messageInput.value.trim()) return t("emptyMessageHint");
-    if (key === "proposalRequestButton" && (selectedStageHasActiveDisagreement() || proposalFlowActive())) return t("needsDiscussion");
-    if (state.session?.status && state.session.status !== "active") return t("closedHint");
-    if (["map", "palette"].includes(key) && state.selectedVersionId !== state.session?.currentVersionId) return t("historyHint");
-    return helpLocale(["当前暂不可用。", "Currently unavailable."]);
-}
-
-function uiHelpTarget(node) {
-    if (!node?.closest) return null;
-    return node.closest("[data-ui-help-kind], [data-ui-help-key], button, [data-coordinate-link-index]");
-}
-
-function hideUiHelp() {
-    if (uiHelpView.timer != null) window.clearTimeout(uiHelpView.timer);
-    uiHelpView.timer = null;
-    uiHelpView.pendingTarget = null;
-    const node = uiHelpView.target;
-    if (node) {
-        if (uiHelpView.previousDescription == null) node.removeAttribute("aria-describedby");
-        else node.setAttribute("aria-describedby", uiHelpView.previousDescription);
+    function turnReplyIdentity(turn) {
+        const known = replyHttpAttempts.get(turn.requestId)
+            || [...replyDiagnostics].reverse().find(item => item.messageKey === turn.requestId && item.requestId) || {};
+        return { requestId: known.requestId, pipelineVersion: known.pipelineVersion,
+            messageKey: turn.requestId, versionId: turn.versionId, assistantTurnId: turn.turnId };
     }
-    uiHelpView.target = null;
-    uiHelpView.previousDescription = null;
-    const tooltip = document.getElementById("uiTooltip");
-    if (tooltip) tooltip.hidden = true;
-}
 
-function showUiHelp(target) {
-    if (!target?.isConnected) return;
-    const help = uiHelpFor(target);
-    if (!help) return;
-    hideUiHelp();
-    const tooltip = document.getElementById("uiTooltip");
-    const title = document.getElementById("uiTooltipTitle");
-    const body = document.getElementById("uiTooltipBody");
-    const status = document.getElementById("uiTooltipStatus");
-    title.textContent = help.title;
-    body.textContent = help.body;
-    status.textContent = help.status;
-    status.hidden = !help.status;
-    tooltip.hidden = false;
-    uiHelpView.target = target;
-    uiHelpView.previousDescription = target.getAttribute("aria-describedby");
-    target.setAttribute("aria-describedby", [uiHelpView.previousDescription, "uiTooltip"].filter(Boolean).join(" "));
-    const rect = target.getBoundingClientRect();
-    const box = tooltip.getBoundingClientRect();
-    const left = Math.max(8, Math.min(rect.left + rect.width / 2 - box.width / 2, window.innerWidth - box.width - 8));
-    const above = rect.top >= box.height + 16;
-    const top = above ? rect.top - box.height - 10 : Math.min(rect.bottom + 10, window.innerHeight - box.height - 8);
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${Math.max(8, top)}px`;
-    tooltip.dataset.placement = above ? "above" : "below";
-    tooltip.style.setProperty("--help-anchor-x", `${Math.max(14, Math.min(rect.left + rect.width / 2 - left, box.width - 14))}px`);
-}
+    const uiHelpView = { target: null, pendingTarget: null, timer: null, previousDescription: null };
+    const tileName = (...args) => ports.tileName(...args);
+    const deadlineExpired = (...args) => ports.deadlineExpired(...args);
+    const selectedStageHasActiveDisagreement = (...args) => ports.selectedStageHasActiveDisagreement(...args);
+    const proposalFlowActive = (...args) => ports.proposalFlowActive(...args);
+    const updateCharacterCount = (...args) => ports.updateCharacterCount(...args);
+    const renderChatRequestStatus = (...args) => ports.renderChatRequestStatus(...args);
+    const renderTranslationStatus = (...args) => ports.renderTranslationStatus(...args);
+    const renderDraftPreview = (...args) => ports.renderDraftPreview(...args);
 
-function queueUiHelp(target, immediate = false) {
-    if (target === uiHelpView.target || target === uiHelpView.pendingTarget) return;
-    hideUiHelp();
-    if (!target || !uiHelpFor(target)) return;
-    uiHelpView.pendingTarget = target;
-    uiHelpView.timer = window.setTimeout(() => showUiHelp(target), immediate ? 0 : 360);
-}
+    function t(key) { return translations[state.language][key] || translations.en[key] || key; }
+    function helpLocale(pair) { return pair?.[state.language === "zh-CN" ? 0 : 1] || ""; }
 
-function initializeUiHelp() {
-    document.addEventListener("pointerover", event => {
-        if (event.pointerType !== "touch") queueUiHelp(uiHelpTarget(event.target));
-    });
-    document.addEventListener("pointerout", event => {
-        const target = uiHelpTarget(event.target);
-        if (target && !target.contains(event.relatedTarget)) hideUiHelp();
-    });
-    document.addEventListener("focusin", event => queueUiHelp(uiHelpTarget(event.target), true));
-    document.addEventListener("focusout", hideUiHelp);
-    document.addEventListener("pointerdown", event => {
-        hideUiHelp();
-        document.querySelectorAll(".contextual-help[open]").forEach(details => {
-            if (!details.contains(event.target)) details.open = false;
-        });
-    });
-    document.addEventListener("keydown", event => {
-        if (event.key === "Escape") {
-            hideUiHelp();
-            document.querySelectorAll(".contextual-help[open]").forEach(details => details.open = false);
+    function markTileHelp(node, tile, x, y, entity, kind) {
+        node.dataset.uiHelpKind = kind;
+        node.dataset.uiHelpTile = tile;
+        node.dataset.uiHelpRow = String(y + 1);
+        node.dataset.uiHelpColumn = String(x + 1);
+        if (entity) node.dataset.uiHelpEntity = entity;
+    }
+
+    function uiHelpFor(target) {
+        const zh = state.language === "zh-CN";
+        const kind = target.dataset.uiHelpKind;
+        if (kind === "palette" || kind === "map" || kind === "preview") {
+            const tile = target.dataset.uiHelpTile;
+            const title = [target.dataset.uiHelpEntity, t(tileName(tile))].filter(Boolean).join(" · ");
+            const coordinates = kind === "palette" ? "" : zh
+                ? `第 ${target.dataset.uiHelpRow} 行，第 ${target.dataset.uiHelpColumn} 列。`
+                : `Row ${target.dataset.uiHelpRow}, column ${target.dataset.uiHelpColumn}. `;
+            const stagePreview = kind === "preview" && target.closest?.(".stage-card");
+            const instruction = kind === "palette" ? helpLocale(["选中这个工具后，再点击地图放置。改动需要另行保存。", "Select this tool, then click the map to place it. Save your changes separately."])
+                : stagePreview ? helpLocale(["点击缩略图可查看这一版的地图、对话和试玩记录。", "Click the thumbnail to view this version’s map, conversation, and play history."])
+                    + (state.dirty ? helpLocale([" 切换会放弃未保存的修改，请先存档。", " Switching discards unsaved changes, so save them first."]) : "")
+                : kind === "preview" ? helpLocale(["这是预览中的格子，只供查看。", "This is a preview tile, for viewing only."])
+                : target.disabled ? helpLocale(["这一格当前不能编辑。", "This tile cannot be edited right now."])
+                : helpLocale([`点击会用当前选中的“${t(tileName(state.selectedTile))}”工具替换这一格。`, `Click to replace this tile with the selected ${t(tileName(state.selectedTile))} tool.`]);
+            return { title, body: coordinates + helpLocale(UI_TILE_HELP[tile]) + " " + instruction,
+                status: target.disabled ? uiHelpBlockedStatus(target, kind) : "" };
         }
-    });
-    window.addEventListener("scroll", hideUiHelp, true);
-    window.addEventListener("resize", hideUiHelp);
-}
-
-
-// Keep peer workspace headers aligned, including translated titles and blocked-play hints.
-function initializeWorkspaceHeaderAlignment() {
-    if (typeof ResizeObserver === "undefined") return;
-    const headers = [document.querySelector(".chat-panel > .panel-header"), document.querySelector(".map-panel > .panel-header")];
-    if (headers.some(header => !header)) return;
-    const synchronize = () => {
-        if (headers.some(header => !header.getClientRects().length)) return;
-        const height = Math.max(72, ...headers.map(header => {
-            const style = getComputedStyle(header);
-            const edges = [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
-                .reduce((sum, value) => sum + (parseFloat(value) || 0), 0);
-            return Math.max(0, ...Array.from(header.children, child => child.getBoundingClientRect().height)) + edges;
-        }));
-        headers.forEach(header => header.style.minHeight = `${height}px`);
-    };
-    const observer = new ResizeObserver(synchronize);
-    headers.forEach(header => Array.from(header.children).forEach(child => observer.observe(child)));
-    synchronize();
-}
-
-function applyTranslations() {
-    hideUiHelp();
-    document.documentElement.lang = state.language;
-    document.querySelectorAll("[data-i18n]").forEach(element => element.textContent = t(element.dataset.i18n));
-    document.querySelectorAll("[data-i18n-placeholder]").forEach(element => element.placeholder = t(element.dataset.i18nPlaceholder));
-    document.querySelectorAll("[data-i18n-title]").forEach(element => element.title = t(element.dataset.i18nTitle));
-    document.querySelectorAll("[data-i18n-aria-label]").forEach(element => element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel)));
-    elements.setupChineseButton.setAttribute("aria-pressed", String(state.language === "zh-CN"));
-    elements.setupEnglishButton.setAttribute("aria-pressed", String(state.language === "en"));
-    updateCharacterCount();
-    renderChatRequestStatus();
-    renderTranslationStatus();
-    if (!elements.landing.hidden && state.session && !state.session.languageLocked) {
-        renderDraftPreview();
+        if (kind === "stage") return { title: `Stage ${target.dataset.uiHelpStage}`,
+            body: helpLocale(["查看这一版的地图、对话和试玩记录。", "View this version’s map, conversation, and play history."])
+                + (state.dirty ? helpLocale([" 切换会放弃未保存的修改，请先存档。", " Switching discards unsaved changes, so save them first."]) : ""),
+            status: target.disabled ? uiHelpBlockedStatus(target, kind) : "" };
+        if (target.dataset.coordinateLinkIndex != null) return { title: helpLocale(["查看路线", "View route"]),
+            body: helpLocale(["在地图上显示这段文字对应的路线，再点一次收起。", "Show the route described by this text on the map. Click again to hide it."]), status: "" };
+        const key = target.dataset.uiHelpKey || target.id || (target.dataset.i18n === "completeSession" ? "completeSession" : "");
+        const pair = UI_ACTION_HELP[key];
+        if (!pair) return null;
+        const labelKey = ({ saveStageButton: "saveStage", discardDraftButton: "discard", playButton: "playStage", restoreStageButton: "continueFromStage", finalizeButton: "finalizeStage", confirmFinalizeButton: "confirmFinal", cancelFinalizeButton: "cancel", sendButton: "send", proposalRequestButton: "requestProposal", enterSessionButton: "enterSession", regenerateDraftButton: "regenerateDraft", returnUnityButton: "returnUnity", returnCurrentButton: "returnCurrent", retryButton: "retry", chatRetryButton: "retry", setupChineseButton: "sessionLanguage", setupEnglishButton: "sessionLanguage" })[key] || key;
+        return { title: translations[state.language]?.[labelKey] || target.textContent.trim(), body: helpLocale(pair),
+            status: target.disabled || target.getAttribute("aria-disabled") === "true" ? uiHelpBlockedStatus(target, key) : "" };
     }
-}
 
-function t(key) { return translations[state.language][key] || translations.en[key] || key; }
+    function uiHelpBlockedStatus(target, key) {
+        if (target.dataset.uiHelpStatus) return target.dataset.uiHelpStatus;
+        if (deadlineExpired()) return t("deadlineExpiredAnnouncement");
+        if (state.unityPlayActive) return t("playActiveHint");
+        if (state.busy) return t("busyHint");
+        const hint = ({ playButton: elements.playControlHint, saveStageButton: elements.mapControlHint,
+            sendButton: elements.chatControlHint, finalizeButton: elements.finalizeControlHint })[key];
+        if (hint?.textContent) return hint.textContent;
+        if (key === "saveStageButton" && !state.dirty) return t("noChangesHint");
+        if (key === "discardDraftButton" && !state.dirty) return t("noChangesHint");
+        if (key === "sendButton" && !elements.messageInput.value.trim()) return t("emptyMessageHint");
+        if (key === "proposalRequestButton" && (selectedStageHasActiveDisagreement() || proposalFlowActive())) return t("needsDiscussion");
+        if (state.session?.status && state.session.status !== "active") return t("closedHint");
+        if (["map", "palette"].includes(key) && state.selectedVersionId !== state.session?.currentVersionId) return t("historyHint");
+        return helpLocale(["当前暂不可用。", "Currently unavailable."]);
+    }
+
+    function uiHelpTarget(node) {
+        if (!node?.closest) return null;
+        return node.closest("[data-ui-help-kind], [data-ui-help-key], button, [data-coordinate-link-index]");
+    }
+
+    function hideUiHelp() {
+        if (uiHelpView.timer != null) clearTimeout(uiHelpView.timer);
+        uiHelpView.timer = null;
+        uiHelpView.pendingTarget = null;
+        const node = uiHelpView.target;
+        if (node) {
+            if (uiHelpView.previousDescription == null) node.removeAttribute("aria-describedby");
+            else node.setAttribute("aria-describedby", uiHelpView.previousDescription);
+        }
+        uiHelpView.target = null;
+        uiHelpView.previousDescription = null;
+        const tooltip = document.getElementById("uiTooltip");
+        if (tooltip) tooltip.hidden = true;
+    }
+
+    function showUiHelp(target) {
+        if (!target?.isConnected) return;
+        const help = uiHelpFor(target);
+        if (!help) return;
+        hideUiHelp();
+        const tooltip = document.getElementById("uiTooltip");
+        const title = document.getElementById("uiTooltipTitle");
+        const body = document.getElementById("uiTooltipBody");
+        const status = document.getElementById("uiTooltipStatus");
+        title.textContent = help.title;
+        body.textContent = help.body;
+        status.textContent = help.status;
+        status.hidden = !help.status;
+        tooltip.hidden = false;
+        uiHelpView.target = target;
+        uiHelpView.previousDescription = target.getAttribute("aria-describedby");
+        target.setAttribute("aria-describedby", [uiHelpView.previousDescription, "uiTooltip"].filter(Boolean).join(" "));
+        const rect = target.getBoundingClientRect();
+        const box = tooltip.getBoundingClientRect();
+        const left = Math.max(8, Math.min(rect.left + rect.width / 2 - box.width / 2, window.innerWidth - box.width - 8));
+        const above = rect.top >= box.height + 16;
+        const top = above ? rect.top - box.height - 10 : Math.min(rect.bottom + 10, window.innerHeight - box.height - 8);
+        tooltip.style.left = `${left}px`;
+        tooltip.style.top = `${Math.max(8, top)}px`;
+        tooltip.dataset.placement = above ? "above" : "below";
+        tooltip.style.setProperty("--help-anchor-x", `${Math.max(14, Math.min(rect.left + rect.width / 2 - left, box.width - 14))}px`);
+    }
+
+    function queueUiHelp(target, immediate = false) {
+        if (target === uiHelpView.target || target === uiHelpView.pendingTarget) return;
+        hideUiHelp();
+        if (!target || !uiHelpFor(target)) return;
+        uiHelpView.pendingTarget = target;
+        uiHelpView.timer = setTimeout(() => showUiHelp(target), immediate ? 0 : 360);
+    }
+
+    function initializeUiHelp() {
+        document.addEventListener("pointerover", event => {
+            if (event.pointerType !== "touch") queueUiHelp(uiHelpTarget(event.target));
+        });
+        document.addEventListener("pointerout", event => {
+            const target = uiHelpTarget(event.target);
+            if (target && !target.contains(event.relatedTarget)) hideUiHelp();
+        });
+        document.addEventListener("focusin", event => queueUiHelp(uiHelpTarget(event.target), true));
+        document.addEventListener("focusout", hideUiHelp);
+        document.addEventListener("pointerdown", event => {
+            hideUiHelp();
+            document.querySelectorAll(".contextual-help[open]").forEach(details => {
+                if (!details.contains(event.target)) details.open = false;
+            });
+        });
+        document.addEventListener("keydown", event => {
+            if (event.key === "Escape") {
+                hideUiHelp();
+                document.querySelectorAll(".contextual-help[open]").forEach(details => details.open = false);
+            }
+        });
+        window.addEventListener("scroll", hideUiHelp, true);
+        window.addEventListener("resize", hideUiHelp);
+    }
+
+    // Keep peer workspace headers aligned, including translated titles and blocked-play hints.
+    function initializeWorkspaceHeaderAlignment() {
+        if (!ResizeObserver) return;
+        const headers = [document.querySelector?.(".chat-panel > .panel-header"), document.querySelector?.(".map-panel > .panel-header")];
+        if (headers.some(header => !header)) return;
+        const synchronize = () => {
+            if (headers.some(header => !header.getClientRects().length)) return;
+            const height = Math.max(72, ...headers.map(header => {
+                const style = getComputedStyle(header);
+                const edges = [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
+                    .reduce((sum, value) => sum + (parseFloat(value) || 0), 0);
+                return Math.max(0, ...Array.from(header.children, child => child.getBoundingClientRect().height)) + edges;
+            }));
+            headers.forEach(header => header.style.minHeight = `${height}px`);
+        };
+        const observer = new ResizeObserver(synchronize);
+        headers.forEach(header => Array.from(header.children).forEach(child => observer.observe(child)));
+        synchronize();
+    }
+
+    function applyTranslations() {
+        hideUiHelp();
+        if (document.documentElement) document.documentElement.lang = state.language;
+        document.querySelectorAll("[data-i18n]").forEach(element => element.textContent = t(element.dataset.i18n));
+        document.querySelectorAll("[data-i18n-placeholder]").forEach(element => element.placeholder = t(element.dataset.i18nPlaceholder));
+        document.querySelectorAll("[data-i18n-title]").forEach(element => element.title = t(element.dataset.i18nTitle));
+        document.querySelectorAll("[data-i18n-aria-label]").forEach(element => element.setAttribute("aria-label", t(element.dataset.i18nAriaLabel)));
+        elements.setupChineseButton.setAttribute("aria-pressed", String(state.language === "zh-CN"));
+        elements.setupEnglishButton.setAttribute("aria-pressed", String(state.language === "en"));
+        updateCharacterCount();
+        renderChatRequestStatus();
+        renderTranslationStatus();
+        if (!elements.landing.hidden && state.session && !state.session.languageLocked) {
+            renderDraftPreview();
+        }
+    }
+
+    return {
+        replyHttpAttempts,
+        getReplyDiagnostics: () => replyDiagnostics,
+        recordReplyDiagnostic,
+        turnReplyIdentity,
+        helpLocale,
+        markTileHelp,
+        uiHelpFor,
+        uiHelpBlockedStatus,
+        uiHelpTarget,
+        hideUiHelp,
+        showUiHelp,
+        queueUiHelp,
+        initializeUiHelp,
+        initializeWorkspaceHeaderAlignment,
+        applyTranslations,
+        t,
+    };
+}

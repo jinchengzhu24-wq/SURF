@@ -4,12 +4,9 @@ from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
-import os
 import re
-import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -17,7 +14,7 @@ from openai import (
     AsyncOpenAI,
     RateLimitError,
 )
-from proposal_search import (
+from cocreation.domain.proposal_search import (
     Focus,
     MetricGoal,
     ProposalSearchExhausted,
@@ -26,7 +23,7 @@ from proposal_search import (
     search_revision_plan,
     validate_revision_plan_against_map,
 )
-from level_validation import (
+from cocreation.domain.level_validation import (
     TILE_LEGEND,
     build_map_facts,
     build_stage_snapshot,
@@ -35,35 +32,79 @@ from level_validation import (
     summarize_verified_diff,
     validate_and_solve,
 )
-from design_context import validate_design_context_patch
-from repository import map_fingerprint
-from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key,
-    CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
-from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
-from conversation_evidence import CONTEXT_VERSION
-from understanding_review import review_schema, review_targets, merge_review, review_patch_request, REVIEW_VERSION
-import proposal_options
-from proposal_understanding import (
-    turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
-    engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
-    understanding_patch_request, validate_option_plan_scope,
+from cocreation.domain.design_context import validate_design_context_patch
+from cocreation.persistence.repository import map_fingerprint
+from cocreation.reliability.reply_reliability import (
+    ComponentCheck,
+    OptionalRepairBudget,
+    parse_json_object,
+    requirement_cache_key,
+    CURRENT_REPLY_TRACE,
+    REPLY_PIPELINE_VERSION,
+    trace_reply,
+    failure_reason,
 )
-from proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
-    CURRENT_PROPOSAL_DIAGNOSTIC, ProposalValidationError)
-from design_requirements import (
-    requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
-    goal_rank, tradeoff_message, protected_change_requested,
+from cocreation.reliability.component_patches import (
+    PatchRequest,
+    PatchError,
+    Target,
+    patch_response_format,
+    dependent_components,
+    restore_operation_sources,
+    PATCH_VERSION,
+)
+from cocreation.domain.conversation_evidence import CONTEXT_VERSION
+from cocreation.domain.understanding_review import (
+    review_schema,
+    review_targets,
+    merge_review,
+    review_patch_request,
+    REVIEW_VERSION,
+)
+import cocreation.domain.proposal_options as proposal_options
+from cocreation.domain.proposal_understanding import (
+    turn_schema,
+    validate_topic,
+    designer_sources,
+    critical_review_reason,
+    topic_signature,
+    validate_plan_scope,
+    engagement_schema,
+    validate_engagement,
+    MEANING_REVIEW_VERSION,
+    understanding_patch_request,
+    validate_option_plan_scope,
+)
+from cocreation.domain.proposal_diagnostics import (
+    proposal_phase,
+    trace_proposal,
+    trace_repair,
+    reason_code,
+    safe_issues,
+    CURRENT_PROPOSAL_DIAGNOSTIC,
+    ProposalValidationError,
+)
+from cocreation.domain.design_requirements import (
+    requirement_response_schema,
+    validate_requirement_record,
+    evaluate_requirements,
+    preflight_requirements,
+    goal_rank,
+    tradeoff_message,
+    protected_change_requested,
     validate_requirement_components,
-    requirement_model_view, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, INTERPRETATION_VERSION,
+    requirement_model_view,
+    REQUIREMENT_SEMANTICS,
+    REQUIREMENT_DEFINITIONS,
+    INTERPRETATION_VERSION,
 )
-from revision_workflow import (
+from cocreation.domain.revision_workflow import (
     SemanticConstraintError,
     build_revision_workflow,
     validate_semantic_constraints,
 )
 
-from ..runtime_ref import llm_attr
-from .config_and_runtime import BACKEND_REQUEST_TIMEOUT_SECONDS, EmptyModelResponse, KIMI_MODEL, LLMExecutionResult, LLMServiceError, MIN_RETRY_BUDGET_SECONDS, PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_CANDIDATE_LIMIT, PROPOSAL_GENERATION_ATTEMPTS, PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_OPERATION_LIMIT, PROPOSAL_OPERATION_MAX_TOKENS, PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, PROPOSAL_PLAN_MAX_TOKENS, PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, PROPOSAL_REQUEST_TIMEOUT_SECONDS, PROPOSAL_SEARCH_DEADLINE_SECONDS, REVISION_CONTRACT_SCHEMA_VERSION, REVISION_MAX_CHANGED_CELLS, REVISION_MIN_CHANGED_CELLS, _content_block_sentences, _empty_response_diagnostics, _first_declarative_sentence, _is_human_edit_stage_opening, _is_stage_one, _latest_role_content, _latest_user_confirms_revision, _latest_user_explicitly_agrees, _latest_user_explicitly_rejects, _log_llm_event, _provider_error_fields, _request_component_patch, _request_deadline, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _unified_model_attempts, _user_states_first_person_view, _visible_reply_style, classify_exception
+from .config_and_runtime import BACKEND_REQUEST_TIMEOUT_SECONDS, EmptyModelResponse, KIMI_MODEL, LLMExecutionResult, LLMServiceError, MIN_RETRY_BUDGET_SECONDS, PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_CANDIDATE_LIMIT, PROPOSAL_GENERATION_ATTEMPTS, PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_OPERATION_LIMIT, PROPOSAL_OPERATION_MAX_TOKENS, PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, PROPOSAL_PLAN_MAX_TOKENS, PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS, PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, PROPOSAL_REQUEST_TIMEOUT_SECONDS, PROPOSAL_SEARCH_DEADLINE_SECONDS, REVISION_CONTRACT_SCHEMA_VERSION, REVISION_MAX_CHANGED_CELLS, REVISION_MIN_CHANGED_CELLS, _active_clock, _content_block_sentences, _current_service, _empty_response_diagnostics, _first_declarative_sentence, _is_human_edit_stage_opening, _is_stage_one, _latest_role_content, _latest_user_confirms_revision, _latest_user_explicitly_agrees, _latest_user_explicitly_rejects, _log_llm_event, _provider_error_fields, _request_completion, _request_component_patch, _request_deadline, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _solve_stage, _unified_model_attempts, _user_states_first_person_view, _visible_reply_style, classify_exception
 from .intent_and_review import _contextual_manual_edit, _cue_repeats_current_evidence, _deterministic_play_warning, _natural_intent_candidate, _replace_echoed_intent_hypothesis, _user_explicitly_off_topic, _user_explicitly_states_design_stance, _user_reframes_difficulty_judgment, _warning_has_strong_evidence
 from .snapshot_grounding import _assert_visible_output_language, _guidance_reuses_visible_sentence, _guidance_text_matches, _llm_solver_evidence, _map_grounding_contract, _proposal_card_is_meta_language, _proposal_clarification_route_evidence, _remove_proposal_text_from_body, _sanitize_visible_model_text, _stage_snapshot_for_prompt, _strip_invalid_grounding_sentences
 
@@ -150,7 +191,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
         candidate = cached.get('record') or {}
         try:
             restored = validate_requirement_record(requirement_model_view(candidate), turns, snapshot)
-            from binary_discovery import require_choice_coverage
+            from cocreation.domain.binary_discovery import require_choice_coverage
             require_choice_coverage(restored, stage_context.get('binaryChoices') or [])
         except (ValueError, TypeError, KeyError):
             continue
@@ -176,8 +217,9 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
     verdict = {}
     payload = {}
     attempt = 0
+    svc = _current_service()
     for attempt in range(1, 3):
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         if remaining < 1:
             break
         phase = 'compilation'
@@ -190,7 +232,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 payload = {key: patched[key] for key in ('requirements', 'automaticBindings', 'exactTransitions')}
                 payload['requirements'] += patched.get('additionalRequirements', [])
             else:
-                response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, 3200, min(20.0, remaining), task='revision_requirements'), timeout=min(20.0, remaining)))
+                response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 3200, min(20.0, remaining), task='revision_requirements'), timeout=min(20.0, remaining)))
                 if getattr(response.choices[0], 'finish_reason', None) == 'length':
                     raise ValueError('Requirements JSON was truncated.')
                 payload = parse_json_object(response.choices[0].message.content)
@@ -206,7 +248,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 locked = dict(raw_by_id)
                 raise
             try:
-                from binary_discovery import require_choice_coverage
+                from cocreation.domain.binary_discovery import require_choice_coverage
                 require_choice_coverage(record, stage_context.get('binaryChoices') or [])
             except ValueError:
                 locked = dict(raw_by_id)
@@ -215,7 +257,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
                 raise ValueError('A local repair changed a locked, previously valid requirement.')
             review_messages = [{'role': 'system', 'content': REQUIREMENT_SEMANTICS + ' ' + "Independently verify this interpretation against exact designer evidence. Return JSON accepted and structured issues. Each issue has requirementIds, kind (evidence/meaning/coverage/conflict), exact evidenceSpans from designerTurns, and repairInstruction. Use IDs from the interpretation; coverage issues can have an empty ID list. Identify all related conflicting requirements. Reject misread attributes, directions, units, invented priorities, invented exact transitions, missing prohibitions, or missing still-active goals. Entity mentions are not entity changes. Questions provide linguistic context only; a selected preference never confirms assistant-invented numerical/coordinate/mandatory dependency requirements. Do not judge feasibility here. Only explicit prohibitions/fixed values are invariants; clear directional wishes are negotiable goals. Automatic bindings can fill an unspecified goal but cannot replace an explicit binding. A short answer binds to its supplied question. Reject 'early' interpreted as a fixed push count."}, {'role': 'user', 'content': json.dumps({'designerTurns': turns, 'selectedInterfaceChoices': stage_context.get('binaryChoices') or [], 'answeredQuestions': discovery.get('answers') or [], 'interpretation': record, 'proposalUnderstanding': discovery.get('understanding') or {}}, ensure_ascii=False)}]
             review_messages[1]['content'] = json.dumps({**json.loads(review_messages[1]['content']), 'inheritedVerifiedRequirements': inherited, 'requirementDefinitions': REQUIREMENT_DEFINITIONS, 'inheritanceRule': 'Reject loss or reinterpretation of unchanged verified goals. Allow replacement only for exact later designer correction; qualitative appearance is not a numeric distribution claim.'}, ensure_ascii=False)
-            remaining = llm_attr('_remaining_until')(deadline)
+            remaining = svc.remaining_until(deadline)
             if remaining <= 0:
                 raise asyncio.TimeoutError()
             phase = 'review'
@@ -224,7 +266,7 @@ def _review_proposal_requirements(api_key, base_url, stage_context, request_id, 
             if review_repair_request is not None:
                 verdict = asyncio.run(_request_component_patch(api_key, base_url, review_repair_request, review_messages, request_id, deadline, 'revision_requirement_review', max_tokens=1600, timeout_limit=min(12.0, remaining)))
             else:
-                reviewed = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, review_messages, 1600, min(12.0, remaining), task='revision_requirement_review'), timeout=min(12.0, remaining)))
+                reviewed = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, review_messages, 1600, min(12.0, remaining), task='revision_requirement_review'), timeout=min(12.0, remaining)))
                 if getattr(reviewed.choices[0], 'finish_reason', None) == 'length':
                     raise ValueError('Independent requirements review JSON was truncated.')
                 verdict = parse_json_object(reviewed.choices[0].message.content)
@@ -328,15 +370,17 @@ def _requirements_patch_request(payload, locked, turns, snapshot):
     return PatchRequest('requirements', candidate, targets, {'snapshot': snapshot, **{f"user:{turn['id']}": turn for turn in turns}})
 
 def _generate_verified_proposal_failure_analysis(api_key, base_url, context, rows, language, request_id, deadline, failure):
+    svc = _current_service()
     verified = (context.get('_reliabilityState') or {}).get('verifiedRequirements')
     recoverable = {'PROPOSAL_SEARCH_EXHAUSTED', 'DETERMINISTIC_SEARCH_EXHAUSTED', 'CANDIDATE_UNSOLVABLE', 'CANDIDATE_DUPLICATED', 'SEMANTIC_CONSTRAINT_NOT_MET', 'SOFT_OBJECTIVE_EVIDENCE_MISSING', 'HARD_OBJECTIVE_NOT_MET'}
-    if not verified or failure.code not in recoverable or llm_attr('_remaining_until')(deadline) < 3.0:
+    if not verified or failure.code not in recoverable or svc.remaining_until(deadline) < 3.0:
         return None
     prompt = [{'role': 'system', 'content': 'Return JSON with body only, in ' + ('Simplified Chinese' if language == 'zh-CN' else 'English') + '. Explain this unsuccessful proposal search directly: the verified result, its key reason and a useful next step, without recapping the entire planning process. Respond to the verified designer requirements, explain only the supplied verified failure, and suggest a conceptual next direction without inventing a cause or new hard requirement. No candidate passed: do not claim a proposal exists, a goal was achieved or any map was changed. Do not expose internal fields, add cards, or promise an unverified mechanism. The supplied StageSnapshot is the only current map authority. ' + _visible_reply_style()}, {'role': 'user', 'content': json.dumps({'designerTurns': context.get('requirementUserTurns') or [], 'requirements': verified['record'], 'failureCode': failure.code, 'verifiedFailure': failure.safe_message, 'currentStageSnapshot': context.get('stageSnapshot')}, ensure_ascii=False)}]
-    started = time.monotonic()
+    started = svc.clock.monotonic()
+    model = svc.config.model
     try:
-        timeout = min(12.0, llm_attr('_remaining_until')(deadline))
-        response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, prompt, 700, timeout, task='proposal_failure_analysis'), timeout=timeout))
+        timeout = min(12.0, svc.remaining_until(deadline))
+        response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model, prompt, 700, timeout, task='proposal_failure_analysis'), timeout=timeout))
         choice = response.choices[0]
         if getattr(choice, 'finish_reason', None) == 'length':
             raise ValueError('Failure analysis was truncated.')
@@ -350,7 +394,7 @@ def _generate_verified_proposal_failure_analysis(api_key, base_url, context, row
         _assert_visible_output_language(language, body)
         marker = {**(context.get('proposalDiscovery') or {}), 'status': 'revision_needed', 'failureCode': failure.code, 'topicId': (context.get('proposalDiscovery') or {}).get('topicId'), 'clarificationQuestionCount': (context.get('proposalDiscovery') or {}).get('clarificationQuestionCount', 0)}
         _log_llm_event('llm_request_completed', requestId=request_id, task='proposal_failure_analysis', outcome='success', modelGenerationSucceeded=True, reliableBodyDelivered=True, fullQualityPassed=False, verifiedProposal=False, failureCode=failure.code)
-        return LLMExecutionResult(body, failure.attempts_used, request_id, model=KIMI_MODEL, latency_ms=int((time.monotonic() - started) * 1000), guidance={'move': 'offer_perspective', 'proposalOffer': None, 'intentHypothesis': None, 'disagreement': None, 'followUpQuestion': None, 'uiCues': [], 'coordinateLinks': [], 'proposalDiscovery': marker}, proposal_diagnostics={'verifiedFailureAnalysis': True, 'proposalStatus': 'revision_needed', 'failureCode': failure.code, 'reliableBodyDelivered': True, 'fullQualityPassed': False})
+        return LLMExecutionResult(body, failure.attempts_used, request_id, model=model, latency_ms=int((svc.clock.monotonic() - started) * 1000), guidance={'move': 'offer_perspective', 'proposalOffer': None, 'intentHypothesis': None, 'disagreement': None, 'followUpQuestion': None, 'uiCues': [], 'coordinateLinks': [], 'proposalDiscovery': marker}, proposal_diagnostics={'verifiedFailureAnalysis': True, 'proposalStatus': 'revision_needed', 'failureCode': failure.code, 'reliableBodyDelivered': True, 'fullQualityPassed': False})
     except (LLMServiceError, ValueError, TypeError, KeyError, asyncio.TimeoutError):
         _log_llm_event('llm_component_rejected', requestId=request_id, task='proposal_failure_analysis', component='body', failureCode='RECOVERY_FAILED')
         return None
@@ -432,8 +476,9 @@ def _apply_objective_policy_to_plan(plan, policy, preserved_components=None):
 def _proposal_route_features(rows, validation, entity_bindings=None, *, deadline=None):
     metrics = validation.as_dict() if hasattr(validation, 'as_dict') else dict(validation or {})
     evidence = _proposal_clarification_route_evidence(rows, metrics, {'entityBindings': entity_bindings or {}})
+    clock = _active_clock()
     try:
-        minimum = minimum_pushes(rows, deadline=deadline) if deadline is not None else minimum_pushes(rows)
+        minimum = minimum_pushes(rows, deadline=deadline, clock=clock) if deadline is not None else minimum_pushes(rows, clock=clock)
     except TimeoutError:
         raise
     except Exception:
@@ -506,7 +551,7 @@ def _objective_validating_proposal_validator(proposal_validator, base_rows, base
 
     @proposal_phase('structure_and_solve', 'candidate')
     def validate(candidate_rows):
-        validation = proposal_validator(candidate_rows) if proposal_validator is not None else validate_and_solve(candidate_rows)
+        validation = proposal_validator(candidate_rows) if proposal_validator is not None else _solve_stage(candidate_rows)
         features = _proposal_route_features(candidate_rows, validation, entity_bindings, **{'deadline': deadline} if deadline is not None else {})
         evidence = _objective_mechanism_evidence(base_rows, candidate_rows, baseline_features, features, policy)
         evidence_by_fingerprint[map_fingerprint(candidate_rows)] = evidence
@@ -520,7 +565,7 @@ def _objective_validating_proposal_validator(proposal_validator, base_rows, base
             if any((not x['passed'] for x in outcomes)):
                 raise SemanticConstraintError(outcomes)
         if (revision_workflow or {}).get('binaryPromises'):
-            from binary_discovery import check_promises
+            from cocreation.domain.binary_discovery import check_promises
             check_promises(base_rows, candidate_rows, revision_workflow['binaryPromises'], baseline_validation, validation)
         if policy.get('requiresMechanismEvidence') and (not evidence['passed']):
             raise ObjectiveEvidenceError(evidence)
@@ -532,7 +577,7 @@ def _objective_validating_proposal_validator(proposal_validator, base_rows, base
 @proposal_phase('requirement_postcondition', 'requirements')
 def validate_frozen_requirements(base_rows, candidate_rows, workflow, baseline_validation, candidate_validation, entity_bindings, *, deadline=None):
     if (workflow or {}).get('binaryPromises'):
-        from binary_discovery import check_promises, BinaryError
+        from cocreation.domain.binary_discovery import check_promises, BinaryError
         try:
             check_promises(base_rows, candidate_rows, workflow['binaryPromises'], baseline_validation, candidate_validation)
         except BinaryError as error:
@@ -548,13 +593,14 @@ def validate_frozen_requirements(base_rows, candidate_rows, workflow, baseline_v
     return outcomes
 
 def _attempt_semantic_revision_replan(*, api_key, base_url, model, original_messages, rows, request_id, language, stage_context, objective_policy, objective_validator, baseline_metrics, movement_requirement, preserved_components, started_at, deadline, first_failure, evidence_by_fingerprint, excluded_map_fingerprints=None):
-    if llm_attr('_remaining_until')(deadline) < MIN_RETRY_BUDGET_SECONDS:
+    svc = _current_service()
+    if svc.remaining_until(deadline) < svc.config.min_retry_budget_seconds:
         raise first_failure
     messages = [dict(item) for item in original_messages]
     failure_summary = json.dumps((getattr(first_failure, 'proposal_diagnostics', {}) or {}).get('rejectionRecords', [])[-3:], ensure_ascii=False, separators=(',', ':'))[:1000]
     messages[0]['content'] += '\n\nThe previous semantic plan produced no admissible candidate. Create one to three materially different local strategies while preserving the authorized direction, explicit anchors, prohibitions, and objectivePolicy. Change focus, effect, or allowed operators as needed. Do not repeat the previous concrete treatment and keep requiredTransitions empty unless the supplied execution brief itself froze exact transitions. Previous safe rejection summary: ' + failure_summary
-    replan_deadline = min(deadline, time.monotonic() + PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS)
-    plan, plan_attempts, _ = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=[model], messages=messages, request_id=request_id, started_at=started_at, deadline=replan_deadline), timeout=max(0.001, llm_attr('_remaining_until')(replan_deadline))))
+    replan_deadline = min(deadline, svc.clock.monotonic() + svc.config.proposal_plan_retry_timeout_seconds)
+    plan, plan_attempts, _ = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=[model], messages=messages, request_id=request_id, started_at=started_at, deadline=replan_deadline), timeout=max(0.001, svc.remaining_until(replan_deadline))))
     plan = _apply_objective_policy_to_plan(plan, objective_policy, preserved_components)
     plan, replan_preflight_failures = _preflight_revision_strategies(plan, rows, stage_context, stage_context.get('authorizedRevisionBrief') or '')
     if not plan.strategies:
@@ -566,7 +612,7 @@ def _attempt_semantic_revision_replan(*, api_key, base_url, model, original_mess
         workflow['softObjectives'] = [{'kind': 'visual_preference' if objective_policy.get('softObjectiveClass') == 'visual_composition' else 'route_mechanism', 'statement': str(objective_policy.get('softObjectiveClass'))[:600]}]
     operation_messages = _build_map_operation_messages(contract, rows, language, stage_context, baseline_metrics)
     try:
-        result = asyncio.run(asyncio.wait_for(_generate_map_operation_candidates(api_key=api_key, base_url=base_url, models=[model], messages=operation_messages, base_rows=rows, request_id=request_id, language=language, proposal_validator=objective_validator, revision_contract=contract, baseline_metrics=baseline_metrics, started_at=started_at, deadline=deadline, candidate_evidence=evidence_by_fingerprint, excluded_map_fingerprints=excluded_map_fingerprints), timeout=max(0.001, llm_attr('_remaining_until')(deadline))))
+        result = asyncio.run(asyncio.wait_for(_generate_map_operation_candidates(api_key=api_key, base_url=base_url, models=[model], messages=operation_messages, base_rows=rows, request_id=request_id, language=language, proposal_validator=objective_validator, revision_contract=contract, baseline_metrics=baseline_metrics, started_at=started_at, deadline=deadline, candidate_evidence=evidence_by_fingerprint, excluded_map_fingerprints=excluded_map_fingerprints), timeout=max(0.001, svc.remaining_until(deadline))))
     except LLMServiceError as operation_error:
         if operation_error.code != 'PROPOSAL_SEARCH_EXHAUSTED':
             raise
@@ -577,14 +623,15 @@ def _attempt_semantic_revision_replan(*, api_key, base_url, model, original_mess
 
 @proposal_phase('proposal_generation', 'proposal')
 def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, rows, request_id, language, proposal_validator, stage_context, baseline_metrics=None, deadline=None):
-    started_at = time.monotonic()
+    svc = _current_service()
+    started_at = svc.clock.monotonic()
     deadline = deadline or _request_deadline(started_at)
     stage_context = dict(stage_context or {})
-    plan_phase_seconds = PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS
-    plan_primary_seconds = PROPOSAL_PLAN_PRIMARY_TIMEOUT_SECONDS
+    plan_phase_seconds = svc.config.proposal_llm_phase_timeout_seconds
+    plan_primary_seconds = svc.config.proposal_plan_primary_timeout_seconds
     if stage_context.get('requirementPolicyVersion') == 1:
         plan_phase_seconds, plan_primary_seconds = (50.0, 35.0)
-        stage_context['requirementRecord'] = llm_attr('_review_proposal_requirements')(api_key, base_url, stage_context, request_id, deadline)
+        stage_context['requirementRecord'] = _current_service().review_proposal_requirements(api_key, base_url, stage_context, request_id, deadline)
         issues = preflight_requirements(rows, stage_context['requirementRecord'])
         if issues:
             error = LLMServiceError('REQUIREMENT_PERMISSION_CONFLICT', 'Verified requirements conflict with fixed editing permissions.', request_id, False, 0, 422)
@@ -597,25 +644,25 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
     baseline_metrics = dict(baseline_metrics or {})
     if 'minimumPushes' not in baseline_metrics:
         try:
-            baseline_metrics['minimumPushes'] = minimum_pushes(rows)
+            baseline_metrics['minimumPushes'] = minimum_pushes(rows, clock=svc.clock)
         except Exception:
             baseline_metrics['minimumPushes'] = None
-    models = _unified_model_attempts(PROPOSAL_GENERATION_ATTEMPTS)
+    models = _unified_model_attempts(svc.config.proposal_generation_attempts)
     movement_requirement = _authorized_movement_requirement(conversation)
     preserved_components = _authorized_preserved_components(conversation, stage_context)
     messages = _build_revision_plan_messages(conversation, rows, language, stage_context, movement_requirement, preserved_components)
-    _log_llm_event('llm_request_started', requestId=request_id, task='revision_plan', primaryModel=models[0], fallbackModel=None, timeoutSeconds=BACKEND_REQUEST_TIMEOUT_SECONDS if stage_context.get('requirementPolicyVersion') == 1 else PROPOSAL_REQUEST_TIMEOUT_SECONDS, internalDeadlineSeconds=round(llm_attr('_remaining_until')(deadline), 3), revisionPlanPhaseSeconds=min(PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS, llm_attr('_remaining_until')(deadline)), revisionPlanTokenLimit=PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, operationAttemptSeconds=PROPOSAL_OPERATION_ATTEMPT_TIMEOUT_SECONDS, deterministicSearchSeconds=PROPOSAL_SEARCH_DEADLINE_SECONDS, responseMode='revision_plan')
+    _log_llm_event('llm_request_started', requestId=request_id, task='revision_plan', primaryModel=models[0], fallbackModel=None, timeoutSeconds=svc.config.backend_request_timeout_seconds if stage_context.get('requirementPolicyVersion') == 1 else svc.config.proposal_request_timeout_seconds, internalDeadlineSeconds=round(svc.remaining_until(deadline), 3), revisionPlanPhaseSeconds=min(svc.config.proposal_llm_phase_timeout_seconds, svc.remaining_until(deadline)), revisionPlanTokenLimit=PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, operationAttemptSeconds=svc.config.proposal_operation_attempt_timeout_seconds, deterministicSearchSeconds=svc.config.proposal_search_deadline_seconds, responseMode='revision_plan')
     try:
-        plan, attempts_used, model = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, time.monotonic() + plan_phase_seconds), first_attempt_timeout=plan_primary_seconds), timeout=min(plan_phase_seconds, llm_attr('_remaining_until')(deadline))))
+        plan, attempts_used, model = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, svc.clock.monotonic() + plan_phase_seconds), first_attempt_timeout=plan_primary_seconds), timeout=min(plan_phase_seconds, svc.remaining_until(deadline))))
     except asyncio.TimeoutError as exception:
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        _log_llm_event('llm_request_completed', requestId=request_id, task='revision_plan', outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=PROPOSAL_GENERATION_ATTEMPTS, latencyMs=elapsed_ms, responseMode='revision_plan')
-        raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not compile the revision plan before the proposal time limit.', request_id, True, PROPOSAL_GENERATION_ATTEMPTS, 504) from exception
+        elapsed_ms = int((svc.clock.monotonic() - started_at) * 1000)
+        _log_llm_event('llm_request_completed', requestId=request_id, task='revision_plan', outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=svc.config.proposal_generation_attempts, latencyMs=elapsed_ms, responseMode='revision_plan')
+        raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not compile the revision plan before the proposal time limit.', request_id, True, svc.config.proposal_generation_attempts, 504) from exception
     except LLMServiceError as exception:
         if exception.code in {'MODEL_RESPONSE_INVALID', 'MODEL_EMPTY_RESPONSE', 'MODEL_LOW_QUALITY_RESPONSE'}:
             exception.code = 'REVISION_PLAN_INVALID'
             exception.safe_message = 'Kimi did not return a complete valid RevisionPlan after the bounded repair attempt.'
-        _log_llm_event('llm_request_completed', requestId=request_id, task='revision_plan', outcome='error', code=exception.code, attemptsUsed=exception.attempts_used, latencyMs=int((time.monotonic() - started_at) * 1000), responseMode='revision_plan', **_provider_error_fields(exception))
+        _log_llm_event('llm_request_completed', requestId=request_id, task='revision_plan', outcome='error', code=exception.code, attemptsUsed=exception.attempts_used, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), responseMode='revision_plan', **_provider_error_fields(exception))
         raise
     plan = _bind_execution_brief_to_plan(plan, stage_context.get('authorizedExecutionBrief') if stage_context else None)
     plan = _apply_objective_policy_to_plan(plan, objective_policy, preserved_components)
@@ -623,7 +670,7 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
     if not plan.strategies:
         correction_feedback = json.dumps(contract_preflight_failures[-3:], ensure_ascii=False, separators=(',', ':'))[:1600]
         try:
-            corrected_plan, correction_attempts, _ = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, time.monotonic() + PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS), max_attempts=1, initial_validation_feedback=correction_feedback, first_attempt_timeout=PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS), timeout=max(0.001, min(PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, llm_attr('_remaining_until')(deadline)))))
+            corrected_plan, correction_attempts, _ = asyncio.run(asyncio.wait_for(_compile_revision_plan(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, started_at=started_at, deadline=min(deadline, svc.clock.monotonic() + svc.config.proposal_plan_retry_timeout_seconds), max_attempts=1, initial_validation_feedback=correction_feedback, first_attempt_timeout=svc.config.proposal_plan_retry_timeout_seconds), timeout=max(0.001, min(svc.config.proposal_plan_retry_timeout_seconds, svc.remaining_until(deadline)))))
             attempts_used += correction_attempts
             corrected_plan = _apply_objective_policy_to_plan(corrected_plan, objective_policy, preserved_components)
             plan, corrected_failures = _preflight_revision_strategies(corrected_plan, rows, stage_context, stage_context.get('authorizedRevisionBrief') if stage_context else '')
@@ -658,7 +705,7 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
         error.proposal_diagnostics = {'category': 'coordinate_or_contract_conflict'}
         raise error from exception
     evidence_by_fingerprint = {}
-    baseline_validation = validate_and_solve(rows, **{'deadline': deadline} if stage_context.get('binaryDiscovery') else {})
+    baseline_validation = _solve_stage(rows, **{'deadline': deadline} if stage_context.get('binaryDiscovery') else {})
     objective_validator = _objective_validating_proposal_validator(proposal_validator, rows, baseline_validation, objective_policy, stage_context.get('entityBindings'), evidence_by_fingerprint, revision_contract.get('revisionWorkflow'), deadline=deadline if stage_context.get('binaryDiscovery') else None)
     exact_strategies = [item for item in revision_contract.get('strategies') or [] if item.get('requiredTransitions')]
     can_execute_exactly = exact_strategies and len(exact_strategies) == len(revision_contract.get('strategies') or []) and (exact_strategies[0].get('effect') not in {'relocate_start', 'relocate_box', 'relocate_target'} or bool(stage_context.get('entityBindings')))
@@ -683,7 +730,7 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
                 raise error
             evidence = evidence_by_fingerprint.get(exact_fingerprint)
             return replace(exact, attempts_used=attempts_used, revision_plan=plan.as_dict(), revision_contract=revision_contract, proposal_diagnostics={**(exact.proposal_diagnostics or {}), 'selectedStrategyIndex': 1, 'planAttempts': attempts_used, 'modifierAttempts': 0, 'objectivePolicy': objective_policy, 'mechanismEvidence': evidence})
-    remaining_seconds = llm_attr('_remaining_until')(deadline)
+    remaining_seconds = svc.remaining_until(deadline)
     if remaining_seconds <= 0:
         error = LLMServiceError('GLOBAL_PROPOSAL_TIMEOUT', 'The complete proposal pipeline exhausted its global time budget.', request_id, True, attempts_used, 504)
         error.revision_plan = plan.as_dict()
@@ -693,8 +740,8 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
     try:
         operation_result = asyncio.run(asyncio.wait_for(_generate_map_operation_candidates(api_key=api_key, base_url=base_url, models=models, messages=operation_messages, base_rows=rows, request_id=request_id, language=language, proposal_validator=objective_validator, revision_contract=revision_contract, baseline_metrics=baseline_metrics, started_at=started_at, deadline=deadline, candidate_evidence=evidence_by_fingerprint, excluded_map_fingerprints=excluded_candidate_fingerprints), timeout=remaining_seconds))
     except asyncio.TimeoutError as exception:
-        exhausted_global_budget = llm_attr('_remaining_until')(deadline) <= 0.05
-        error = LLMServiceError('GLOBAL_PROPOSAL_TIMEOUT' if exhausted_global_budget else 'UPSTREAM_TIMEOUT', 'The complete proposal pipeline exhausted its global time budget.' if exhausted_global_budget else 'Kimi did not create executable revision operations before the operation-phase time limit.', request_id, True, attempts_used + PROPOSAL_GENERATION_ATTEMPTS, 504)
+        exhausted_global_budget = svc.remaining_until(deadline) <= 0.05
+        error = LLMServiceError('GLOBAL_PROPOSAL_TIMEOUT' if exhausted_global_budget else 'UPSTREAM_TIMEOUT', 'The complete proposal pipeline exhausted its global time budget.' if exhausted_global_budget else 'Kimi did not create executable revision operations before the operation-phase time limit.', request_id, True, attempts_used + svc.config.proposal_generation_attempts, 504)
         error.revision_plan = plan.as_dict()
         error.revision_contract = revision_contract
         raise error from exception
@@ -750,7 +797,7 @@ def _generate_revision_search_proposal_sync(*, api_key, base_url, conversation, 
         fallback_diagnostics.setdefault('replanSucceeded', bool(semantic_contract and (not replan_failure)))
         fallback_diagnostics['modifierFailure'] = (getattr(exception, 'proposal_diagnostics', {}) or {}).get('modifierFailure')
         operation_result = replace(fallback, attempts_used=exception.attempts_used, revision_plan=plan.as_dict(), revision_contract=revision_contract, proposal_diagnostics=fallback_diagnostics)
-    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    elapsed_ms = int((svc.clock.monotonic() - started_at) * 1000)
     guidance = dict(operation_result.guidance)
     latest_user = _latest_role_content(conversation, 'user')
     intent_hypothesis = _replace_echoed_intent_hypothesis(_natural_intent_candidate(latest_user, language, _latest_user_explicitly_agrees(latest_user), difficulty_reframe=_user_reframes_difficulty_judgment(conversation)), latest_user, language) if _user_states_first_person_view(latest_user) else None
@@ -977,16 +1024,17 @@ async def _compile_revision_plan(*, api_key, base_url, models, messages, request
     first_failure_code = None
     repair_request = None
     raw_plan = {}
-    deadline = deadline or min(_request_deadline(started_at), started_at + PROPOSAL_LLM_PHASE_TIMEOUT_SECONDS)
+    svc = _current_service()
+    deadline = deadline or min(_request_deadline(started_at), started_at + svc.config.proposal_llm_phase_timeout_seconds)
     for attempt in range(1, max_attempts + 1):
         if attempt == 1 or first_failure_code == 'MODEL_RESPONSE_INVALID':
             model = models[0]
         else:
             model = models[1] if len(models) > 1 else models[0]
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         if remaining <= 0:
             raise asyncio.TimeoutError()
-        attempt_timeout = min(first_attempt_timeout if attempt == 1 else PROPOSAL_PLAN_RETRY_TIMEOUT_SECONDS, remaining)
+        attempt_timeout = min(first_attempt_timeout if attempt == 1 else svc.config.proposal_plan_retry_timeout_seconds, remaining)
         response_fields = _empty_response_diagnostics()
         _log_llm_event('llm_attempt_started', requestId=request_id, task='map_proposal', model=model, attempt=attempt, maxAttempts=max_attempts, timeoutSeconds=round(attempt_timeout, 3), completionTokenLimit=PROPOSAL_PLAN_MAX_COMPLETION_TOKENS, deadlineRemainingSeconds=round(remaining, 3), responseMode='revision_plan')
         try:
@@ -994,7 +1042,7 @@ async def _compile_revision_plan(*, api_key, base_url, models, messages, request
                 raw_plan = await _request_component_patch(api_key, base_url, repair_request, _revision_plan_messages_with_feedback(messages, validation_feedback), request_id, deadline, 'revision_plan', PROPOSAL_PLAN_MAX_TOKENS, attempt_timeout)
                 plan = parse_revision_plan(raw_plan)
                 return (plan, attempt, model)
-            response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, model, _revision_plan_messages_with_feedback(messages, validation_feedback), PROPOSAL_PLAN_MAX_TOKENS, attempt_timeout, task='revision_plan'), timeout=attempt_timeout)
+            response = await asyncio.wait_for(_request_completion(api_key, base_url, model, _revision_plan_messages_with_feedback(messages, validation_feedback), PROPOSAL_PLAN_MAX_TOKENS, attempt_timeout, task='revision_plan'), timeout=attempt_timeout)
             choice = response.choices[0]
             response_fields = _response_diagnostics(response, choice)
             if str(getattr(choice, 'finish_reason', '') or '') == 'length':
@@ -1021,7 +1069,7 @@ async def _compile_revision_plan(*, api_key, base_url, models, messages, request
                     break
         if attempt == 1:
             first_failure_code = last_error.code
-        fields = {'requestId': request_id, 'task': 'map_proposal', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((time.monotonic() - started_at) * 1000), 'responseMode': 'revision_plan', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
+        fields = {'requestId': request_id, 'task': 'map_proposal', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'revision_plan', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
         if failure_reason:
             fields['validationReason'] = failure_reason
         trace_proposal('plan', 'plan', 'revalidation_failed' if repair_request is not None else 'rejected', reason_code(last_error), attempt=attempt, maximumAttempts=max_attempts)
@@ -1030,7 +1078,7 @@ async def _compile_revision_plan(*, api_key, base_url, models, messages, request
         _log_llm_event('llm_attempt_failed', **fields)
         attempt_failures.append({'attempt': attempt, 'code': last_error.code, 'failureClass': fields['failureClass'], 'finishReason': response_fields.get('finishReason'), 'completionTokens': response_fields.get('completionTokens'), 'validationReason': failure_reason})
         last_error.details = {'task': 'revision_plan', 'failureStage': 'revision_plan', 'component': 'plan', 'maximumAttempts': max_attempts, **getattr(last_error, 'details', {})}
-        last_error.proposal_diagnostics = {'failureStage': 'revision_plan', 'attemptFailures': attempt_failures, 'remainingSeconds': round(llm_attr('_remaining_until')(deadline), 3)}
+        last_error.proposal_diagnostics = {'failureStage': 'revision_plan', 'attemptFailures': attempt_failures, 'remainingSeconds': round(svc.remaining_until(deadline), 3)}
         if not last_error.retryable:
             raise last_error
         if attempt == 1 and last_error.code not in {'MODEL_RESPONSE_INVALID', 'MODEL_EMPTY_RESPONSE', 'UPSTREAM_TIMEOUT', 'UPSTREAM_CONNECTION_ERROR'}:
@@ -1157,15 +1205,16 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
     rejection_records = []
     excluded_map_fingerprints = set(excluded_map_fingerprints or ())
     deadline = deadline or _request_deadline(started_at)
-    attempted_models = list(models[:PROPOSAL_GENERATION_ATTEMPTS])
-    while len(attempted_models) < PROPOSAL_GENERATION_ATTEMPTS:
+    svc = _current_service()
+    attempted_models = list(models[:svc.config.proposal_generation_attempts])
+    while len(attempted_models) < svc.config.proposal_generation_attempts:
         attempted_models.append(models[0])
     for attempt, configured_model in enumerate(attempted_models, start=1):
         model = models[0] if validation_feedback is not None else configured_model
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         if remaining <= 0:
             raise asyncio.TimeoutError()
-        attempt_timeout = min(PROPOSAL_ATTEMPT_TIMEOUT_SECONDS, remaining)
+        attempt_timeout = min(svc.config.proposal_operation_attempt_timeout_seconds, remaining)
         response_fields = _empty_response_diagnostics()
         _log_llm_event('llm_attempt_started', requestId=request_id, task='map_proposal', model=model, attempt=attempt, maxAttempts=len(attempted_models), timeoutSeconds=round(attempt_timeout, 3), responseMode='operation_candidates')
         try:
@@ -1174,7 +1223,7 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
                 payload = await _request_component_patch(api_key, base_url, repair_request, attempt_messages, request_id, deadline, 'operation_candidates', PROPOSAL_OPERATION_MAX_TOKENS, attempt_timeout)
                 content = json.dumps(payload, ensure_ascii=False)
             else:
-                response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, model, attempt_messages, PROPOSAL_OPERATION_MAX_TOKENS, attempt_timeout, task='operation_candidates'), timeout=attempt_timeout)
+                response = await asyncio.wait_for(_request_completion(api_key, base_url, model, attempt_messages, PROPOSAL_OPERATION_MAX_TOKENS, attempt_timeout, task='operation_candidates'), timeout=attempt_timeout)
                 choice = response.choices[0]
                 if str(getattr(choice, 'finish_reason', '') or '') == 'length':
                     raise ValueError('The operation-candidate output reached its token limit.')
@@ -1186,7 +1235,7 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
             if isinstance(payload, dict) and isinstance(payload.get('candidates'), list):
                 attempted_candidate_count = max(attempted_candidate_count, len(payload['candidates']))
             selected_rows, selected_index, candidate_count, selected_operations = _select_operation_candidate(payload, base_rows, revision_contract, proposal_validator, baseline_metrics, rejected_operation_signatures, rejected_map_signatures, rejection_records, candidate_evidence, excluded_map_fingerprints)
-            latency_ms = int((time.monotonic() - started_at) * 1000)
+            latency_ms = int((svc.clock.monotonic() - started_at) * 1000)
             changed_cell_count = _changed_cell_count(base_rows, selected_rows)
             result = LLMExecutionResult(assistant_message='我整理了一份等待你审查的地图提案。' if language == 'zh-CN' else 'I prepared a map proposal for your review.', attempts_used=attempt, request_id=request_id, proposed_rows=list(selected_rows), modification_summary='', model=model, latency_ms=latency_ms, guidance={'move': 'deliver_revision', 'intentHypothesis': None, 'intentConfidence': None, 'followUpQuestion': None, 'proposalOffer': None, 'uiCues': []}, revision_contract=revision_contract, revision_operations=selected_operations, proposal_diagnostics={'candidateCount': candidate_count, 'validCandidates': 1, 'constructedCandidates': candidate_count, 'selectedCandidateIndex': selected_index, 'selectedStrategyIndex': _candidate_strategy_index(payload, selected_index), 'changedCellCount': changed_cell_count})
             _log_llm_event('llm_request_completed', requestId=request_id, task='map_proposal', outcome='success', model=model, attemptsUsed=attempt, latencyMs=latency_ms, responseMode='operation_candidates', candidateCount=candidate_count, selectedCandidateIndex=selected_index, changedCellCount=changed_cell_count, **response_fields)
@@ -1201,7 +1250,7 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
                 last_error.safe_message = failure_reason[:1200]
                 validation_feedback = json.dumps(rejection_records[-3:] or [{'reason': failure_reason[:500]}], ensure_ascii=False, separators=(',', ':'))[:1200]
                 repair_request = _operation_patch_request(payload, revision_contract, base_rows)
-        failure_fields = {'requestId': request_id, 'task': 'map_proposal', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((time.monotonic() - started_at) * 1000), 'responseMode': 'operation_candidates', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
+        failure_fields = {'requestId': request_id, 'task': 'map_proposal', 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'operation_candidates', 'failureClass': _llm_failure_class(last_error, failure_reason), **response_fields, **_provider_error_fields(last_error)}
         if failure_reason:
             failure_fields['validationReason'] = failure_reason[:1200]
         trace_proposal('operation_candidates', 'operations', 'rejected', reason_code(last_error), attempt=attempt, maximumAttempts=len(attempted_models))
@@ -1212,7 +1261,7 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
             raise last_error
         if attempt < len(attempted_models) and (not _retry_budget_available(deadline, request_id=request_id, task='map_proposal', attempt=attempt, max_attempts=len(attempted_models), response_mode='operation_candidates', fallback_reason=last_error.code)):
             break
-    _log_llm_event('llm_request_completed', requestId=request_id, task='map_proposal', outcome='error', code=last_error.code, attemptsUsed=last_error.attempts_used, latencyMs=int((time.monotonic() - started_at) * 1000), responseMode='operation_candidates', **_provider_error_fields(last_error))
+    _log_llm_event('llm_request_completed', requestId=request_id, task='map_proposal', outcome='error', code=last_error.code, attemptsUsed=last_error.attempts_used, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), responseMode='operation_candidates', **_provider_error_fields(last_error))
     if last_error.code == 'MODEL_RESPONSE_INVALID':
         error = LLMServiceError('PROPOSAL_SEARCH_EXHAUSTED', 'The level revision assistant produced no executable candidate satisfying the revision contract.', request_id, False, last_error.attempts_used, 502)
         error.proposal_diagnostics = {'modifierFailure': str(last_error.safe_message)[:1200], 'attempts': last_error.attempts_used, 'constructedCandidates': attempted_candidate_count, 'validCandidates': 0, 'candidateCount': attempted_candidate_count, 'rejectionRecords': rejection_records[-12:], 'uniqueRejectedOperationSets': len(rejected_operation_signatures), 'uniqueRejectedMaps': len(rejected_map_signatures)}
@@ -1223,7 +1272,8 @@ async def _generate_map_operation_candidates(*, api_key, base_url, models, messa
 @proposal_phase('search', 'deterministic_search')
 def _deterministic_revision_fallback(*, rows, plan, revision_contract, request_id, language, proposal_validator, baseline_metrics, movement_requirement, preserved_components, started_at, entity_bindings=None, deadline=None, excluded_map_fingerprints=None):
     """Use the bounded local search when the modifier model cannot supply a valid candidate."""
-    result = search_revision_plan(rows, plan, proposal_validator or validate_and_solve, baseline_metrics=baseline_metrics, deadline=min(deadline or _request_deadline(started_at), time.monotonic() + PROPOSAL_SEARCH_DEADLINE_SECONDS), movement_requirement=movement_requirement, preserved_components=preserved_components, entity_bindings=entity_bindings, excluded_map_fingerprints=excluded_map_fingerprints)
+    svc = _current_service()
+    result = search_revision_plan(rows, plan, proposal_validator or _solve_stage, baseline_metrics=baseline_metrics, deadline=min(deadline or _request_deadline(started_at), svc.clock.monotonic() + svc.config.proposal_search_deadline_seconds), movement_requirement=movement_requirement, preserved_components=preserved_components, entity_bindings=entity_bindings, excluded_map_fingerprints=excluded_map_fingerprints, clock=svc.clock)
     strategy_index = result.strategy_index
     selected_contract = (revision_contract.get('strategies') or [])[result.strategy_index - 1]
     operations = _operations_from_diff(rows, result.rows, include_from=bool(selected_contract.get('requiredTransitions')))
@@ -1308,7 +1358,7 @@ def _select_operation_candidate(payload, base_rows, revision_contract, proposal_
             if proposal_validator is not None:
                 validation = proposal_validator(rows)
             else:
-                validation = validate_and_solve(rows)
+                validation = _solve_stage(rows)
             _validate_metric_goals(strategy.get('metricGoals') or [], baseline_metrics or {}, validation)
             evidence = candidate_evidence.get(full_map_hash) or {}
             positive_deltas = [value for value in (evidence.get('metricDeltas') or {}).values() if isinstance(value, int) and value > 0]
@@ -1525,7 +1575,7 @@ def _validate_metric_goals(goals, baseline_metrics, validation):
         metric = goal.get('metric')
         if metric == 'minimumPushes':
             try:
-                values[metric] = minimum_pushes(validation.rows)
+                values[metric] = minimum_pushes(validation.rows, clock=_active_clock())
             except Exception:
                 values[metric] = None
         before = baseline_metrics.get(metric)
@@ -1934,12 +1984,13 @@ async def _review_proposal_clarification(api_key, base_url, body, question, stag
     option_mode = specification.get('optionPolicyVersion') == proposal_options.VERSION
     option_set = stage_context.get('_clarificationOptions') or {}
     messages = [{'role': 'system', 'content': "Review the actual body and question, not just annotations. Reject design options/questions moving boxes, targets, player start or shell: only water/internal walls may change. Gameplay pushes are distinct. Return bodyIssues as IDs from bodySentences for sentences that must be dropped, and questionIssue as null or a repair instruction. Never quote, paraphrase or invent a sentence ID. Check speaker attribution: the designer owns their wish; AI can express its own tentative suggestion/opinion, but cannot claim the designer's goal as its own. Reject invented user locks, numeric requirements, fixed solution lengths, edit scope, and guaranteed effects. Witness counts may be observations, never new preservation constraints. Only exact designer evidence establishes requirements. Water/internal walls are editable; player/boxes/targets/outer shell are fixed. Spatial references do not authorize entity edits. Visual goals need not increase transport or change gameplay. Preserve reliable sentences and personal opinions; do not rewrite them, reject a response for length/style, or require a stock opening. Questions may offer valid optional choices. Do not put assistant suggestions into designer memory." + (" Also return optionIssues, an array of exact option IDs that are unsafe, inconsistent with the designer's expressed goals/prohibitions, unsupported by the snapshot, duplicate directions, or claim guaranteed effects. Empty means all options verified. Check every option's actual text, not just its components. questionIssue must also reject a question that fails to discriminate the compared options, introduces an unrelated choice, repeats an answered tradeoff, or attributes an inferred option to the designer. With zero/one options the question must be empty. Do not require extra choices or questions merely to fill a quota." if option_mode else '')}, {'role': 'user', 'content': json.dumps({'body': body, 'bodySentences': [{'id': f'sentence-{i}', 'text': sentence} for i, sentence in enumerate(_content_block_sentences(body), 1)], 'question': question, 'designerTurns': discovery.get('userTurns') or [], 'answeredQuestions': discovery.get('answers') or [], 'understanding': discovery.get('understanding') or {}, 'questionIntent': specification.get('questionIntent'), 'currentStageSnapshot': stage_context.get('stageSnapshot') or {}, 'verifiedRouteWitness': specification.get('routeEvidence') or {}, **({'optionSet': option_set, 'optionQuestion': stage_context.get('_clarificationOptionQuestion')} if option_mode else {})}, ensure_ascii=False)}]
-    review_deadline = min(deadline, time.monotonic() + 10.0)
-    remaining = min(6.0, llm_attr('_remaining_until')(review_deadline))
+    svc = _current_service()
+    review_deadline = min(deadline, svc.clock.monotonic() + 10.0)
+    remaining = min(6.0, svc.remaining_until(review_deadline))
     if remaining <= 0:
         raise asyncio.TimeoutError()
     try:
-        response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, 1000, remaining, task='proposal_clarification_review', response_format_override=proposal_options.review_response_format() if option_mode else None), timeout=remaining)
+        response = await asyncio.wait_for(_request_completion(api_key, base_url, svc.config.model, messages, 1000, remaining, task='proposal_clarification_review', response_format_override=proposal_options.review_response_format() if option_mode else None), timeout=remaining)
     except asyncio.TimeoutError:
         response = None
     sentences = _content_block_sentences(body)

@@ -7,15 +7,17 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import llm_client as llm
-import app
-from component_patches import PatchRequest, PatchError, Target, dependent_components, restore_operation_sources
-from level_validation import build_stage_snapshot
-from proposal_understanding import critical_review_reason
+from tests.fakes import RecordedAsyncCall, llm_scope
+from cocreation.llm import facade as llm
+from cocreation.api import config_models
+from cocreation.api import context_and_discovery
+from cocreation.api import proposal_and_challenge
+from cocreation.reliability.component_patches import PatchRequest, PatchError, Target, dependent_components, restore_operation_sources
+from cocreation.domain.level_validation import build_stage_snapshot
+from cocreation.domain.proposal_understanding import critical_review_reason
 from patch_fixtures import patch_fixture
 
 ROWS = ["############", "#..........#", "#..p.......#", "#..s..t....#", "#..........#",
@@ -132,7 +134,8 @@ class ComponentIntegrationTests(unittest.TestCase):
             self.assertIsNone(spec["frozenCandidate"]["questionIssue"])
             self.assertLessEqual(args[5], 4.0)
             return completion(patch_fixture(spec, {"bodyIssues": []}))
-        with patch.object(llm, "_request_completion", AsyncMock(side_effect=request)) as call:
+        call = RecordedAsyncCall(side_effect=request)
+        with llm_scope(completion_requester=call):
             result = asyncio.run(llm._review_proposal_clarification("offline", "offline", body, "先关注哪个区域？",
                 {"stageSnapshot": self.snapshot}, "r", time.monotonic() + 116))
         self.assertEqual(result, (body, ""))
@@ -145,7 +148,7 @@ class ComponentIntegrationTests(unittest.TestCase):
             if kwargs["task"] == "proposal_clarification_review":
                 return completion({"bodyIssues": ["fabricated-quote"], "questionIssue": None})
             return completion(patch_fixture(args[3][-1]["content"], {"bodyIssues": ["sentence-1"]}))
-        with patch.object(llm, "_request_completion", AsyncMock(side_effect=request)):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             result = asyncio.run(llm._review_proposal_clarification("offline", "offline", body, "先关注什么？", {}, "r", time.monotonic() + 116))
         self.assertEqual(result, ("我们可以讨论视觉布局。", ""))
 
@@ -154,13 +157,15 @@ class ComponentIntegrationTests(unittest.TestCase):
             if kwargs["task"] == "proposal_clarification_review":
                 raise asyncio.TimeoutError()
             return completion(patch_fixture(args[3][-1]["content"], {"bodyIssues": [], "questionIssue": None}))
-        with patch.object(llm, "_request_completion", AsyncMock(side_effect=request)) as call:
+        call = RecordedAsyncCall(side_effect=request)
+        with llm_scope(completion_requester=call):
             result = asyncio.run(llm._review_proposal_clarification("offline", "offline", "Reliable body.", "Which area?", {}, "r", time.monotonic() + 116))
         self.assertEqual(result[0], "Reliable body.")
         self.assertEqual(call.await_count, 2)
 
     def test_review_exhaustion_reports_component_and_does_not_forge_valid_prose(self):
-        with patch.object(llm, "_request_completion", AsyncMock(return_value=completion({}))) as call:
+        call = RecordedAsyncCall(return_value=completion({}))
+        with llm_scope(completion_requester=call):
             with self.assertRaises(llm.LLMServiceError) as caught:
                 asyncio.run(llm._review_proposal_clarification("offline", "offline", "A candidate body.", "Which area?", {}, "r", time.monotonic() + 116))
         self.assertEqual(call.await_count, 2)
@@ -180,7 +185,7 @@ class ComponentIntegrationTests(unittest.TestCase):
             self.assertEqual(spec["targets"], ["strategy-1.operators"])
             self.assertEqual(spec["frozenCandidate"]["strategies"][1], good)
             return completion(patch_fixture(spec, {"strategies": [good, good]}))
-        with patch.object(llm, "_request_completion", AsyncMock(side_effect=request)):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             plan, attempts, _ = asyncio.run(llm._compile_revision_plan(api_key="offline", base_url="offline", models=[llm.KIMI_MODEL] * 2,
                 messages=[{"role": "user", "content": "Adjust water only"}], request_id="r", started_at=time.monotonic(), deadline=time.monotonic() + 116))
         self.assertEqual(attempts, 2)
@@ -197,10 +202,10 @@ class ComponentIntegrationTests(unittest.TestCase):
 
     def test_error_counter_is_actual_when_known_and_unknown_is_not_guessed(self):
         error = llm.LLMServiceError("MODEL_RESPONSE_INVALID", "Invalid component", "r", True, 2, 502)
-        self.assertNotIn("maximumAttempts", app._llm_failure_details(error))
+        self.assertNotIn("maximumAttempts", config_models._llm_failure_details(error))
         error.details = {"maximumAttempts": 2, "component": "clarification_review", "failureStage": "clarification_review"}
-        self.assertEqual(app._llm_failure_details(error)["maximumAttempts"], 2)
-        self.assertEqual(app._llm_failure_details(error)["failureStage"], "clarification_review")
+        self.assertEqual(config_models._llm_failure_details(error)["maximumAttempts"], 2)
+        self.assertEqual(config_models._llm_failure_details(error)["failureStage"], "clarification_review")
 
     def test_requirement_review_repairs_only_missing_metadata_and_reuses_compilation(self):
         from test_reply_reliability import requirement, TURNS
@@ -216,7 +221,7 @@ class ComponentIntegrationTests(unittest.TestCase):
             self.assertEqual(spec["targets"], ["issues"])
             self.assertTrue(spec["frozenCandidate"]["accepted"])
             return completion(patch_fixture(spec, {"issues": []}))
-        with patch.object(llm, "_request_completion", AsyncMock(side_effect=request)):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             result = llm._review_proposal_requirements("offline", "offline",
                 {"stageSnapshot": self.snapshot, "requirementUserTurns": TURNS}, "r", time.monotonic() + 116)
         self.assertEqual(len(result["requirements"]), 1)
@@ -234,11 +239,11 @@ class ComponentIntegrationTests(unittest.TestCase):
             self.assertEqual(spec["targets"], ["candidate-1.operation-1.to"])
             return completion(patch_fixture(spec, {"candidates": [{"operations": [{"to": "@"}]}]}))
         before = copy.deepcopy(ROWS)
-        with patch.object(llm, "_request_completion", AsyncMock(side_effect=request)):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             result = asyncio.run(llm._generate_map_operation_candidates(api_key="offline", base_url="offline", models=[llm.KIMI_MODEL] * 2,
                 messages=[{"role": "user", "content": "Use the verified water contract"}], base_rows=ROWS, request_id="r", language="en",
                 proposal_validator=None, revision_contract=contract, baseline_metrics={}, started_at=time.monotonic(), deadline=time.monotonic() + 116))
-        frozen = app._materialize_verified_automatic_offer(result, ROWS, "en", {"aiEditableTilesOnly": True})
+        frozen = proposal_and_challenge._materialize_verified_automatic_offer(result, ROWS, "en", {"aiEditableTilesOnly": True})
         offer = frozen.guidance["proposalOffer"]
         self.assertTrue(offer["summary"])
         self.assertTrue(offer["rationale"])
@@ -260,7 +265,7 @@ class ComponentIntegrationTests(unittest.TestCase):
             self.assertEqual(spec["frozenCandidate"]["translations"][0]["body"], initial["translations"][0]["body"])
             self.assertNotIn("stageRows", spec["evidence"]["turn:t1"])
             return completion(patch_fixture(spec, translated))
-        with patch.object(llm, "_request_completion", AsyncMock(side_effect=request)):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=request)):
             result = asyncio.run(llm._translate_with_model_fallback(api_key="offline", base_url="offline", models=[llm.KIMI_MODEL] * 2,
                 messages=[{"role": "user", "content": "Translate the source turn"}], items=[source], target_language="zh-CN",
                 request_id="r", started_at=time.monotonic(), deadline=time.monotonic() + 116))
@@ -274,10 +279,10 @@ class ComponentIntegrationTests(unittest.TestCase):
         case.setUp()
         discovery = {**case.context, "status": "clarifying", "understanding": topic(sufficient=False),
                      "brief": "Visual order\nWater and interior walls"}
-        spec = app._proposal_clarification_dimensions_spec(discovery, case.snapshot, "en")
+        spec = context_and_discovery._proposal_clarification_dimensions_spec(discovery, case.snapshot, "en")
         question = "Which local area should carry the water pattern?"
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm, "_request_completion", AsyncMock(return_value=completion({"question": question}))) as call:
+        call = RecordedAsyncCall(return_value=completion({'question': question}))
+        with llm_scope(completion_requester=call):
             result = llm.generate_chat_reply([{"role": "user", "content": "Water and interior walls"}], case.snapshot["rows"], "r",
                 language="en", stage_context={"revisionRouting": "needs_clarification", "proposalDiscovery": discovery,
                     "proposalClarification": spec, "stageSnapshot": case.snapshot, "entityBindings": case.bindings},

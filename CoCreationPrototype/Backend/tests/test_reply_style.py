@@ -7,13 +7,13 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import llm_client as llm
-from level_validation import build_stage_snapshot
-from reply_reliability import OptionalRepairBudget
+from tests.fakes import RecordedAsyncCall, RecordedCall, llm_scope
+from cocreation.llm import facade as llm
+from cocreation.domain.level_validation import build_stage_snapshot
+from cocreation.reliability.reply_reliability import OptionalRepairBudget
 
 
 ROWS = ["############", "#..........#", "#..........#", "#..........#", "#...p......#",
@@ -79,10 +79,8 @@ class ReplyStyleTests(unittest.TestCase):
 
     def test_manual_edit_pair_uses_restrained_voice_without_changing_frozen_verdict(self):
         result = SimpleNamespace(secondary_execution=SimpleNamespace(guidance={}))
-        with patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), \
-                patch.object(llm, "_classify_manual_edit_conflict", return_value={"verdict": "no_conflict"}), \
-                patch.object(llm, "_request_completion", new_callable=AsyncMock, return_value=completion({})) as request, \
-                patch.object(llm, "_validate_manual_edit_pair_payload", return_value=result):
+        request = RecordedAsyncCall(return_value=completion({}))
+        with llm_scope(manual_edit_conflict_classifier=RecordedCall(return_value={'verdict': 'no_conflict'}), completion_requester=request, handlers={'validate_manual_edit_pair': RecordedCall(return_value=result)}):
             self.assertIs(llm._generate_manual_edit_assessment_pair([], ROWS, "en",
                 {"solvable": True}, {}, "style", {"source": "human_edit", "stageNumber": 2}), result)
         prompt = request.call_args.args[3][0]["content"]
@@ -93,10 +91,8 @@ class ReplyStyleTests(unittest.TestCase):
 
     def test_translation_preserves_existing_tone_without_adding_jokes_or_snapshot(self):
         for language in ("en", "zh-CN"):
-            with self.subTest(language=language), \
-                    patch.object(llm, "_llm_credentials", return_value=("fake", "fake")), \
-                    patch.object(llm, "_translate_with_model_fallback", new_callable=AsyncMock,
-                        return_value="translated") as translate:
+            translate = RecordedAsyncCall(return_value='translated')
+            with llm_scope(handlers={'translate_with_model_fallback': translate}), self.subTest(language=language):
                 llm.translate_turns([{"turnId": "t1", "body": BODY, "stageRows": ROWS,
                     "entityBindings": {}, "guidance": {}}], language, "style")
             messages = translate.call_args.kwargs["messages"]
@@ -111,8 +107,8 @@ class ReplyStyleTests(unittest.TestCase):
     def test_body_fault_repair_keeps_locked_card_claims_and_natural_voice(self):
         claims = [{"normalizedMeaning": "The route should be clearer."}]
         original = copy.deepcopy(claims)
-        with patch.object(llm, "_request_completion", new_callable=AsyncMock,
-                return_value=completion({"bodyParagraphs": [BODY]})) as request:
+        request = RecordedAsyncCall(return_value=completion({'bodyParagraphs': [BODY]}))
+        with llm_scope(completion_requester=request):
             body, card = asyncio.run(llm._repair_intent_components_async(api_key="fake", base_url="fake",
                 user_text="Make the route clearer.", body="Unsupported claim.", card_text="Locked card.",
                 claims=claims, issues=["Remove the unsupported claim."], repair_body=True, repair_card=False,
@@ -129,8 +125,7 @@ class ReplyStyleTests(unittest.TestCase):
 
     def test_optional_card_failure_does_not_discard_reliable_wit(self):
         checks = []
-        with patch.object(llm, "_repair_intent_components_async", new_callable=AsyncMock,
-                side_effect=ValueError("Injected card failure")):
+        with llm_scope(intent_component_repairer=RecordedAsyncCall(side_effect=ValueError('Injected card failure'))):
             result = asyncio.run(llm._repair_reviewed_intent_presentation(
                 repair_body=False, repair_card=True, body=BODY, card_text="bad",
                 deadline=time.monotonic() + 60, optional_budget=OptionalRepairBudget(time.monotonic() + 60),
@@ -147,10 +142,8 @@ class ReplyStyleTests(unittest.TestCase):
             "conflictingHypothesisIds": [], "explanation": None}
         messages = llm.build_plain_chat_messages([{"role": "user",
             "content": "Does one solution prove all solutions follow that route?"}], ROWS, stage_context=context)
-        with patch.object(llm, "_request_completion", new_callable=AsyncMock,
-                return_value=completion(text)) as request, \
-                patch.object(llm, "_review_ordinary_intent_with_recovery", new_callable=AsyncMock,
-                    return_value=review):
+        request = RecordedAsyncCall(return_value=completion(text))
+        with llm_scope(completion_requester=request, handlers={'review_ordinary_intent_with_recovery': RecordedAsyncCall(return_value=review)}):
             result = asyncio.run(llm._generate_plain_with_model_fallback(api_key="fake", base_url="fake",
                 models=[llm.KIMI_MODEL] * 3, messages=messages, request_id="style", task="chat", language="en",
                 solver_metrics={}, rows=ROWS, play_summary={}, stage_opening=False, stage_context=context,

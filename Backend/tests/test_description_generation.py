@@ -1,34 +1,70 @@
 import copy
+from pathlib import Path
+import tempfile
 import unittest
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-try:
-    import Backend.app as backend
-    from Backend.llm_runtime import LLMExecutionResult
-    from Backend.prompt import resolve_zero_feature_constraints
-except ImportError:
-    import app as backend
-    from llm_runtime import LLMExecutionResult
-    from prompt import resolve_zero_feature_constraints
+from sokoban_backend.dependencies import BlueprintPlannerService
+from sokoban_backend.llm.prompts import (
+    build_dg_guide_summary_messages,
+    resolve_zero_feature_constraints,
+)
+from sokoban_backend.llm.runtime import LLMExecutionResult, LLMServiceError
+from sokoban_backend.schemas import DEFAULT_PLAN
+from sokoban_backend.services.blueprint_planner import (
+    apply_selected_ha_plan,
+    normalize_generation_preferences,
+)
+from sokoban_backend.services.dg_guide import (
+    DG_DIFFICULTY_ANSWERS,
+    DG_LAYOUT_ANSWERS,
+    build_dg_fallback_summary,
+    dg_preference_allowed_scores,
+    dg_preference_score,
+    normalize_dg_rationale,
+)
+from tests.fakes import (
+    FakeLLMGateway,
+    RecordingBlueprintPlannerService,
+    create_test_app,
+    create_test_container,
+)
 
 
 class DescriptionGenerationApiTests(unittest.TestCase):
     def setUp(self):
-        self.client = TestClient(backend.app)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.temp_dir.name)
+        self.container = create_test_container(self.tmp_path)
+        self.client = TestClient(create_test_app(self.tmp_path, container=self.container))
+
+    def tearDown(self):
+        self.client.close()
+        self.container.close()
+        self.temp_dir.cleanup()
 
     def test_post_forwards_description_and_nested_preferences(self):
         captured = {}
 
-        def create_level_plan(context, request_id, max_attempts):
+        def handle_level_plan(context, request_id, max_attempts):
             captured.update(context)
             return LLMExecutionResult(
-                copy.deepcopy(backend.DEFAULT_PLAN),
+                copy.deepcopy(DEFAULT_PLAN),
                 1,
                 request_id,
             )
 
+        gateway = FakeLLMGateway()
+        planner = RecordingBlueprintPlannerService(
+            gateway,
+            level_plan_handler=handle_level_plan,
+        )
+        local_container = create_test_container(
+            self.tmp_path / "forward-prefs",
+            llm_gateway=gateway,
+            blueprint_service=planner,
+        )
         payload = {
             "styleDescription": "A compact waterside workshop.",
             "generationPreferences": {
@@ -38,12 +74,11 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             },
         }
 
-        with patch.object(
-            backend,
-            "create_level_plan",
-            side_effect=create_level_plan,
-        ):
-            response = self.client.post("/generate-level-plan", json=payload)
+        with TestClient(
+            create_test_app(self.tmp_path / "forward-prefs", container=local_container)
+        ) as local_client:
+            response = local_client.post("/generate-level-plan", json=payload)
+        local_container.close()
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -57,32 +92,41 @@ class DescriptionGenerationApiTests(unittest.TestCase):
 
     def test_level_plan_records_blueprint_handoff_in_existing_runtime_log(self):
         execution = LLMExecutionResult(
-            copy.deepcopy(backend.DEFAULT_PLAN),
+            copy.deepcopy(DEFAULT_PLAN),
             1,
             "blueprint-handoff-request",
         )
+        gateway = FakeLLMGateway()
+        planner = RecordingBlueprintPlannerService(
+            gateway,
+            level_plan_handler=lambda _ctx, _rid, _attempts: execution,
+        )
+        local_container = create_test_container(
+            self.tmp_path / "handoff-log",
+            llm_gateway=gateway,
+            blueprint_service=planner,
+        )
 
-        with patch.object(backend, "create_level_plan", return_value=execution), patch.object(
-            backend, "log_event"
-        ) as logger:
-            response = self.client.post(
+        with TestClient(
+            create_test_app(self.tmp_path / "handoff-log", container=local_container)
+        ) as local_client:
+            response = local_client.post(
                 "/generate-level-plan",
                 json={"dgContext": {"recommendedDifficulty": "Medium"}},
                 headers={"X-Request-ID": "blueprint-handoff-request"},
             )
 
         self.assertEqual(response.status_code, 200)
-        handoff = next(
-            call for call in logger.call_args_list if call.args[1] == "agent_handoff"
-        )
-        self.assertEqual(handoff.kwargs["fromAgent"], "blueprint_planning")
-        self.assertEqual(handoff.kwargs["toAgent"], "unity_generator")
-        self.assertEqual(handoff.kwargs["artifactType"], "LevelDesignPlan")
+        handoff = local_container.event_logger.find_events("agent_handoff")[0]
+        self.assertEqual(handoff["fromAgent"], "blueprint_planning")
+        self.assertEqual(handoff["toAgent"], "unity_generator")
+        self.assertEqual(handoff["artifactType"], "LevelDesignPlan")
         self.assertEqual(
-            handoff.kwargs["artifact"]["levelDesignPlan"],
-            backend.DEFAULT_PLAN,
+            handoff["artifact"]["levelDesignPlan"],
+            DEFAULT_PLAN,
         )
-        self.assertTrue(handoff.kwargs["evidence"][1]["present"])
+        self.assertTrue(handoff["evidence"][1]["present"])
+        local_container.close()
 
     def test_manual_parameters_override_conflicting_description(self):
         context = {
@@ -99,34 +143,26 @@ class DescriptionGenerationApiTests(unittest.TestCase):
                 "archetype": "split_route",
             },
         }
-        captured_messages = []
-
-        def execute_json_request(**kwargs):
-            captured_messages.extend(kwargs["messages"])
-            value = kwargs["validator"](copy.deepcopy(backend.DEFAULT_PLAN))
-            return LLMExecutionResult(value, 1, kwargs["request_id"])
-
-        with patch.object(
-            backend,
-            "execute_json_request",
-            side_effect=execute_json_request,
-        ):
-            execution = backend.create_level_plan(
-                context,
-                request_id="description-request",
-                max_attempts=1,
-            )
+        gateway = FakeLLMGateway([copy.deepcopy(DEFAULT_PLAN)])
+        planner = BlueprintPlannerService(gateway)
+        execution = planner.create_level_plan(
+            context,
+            request_id="description-request",
+            max_attempts=1,
+        )
 
         self.assertEqual(execution.value["minWaterAreas"], 2)
         self.assertEqual(execution.value["maxWaterAreas"], 2)
         self.assertEqual(execution.value["archetype"], "split_route")
-        prompt_text = "\n".join(message["content"] for message in captured_messages)
+        prompt_text = "\n".join(
+            message["content"] for message in gateway.calls[0]["messages"]
+        )
         self.assertIn("minWaterAreas=2", prompt_text)
         self.assertIn("authoritative hard constraints", prompt_text)
 
     def test_zero_walls_cannot_request_a_corridor(self):
         with self.assertRaisesRegex(ValueError, "zero internal wall"):
-            backend.normalize_generation_preferences(
+            normalize_generation_preferences(
                 {
                     "minWallObstacleBlocks": 0,
                     "maxWallObstacleBlocks": 0,
@@ -148,6 +184,7 @@ class DescriptionGenerationApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("maxSolutionSteps", response.json()["detail"])
+        self.assertEqual(len(self.container.llm_gateway.calls), 0)
 
     def test_dg_guide_returns_validated_llm_summary(self):
         result = {
@@ -164,24 +201,17 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             ),
             "recommendedLayout": "Balanced",
         }
+        self.container.llm_gateway.queue(result)
 
-        def execute_json_request(**kwargs):
-            return LLMExecutionResult(
-                kwargs["validator"](result),
-                1,
-                "guide-request",
-            )
-
-        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
-            response = self.client.post(
-                "/dg/guide/summary",
-                json={
-                    "firstMovePreference": "observe_then_decide",
-                    "pushPlanningPreference": "consider_order",
-                    "spacePreference": "connected_areas",
-                    "routeRhythmPreference": "occasional_detours",
-                },
-            )
+        response = self.client.post(
+            "/dg/guide/summary",
+            json={
+                "firstMovePreference": "observe_then_decide",
+                "pushPlanningPreference": "consider_order",
+                "spacePreference": "connected_areas",
+                "routeRhythmPreference": "occasional_detours",
+            },
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["recommendedDifficulty"], "Medium")
@@ -197,36 +227,29 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             "layoutRationale": "I connect a few connected areas with mostly direct routes and some detours, which supports a Balanced layout.",
             "recommendedLayout": "Balanced",
         }
+        self.container.llm_gateway.queue(result)
 
-        def execute_json_request(**kwargs):
-            return LLMExecutionResult(kwargs["validator"](result), 1, "dg-handoff-request")
-
-        with patch.object(
-            backend, "execute_json_request", side_effect=execute_json_request
-        ), patch.object(backend, "log_event") as logger:
-            response = self.client.post(
-                "/dg/guide/summary",
-                json={
-                    "firstMovePreference": "observe_then_decide",
-                    "pushPlanningPreference": "consider_order",
-                    "spacePreference": "connected_areas",
-                    "routeRhythmPreference": "occasional_detours",
-                },
-                headers={"X-Request-ID": "dg-handoff-request"},
-            )
+        response = self.client.post(
+            "/dg/guide/summary",
+            json={
+                "firstMovePreference": "observe_then_decide",
+                "pushPlanningPreference": "consider_order",
+                "spacePreference": "connected_areas",
+                "routeRhythmPreference": "occasional_detours",
+            },
+            headers={"X-Request-ID": "dg-handoff-request"},
+        )
 
         self.assertEqual(response.status_code, 200)
-        handoff = next(
-            call for call in logger.call_args_list if call.args[1] == "agent_handoff"
-        )
-        self.assertEqual(handoff.kwargs["fromAgent"], "draft_understanding")
-        self.assertEqual(handoff.kwargs["toAgent"], "blueprint_planning")
-        self.assertEqual(handoff.kwargs["artifactType"], "dgContext")
+        handoff = self.container.event_logger.find_events("agent_handoff")[0]
+        self.assertEqual(handoff["fromAgent"], "draft_understanding")
+        self.assertEqual(handoff["toAgent"], "blueprint_planning")
+        self.assertEqual(handoff["artifactType"], "dgContext")
         self.assertEqual(
-            handoff.kwargs["artifact"]["dgContext"]["spacePreference"],
+            handoff["artifact"]["dgContext"]["spacePreference"],
             "connected_areas",
         )
-        self.assertEqual(handoff.kwargs["status"], "confirmed")
+        self.assertEqual(handoff["status"], "confirmed")
 
     def test_dg_guide_accepts_random_recommendations_for_two_no_preference_answers(self):
         result = {
@@ -243,31 +266,24 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             ),
             "recommendedLayout": "Random",
         }
+        self.container.llm_gateway.queue(result)
 
-        def execute_json_request(**kwargs):
-            return LLMExecutionResult(
-                kwargs["validator"](result),
-                1,
-                "guide-random-request",
-            )
-
-        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
-            response = self.client.post(
-                "/dg/guide/summary",
-                json={
-                    "firstMovePreference": "no_preference",
-                    "pushPlanningPreference": "no_preference",
-                    "spacePreference": "no_preference",
-                    "routeRhythmPreference": "no_preference",
-                },
-            )
+        response = self.client.post(
+            "/dg/guide/summary",
+            json={
+                "firstMovePreference": "no_preference",
+                "pushPlanningPreference": "no_preference",
+                "spacePreference": "no_preference",
+                "routeRhythmPreference": "no_preference",
+            },
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["recommendedDifficulty"], "Random")
         self.assertEqual(response.json()["recommendedLayout"], "Random")
 
     def test_dg_prompt_explains_new_answer_meanings_and_no_preference(self):
-        messages = backend.build_dg_guide_summary_messages({
+        messages = build_dg_guide_summary_messages({
             "firstMovePreference": "quick_start",
             "pushPlanningPreference": "easy_to_adjust",
             "spacePreference": "focused_area",
@@ -284,19 +300,19 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertNotIn("two explicit answers differ, use Medium", system_prompt)
 
     def test_dg_fallback_combines_neutral_answers_by_parameter_group(self):
-        focused = backend.build_dg_fallback_summary({
+        focused = build_dg_fallback_summary({
             "firstMovePreference": "quick_start",
             "pushPlanningPreference": "no_preference",
             "spacePreference": "focused_area",
             "routeRhythmPreference": "short_routes",
         })
-        open_layout = backend.build_dg_fallback_summary({
+        open_layout = build_dg_fallback_summary({
             "firstMovePreference": "no_preference",
             "pushPlanningPreference": "connected_pushes",
             "spacePreference": "wide_area",
             "routeRhythmPreference": "long_routes",
         })
-        defaults = backend.build_dg_fallback_summary({
+        defaults = build_dg_fallback_summary({
             "firstMovePreference": "no_preference",
             "pushPlanningPreference": "no_preference",
             "spacePreference": "no_preference",
@@ -315,7 +331,7 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertNotEqual(focused["summary"], open_layout["summary"])
 
     def test_dg_fallback_uses_endpoints_for_adjacent_explicit_directions(self):
-        result = backend.build_dg_fallback_summary({
+        result = build_dg_fallback_summary({
             "firstMovePreference": "observe_then_decide",
             "pushPlanningPreference": "connected_pushes",
             "spacePreference": "connected_areas",
@@ -326,54 +342,54 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertEqual(result["recommendedLayout"], "Open")
 
     def test_dg_score_and_allowed_scores_handle_conflicts(self):
-        difficulty = backend.DG_DIFFICULTY_ANSWERS
+        difficulty = DG_DIFFICULTY_ANSWERS
         self.assertEqual(
-            backend.dg_preference_score("quick_start", "observe_then_decide", difficulty),
+            dg_preference_score("quick_start", "observe_then_decide", difficulty),
             0,
         )
         self.assertEqual(
-            backend.dg_preference_score("observe_then_decide", "connected_pushes", difficulty),
+            dg_preference_score("observe_then_decide", "connected_pushes", difficulty),
             2,
         )
         self.assertEqual(
-            backend.dg_preference_score("quick_start", "connected_pushes", difficulty),
+            dg_preference_score("quick_start", "connected_pushes", difficulty),
             1,
         )
         self.assertEqual(
-            backend.dg_preference_allowed_scores(
+            dg_preference_allowed_scores(
                 "observe_then_decide", "connected_pushes", difficulty
             ),
             {1, 2},
         )
         self.assertEqual(
-            backend.dg_preference_allowed_scores(
+            dg_preference_allowed_scores(
                 "quick_start", "connected_pushes", difficulty
             ),
             {0, 1, 2},
         )
         self.assertEqual(
-            backend.dg_preference_allowed_scores(
+            dg_preference_allowed_scores(
                 "quick_start", "no_preference", difficulty
             ),
             {0},
         )
-        layout = backend.DG_LAYOUT_ANSWERS
+        layout = DG_LAYOUT_ANSWERS
         self.assertEqual(
-            backend.dg_preference_score("focused_area", "connected_areas", layout),
+            dg_preference_score("focused_area", "connected_areas", layout),
             0,
         )
         self.assertEqual(
-            backend.dg_preference_score("connected_areas", "wide_area", layout),
+            dg_preference_score("connected_areas", "wide_area", layout),
             2,
         )
         self.assertEqual(
-            backend.dg_preference_allowed_scores(
+            dg_preference_allowed_scores(
                 "focused_area", "wide_area", layout
             ),
             {0, 1, 2},
         )
         self.assertIsNone(
-            backend.dg_preference_allowed_scores(
+            dg_preference_allowed_scores(
                 "no_preference", "no_preference", difficulty
             )
         )
@@ -393,24 +409,17 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             ),
             "recommendedLayout": "Balanced",
         }
+        self.container.llm_gateway.queue(result)
 
-        def execute_json_request(**kwargs):
-            return LLMExecutionResult(
-                kwargs["validator"](result),
-                1,
-                "guide-adjustment-request",
-            )
-
-        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
-            response = self.client.post(
-                "/dg/guide/summary",
-                json={
-                    "firstMovePreference": "observe_then_decide",
-                    "pushPlanningPreference": "connected_pushes",
-                    "spacePreference": "connected_areas",
-                    "routeRhythmPreference": "long_routes",
-                },
-            )
+        response = self.client.post(
+            "/dg/guide/summary",
+            json={
+                "firstMovePreference": "observe_then_decide",
+                "pushPlanningPreference": "connected_pushes",
+                "spacePreference": "connected_areas",
+                "routeRhythmPreference": "long_routes",
+            },
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["recommendedDifficulty"], "Medium")
@@ -429,10 +438,10 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             "recommendedLayout": "Open",
         }
 
-        def execute_json_request(**kwargs):
+        def validate_and_fail(call):
             with self.assertRaisesRegex(ValueError, "does not match"):
-                kwargs["validator"](result)
-            raise backend.LLMServiceError(
+                call["validator"](result)
+            raise LLMServiceError(
                 "LLM_VALIDATION_FAILED",
                 "dg_guide_summary",
                 "Invalid recommendation.",
@@ -442,16 +451,16 @@ class DescriptionGenerationApiTests(unittest.TestCase):
                 502,
             )
 
-        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
-            response = self.client.post(
-                "/dg/guide/summary",
-                json={
-                    "firstMovePreference": "quick_start",
-                    "pushPlanningPreference": "easy_to_adjust",
-                    "spacePreference": "focused_area",
-                    "routeRhythmPreference": "short_routes",
-                },
-            )
+        self.container.llm_gateway.queue(validate_and_fail)
+        response = self.client.post(
+            "/dg/guide/summary",
+            json={
+                "firstMovePreference": "quick_start",
+                "pushPlanningPreference": "easy_to_adjust",
+                "spacePreference": "focused_area",
+                "routeRhythmPreference": "short_routes",
+            },
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["recommendedDifficulty"], "Easy")
@@ -470,10 +479,10 @@ class DescriptionGenerationApiTests(unittest.TestCase):
             "recommendedLayout": "Compact",
         }
 
-        def execute_json_request(**kwargs):
+        def validate_and_fail(call):
             with self.assertRaisesRegex(ValueError, "does not match"):
-                kwargs["validator"](result)
-            raise backend.LLMServiceError(
+                call["validator"](result)
+            raise LLMServiceError(
                 "LLM_VALIDATION_FAILED",
                 "dg_guide_summary",
                 "Invalid recommendation.",
@@ -483,16 +492,16 @@ class DescriptionGenerationApiTests(unittest.TestCase):
                 502,
             )
 
-        with patch.object(backend, "execute_json_request", side_effect=execute_json_request):
-            response = self.client.post(
-                "/dg/guide/summary",
-                json={
-                    "firstMovePreference": "no_preference",
-                    "pushPlanningPreference": "no_preference",
-                    "spacePreference": "no_preference",
-                    "routeRhythmPreference": "no_preference",
-                },
-            )
+        self.container.llm_gateway.queue(validate_and_fail)
+        response = self.client.post(
+            "/dg/guide/summary",
+            json={
+                "firstMovePreference": "no_preference",
+                "pushPlanningPreference": "no_preference",
+                "spacePreference": "no_preference",
+                "routeRhythmPreference": "no_preference",
+            },
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["recommendedDifficulty"], "Random")
@@ -502,13 +511,13 @@ class DescriptionGenerationApiTests(unittest.TestCase):
     def test_dg_rationale_requires_one_sentence_and_adds_first_person_prefix_when_needed(self):
         self.assertIn(
             "I'd recommend Hard",
-            backend.normalize_dg_rationale(
+            normalize_dg_rationale(
                 "The push order raises planning complexity across several decisions, so I'd recommend Hard for this planning rhythm.",
                 "difficulty",
             ),
         )
         self.assertTrue(
-            backend.normalize_dg_rationale(
+            normalize_dg_rationale(
                 "The wide routes support an Open layout and give the player room to inspect distant choices.",
                 "layout",
             ).startswith("I read this as: ")
@@ -516,22 +525,20 @@ class DescriptionGenerationApiTests(unittest.TestCase):
 
     def test_dg_guide_rejects_unknown_choice(self):
         response = self.client.post(
-                "/dg/guide/summary",
-                json={
-                    "firstMovePreference": "unknown",
-                    "pushPlanningPreference": "consider_order",
-                    "spacePreference": "connected_areas",
-                    "routeRhythmPreference": "occasional_detours",
+            "/dg/guide/summary",
+            json={
+                "firstMovePreference": "unknown",
+                "pushPlanningPreference": "consider_order",
+                "spacePreference": "connected_areas",
+                "routeRhythmPreference": "occasional_detours",
             },
         )
 
         self.assertEqual(response.status_code, 400)
 
     def test_dg_guide_uses_readable_fallback_after_llm_failure(self):
-        with patch.object(
-            backend,
-            "execute_json_request",
-            side_effect=backend.LLMServiceError(
+        self.container.llm_gateway.queue(
+            LLMServiceError(
                 "MODEL_UNAVAILABLE",
                 "dg_guide_summary",
                 "Model unavailable.",
@@ -539,17 +546,17 @@ class DescriptionGenerationApiTests(unittest.TestCase):
                 True,
                 1,
                 503,
-            ),
-        ):
-            response = self.client.post(
-                "/dg/guide/summary",
-                json={
-                    "firstMovePreference": "plan_ahead",
-                    "pushPlanningPreference": "connected_pushes",
-                    "spacePreference": "wide_area",
-                    "routeRhythmPreference": "long_routes",
-                },
             )
+        )
+        response = self.client.post(
+            "/dg/guide/summary",
+            json={
+                "firstMovePreference": "plan_ahead",
+                "pushPlanningPreference": "connected_pushes",
+                "spacePreference": "wide_area",
+                "routeRhythmPreference": "long_routes",
+            },
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["recommendedDifficulty"], "Hard")
@@ -559,14 +566,14 @@ class DescriptionGenerationApiTests(unittest.TestCase):
         self.assertTrue(response.json()["difficultyRationale"].startswith("I connect"))
 
     def test_custom_single_wall_range_is_supported(self):
-        preferences = backend.normalize_generation_preferences(
+        preferences = normalize_generation_preferences(
             {
                 "minWallObstacleBlocks": 1,
                 "maxWallObstacleBlocks": 1,
             }
         )
-        plan = copy.deepcopy(backend.DEFAULT_PLAN)
-        result = backend.apply_selected_ha_plan(
+        plan = copy.deepcopy(DEFAULT_PLAN)
+        result = apply_selected_ha_plan(
             plan,
             {},
             {"noWater": False, "noInternalWalls": False},

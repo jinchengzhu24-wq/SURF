@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from design_requirements import evaluate_requirements, METRICS
+from cocreation.domain.design_requirements import evaluate_requirements, METRICS
 
 
 WORKFLOW_SCHEMA_VERSION = 2
@@ -38,14 +38,15 @@ class SemanticConstraintError(ValueError):
         super().__init__("semantic contract failed: " + ", ".join(filter(None, failed)))
 
 
-def modification_v2_mode(demo_mode=False):
+def modification_v2_mode(demo_mode=False, env=None):
     name = (
         "COCREATION_DEMO_MODIFICATION_V2_MODE"
         if demo_mode
         else "COCREATION_FORMAL_MODIFICATION_V2_MODE"
     )
     default = "enforce" if demo_mode else "shadow"
-    value = str(os.getenv(name, default)).strip().lower()
+    source = os.environ if env is None else env
+    value = str(source.get(name, default)).strip().lower()
     return value if value in MODES else default
 
 

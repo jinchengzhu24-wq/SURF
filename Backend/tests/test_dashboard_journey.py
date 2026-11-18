@@ -1,12 +1,16 @@
-import os
+from pathlib import Path
 import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-import Backend.app as backend
+from sokoban_backend.routes.dashboard import (
+    delete_journey_event,
+    get_level_records_data,
+)
+from sokoban_backend.schemas import DeleteJourneyEventRequest
+from sokoban_backend.services.dashboard_projections import filter_frontend_ha_plan_records
+from tests.fakes import create_test_app, create_test_container
 
 
 TEST_DELETE_PASSWORD = "test-delete-password"
@@ -14,18 +18,20 @@ TEST_DELETE_PASSWORD = "test-delete-password"
 
 class DashboardJourneyTests(unittest.TestCase):
     def test_dashboard_password_verification_reuses_delete_password_without_mutation(self):
-        with (
-            patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": TEST_DELETE_PASSWORD}),
-            TestClient(backend.app) as client,
-        ):
-            success = client.post(
-                "/verify-dashboard-password",
-                headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_test_app(
+                temp_dir,
+                dashboard_delete_password=TEST_DELETE_PASSWORD,
             )
-            wrong = client.post(
-                "/verify-dashboard-password",
-                headers={"X-Delete-Password": "wrong"},
-            )
+            with TestClient(app) as client:
+                success = client.post(
+                    "/verify-dashboard-password",
+                    headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
+                )
+                wrong = client.post(
+                    "/verify-dashboard-password",
+                    headers={"X-Delete-Password": "wrong"},
+                )
 
         self.assertEqual(success.status_code, 200)
         self.assertEqual(success.json(), {"ok": True})
@@ -33,14 +39,13 @@ class DashboardJourneyTests(unittest.TestCase):
         self.assertEqual(wrong.json()["detail"], "Incorrect delete password")
 
     def test_dashboard_password_verification_fails_closed_without_configured_password(self):
-        with (
-            patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": ""}),
-            TestClient(backend.app) as client,
-        ):
-            response = client.post(
-                "/verify-dashboard-password",
-                headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
-            )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_test_app(temp_dir, dashboard_delete_password="")
+            with TestClient(app) as client:
+                response = client.post(
+                    "/verify-dashboard-password",
+                    headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
+                )
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"], "Delete password is not configured")
@@ -60,34 +65,37 @@ class DashboardJourneyTests(unittest.TestCase):
             ("/clear-matchmaking-records", {}),
         ]
 
-        with (
-            patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": TEST_DELETE_PASSWORD}),
-            TestClient(backend.app) as client,
-        ):
-            for path, payload in routes:
-                with self.subTest(path=path):
-                    response = client.post(path, json=payload)
-                    self.assertEqual(response.status_code, 401)
-                    self.assertEqual(response.json()["detail"], "Incorrect delete password")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_test_app(
+                temp_dir,
+                dashboard_delete_password=TEST_DELETE_PASSWORD,
+            )
+            with TestClient(app) as client:
+                for path, payload in routes:
+                    with self.subTest(path=path):
+                        response = client.post(path, json=payload)
+                        self.assertEqual(response.status_code, 401)
+                        self.assertEqual(response.json()["detail"], "Incorrect delete password")
 
     def test_delete_route_fails_closed_without_configured_password(self):
-        with (
-            patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": ""}),
-            TestClient(backend.app) as client,
-        ):
-            response = client.post(
-                "/delete-journey-event",
-                json={"journeyEventId": "event-a"},
-                headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
-            )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_test_app(temp_dir, dashboard_delete_password="")
+            with TestClient(app) as client:
+                response = client.post(
+                    "/delete-journey-event",
+                    json={"journeyEventId": "event-a"},
+                    headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
+                )
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"], "Delete password is not configured")
 
     def test_delete_route_rejects_wrong_password_without_changing_records(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            log_dir = Path(temp_dir)
-            journey_file = log_dir / "journey.jsonl"
+            container = create_test_container(
+                temp_dir,
+                dashboard_delete_password=TEST_DELETE_PASSWORD,
+            )
             records = [
                 {
                     "journeyEventId": "event-a",
@@ -96,23 +104,17 @@ class DashboardJourneyTests(unittest.TestCase):
                     "phase": "review",
                 }
             ]
-
-            with (
-                patch.multiple(
-                    backend,
-                    STUDY_LOG_DIR=log_dir,
-                    JOURNEY_EVENT_LOG_FILE=journey_file,
-                ),
-                patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": TEST_DELETE_PASSWORD}),
-                TestClient(backend.app) as client,
-            ):
-                backend.write_jsonl_records(journey_file, records)
+            container.store.write_jsonl_records(
+                container.paths.journey_event_log_file,
+                records,
+            )
+            with TestClient(create_test_app(temp_dir, container=container)) as client:
                 response = client.post(
                     "/delete-journey-event",
                     json={"journeyEventId": "event-a"},
                     headers={"X-Delete-Password": "wrong"},
                 )
-                remaining, malformed = backend.read_journey_events()
+            remaining, malformed = container.store.read_journey_events()
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(malformed, 0)
@@ -120,32 +122,28 @@ class DashboardJourneyTests(unittest.TestCase):
 
     def test_delete_route_accepts_correct_password(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            log_dir = Path(temp_dir)
-            journey_file = log_dir / "journey.jsonl"
-
-            with (
-                patch.multiple(
-                    backend,
-                    STUDY_LOG_DIR=log_dir,
-                    JOURNEY_EVENT_LOG_FILE=journey_file,
-                ),
-                patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": TEST_DELETE_PASSWORD}),
-                TestClient(backend.app) as client,
-            ):
-                backend.write_jsonl_records(journey_file, [
+            container = create_test_container(
+                temp_dir,
+                dashboard_delete_password=TEST_DELETE_PASSWORD,
+            )
+            container.store.write_jsonl_records(
+                container.paths.journey_event_log_file,
+                [
                     {
                         "journeyEventId": "event-a",
                         "eventType": "journey-event",
                         "ideaId": "idea-a",
                         "phase": "review",
                     }
-                ])
+                ],
+            )
+            with TestClient(create_test_app(temp_dir, container=container)) as client:
                 response = client.post(
                     "/delete-journey-event",
                     json={"journeyEventId": "event-a"},
                     headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
                 )
-                remaining, malformed = backend.read_journey_events()
+            remaining, malformed = container.store.read_journey_events()
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["deletedJourneyEventCount"], 1)
@@ -154,57 +152,55 @@ class DashboardJourneyTests(unittest.TestCase):
 
     def test_delete_idea_records_accepts_correct_password(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            log_dir = Path(temp_dir)
-            paths = {
-                "STUDY_LOG_DIR": log_dir,
-                "STUDY_LOG_FILE": log_dir / "levels.jsonl",
-                "SURVEY_LOG_FILE": log_dir / "surveys.jsonl",
-                "CREATIVE_IDEA_LOG_FILE": log_dir / "ideas.jsonl",
-                "CREATIVE_EXPANSION_CHOICE_LOG_FILE": log_dir / "choices.jsonl",
-                "HA_PLAN_EVENT_LOG_FILE": log_dir / "ha.jsonl",
-                "JOURNEY_EVENT_LOG_FILE": log_dir / "journey.jsonl",
-            }
+            container = create_test_container(
+                temp_dir,
+                dashboard_delete_password=TEST_DELETE_PASSWORD,
+            )
+            paths = container.paths
+            container.store.write_jsonl_records(paths.study_log_file, [
+                {"creativeIdeaId": "idea-a"},
+                {"creativeIdeaId": "idea-b"},
+            ])
+            container.store.write_jsonl_records(paths.survey_log_file, [
+                {"creativeIdeaId": "idea-a", "sessionId": "session-a"},
+                {"creativeIdeaId": "idea-b", "sessionId": "session-b"},
+            ])
+            container.store.write_jsonl_records(paths.creative_idea_log_file, [
+                {"ideaId": "idea-a"},
+                {"ideaId": "idea-b"},
+            ])
+            container.store.write_jsonl_records(
+                paths.creative_expansion_choice_log_file,
+                [{"ideaId": "idea-a"}, {"ideaId": "idea-b"}],
+            )
+            container.store.write_jsonl_records(paths.ha_plan_event_log_file, [
+                {"ideaId": "idea-a"},
+                {"ideaId": "idea-b"},
+            ])
+            container.store.write_jsonl_records(paths.journey_event_log_file, [
+                {"ideaId": "idea-a"},
+                {"ideaId": "idea-b"},
+            ])
 
-            with (
-                patch.multiple(backend, **paths),
-                patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": TEST_DELETE_PASSWORD}),
-                TestClient(backend.app) as client,
-            ):
-                backend.write_jsonl_records(paths["STUDY_LOG_FILE"], [
-                    {"creativeIdeaId": "idea-a"},
-                    {"creativeIdeaId": "idea-b"},
-                ])
-                backend.write_jsonl_records(paths["SURVEY_LOG_FILE"], [
-                    {"creativeIdeaId": "idea-a", "sessionId": "session-a"},
-                    {"creativeIdeaId": "idea-b", "sessionId": "session-b"},
-                ])
-                backend.write_jsonl_records(paths["CREATIVE_IDEA_LOG_FILE"], [
-                    {"ideaId": "idea-a"},
-                    {"ideaId": "idea-b"},
-                ])
-                backend.write_jsonl_records(
-                    paths["CREATIVE_EXPANSION_CHOICE_LOG_FILE"],
-                    [{"ideaId": "idea-a"}, {"ideaId": "idea-b"}],
-                )
-                backend.write_jsonl_records(paths["HA_PLAN_EVENT_LOG_FILE"], [
-                    {"ideaId": "idea-a"},
-                    {"ideaId": "idea-b"},
-                ])
-                backend.write_jsonl_records(paths["JOURNEY_EVENT_LOG_FILE"], [
-                    {"ideaId": "idea-a"},
-                    {"ideaId": "idea-b"},
-                ])
-
+            with TestClient(create_test_app(temp_dir, container=container)) as client:
                 response = client.post(
                     "/delete-idea-records",
                     json={"ideaId": "idea-a"},
                     headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
                 )
-                remaining_records = {
-                    name: backend.read_jsonl_records(path)[0]
-                    for name, path in paths.items()
-                    if name != "STUDY_LOG_DIR"
-                }
+
+            tracked_files = (
+                paths.study_log_file,
+                paths.survey_log_file,
+                paths.creative_idea_log_file,
+                paths.creative_expansion_choice_log_file,
+                paths.ha_plan_event_log_file,
+                paths.journey_event_log_file,
+            )
+            remaining_records = {
+                path.name: container.store.read_jsonl_records(path)[0]
+                for path in tracked_files
+            }
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(all(len(records) == 1 for records in remaining_records.values()))
@@ -216,36 +212,32 @@ class DashboardJourneyTests(unittest.TestCase):
 
     def test_clear_records_accepts_correct_password(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            log_dir = Path(temp_dir)
-            paths = {
-                "STUDY_LOG_DIR": log_dir,
-                "STUDY_LOG_FILE": log_dir / "levels.jsonl",
-                "SURVEY_LOG_FILE": log_dir / "surveys.jsonl",
-                "CREATIVE_IDEA_LOG_FILE": log_dir / "ideas.jsonl",
-                "CREATIVE_EXPANSION_CHOICE_LOG_FILE": log_dir / "choices.jsonl",
-                "HA_PLAN_EVENT_LOG_FILE": log_dir / "ha.jsonl",
-                "JOURNEY_EVENT_LOG_FILE": log_dir / "journey.jsonl",
-            }
+            container = create_test_container(
+                temp_dir,
+                dashboard_delete_password=TEST_DELETE_PASSWORD,
+            )
+            paths = container.paths
+            tracked_files = (
+                paths.study_log_file,
+                paths.survey_log_file,
+                paths.creative_idea_log_file,
+                paths.creative_expansion_choice_log_file,
+                paths.ha_plan_event_log_file,
+                paths.journey_event_log_file,
+            )
+            for path in tracked_files:
+                container.store.write_jsonl_records(path, [{"record": path.name}])
 
-            with (
-                patch.multiple(backend, **paths),
-                patch.dict(os.environ, {"DASHBOARD_DELETE_PASSWORD": TEST_DELETE_PASSWORD}),
-                TestClient(backend.app) as client,
-            ):
-                for name, path in paths.items():
-                    if name != "STUDY_LOG_DIR":
-                        backend.write_jsonl_records(path, [{"record": name}])
-
+            with TestClient(create_test_app(temp_dir, container=container)) as client:
                 response = client.post(
                     "/clear-level-records",
                     headers={"X-Delete-Password": TEST_DELETE_PASSWORD},
                     follow_redirects=False,
                 )
-                remaining_records = [
-                    backend.read_jsonl_records(path)[0]
-                    for name, path in paths.items()
-                    if name != "STUDY_LOG_DIR"
-                ]
+            remaining_records = [
+                container.store.read_jsonl_records(path)[0]
+                for path in tracked_files
+            ]
 
         self.assertEqual(response.status_code, 303)
         self.assertTrue(all(records == [] for records in remaining_records))
@@ -269,53 +261,43 @@ class DashboardJourneyTests(unittest.TestCase):
             },
         ]
 
-        filtered = backend.filter_frontend_ha_plan_records(records)
+        filtered = filter_frontend_ha_plan_records(records)
 
         self.assertEqual(len(filtered), 2)
         self.assertTrue(all(record["ideaId"] == "idea-a" for record in filtered))
 
     def test_dashboard_payload_exposes_ha_and_journey_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            log_dir = Path(temp_dir)
-            paths = {
-                "STUDY_LOG_DIR": log_dir,
-                "STUDY_LOG_FILE": log_dir / "levels.jsonl",
-                "SURVEY_LOG_FILE": log_dir / "surveys.jsonl",
-                "CREATIVE_IDEA_LOG_FILE": log_dir / "ideas.jsonl",
-                "CREATIVE_EXPANSION_CHOICE_LOG_FILE": log_dir / "choices.jsonl",
-                "HA_PLAN_EVENT_LOG_FILE": log_dir / "ha.jsonl",
-                "JOURNEY_EVENT_LOG_FILE": log_dir / "journey.jsonl",
-            }
+            container = create_test_container(Path(temp_dir))
+            paths = container.paths
+            container.store.write_jsonl_records(paths.creative_idea_log_file, [
+                {
+                    "eventType": "creative-idea",
+                    "ideaId": "idea-a",
+                    "ideaText": "A compact route.",
+                    "sessionId": "session-a",
+                    "officialRound": True,
+                }
+            ])
+            container.store.write_jsonl_records(paths.ha_plan_event_log_file, [
+                {
+                    "eventType": "ha-plan-choice",
+                    "ideaId": "idea-a",
+                    "selectedOptionTitle": "Keep the route",
+                    "officialRound": True,
+                }
+            ])
+            container.store.write_jsonl_records(paths.journey_event_log_file, [
+                {
+                    "eventType": "journey-event",
+                    "ideaId": "idea-a",
+                    "phase": "review",
+                    "action": "retry",
+                    "officialRound": True,
+                }
+            ])
 
-            with patch.multiple(backend, **paths):
-                backend.write_jsonl_records(paths["CREATIVE_IDEA_LOG_FILE"], [
-                    {
-                        "eventType": "creative-idea",
-                        "ideaId": "idea-a",
-                        "ideaText": "A compact route.",
-                        "sessionId": "session-a",
-                        "officialRound": True,
-                    }
-                ])
-                backend.write_jsonl_records(paths["HA_PLAN_EVENT_LOG_FILE"], [
-                    {
-                        "eventType": "ha-plan-choice",
-                        "ideaId": "idea-a",
-                        "selectedOptionTitle": "Keep the route",
-                        "officialRound": True,
-                    }
-                ])
-                backend.write_jsonl_records(paths["JOURNEY_EVENT_LOG_FILE"], [
-                    {
-                        "eventType": "journey-event",
-                        "ideaId": "idea-a",
-                        "phase": "review",
-                        "action": "retry",
-                        "officialRound": True,
-                    }
-                ])
-
-                payload = backend.get_level_records_data()
+            payload = get_level_records_data(container)
 
         self.assertEqual(payload["haPlanSummary"]["choiceCount"], 1)
         self.assertEqual(payload["journeyEventSummary"]["phaseCounts"]["review"], 1)
@@ -324,8 +306,10 @@ class DashboardJourneyTests(unittest.TestCase):
 
     def test_delete_journey_event_removes_only_target_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            log_dir = Path(temp_dir)
-            journey_file = log_dir / "journey.jsonl"
+            container = create_test_container(
+                temp_dir,
+                dashboard_delete_password=TEST_DELETE_PASSWORD,
+            )
             records = [
                 {
                     "journeyEventId": "event-a",
@@ -340,17 +324,15 @@ class DashboardJourneyTests(unittest.TestCase):
                     "phase": "routing",
                 },
             ]
-
-            with patch.multiple(
-                backend,
-                STUDY_LOG_DIR=log_dir,
-                JOURNEY_EVENT_LOG_FILE=journey_file,
-            ):
-                backend.write_jsonl_records(journey_file, records)
-                result = backend.delete_journey_event(
-                    backend.DeleteJourneyEventRequest(journeyEventId="event-a")
-                )
-                remaining, malformed = backend.read_journey_events()
+            container.store.write_jsonl_records(
+                container.paths.journey_event_log_file,
+                records,
+            )
+            result = delete_journey_event(
+                DeleteJourneyEventRequest(journeyEventId="event-a"),
+                container,
+            )
+            remaining, malformed = container.store.read_journey_events()
 
         self.assertEqual(result["deletedJourneyEventCount"], 1)
         self.assertEqual(malformed, 0)

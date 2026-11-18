@@ -1,39 +1,29 @@
 """Research projections exercise real API transitions with an isolated database."""
 import json
-import unittest
 from datetime import timedelta
-from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import test_sessions as fixtures
+from tests.fakes import RecordedCall, SessionTestCase
 
 
-backend = fixtures.backend
+from cocreation.api import config_models
+from cocreation.api import context_and_discovery
+from cocreation.api import online_sync_and_dashboard
 repository = fixtures.repository
 
 
-class ResearchProjectionTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        fixtures.CoCreationSessionTests.setUpClass()
-
-    @classmethod
-    def tearDownClass(cls):
-        fixtures.CoCreationSessionTests.tearDownClass()
-
+class ResearchProjectionTests(SessionTestCase):
     def setUp(self):
         self.fixture = fixtures.CoCreationSessionTests()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.addCleanup(self.fixture.tearDown)
-        self.client = self.fixture.client
-        self.session_id = self.fixture.session_id
+        self.fixture.setUp()
         self.events = []
-        self.sync = patch.object(
-            backend, "synchronize_cocreation_event_with_online_match", side_effect=self.capture,
-        )
-        self.sync.start()
-        self.addCleanup(self.sync.stop)
+        self.enterContext(self.fixture.using_dependencies(
+            online_handlers={"event": self.capture, "version_event": self.capture},
+        ))
+        self.client, self.services = self.fixture.client, self.fixture.services
+        self.session_id = self.fixture.session_id
 
     def capture(self, session, event):
         self.events.append(json.loads(json.dumps(event)))
@@ -55,17 +45,17 @@ class ResearchProjectionTests(unittest.TestCase):
         def fail_once(session, event):
             self.capture(session, event)
             if len(self.events) == 1:
-                raise backend.ApiError(503, "ONLINE_FLOW_SYNC_UNAVAILABLE", "Retry", retryable=True)
-        with patch.object(backend, "synchronize_cocreation_event_with_online_match", side_effect=fail_once):
+                raise config_models.ApiError(503, "ONLINE_FLOW_SYNC_UNAVAILABLE", "Retry", retryable=True)
+        with self.using_dependencies(online_handlers={"version_event": fail_once}):
             first = self.client.patch(f"/api/sessions/{session_id}/language", json={"language": "en"})
             self.assertEqual(first.status_code, 503)
-            with repository.connect() as database:
+            with self.services.connect() as database:
                 before = dict(repository.get_session(database, session_id))
             retry = self.client.patch(f"/api/sessions/{session_id}/language", json={"language": "en"})
         self.assertEqual(retry.status_code, 200, retry.text)
         self.assertEqual(self.events[0], self.events[1])
         self.assertEqual(self.events[0]["eventType"], "first_stage")
-        with repository.connect() as database:
+        with self.services.connect() as database:
             after = repository.get_session(database, session_id)
             self.assertEqual(before["deadline_at"], after["deadline_at"])
             self.assertEqual(database.execute("SELECT COUNT(*) FROM level_versions WHERE session_id = ?", (session_id,)).fetchone()[0], 1)
@@ -79,9 +69,9 @@ class ResearchProjectionTests(unittest.TestCase):
         def fail_once(session, event):
             self.capture(session, event)
             if len(self.events) == 1:
-                raise backend.ApiError(503, "ONLINE_FLOW_SYNC_UNAVAILABLE", "Retry", retryable=True)
+                raise config_models.ApiError(503, "ONLINE_FLOW_SYNC_UNAVAILABLE", "Retry", retryable=True)
         request = {"baseVersionId": edited, "idempotencyKey": "restore-retry"}
-        with patch.object(backend, "synchronize_cocreation_event_with_online_match", side_effect=fail_once):
+        with self.using_dependencies(online_handlers={"version_event": fail_once}):
             first = self.client.post(f"/api/sessions/{self.session_id}/versions/{original}/restore", json=request)
             retry = self.client.post(f"/api/sessions/{self.session_id}/versions/{original}/restore", json=request)
         self.assertEqual(first.status_code, 503)
@@ -95,8 +85,8 @@ class ResearchProjectionTests(unittest.TestCase):
 
     def deadline_retry(self, fail_type):
         original = self.read()["currentVersionId"]
-        with repository.connect(immediate=True) as database:
-            expired = (backend.parse_time(backend.utc_now()) - timedelta(seconds=1)).isoformat()
+        with self.services.connect(immediate=True) as database:
+            expired = (config_models.parse_time(self.services.utc_now()) - timedelta(seconds=1)).isoformat()
             database.execute("UPDATE design_sessions SET deadline_at = ? WHERE id = ?", (expired, self.session_id))
         request = {"baseVersionId": original, "rows": fixtures.EDITED_ROWS, "idempotencyKey": "final-retry"}
         failed = False
@@ -105,8 +95,8 @@ class ResearchProjectionTests(unittest.TestCase):
             self.capture(session, event)
             if not failed and event["eventType"] == fail_type:
                 failed = True
-                raise backend.ApiError(503, "ONLINE_FLOW_SYNC_UNAVAILABLE", "Retry", retryable=True)
-        with patch.object(backend, "synchronize_cocreation_event_with_online_match", side_effect=fail_once):
+                raise config_models.ApiError(503, "ONLINE_FLOW_SYNC_UNAVAILABLE", "Retry", retryable=True)
+        with self.using_dependencies(online_handlers={"version_event": fail_once}):
             first = self.client.post(f"/api/sessions/{self.session_id}/finalize", json=request)
             retry = self.client.post(f"/api/sessions/{self.session_id}/finalize", json=request)
         self.assertEqual(first.status_code, 503)
@@ -136,22 +126,22 @@ class ResearchProjectionTests(unittest.TestCase):
             "aiPosition": "Consider recovery space.", "coreDisagreement": "Which trade-off matters?",
             "nextQuestion": "Would you like to discuss the route?", "resolution": None, "displayCard": True,
         } if conflict else None
-        with repository.connect(immediate=True) as database:
+        with self.services.connect(immediate=True) as database:
             session = repository.get_session(database, self.session_id)
             opening_execution = fixtures.LLMExecutionResult("I observe the new Stage.", 1, "review-opening", guidance={"uiCues": []})
             review_execution = fixtures.LLMExecutionResult("I compare this edit with the earlier Stage.", 1, "review-comparison", guidance={"disagreement": disagreement, "uiCues": []})
-            opening = backend.insert_turn(database, session, "assistant", opening_execution.assistant_message, version_id, "review-opening", opening_execution)
-            review = backend.insert_turn(database, session, "assistant", review_execution.assistant_message, version_id, "review-comparison", review_execution)
-            backend.record_event(database, self.session_id, "human_edit_reviewed", {
+            opening = self.services.insert_turn(database, session, "assistant", opening_execution.assistant_message, version_id, "review-opening", opening_execution)
+            review = self.services.insert_turn(database, session, "assistant", review_execution.assistant_message, version_id, "review-comparison", review_execution)
+            config_models.record_event(database, self.session_id, "human_edit_reviewed", {
                 "versionId": version_id, "openingTurnId": opening, "reviewTurnId": review,
                 "changeSummary": {"changedCells": 2}, "disagreement": disagreement,
-            }, backend.utc_now())
+            }, self.services.utc_now())
             if disagreement:
                 context = repository.load_design_context(database, self.session_id, version_id)
                 context["activeDisagreement"] = disagreement
                 repository.save_design_context(database, version_id, context)
-                backend._record_disagreement_event(database, self.session_id, version_id, review, {"disagreement": disagreement})
-        backend.synchronize_manual_edit_review_nodes(self.session_id, version_id)
+                context_and_discovery._record_disagreement_event(database, self.session_id, version_id, review, {"disagreement": disagreement}, services=self.services)
+        online_sync_and_dashboard.synchronize_manual_edit_review_nodes(self.session_id, version_id, services=self.services)
         return version_id, disagreement
 
     def test_manual_review_without_conflict_has_two_messages_and_no_challenge(self):
@@ -169,7 +159,7 @@ class ResearchProjectionTests(unittest.TestCase):
         ]):
             execution = fixtures.LLMExecutionResult("I respond to your explanation.", 1, f"manual-followup-{index}",
                 guidance={"disagreement": {**disagreement, "status": status}, "uiCues": []})
-            with patch.object(backend, "generate_chat_reply", return_value=execution):
+            with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
                 response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                     "content": text, "baseVersionId": version_id, "idempotencyKey": f"manual-followup-{index}",
                 })
@@ -180,13 +170,13 @@ class ResearchProjectionTests(unittest.TestCase):
         self.assertEqual(sum(entry["kind"] == "card" for entry in node["nodeEntries"]), 1)
         self.assertEqual(sum(entry["kind"] == "player_message" for entry in node["nodeEntries"]), 2)
         self.assertFalse(any(event.get("nodeType") == "discussion" for event in self.events))
-        with repository.connect() as database:
+        with self.services.connect() as database:
             context = repository.load_design_context(database, self.session_id, version_id)
         self.assertIsNone(context["activeDisagreement"])
         self.assertEqual(context["confirmedDecisions"], [])
         before = json.loads(json.dumps(node))
         execution = fixtures.LLMExecutionResult("A later ordinary discussion.", 1, "after-ack", guidance={"uiCues": []})
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": "What do you think now?", "baseVersionId": version_id, "idempotencyKey": "after-ack",
             })
@@ -203,7 +193,7 @@ class ResearchProjectionTests(unittest.TestCase):
         node = self.latest("llm_challenge")
         self.assertEqual(node["nodeStatus"], "manual_reedit")
         self.assertIn("Stage 3", node["nodeEntries"][-1]["text"])
-        with repository.connect() as database:
+        with self.services.connect() as database:
             parent = repository.load_design_context(database, self.session_id, version_id)
             child = repository.load_design_context(database, self.session_id, saved.json()["currentVersionId"])
         self.assertEqual(parent["activeDisagreement"], disagreement)
@@ -213,7 +203,7 @@ class ResearchProjectionTests(unittest.TestCase):
         version_id, disagreement = self.seed_manual_review()
         request = {"content": "Let's discuss this route.", "baseVersionId": version_id, "idempotencyKey": "manual-reply-retry"}
         failure = fixtures.LLMServiceError("MODEL_RESPONSE_INVALID", "Retry this message.", "manual-reply-retry", True, 3, 502)
-        with patch.object(backend, "generate_chat_reply", side_effect=failure):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": failure}):
             for _ in range(2):
                 response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=request)
                 self.assertEqual(response.status_code, 502, response.text)
@@ -223,7 +213,8 @@ class ResearchProjectionTests(unittest.TestCase):
         self.assertFalse(any(entry["kind"] == "llm_message" for entry in node["nodeEntries"]))
         execution = fixtures.LLMExecutionResult("Let's inspect it together.", 1, "manual-reply-retry",
             guidance={"disagreement": {**disagreement, "status": "acknowledged"}, "uiCues": []})
-        with patch.object(backend, "generate_chat_reply", return_value=execution) as model:
+        model = RecordedCall(return_value=execution)
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": model}):
             for _ in range(2):
                 response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=request)
                 self.assertEqual(response.status_code, 200, response.text)
@@ -236,7 +227,11 @@ class ResearchProjectionTests(unittest.TestCase):
     def accept_pending(self):
         state = self.read()
         proposal = next(item for item in state["proposals"] if item["status"] == "pending")
-        with patch.object(backend, "rewrite_intent_progress", return_value={"summaryText": "Accepted map.", "detailedText": None, "model": "mock"}):
+        with self.using_dependencies(
+            llm_handlers={
+                "rewrite_intent_progress": {'summaryText': 'Accepted map.', 'detailedText': None, 'model': 'mock'},
+            },
+        ):
             response = self.client.post(f"/api/sessions/{self.session_id}/proposals/{proposal['proposalId']}/decision", json={
                 "decision": "accept", "baseVersionId": state["currentVersionId"], "idempotencyKey": "projection-accept",
             })
@@ -305,7 +300,7 @@ class ResearchProjectionTests(unittest.TestCase):
         version_id = self.read()["currentVersionId"]
         source = self.fixture.offer_bound_revision(fixtures.PLAYER_MOVE_BRIEF, summary="Move player left", message_key="failed-source")
         execution = fixtures.LLMExecutionResult("Initial reply.", 1, "failed-start", guidance={"uiCues": []})
-        with patch.object(backend, "generate_chat_reply", return_value=execution):
+        with self.using_dependencies(llm_handlers={"generate_chat_reply": execution}):
             started = self.client.post(f"/api/sessions/{self.session_id}/messages", json={
                 "content": "Challenge this plan.", "baseVersionId": version_id, "idempotencyKey": "failed-start",
                 "action": "challenge_revision", "sourceTurnId": source["turnId"],
@@ -313,7 +308,7 @@ class ResearchProjectionTests(unittest.TestCase):
         self.assertEqual(started.status_code, 200, started.text)
         failure = fixtures.LLMServiceError("MODEL_RESPONSE_INVALID", "Retry the reason.", "failed-reason", True, 2, 502)
         request = {"content": "The change is too small.", "baseVersionId": version_id, "idempotencyKey": "failed-reason"}
-        with patch.object(backend, "classify_challenge_reason", side_effect=failure):
+        with self.using_dependencies(llm_handlers={"classify_challenge_reason": failure}):
             for _ in range(2):
                 response = self.client.post(f"/api/sessions/{self.session_id}/messages", json=request)
                 self.assertEqual(response.status_code, 502, response.text)
@@ -335,10 +330,11 @@ class ResearchProjectionTests(unittest.TestCase):
         request = {"action": "revise", "candidateText": "I want a route with recovery space.",
                    "baseVersionId": self.read()["currentVersionId"], "sourceTurnId": card["turnId"],
                    "idempotencyKey": "research-intent-revise"}
-        with patch.object(backend, "review_intent_feedback", return_value={
-            "verdict": "compatible", "explanation": "This is your revised direction.",
-            "displayStatement": "A route with recovery space.", "semanticClaims": [],
-        }):
+        with self.using_dependencies(
+            llm_handlers={
+                "review_intent_feedback": {'verdict': 'compatible', 'explanation': 'This is your revised direction.', 'displayStatement': 'A route with recovery space.', 'semanticClaims': []},
+            },
+        ):
             response = self.client.post(f"/api/sessions/{self.session_id}/intent-hypotheses/{state['hypothesisId']}/feedback", json=request)
         self.assertEqual(response.status_code, 200, response.text)
         node = self.latest("intent")
@@ -348,8 +344,8 @@ class ResearchProjectionTests(unittest.TestCase):
         self.assertIn(request["candidateText"], text)
         self.assertIn("recovery space", text)
         original = json.loads(json.dumps(node))
-        backend.synchronize_dashboard_node_for_turn(self.session_id, "intent-source")
-        backend.synchronize_dashboard_intent_node(self.session_id, state["hypothesisId"])
+        online_sync_and_dashboard.synchronize_dashboard_node_for_turn(self.session_id, "intent-source", services=self.services)
+        online_sync_and_dashboard.synchronize_dashboard_intent_node(self.session_id, state["hypothesisId"], services=self.services)
         self.assertEqual(self.latest("intent"), original)
 
     def test_pending_intent_revision_is_not_confirmed(self):
@@ -358,9 +354,11 @@ class ResearchProjectionTests(unittest.TestCase):
         request = {"action": "revise", "candidateText": "I might want a different route feel.",
                    "baseVersionId": self.read()["currentVersionId"], "sourceTurnId": card["turnId"],
                    "idempotencyKey": "pending-intent-revise"}
-        with patch.object(backend, "review_intent_feedback", return_value={
-            "verdict": "unclear", "explanation": "Please clarify the route effect.", "semanticClaims": [],
-        }):
+        with self.using_dependencies(
+            llm_handlers={
+                "review_intent_feedback": {'verdict': 'unclear', 'explanation': 'Please clarify the route effect.', 'semanticClaims': []},
+            },
+        ):
             response = self.client.post(f"/api/sessions/{self.session_id}/intent-hypotheses/{state['hypothesisId']}/feedback", json=request)
         self.assertEqual(response.status_code, 200, response.text)
         node = self.latest("intent")

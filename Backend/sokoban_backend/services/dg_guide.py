@@ -1,10 +1,8 @@
 import re
 
-from . import __name__  # noqa: F401
-from ..config import SHORT_LLM_TIMEOUT_SECONDS
+from ..config import BackendSettings
 from ..llm.prompts import build_dg_guide_summary_messages
-from ..llm.runtime import LLMServiceError
-from ..runtime_state import call_app_hook
+from ..llm.runtime import LLMGateway, LLMServiceError
 
 
 DG_DIFFICULTY_ANSWERS = {
@@ -121,14 +119,9 @@ def dg_preference_score(first, second, choices):
     explicit = [choices[first], choices[second]]
     explicit = [value for value in explicit if value is not None]
     if not explicit:
-        # Both answers are no_preference. Preserve that uncertainty as Random
-        # and let Confirm resolve it to a concrete value.
         return None
     if len(explicit) == 1 or explicit[0] == explicit[-1]:
         return explicit[0]
-    # Adjacent directions use the ordered endpoints from the neutral rule:
-    # low+middle stays low, while middle+high stays high.  A two-step
-    # disagreement stays at the middle so neither extreme wins.
     low, high = sorted(explicit)
     if high - low == 1:
         return low if low == 0 else high
@@ -236,73 +229,84 @@ def build_dg_fallback_summary(context, reason=""):
     }
 
 
-def create_dg_guide_summary(context, request_id=""):
-    fallback = build_dg_fallback_summary(context)
+def validate_dg_guide_payload(payload, context):
+    if not isinstance(payload, dict):
+        raise ValueError("DG guide response must be a JSON object")
+    summary = normalize_dg_reflection(payload.get("summary"))
+    difficulty_rationale = normalize_dg_rationale(
+        payload.get("difficultyRationale"),
+        "difficulty",
+    )
+    layout_rationale = normalize_dg_rationale(
+        payload.get("layoutRationale"),
+        "layout",
+    )
+    difficulty = str(payload.get("recommendedDifficulty") or "").strip()
+    layout = str(payload.get("recommendedLayout") or "").strip()
+    if not summary:
+        raise ValueError("DG guide summary is required")
+    if difficulty not in {"Easy", "Medium", "Hard", "Random"}:
+        raise ValueError("DG guide difficulty is invalid")
+    if layout not in {"Compact", "Balanced", "Open", "Random"}:
+        raise ValueError("DG guide layout is invalid")
+    difficulty_scores = dg_preference_allowed_scores(
+        context["firstMovePreference"],
+        context["pushPlanningPreference"],
+        DG_DIFFICULTY_ANSWERS,
+    )
+    layout_scores = dg_preference_allowed_scores(
+        context["spacePreference"],
+        context["routeRhythmPreference"],
+        DG_LAYOUT_ANSWERS,
+    )
+    allowed_difficulties = (
+        {"Random"}
+        if difficulty_scores is None
+        else {("Easy", "Medium", "Hard")[score] for score in difficulty_scores}
+    )
+    allowed_layouts = (
+        {"Random"}
+        if layout_scores is None
+        else {("Compact", "Balanced", "Open")[score] for score in layout_scores}
+    )
+    if difficulty not in allowed_difficulties or layout not in allowed_layouts:
+        raise ValueError("DG guide recommendation does not match the neutral answer rules")
+    return {
+        "summary": summary,
+        "recommendedDifficulty": difficulty,
+        "difficultyRationale": difficulty_rationale,
+        "recommendedLayout": layout,
+        "layoutRationale": layout_rationale,
+        "source": "llm",
+    }
 
-    def validate(payload):
-        if not isinstance(payload, dict):
-            raise ValueError("DG guide response must be a JSON object")
-        summary = normalize_dg_reflection(payload.get("summary"))
-        difficulty_rationale = normalize_dg_rationale(
-            payload.get("difficultyRationale"),
-            "difficulty",
-        )
-        layout_rationale = normalize_dg_rationale(
-            payload.get("layoutRationale"),
-            "layout",
-        )
-        difficulty = str(payload.get("recommendedDifficulty") or "").strip()
-        layout = str(payload.get("recommendedLayout") or "").strip()
-        if not summary:
-            raise ValueError("DG guide summary is required")
-        if difficulty not in {"Easy", "Medium", "Hard", "Random"}:
-            raise ValueError("DG guide difficulty is invalid")
-        if layout not in {"Compact", "Balanced", "Open", "Random"}:
-            raise ValueError("DG guide layout is invalid")
-        difficulty_scores = dg_preference_allowed_scores(
-            context["firstMovePreference"],
-            context["pushPlanningPreference"],
-            DG_DIFFICULTY_ANSWERS,
-        )
-        layout_scores = dg_preference_allowed_scores(
-            context["spacePreference"],
-            context["routeRhythmPreference"],
-            DG_LAYOUT_ANSWERS,
-        )
-        allowed_difficulties = (
-            {"Random"}
-            if difficulty_scores is None
-            else {("Easy", "Medium", "Hard")[score] for score in difficulty_scores}
-        )
-        allowed_layouts = (
-            {"Random"}
-            if layout_scores is None
-            else {("Compact", "Balanced", "Open")[score] for score in layout_scores}
-        )
-        if difficulty not in allowed_difficulties or layout not in allowed_layouts:
-            raise ValueError("DG guide recommendation does not match the neutral answer rules")
-        return {
-            "summary": summary,
-            "recommendedDifficulty": difficulty,
-            "difficultyRationale": difficulty_rationale,
-            "recommendedLayout": layout,
-            "layoutRationale": layout_rationale,
-            "source": "llm",
-        }
 
-    try:
-        execution = call_app_hook(
-            "execute_json_request",
-            task="dg_guide_summary",
-            messages=build_dg_guide_summary_messages(context),
-            validator=validate,
-            temperature=0.2,
-            timeout_seconds=SHORT_LLM_TIMEOUT_SECONDS,
-            max_attempts=1,
-            request_id=request_id,
-            validation_stage="dg_guide_validation",
-        )
-        return execution.value
-    except LLMServiceError as exception:
-        fallback["fallbackReason"] = exception.safe_message
-        return fallback
+class DGGuideService:
+    def __init__(
+        self,
+        llm_gateway: LLMGateway,
+        *,
+        settings: BackendSettings | None = None,
+    ) -> None:
+        self.llm_gateway = llm_gateway
+        self.settings = settings or llm_gateway.settings
+
+    def create_summary(self, context: dict, request_id: str = "") -> dict:
+        fallback = build_dg_fallback_summary(context)
+        try:
+            execution = self.llm_gateway.execute_json_request(
+                task="dg_guide_summary",
+                messages=build_dg_guide_summary_messages(context),
+                validator=lambda payload: validate_dg_guide_payload(payload, context),
+                temperature=0.2,
+                timeout_seconds=self.settings.llm_timeout_seconds,
+                max_attempts=1,
+                request_id=request_id,
+                validation_stage="dg_guide_validation",
+            )
+            return execution.value
+        except LLMServiceError as exception:
+            fallback["fallbackReason"] = exception.safe_message
+            return fallback
+
+    create_dg_guide_summary = create_summary

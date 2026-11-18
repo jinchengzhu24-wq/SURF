@@ -4,24 +4,24 @@ import json
 import sys
 import time
 import unittest
-from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import app as B
-import repository
-import binary_discovery as binary
-import binary_model
-import llm_client as llm
-from level_validation import validate_and_solve, minimum_pushes
+from tests.fakes import RecordedCall, SessionTestCase
+from cocreation.api import config_models
+from cocreation.api import session_persistence_helpers
+from cocreation.persistence import repository
+from cocreation.domain import binary_discovery as binary
+from cocreation.llm import binary_model
+from cocreation.llm import facade as llm
+from cocreation.domain.level_validation import validate_and_solve, minimum_pushes
 import test_sessions as legacy
 import test_wire_contracts as wire_tests
 from test_wire_contracts import assert_schema
 
 
-ROWS = list(B.SAMPLE_ROWS)
+ROWS = list(config_models.SAMPLE_ROWS)
 ROWS[2] = "#.@.....@..#"
 
 
@@ -190,34 +190,34 @@ class BinaryWireTests(unittest.TestCase):
         self.assertTrue(review["evidence"]["topic"]["selectedFeasibility"]["allSelectedActionsPassed"])
 
 
-class BinaryHTTPTests(unittest.TestCase):
-    setUpClass = classmethod(legacy.CoCreationSessionTests.setUpClass.__func__)
-    tearDownClass = classmethod(legacy.CoCreationSessionTests.tearDownClass.__func__)
-    tearDown = legacy.CoCreationSessionTests.tearDown
+class BinaryHTTPTests(SessionTestCase):
     create_and_open_session = legacy.CoCreationSessionTests.create_and_open_session
     _fake_turn_understanding = staticmethod(legacy.CoCreationSessionTests._fake_turn_understanding)
 
     def setUp(self):
-        legacy.CoCreationSessionTests.setUp(self)
+        self.open_workspace(
+            settings_overrides={"binary_discovery_enabled": True},
+            llm_handlers={
+                "classify_turn_understanding": self._fake_turn_understanding,
+                "review_proposal_requirements": {
+                    "requirements": [], "automaticBindings": [], "exactTransitions": [],
+                },
+                "generate_binary_step": self.generate,
+            },
+        )
+        self.session_id, self.integration_token = self.create_and_open_session()
         self.version = self.client.get(f"/api/sessions/{self.session_id}").json()["currentVersionId"]
         # Existing session fixture is an open map; add two legal blocked cells to its immutable test Stage.
-        with repository.connect(immediate=True) as db:
+        with self.services.connect(immediate=True) as db:
             db.execute("UPDATE level_versions SET rows_json=?, validation_json=? WHERE id=?",
                 (json.dumps(ROWS), json.dumps(validate_and_solve(ROWS).as_dict()), self.version))
-        self.requirements = patch.object(llm, "_review_proposal_requirements", return_value={
-            "requirements": [], "automaticBindings": [], "exactTransitions": []})
-        self.requirements.start(); self.addCleanup(self.requirements.stop)
-        self.start_patch = patch("binary_routes.should_start", return_value=True)
-        self.start_patch.start(); self.addCleanup(self.start_patch.stop)
-        self.model = patch.object(binary_model, "generate", side_effect=self.generate)
-        self.model.start(); self.addCleanup(self.model.stop)
 
     def generate(self, current, context, validator, strategy_validator, request_id, deadline, budget=20):
         result = step()
         context["stageContext"]["requirementRecord"] = current.get("requirements") or result["initialRequirements"]
         if current.get("requirements") is not None: result["initialRequirements"] = None
         caches = binary.preflight(result, current, context["rows"], context["stageContext"]["stageSnapshot"],
-            validator, deadline, strategy_validator, budget)
+            validator, deadline, strategy_validator, budget, clock=self.services.clock)
         return result, caches
 
     def start(self):
@@ -249,7 +249,7 @@ class BinaryHTTPTests(unittest.TestCase):
     def test_failed_continuation_keeps_click_exactly_once_and_rejects_old_buttons(self):
         state = self.start(); payload = self.choice(state)
         failure = llm.LLMServiceError("BINARY_PREFLIGHT_NOT_FOUND", "Retry", "fixture", True, 1, 502)
-        with patch.object(binary_model, "generate", side_effect=failure):
+        with self.using_dependencies(llm_handlers={"generate_binary_step": failure}):
             for _ in range(2):
                 response = self.client.post(f"/api/sessions/{self.session_id}/proposal-discovery/choices", json=payload)
                 self.assertEqual(response.status_code, 502, response.text)
@@ -265,18 +265,22 @@ class BinaryHTTPTests(unittest.TestCase):
         state = self.start(); payload = self.choice(state)
         def planner(**kwargs):
             stage = kwargs["stage_context"]
-            with repository.connect() as db:
+            with self.services.connect() as db:
                 current = binary.current_topic(db, self.session_id, self.version)
             cache = current["selectedCandidate"]
-            from proposal_search import parse_revision_plan
+            from cocreation.domain.proposal_search import parse_revision_plan
             plan = parse_revision_plan({"strategies": [cache["strategy"]]})
             contract = llm._build_revision_execution_contract(plan, current["initialRequest"], stage)
-            import binary_routes
+            from cocreation.api import binary_routes
             return llm.LLMExecutionResult("", 1, "fixture-final", model="offline",
                 proposed_rows=cache["rows"], revision_contract=contract, revision_plan=plan.as_dict(),
                 revision_operations=binary_routes._operations(ROWS, cache["rows"]), proposal_diagnostics={"selectedStrategyIndex": 1})
-        with patch.object(binary_model, "generate", return_value=({"action": "plan", "question": "", "note": "", "branches": []}, [])), \
-                patch.object(llm, "_generate_revision_search_proposal_sync", side_effect=planner):
+        with self.using_dependencies(
+            llm_handlers={
+                "generate_binary_step": ({'action': 'plan', 'question': '', 'note': '', 'branches': []}, []),
+            },
+            llm_options={"revision_search_generator": RecordedCall(side_effect=planner)},
+        ):
             response = self.client.post(f"/api/sessions/{self.session_id}/proposal-discovery/choices", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         state = response.json()
@@ -302,7 +306,11 @@ class BinaryHTTPTests(unittest.TestCase):
         self.assertEqual(len(adopted.json()["versions"]), 2)
 
     def test_cancelled_failed_request_cannot_be_resumed_with_old_key(self):
-        with patch.object(binary_model, "generate", side_effect=llm.LLMServiceError("BINARY_PREFLIGHT_NOT_FOUND", "Retry", "x", True, 1, 502)):
+        with self.using_dependencies(
+            llm_handlers={
+                "generate_binary_step": llm.LLMServiceError('BINARY_PREFLIGHT_NOT_FOUND', 'Retry', 'x', True, 1, 502),
+            },
+        ):
             failed = self.client.post(f"/api/sessions/{self.session_id}/messages", json={"baseVersionId": self.version,
                 "content": "Make it simpler.", "requestProposal": True, "idempotencyKey": "binary-start"})
         self.assertEqual(failed.status_code, 502)
@@ -314,11 +322,11 @@ class BinaryHTTPTests(unittest.TestCase):
         self.assertEqual(replay.status_code, 409, replay.text)
 
     def test_unpublished_question_does_not_consume_count_after_commit_failure(self):
-        original = B.insert_turn
+        original = session_persistence_helpers.insert_turn
         def fail_assistant(database, session, role, *args, **kwargs):
             if role == "assistant": raise RuntimeError("injected commit failure")
             return original(database, session, role, *args, **kwargs)
-        with patch.object(B, "insert_turn", side_effect=fail_assistant):
+        with self.using_dependencies(insert_turn_fn=RecordedCall(side_effect=fail_assistant)):
             response = self.client.post(f"/api/sessions/{self.session_id}/messages", json={"baseVersionId": self.version,
                 "content": "Make it simpler.", "requestProposal": True, "idempotencyKey": "binary-start"})
         self.assertEqual(response.status_code, 502, response.text)
@@ -330,10 +338,10 @@ class BinaryHTTPTests(unittest.TestCase):
 
     def test_tampered_cached_proof_rolls_back_the_choice_turn(self):
         state = self.start(); payload = self.choice(state)
-        with repository.connect(immediate=True) as db:
+        with self.services.connect(immediate=True) as db:
             current = binary.current_topic(db, self.session_id, self.version)
             current["pendingQuestion"]["choices"][0]["candidate"]["rows"] = list(ROWS)
-            repository.record_event(db, self.session_id, "binary_discovery_state", current, B.utc_now())
+            repository.record_event(db, self.session_id, "binary_discovery_state", current, self.services.utc_now())
         response = self.client.post(f"/api/sessions/{self.session_id}/proposal-discovery/choices", json=payload)
         self.assertEqual(response.status_code, 409, response.text)
         latest = self.client.get(f"/api/sessions/{self.session_id}").json()

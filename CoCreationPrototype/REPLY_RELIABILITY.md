@@ -8,6 +8,8 @@
 - **8010 前端模块化（`css/`、`js/`）**：将 `styles.css` 与 `app.js` 拆分为有序的 5 个 CSS 模块与 7 个经典 JS 模块；修复提案接受/拒绝与同 Stage 反馈草稿丢失、`ensureAssessment` 过期并发及到期后阻塞定稿、翻译无限重试与并发漏翻、坐标高亮闪烁、schema-v2 提案卡识别及本地调试域隔离。
 - **8000 与 Unity/WebGL 联动**：同步模块化拆分 `Backend/sokoban_backend/`、`Frontend/{css,js}/` 与 `Assets/Scripts/Level/Generation/`，修复靠墙南侧水域失灵（`LevelLoader`）、超时按 `R` 绕过锁定、`Physics2D` 推箱同步、Stage Play `Esc`/宿主返回退出、`DATA DASHBOARD` 弹窗二次打开锁死及 Unity `JsonUtility` 非空嵌套对象误判等缺陷。
 
+8010 的 `create_app(services)` 统一接入 SQLite 仓库、Kimi 服务、时钟和 8000 同步客户端。SQLite 在首次使用时初始化。会话剩余时间与意图卡可操作性使用同一会话时钟。原生 ES Modules 网页由入口模块加载，离线测试直接导入模块。
+
 ## 2026-11-16 理解复核局部纠正（本地修订，未部署）
 
 当前本地协议为 `understanding-delta-3-quote-leaf`，由下述首轮 `understanding-delta-2-native` 收尾修复而来，仅调整8010理解复核。独立复核完整审阅同一份用户来源、StageSnapshot、历史主题和基准理解：`APPROVE` 返回空纠正列表，沿用已校验对象；`CORRECT` 只返回服务器提供的目标 ID、理由、原生 JSON `value` 及用户来源引用；`REJECT` 安全失败。首次语义纠正仍可逐项替换或追加遗漏项；不暴露整份理解、整组目标/保留条件替换或删除/重排操作，额外拒绝字面跨条目复制/交换及新增重复项。这不等于能确定性识别语义等价改写。必要纠正不合法不得回退旧理解宣告通过。
@@ -287,13 +289,13 @@ Session 的可选 `lastMessageFailure` 从现有 `message_generation_failed` 审
 | 翻译 | 合格字段锁定，按来源快照重验，提示不发送快照内部信息；逐条保留成功项；`test_sessions`、`test_llm_client` |
 | 保存、恢复、试玩、最终提交 | 幂等、并发、旧 Stage、deadline、确定性操作保护；`test_sessions`、`test_app` |
 | Demo/正式、8000/Unity 边界 | deadline 和研究同步差异不变，模型/DG 隔离，host 协议保持版本 5；8010 全量及 `Backend/test_*.py` |
-| 前端错误恢复 | HTML/非法 JSON、空或缺字段 2xx、响应正文超时、原键重试、诊断字段；`Frontend/tests/test_controls.cjs` |
+| 前端错误恢复 | HTML/非法 JSON、空或缺字段 2xx、响应正文超时、原键重试、诊断字段；`Frontend/tests/test_controls.mjs` |
 
 测试仅使用固定模型输出、临时数据库与故障注入，不需要真实 API 或模型网络调用：
 
 ```powershell
 python -m unittest discover -s CoCreationPrototype/Backend/tests -p "test_*.py"
-node --test CoCreationPrototype/Frontend/tests/*.cjs
+node --test CoCreationPrototype/Frontend/tests/*.mjs
 python -m unittest discover -s Backend -p "test_*.py"
 ```
 

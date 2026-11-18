@@ -1,29 +1,19 @@
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Iterable
 import hashlib
 import json
 import os
+from pathlib import Path
+import re
 import tempfile
 import threading
-from pathlib import Path
+from typing import Any
 
 from fastapi import HTTPException, Request
 
-from ..runtime_state import app_attr, current_time, utc_timestamp
-
-
-study_record_lock = threading.RLock()
-
-
-def _lock():
-    return app_attr("study_record_lock") or study_record_lock
-
-
-def _study_log_dir():
-    return Path(app_attr("STUDY_LOG_DIR"))
-
-
-def ensure_study_log_dir():
-    _study_log_dir().mkdir(parents=True, exist_ok=True)
+from ..config import Clock, StudyLogPaths
 
 
 def normalize_identifier(value):
@@ -114,78 +104,7 @@ def build_journey_event_identifier(event):
     return digest[:16]
 
 
-def read_jsonl_records(path):
-    path = Path(path)
-    with _lock():
-        if not path.exists():
-            return [], 0
-
-        records = []
-        malformed_count = 0
-
-        with path.open("r", encoding="utf-8") as log_file:
-            for line in log_file:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    malformed_count += 1
-                    continue
-                if isinstance(data, dict):
-                    records.append(data)
-                else:
-                    malformed_count += 1
-
-        return records, malformed_count
-
-
-def read_raw_jsonl_text(path):
-    path = Path(path)
-    with _lock():
-        if not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8")
-
-
-def write_jsonl_records(path, records):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _lock():
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=str(path.parent),
-        )
-        temp_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as log_file:
-                for record in records:
-                    log_file.write(json.dumps(record, ensure_ascii=False))
-                    log_file.write("\n")
-                log_file.flush()
-                os.fsync(log_file.fileno())
-            os.replace(temp_path, path)
-        except Exception:
-            if temp_path.exists():
-                try:
-                    temp_path.unlink()
-                except OSError:
-                    pass
-            raise
-
-
-def append_jsonl_record(path, record):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _lock():
-        with path.open("a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps(record, ensure_ascii=False))
-            log_file.write("\n")
-
-
-async def _parse_json_dict(request: Request):
+async def _parse_json_dict(request: Request) -> dict[str, Any]:
     try:
         data = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exception:
@@ -195,189 +114,295 @@ async def _parse_json_dict(request: Request):
     return data
 
 
-async def append_level_record(request: Request, default_event_type: str):
-    data = await _parse_json_dict(request)
-    data.setdefault("eventType", default_event_type)
-    data["serverReceivedAt"] = utc_timestamp()
-    log_path = Path(app_attr("STUDY_LOG_FILE"))
+class StudyLogStore:
+    def __init__(
+        self,
+        paths: StudyLogPaths,
+        clock: Clock | None = None,
+        record_lock: threading.RLock | None = None,
+    ) -> None:
+        self.paths = paths
+        self.clock = clock or Clock()
+        self.record_lock = record_lock or threading.RLock()
 
-    def _write():
-        ensure_study_log_dir()
-        append_jsonl_record(log_path, data)
+    def ensure_study_log_dir(self) -> None:
+        self.paths.study_log_dir.mkdir(parents=True, exist_ok=True)
 
-    await asyncio.to_thread(_write)
-    return {
-        "status": "ok",
-        "eventType": data["eventType"],
-        "logFile": str(log_path),
-    }
+    def read_jsonl_records(self, path: Path | str) -> tuple[list[dict[str, Any]], int]:
+        target = Path(path)
+        with self.record_lock:
+            if not target.exists():
+                return [], 0
 
+            records: list[dict[str, Any]] = []
+            malformed_count = 0
 
-async def append_survey_record(request: Request):
-    data = await _parse_json_dict(request)
-    data.setdefault("eventType", "survey-response")
-    data["serverReceivedAt"] = utc_timestamp()
-    log_path = Path(app_attr("SURVEY_LOG_FILE"))
+            with target.open("r", encoding="utf-8") as log_file:
+                for line in log_file:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        malformed_count += 1
+                        continue
+                    if isinstance(data, dict):
+                        records.append(data)
+                    else:
+                        malformed_count += 1
 
-    def _write():
-        ensure_study_log_dir()
-        append_jsonl_record(log_path, data)
+            return records, malformed_count
 
-    await asyncio.to_thread(_write)
-    return {
-        "status": "ok",
-        "eventType": data["eventType"],
-        "logFile": str(log_path),
-    }
+    def read_raw_jsonl_text(self, path: Path | str) -> str:
+        target = Path(path)
+        with self.record_lock:
+            if not target.exists():
+                return ""
+            return target.read_text(encoding="utf-8")
 
+    def write_jsonl_records(
+        self,
+        path: Path | str,
+        records: Iterable[dict[str, Any]],
+    ) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self.record_lock:
+            fd, temp_name = tempfile.mkstemp(
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                dir=str(target.parent),
+            )
+            temp_path = Path(temp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as log_file:
+                    for record in records:
+                        log_file.write(json.dumps(record, ensure_ascii=False))
+                        log_file.write("\n")
+                    log_file.flush()
+                    os.fsync(log_file.fileno())
+                os.replace(temp_path, target)
+            except Exception:
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except OSError:
+                        pass
+                raise
 
-async def append_creative_idea_record(request: Request):
-    data = await _parse_json_dict(request)
-    idea_text = str(data.get("ideaText") or data.get("idea") or "").strip()
-    if not idea_text:
-        raise HTTPException(status_code=400, detail="ideaText is required")
-    data["ideaText"] = idea_text
-    data.setdefault("eventType", "creative-idea")
-    data.setdefault("ideaId", f"idea-{int(current_time() * 1000)}")
-    data["serverReceivedAt"] = utc_timestamp()
-    log_path = Path(app_attr("CREATIVE_IDEA_LOG_FILE"))
+    def append_jsonl_record(self, path: Path | str, record: dict[str, Any]) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self.record_lock:
+            with target.open("a", encoding="utf-8") as log_file:
+                log_file.write(json.dumps(record, ensure_ascii=False))
+                log_file.write("\n")
 
-    def _write():
-        ensure_study_log_dir()
-        append_jsonl_record(log_path, data)
+    def online_match_flow_directory(self, match_id: str) -> Path:
+        normalized = str(match_id or "").strip()
+        if not re.fullmatch(r"[a-f0-9]{32}", normalized):
+            raise HTTPException(status_code=400, detail="Invalid match ID")
+        return self.paths.online_match_flow_dir / normalized
 
-    await asyncio.to_thread(_write)
-    return {
-        "status": "ok",
-        "eventType": data["eventType"],
-        "ideaId": data["ideaId"],
-        "logFile": str(log_path),
-    }
+    def online_match_flow_file(self, match_id: str, player_number: int) -> Path:
+        if player_number not in (1, 2):
+            raise HTTPException(status_code=400, detail="Invalid player number")
+        return self.online_match_flow_directory(match_id) / f"player-{player_number}.jsonl"
 
+    def read_online_match_flow_events(
+        self,
+        match_id: str,
+        player_number: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        if not re.fullmatch(r"[a-f0-9]{32}", str(match_id or "").strip()):
+            return [], 0
+        return self.read_jsonl_records(
+            self.online_match_flow_file(match_id, player_number)
+        )
 
-async def append_expansion_choice_record(request: Request):
-    data = await _parse_json_dict(request)
-    idea_id = str(data.get("ideaId") or "").strip()
-    selected_title = str(data.get("selectedOptionTitle") or "").strip()
-    if not idea_id:
-        raise HTTPException(status_code=400, detail="ideaId is required")
-    if not selected_title:
-        raise HTTPException(status_code=400, detail="selectedOptionTitle is required")
-    data.setdefault("eventType", "creative-expansion-choice")
-    data["serverReceivedAt"] = utc_timestamp()
-    if not normalize_expansion_choice_identifier(data.get("choiceId")):
-        data["choiceId"] = build_expansion_choice_identifier(data)
-    log_path = Path(app_attr("CREATIVE_EXPANSION_CHOICE_LOG_FILE"))
+    async def append_level_record(
+        self,
+        request: Request,
+        default_event_type: str,
+    ) -> dict[str, Any]:
+        data = await _parse_json_dict(request)
+        data.setdefault("eventType", default_event_type)
+        data["serverReceivedAt"] = self.clock.utc_timestamp()
+        log_path = self.paths.study_log_file
 
-    def _write():
-        ensure_study_log_dir()
-        append_jsonl_record(log_path, data)
+        def _write() -> None:
+            self.ensure_study_log_dir()
+            self.append_jsonl_record(log_path, data)
 
-    await asyncio.to_thread(_write)
-    return {
-        "status": "ok",
-        "eventType": data["eventType"],
-        "choiceId": data["choiceId"],
-        "ideaId": idea_id,
-        "logFile": str(log_path),
-    }
+        await asyncio.to_thread(_write)
+        return {
+            "status": "ok",
+            "eventType": data["eventType"],
+            "logFile": str(log_path),
+        }
 
+    async def append_survey_record(self, request: Request) -> dict[str, Any]:
+        data = await _parse_json_dict(request)
+        data.setdefault("eventType", "survey-response")
+        data["serverReceivedAt"] = self.clock.utc_timestamp()
+        log_path = self.paths.survey_log_file
 
-async def append_ha_plan_event(request: Request, default_event_type: str):
-    data = await _parse_json_dict(request)
-    idea_id = str(data.get("ideaId") or "").strip()
-    selected_title = str(data.get("selectedOptionTitle") or "").strip()
-    if not idea_id:
-        raise HTTPException(status_code=400, detail="ideaId is required")
-    if default_event_type == "ha-plan-choice" and not selected_title:
-        raise HTTPException(status_code=400, detail="selectedOptionTitle is required")
-    data.setdefault("eventType", default_event_type)
-    data["serverReceivedAt"] = utc_timestamp()
-    await asyncio.to_thread(write_ha_plan_event, data)
-    return {
-        "status": "ok",
-        "eventType": data["eventType"],
-        "ideaId": idea_id,
-        "logFile": str(app_attr("HA_PLAN_EVENT_LOG_FILE")),
-    }
+        def _write() -> None:
+            self.ensure_study_log_dir()
+            self.append_jsonl_record(log_path, data)
 
+        await asyncio.to_thread(_write)
+        return {
+            "status": "ok",
+            "eventType": data["eventType"],
+            "logFile": str(log_path),
+        }
 
-async def append_journey_event(request: Request):
-    data = await _parse_json_dict(request)
-    idea_id = str(data.get("ideaId") or "").strip()
-    phase = str(data.get("phase") or "").strip()
-    if not idea_id:
-        raise HTTPException(status_code=400, detail="ideaId is required")
-    if not phase:
-        raise HTTPException(status_code=400, detail="phase is required")
-    data.setdefault("eventType", "journey-event")
-    data["serverReceivedAt"] = utc_timestamp()
-    data["journeyEventId"] = build_journey_event_identifier(data)
-    log_path = Path(app_attr("JOURNEY_EVENT_LOG_FILE"))
+    async def append_creative_idea_record(self, request: Request) -> dict[str, Any]:
+        data = await _parse_json_dict(request)
+        idea_text = str(data.get("ideaText") or data.get("idea") or "").strip()
+        if not idea_text:
+            raise HTTPException(status_code=400, detail="ideaText is required")
+        data["ideaText"] = idea_text
+        data.setdefault("eventType", "creative-idea")
+        data.setdefault("ideaId", f"idea-{int(self.clock.now() * 1000)}")
+        data["serverReceivedAt"] = self.clock.utc_timestamp()
+        log_path = self.paths.creative_idea_log_file
 
-    def _write():
-        ensure_study_log_dir()
-        append_jsonl_record(log_path, data)
+        def _write() -> None:
+            self.ensure_study_log_dir()
+            self.append_jsonl_record(log_path, data)
 
-    await asyncio.to_thread(_write)
-    return {
-        "status": "ok",
-        "eventType": data["eventType"],
-        "journeyEventId": data["journeyEventId"],
-        "ideaId": idea_id,
-        "logFile": str(log_path),
-    }
+        await asyncio.to_thread(_write)
+        return {
+            "status": "ok",
+            "eventType": data["eventType"],
+            "ideaId": data["ideaId"],
+            "logFile": str(log_path),
+        }
 
+    async def append_expansion_choice_record(self, request: Request) -> dict[str, Any]:
+        data = await _parse_json_dict(request)
+        idea_id = str(data.get("ideaId") or "").strip()
+        selected_title = str(data.get("selectedOptionTitle") or "").strip()
+        if not idea_id:
+            raise HTTPException(status_code=400, detail="ideaId is required")
+        if not selected_title:
+            raise HTTPException(status_code=400, detail="selectedOptionTitle is required")
+        data.setdefault("eventType", "creative-expansion-choice")
+        data["serverReceivedAt"] = self.clock.utc_timestamp()
+        if not normalize_expansion_choice_identifier(data.get("choiceId")):
+            data["choiceId"] = build_expansion_choice_identifier(data)
+        log_path = self.paths.creative_expansion_choice_log_file
 
-def append_ha_generation_event(request_data, options, error=""):
-    data = {
-        "eventType": "ha-plan-generation",
-        "ideaId": str(request_data.get("ideaId") or "").strip(),
-        "sessionId": str(request_data.get("sessionId") or "").strip(),
-        "gameRoundId": str(request_data.get("gameRoundId") or "").strip(),
-        "gameRoundIndex": int(request_data.get("gameRoundIndex") or 0),
-        "adjustmentText": str(request_data.get("adjustmentText") or "").strip(),
-        "sceneName": str(request_data.get("sceneName") or "").strip(),
-        "officialRound": request_data.get("officialRound") is True,
-        "previousLevelPlan": request_data.get("previousLevelPlan"),
-        "corridorValidation": request_data.get("corridorValidation"),
-        "regenerationAttempt": int(request_data.get("regenerationAttempt") or 0),
-        "previousOptions": request_data.get("previousOptions"),
-        "options": options,
-        "error": str(error or ""),
-        "serverReceivedAt": utc_timestamp(),
-    }
-    write_ha_plan_event(data)
+        def _write() -> None:
+            self.ensure_study_log_dir()
+            self.append_jsonl_record(log_path, data)
 
+        await asyncio.to_thread(_write)
+        return {
+            "status": "ok",
+            "eventType": data["eventType"],
+            "choiceId": data["choiceId"],
+            "ideaId": idea_id,
+            "logFile": str(log_path),
+        }
 
-def write_ha_plan_event(data):
-    ensure_study_log_dir()
-    append_jsonl_record(Path(app_attr("HA_PLAN_EVENT_LOG_FILE")), data)
+    async def append_ha_plan_event(
+        self,
+        request: Request,
+        default_event_type: str,
+    ) -> dict[str, Any]:
+        data = await _parse_json_dict(request)
+        idea_id = str(data.get("ideaId") or "").strip()
+        selected_title = str(data.get("selectedOptionTitle") or "").strip()
+        if not idea_id:
+            raise HTTPException(status_code=400, detail="ideaId is required")
+        if default_event_type == "ha-plan-choice" and not selected_title:
+            raise HTTPException(status_code=400, detail="selectedOptionTitle is required")
+        data.setdefault("eventType", default_event_type)
+        data["serverReceivedAt"] = self.clock.utc_timestamp()
+        await asyncio.to_thread(self.write_ha_plan_event, data)
+        return {
+            "status": "ok",
+            "eventType": data["eventType"],
+            "ideaId": idea_id,
+            "logFile": str(self.paths.ha_plan_event_log_file),
+        }
 
+    async def append_journey_event(self, request: Request) -> dict[str, Any]:
+        data = await _parse_json_dict(request)
+        idea_id = str(data.get("ideaId") or "").strip()
+        phase = str(data.get("phase") or "").strip()
+        if not idea_id:
+            raise HTTPException(status_code=400, detail="ideaId is required")
+        if not phase:
+            raise HTTPException(status_code=400, detail="phase is required")
+        data.setdefault("eventType", "journey-event")
+        data["serverReceivedAt"] = self.clock.utc_timestamp()
+        data["journeyEventId"] = build_journey_event_identifier(data)
+        log_path = self.paths.journey_event_log_file
 
-def read_level_record_events():
-    return read_jsonl_records(app_attr("STUDY_LOG_FILE"))
+        def _write() -> None:
+            self.ensure_study_log_dir()
+            self.append_jsonl_record(log_path, data)
 
+        await asyncio.to_thread(_write)
+        return {
+            "status": "ok",
+            "eventType": data["eventType"],
+            "journeyEventId": data["journeyEventId"],
+            "ideaId": idea_id,
+            "logFile": str(log_path),
+        }
 
-def read_survey_response_events():
-    return read_jsonl_records(app_attr("SURVEY_LOG_FILE"))
+    def append_ha_generation_event(
+        self,
+        request_data: dict[str, Any],
+        options: list[dict[str, Any]],
+        error: str = "",
+    ) -> None:
+        data = {
+            "eventType": "ha-plan-generation",
+            "ideaId": str(request_data.get("ideaId") or "").strip(),
+            "sessionId": str(request_data.get("sessionId") or "").strip(),
+            "gameRoundId": str(request_data.get("gameRoundId") or "").strip(),
+            "gameRoundIndex": int(request_data.get("gameRoundIndex") or 0),
+            "adjustmentText": str(request_data.get("adjustmentText") or "").strip(),
+            "sceneName": str(request_data.get("sceneName") or "").strip(),
+            "officialRound": request_data.get("officialRound") is True,
+            "previousLevelPlan": request_data.get("previousLevelPlan"),
+            "corridorValidation": request_data.get("corridorValidation"),
+            "regenerationAttempt": int(request_data.get("regenerationAttempt") or 0),
+            "previousOptions": request_data.get("previousOptions"),
+            "options": options,
+            "error": str(error or ""),
+            "serverReceivedAt": self.clock.utc_timestamp(),
+        }
+        self.write_ha_plan_event(data)
 
+    def write_ha_plan_event(self, data: dict[str, Any]) -> None:
+        self.ensure_study_log_dir()
+        self.append_jsonl_record(self.paths.ha_plan_event_log_file, data)
 
-def read_creative_idea_events():
-    return read_jsonl_records(app_attr("CREATIVE_IDEA_LOG_FILE"))
+    def read_level_record_events(self) -> tuple[list[dict[str, Any]], int]:
+        return self.read_jsonl_records(self.paths.study_log_file)
 
+    def read_survey_response_events(self) -> tuple[list[dict[str, Any]], int]:
+        return self.read_jsonl_records(self.paths.survey_log_file)
 
-def read_expansion_choice_events():
-    return read_jsonl_records(app_attr("CREATIVE_EXPANSION_CHOICE_LOG_FILE"))
+    def read_creative_idea_events(self) -> tuple[list[dict[str, Any]], int]:
+        return self.read_jsonl_records(self.paths.creative_idea_log_file)
 
+    def read_expansion_choice_events(self) -> tuple[list[dict[str, Any]], int]:
+        return self.read_jsonl_records(self.paths.creative_expansion_choice_log_file)
 
-def read_ha_plan_events():
-    return read_jsonl_records(app_attr("HA_PLAN_EVENT_LOG_FILE"))
+    def read_ha_plan_events(self) -> tuple[list[dict[str, Any]], int]:
+        return self.read_jsonl_records(self.paths.ha_plan_event_log_file)
 
+    def read_journey_events(self) -> tuple[list[dict[str, Any]], int]:
+        return self.read_jsonl_records(self.paths.journey_event_log_file)
 
-def read_journey_events():
-    return read_jsonl_records(app_attr("JOURNEY_EVENT_LOG_FILE"))
-
-
-def read_online_match_events():
-    return read_jsonl_records(app_attr("ONLINE_MATCH_LOG_FILE"))
+    def read_online_match_events(self) -> tuple[list[dict[str, Any]], int]:
+        return self.read_jsonl_records(self.paths.online_match_log_file)

@@ -1,28 +1,34 @@
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-from pathlib import Path
 import re
 import sys
 import threading
-import time
 import traceback
+from typing import Any
 import uuid
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 
+from ..config import (
+    BackendSettings,
+    Clock,
+    DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_LLM_RESPONSE_EXCERPT_CHARS,
+    DEFAULT_LLM_RETRY_DELAY_SECONDS,
+)
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-OPERATIONS_LOG_DIR = BASE_DIR / "logs"
-OPERATIONS_LOG_FILE = OPERATIONS_LOG_DIR / "backend.log"
-DEFAULT_MODEL = "deepseek-v4-flash"
-DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_RESPONSE_EXCERPT_CHARS = 1000
-DEFAULT_RETRY_DELAY_SECONDS = 0.5
+
+DEFAULT_MODEL = DEFAULT_DEEPSEEK_MODEL
+DEFAULT_BASE_URL = DEFAULT_DEEPSEEK_BASE_URL
+DEFAULT_RESPONSE_EXCERPT_CHARS = DEFAULT_LLM_RESPONSE_EXCERPT_CHARS
+DEFAULT_RETRY_DELAY_SECONDS = DEFAULT_LLM_RETRY_DELAY_SECONDS
 MAX_CACHED_CLIENTS = 16
 ASCII_PUNCTUATION_TRANSLATION = str.maketrans({
     "\u00a0": " ",
@@ -39,66 +45,10 @@ ASCII_PUNCTUATION_TRANSLATION = str.maketrans({
     "\u2022": "-",
 })
 
-_client_lock = threading.Lock()
-_clients = OrderedDict()
+_DEFAULT_STREAM = object()
 
 
-def _build_logger():
-    logger = logging.getLogger("sokoban.backend")
-
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(getattr(logging, os.getenv("BACKEND_LOG_LEVEL", "INFO").upper(), logging.INFO))
-    logger.propagate = False
-    formatter = logging.Formatter("%(message)s")
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
-
-    try:
-        OPERATIONS_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            OPERATIONS_LOG_FILE,
-            maxBytes=5 * 1024 * 1024,
-            backupCount=5,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-    except OSError as exception:
-        stream_handler.handle(
-            logging.LogRecord(
-                logger.name,
-                logging.ERROR,
-                __file__,
-                0,
-                json.dumps(
-                    {
-                        "timestamp": time.strftime(
-                            "%Y-%m-%dT%H:%M:%SZ",
-                            time.gmtime(),
-                        ),
-                        "level": "ERROR",
-                        "event": "operations_log_unavailable",
-                        "exceptionType": type(exception).__name__,
-                        "errorMessage": str(exception),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                (),
-                None,
-            )
-        )
-
-    return logger
-
-
-LOGGER = _build_logger()
-
-
-def new_request_id(value=""):
+def new_request_id(value: object = "") -> str:
     candidate = "".join(
         character
         for character in str(value or "").strip()
@@ -107,33 +57,142 @@ def new_request_id(value=""):
     return candidate or uuid.uuid4().hex
 
 
-def log_event(level, event, **fields):
-    payload = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "level": str(level or "INFO").upper(),
-        "event": str(event or "backend-event"),
-    }
-    payload.update(
-        {
-            key: value
-            for key, value in fields.items()
-            if value is not None and value != ""
-        }
-    )
-    message = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-    log_method = getattr(LOGGER, payload["level"].lower(), LOGGER.info)
-    log_method(message)
-
-
-def safe_log_text(value, limit=1000):
+def redact_log_text(value: object, limit: int = 1000, api_key: str = "") -> str:
     text = str(value or "")
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-
-    if api_key:
-        text = text.replace(api_key, "[redacted-api-key]")
-
+    clean_key = str(api_key or "").strip()
+    if clean_key:
+        text = text.replace(clean_key, "[redacted-api-key]")
     text = re.sub(r"https?://[^\s\"']+", "[redacted-url]", text)
     return text[: max(0, int(limit))]
+
+
+class EventLogger:
+    def __init__(
+        self,
+        settings: BackendSettings,
+        clock: Clock | None = None,
+        *,
+        stream: Any = _DEFAULT_STREAM,
+        enable_file_handler: bool = True,
+    ) -> None:
+        self.settings = settings
+        self.clock = clock or Clock()
+        self._stream = stream
+        self._enable_file_handler = bool(enable_file_handler)
+        self._lock = threading.Lock()
+        self._logger: logging.Logger | None = None
+
+    def _get_logger(self) -> logging.Logger:
+        with self._lock:
+            if self._logger is not None:
+                return self._logger
+
+            logger = logging.Logger(f"sokoban.backend.{id(self)}")
+            logger.setLevel(
+                getattr(
+                    logging,
+                    str(self.settings.log_level or "INFO").upper(),
+                    logging.INFO,
+                )
+            )
+            logger.propagate = False
+            formatter = logging.Formatter("%(message)s")
+
+            stream_handler = None
+            target_stream = sys.stdout if self._stream is _DEFAULT_STREAM else self._stream
+            if target_stream is not None:
+                stream_handler = logging.StreamHandler(target_stream)
+                stream_handler.setFormatter(formatter)
+                logger.addHandler(stream_handler)
+
+            if self._enable_file_handler and self.settings.operations_log_file is not None:
+                try:
+                    self.settings.operations_log_file.parent.mkdir(
+                        parents=True,
+                        exist_ok=True,
+                    )
+                    file_handler = RotatingFileHandler(
+                        self.settings.operations_log_file,
+                        maxBytes=5 * 1024 * 1024,
+                        backupCount=5,
+                        encoding="utf-8",
+                    )
+                    file_handler.setFormatter(formatter)
+                    logger.addHandler(file_handler)
+                except OSError as exception:
+                    if stream_handler is not None:
+                        stream_handler.handle(
+                            logging.LogRecord(
+                                logger.name,
+                                logging.ERROR,
+                                __file__,
+                                0,
+                                json.dumps(
+                                    {
+                                        "timestamp": self.clock.utc_timestamp(),
+                                        "level": "ERROR",
+                                        "event": "operations_log_unavailable",
+                                        "exceptionType": type(exception).__name__,
+                                        "errorMessage": str(exception),
+                                    },
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                                (),
+                                None,
+                            )
+                        )
+
+            self._logger = logger
+            return logger
+
+    def safe_log_text(self, value: object, limit: int = 1000) -> str:
+        return redact_log_text(
+            value,
+            limit=limit,
+            api_key=self.settings.deepseek_api_key,
+        )
+
+    def _build_payload(self, level: str, event: str, **fields: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "timestamp": self.clock.utc_timestamp(),
+            "level": str(level or "INFO").upper(),
+            "event": str(event or "backend-event"),
+        }
+        payload.update(
+            {
+                key: value
+                for key, value in fields.items()
+                if value is not None and value != ""
+            }
+        )
+        return payload
+
+    def log_event(self, level: str, event: str, **fields: Any) -> dict[str, Any]:
+        payload = self._build_payload(level, event, **fields)
+        logger = self._get_logger()
+        if logger.handlers:
+            message = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+            log_method = getattr(logger, payload["level"].lower(), logger.info)
+            log_method(message)
+        return payload
+
+    def close(self) -> None:
+        with self._lock:
+            if self._logger is None:
+                return
+            for handler in list(self._logger.handlers):
+                self._logger.removeHandler(handler)
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+            self._logger = None
 
 
 @dataclass
@@ -215,223 +274,20 @@ def normalize_ascii_punctuation(value):
     return value
 
 
-def execute_json_request(
-    *,
-    task,
-    messages,
-    validator,
-    temperature,
-    timeout_seconds,
-    max_attempts=2,
-    thinking_mode=None,
-    retry_error_codes=None,
-    request_id="",
-    validation_stage="model_validation",
-):
-    request_id = new_request_id(request_id)
-    max_attempts = max(1, min(2, int(max_attempts or 1)))
-    allowed_retry_codes = (
-        None if retry_error_codes is None else set(retry_error_codes)
-    )
-    model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    base_url = os.getenv("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-
-    if not api_key or api_key == "your_deepseek_api_key_here":
-        error = LLMServiceError(
-            "CONFIGURATION_ERROR",
-            "configuration",
-            "DEEPSEEK_API_KEY is missing.",
-            request_id,
-            False,
-            0,
-            503,
-        )
-        log_event(
-            "ERROR",
-            "llm_request_failed",
-            requestId=request_id,
-            task=task,
-            stage=error.stage,
-            errorCode=error.code,
-            attemptsUsed=0,
-        )
-        raise error
-
-    client = _get_client(api_key, base_url, timeout_seconds)
-    current_messages = [dict(message) for message in messages]
-    overall_started = time.perf_counter()
-
-    for attempt in range(1, max_attempts + 1):
-        attempt_started = time.perf_counter()
-        content = ""
-
-        try:
-            log_event(
-                "INFO",
-                "llm_attempt_started",
-                requestId=request_id,
-                task=task,
-                model=model,
-                attempt=attempt,
-                maxAttempts=max_attempts,
-                timeoutSeconds=timeout_seconds,
-            )
-            request_options = {
-                "model": model,
-                "messages": current_messages,
-                "response_format": {"type": "json_object"},
-                "temperature": temperature,
-                "stream": False,
-            }
-
-            if thinking_mode in {"enabled", "disabled"}:
-                request_options["extra_body"] = {
-                    "thinking": {"type": thinking_mode}
-                }
-
-            response = client.chat.completions.create(**request_options)
-            choices = getattr(response, "choices", None) or []
-            if not choices:
-                raise ValueError("Model returned no completion choices.")
-            message = getattr(choices[0], "message", None)
-            content = str(getattr(message, "content", None) or "")
-            parsed = normalize_ascii_punctuation(json.loads(content))
-            if not isinstance(parsed, (dict, list)):
-                raise ValueError("Model JSON root must be an object or array.")
-            validate_english_only_payload(parsed)
-            value = validator(parsed)
-            elapsed_ms = round((time.perf_counter() - overall_started) * 1000)
-            usage = getattr(response, "usage", None)
-            log_event(
-                "INFO",
-                "llm_request_succeeded",
-                requestId=request_id,
-                task=task,
-                model=model,
-                attempt=attempt,
-                attemptsUsed=attempt,
-                elapsedMs=elapsed_ms,
-                promptTokens=getattr(usage, "prompt_tokens", None),
-                completionTokens=getattr(usage, "completion_tokens", None),
-            )
-            return LLMExecutionResult(value, attempt, request_id)
-        except Exception as exception:
-            error = _classify_exception(
-                exception,
-                request_id=request_id,
-                attempts_used=attempt,
-                validation_stage=validation_stage,
-            )
-            excerpt = _response_excerpt(content) if content else ""
-            log_event(
-                "ERROR",
-                "llm_attempt_failed",
-                requestId=request_id,
-                task=task,
-                model=model,
-                attempt=attempt,
-                maxAttempts=max_attempts,
-                elapsedMs=round((time.perf_counter() - attempt_started) * 1000),
-                stage=error.stage,
-                errorCode=error.code,
-                retryable=error.retryable,
-                exceptionType=type(exception).__name__,
-                errorMessage=safe_log_text(exception),
-                responseExcerpt=excerpt,
-                responseHash=_response_hash(content) if content else "",
-                traceback=safe_log_text(traceback.format_exc()[-4000:], 4000),
-            )
-
-            retry_is_allowed = (
-                allowed_retry_codes is None
-                or error.code in allowed_retry_codes
-            )
-
-            if (
-                not error.retryable
-                or not retry_is_allowed
-                or attempt >= max_attempts
-            ):
-                raise error from exception
-
-            if error.code in {"MODEL_JSON_INVALID", "MODEL_VALIDATION_FAILED"}:
-                current_messages = _build_repair_messages(
-                    messages,
-                    content,
-                    error.safe_message,
-                )
-
-            time.sleep(DEFAULT_RETRY_DELAY_SECONDS)
-
-    raise LLMServiceError(
-        "INTERNAL_ERROR",
-        "llm_runtime",
-        "The LLM request ended unexpectedly.",
-        request_id,
-        False,
-        max_attempts,
-        500,
+def default_openai_client_factory(
+    api_key: str,
+    base_url: str,
+    timeout_seconds: float,
+) -> Any:
+    return OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=float(timeout_seconds),
+        max_retries=0,
     )
 
 
-def readiness_payload():
-    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    configured = bool(api_key and api_key != "your_deepseek_api_key_here")
-    model = os.getenv("DEEPSEEK_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    model_configured = bool(model)
-    writable = False
-
-    try:
-        OPERATIONS_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        writable = os.access(OPERATIONS_LOG_DIR, os.W_OK)
-    except OSError:
-        writable = False
-
-    return {
-        "status": (
-            "ready"
-            if configured and model_configured and writable
-            else "not-ready"
-        ),
-        "apiKeyConfigured": configured,
-        "modelConfigured": model_configured,
-        "model": model,
-        "logDirectoryWritable": writable,
-        "singleWorkerRequired": True,
-    }
-
-
-def _get_client(api_key, base_url, timeout_seconds):
-    key = (str(api_key or ""), str(base_url or ""), float(timeout_seconds))
-
-    with _client_lock:
-        client = _clients.get(key)
-
-        if client is not None:
-            _clients.move_to_end(key)
-            return client
-
-        client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=float(timeout_seconds),
-            max_retries=0,
-        )
-        _clients[key] = client
-        while len(_clients) > MAX_CACHED_CLIENTS:
-            _, evicted = _clients.popitem(last=False)
-            close = getattr(evicted, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-
-        return client
-
-
-def _classify_exception(exception, request_id, attempts_used, validation_stage):
+def classify_llm_exception(exception, request_id, attempts_used, validation_stage):
     if isinstance(exception, APITimeoutError):
         return LLMServiceError(
             "UPSTREAM_TIMEOUT",
@@ -525,6 +381,9 @@ def _classify_exception(exception, request_id, attempts_used, validation_stage):
     )
 
 
+_classify_exception = classify_llm_exception
+
+
 def _build_repair_messages(original_messages, content, validation_error):
     repair_prompt = (
         "Your previous JSON response failed validation. Correct only the invalid "
@@ -540,19 +399,273 @@ def _build_repair_messages(original_messages, content, validation_error):
     return repaired
 
 
-def _response_excerpt(content):
-    limit_text = os.getenv(
-        "LLM_LOG_RESPONSE_EXCERPT_CHARS",
-        str(DEFAULT_RESPONSE_EXCERPT_CHARS),
-    )
-
-    try:
-        limit = max(0, min(4000, int(limit_text)))
-    except ValueError:
-        limit = DEFAULT_RESPONSE_EXCERPT_CHARS
-
-    return str(content or "")[:limit]
+def _response_excerpt(content: object, limit: int = DEFAULT_RESPONSE_EXCERPT_CHARS) -> str:
+    clamped = max(0, min(4000, int(limit)))
+    return str(content or "")[:clamped]
 
 
-def _response_hash(content):
+def _response_hash(content: object) -> str:
     return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()[:16]
+
+
+class LLMGateway:
+    def __init__(
+        self,
+        settings: BackendSettings,
+        client_factory: Callable[[str, str, float], Any] = default_openai_client_factory,
+        clock: Clock | None = None,
+        event_logger: EventLogger | None = None,
+    ) -> None:
+        self.settings = settings
+        self.client_factory = client_factory
+        self.clock = clock or Clock()
+        self.event_logger = event_logger or EventLogger(
+            settings=settings,
+            clock=self.clock,
+        )
+        self._client_lock = threading.Lock()
+        self._clients: OrderedDict[tuple[str, str, float], Any] = OrderedDict()
+
+    @property
+    def cached_client_count(self) -> int:
+        with self._client_lock:
+            return len(self._clients)
+
+    def get_client(
+        self,
+        api_key: str,
+        base_url: str,
+        timeout_seconds: float,
+    ) -> Any:
+        key = (str(api_key or ""), str(base_url or ""), float(timeout_seconds))
+
+        with self._client_lock:
+            client = self._clients.get(key)
+            if client is not None:
+                self._clients.move_to_end(key)
+                return client
+
+            client = self.client_factory(
+                api_key,
+                base_url,
+                float(timeout_seconds),
+            )
+            self._clients[key] = client
+            while len(self._clients) > MAX_CACHED_CLIENTS:
+                _, evicted = self._clients.popitem(last=False)
+                close = getattr(evicted, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+
+            return client
+
+    def close(self) -> None:
+        with self._client_lock:
+            while self._clients:
+                _, client = self._clients.popitem(last=False)
+                close = getattr(client, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+
+    def execute_json_request(
+        self,
+        *,
+        task: str,
+        messages: list[dict[str, Any]],
+        validator: Callable[[Any], Any],
+        temperature: float,
+        timeout_seconds: float,
+        max_attempts: int = 2,
+        thinking_mode: str | None = None,
+        retry_error_codes: set[str] | None = None,
+        request_id: str = "",
+        validation_stage: str = "model_validation",
+    ) -> LLMExecutionResult:
+        request_id = new_request_id(request_id)
+        max_attempts = max(1, min(2, int(max_attempts or 1)))
+        allowed_retry_codes = (
+            None if retry_error_codes is None else set(retry_error_codes)
+        )
+        model = str(self.settings.deepseek_model or "").strip() or DEFAULT_MODEL
+        base_url = str(self.settings.deepseek_base_url or "").strip() or DEFAULT_BASE_URL
+        api_key = str(self.settings.deepseek_api_key or "").strip()
+
+        if not api_key or api_key == "your_deepseek_api_key_here":
+            error = LLMServiceError(
+                "CONFIGURATION_ERROR",
+                "configuration",
+                "DEEPSEEK_API_KEY is missing.",
+                request_id,
+                False,
+                0,
+                503,
+            )
+            self.event_logger.log_event(
+                "ERROR",
+                "llm_request_failed",
+                requestId=request_id,
+                task=task,
+                stage=error.stage,
+                errorCode=error.code,
+                attemptsUsed=0,
+            )
+            raise error
+
+        client = self.get_client(api_key, base_url, timeout_seconds)
+        current_messages = [dict(message) for message in messages]
+        overall_started = self.clock.perf_counter()
+
+        for attempt in range(1, max_attempts + 1):
+            attempt_started = self.clock.perf_counter()
+            content = ""
+
+            try:
+                self.event_logger.log_event(
+                    "INFO",
+                    "llm_attempt_started",
+                    requestId=request_id,
+                    task=task,
+                    model=model,
+                    attempt=attempt,
+                    maxAttempts=max_attempts,
+                    timeoutSeconds=timeout_seconds,
+                )
+                request_options: dict[str, Any] = {
+                    "model": model,
+                    "messages": current_messages,
+                    "response_format": {"type": "json_object"},
+                    "temperature": temperature,
+                    "stream": False,
+                }
+
+                if thinking_mode in {"enabled", "disabled"}:
+                    request_options["extra_body"] = {
+                        "thinking": {"type": thinking_mode}
+                    }
+
+                response = client.chat.completions.create(**request_options)
+                choices = getattr(response, "choices", None) or []
+                if not choices:
+                    raise ValueError("Model returned no completion choices.")
+                message = getattr(choices[0], "message", None)
+                content = str(getattr(message, "content", None) or "")
+                parsed = normalize_ascii_punctuation(json.loads(content))
+                if not isinstance(parsed, (dict, list)):
+                    raise ValueError("Model JSON root must be an object or array.")
+                validate_english_only_payload(parsed)
+                value = validator(parsed)
+                elapsed_ms = round((self.clock.perf_counter() - overall_started) * 1000)
+                usage = getattr(response, "usage", None)
+                self.event_logger.log_event(
+                    "INFO",
+                    "llm_request_succeeded",
+                    requestId=request_id,
+                    task=task,
+                    model=model,
+                    attempt=attempt,
+                    attemptsUsed=attempt,
+                    elapsedMs=elapsed_ms,
+                    promptTokens=getattr(usage, "prompt_tokens", None),
+                    completionTokens=getattr(usage, "completion_tokens", None),
+                )
+                return LLMExecutionResult(value, attempt, request_id)
+            except Exception as exception:
+                error = classify_llm_exception(
+                    exception,
+                    request_id=request_id,
+                    attempts_used=attempt,
+                    validation_stage=validation_stage,
+                )
+                excerpt = (
+                    _response_excerpt(
+                        content,
+                        self.settings.llm_response_excerpt_chars,
+                    )
+                    if content
+                    else ""
+                )
+                self.event_logger.log_event(
+                    "ERROR",
+                    "llm_attempt_failed",
+                    requestId=request_id,
+                    task=task,
+                    model=model,
+                    attempt=attempt,
+                    maxAttempts=max_attempts,
+                    elapsedMs=round((self.clock.perf_counter() - attempt_started) * 1000),
+                    stage=error.stage,
+                    errorCode=error.code,
+                    retryable=error.retryable,
+                    exceptionType=type(exception).__name__,
+                    errorMessage=self.event_logger.safe_log_text(exception),
+                    responseExcerpt=excerpt,
+                    responseHash=_response_hash(content) if content else "",
+                    traceback=self.event_logger.safe_log_text(
+                        traceback.format_exc()[-4000:],
+                        4000,
+                    ),
+                )
+
+                retry_is_allowed = (
+                    allowed_retry_codes is None
+                    or error.code in allowed_retry_codes
+                )
+
+                if (
+                    not error.retryable
+                    or not retry_is_allowed
+                    or attempt >= max_attempts
+                ):
+                    raise error from exception
+
+                if error.code in {"MODEL_JSON_INVALID", "MODEL_VALIDATION_FAILED"}:
+                    current_messages = _build_repair_messages(
+                        messages,
+                        content,
+                        error.safe_message,
+                    )
+
+                self.clock.sleep(self.settings.llm_retry_delay_seconds)
+
+        raise LLMServiceError(
+            "INTERNAL_ERROR",
+            "llm_runtime",
+            "The LLM request ended unexpectedly.",
+            request_id,
+            False,
+            max_attempts,
+            500,
+        )
+
+    def readiness_payload(self) -> dict[str, Any]:
+        api_key = str(self.settings.deepseek_api_key or "").strip()
+        configured = bool(api_key and api_key != "your_deepseek_api_key_here")
+        model = str(self.settings.deepseek_model or "").strip() or DEFAULT_MODEL
+        model_configured = bool(model)
+        writable = False
+
+        try:
+            log_dir = self.settings.operations_log_file.parent
+            log_dir.mkdir(parents=True, exist_ok=True)
+            writable = os.access(log_dir, os.W_OK)
+        except OSError:
+            writable = False
+
+        return {
+            "status": (
+                "ready"
+                if configured and model_configured and writable
+                else "not-ready"
+            ),
+            "apiKeyConfigured": configured,
+            "modelConfigured": model_configured,
+            "model": model,
+            "logDirectoryWritable": writable,
+            "singleWorkerRequired": True,
+        }

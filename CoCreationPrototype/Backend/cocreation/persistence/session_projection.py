@@ -6,12 +6,12 @@ import sqlite3
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
-from component_recovery import interaction_state
-from design_context import add_confirmed_decision, add_open_question, add_rejected_decision, apply_question_answer_review, deduplicate_open_questions, design_level_open_questions, empty_design_context, infer_intent_topic, merge_chat_update, normalize_design_context, question_dedup_key, set_active_disagreement
-from level_validation import build_entity_bindings, build_untrusted_entity_bindings, derive_entity_transitions, entity_binding_fingerprint, entity_bindings_match_rows
-from .database import _deadline_expired, _remaining_deadline_seconds, _parse_time, _public_guidance, get_session, load_json, map_fingerprint
+from cocreation.domain import binary_discovery
+from cocreation.reliability.component_recovery import interaction_state
+from cocreation.domain.design_context import add_confirmed_decision, add_open_question, add_rejected_decision, apply_question_answer_review, deduplicate_open_questions, design_level_open_questions, empty_design_context, infer_intent_topic, merge_chat_update, normalize_design_context, question_dedup_key, set_active_disagreement
+from cocreation.domain.level_validation import build_entity_bindings, build_untrusted_entity_bindings, derive_entity_transitions, entity_binding_fingerprint, entity_bindings_match_rows
+from .database import DEFAULT_DATABASE_PATH, SCHEMA, _deadline_expired, _ensure_column, _parse_time, _public_guidance, _remaining_deadline_seconds, backfill_language_locks, get_session, load_json, map_fingerprint
 from .backfill import load_design_context, load_entity_bindings, backfill_design_contexts, backfill_entity_bindings, backfill_intent_semantics, backfill_revision_challenges, repair_resolved_challenge_disagreements, repair_duplicate_progress_questions, repair_answered_challenge_choice_questions
-from .database import SCHEMA, _ensure_column, backfill_language_locks, database_path
 
 def _last_message_failure(database, session, turns):
     """Current request diagnostics only; never expose audit prose or stale failures."""
@@ -32,7 +32,8 @@ def _last_message_failure(database, session, turns):
 def _serialize_attempt(attempt):
     return {'attemptId': attempt['id'], 'status': attempt['status'], 'issuedAt': attempt['issued_at'], 'loadedAt': attempt['loaded_at'], 'firstMoveAt': attempt['first_move_at'], 'finishedAt': attempt['finished_at'], 'durationSeconds': attempt['duration_seconds'], 'moveCount': attempt['move_count'], 'pushCount': attempt['push_count'], 'restartCount': attempt['restart_count'], 'minimumMoves': attempt['minimum_moves'], 'minimumPushes': attempt['minimum_pushes']}
 
-def serialize_session(database, session_id):
+def serialize_session(database, session_id, *, now=None, clock=None):
+    effective_now = now if now is not None else (clock.utc_datetime() if clock is not None else None)
     session = get_session(database, session_id)
     if session is None:
         return None
@@ -99,12 +100,12 @@ def serialize_session(database, session_id):
         """Recheck stored route annotations before exposing historical turns."""
         guidance = _public_guidance(turn_guidance)
         try:
-            from llm_client import repair_legacy_visible_guidance
+            from cocreation.llm.facade import repair_legacy_visible_guidance
             guidance = repair_legacy_visible_guidance(guidance, language)
         except (ImportError, TypeError, ValueError, KeyError):
             pass
         try:
-            from llm_client import _filter_coordinate_links, _recover_coordinate_links
+            from cocreation.llm.facade import _filter_coordinate_links, _recover_coordinate_links
             links = _filter_coordinate_links(guidance.get('coordinateLinks'), body, rows, entity_bindings)
             links = _recover_coordinate_links(body, rows, links, entity_bindings)
         except (ImportError, TypeError, ValueError, KeyError):
@@ -118,7 +119,7 @@ def serialize_session(database, session_id):
     def public_text(value, language):
         """Hide prompt-only implementation labels in legacy stored text."""
         try:
-            from llm_client import repair_legacy_visible_text
+            from cocreation.llm.facade import repair_legacy_visible_text
             return repair_legacy_visible_text(value, language)
         except (ImportError, TypeError, ValueError, KeyError):
             return value
@@ -134,7 +135,7 @@ def serialize_session(database, session_id):
         stage_number = stage_numbers.get(turn['version_id'])
         if stage_number == 1 and turn['id'] in opening_turn_ids_by_version.get(turn['version_id'], set()):
             try:
-                from llm_client import _repair_stage_one_opening_display
+                from cocreation.llm.facade import _repair_stage_one_opening_display
                 content = _repair_stage_one_opening_display(content, version_rows.get(turn['version_id']), turn['language'])
             except (ImportError, TypeError, ValueError, KeyError):
                 pass
@@ -157,7 +158,7 @@ def serialize_session(database, session_id):
         if not isinstance(payload, dict):
             return payload
         try:
-            from llm_client import repair_legacy_visible_text
+            from cocreation.llm.facade import repair_legacy_visible_text
         except ImportError:
             return payload
         result = dict(payload)
@@ -236,7 +237,12 @@ def serialize_session(database, session_id):
         is_latest = latest_intent_turn.get(turn['version_id']) == turn['id']
         status = hypothesis.get('status', 'tentative')
         review = guidance.get('_intentReviewState') or {}
-        actionable = bool(is_latest and status == 'tentative' and (turn['version_id'] == session['current_version_id']) and (session['status'] == 'active') and (not _deadline_expired(session['deadline_at'])))
+        actionable = bool(
+            is_latest and status == 'tentative'
+            and turn['version_id'] == session['current_version_id']
+            and session['status'] == 'active'
+            and not _deadline_expired(session['deadline_at'], now=effective_now)
+        )
         review_mode = review.get('interactionMode', 'full')
         mode = 'conflict_choice' if review_mode == 'conflict_choice' else review_mode if actionable else 'resolved'
         result = {'hypothesisId': hypothesis_id, 'status': status, 'interactionMode': mode, 'actionable': actionable, 'resolvedStatement': hypothesis.get('statement') if status in {'confirmed', 'superseded'} else None, 'reviewExplanation': review.get('reviewExplanation') if actionable else None}
@@ -450,7 +456,6 @@ def serialize_session(database, session_id):
             proposal_flow_status = latest_marker.get('status')
             proposal_flow_question_count = max(0, min(3, int(latest_marker.get('clarificationQuestionCount') or 0)))
             proposal_flow_topic_id = latest_marker.get('topicId')
-    import binary_discovery
     binary_topic = binary_discovery.current_topic(database, session_id, session['current_version_id'])
     for turn in turns:
         question = public_guidance_by_turn.get(turn['id'], {}).get('proposalQuestion')
@@ -466,11 +471,13 @@ def serialize_session(database, session_id):
             translated_question = (translation.get('guidance') or {}).get('proposalQuestion')
             if translated_question:
                 translated_question.update(selectedChoiceId=selected, status=question['status'], sourceLanguage=locale)
-    return {'sessionId': session['id'], 'status': session['status'], 'language': session['language'], 'languageLocked': session['language_locked_at'] is not None, 'demoMode': bool(session['demo_mode']), 'initialDraftMethod': session['initial_draft_method'], 'matchId': session['match_id'], 'playerNumber': session['player_number'], 'currentVersionId': session['current_version_id'], 'lastMessageFailure': _last_message_failure(database, session, turns), 'interactionState': interaction_state(database, session), 'finalVersionId': session['final_version_id'], 'createdAt': session['created_at'], 'updatedAt': session['updated_at'], 'deadlineStartedAt': session['deadline_started_at'], 'deadlineAt': session['deadline_at'], 'deadlineExpired': _deadline_expired(session['deadline_at']), 'remainingSeconds': _remaining_deadline_seconds(session['deadline_at']), 'draftPreview': {'rows': load_json(session['draft_rows_json']), 'validation': load_json(session['draft_validation_json']), 'generation': int(session['draft_generation'] or 1), 'regenerationStatus': session['draft_regeneration_status'], 'regenerationRequestId': session['draft_regeneration_request_id'], 'regenerationRequestedAt': session['draft_regeneration_requested_at'], 'regenerationUpdatedAt': session['draft_regeneration_updated_at'], 'failureCode': session['draft_regeneration_failure_code'], 'mutable': session['current_version_id'] is None} if session['draft_rows_json'] else None, 'proposalFlowState': binary_discovery.public_flow(binary_topic) if binary_topic else {'active': proposal_flow_status in {'clarifying', 'planning', 'retry_pending', 'revision_needed'}, 'status': proposal_flow_status, 'topicId': proposal_flow_topic_id, 'clarificationQuestionCount': proposal_flow_question_count, 'canSupplement': proposal_flow_status == 'revision_needed', 'retryable': proposal_flow_status == 'retry_pending', 'failureCategory': proposal_flow_failure_category, 'recoverySuggestions': proposal_flow_recovery_suggestions}, 'versions': [{'versionId': version['id'], 'stageNumber': version['stage_number'], 'parentVersionId': version['parent_version_id'], 'source': version['source'], 'rows': load_json(version['rows_json']), 'summary': version['summary'], 'diff': load_json(version['diff_json']), 'validation': load_json(version['validation_json']), 'createdAt': version['created_at'], 'playAttempts': attempts_by_version.get(version['id'], []), 'executionOutcome': execution_outcomes.get(version['id']), 'openingTurnId': opening_by_version[version['id']]['assistant_turn_id'] if version['id'] in opening_by_version else None, 'openingProposalId': opening_by_version[version['id']]['proposal_id'] if version['id'] in opening_by_version else None} for version in versions], 'progressContexts': progress_contexts, 'challengeReviewRecords': list(challenge_reviews.values()), 'turns': [{'turnId': turn['id'], 'sequence': turn['sequence_number'], 'role': turn['role'], 'content': public_content_by_turn[turn['id']], 'language': turn['language'], 'versionId': turn['version_id'], 'requestId': turn['request_id'], 'requestProposal': turn['role'] == 'user' and turn['request_id'] in proposal_request_keys, 'guidance': public_guidance_by_turn.get(turn['id'], {}), 'proposalState': proposal_state(turn, load_json(turn['guidance_json']) or {}), 'translations': translations_by_turn.get(turn['id'], {}), 'createdAt': turn['created_at']} for turn in turns], 'assessments': [{'assessmentId': assessment['id'], 'versionId': assessment['version_id'], 'assistantTurnId': assessment['assistant_turn_id'], 'payload': public_assessment_payload(load_json(assessment['payload_json']), next((turn['language'] for turn in turns if turn['id'] == assessment['assistant_turn_id']), session['language'])), 'createdAt': assessment['created_at']} for assessment in assessments], 'proposals': [{'proposalId': proposal['id'], 'baseVersionId': proposal['base_version_id'], 'proposedRows': load_json(proposal['proposed_rows_json']), 'summary': proposal['summary'], 'diff': load_json(proposal['diff_json']), 'validation': load_json(proposal['validation_json']), 'status': proposal['status'], 'assistantTurnId': proposal['assistant_turn_id'], 'createdAt': proposal['created_at'], 'decidedAt': proposal['decided_at']} for proposal in proposals], 'intention': {'content': intention['content'], 'language': intention['language'], 'createdAt': intention['created_at']} if intention is not None else None}
+    return {'sessionId': session['id'], 'status': session['status'], 'language': session['language'], 'languageLocked': session['language_locked_at'] is not None, 'demoMode': bool(session['demo_mode']), 'initialDraftMethod': session['initial_draft_method'], 'matchId': session['match_id'], 'playerNumber': session['player_number'], 'currentVersionId': session['current_version_id'], 'lastMessageFailure': _last_message_failure(database, session, turns), 'interactionState': interaction_state(database, session, clock=clock), 'finalVersionId': session['final_version_id'], 'createdAt': session['created_at'], 'updatedAt': session['updated_at'], 'deadlineStartedAt': session['deadline_started_at'], 'deadlineAt': session['deadline_at'], 'deadlineExpired': _deadline_expired(session['deadline_at'], now=effective_now), 'remainingSeconds': _remaining_deadline_seconds(session['deadline_at'], now=effective_now), 'draftPreview': {'rows': load_json(session['draft_rows_json']), 'validation': load_json(session['draft_validation_json']), 'generation': int(session['draft_generation'] or 1), 'regenerationStatus': session['draft_regeneration_status'], 'regenerationRequestId': session['draft_regeneration_request_id'], 'regenerationRequestedAt': session['draft_regeneration_requested_at'], 'regenerationUpdatedAt': session['draft_regeneration_updated_at'], 'failureCode': session['draft_regeneration_failure_code'], 'mutable': session['current_version_id'] is None} if session['draft_rows_json'] else None, 'proposalFlowState': binary_discovery.public_flow(binary_topic) if binary_topic else {'active': proposal_flow_status in {'clarifying', 'planning', 'retry_pending', 'revision_needed'}, 'status': proposal_flow_status, 'topicId': proposal_flow_topic_id, 'clarificationQuestionCount': proposal_flow_question_count, 'canSupplement': proposal_flow_status == 'revision_needed', 'retryable': proposal_flow_status == 'retry_pending', 'failureCategory': proposal_flow_failure_category, 'recoverySuggestions': proposal_flow_recovery_suggestions}, 'versions': [{'versionId': version['id'], 'stageNumber': version['stage_number'], 'parentVersionId': version['parent_version_id'], 'source': version['source'], 'rows': load_json(version['rows_json']), 'summary': version['summary'], 'diff': load_json(version['diff_json']), 'validation': load_json(version['validation_json']), 'createdAt': version['created_at'], 'playAttempts': attempts_by_version.get(version['id'], []), 'executionOutcome': execution_outcomes.get(version['id']), 'openingTurnId': opening_by_version[version['id']]['assistant_turn_id'] if version['id'] in opening_by_version else None, 'openingProposalId': opening_by_version[version['id']]['proposal_id'] if version['id'] in opening_by_version else None} for version in versions], 'progressContexts': progress_contexts, 'challengeReviewRecords': list(challenge_reviews.values()), 'turns': [{'turnId': turn['id'], 'sequence': turn['sequence_number'], 'role': turn['role'], 'content': public_content_by_turn[turn['id']], 'language': turn['language'], 'versionId': turn['version_id'], 'requestId': turn['request_id'], 'requestProposal': turn['role'] == 'user' and turn['request_id'] in proposal_request_keys, 'guidance': public_guidance_by_turn.get(turn['id'], {}), 'proposalState': proposal_state(turn, load_json(turn['guidance_json']) or {}), 'translations': translations_by_turn.get(turn['id'], {}), 'createdAt': turn['created_at']} for turn in turns], 'assessments': [{'assessmentId': assessment['id'], 'versionId': assessment['version_id'], 'assistantTurnId': assessment['assistant_turn_id'], 'payload': public_assessment_payload(load_json(assessment['payload_json']), next((turn['language'] for turn in turns if turn['id'] == assessment['assistant_turn_id']), session['language'])), 'createdAt': assessment['created_at']} for assessment in assessments], 'proposals': [{'proposalId': proposal['id'], 'baseVersionId': proposal['base_version_id'], 'proposedRows': load_json(proposal['proposed_rows_json']), 'summary': proposal['summary'], 'diff': load_json(proposal['diff_json']), 'validation': load_json(proposal['validation_json']), 'status': proposal['status'], 'assistantTurnId': proposal['assistant_turn_id'], 'createdAt': proposal['created_at'], 'decidedAt': proposal['decided_at']} for proposal in proposals], 'intention': {'content': intention['content'], 'language': intention['language'], 'createdAt': intention['created_at']} if intention is not None else None}
 
-def initialize_database():
-    database_path().parent.mkdir(parents=True, exist_ok=True)
-    database = sqlite3.connect(database_path())
+def initialize_database(db_path=None, *, clock=None):
+    target_path = Path(db_path) if db_path is not None else DEFAULT_DATABASE_PATH
+    if str(target_path) != ':memory:':
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+    database = sqlite3.connect(target_path)
     database.row_factory = sqlite3.Row
     try:
         database.executescript(SCHEMA)
@@ -494,12 +501,12 @@ def initialize_database():
         database.execute('PRAGMA journal_mode=WAL')
         database.execute('PRAGMA foreign_keys=ON')
         database.commit()
-        backfill_design_contexts(database)
+        backfill_design_contexts(database, clock=clock)
         backfill_entity_bindings(database)
         backfill_revision_challenges(database)
-        repair_resolved_challenge_disagreements(database)
-        repair_duplicate_progress_questions(database)
-        repair_answered_challenge_choice_questions(database)
+        repair_resolved_challenge_disagreements(database, clock=clock)
+        repair_duplicate_progress_questions(database, clock=clock)
+        repair_answered_challenge_choice_questions(database, clock=clock)
         backfill_language_locks(database)
         database.commit()
     finally:

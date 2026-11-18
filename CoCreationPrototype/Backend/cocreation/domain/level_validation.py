@@ -49,7 +49,8 @@ class LevelValidationResult:
         }
 
 
-def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadline=None):
+def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadline=None, clock=None):
+    monotonic = clock.monotonic if clock is not None else time.monotonic
     normalized = validate_rows(rows)
     walkable = {
         (x, y)
@@ -70,7 +71,7 @@ def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadlin
     )
 
     while queue:
-        if deadline is not None and time.monotonic() >= deadline:
+        if deadline is not None and monotonic() >= deadline:
             raise TimeoutError("The shared solver deadline was exhausted.")
         current_player, current_boxes, trace, pushes = queue.popleft()
 
@@ -127,7 +128,7 @@ def validate_and_solve(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadlin
     )
 
 
-def minimum_pushes(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadline=None):
+def minimum_pushes(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadline=None, clock=None):
     """Return the fewest pushes needed to solve a valid Stage.
 
     The ordinary validator optimizes total player moves and reports the pushes
@@ -135,6 +136,7 @@ def minimum_pushes(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadline=No
     count need a different metric, so this bounded 0-1 search minimizes pushes
     directly without changing the public validator result.
     """
+    monotonic = clock.monotonic if clock is not None else time.monotonic
     normalized = validate_rows(rows)
     walkable = {
         (x, y)
@@ -150,7 +152,7 @@ def minimum_pushes(rows, maximum_search_states=MAX_SEARCH_STATES, *, deadline=No
     directions = ((0, -1), (0, 1), (-1, 0), (1, 0))
 
     while pending:
-        if deadline is not None and time.monotonic() >= deadline:
+        if deadline is not None and monotonic() >= deadline:
             raise TimeoutError("The shared minimum-push deadline was exhausted.")
         current_player, current_boxes = pending.popleft()
         current_state = (current_player, current_boxes)

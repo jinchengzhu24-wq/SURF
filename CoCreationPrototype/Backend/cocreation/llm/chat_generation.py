@@ -4,12 +4,9 @@ from contextvars import ContextVar
 from difflib import SequenceMatcher
 import hashlib
 import json
-import os
 import re
-import time
 from collections import deque
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -17,7 +14,7 @@ from openai import (
     AsyncOpenAI,
     RateLimitError,
 )
-from proposal_search import (
+from cocreation.domain.proposal_search import (
     Focus,
     MetricGoal,
     ProposalSearchExhausted,
@@ -26,7 +23,7 @@ from proposal_search import (
     search_revision_plan,
     validate_revision_plan_against_map,
 )
-from level_validation import (
+from cocreation.domain.level_validation import (
     TILE_LEGEND,
     build_map_facts,
     build_stage_snapshot,
@@ -35,38 +32,82 @@ from level_validation import (
     summarize_verified_diff,
     validate_and_solve,
 )
-from design_context import validate_design_context_patch
-from repository import map_fingerprint
-from reply_reliability import (ComponentCheck, OptionalRepairBudget, parse_json_object, requirement_cache_key,
-    CURRENT_REPLY_TRACE, REPLY_PIPELINE_VERSION, trace_reply, failure_reason)
-from component_patches import PatchRequest, PatchError, Target, patch_response_format, dependent_components, restore_operation_sources, PATCH_VERSION
-from conversation_evidence import CONTEXT_VERSION
-from understanding_review import review_schema, review_targets, merge_review, review_patch_request, REVIEW_VERSION
-import proposal_options
-from proposal_understanding import (
-    turn_schema, validate_topic, designer_sources, critical_review_reason, topic_signature, validate_plan_scope,
-    engagement_schema, validate_engagement, MEANING_REVIEW_VERSION,
-    understanding_patch_request, validate_option_plan_scope,
+from cocreation.domain.design_context import validate_design_context_patch
+from cocreation.persistence.repository import map_fingerprint
+from cocreation.reliability.reply_reliability import (
+    ComponentCheck,
+    OptionalRepairBudget,
+    parse_json_object,
+    requirement_cache_key,
+    CURRENT_REPLY_TRACE,
+    REPLY_PIPELINE_VERSION,
+    trace_reply,
+    failure_reason as _diagnostic_failure_reason,
 )
-from proposal_diagnostics import (proposal_phase, trace_proposal, trace_repair, reason_code, safe_issues,
-    CURRENT_PROPOSAL_DIAGNOSTIC, ProposalValidationError)
-from design_requirements import (
-    requirement_response_schema, validate_requirement_record, evaluate_requirements, preflight_requirements,
-    goal_rank, tradeoff_message, protected_change_requested,
+from cocreation.reliability.component_patches import (
+    PatchRequest,
+    PatchError,
+    Target,
+    patch_response_format,
+    dependent_components,
+    restore_operation_sources,
+    PATCH_VERSION,
+)
+from cocreation.domain.conversation_evidence import CONTEXT_VERSION
+from cocreation.domain.understanding_review import (
+    review_schema,
+    review_targets,
+    merge_review,
+    review_patch_request,
+    REVIEW_VERSION,
+)
+import cocreation.domain.proposal_options as proposal_options
+from cocreation.domain.proposal_understanding import (
+    turn_schema,
+    validate_topic,
+    designer_sources,
+    critical_review_reason,
+    topic_signature,
+    validate_plan_scope,
+    engagement_schema,
+    validate_engagement,
+    MEANING_REVIEW_VERSION,
+    understanding_patch_request,
+    validate_option_plan_scope,
+)
+from cocreation.domain.proposal_diagnostics import (
+    proposal_phase,
+    trace_proposal,
+    trace_repair,
+    reason_code,
+    safe_issues,
+    CURRENT_PROPOSAL_DIAGNOSTIC,
+    ProposalValidationError,
+)
+from cocreation.domain.design_requirements import (
+    requirement_response_schema,
+    validate_requirement_record,
+    evaluate_requirements,
+    preflight_requirements,
+    goal_rank,
+    tradeoff_message,
+    protected_change_requested,
     validate_requirement_components,
-    requirement_model_view, REQUIREMENT_SEMANTICS, REQUIREMENT_DEFINITIONS, INTERPRETATION_VERSION,
+    requirement_model_view,
+    REQUIREMENT_SEMANTICS,
+    REQUIREMENT_DEFINITIONS,
+    INTERPRETATION_VERSION,
 )
-from revision_workflow import (
+from cocreation.domain.revision_workflow import (
     SemanticConstraintError,
     build_revision_workflow,
     validate_semantic_constraints,
 )
 
-from ..runtime_ref import llm_attr
-from .config_and_runtime import CHAT_MAX_ATTEMPTS, CHAT_MAX_TOKENS, CHAT_RESPONSE_HARD_LENGTH, CHAT_TIMEOUT_SECONDS, COORDINATE_LINK_LIMIT, EmptyModelResponse, GUIDANCE_MOVES, INTENT_CONFIDENCE_LEVELS, KIMI_MODEL, LLMExecutionResult, LLMServiceError, LowQualityModelResponse, MANUAL_EDIT_EFFECT_EVIDENCE_KINDS, MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS, MIN_RETRY_BUDGET_SECONDS, ORDINARY_CHAT_ATTEMPT_TIMEOUTS, ORDINARY_CHAT_MAX_ATTEMPTS, PLAIN_CHAT_MAX_TOKENS, PRIMARY_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_INTERNAL_DEADLINE_SECONDS, PROPOSAL_MAX_TOKENS, ROUTE_REASONING_PASSAGE_LIMIT, UI_CUE_TYPES, _clean_list, _clean_optional_text, _clean_text, _content_block_sentences, _dialogue_background_prompt, _empty_response_diagnostics, _is_human_edit_stage_opening, _is_length_failure, _is_map_grounding_failure, _is_stage_one, _latest_role_content, _latest_user_explicitly_agrees, _latest_user_text, _log_llm_event, _plain_fallback_allowed, _provider_error_fields, _questionless_body, _request_component_patch, _request_deadline, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _strip_unreferenced_current_map_claims, _unified_model_attempts, _visible_reply_style, classify_exception
-from .intent_and_review import _active_human_edit_disagreement, _assert_no_unsupported_manual_edit_intent, _components_quality_passed, _disagreement_from_warning, _extract_plain_intent_decision, _intent_body_detail_issue, _intent_body_presentation_issue, _intent_hypothesis_detail_issue, _intent_is_only_execution_authorization, _intent_semantic_binding_issue, _manual_edit_has_design_evidence, _manual_edit_review_evidence, _natural_intent_candidate, _normalize_intent_hypothesis, _repair_human_edit_engagement, _repair_reviewed_intent_presentation, _strip_unverified_state_claims, _unclear_revision_reply, _user_reframes_difficulty_judgment, _validate_disagreement, _validate_intent_decision, _warning_text_is_evidence_grounded
+from .config_and_runtime import CHAT_MAX_ATTEMPTS, CHAT_MAX_TOKENS, CHAT_RESPONSE_HARD_LENGTH, CHAT_TIMEOUT_SECONDS, COORDINATE_LINK_LIMIT, EmptyModelResponse, GUIDANCE_MOVES, INTENT_CONFIDENCE_LEVELS, KIMI_MODEL, LLMExecutionResult, LLMServiceError, LowQualityModelResponse, MANUAL_EDIT_EFFECT_EVIDENCE_KINDS, MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS, MIN_RETRY_BUDGET_SECONDS, ORDINARY_CHAT_ATTEMPT_TIMEOUTS, ORDINARY_CHAT_MAX_ATTEMPTS, PLAIN_CHAT_MAX_TOKENS, PRIMARY_ATTEMPT_TIMEOUT_SECONDS, PROPOSAL_INTERNAL_DEADLINE_SECONDS, PROPOSAL_MAX_TOKENS, ROUTE_REASONING_PASSAGE_LIMIT, UI_CUE_TYPES, _clean_list, _clean_optional_text, _clean_text, _content_block_sentences, _current_service, _dialogue_background_prompt, _empty_response_diagnostics, _is_human_edit_stage_opening, _is_length_failure, _is_map_grounding_failure, _is_stage_one, _latest_role_content, _latest_user_explicitly_agrees, _latest_user_text, _log_llm_event, _plain_fallback_allowed, _provider_error_fields, _questionless_body, _request_completion, _request_component_patch, _request_deadline, _response_diagnostics, _retry_budget_available, _safe_validation_reason, _strip_unreferenced_current_map_claims, _unified_model_attempts, _visible_reply_style, classify_exception
+from .intent_and_review import _active_human_edit_disagreement, _assert_no_unsupported_manual_edit_intent, _components_quality_passed, _disagreement_from_warning, _extract_plain_intent_decision, _intent_body_detail_issue, _intent_body_presentation_issue, _intent_hypothesis_detail_issue, _intent_is_only_execution_authorization, _intent_semantic_binding_issue, _manual_edit_has_design_evidence, _manual_edit_review_evidence, _natural_intent_candidate, _normalize_intent_hypothesis, _repair_human_edit_engagement, _repair_reviewed_intent_presentation, _review_ordinary_intent_with_recovery, _strip_unverified_state_claims, _unclear_revision_reply, _user_reframes_difficulty_judgment, _validate_disagreement, _validate_intent_decision, _warning_text_is_evidence_grounded
 from .prompts_and_messages import _human_edit_intent_discussion_focus, _is_human_edit_intent_question, build_chat_messages, build_plain_chat_messages
-from .proposal_planning import _apply_guidance_card_policy, _clarification_needs_semantic_review, _classify_revision_request, _deterministic_exact_revision, _distill_proposal_offer, _ensure_required_guidance_card, _exact_revision_clarification, _has_proposal_clarification, _is_proposal_conversation_branch, _latest_user_states_direction, _llm_failure_class, _multiple_proposal_fallback_reply, _parse_proposal_clarification_payload, _plain_guidance_move, _proposal_clarification_fallback_message, _proposal_clarification_fallback_question, _proposal_clarification_observability, _proposal_offer_binding_issue, _proposal_offer_has_exact_execution_plan, _repair_conceptual_proposal_binding, _response_contains_multiple_proposals, _validate_execution_brief, _validate_revision_plan_payload, classify_guidance_request, proposal_offer_requires_execution_brief
+from .proposal_planning import _apply_deterministic_guidance_fallback, _apply_guidance_card_policy, _clarification_envelope_patch, _clarification_needs_semantic_review, _classify_revision_request, _deterministic_exact_revision, _distill_proposal_offer, _ensure_required_guidance_card, _exact_revision_clarification, _generate_verified_proposal_failure_analysis, _has_proposal_clarification, _is_proposal_conversation_branch, _latest_user_states_direction, _llm_failure_class, _multiple_proposal_fallback_reply, _parse_proposal_clarification_payload, _plain_guidance_move, _proposal_clarification_fallback_message, _proposal_clarification_fallback_question, _proposal_clarification_observability, _proposal_offer_binding_issue, _proposal_offer_has_exact_execution_plan, _repair_conceptual_proposal_binding, _response_contains_multiple_proposals, _review_proposal_clarification, _validate_execution_brief, _validate_revision_plan_payload, classify_guidance_request, proposal_offer_requires_execution_brief
 from .snapshot_grounding import _GROUNDING_MEMO, _assert_visible_output_language, _chat_validation_mode, _deduplicate_assistant_body, _filter_coordinate_links, _guidance_reuses_visible_sentence, _guidance_text_matches, _has_historical_stage_reference, _isolate_optional_language_components, _join_english, _localized_change_labels, _manual_edit_text_is_contextual, _map_facts_for_prompt, _normalize_change_claims_for_proposal, _normalize_coordinate_links, _normalize_response_paragraphs, _normalize_single_level_language, _normalize_unsaved_change_claims, _proposal_clarification_route_evidence, _recover_coordinate_links, _remove_exact_guidance_from_body, _remove_extracted_warning_sentence, _remove_guidance_from_body, _render_content_blocks, _route_evidence_for_prompt, _sanitize_assessment_grounding, _sanitize_ordinary_grounding_metadata, _sanitize_visible_guidance, _sanitize_visible_model_text, _snapshot_entity_records, _stage_snapshot_for_prompt, _strip_invalid_grounding_sentences, _strip_invalid_stage_grounding_sentences, _validate_map_grounding_texts
 
 
@@ -126,13 +167,14 @@ def _validate_manual_edit_pair_payload(payload, rows, language, solver_metrics, 
     return LLMExecutionResult(assistant_message=opening_message, attempts_used=attempts_used, request_id=request_id, assessment=assessment, model=model, latency_ms=latency_ms, guidance=opening_guidance, secondary_execution=secondary)
 
 def _generate_manual_edit_assessment_pair(conversation, rows, language, solver_metrics, play_summary, request_id, stage_context, _deadline=None):
-    api_key, base_url = llm_attr('_llm_credentials')()
+    svc = _current_service()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
     evidence = _manual_edit_review_evidence(stage_context, solver_metrics, play_summary, language)
-    started_at = time.monotonic()
+    started_at = svc.clock.monotonic()
     deadline = _deadline or _request_deadline(started_at)
-    conflict_decision = llm_attr('_classify_manual_edit_conflict')(evidence, language, f'{request_id}:manual-conflict', deadline)
+    conflict_decision = svc.classify_manual_edit_conflict(evidence, language, f'{request_id}:manual-conflict', deadline)
     requires_conflict = conflict_decision.get('verdict') == 'conflict'
     response_language = 'Simplified Chinese' if language == 'zh-CN' else 'English'
     current_snapshot = _stage_snapshot_for_prompt(rows, stage_context)
@@ -142,35 +184,36 @@ def _generate_manual_edit_assessment_pair(conversation, rows, language, solver_m
     messages = [{'role': 'system', 'content': 'You are the Kimi K2.6 Sokoban co-creation evaluator. A designer has saved a deterministically validated manual edit. Return one JSON object containing two distinct messages. Write every natural-language field in ' + response_language + ".\n\nopeningMessage is the first Stage-opening bubble. It must be declarative and card-free: acknowledge the saved solvable Stage once and highlight the key current layout feature and its supported play effect. A personal reaction is optional; do not cover every design dimension or repeat the comparison below. Do not ask a question or infer intent.\n\nreviewMessage is a second, always-visible declarative evaluator bubble. Compare the verified manual diff with active explicit/confirmed design directions and the bounded Stage lineage. Explain where the edit aligns, shifts, or creates a trade-off without repeating openingMessage. Do not invent a motive, proposal, map change, question, or warning card. Do not print evidence IDs or raw tile transitions in visible prose.\n\nThis project's tile legend is # wall, . floor, @ water, p player, s box, t target. Never reinterpret these glyphs using another Sokoban convention. The server's verified change summary and named beforeTile/afterTile fields are authoritative for changed tile types.\n\nIf confirmedDesignDirectionAvailable is false, explicitly say that there is no confirmed design direction available for comparison and discuss only verified map, solver, or play effects. In that case, never describe the edit as expressing, supporting, or conflicting with an implicit intention, preference, pursuit, hope, or goal. The saved edit itself is not proof of motive.\n\n" + _visible_reply_style('review') + '\n\n' + conflict_instruction + f"\n\nWhen conflict is non-null, fill one warm human_edit discussion: userPosition, aiPosition, a substantive coreDisagreement, and exactly one nextQuestion. This produces LET'S DISCUSS only; never produce WARNING. Historical Stage facts are comparison-only. Current-map claims must use only the Current Stage Snapshot. Avoid coordinates in reviewMessage and conflict fields. assessment.satisfactionQuestion must be null.\n\nCurrent Stage Snapshot (authoritative):\n{current_snapshot}\n\nManual-edit review context (server-owned):\n" + json.dumps(review_context, ensure_ascii=False, separators=(',', ':'))}]
     last_error = None
     locked_components = {}
+    model = svc.config.model
     for attempt in range(1, 3):
         raw_content = None
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         if remaining <= 0:
             break
         timeout_seconds = min(60.0 if attempt == 1 else remaining, remaining)
-        _log_llm_event('llm_attempt_started', requestId=request_id, task='manual_edit_assessment_pair', model=KIMI_MODEL, attempt=attempt, maxAttempts=2, timeoutSeconds=round(timeout_seconds, 3), responseMode='json_schema', frozenVerdict=conflict_decision.get('verdict'))
+        _log_llm_event('llm_attempt_started', requestId=request_id, task='manual_edit_assessment_pair', model=model, attempt=attempt, maxAttempts=2, timeoutSeconds=round(timeout_seconds, 3), responseMode='json_schema', frozenVerdict=conflict_decision.get('verdict'))
         try:
-            response = asyncio.run(asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, KIMI_MODEL, messages, MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS, timeout_seconds, task='manual_edit_assessment_pair_conflict' if requires_conflict else 'manual_edit_assessment_pair_no_conflict'), timeout=timeout_seconds))
+            response = asyncio.run(asyncio.wait_for(_request_completion(api_key, base_url, model, messages, MANUAL_EDIT_PAIR_MAX_COMPLETION_TOKENS, timeout_seconds, task='manual_edit_assessment_pair_conflict' if requires_conflict else 'manual_edit_assessment_pair_no_conflict'), timeout=timeout_seconds))
             choice = response.choices[0]
             if str(getattr(choice, 'finish_reason', '') or '') == 'length':
                 raise ValueError('The manual-edit assessment pair reached its output limit.')
             raw_content = str(choice.message.content or '')
             payload = parse_json_object(raw_content)
             payload.update(locked_components)
-            latency_ms = int((time.monotonic() - started_at) * 1000)
-            result = llm_attr('_validate_manual_edit_pair_payload')(payload, rows, language, solver_metrics, stage_context, evidence, conflict_decision, request_id, attempt, KIMI_MODEL, latency_ms, _component_state=locked_components)
-            _log_llm_event('llm_request_completed', requestId=request_id, task='manual_edit_assessment_pair', outcome='success', model=KIMI_MODEL, attemptsUsed=attempt, latencyMs=latency_ms, frozenVerdict=conflict_decision.get('verdict'), discussionCard=bool(result.secondary_execution.guidance.get('disagreement')), reliableBodyDelivered=True, componentChecks=[ComponentCheck(name, 'preserved').diagnostic() for name in locked_components])
+            latency_ms = int((svc.clock.monotonic() - started_at) * 1000)
+            result = _current_service().validate_manual_edit_pair(payload, rows, language, solver_metrics, stage_context, evidence, conflict_decision, request_id, attempt, model, latency_ms, _component_state=locked_components)
+            _log_llm_event('llm_request_completed', requestId=request_id, task='manual_edit_assessment_pair', outcome='success', model=model, attemptsUsed=attempt, latencyMs=latency_ms, frozenVerdict=conflict_decision.get('verdict'), discussionCard=bool(result.secondary_execution.guidance.get('disagreement')), reliableBodyDelivered=True, componentChecks=[ComponentCheck(name, 'preserved').diagnostic() for name in locked_components])
             return result
         except asyncio.TimeoutError as exception:
             last_error = LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not complete the manual-edit review before the request deadline.', request_id, True, attempt, 504)
-            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_assessment_pair', model=KIMI_MODEL, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((time.monotonic() - started_at) * 1000), validationReason='The Kimi request exceeded the manual-review time budget.', frozenVerdict=conflict_decision.get('verdict'))
+            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_assessment_pair', model=model, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason='The Kimi request exceeded the manual-review time budget.', frozenVerdict=conflict_decision.get('verdict'))
         except LLMServiceError as exception:
-            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_assessment_pair', model=KIMI_MODEL, attempt=attempt, maxAttempts=2, code=exception.code, retryable=exception.retryable, latencyMs=int((time.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception), frozenVerdict=conflict_decision.get('verdict'))
+            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_assessment_pair', model=model, attempt=attempt, maxAttempts=2, code=exception.code, retryable=exception.retryable, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception), frozenVerdict=conflict_decision.get('verdict'))
             raise
         except Exception as exception:
             last_error = classify_exception(exception, request_id, attempt)
             last_error.retryable = True
-            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_assessment_pair', model=KIMI_MODEL, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((time.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception), frozenVerdict=conflict_decision.get('verdict'))
+            _log_llm_event('llm_attempt_failed', requestId=request_id, task='manual_edit_assessment_pair', model=model, attempt=attempt, maxAttempts=2, code=last_error.code, retryable=True, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), validationReason=_safe_validation_reason(exception), frozenVerdict=conflict_decision.get('verdict'))
             if raw_content and attempt < 2:
                 messages.extend([{'role': 'assistant', 'content': raw_content}, {'role': 'user', 'content': 'Preserve these already validated components exactly: ' + json.dumps(locked_components, ensure_ascii=False) + f'. Repair only rejected components. Your review failed server validation: {exception}. Keep the frozen conflict decision unchanged and return a corrected complete JSON object.'}])
     if last_error is not None:
@@ -178,6 +221,7 @@ def _generate_manual_edit_assessment_pair(conversation, rows, language, solver_m
     raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not complete the manual-edit review before the request deadline.', request_id, True, 0, 504)
 
 def generate_stage_assessment(conversation, rows, language, solver_metrics, play_summary, request_id, stage_context=None, _deadline=None):
+    svc = _current_service()
     if _is_human_edit_stage_opening(True, stage_context):
         return _generate_manual_edit_assessment_pair(conversation, rows, language, solver_metrics, play_summary, request_id, stage_context or {}, _deadline=_deadline)
     deadline = _deadline or _request_deadline()
@@ -186,20 +230,21 @@ def generate_stage_assessment(conversation, rows, language, solver_metrics, play
     except LLMServiceError as exception:
         if exception.code not in {'MODEL_EMPTY_RESPONSE', 'MODEL_RESPONSE_INVALID', 'UPSTREAM_TIMEOUT', 'UPSTREAM_CONNECTION_ERROR'}:
             raise
-        can_attempt_plain_recovery = llm_attr('_remaining_until')(deadline) >= MIN_RETRY_BUDGET_SECONDS
-        _log_llm_event('llm_stage_opening_structured_failed' if can_attempt_plain_recovery else 'llm_stage_opening_fallback', requestId=request_id, fromCode=exception.code, responseMode='plain_text_recovery' if can_attempt_plain_recovery else 'server_snapshot', remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3), fallbackReason=exception.code)
+        can_attempt_plain_recovery = svc.remaining_until(deadline) >= svc.config.min_retry_budget_seconds
+        _log_llm_event('llm_stage_opening_structured_failed' if can_attempt_plain_recovery else 'llm_stage_opening_fallback', requestId=request_id, fromCode=exception.code, responseMode='plain_text_recovery' if can_attempt_plain_recovery else 'server_snapshot', remainingSeconds=round(svc.remaining_until(deadline), 3), fallbackReason=exception.code)
         if can_attempt_plain_recovery:
             try:
-                recovered = _generate_plain_chat_sync(conversation=conversation, rows=rows, request_id=request_id, language=language, solver_metrics=solver_metrics, play_summary=play_summary, stage_context=stage_context, stage_opening=True, deadline=deadline, max_attempts=1)
-                _log_llm_event('llm_stage_opening_recovered' if recovered.model != 'kimi-k2.6-safe-opening' else 'llm_stage_opening_recovery_exhausted', requestId=request_id, fromCode=exception.code, responseMode='plain_text' if recovered.model != 'kimi-k2.6-safe-opening' else 'server_snapshot', finalDisplayMode='plain_text_recovery' if recovered.model != 'kimi-k2.6-safe-opening' else 'server_snapshot', bodyPreserved=bool(recovered.assistant_message.strip()), droppedSentenceCount=0, remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3))
+                recovered = _current_service().generate_plain_chat(conversation=conversation, rows=rows, request_id=request_id, language=language, solver_metrics=solver_metrics, play_summary=play_summary, stage_context=stage_context, stage_opening=True, deadline=deadline, max_attempts=1)
+                _log_llm_event('llm_stage_opening_recovered' if recovered.model != 'kimi-k2.6-safe-opening' else 'llm_stage_opening_recovery_exhausted', requestId=request_id, fromCode=exception.code, responseMode='plain_text' if recovered.model != 'kimi-k2.6-safe-opening' else 'server_snapshot', finalDisplayMode='plain_text_recovery' if recovered.model != 'kimi-k2.6-safe-opening' else 'server_snapshot', bodyPreserved=bool(recovered.assistant_message.strip()), droppedSentenceCount=0, remainingSeconds=round(svc.remaining_until(deadline), 3))
                 return recovered
             except LLMServiceError as recovery_exception:
-                _log_llm_event('llm_stage_opening_recovery_failed', requestId=request_id, fromCode=exception.code, recoveryCode=recovery_exception.code, remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3))
-        _log_llm_event('llm_stage_opening_fallback', requestId=request_id, fromCode=exception.code, responseMode='server_snapshot', remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3), fallbackReason=exception.code)
-        return _stage_opening_safe_execution(language=language, rows=rows, request_id=request_id, attempts_used=exception.attempts_used, started_at=deadline - llm_attr('LLM_INTERNAL_DEADLINE_SECONDS'), fallback_reason=exception.code, stage_context=stage_context, solver_metrics=solver_metrics)
+                _log_llm_event('llm_stage_opening_recovery_failed', requestId=request_id, fromCode=exception.code, recoveryCode=recovery_exception.code, remainingSeconds=round(svc.remaining_until(deadline), 3))
+        _log_llm_event('llm_stage_opening_fallback', requestId=request_id, fromCode=exception.code, responseMode='server_snapshot', remainingSeconds=round(svc.remaining_until(deadline), 3), fallbackReason=exception.code)
+        return _stage_opening_safe_execution(language=language, rows=rows, request_id=request_id, attempts_used=exception.attempts_used, started_at=deadline - svc.config.llm_internal_deadline_seconds, fallback_reason=exception.code, stage_context=stage_context, solver_metrics=solver_metrics)
 
 def generate_chat_reply(conversation, rows, request_id, language='en', solver_metrics=None, play_summary=None, assessment_only=False, proposal_validator=None, stage_context=None, _max_attempts=CHAT_MAX_ATTEMPTS, _deadline=None):
-    request_started_at = time.monotonic() if _deadline is None else None
+    svc = _current_service()
+    request_started_at = svc.clock.monotonic() if _deadline is None else None
     deadline = _deadline or _request_deadline(request_started_at)
     shared_reliability = stage_context.setdefault('_reliabilityState', {}) if isinstance(stage_context, dict) else {}
     effective_stage_context = dict(stage_context or {})
@@ -216,7 +261,7 @@ def generate_chat_reply(conversation, rows, request_id, language='en', solver_me
             raise error from exception
         if exact is not None:
             return exact
-    api_key, base_url = llm_attr('_llm_credentials')()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
     revision_state, revision_brief = _classify_revision_request(conversation, stage_context)
@@ -245,7 +290,7 @@ def generate_chat_reply(conversation, rows, request_id, language='en', solver_me
     automatic_proposal = effective_stage_context.get('revisionRouting') in {'proposal', 'proposal_conservative'}
     proposal_request = not assessment_only and (explicit_action == 'execute_revision' or explicit_action == 'alternative_revision' or automatic_proposal or (not effective_stage_context.get('deferRevisionExecution') and (revision_state in {'authorized', 'authorized_relaxed'} or automatic_proposal)))
     if proposal_request and _deadline is None:
-        deadline = _request_deadline(request_started_at, budget_seconds=116.0 if effective_stage_context.get('requirementPolicyVersion') == 1 else PROPOSAL_INTERNAL_DEADLINE_SECONDS)
+        deadline = _request_deadline(request_started_at, budget_seconds=svc.config.llm_internal_deadline_seconds if effective_stage_context.get('requirementPolicyVersion') == 1 else svc.config.proposal_internal_deadline_seconds)
     if revision_state == 'authorized_relaxed':
         effective_stage_context['revisionRelaxed'] = True
         effective_stage_context['relaxationOriginalBrief'] = str((((stage_context or {}).get('recentGuidance') or {}).get('relaxationOffer') or {}).get('originalBrief') or '')
@@ -253,7 +298,7 @@ def generate_chat_reply(conversation, rows, request_id, language='en', solver_me
         raise LLMServiceError('PROPOSAL_ROUTING_INVARIANT', 'A ready automatic proposal cannot enter the plain-chat path.', request_id, False, 0, 500)
     direction_handoff = None
     if not assessment_only and (not proposal_request):
-        discussion = _generate_plain_chat_sync(conversation=conversation, rows=rows, request_id=request_id, language=language, solver_metrics=solver_metrics, play_summary=play_summary, stage_context=effective_stage_context, deadline=deadline)
+        discussion = _current_service().generate_plain_chat(conversation=conversation, rows=rows, request_id=request_id, language=language, solver_metrics=solver_metrics, play_summary=play_summary, stage_context=effective_stage_context, deadline=deadline)
         if (discussion.proposal_diagnostics or {}).get('optionOutcome') != 'ready':
             return discussion
         discovery = dict(effective_stage_context.get('proposalDiscovery') or {})
@@ -266,14 +311,14 @@ def generate_chat_reply(conversation, rows, request_id, language='en', solver_me
         direction_handoff = {'optionSet': discovery['optionSet'], 'optionDecision': discovery.get('optionDecision'), 'optionAutoPlan': True}
         proposal_request = True
     if proposal_request:
-        reserve = 12.0 if effective_stage_context.get('requirementPolicyVersion') == 1 and llm_attr('_remaining_until')(deadline) > 32 else 0.0
+        reserve = 12.0 if effective_stage_context.get('requirementPolicyVersion') == 1 and svc.remaining_until(deadline) > 32 else 0.0
         try:
-            planned = llm_attr('_generate_revision_search_proposal_sync')(api_key=api_key, base_url=base_url, conversation=conversation, rows=rows, request_id=request_id, language=language, proposal_validator=proposal_validator, stage_context=effective_stage_context, baseline_metrics=solver_metrics, deadline=deadline - reserve)
+            planned = svc.generate_revision_search_proposal_sync(api_key=api_key, base_url=base_url, conversation=conversation, rows=rows, request_id=request_id, language=language, proposal_validator=proposal_validator, stage_context=effective_stage_context, baseline_metrics=solver_metrics, deadline=deadline - reserve)
             if direction_handoff:
                 planned = replace(planned, proposal_diagnostics={**(planned.proposal_diagnostics or {}), **direction_handoff})
             return planned
         except LLMServiceError as error:
-            recovery = llm_attr('_generate_verified_proposal_failure_analysis')(api_key, base_url, effective_stage_context, rows, language, request_id, deadline, error)
+            recovery = _current_service().generate_verified_proposal_failure_analysis(api_key, base_url, effective_stage_context, rows, language, request_id, deadline, error)
             if recovery is None:
                 raise
             if direction_handoff:
@@ -284,17 +329,18 @@ def generate_chat_reply(conversation, rows, request_id, language='en', solver_me
     primary_model = models[0]
     task = 'stage_assessment' if assessment_only else 'map_proposal' if proposal_request else 'chat'
     max_tokens = PROPOSAL_MAX_TOKENS if proposal_request else CHAT_MAX_TOKENS
-    started_at = time.monotonic()
-    _log_llm_event('llm_request_started', requestId=request_id, task=task, primaryModel=primary_model, fallbackModel=None, timeoutSeconds=CHAT_TIMEOUT_SECONDS, responseMode='json_object')
+    started_at = svc.clock.monotonic()
+    _log_llm_event('llm_request_started', requestId=request_id, task=task, primaryModel=primary_model, fallbackModel=None, timeoutSeconds=svc.config.backend_request_timeout_seconds, responseMode='json_object')
     try:
-        return asyncio.run(asyncio.wait_for(_generate_with_model_fallback(api_key=api_key, base_url=base_url, models=models, messages=messages, rows=rows, max_tokens=max_tokens, request_id=request_id, task=task, language=language, assessment_only=assessment_only, proposal_validator=proposal_validator, stage_context=effective_stage_context, started_at=started_at, deadline=deadline, max_attempts=_max_attempts), timeout=min(CHAT_TIMEOUT_SECONDS, llm_attr('_remaining_until')(deadline))))
+        return asyncio.run(asyncio.wait_for(_generate_with_model_fallback(api_key=api_key, base_url=base_url, models=models, messages=messages, rows=rows, max_tokens=max_tokens, request_id=request_id, task=task, language=language, assessment_only=assessment_only, proposal_validator=proposal_validator, stage_context=effective_stage_context, started_at=started_at, deadline=deadline, max_attempts=_max_attempts), timeout=min(svc.config.backend_request_timeout_seconds, svc.remaining_until(deadline))))
     except asyncio.TimeoutError as exception:
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        elapsed_ms = int((svc.clock.monotonic() - started_at) * 1000)
         _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=min(len(models), _max_attempts), latencyMs=elapsed_ms, responseMode='json_object')
         raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not complete the request before the 120 second limit.', request_id, True, min(len(models), _max_attempts), 504) from exception
 
 def _generate_plain_chat_sync(*, conversation, rows, request_id, language, solver_metrics, play_summary, stage_context, stage_opening=False, deadline=None, max_attempts=None):
-    api_key, base_url = llm_attr('_llm_credentials')()
+    svc = _current_service()
+    api_key, base_url = svc.credentials()
     if not api_key or api_key in {'your_kimi_api_key_here', 'your_llm_api_key_here'}:
         raise LLMServiceError('CONFIGURATION_ERROR', 'The configured LLM API key is missing.', request_id, False, 0, 503)
     shared_reliability = stage_context.setdefault('_reliabilityState', {}) if isinstance(stage_context, dict) else {}
@@ -308,20 +354,20 @@ def _generate_plain_chat_sync(*, conversation, rows, request_id, language, solve
     task = 'stage_assessment_fallback' if stage_opening else 'chat'
     validation_mode = _chat_validation_mode(conversation, effective_stage_context, stage_opening=stage_opening, guidance_mode=guidance_mode)
     if max_attempts is None:
-        effective_max_attempts = 1 if stage_opening else ORDINARY_CHAT_MAX_ATTEMPTS if validation_mode in {'ordinary_chat', 'route_discussion'} else CHAT_MAX_ATTEMPTS
+        effective_max_attempts = 1 if stage_opening else svc.config.ordinary_chat_max_attempts if validation_mode in {'ordinary_chat', 'route_discussion'} else svc.config.chat_max_attempts
     else:
         effective_max_attempts = max(1, int(max_attempts))
     models = _unified_model_attempts(effective_max_attempts)
     messages = build_plain_chat_messages(conversation, rows, language, solver_metrics, play_summary, effective_stage_context, stage_opening=stage_opening, validation_mode=validation_mode)
     historical_reference = _has_historical_stage_reference(_latest_user_text(conversation))
-    started_at = time.monotonic()
+    started_at = svc.clock.monotonic()
     deadline = deadline or _request_deadline(started_at)
-    _log_llm_event('llm_request_started', requestId=request_id, task=task, primaryModel=models[0], fallbackModel=None, timeoutSeconds=llm_attr('PLAIN_CHAT_TIMEOUT_SECONDS'), responseMode='plain_text', guidanceMode=guidance_mode)
+    _log_llm_event('llm_request_started', requestId=request_id, task=task, primaryModel=models[0], fallbackModel=None, timeoutSeconds=svc.config.plain_chat_timeout_seconds, responseMode='plain_text', guidanceMode=guidance_mode)
     attempt_state = {'count': 0}
     try:
-        return asyncio.run(asyncio.wait_for(_generate_plain_with_model_fallback(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, task=task, language=language, solver_metrics=solver_metrics, rows=rows, play_summary=play_summary, stage_opening=stage_opening, stage_context=effective_stage_context, guidance_mode=guidance_mode, validation_mode=validation_mode, historical_reference=historical_reference, semantic_messages=conversation, started_at=started_at, deadline=deadline, attempt_state=attempt_state), timeout=min(llm_attr('PLAIN_CHAT_TIMEOUT_SECONDS'), llm_attr('_remaining_until')(deadline))))
+        return asyncio.run(asyncio.wait_for(_generate_plain_with_model_fallback(api_key=api_key, base_url=base_url, models=models, messages=messages, request_id=request_id, task=task, language=language, solver_metrics=solver_metrics, rows=rows, play_summary=play_summary, stage_opening=stage_opening, stage_context=effective_stage_context, guidance_mode=guidance_mode, validation_mode=validation_mode, historical_reference=historical_reference, semantic_messages=conversation, started_at=started_at, deadline=deadline, attempt_state=attempt_state), timeout=min(svc.config.plain_chat_timeout_seconds, svc.remaining_until(deadline))))
     except asyncio.TimeoutError as exception:
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        elapsed_ms = int((svc.clock.monotonic() - started_at) * 1000)
         _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='error', code='UPSTREAM_TIMEOUT', attemptsUsed=attempt_state['count'], latencyMs=elapsed_ms, responseMode='plain_text')
         raise LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not complete the request before the 120 second limit.', request_id, True, attempt_state['count'], 504) from exception
 
@@ -335,11 +381,12 @@ async def _generate_plain_with_model_fallback(**kwargs):
         _GROUNDING_MEMO.reset(token)
 
 async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models, messages, request_id, task, language, solver_metrics, rows, play_summary, stage_opening, stage_context, guidance_mode, validation_mode='ordinary_chat', historical_reference=False, semantic_messages=None, started_at, deadline=None, attempt_state=None):
+    svc = _current_service()
     stage_context = stage_context if stage_context is not None else {}
     last_error = None
     validation_feedback = None
     deadline = deadline or _request_deadline(started_at)
-    optional_budget = OptionalRepairBudget(deadline)
+    optional_budget = OptionalRepairBudget(deadline, clock=svc.clock)
     optional_budget.spent = float((stage_context or {}).get('_optionalRepairSpent') or 0.0)
     component_checks = []
     semantic_messages = semantic_messages or messages
@@ -354,17 +401,17 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
     ordinary_discussion = validation_mode in {'ordinary_chat', 'route_discussion'}
     human_edit_engagement_required = _active_human_edit_disagreement(stage_context)
     for attempt, model in enumerate(models[:max_attempts], start=1):
-        remaining = llm_attr('_remaining_until')(deadline)
+        remaining = svc.remaining_until(deadline)
         if remaining <= 0:
             raise asyncio.TimeoutError()
         if ordinary_discussion and attempt == 3 and (remaining < 20.0):
             break
         if attempt_state is not None:
             attempt_state['count'] = attempt
-        if ordinary_discussion and attempt <= len(ORDINARY_CHAT_ATTEMPT_TIMEOUTS):
-            attempt_timeout = min(ORDINARY_CHAT_ATTEMPT_TIMEOUTS[attempt - 1], remaining)
+        if ordinary_discussion and attempt <= len(svc.config.ordinary_chat_attempt_timeouts):
+            attempt_timeout = min(svc.config.ordinary_chat_attempt_timeouts[attempt - 1], remaining)
         else:
-            attempt_timeout = min(llm_attr('PLAIN_PRIMARY_TIMEOUT_SECONDS') if attempt == 1 else remaining, remaining)
+            attempt_timeout = min(svc.config.plain_primary_timeout_seconds if attempt == 1 else remaining, remaining)
         response_fields = _empty_response_diagnostics()
         grounding_dropped_count = 0
         clarification_fallback_used = False
@@ -379,7 +426,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                 envelope = await _request_component_patch(api_key, base_url, clarification_repair_request, attempt_messages, request_id, deadline, 'proposal_clarification', PLAIN_CHAT_MAX_TOKENS, attempt_timeout)
                 content = json.dumps(envelope, ensure_ascii=False)
             else:
-                response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, model, attempt_messages, PLAIN_CHAT_MAX_TOKENS, attempt_timeout, structured=clarification_active, task='proposal_clarification' if clarification_active else 'stage_assessment_fallback' if stage_opening else 'plain_chat', response_format_override=proposal_options.clarification_response_format(stage_context.get('proposalDiscovery') or {}, stage_context.get('stageSnapshot') or {}) if clarification_active and (proposal_clarification or {}).get('optionPolicyVersion') == proposal_options.VERSION else None), timeout=attempt_timeout)
+                response = await asyncio.wait_for(_request_completion(api_key, base_url, model, attempt_messages, PLAIN_CHAT_MAX_TOKENS, attempt_timeout, structured=clarification_active, task='proposal_clarification' if clarification_active else 'stage_assessment_fallback' if stage_opening else 'plain_chat', response_format_override=proposal_options.clarification_response_format(stage_context.get('proposalDiscovery') or {}, stage_context.get('stageSnapshot') or {}) if clarification_active and (proposal_clarification or {}).get('optionPolicyVersion') == proposal_options.VERSION else None), timeout=attempt_timeout)
                 choice = response.choices[0]
                 response_fields = _response_diagnostics(response, choice)
                 if str(getattr(choice, 'finish_reason', '') or '') == 'length':
@@ -407,11 +454,11 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                     parsed_body, clarification_question, clarification_question_issue, clarification_body_dropped = _parse_proposal_clarification_payload(content, language, stage_context)
                 except ProposalValidationError as error:
                     if attempt < max_attempts:
-                        clarification_repair_request = llm_attr('_clarification_envelope_patch')(parse_json_object(content), error, stage_context)
+                        clarification_repair_request = _clarification_envelope_patch(parse_json_object(content), error, stage_context)
                     raise
                 if (proposal_clarification or {}).get('optionPolicyVersion') == proposal_options.VERSION or ((proposal_clarification or {}).get('semanticPolicyVersion') == 1 and _clarification_needs_semantic_review('' if clarification_body_candidate else parsed_body, clarification_question)):
                     clarification_semantic_review_failed = True
-                    reviewed_body, reviewed_question_issue = await llm_attr('_review_proposal_clarification')(api_key, base_url, '' if clarification_body_candidate else parsed_body, clarification_question, stage_context, request_id, deadline)
+                    reviewed_body, reviewed_question_issue = await _current_service().review_proposal_clarification(api_key, base_url, '' if clarification_body_candidate else parsed_body, clarification_question, stage_context, request_id, deadline)
                     if not clarification_body_candidate:
                         parsed_body = reviewed_body
                     clarification_question_issue = reviewed_question_issue or clarification_question_issue
@@ -449,7 +496,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                 clarification_author = 'server_fallback' if clarification_fallback_used and clarification_question_issue else 'mixed' if clarification_fallback_used or clarification_question_issue else 'kimi'
             content = _sanitize_visible_model_text(_normalize_unsaved_change_claims(_normalize_single_level_language(content.strip()), language), language)
             if not stage_opening and (stage_context.get('conversationOnly') or (proposal_options.current_set(stage_context.get('proposalDiscovery')) and (not clarification_active))):
-                content, permission_issue = await llm_attr('_review_proposal_clarification')(api_key, base_url, content, '', stage_context, request_id, deadline)
+                content, permission_issue = await _current_service().review_proposal_clarification(api_key, base_url, content, '', stage_context, request_id, deadline)
                 if permission_issue or not content.strip():
                     raise LowQualityModelResponse('No independently reliable permission-safe discussion remains.')
             discussion_focus = _extract_plain_discussion_focus(content, language, stage_opening, stage_context)
@@ -492,7 +539,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                     _log_llm_event('llm_grounding_sentences_dropped', requestId=request_id, task=task, sentenceCount=len(removed_grounding), reasonCodes=[item['reason'].split(':', 1)[0] for item in removed_grounding])
                 if not visible_content:
                     snapshot_fallback_used = True
-                    visible_content = llm_attr('_server_snapshot_fallback_message')(rows, language, stage_context=stage_context, stage_opening=True)
+                    visible_content = _current_service().server_snapshot_fallback_message(rows, language, stage_context=stage_context, stage_opening=True)
                 discussion_focus = _extract_plain_discussion_focus(visible_content, language, stage_opening, stage_context)
             if rows and (not stage_opening):
                 visible_content, removed_grounding = _strip_invalid_grounding_sentences(visible_content, rows, historical_reference=historical_reference, entity_bindings=(stage_context or {}).get('entityBindings'))
@@ -510,7 +557,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                     raise LowQualityModelResponse('No reliable model prose remained after current-map cleanup.')
                 clarification_fallback_used = clarification_active
                 snapshot_fallback_used = stage_opening and (not clarification_active)
-                visible_content = _proposal_clarification_fallback_message(language, stage_context) if clarification_active else llm_attr('_server_snapshot_fallback_message')(rows, language, stage_context=stage_context, stage_opening=stage_opening)
+                visible_content = _proposal_clarification_fallback_message(language, stage_context) if clarification_active else _current_service().server_snapshot_fallback_message(rows, language, stage_context=stage_context, stage_opening=stage_opening)
             visible_content, route_recovery = _recover_overlong_content(visible_content, rows, language=language)
             route_recovery['droppedSentenceCount'] += grounding_dropped_count
             if route_recovery['changed']:
@@ -548,7 +595,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                 visible_content = _strip_unverified_state_claims(visible_content)
             proposal_binding_downgraded = False
             kimi_ordinary = bool(not stage_opening and (not clarification_active) and (not (stage_context or {}).get('conversationOnly')) and (not _is_proposal_conversation_branch(stage_context)) and (not isinstance(disagreement, dict)) and (proposal_offer is None))
-            intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = llm_attr('_apply_deterministic_guidance_fallback')(semantic_messages, visible_content, language, stage_context, stage_opening, intent_hypothesis, proposal_offer, ui_cues, rows, play_summary, guidance_mode=guidance_mode, allow_required_fallback=attempt >= max_attempts, semantic_intent=kimi_ordinary)
+            intent_hypothesis, proposal_offer, ui_cues, guidance_fallback_used = _current_service().apply_deterministic_guidance_fallback(semantic_messages, visible_content, language, stage_context, stage_opening, intent_hypothesis, proposal_offer, ui_cues, rows, play_summary, guidance_mode=guidance_mode, allow_required_fallback=attempt >= max_attempts, semantic_intent=kimi_ordinary)
             if stage_opening:
                 intent_hypothesis = None
                 proposal_offer = None
@@ -670,7 +717,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                 guidance['intentHypothesis'] = intent_decision['cardText'] if draft_classification == 'candidate' else None
                 guidance['intentConfidence'] = 'medium' if draft_classification == 'candidate' else None
                 active_intents = [{'hypothesisId': item.get('id'), 'statement': item.get('statement'), 'semanticClaims': item.get('semanticClaims') or [], 'evidenceText': item.get('evidenceText') or ''} for item in ((stage_context or {}).get('designContext') or {}).get('intentHypotheses', []) if item.get('status') == 'confirmed']
-                intent_review = await llm_attr('_review_ordinary_intent_with_recovery')(optional_budget=optional_budget, component_checks=component_checks, api_key=api_key, base_url=base_url, user_text=latest_user_text, body=body, decision=intent_decision, active_inclinations=active_intents, language=language, request_id=request_id, deadline=deadline, discussion_background=_dialogue_background_prompt(stage_context), visible_questions=(stage_context or {}).get('ordinaryOpenQuestions'), component_state=stage_context.setdefault('_reliabilityState', {}))
+                intent_review = await _current_service().review_ordinary_intent_with_recovery(optional_budget=optional_budget, component_checks=component_checks, api_key=api_key, base_url=base_url, user_text=latest_user_text, body=body, decision=intent_decision, active_inclinations=active_intents, language=language, request_id=request_id, deadline=deadline, discussion_background=_dialogue_background_prompt(stage_context), visible_questions=(stage_context or {}).get('ordinaryOpenQuestions'), component_state=stage_context.setdefault('_reliabilityState', {}))
                 if stage_context.get('_reliabilityState', {}).get('questionReviewIssue'):
                     component_checks.append(ComponentCheck('question_review', 'omitted', 'QUESTION_RESULTS_INVALID'))
                 if intent_review.get('issues'):
@@ -717,7 +764,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
                                 raise LowQualityModelResponse('No reliable repaired intent prose remained after map-grounding cleanup.')
                         post_repair_body_issue = _intent_body_detail_issue(body, language, selected_card)
                         if post_repair_body_issue not in {None, 'intent body does not distinguish two design consequences', 'intent body does not preserve the unresolved design boundary', 'Chinese intent body is too brief', 'English intent body is too brief', 'intent body contains an option or fragment list', 'intent body repeats the intent card'}:
-                            body, selected_card = await llm_attr('_repair_intent_components_async')(api_key=api_key, base_url=base_url, user_text=latest_user_text, body=body, card_text=selected_card, claims=intent_review['claims'], issues=[post_repair_body_issue], repair_body=True, repair_card=False, map_facts=intent_repair_map_facts, language=language, request_id=request_id, deadline=deadline)
+                            body, selected_card = await svc.repair_intent_components_async(api_key=api_key, base_url=base_url, user_text=latest_user_text, body=body, card_text=selected_card, claims=intent_review['claims'], issues=[post_repair_body_issue], repair_body=True, repair_card=False, map_facts=intent_repair_map_facts, language=language, request_id=request_id, deadline=deadline)
                             if rows:
                                 body, removed_repair_grounding = _strip_invalid_grounding_sentences(body, rows, historical_reference=historical_reference, entity_bindings=(stage_context or {}).get('entityBindings'))
                             if not body:
@@ -815,7 +862,7 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
             if evidence_signature and guidance['uiCues']:
                 guidance['evidenceSignature'] = evidence_signature
             assessment = _build_minimal_stage_assessment(body, question, language, solver_metrics) if stage_opening else {}
-            latency_ms = int((time.monotonic() - started_at) * 1000)
+            latency_ms = int((svc.clock.monotonic() - started_at) * 1000)
             opening_body = body
             guidance = _isolate_optional_language_components(guidance, language, required_question=clarification_active or bool(guidance.get('disagreement')))
             if stage_opening and _is_human_edit_stage_opening(True, stage_context):
@@ -832,23 +879,22 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
             trace_reply('final_projection', 'passed', cardPresent=bool(guidance.get('intentHypothesis')))
             visible_body_source = 'kimi_salvaged' if grounding_dropped_count else 'kimi_corrective' if ordinary_discussion and attempt > 1 else 'kimi'
             result = LLMExecutionResult(assistant_message=assistant_message, assessment=assessment, proposed_rows=None, modification_summary='', attempts_used=attempt, request_id=request_id, model='kimi-k2.6-safe-opening' if snapshot_fallback_used else model, latency_ms=latency_ms, guidance=guidance, proposal_diagnostics={'groundingSentencesDropped': total_grounding_dropped_count, 'clarificationRecoveryMode': 'server_fallback' if clarification_fallback_used and clarification_question_issue else 'question_replaced' if clarification_question_issue else 'body_recovered' if clarification_fallback_used else 'kimi_complete', 'clarificationAuthor': 'server_fallback' if clarification_fallback_used and clarification_question_issue else 'mixed' if clarification_fallback_used or clarification_question_issue else 'kimi', 'clarificationTargetDimension': (proposal_clarification or {}).get('questionKey'), 'clarificationQuestion': clarification_question, **({'optionSet': stage_context.get('_clarificationOptions'), 'optionQuestion': stage_context.get('_clarificationOptionQuestion'), 'optionOutcome': 'clarifying' if len(stage_context['_clarificationOptions']['options']) > 1 else 'ready' if stage_context['_clarificationOptions']['options'] else 'revision_needed'} if (proposal_clarification or {}).get('optionPolicyVersion') == proposal_options.VERSION else {}), 'clarificationQuestionValidated': not bool(clarification_question_issue), 'clarificationQuestionRepairAttempts': clarification_question_repair_attempts, 'clarificationFallbackReason': clarification_fallback_reason, **_proposal_clarification_observability(content, clarification_question, stage_context)} if clarification_active else {'visibleBodySource': visible_body_source, 'groundingSentencesDropped': total_grounding_dropped_count, 'intentReviewVerified': bool(state.get('intentReviewAudit') and state['intentReviewAudit'].get('relation') != 'unclear'), 'questionReviewVerified': 'questionAnswerReview' in state, 'componentChecks': [check.diagnostic() for check in component_checks], 'fullQualityPassed': _components_quality_passed(component_checks) and (not total_grounding_dropped_count)} if ordinary_discussion else {})
-            _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='success', modelGenerationSucceeded=True, reliableBodyDelivered=True, fullQualityPassed=_components_quality_passed(component_checks) and (not total_grounding_dropped_count), componentChecks=[check.diagnostic() for check in component_checks], model=model, attemptsUsed=attempt, latencyMs=latency_ms, responseMode='plain_text', guidanceMode=guidance_mode, guidanceFallbackUsed=guidance_fallback_used, visibleBodySource=visible_body_source, intentCard=bool(guidance.get('intentHypothesis')), questionCard=bool(guidance.get('followUpQuestion')), proposalCard=bool(guidance.get('proposalOffer')), warningCard=any((cue.get('type') in {'warning', 'tradeoff'} for cue in guidance.get('uiCues', []))), manualEditCard=any((cue.get('type') == 'manual_edit' for cue in guidance.get('uiCues', []))), failureClass=None, salvageAction=route_recovery['salvageAction'], routeSentenceCount=route_recovery['routeSentenceCount'], routeCoordinateCount=route_recovery['routeCoordinateCount'], droppedSentenceCount=total_grounding_dropped_count, coordinateLinksDropped=route_recovery['coordinateLinksDropped'], clarificationAuthor='server_fallback' if clarification_active and clarification_fallback_used and clarification_question_issue else 'mixed' if clarification_active and (clarification_fallback_used or clarification_question_issue) else 'kimi' if clarification_active else None, clarificationTargetDimension=(proposal_clarification or {}).get('questionKey') if clarification_active else None, clarificationQuestionValidated=not bool(clarification_question_issue) if clarification_active else None, clarificationQuestionRepairAttempts=clarification_question_repair_attempts if clarification_active else None, clarificationFallbackReason=clarification_fallback_reason if clarification_active else None, **_proposal_clarification_observability(content, clarification_question, stage_context) if clarification_active else {}, remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3), **response_fields)
+            _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='success', modelGenerationSucceeded=True, reliableBodyDelivered=True, fullQualityPassed=_components_quality_passed(component_checks) and (not total_grounding_dropped_count), componentChecks=[check.diagnostic() for check in component_checks], model=model, attemptsUsed=attempt, latencyMs=latency_ms, responseMode='plain_text', guidanceMode=guidance_mode, guidanceFallbackUsed=guidance_fallback_used, visibleBodySource=visible_body_source, intentCard=bool(guidance.get('intentHypothesis')), questionCard=bool(guidance.get('followUpQuestion')), proposalCard=bool(guidance.get('proposalOffer')), warningCard=any((cue.get('type') in {'warning', 'tradeoff'} for cue in guidance.get('uiCues', []))), manualEditCard=any((cue.get('type') == 'manual_edit' for cue in guidance.get('uiCues', []))), failureClass=None, salvageAction=route_recovery['salvageAction'], routeSentenceCount=route_recovery['routeSentenceCount'], routeCoordinateCount=route_recovery['routeCoordinateCount'], droppedSentenceCount=total_grounding_dropped_count, coordinateLinksDropped=route_recovery['coordinateLinksDropped'], clarificationAuthor='server_fallback' if clarification_active and clarification_fallback_used and clarification_question_issue else 'mixed' if clarification_active and (clarification_fallback_used or clarification_question_issue) else 'kimi' if clarification_active else None, clarificationTargetDimension=(proposal_clarification or {}).get('questionKey') if clarification_active else None, clarificationQuestionValidated=not bool(clarification_question_issue) if clarification_active else None, clarificationQuestionRepairAttempts=clarification_question_repair_attempts if clarification_active else None, clarificationFallbackReason=clarification_fallback_reason if clarification_active else None, **_proposal_clarification_observability(content, clarification_question, stage_context) if clarification_active else {}, remainingSeconds=round(svc.remaining_until(deadline), 3), **response_fields)
             return result
         except asyncio.TimeoutError:
             failure_reason = None
             last_error = LLMServiceError('UPSTREAM_TIMEOUT', 'Kimi did not respond before the attempt timeout.', request_id, True, attempt, 504)
         except Exception as exception:
             failure_reason = _safe_validation_reason(exception)
-            from reply_reliability import failure_reason as diagnostic_reason
-            trace_reply('body_validation', 'rejected', diagnostic_reason(exception), attempt=attempt)
+            trace_reply('body_validation', 'rejected', _diagnostic_failure_reason(exception), attempt=attempt)
             last_error = classify_exception(exception, request_id, attempt)
             if last_error.code == 'MODEL_RESPONSE_INVALID' and failure_reason:
                 validation_feedback = failure_reason
-        failure_fields = {'requestId': request_id, 'task': task, 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((time.monotonic() - started_at) * 1000), 'responseMode': 'plain_text', **response_fields, **_provider_error_fields(last_error)}
+        failure_fields = {'requestId': request_id, 'task': task, 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'plain_text', **response_fields, **_provider_error_fields(last_error)}
         if failure_reason:
             failure_fields['validationReason'] = failure_reason
         failure_fields['failureClass'] = _llm_failure_class(last_error, validation_feedback)
-        failure_fields['remainingSeconds'] = round(llm_attr('_remaining_until')(deadline), 3)
+        failure_fields['remainingSeconds'] = round(svc.remaining_until(deadline), 3)
         failure_fields['salvageAction'] = 'pending_retry' if ordinary_discussion else 'pending_retry_or_fallback'
         _log_llm_event('llm_attempt_failed', **failure_fields)
         last_error.attempts_used = attempt
@@ -860,37 +906,38 @@ async def _generate_plain_with_model_fallback_impl(*, api_key, base_url, models,
         if not _retry_budget_available(deadline, request_id=request_id, task=task, attempt=attempt, max_attempts=max_attempts, response_mode='plain_text', fallback_reason=last_error.code):
             break
     if last_error is not None:
-        _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='error', code=last_error.code, attemptsUsed=last_error.attempts_used, latencyMs=int((time.monotonic() - started_at) * 1000), responseMode='plain_text', failureClass=_llm_failure_class(last_error, validation_feedback), salvageAction='return_error' if ordinary_discussion or human_edit_engagement_required else 'pending_fallback', routeSentenceCount=0, routeCoordinateCount=0, droppedSentenceCount=total_grounding_dropped_count, coordinateLinksDropped=False, remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3), **_provider_error_fields(last_error))
+        _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='error', code=last_error.code, attemptsUsed=last_error.attempts_used, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), responseMode='plain_text', failureClass=_llm_failure_class(last_error, validation_feedback), salvageAction='return_error' if ordinary_discussion or human_edit_engagement_required else 'pending_fallback', routeSentenceCount=0, routeCoordinateCount=0, droppedSentenceCount=total_grounding_dropped_count, coordinateLinksDropped=False, remainingSeconds=round(svc.remaining_until(deadline), 3), **_provider_error_fields(last_error))
         if stage_opening:
             return _stage_opening_safe_execution(language=language, rows=rows, request_id=request_id, attempts_used=last_error.attempts_used, started_at=started_at, fallback_reason=last_error.code, stage_context=stage_context, solver_metrics=solver_metrics)
         if ordinary_discussion or clarification_active or human_edit_engagement_required or clarification_semantic_review_failed:
             raise last_error
         if _is_length_failure(last_error, validation_feedback):
             fallback_message = _proposal_clarification_fallback_message(language, stage_context) if clarification_active else _safe_incomplete_chat_reply(language, stage_opening=stage_opening, rows=rows)
-            return LLMExecutionResult(assistant_message=fallback_message, assessment={}, proposed_rows=None, modification_summary='', attempts_used=last_error.attempts_used, request_id=request_id, model='kimi-k2.6', latency_ms=int((time.monotonic() - started_at) * 1000), guidance={'move': 'observe_stage' if stage_opening else 'clarify_intent', 'intentHypothesis': None, 'intentConfidence': None, 'followUpQuestion': None, 'proposalOffer': None, 'disagreement': None, 'uiCues': [], 'coordinateLinks': []}, proposal_diagnostics={'groundingSentencesDropped': 0, 'clarificationRecoveryMode': 'deterministic_clarification'} if clarification_active else {})
+            return LLMExecutionResult(assistant_message=fallback_message, assessment={}, proposed_rows=None, modification_summary='', attempts_used=last_error.attempts_used, request_id=request_id, model=svc.config.model, latency_ms=int((svc.clock.monotonic() - started_at) * 1000), guidance={'move': 'observe_stage' if stage_opening else 'clarify_intent', 'intentHypothesis': None, 'intentConfidence': None, 'followUpQuestion': None, 'proposalOffer': None, 'disagreement': None, 'uiCues': [], 'coordinateLinks': []}, proposal_diagnostics={'groundingSentencesDropped': 0, 'clarificationRecoveryMode': 'deterministic_clarification'} if clarification_active else {})
         if rows is not None and _is_map_grounding_failure(last_error.safe_message, validation_feedback):
-            clarification = llm_attr('_safe_grounding_chat_reply')(language, rows=rows, stage_context=stage_context)
-            return LLMExecutionResult(assistant_message=clarification, assessment={}, proposed_rows=None, modification_summary='', attempts_used=last_error.attempts_used, request_id=request_id, model='grounding-safe-chat-fallback', latency_ms=int((time.monotonic() - started_at) * 1000), guidance={'move': 'offer_perspective', 'intentHypothesis': None, 'intentConfidence': None, 'followUpQuestion': None, 'proposalOffer': None, 'disagreement': None, 'uiCues': [], 'coordinateLinks': []}, proposal_diagnostics={'groundingSentencesDropped': 0, 'clarificationRecoveryMode': 'deterministic_clarification'} if _has_proposal_clarification(stage_context) else {})
+            clarification = _current_service().safe_grounding_chat_reply(language, rows=rows, stage_context=stage_context)
+            return LLMExecutionResult(assistant_message=clarification, assessment={}, proposed_rows=None, modification_summary='', attempts_used=last_error.attempts_used, request_id=request_id, model='grounding-safe-chat-fallback', latency_ms=int((svc.clock.monotonic() - started_at) * 1000), guidance={'move': 'offer_perspective', 'intentHypothesis': None, 'intentConfidence': None, 'followUpQuestion': None, 'proposalOffer': None, 'disagreement': None, 'uiCues': [], 'coordinateLinks': []}, proposal_diagnostics={'groundingSentencesDropped': 0, 'clarificationRecoveryMode': 'deterministic_clarification'} if _has_proposal_clarification(stage_context) else {})
         raise last_error
     raise LLMServiceError('INTERNAL_ERROR', 'The LLM request ended unexpectedly.', request_id, False, 0, 500)
 
 async def _generate_with_model_fallback(*, api_key, base_url, models, messages, rows, max_tokens, request_id, task, language, assessment_only, proposal_validator, stage_context, started_at, max_attempts, deadline=None):
+    svc = _current_service()
     last_error = None
     validation_feedback = None
     deadline = deadline or _request_deadline(started_at)
     for attempt, configured_model in enumerate(models[:max_attempts], start=1):
         model = models[0] if task == 'map_proposal' and validation_feedback is not None else configured_model
-        elapsed = time.monotonic() - started_at
-        remaining = llm_attr('_remaining_until')(deadline)
+        elapsed = svc.clock.monotonic() - started_at
+        remaining = svc.remaining_until(deadline)
         response_fields = _empty_response_diagnostics()
         route_recovery = {'changed': False, 'salvageAction': 'none', 'routeSentenceCount': 0, 'routeCoordinateCount': 0, 'droppedSentenceCount': 0, 'coordinateLinksDropped': False}
         if remaining <= 0:
             raise asyncio.TimeoutError()
-        attempt_timeout = min(PRIMARY_ATTEMPT_TIMEOUT_SECONDS if attempt == 1 else remaining, remaining)
+        attempt_timeout = min(svc.config.primary_attempt_timeout_seconds if attempt == 1 else remaining, remaining)
         _log_llm_event('llm_attempt_started', requestId=request_id, task=task, model=model, attempt=attempt, maxAttempts=len(models[:max_attempts]), timeoutSeconds=round(attempt_timeout, 3), responseMode='json_object')
         try:
             attempt_messages = _messages_with_validation_feedback(messages, validation_feedback, task)
-            response = await asyncio.wait_for(llm_attr('_request_completion')(api_key, base_url, model, attempt_messages, max_tokens, attempt_timeout, task=task), timeout=attempt_timeout)
+            response = await asyncio.wait_for(_request_completion(api_key, base_url, model, attempt_messages, max_tokens, attempt_timeout, task=task), timeout=attempt_timeout)
             choice = response.choices[0]
             finish_reason = str(getattr(choice, 'finish_reason', '') or '')
             if finish_reason == 'length':
@@ -921,13 +968,13 @@ async def _generate_with_model_fallback(*, api_key, base_url, models, messages, 
             if validated[2] is not None and proposal_validator is not None:
                 proposal_validator(validated[2])
             route_recovery['coordinateLinksDropped'] = isinstance(payload.get('guidance'), dict) and len(payload['guidance'].get('coordinateLinks') or []) > len(validated[4].get('coordinateLinks') or [])
-            latency_ms = int((time.monotonic() - started_at) * 1000)
+            latency_ms = int((svc.clock.monotonic() - started_at) * 1000)
             result = LLMExecutionResult(assistant_message=_compose_assistant_message(validated[0], validated[4], language, assessment_only, stage_context), assessment=validated[1], proposed_rows=validated[2], modification_summary=validated[3], attempts_used=attempt, request_id=request_id, model=model, latency_ms=latency_ms, guidance=validated[4])
             opening_recovery = validated[4].get('openingRecovery') or []
             opening_presentation = dict(validated[4].get('openingPresentation') or {})
             if assessment_only:
                 opening_presentation['sentenceCount'] = len([item.strip() for item in re.split('(?<=[.!?。！？])\\s*', result.assistant_message or '') if item.strip()])
-            _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='success', model=model, attemptsUsed=attempt, latencyMs=latency_ms, responseMode='json_object', failureClass=None, salvageAction=route_recovery['salvageAction'], routeSentenceCount=route_recovery['routeSentenceCount'], routeCoordinateCount=route_recovery['routeCoordinateCount'], droppedSentenceCount=route_recovery['droppedSentenceCount'], coordinateLinksDropped=route_recovery['coordinateLinksDropped'], bodyPreserved=bool(validated[0].strip()), openingRecoveryActions=opening_recovery, openingPresentation=opening_presentation, remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3), **response_fields)
+            _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='success', model=model, attemptsUsed=attempt, latencyMs=latency_ms, responseMode='json_object', failureClass=None, salvageAction=route_recovery['salvageAction'], routeSentenceCount=route_recovery['routeSentenceCount'], routeCoordinateCount=route_recovery['routeCoordinateCount'], droppedSentenceCount=route_recovery['droppedSentenceCount'], coordinateLinksDropped=route_recovery['coordinateLinksDropped'], bodyPreserved=bool(validated[0].strip()), openingRecoveryActions=opening_recovery, openingPresentation=opening_presentation, remainingSeconds=round(svc.remaining_until(deadline), 3), **response_fields)
             return result
         except asyncio.TimeoutError as exception:
             failure_reason = None
@@ -937,13 +984,13 @@ async def _generate_with_model_fallback(*, api_key, base_url, models, messages, 
             last_error = classify_exception(exception, request_id, attempt)
             if last_error.code == 'MODEL_RESPONSE_INVALID' and failure_reason:
                 validation_feedback = failure_reason
-        failure_fields = {'requestId': request_id, 'task': task, 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((time.monotonic() - started_at) * 1000), 'responseMode': 'json_object', **_provider_error_fields(last_error)}
+        failure_fields = {'requestId': request_id, 'task': task, 'model': model, 'attempt': attempt, 'code': last_error.code, 'retryable': last_error.retryable, 'latencyMs': int((svc.clock.monotonic() - started_at) * 1000), 'responseMode': 'json_object', **_provider_error_fields(last_error)}
         failure_fields.update(response_fields)
         if failure_reason:
             failure_fields['validationReason'] = failure_reason
         failure_fields['failureClass'] = _llm_failure_class(last_error, validation_feedback)
         failure_fields['salvageAction'] = 'pending_retry'
-        failure_fields['remainingSeconds'] = round(llm_attr('_remaining_until')(deadline), 3)
+        failure_fields['remainingSeconds'] = round(svc.remaining_until(deadline), 3)
         _log_llm_event('llm_attempt_failed', **failure_fields)
         if not last_error.retryable:
             raise last_error
@@ -951,7 +998,7 @@ async def _generate_with_model_fallback(*, api_key, base_url, models, messages, 
             break
     if last_error is not None:
         failure_class = _llm_failure_class(last_error, validation_feedback)
-        _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='error', code=last_error.code, attemptsUsed=last_error.attempts_used, latencyMs=int((time.monotonic() - started_at) * 1000), responseMode='json_object', failureClass=failure_class, salvageAction='none', routeSentenceCount=0, routeCoordinateCount=0, droppedSentenceCount=0, coordinateLinksDropped=False, remainingSeconds=round(llm_attr('_remaining_until')(deadline), 3), **_provider_error_fields(last_error))
+        _log_llm_event('llm_request_completed', requestId=request_id, task=task, outcome='error', code=last_error.code, attemptsUsed=last_error.attempts_used, latencyMs=int((svc.clock.monotonic() - started_at) * 1000), responseMode='json_object', failureClass=failure_class, salvageAction='none', routeSentenceCount=0, routeCoordinateCount=0, droppedSentenceCount=0, coordinateLinksDropped=False, remainingSeconds=round(svc.remaining_until(deadline), 3), **_provider_error_fields(last_error))
         raise last_error
     raise LLMServiceError('INTERNAL_ERROR', 'The LLM request ended unexpectedly.', request_id, False, 0, 500)
 
@@ -1887,7 +1934,7 @@ def _compact_arrow_route_sentence(sentence):
 
 def _safe_incomplete_chat_reply(language, stage_opening=False, rows=None):
     if rows:
-        return llm_attr('_server_snapshot_fallback_message')(rows, language, stage_opening=stage_opening)
+        return _current_service().server_snapshot_fallback_message(rows, language, stage_opening=stage_opening)
     if language == 'zh-CN':
         return '我会继续从当前已确认的设计信息出发。'
     return 'I will continue from the currently confirmed design information.'
@@ -1950,15 +1997,16 @@ def _server_snapshot_fallback_message(rows, language, *, stage_context=None, sta
 
 def _stage_opening_safe_execution(*, language, rows, request_id, attempts_used, started_at, fallback_reason, stage_context=None, solver_metrics=None):
     """Return a complete opening without spending another upstream request."""
-    fallback_message = llm_attr('_server_snapshot_fallback_message')(rows, language, stage_opening=True, stage_context=stage_context)
-    _log_llm_event('llm_fallback_returned', requestId=request_id, task='stage_assessment_fallback', fallbackReason=fallback_reason, finalDisplayMode='server_snapshot', bodyPreserved=bool(fallback_message.strip()), droppedSentenceCount=0, remainingSeconds=round(llm_attr('_remaining_until')(_request_deadline(started_at)), 3))
-    return LLMExecutionResult(assistant_message=fallback_message, assessment=_build_minimal_stage_assessment(fallback_message, None, language, solver_metrics or {}), proposed_rows=None, modification_summary='', attempts_used=attempts_used, request_id=request_id, model='kimi-k2.6-safe-opening', latency_ms=int((time.monotonic() - started_at) * 1000), guidance={'move': 'observe_stage', 'intentHypothesis': None, 'intentConfidence': None, 'followUpQuestion': None, 'proposalOffer': None, 'disagreement': None, 'uiCues': [], 'coordinateLinks': []})
+    svc = _current_service()
+    fallback_message = _current_service().server_snapshot_fallback_message(rows, language, stage_opening=True, stage_context=stage_context)
+    _log_llm_event('llm_fallback_returned', requestId=request_id, task='stage_assessment_fallback', fallbackReason=fallback_reason, finalDisplayMode='server_snapshot', bodyPreserved=bool(fallback_message.strip()), droppedSentenceCount=0, remainingSeconds=round(svc.remaining_until(_request_deadline(started_at)), 3))
+    return LLMExecutionResult(assistant_message=fallback_message, assessment=_build_minimal_stage_assessment(fallback_message, None, language, solver_metrics or {}), proposed_rows=None, modification_summary='', attempts_used=attempts_used, request_id=request_id, model='kimi-k2.6-safe-opening', latency_ms=int((svc.clock.monotonic() - started_at) * 1000), guidance={'move': 'observe_stage', 'intentHypothesis': None, 'intentConfidence': None, 'followUpQuestion': None, 'proposalOffer': None, 'disagreement': None, 'uiCues': [], 'coordinateLinks': []})
 
 def _safe_grounding_chat_reply(language, rows=None, stage_context=None):
     if _has_proposal_clarification(stage_context):
         return _proposal_clarification_fallback_message(language, stage_context)
     if rows:
-        return llm_attr('_server_snapshot_fallback_message')(rows, language, stage_context=stage_context)
+        return _current_service().server_snapshot_fallback_message(rows, language, stage_context=stage_context)
     if language == 'zh-CN':
         return '我会以当前保存的地图为准继续分析；刚才回复中的一处具体地图事实没有被可靠确认，所以我不会把未经验证的坐标当成结论。我们仍然可以继续讨论空间分布、节奏和引导效果。'
     return 'I understand that you are discussing the design feel of the current layout. One concrete map fact in the previous reply could not be verified, so I will not treat an unverified coordinate as fact; we can still continue from the layout, rhythm, and guidance effect.'

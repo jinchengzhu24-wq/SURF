@@ -8,6 +8,9 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from cocreation.domain.design_context import set_active_disagreement
+from cocreation.domain.proposal_understanding import validate_engagement
+
 POLICY_VERSION = "human-edit-engagement-1"
 PROMPT_VERSION = "human-edit-engagement-replay-1"
 EVENT = "component_recovery"
@@ -16,8 +19,8 @@ LEASE_SECONDS = 15
 TERMINAL = {"applied", "completed_no_change", "needs_input", "expired", "exhausted"}
 
 
-def now():
-    return datetime.now(timezone.utc)
+def now(clock=None):
+    return clock.utc_datetime() if clock is not None else datetime.now(timezone.utc)
 
 
 def signature(value):
@@ -39,10 +42,12 @@ def tasks(database, session_id):
     return result
 
 
-def record(database, session_id, task, status, **fields):
-    from repository import record_event
-    updated = {**task, **fields, "status": status, "updatedAt": now().isoformat()}
-    record_event(database, session_id, EVENT, updated, updated["updatedAt"])
+def record(database, session_id, task, status, *, clock=None, record_event_fn=None, **fields):
+    from cocreation.persistence.repository import record_event
+
+    event_writer = record_event_fn or record_event
+    updated = {**task, **fields, "status": status, "updatedAt": now(clock).isoformat()}
+    event_writer(database, session_id, EVENT, updated, updated["updatedAt"])
     return updated
 
 
@@ -77,7 +82,8 @@ def disagreement_identity(database, session_id, version_id, active):
 
 
 def state_stamp(database, session_id, version_id):
-    from repository import load_design_context
+    from cocreation.persistence.repository import load_design_context
+
     active = load_design_context(database, session_id, version_id).get("activeDisagreement")
     identity = disagreement_identity(database, session_id, version_id, active)
     row = database.execute(
@@ -91,7 +97,8 @@ def state_stamp(database, session_id, version_id):
             "latestMessageReceipt": receipt["n"]}
 
 
-def pending_message_until(database, session_id, version_id):
+def pending_message_until(database, session_id, version_id, *, clock=None):
+    current = now(clock)
     guards = {}
     for row in database.execute("SELECT payload_json FROM audit_events WHERE session_id=? "
                                 "AND event_type='interaction_message_guard' "
@@ -99,7 +106,7 @@ def pending_message_until(database, session_id, version_id):
         guard = json.loads(row["payload_json"])
         guards[guard["guardId"]] = guard
     pending = [item["leaseUntil"] for item in guards.values()
-               if item["status"] == "started" and _time(item["leaseUntil"]) > now()]
+               if item["status"] == "started" and _time(item["leaseUntil"]) > current]
     return max(pending) if pending else None
 
 
@@ -109,33 +116,34 @@ def snapshot_signature(database, session_id, version_id):
     return signature(list(row) if row else None)
 
 
-def eligible(database, session, task):
+def eligible(database, session, task, *, clock=None):
     if (session["status"] != "active" or session["current_version_id"] != task["baseVersionId"]
-            or (session["deadline_at"] and _time(session["deadline_at"]) <= now())):
+            or (session["deadline_at"] and _time(session["deadline_at"]) <= now(clock))):
         return False
     stamp = state_stamp(database, session["id"], task["baseVersionId"])
     return bool(stamp["disagreementId"] and stamp["disagreementId"] == task["disagreementId"]
                 and task["snapshotSignature"] == snapshot_signature(database, session["id"], task["baseVersionId"]))
 
 
-def projected_status(database, session, task):
+def projected_status(database, session, task, *, clock=None):
     if task["status"] in TERMINAL:
         return task["status"]
     if (task.get("policyVersion") != POLICY_VERSION or task.get("promptVersion") != PROMPT_VERSION
-            or not eligible(database, session, task)):
+            or not eligible(database, session, task, clock=clock)):
         return "expired"
     if task["status"] == "claimed":
-        if _time(task["leaseUntil"]) > now():
+        if _time(task["leaseUntil"]) > now(clock):
             return "claimed"
     if task["attemptsUsed"] >= MAX_ATTEMPTS:
         return "exhausted"
-    if pending_message_until(database, session["id"], task["baseVersionId"]):
+    if pending_message_until(database, session["id"], task["baseVersionId"], clock=clock):
         return "waiting_message"
     return "retry_pending" if task["status"] == "claimed" else task["status"]
 
 
-def enqueue(database, session_id, version_id, user_turn_id, assistant_turn_id, message_key):
-    from repository import load_design_context
+def enqueue(database, session_id, version_id, user_turn_id, assistant_turn_id, message_key, *, clock=None, record_event_fn=None):
+    from cocreation.persistence.repository import load_design_context
+
     active = load_design_context(database, session_id, version_id).get("activeDisagreement") or {}
     identity = disagreement_identity(database, session_id, version_id, active)
     if not identity or active.get("status") != "active":
@@ -146,7 +154,7 @@ def enqueue(database, session_id, version_id, user_turn_id, assistant_turn_id, m
         return previous[recovery_id]
     for old in previous.values():
         if old["status"] not in TERMINAL and old["disagreementId"] == identity:
-            record(database, session_id, old, "expired", failureCode="SUPERSEDED_SOURCE")
+            record(database, session_id, old, "expired", clock=clock, record_event_fn=record_event_fn, failureCode="SUPERSEDED_SOURCE")
     user = database.execute("SELECT content,sequence_number FROM conversation_turns WHERE id=?", (user_turn_id,)).fetchone()
     prior = database.execute(
         "SELECT id FROM conversation_turns WHERE session_id=? AND version_id=? AND role='assistant' "
@@ -160,11 +168,11 @@ def enqueue(database, session_id, version_id, user_turn_id, assistant_turn_id, m
             "messageKey": message_key, "sourceSignature": signature(user["content"]),
             "snapshotSignature": snapshot_signature(database, session_id, version_id),
             "stateVersion": state_stamp(database, session_id, version_id), "attemptsUsed": 0,
-            "createdAt": now().isoformat()}
-    return record(database, session_id, task, "pending")
+            "createdAt": now(clock).isoformat()}
+    return record(database, session_id, task, "pending", clock=clock, record_event_fn=record_event_fn)
 
 
-def claim(database, session, recovery_id, base_version_id, key):
+def claim(database, session, recovery_id, base_version_id, key, *, clock=None, record_event_fn=None):
     task = tasks(database, session["id"]).get(recovery_id)
     if task is None:
         raise ValueError("UNKNOWN_RECOVERY")
@@ -175,17 +183,17 @@ def claim(database, session, recovery_id, base_version_id, key):
     expected_key = recovery_id + "-" + str(task["attemptsUsed"] + 1)
     if key != expected_key:
         raise ValueError("IDEMPOTENCY_CONFLICT")
-    status = projected_status(database, session, task)
+    status = projected_status(database, session, task, clock=clock)
     if status in TERMINAL:
         if task["status"] != status:
-            record(database, session["id"], task, status)
+            record(database, session["id"], task, status, clock=clock, record_event_fn=record_event_fn)
         return None
     if status in {"claimed", "waiting_message"}:
         return None
     token = uuid.uuid4().hex
-    return record(database, session["id"], task, "claimed", claimToken=token,
+    return record(database, session["id"], task, "claimed", clock=clock, record_event_fn=record_event_fn, claimToken=token,
                   attemptsUsed=task["attemptsUsed"] + 1, requestKeys=[*task.get("requestKeys", []), key],
-                  leaseUntil=(now() + timedelta(seconds=LEASE_SECONDS)).isoformat(),
+                  leaseUntil=(now(clock) + timedelta(seconds=LEASE_SECONDS)).isoformat(),
                   reviewStamp=state_stamp(database, session["id"], base_version_id))
 
 
@@ -214,52 +222,53 @@ def replay_sources(database, session_id, task):
             "subsequentTurns": [dict(row) for row in later if row["id"] != task["deliveredAssistantTurnId"]]}
 
 
-def finish(database, session, task, decision=None, failure_code=None):
+def finish(database, session, task, decision=None, failure_code=None, *, clock=None, record_event_fn=None):
     current = tasks(database, session["id"]).get(task["recoveryId"])
     if not current or current.get("claimToken") != task["claimToken"] or current["status"] != "claimed":
         return "expired"
-    if not eligible(database, session, task):
-        return record(database, session["id"], current, "expired", failureCode="STALE_TARGET")["status"]
+    if not eligible(database, session, task, clock=clock):
+        return record(database, session["id"], current, "expired", clock=clock, record_event_fn=record_event_fn, failureCode="STALE_TARGET")["status"]
     source = database.execute("SELECT content FROM conversation_turns WHERE id=? AND session_id=? AND version_id=? AND role='user'",
                               (task["sourceUserTurnId"], session["id"], task["baseVersionId"])).fetchone()
     if not source or signature(source["content"]) != task["sourceSignature"]:
-        return record(database, session["id"], current, "expired", failureCode="INVALID_RECOVERY_EVIDENCE")["status"]
+        return record(database, session["id"], current, "expired", clock=clock, record_event_fn=record_event_fn, failureCode="INVALID_RECOVERY_EVIDENCE")["status"]
     if not failure_code:
-        from proposal_understanding import validate_engagement
         try:
             decision = validate_engagement(decision, source["content"])
         except ValueError:
             failure_code = "STATE_UNVERIFIED"
     if (state_stamp(database, session["id"], task["baseVersionId"]) != task["reviewStamp"]
-            or pending_message_until(database, session["id"], task["baseVersionId"])):
+            or pending_message_until(database, session["id"], task["baseVersionId"], clock=clock)):
         failure_code = "CONCURRENT_CHANGE"
         decision = None
     if failure_code:
         status = "retry_pending" if task["attemptsUsed"] < MAX_ATTEMPTS else "exhausted"
-        return record(database, session["id"], current, status, failureCode=failure_code)["status"]
+        return record(database, session["id"], current, status, clock=clock, record_event_fn=record_event_fn, failureCode=failure_code)["status"]
     if decision["decision"] == "unclear":
         status = "needs_input"
     elif decision["decision"] == "unchanged":
         status = "completed_no_change"
     else:
-        from repository import load_design_context, save_design_context, record_event
-        from design_context import set_active_disagreement
+        from cocreation.persistence.repository import load_design_context, save_design_context, record_event
+
+        event_writer = record_event_fn or record_event
         context = load_design_context(database, session["id"], task["baseVersionId"])
         active = context["activeDisagreement"]
         context = set_active_disagreement(context, None, task["baseVersionId"], task["sourceUserTurnId"])
         save_design_context(database, task["baseVersionId"], context)
-        record_event(database, session["id"], "disagreement_acknowledged", {
+        event_writer(database, session["id"], "disagreement_acknowledged", {
             "versionId": task["baseVersionId"], "turnId": task["sourceUserTurnId"], "subject": "human_edit",
             "resolution": None, "disagreement": {**active, "status": "acknowledged", "resolution": None,
                 "displayCard": False, "disagreementId": task["disagreementId"]},
             "source": "component_recovery", "recoveryId": task["recoveryId"],
-        }, now().isoformat())
+        }, now(clock).isoformat())
         status = "applied"
-    return record(database, session["id"], current, status, failureCode=None)["status"]
+    return record(database, session["id"], current, status, clock=clock, record_event_fn=record_event_fn, failureCode=None)["status"]
 
 
-def interaction_state(database, session):
-    from repository import load_design_context
+def interaction_state(database, session, *, clock=None):
+    from cocreation.persistence.repository import load_design_context
+
     version_id = session["current_version_id"]
     active = load_design_context(database, session["id"], version_id).get("activeDisagreement") if version_id else None
     revision = database.execute(
@@ -270,11 +279,11 @@ def interaction_state(database, session):
     for task in tasks(database, session["id"]).values():
         if task["baseVersionId"] != version_id:
             continue
-        status = projected_status(database, session, task)
+        status = projected_status(database, session, task, clock=clock)
         recoveries.append({"recoveryId": task["recoveryId"], "component": task["component"], "status": status,
                            "attemptsUsed": task["attemptsUsed"], "baseVersionId": version_id,
                            "nextAttemptKey": task["recoveryId"] + "-" + str(task["attemptsUsed"] + 1),
-                           "leaseUntil": (pending_message_until(database, session["id"], version_id)
+                           "leaseUntil": (pending_message_until(database, session["id"], version_id, clock=clock)
                                           if status == "waiting_message" else task.get("leaseUntil"))})
     return {"versionId": version_id, "revision": revision,
             "disagreementId": disagreement_identity(database, session["id"], version_id, active),

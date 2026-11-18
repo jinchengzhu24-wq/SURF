@@ -12,8 +12,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
     import cocreation  # noqa: F401
 
-import repository
-from design_context import (
+from cocreation.persistence import repository
+from cocreation.domain.design_context import (
     apply_question_answer_review,
     apply_question_feedback,
     apply_hypothesis_feedback,
@@ -629,11 +629,10 @@ class DesignContextUnitTests(unittest.TestCase):
 
 class DesignContextRepositoryTests(unittest.TestCase):
     def test_startup_repair_merges_duplicate_progress_questions_idempotently(self):
-        original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            repository.DATABASE_PATH = Path(directory) / "duplicate-questions.sqlite3"
+            repo = repository.SQLiteRepository(Path(directory) / "duplicate-questions.sqlite3")
+            repo.initialize()
             try:
-                repository.initialize_database()
                 session_id = uuid.uuid4().hex
                 version_id = uuid.uuid4().hex
                 now = "2026-09-10T00:00:00Z"
@@ -657,7 +656,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                         "sourceTurnId": "assistant-turn",
                     },
                 ]
-                with repository.connect(immediate=True) as database:
+                with repo.connect(immediate=True) as database:
                     database.execute(
                         """
                         INSERT INTO design_sessions(
@@ -755,14 +754,13 @@ class DesignContextRepositoryTests(unittest.TestCase):
                 self.assertEqual(repaired["openQuestions"][0]["question"], canonical)
                 self.assertEqual(repaired["openQuestions"][0]["status"], "answered")
             finally:
-                repository.DATABASE_PATH = original_path
+                pass
 
     def test_repair_clears_audited_stale_disagreement_from_descendants(self):
-        original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            repository.DATABASE_PATH = Path(directory) / "stale-disagreement.sqlite3"
+            repo = repository.SQLiteRepository(Path(directory) / "stale-disagreement.sqlite3")
+            repo.initialize()
             try:
-                repository.initialize_database()
                 session_id = uuid.uuid4().hex
                 parent_id = uuid.uuid4().hex
                 child_id = uuid.uuid4().hex
@@ -788,7 +786,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                     "nextQuestion": "Please answer only yes or no.",
                     "displayCard": False,
                 })
-                with repository.connect(immediate=True) as database:
+                with repo.connect(immediate=True) as database:
                     database.execute(
                         """
                         INSERT INTO design_sessions(
@@ -894,14 +892,13 @@ class DesignContextRepositoryTests(unittest.TestCase):
                 self.assertIsNone(repaired_child["activeDisagreement"])
                 self.assertEqual(event_count, 2)
             finally:
-                repository.DATABASE_PATH = original_path
+                pass
 
     def test_schema_one_snapshot_migrates_without_model_inference(self):
-        original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            repository.DATABASE_PATH = Path(directory) / "schema-v1.sqlite3"
+            repo = repository.SQLiteRepository(Path(directory) / "schema-v1.sqlite3")
+            repo.initialize()
             try:
-                repository.initialize_database()
                 session_id = uuid.uuid4().hex
                 version_id = uuid.uuid4().hex
                 now = "2026-09-01T00:00:00Z"
@@ -917,7 +914,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                 }]
                 legacy.pop("intentHypotheses", None)
                 legacy.pop("processedEvidenceIds", None)
-                with repository.connect(immediate=True) as database:
+                with repo.connect(immediate=True) as database:
                     database.execute(
                         """
                         INSERT INTO design_sessions(
@@ -967,20 +964,20 @@ class DesignContextRepositoryTests(unittest.TestCase):
                     migrated["intentHypotheses"][0]["confidence"], 0.5
                 )
             finally:
-                repository.DATABASE_PATH = original_path
+                pass
 
     def test_database_migrates_design_context_column_and_backfill_is_idempotent(self):
-        original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            repository.DATABASE_PATH = Path(directory) / "context.sqlite3"
+            db_path = Path(directory) / "context.sqlite3"
+            repo = repository.SQLiteRepository(db_path)
             try:
-                legacy = sqlite3.connect(repository.DATABASE_PATH)
+                legacy = sqlite3.connect(db_path)
                 legacy.executescript(
                     repository.SCHEMA.replace("    design_context_json TEXT,\n", "")
                 )
                 legacy.close()
-                repository.initialize_database()
-                with repository.connect(immediate=True) as database:
+                repo.initialize()
+                with repo.connect(immediate=True) as database:
                     columns = {
                         row[1] for row in database.execute(
                             "PRAGMA table_info(level_versions)"
@@ -989,19 +986,18 @@ class DesignContextRepositoryTests(unittest.TestCase):
                     self.assertIn("design_context_json", columns)
                     self.assertEqual(repository.backfill_design_contexts(database), 0)
             finally:
-                repository.DATABASE_PATH = original_path
+                pass
 
     def test_backfill_copies_parent_snapshot_to_child_stage(self):
-        original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            repository.DATABASE_PATH = Path(directory) / "inheritance.sqlite3"
+            repo = repository.SQLiteRepository(Path(directory) / "inheritance.sqlite3")
+            repo.initialize()
             try:
-                repository.initialize_database()
                 session_id = uuid.uuid4().hex
                 parent_id = uuid.uuid4().hex
                 child_id = uuid.uuid4().hex
                 now = "2026-09-01T00:00:00Z"
-                with repository.connect(immediate=True) as database:
+                with repo.connect(immediate=True) as database:
                     database.execute(
                         """
                         INSERT INTO design_sessions(
@@ -1090,14 +1086,14 @@ class DesignContextRepositoryTests(unittest.TestCase):
                     )
                     self.assertNotIn("designContext", payload)
             finally:
-                repository.DATABASE_PATH = original_path
+                pass
 
     def test_entity_binding_column_backfill_is_idempotent_and_keeps_internal_data_private(self):
-        original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            repository.DATABASE_PATH = Path(directory) / "entity-bindings.sqlite3"
+            db_path = Path(directory) / "entity-bindings.sqlite3"
+            repo = repository.SQLiteRepository(db_path)
             try:
-                legacy = sqlite3.connect(repository.DATABASE_PATH)
+                legacy = sqlite3.connect(db_path)
                 legacy.executescript(
                     repository.SCHEMA.replace("    entity_bindings_json TEXT,\n", "")
                 )
@@ -1145,8 +1141,8 @@ class DesignContextRepositoryTests(unittest.TestCase):
                 legacy.commit()
                 legacy.close()
 
-                repository.initialize_database()
-                with repository.connect(immediate=True) as database:
+                repo.initialize()
+                with repo.connect(immediate=True) as database:
                     columns = {
                         row[1] for row in database.execute(
                             "PRAGMA table_info(level_versions)"
@@ -1179,14 +1175,13 @@ class DesignContextRepositoryTests(unittest.TestCase):
                     self.assertNotIn("entityBindings", payload)
                     self.assertNotIn("entity_bindings_json", json.dumps(payload))
             finally:
-                repository.DATABASE_PATH = original_path
+                pass
 
     def test_intent_semantic_backfill_is_idempotent_and_preserves_confirmed_text(self):
-        original_path = repository.DATABASE_PATH
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
-            repository.DATABASE_PATH = Path(directory) / "intent-semantics.sqlite3"
+            repo = repository.SQLiteRepository(Path(directory) / "intent-semantics.sqlite3")
+            repo.initialize()
             try:
-                repository.initialize_database()
                 session_id = uuid.uuid4().hex
                 version_id = uuid.uuid4().hex
                 user_turn_id = uuid.uuid4().hex
@@ -1204,7 +1199,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                     "displayed": True,
                 }]
                 now = "2026-09-11T00:00:00Z"
-                with repository.connect(immediate=True) as database:
+                with repo.connect(immediate=True) as database:
                     database.execute(
                         """INSERT INTO design_sessions(
                             id, creation_key, access_hash, integration_hash, bootstrap_hash,
@@ -1241,7 +1236,7 @@ class DesignContextRepositoryTests(unittest.TestCase):
                     self.assertEqual(hypothesis["semanticClaims"][0]["direction"], "decrease")
                     self.assertEqual(hypothesis["semanticClaims"][0]["sourceUserTurnId"], user_turn_id)
             finally:
-                repository.DATABASE_PATH = original_path
+                pass
 
 
 if __name__ == "__main__":

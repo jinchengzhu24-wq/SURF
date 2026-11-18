@@ -102,17 +102,9 @@ class PublicEndpointConfigurationTests(unittest.TestCase):
         # 8010-only releases have their own cache key and require no WebGL
         # rebuild. The formal host protocol still has to agree at both ends.
         cocreation_scripts = "\n".join(
-            (REPOSITORY_ROOT / "CoCreationPrototype" / "Frontend" / "js" / name).read_text(
-                encoding="utf-8"
-            )
-            for name in (
-                "i18n.js",
-                "state-storage.js",
-                "unity-bridge.js",
-                "map-editor.js",
-                "chat-cards.js",
-                "session-actions.js",
-                "main.js",
+            path.read_text(encoding="utf-8")
+            for path in sorted(
+                (REPOSITORY_ROOT / "CoCreationPrototype" / "Frontend" / "js").rglob("*.js")
             )
         )
         self.assertRegex(cocreation_index, r'js/main\.js\?v=[a-z0-9-]+')

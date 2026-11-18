@@ -7,17 +7,18 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import app as backend
-import llm_client as llm
+from tests.fakes import RecordedAsyncCall, llm_scope
+from cocreation.api import context_and_discovery
+from cocreation.api import proposal_and_challenge
+from cocreation.llm import facade as llm
 from patch_fixtures import patch_fixture
 from review_fixtures import review_fixture
-from level_validation import build_entity_bindings, build_stage_snapshot
-from proposal_search import Focus, RevisionPlan, RevisionStrategy
-from proposal_understanding import (
+from cocreation.domain.level_validation import build_entity_bindings, build_stage_snapshot
+from cocreation.domain.proposal_search import Focus, RevisionPlan, RevisionStrategy
+from cocreation.domain.proposal_understanding import (
     bind_latest, critical_review_reason, designer_sources, protected_request_message,
     validate_plan_scope, validate_topic,
 )
@@ -59,9 +60,8 @@ class ProposalUnderstandingTests(unittest.TestCase):
             "answers": [], "lastQuestionText": "Which local area?", "understanding": topic(sufficient=False)}
 
     def classify(self, latest, outputs, context=None):
-        call = AsyncMock(side_effect=[response(x) for x in outputs])
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm, "_request_completion", call):
+        call = RecordedAsyncCall(side_effect=[response(x) for x in outputs])
+        with llm_scope(completion_requester=call):
             result = llm.classify_turn_understanding([{"role": "user", "content": latest}], self.snapshot,
                 "offline-request", proposal_context=context or self.context, _deadline=time.monotonic() + 116)
         return result, call
@@ -79,7 +79,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
                 self.assertEqual([x.kwargs["task"] for x in call.call_args_list], ["turn_understanding", "turn_understanding_review"])
                 record = bind_latest(result, "u3", "v1")["proposalUnderstanding"]
                 discovery = {**self.context, "understanding": record, "clarificationQuestionCount": 3}
-                self.assertIn(backend._adaptive_revision_routing(answer, {}, self.snapshot,
+                self.assertIn(context_and_discovery._adaptive_revision_routing(answer, {}, self.snapshot,
                     proposal_discovery=discovery, turn_understanding=result), {"proposal", "proposal_conservative"})
 
     def test_outer_shell_can_be_a_focus_without_being_editable(self):
@@ -101,7 +101,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
                 text = protected_request_message(result, "zh-CN")
                 self.assertIn(answer, text)
                 self.assertNotIn("箱子、玩家、目标或外壳", text)
-                self.assertEqual(backend._adaptive_revision_routing(answer, {}, self.snapshot,
+                self.assertEqual(context_and_discovery._adaptive_revision_routing(answer, {}, self.snapshot,
                     proposal_discovery=self.context, turn_understanding=result), "protected_request")
 
     def test_same_short_answer_binds_to_different_questions_in_review_input(self):
@@ -162,7 +162,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
     def test_visual_topic_does_not_need_gameplay_mechanism_or_exact_focus(self):
         record = topic()
         validate_topic(record, designer_sources(self.context), self.snapshot)
-        route = backend._adaptive_revision_routing("Water and interior walls", {}, self.snapshot,
+        route = context_and_discovery._adaptive_revision_routing("Water and interior walls", {}, self.snapshot,
             proposal_discovery={**self.context, "understanding": record, "clarificationQuestionCount": 1},
             turn_understanding={"acts": ["intent"], "mapRelated": True})
         self.assertEqual(route, "proposal_conservative")
@@ -174,7 +174,7 @@ class ProposalUnderstandingTests(unittest.TestCase):
         for dimension in ("visual_direction", "edit_scope", "binding"):
             record = topic(sufficient=False)
             record["nextQuestionDimension"] = dimension
-            specification = backend._proposal_clarification_spec({**self.context, "status": "clarifying", "understanding": record}, self.snapshot, "zh-CN")
+            specification = context_and_discovery._proposal_clarification_spec({**self.context, "status": "clarifying", "understanding": record}, self.snapshot, "zh-CN")
             self.assertEqual(specification["semanticDimension"], dimension)
             self.assertNotIn("运输长度", specification["fallbackQuestion"])
             self.assertNotIn("推箱", specification["fallbackQuestion"])
@@ -183,12 +183,12 @@ class ProposalUnderstandingTests(unittest.TestCase):
         record = topic(sufficient=False)
         discovery = {**self.context, "status": "clarifying", "understanding": record,
             "clarificationQuestionCount": 1, "askedQuestionKeys": ["binding"]}
-        spec = backend._proposal_clarification_dimensions_spec(discovery, self.snapshot, "en")
+        spec = context_and_discovery._proposal_clarification_dimensions_spec(discovery, self.snapshot, "en")
         execution = llm.LLMExecutionResult("I would try a local pattern.\n\n" + spec["fallbackQuestion"], 1, "test",
             proposal_diagnostics={"clarificationQuestion": spec["fallbackQuestion"]})
         context = {"proposalDiscovery": discovery, "proposalClarification": spec, "revisionRouting": "needs_clarification"}
-        first = backend._mark_proposal_discovery_guidance(execution, context)
-        second = backend._mark_proposal_discovery_guidance(execution, context)
+        first = proposal_and_challenge._mark_proposal_discovery_guidance(execution, context)
+        second = proposal_and_challenge._mark_proposal_discovery_guidance(execution, context)
         self.assertEqual(first.guidance["proposalDiscovery"]["clarificationQuestionCount"], 2)
         self.assertEqual(first.guidance["proposalDiscovery"], second.guidance["proposalDiscovery"])
 
@@ -208,13 +208,13 @@ class ProposalUnderstandingTests(unittest.TestCase):
             annotations[f"r{index}"] = bind_latest(raw, f"u{index}", "v1")
             turns.append({"id": f"a{index}", "role": "assistant", "content": "Which area?", "request_id": f"r{index}", "sequence_number": len(turns) + 1,
                 "guidance_json": json.dumps({"proposalDiscovery": {"topicId": "u1", "status": "clarifying"}})})
-        rebuilt = backend._proposal_discovery_from_turns(turns, "v1", turn_understandings=annotations)
+        rebuilt = context_and_discovery._proposal_discovery_from_turns(turns, "v1", turn_understandings=annotations)
         self.assertEqual(rebuilt["understanding"]["focus"][0]["sourceTurnId"], "u3")
         self.assertEqual({x["component"] for x in rebuilt["understanding"]["editScope"]}, {"water", "internal_walls"})
         self.assertEqual(len(rebuilt["answers"]), 2)
-        wrong_stage = backend._proposal_discovery_from_turns(turns, "v2", turn_understandings=annotations)
+        wrong_stage = context_and_discovery._proposal_discovery_from_turns(turns, "v2", turn_understandings=annotations)
         self.assertNotIn("understanding", wrong_stage)
-        self.assertEqual(rebuilt, backend._proposal_discovery_from_turns(turns, "v1", turn_understandings=annotations))
+        self.assertEqual(rebuilt, context_and_discovery._proposal_discovery_from_turns(turns, "v1", turn_understandings=annotations))
 
     def test_legacy_topic_reconstruction_is_reviewed_without_rewriting_sources(self):
         context = copy.deepcopy(self.context)
@@ -254,23 +254,23 @@ class ProposalUnderstandingTests(unittest.TestCase):
         bad = "我想在保持27步的前提下强化秩序美感。"
         good = "我觉得重复的边界可以形成视觉呼应。"
         context = {"proposalDiscovery": self.context, "proposalClarification": {"questionIntent": "visual composition"}}
-        call = AsyncMock(return_value=response({"bodyIssues": ["sentence-1"], "questionIssue": None}))
-        with patch.object(llm, "_request_completion", call):
+        call = RecordedAsyncCall(return_value=response({"bodyIssues": ["sentence-1"], "questionIssue": None}))
+        with llm_scope(completion_requester=call):
             body, issue = asyncio.run(llm._review_proposal_clarification("offline", "offline", bad + good,
                 "你更希望聚焦哪个区域？", context, "offline", time.monotonic() + 116))
         self.assertEqual(body, good)
         self.assertEqual(issue, "")
 
     def test_semantic_review_cannot_rewrite_unrelated_text_or_return_missing_evidence(self):
-        call = AsyncMock(return_value=response({"bodyIssues": ["not in body"], "questionIssue": None}))
-        with patch.object(llm, "_request_completion", call), self.assertRaises(llm.LLMServiceError):
+        call = RecordedAsyncCall(return_value=response({"bodyIssues": ["not in body"], "questionIssue": None}))
+        with llm_scope(completion_requester=call), self.assertRaises(llm.LLMServiceError):
             asyncio.run(llm._review_proposal_clarification("offline", "offline", "I would try repetition.",
                 "Which area?", {"proposalDiscovery": self.context}, "offline", time.monotonic() + 116))
 
     def test_reliable_first_person_suggestion_survives_semantic_review(self):
         body = "我想试着用重复边界形成呼应；这只是一个可选建议。"
-        call = AsyncMock(return_value=response({"bodyIssues": [], "questionIssue": None}))
-        with patch.object(llm, "_request_completion", call):
+        call = RecordedAsyncCall(return_value=response({"bodyIssues": [], "questionIssue": None}))
+        with llm_scope(completion_requester=call):
             result, _ = asyncio.run(llm._review_proposal_clarification("offline", "offline", body,
                 "先聚焦哪片区域？", {"proposalDiscovery": self.context}, "offline", time.monotonic() + 116))
         self.assertEqual(result, body)
@@ -279,13 +279,13 @@ class ProposalUnderstandingTests(unittest.TestCase):
         record = topic(sufficient=False)
         discovery = {**self.context, "status": "clarifying", "understanding": record,
             "brief": "Visual order\nWater and interior walls"}
-        spec = backend._proposal_clarification_spec(discovery, self.snapshot, "zh-CN")
+        spec = context_and_discovery._proposal_clarification_spec(discovery, self.snapshot, "zh-CN")
         payload = {"body": "我想在保持27步不变的前提下整理边界。", "question": "先围绕哪个局部区域调整？"}
-        call = AsyncMock(return_value=response(payload))
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm, "_request_completion", call), \
-                patch.object(llm, "_review_proposal_clarification", AsyncMock(side_effect=ValueError("unverified semantics"))), \
-                self.assertRaises(llm.LLMServiceError) as caught:
+        call = RecordedAsyncCall(return_value=response(payload))
+        with (
+            llm_scope(completion_requester=call, handlers={'review_proposal_clarification': RecordedAsyncCall(side_effect=ValueError('unverified semantics'))}),
+            self.assertRaises(llm.LLMServiceError) as caught,
+        ):
             llm.generate_chat_reply([{"role": "user", "content": "Water and interior walls"}], ROWS,
                 "offline", language="zh-CN", stage_context={"revisionRouting": "needs_clarification",
                     "proposalDiscovery": discovery, "proposalClarification": spec,
@@ -295,17 +295,16 @@ class ProposalUnderstandingTests(unittest.TestCase):
     def test_failing_question_keeps_semantically_verified_body_during_repair(self):
         discovery = {**self.context, "status": "clarifying", "understanding": topic(sufficient=False),
             "brief": "Visual order\nWater and interior walls"}
-        spec = backend._proposal_clarification_dimensions_spec(discovery, self.snapshot, "en")
+        spec = context_and_discovery._proposal_clarification_dimensions_spec(discovery, self.snapshot, "en")
         first = {"body": "I would keep the current objects fixed and try repeated water edges.", "question": "Which local area should frame it?"}
         second = {"body": "", "question": "Which local area should carry the water pattern?"}
         async def request(*args, **kwargs):
             if kwargs["task"] == "proposal_clarification":
                 return response(first)
             return response(patch_fixture(args[3][-1]["content"], second))
-        call = AsyncMock(side_effect=request)
-        review = AsyncMock(side_effect=[(first["body"], "Repair the question only."), ("", "")])
-        with patch.object(llm, "_llm_credentials", return_value=("offline", "offline")), \
-                patch.object(llm, "_request_completion", call), patch.object(llm, "_review_proposal_clarification", review):
+        call = RecordedAsyncCall(side_effect=request)
+        review = RecordedAsyncCall(side_effect=[(first["body"], "Repair the question only."), ("", "")])
+        with llm_scope(completion_requester=call, handlers={'review_proposal_clarification': review}):
             result = llm.generate_chat_reply([{"role": "user", "content": "Water and interior walls"}], ROWS,
                 "offline", language="en", stage_context={"revisionRouting": "needs_clarification",
                     "proposalDiscovery": discovery, "proposalClarification": spec,

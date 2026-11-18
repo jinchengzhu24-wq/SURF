@@ -5,19 +5,20 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cocreation  # noqa: F401
-import app as backend
-import llm_client
+from tests.fakes import RecordedAsyncCall, RecordedCall, llm_scope
+from cocreation.api import context_and_discovery
+from cocreation.api import proposal_and_challenge
+from cocreation.llm import facade as llm_client
 from patch_fixtures import patch_fixture
-from design_requirements import (
+from cocreation.domain.design_requirements import (
     evaluate_requirements, goal_rank, preflight_requirements, protected_change_requested,
     tradeoff_message, validate_requirement_record,
 )
-from level_validation import build_entity_bindings, build_stage_snapshot, validate_and_solve
-from revision_workflow import build_revision_workflow, validate_semantic_constraints, SemanticConstraintError
+from cocreation.domain.level_validation import build_entity_bindings, build_stage_snapshot, validate_and_solve
+from cocreation.domain.revision_workflow import build_revision_workflow, validate_semantic_constraints, SemanticConstraintError
 
 BASE = ["############", "#..........#", "#.......@@.#", "#..........#",
     "#...p......#", "#...s.t....#", "#..........#", "#..........#", "#..........#", "############"]
@@ -195,7 +196,7 @@ class DesignRequirementsTests(unittest.TestCase):
             tasks.append(kwargs["task"])
             value = returns.pop(0)
             return response(patch_fixture(args[3][-1]["content"], value) if kwargs["task"].endswith("_patch") else value)
-        with patch.object(llm_client, "_request_completion", side_effect=stub):
+        with llm_scope(completion_requester=RecordedAsyncCall(side_effect=stub)):
             record = llm_client._review_proposal_requirements("offline", "offline", {"stageSnapshot": self.snapshot,
                 "proposalDiscovery": {"topicId": "u1", "userTurns": SOURCES, "answers": []}}, "request", time.monotonic() + 116)
         self.assertEqual(tasks, ["revision_requirements", "revision_requirement_review", "revision_requirements_patch", "revision_requirement_review"])
@@ -204,7 +205,10 @@ class DesignRequirementsTests(unittest.TestCase):
     def test_unreliable_interpretation_is_retryable_not_user_conflict(self):
         async def stub(*args, **kwargs):
             return response({})
-        with patch.object(llm_client, "_request_completion", side_effect=stub), self.assertRaises(llm_client.LLMServiceError) as caught:
+        with (
+            llm_scope(completion_requester=RecordedAsyncCall(side_effect=stub)),
+            self.assertRaises(llm_client.LLMServiceError) as caught,
+        ):
             llm_client._review_proposal_requirements("offline", "offline", {"stageSnapshot": self.snapshot,
                 "requirementUserTurns": SOURCES}, "request", time.monotonic() + 116)
         self.assertEqual(caught.exception.code, "REQUIREMENT_INTERPRETATION_INVALID")
@@ -219,7 +223,7 @@ class DesignRequirementsTests(unittest.TestCase):
     def test_failure_has_no_warning_and_no_false_impossibility_claim(self):
         error = llm_client.LLMServiceError("SEMANTIC_CONSTRAINT_NOT_MET", "failed", "request", False, 2, 422)
         error.revision_contract = {"revisionWorkflow": {"requirementRecord": self.record(requirement())}}
-        result = backend._classified_proposal_failure_execution(language="zh-CN", request_id="request", exception=error)
+        result = proposal_and_challenge._classified_proposal_failure_execution(language="zh-CN", request_id="request", exception=error)
         self.assertEqual(result.guidance["uiCues"], [])
         self.assertIsNone(result.guidance["proposalOffer"])
         self.assertIsNone(result.proposed_rows)
@@ -239,30 +243,30 @@ class DesignRequirementsTests(unittest.TestCase):
         annotated = {"r0": {"acts": ["revision_request"], "elements": ["unknown"]},
             "r1": {"acts": ["revision_request"], "elements": ["boxes"]},
             "r3": {"acts": ["revision_request"], "elements": ["boxes"]}}
-        first = backend._proposal_discovery_from_turns(turns, "v1", turn_understandings=annotated)
-        second = backend._proposal_discovery_from_turns(copy.deepcopy(turns), "v1", turn_understandings=annotated)
+        first = context_and_discovery._proposal_discovery_from_turns(turns, "v1", turn_understandings=annotated)
+        second = context_and_discovery._proposal_discovery_from_turns(copy.deepcopy(turns), "v1", turn_understandings=annotated)
         self.assertEqual(first, second)
         self.assertEqual(first["clarificationQuestionCount"], 3)
         self.assertEqual(first["observedQuestionCount"], 4)
         self.assertEqual(first["answers"][0]["answerTurnId"], "u2")
         self.assertEqual(first["answers"][0]["answerText"], SOURCES[1]["content"])
         self.assertEqual(first["userTurns"][0], SOURCES[0])
-        self.assertIn(backend._adaptive_revision_routing("不知道", {}, self.snapshot, proposal_discovery=first,
+        self.assertIn(context_and_discovery._adaptive_revision_routing("不知道", {}, self.snapshot, proposal_discovery=first,
             turn_understanding={"acts": ["evaluation"], "elements": ["unknown"], "mapRelated": True}), {"proposal", "proposal_conservative"})
 
     def test_multiple_questions_counted_and_fourth_cannot_display(self):
         discovery = {"topicId": "u1", "clarificationQuestionCount": 1, "askedQuestionKeys": []}
         result = llm_client.LLMExecutionResult("偏好甲？偏好乙？偏好丙？", 0, "request", guidance={"followUpQuestion": "隐藏的第四问？"})
-        guarded = backend._mark_proposal_discovery_guidance(result, {"proposalDiscovery": discovery, "revisionRouting": "needs_clarification"})
-        self.assertEqual(len(backend._visible_proposal_questions(guarded.assistant_message)), 2)
+        guarded = proposal_and_challenge._mark_proposal_discovery_guidance(result, {"proposalDiscovery": discovery, "revisionRouting": "needs_clarification"})
+        self.assertEqual(len(context_and_discovery._visible_proposal_questions(guarded.assistant_message)), 2)
         self.assertEqual(guarded.guidance["proposalDiscovery"]["clarificationQuestionCount"], 3)
         self.assertIsNone(guarded.guidance["followUpQuestion"])
-        exhausted = backend._mark_proposal_discovery_guidance(result, {"proposalDiscovery": dict(discovery, clarificationQuestionCount=3), "revisionRouting": "needs_clarification"})
-        self.assertEqual(backend._visible_proposal_questions(exhausted.assistant_message), [])
+        exhausted = proposal_and_challenge._mark_proposal_discovery_guidance(result, {"proposalDiscovery": dict(discovery, clarificationQuestionCount=3), "revisionRouting": "needs_clarification"})
+        self.assertEqual(context_and_discovery._visible_proposal_questions(exhausted.assistant_message), [])
 
     def test_early_sufficient_request_does_not_force_first_question(self):
         discovery = {"topicId": "u1", "status": "clarifying", "clarificationQuestionCount": 0, "userEvidence": ["增加水域"]}
-        route = backend._adaptive_revision_routing("增加水域", {}, self.snapshot, proposal_discovery=discovery,
+        route = context_and_discovery._adaptive_revision_routing("增加水域", {}, self.snapshot, proposal_discovery=discovery,
             turn_understanding={"acts": ["revision_request"], "elements": ["water"], "mapRelated": True,
                 "directionSufficient": True, "changes": [{"component": "water", "property": "count", "operation": "change"}]})
         self.assertIn(route, {"proposal", "proposal_conservative"})
@@ -286,7 +290,7 @@ class DesignRequirementsTests(unittest.TestCase):
         context = {"versionId": "v1", "stageNumber": 1, "stageSnapshot": self.snapshot, "entityBindings": self.bindings,
             "requirementPolicyVersion": 1, "requirementUserTurns": source, "aiEditableTilesOnly": True,
             "authorizedRevisionBrief": source[0]["content"], "responseLanguage": "zh-CN"}
-        with patch.object(llm_client, "_create_async_client", return_value=client):
+        with llm_scope(client_factory=RecordedCall(return_value=client)):
             execution = llm_client._generate_revision_search_proposal_sync(api_key="offline", base_url="offline",
                 conversation=[{"role": "user", "content": source[0]["content"]}], rows=BASE, request_id="new-policy",
                 language="zh-CN", proposal_validator=validate_and_solve, stage_context=context, deadline=time.monotonic() + 116)
@@ -299,16 +303,16 @@ class DesignRequirementsTests(unittest.TestCase):
         self.assertIn("requirements", modifier_json)
         self.assertNotIn("designerTurns", modifier_json)
         self.assertNotIn("dgContext", modifier_json)
-        frozen = backend._materialize_verified_automatic_offer(execution, BASE, "zh-CN", context)
+        frozen = proposal_and_challenge._materialize_verified_automatic_offer(execution, BASE, "zh-CN", context)
         self.assertIsNone(frozen.proposed_rows)
         self.assertTrue(frozen.guidance["proposalOffer"]["executionBrief"]["requiredTransitions"])
-        marked = backend._mark_proposal_discovery_guidance(frozen, {"proposalDiscovery": {"topicId": "u2", "clarificationQuestionCount": 0}, "revisionRouting": "proposal"})
+        marked = proposal_and_challenge._mark_proposal_discovery_guidance(frozen, {"proposalDiscovery": {"topicId": "u2", "clarificationQuestionCount": 0}, "revisionRouting": "proposal"})
         self.assertTrue(marked.guidance["proposalDiscovery"]["hasValidatedCandidate"])
 
     def test_new_proposal_budget_is_bounded_by_120_seconds(self):
         expected = llm_client.LLMExecutionResult("candidate", 0, "budget")
-        with patch.object(llm_client, "_llm_credentials", return_value=("offline", "offline")), patch.object(
-            llm_client, "_generate_revision_search_proposal_sync", return_value=expected) as generate:
+        generate = RecordedCall(return_value=expected)
+        with llm_scope(revision_search_generator=generate):
             llm_client.generate_chat_reply([{"role": "user", "content": "Please give me a plan."}], BASE, "budget",
                 stage_context={"revisionRouting": "proposal_conservative", "requirementPolicyVersion": 1})
         remaining = generate.call_args.kwargs["deadline"] - time.monotonic()

@@ -1,3 +1,6 @@
+"""Uvicorn and ASGI entrypoint for the 8010 co-creation service."""
+from __future__ import annotations
+
 from pathlib import Path
 import sys
 
@@ -5,16 +8,20 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-import cocreation  # noqa: F401
-from cocreation.api import app_factory as _app_factory  # noqa: E402
+from cocreation.api.app_factory import create_app  # noqa: E402
+from cocreation.api.config_models import HOST, PORT  # noqa: E402
+from cocreation.api.services import (  # noqa: E402
+    CoCreationServices,
+    CoCreationSettings,
+    HttpOnlineSyncGateway,
+    OnlineSyncGateway,
+    build_default_services,
+    get_services,
+)
+
+app = create_app()
 
 if __name__ == "__main__":
-    sys.modules.setdefault("app", sys.modules[__name__])
+    import uvicorn
 
-for _k, _v in vars(_app_factory).items():
-    if not (_k.startswith("__") and _k.endswith("__")):
-        globals()[_k] = _v
-del _k, _v, _app_factory
-
-if __name__ == "__main__":
     uvicorn.run(app, host=HOST, port=PORT)
