@@ -1,6 +1,6 @@
 # 8010 入口语义评测
 
-2026-10-06 启动；2026-10-07 扩展为 36 例。初始轮次只增加离线工具和固定案例，不改产品提示词、路由、授权、地图执行、研究记录或前端。
+本文件说明独立入口语义评测的覆盖、离线验收和采样方法。工作台运行契约见 [8010 回复可靠性](../../REPLY_RELIABILITY.md)。
 
 ## 当前覆盖
 
@@ -29,7 +29,7 @@ python -m unittest discover -s CoCreationPrototype/Backend/tests -p "test_reliab
   "suiteHash": "validate 返回的完整 suiteHash",
   "repeats": 3,
   "model": "kimi-k2.6",
-  "sourceHash": "运行时 llm_client.py 的 SHA256",
+  "sourceHash": "按路径排序拼接 cocreation/llm/ 顶层 *.py 的字节后计算的 SHA-256",
   "runs": [
     {
       "caseId": "zh_crowded",
@@ -56,15 +56,11 @@ python CoCreationPrototype/Backend/semantic_eval.py compare CoCreationPrototype/
 
 ## 可选真实 Kimi 采样
 
-只有显式 `run --live` 会调用 Kimi。凭据必须已经在进程环境中配置为 8010 的 Kimi 配置；不读取 8000 的 DeepSeek 配置。测试工具不创建正式/demo 会话、不调用线上 HTTP、不写 SQLite、不改变地图、不发送研究评测预期。
+有本轮明确授权时才运行 `run --live`。它使用进程环境中的 8010 Kimi 配置调用提供商，不读取 8000 的 DeepSeek 配置。该工具不访问工作台 HTTP、会话或 SQLite，不改变地图，也不把研究评测预期发给模型。
 
 ```powershell
 New-Item -ItemType Directory -Force CoCreationPrototype/Backend/evaluation_runs
 python CoCreationPrototype/Backend/semantic_eval.py run --live --repeats 3 --output CoCreationPrototype/Backend/evaluation_runs/baseline.json
 ```
 
-36 案例重复三次意味着 108 次逻辑分类请求，生产函数内部还可能重试，产生真实费用与耗时。输出路径必须不存在；每完成一个样本保存一次，中断后已有结果可离线评分。运行结果目录已加入 Git 忽略。采样分数不能等同于线上成功率，也不能替代真实输出的人工语义复核；这轮交付仅做离线验收，尚未进行真实模型采样。
-
-## 2026-10-07 方案语义扩展
-
-新增12个合成案例，覆盖视觉目标、水墙修改范围、目标/箱子/玩家/外壳作为空间参照、范围纠正、求解器步数与用户保留条件的区别，以及真实固定对象修改。预期值增加主题作用面、编辑组件、空间焦点和保留条件检查；旧短回答案例补充与生产输入一致的来源 Turn ID。真实采样复用生产入口的关键语义复核；复核失败仍在失败/缺失样本分母中。套件哈希已变更，旧24例采样不能与新版直接比较。回归检查没有进行真实模型采样。
+36 案例重复三次意味着 108 次逻辑分类请求，生产函数内部还可能重试，产生真实费用与耗时。输出路径必须不存在；每完成一个样本保存一次，中断后已有结果可离线评分。运行结果目录已加入 Git 忽略。采样分数用于比较同一套件的入口理解，线上交付与语义质量另行复核。旧采样需先核对套件哈希与重复次数。

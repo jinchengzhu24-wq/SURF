@@ -101,6 +101,7 @@ from .context_and_discovery import (
     record_intent_evidence,
     record_intent_hypothesis,
 )
+from .message_request_identity import conflicts_with_saved_user_turn, message_request_signature
 from .message_response_policy import apply_conversation_only_policy, apply_map_claim_conflict_policy
 from .online_sync_and_dashboard import (
     synchronize_dashboard_intent_node,
@@ -1089,17 +1090,13 @@ def _send_message_locked_impl(
     if payload.action == 'none':
         with services.connect() as read_database:
             read_session = require_active_session(read_database, session_id, access_cookie, services=services)
-            request_signature = hashlib.sha256(
-                dump_json(
-                    {
-                        'content': content,
-                        'baseVersionId': payload.baseVersionId,
-                        'requestProposal': payload.requestProposal,
-                        'action': payload.action,
-                        'sourceTurnId': payload.sourceTurnId,
-                    }
-                ).encode('utf-8')
-            ).hexdigest()
+            request_signature = message_request_signature(
+                content,
+                base_version_id=payload.baseVersionId,
+                request_proposal=payload.requestProposal,
+                action=payload.action,
+                source_turn_id=payload.sourceTurnId,
+            )
             trace_proposal('request_binding', 'binding', 'passed', bindingSignature=request_signature, sourceTurnId=payload.sourceTurnId)
             prior_failure = read_database.execute(
                 "SELECT payload_json FROM audit_events WHERE session_id=? AND event_type='message_generation_failed' "
@@ -1113,7 +1110,7 @@ def _send_message_locked_impl(
                 "SELECT content, version_id FROM conversation_turns WHERE session_id = ? AND request_id = ? AND role = 'user'",
                 (session_id, payload.idempotencyKey),
             ).fetchone()
-            if read_user is not None and (read_user['content'] != content or read_user['version_id'] != payload.baseVersionId):
+            if conflicts_with_saved_user_turn(read_user, content, payload.baseVersionId):
                 raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The message key was already used for different content or Stage.')
             already_answered = read_database.execute(
                 "SELECT 1 FROM conversation_turns\n                WHERE session_id = ? AND request_id = ? AND role = 'assistant'",
@@ -1281,7 +1278,7 @@ def _send_message_locked_impl(
             "            WHERE session_id = ? AND request_id = ? AND role = 'user'\n            ",
             (session_id, payload.idempotencyKey),
         ).fetchone()
-        if prior_user is not None and (prior_user['content'] != content or prior_user['version_id'] != payload.baseVersionId):
+        if conflicts_with_saved_user_turn(prior_user, content, payload.baseVersionId):
             raise ApiError(409, 'IDEMPOTENCY_CONFLICT', 'The message key was already used for different content or Stage.')
         prior_action = _action_for_message_key(database, session_id, payload.idempotencyKey)
         if prior_action is not None and prior_action != (payload.action, payload.sourceTurnId):
