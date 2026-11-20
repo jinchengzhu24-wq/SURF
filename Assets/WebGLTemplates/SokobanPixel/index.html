@@ -956,9 +956,12 @@
       }
 
       function captureDashboardPasswordKey(event) {
-        if (dashboardAccessModal.hidden
-          || !event.target
-          || !dashboardAccessModal.contains(event.target)) {
+        if (dashboardAccessModal.hidden || !event.target) {
+          return;
+        }
+
+        var targetInModal = dashboardAccessModal.contains(event.target);
+        if (!targetInModal && event.key !== "Tab") {
           return;
         }
 
@@ -985,6 +988,12 @@
         }
 
         if (event.key === "Tab") {
+          var lastTabStop = event.shiftKey ? dashboardAccessPassword : dashboardAccessSubmit;
+          if (!targetInModal || event.target === lastTabStop) {
+            event.preventDefault();
+            var firstTabStop = event.shiftKey ? dashboardAccessSubmit : dashboardAccessPassword;
+            firstTabStop.focus();
+          }
           return;
         }
 

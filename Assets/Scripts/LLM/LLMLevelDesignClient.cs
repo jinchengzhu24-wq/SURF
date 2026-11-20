@@ -538,7 +538,13 @@ public static class LLMBackendError
             ? request.downloadHandler.text
             : string.Empty;
         ErrorDetail detail = ParseDetail(responseBody);
-        return detail != null ? detail.retryable : fallback;
+        if (detail != null)
+        {
+            return detail.retryable;
+        }
+
+        // FastAPI request validation errors use a detail array without a retry flag.
+        return fallback && request?.responseCode != 422;
     }
 
     private static ErrorDetail ParseDetail(string responseBody)

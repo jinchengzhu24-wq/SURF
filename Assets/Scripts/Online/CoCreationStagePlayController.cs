@@ -67,6 +67,11 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
 
     private IEnumerator Start()
     {
+        if (returning)
+        {
+            yield break;
+        }
+
         if (!CoCreationPlayContext.IsActive)
         {
             HandleLoadFailure("No valid co-creation Play context was found.");
@@ -104,9 +109,19 @@ public sealed class CoCreationStagePlayController : MonoBehaviour
         }
 
         yield return levelManager.FadeToBlackForExternalInitialLoad();
+        if (returning)
+        {
+            yield break;
+        }
+
         levelLoader.levelData = levelData;
         levelLoader.LoadLevel();
         yield return levelManager.FadeFromBlackAfterExternalInitialLoad(false);
+        if (returning)
+        {
+            yield break;
+        }
+
         levelReady = true;
         levelManager.SetExternalRestartAllowed(true);
         levelManager.SetExternalPlayerInputEnabled(true);
