@@ -266,7 +266,10 @@ export function createStateStorage(ctx) {
                         await enterWorkspaceFromSession();
                         ports.restoreComposerDraft();
                         ports.recoverPendingMessage();
-                        recoveredWorkspaceEntry = true;
+                        recoveredWorkspaceEntry = ![
+                            "ONLINE_FLOW_SYNC_UNAVAILABLE",
+                            "ONLINE_INTENTION_SYNC_UNAVAILABLE",
+                        ].includes(error?.code);
                     } else {
                         render();
                     }

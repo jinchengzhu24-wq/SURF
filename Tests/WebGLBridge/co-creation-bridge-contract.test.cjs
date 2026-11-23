@@ -19,16 +19,29 @@ test("prepare requires a registered regeneration receiver", () => {
     { protocolVersion: 4, sessionId: "session-a" }
   );
   assert.equal(reason, "receiver_not_ready");
+  const clearedBridgeReason = contract.prepareRejectionReason(
+    { ...baseState, activeProtocolVersion: 0, activeSessionId: "", unityReady: true, receiverReady: false },
+    { protocolVersion: 4, sessionId: "session-a" }
+  );
+  assert.equal(clearedBridgeReason, "receiver_not_ready");
 });
 
 test("prepare distinguishes protocol, session and Unity failures", () => {
   assert.equal(contract.prepareRejectionReason(baseState, {
     protocolVersion: 3, sessionId: "session-a"
   }), "protocol_mismatch");
+  assert.equal(contract.prepareRejectionReason({ ...baseState, activeProtocolVersion: 3 }, {
+    protocolVersion: 4, sessionId: "session-a"
+  }), "protocol_mismatch");
   assert.equal(contract.prepareRejectionReason(baseState, {
     protocolVersion: 4, sessionId: "session-b"
   }), "session_mismatch");
   assert.equal(contract.prepareRejectionReason({ ...baseState, unityReady: false }, {
+    protocolVersion: 4, sessionId: "session-a"
+  }), "unity_not_ready");
+  assert.equal(contract.prepareRejectionReason({
+    ...baseState, activeProtocolVersion: 0, activeSessionId: "", unityReady: false, receiverReady: false,
+  }, {
     protocolVersion: 4, sessionId: "session-a"
   }), "unity_not_ready");
 });

@@ -398,7 +398,7 @@ def require_choice_coverage(record, choices):
     """Interface evidence must survive compilation; hidden coordinates never become invariants."""
     for choice in choices:
         items = [r for r in record["requirements"] if r["sourceTurnId"] == choice["sourceTurnId"] or choice["sourceTurnId"] in (r.get("sourceTurnIds") or ())]
-        if not items or any(r.get("value") is not None for r in items):
+        if not items or any(r["sourceTurnId"] == choice["sourceTurnId"] and r.get("value") is not None for r in items):
             raise ValueError("BINARY_CHOICE_COVERAGE: preserve the visible selected action without hidden numeric locks.")
         kind = choice["promise"]["kind"]
         if kind == "reduce_obstacles" and not any(r["property"] == "count" and r["relation"] == "decrease"

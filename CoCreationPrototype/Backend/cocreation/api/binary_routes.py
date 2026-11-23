@@ -383,12 +383,13 @@ def _advance(services: CoCreationServices, session_id, topic, key, receipt_data,
         stage["requirementRecord"] = topic.get("requirements")
         preflight_started = services.monotonic()
         preflight_cutoff = min(deadline - 20.0, preflight_started + 20.0)
-        baseline = services.llm.solve_stage(context["rows"], deadline=preflight_cutoff)
+        baseline_cutoff = deadline if topic["questionCount"] >= 3 else preflight_cutoff
+        baseline = services.llm.solve_stage(context["rows"], deadline=baseline_cutoff)
         baseline_features = services.llm.proposal_route_features(
             context["rows"],
             baseline,
             stage.get("entityBindings"),
-            deadline=preflight_cutoff,
+            deadline=baseline_cutoff,
         )
         context["validation"]["minimumPushes"] = baseline_features.get("minimumPushes")
         preflight_budget = 20.0 - (services.monotonic() - preflight_started)

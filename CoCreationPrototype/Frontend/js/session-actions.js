@@ -571,8 +571,12 @@ export function createSessionActions(ctx) {
         elements.finalizeModal.hidden = true;
         const targetVersionId = state.selectedVersionId;
         const targetIsCurrent = targetVersionId === state.session.currentVersionId;
-        const rows = deadlineExpired() && targetIsCurrent && state.dirty ? state.draftRows.map(row => row) : null;
-        const rowsSignature = rows ? rows.join("\n") : null;
+        const finalizeBody = {
+            baseVersionId: targetVersionId,
+            idempotencyKey: "",
+            rows: deadlineExpired() && targetIsCurrent && state.dirty ? state.draftRows.map(row => row) : null
+        };
+        const rowsSignature = finalizeBody.rows ? finalizeBody.rows.join("\n") : null;
         if (
             !state.pendingFinalize
             || state.pendingFinalize.sessionId !== state.sessionId
@@ -586,11 +590,7 @@ export function createSessionActions(ctx) {
                 idempotencyKey: uniqueId("finalize")
             };
         }
-        const finalizeBody = {
-            baseVersionId: targetVersionId,
-            idempotencyKey: state.pendingFinalize.idempotencyKey,
-            rows
-        };
+        finalizeBody.idempotencyKey = state.pendingFinalize.idempotencyKey;
         await withBusy(async () => {
             state.validationError = null;
             try {

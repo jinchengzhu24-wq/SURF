@@ -126,7 +126,7 @@ class PublicEndpointConfigurationTests(unittest.TestCase):
         self.assertIn("return 308 https://sokobanaidemo.top$request_uri;", nginx)
         self.assertIn("$http_x_forwarded_proto", nginx)
         self.assertIn("proxy_set_header X-Forwarded-Proto $sokoban_public_proto;", nginx)
-        self.assertIn("proxy_read_timeout 320s;", nginx)
+        self.assertIn("proxy_read_timeout 135s;", nginx)
         self.assertNotIn("listen 443", nginx)
         self.assertNotIn("Strict-Transport-Security", nginx)
 

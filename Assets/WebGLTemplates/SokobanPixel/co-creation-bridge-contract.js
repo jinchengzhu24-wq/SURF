@@ -11,14 +11,14 @@
 
   function prepareRejectionReason(state, message) {
     if (!message || message.protocolVersion !== state.protocolVersion
-      || state.activeProtocolVersion !== state.protocolVersion) {
+      || (state.activeProtocolVersion > 0 && state.activeProtocolVersion !== state.protocolVersion)) {
       return "protocol_mismatch";
-    }
-    if (!message.sessionId || message.sessionId !== state.activeSessionId) {
-      return "session_mismatch";
     }
     if (!state.unityReady) return "unity_not_ready";
     if (!state.receiverReady) return "receiver_not_ready";
+    if (!message.sessionId || message.sessionId !== state.activeSessionId) {
+      return "session_mismatch";
+    }
     return "";
   }
 

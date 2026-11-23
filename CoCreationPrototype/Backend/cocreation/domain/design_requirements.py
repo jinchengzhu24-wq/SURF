@@ -85,7 +85,7 @@ def requirement_response_schema():
     }
     return {"type": "object", "additionalProperties": False, "properties": {
         "requirements": {"type": "array", "items": {"type": "object", "additionalProperties": False,
-            "properties": properties, "required": [key for key in properties if key != "scope"]}},
+            "properties": properties, "required": list(properties)}},
         "automaticBindings": {"type": "array", "items": {"type": "object", "additionalProperties": False,
             "properties": {"entity": {"type": "string"}, "reason": {"type": "string"}},
             "required": ["entity", "reason"]}},
@@ -107,7 +107,7 @@ def validate_requirement_record(payload, user_turns, snapshot):
     if not isinstance(raw_requirements, list) or len(raw_requirements) > 48:
         raise ValueError("Invalid requirements collection.")
     requirements, seen = [], set()
-    fields = set(requirement_response_schema()["properties"]["requirements"]["items"]["required"])
+    fields = set(requirement_response_schema()["properties"]["requirements"]["items"]["required"]) - {"scope"}
     for raw in raw_requirements:
         if not isinstance(raw, dict) or not fields.issubset(raw) or set(raw) - fields - {"scope", "sourceTurnIds"}:
             raise ValueError("Invalid typed requirement.")

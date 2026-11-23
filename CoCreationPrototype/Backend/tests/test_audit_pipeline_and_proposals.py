@@ -1093,7 +1093,12 @@ class BinaryPolicyAndIdempotencyHttpTests(SessionTestCase):
         state = start.json()
         topic_id = state["proposalFlowState"]["topicId"]
         clar_turn = state["turns"][-1]
-        self.assertEqual(clar_turn["guidance"]["dashboardNode"]["proposalTopicId"], topic_id)
+        self.assertNotIn("dashboardNode", clar_turn["guidance"])
+        with self.services.connect() as db:
+            row = db.execute("SELECT guidance_json FROM conversation_turns WHERE id = ?", (clar_turn["turnId"],)).fetchone()
+            stored_guidance = json.loads(row["guidance_json"])
+        self.assertEqual(stored_guidance["dashboardNode"]["proposalTopicId"], topic_id)
+        self.assertTrue(any((ev.get("metadata") or {}).get("nodeId") == f"proposal:{topic_id}" for ev in self.services.online_sync.events))
 
         before_sync_count = len(self.services.online_sync.events)
         replay_start = self.client.post(
@@ -1205,6 +1210,93 @@ class BinaryPolicyAndIdempotencyHttpTests(SessionTestCase):
         self.assertEqual(raced.status_code, 409, raced.text)
         self.assertEqual(raced.json()["code"], "PROPOSAL_STALE")
         self.assertEqual(raced.json()["details"]["reason"], "version_changed")
+
+    def test_require_choice_coverage_allows_merged_numeric_turn_and_rejects_choice_numeric_lock(self):
+        choice = {"sourceTurnId": "turn-choice", "promise": {"kind": "reduce_obstacles"}}
+        merged_record = {
+            "requirements": [{
+                "sourceTurnId": "turn-user",
+                "sourceTurnIds": ["turn-user", "turn-choice"],
+                "component": "water",
+                "property": "count",
+                "relation": "decrease",
+                "value": 2,
+                "unit": "absolute",
+            }],
+            "exactTransitions": [],
+        }
+        binary.require_choice_coverage(merged_record, [choice])
+
+        locked_choice_record = {
+            "requirements": [{
+                "sourceTurnId": "turn-choice",
+                "sourceTurnIds": ["turn-choice"],
+                "component": "water",
+                "property": "count",
+                "relation": "decrease",
+                "value": 2,
+                "unit": "absolute",
+            }],
+            "exactTransitions": [],
+        }
+        with self.assertRaisesRegex(ValueError, "BINARY_CHOICE_COVERAGE"):
+            binary.require_choice_coverage(locked_choice_record, [choice])
+
+    def test_advance_question_count_three_uses_full_deadline_for_baseline(self):
+        start = self.client.post(
+            f"/api/sessions/{self.session_id}/messages",
+            json={"baseVersionId": self.version, "content": "Make it simpler.", "requestProposal": True, "idempotencyKey": "p2-q3-start"},
+        )
+        self.assertEqual(start.status_code, 200, start.text)
+        state = start.json()
+        question = state["proposalFlowState"]["pendingQuestion"]
+        with self.services.connect(immediate=True) as db:
+            current = binary.current_topic(db, self.session_id, self.version, clock=self.clock)
+            current["questionCount"] = 3
+            repository.record_event(db, self.session_id, "binary_discovery_state", current, self.services.utc_now())
+
+        started_mono = self.services.monotonic()
+        seen_deadlines = []
+
+        def record_features(*args, **kwargs):
+            seen_deadlines.append(kwargs.get("deadline"))
+            return {"minimumPushes": 1}
+
+        def plan_from_selected(**kwargs):
+            with self.services.connect() as db:
+                current = binary.current_topic(db, self.session_id, self.version, clock=self.clock)
+            cache = current["selectedCandidate"]
+            plan = parse_revision_plan({"strategies": [cache["strategy"]]})
+            contract = llm._build_revision_execution_contract(plan, current["initialRequest"], kwargs["stage_context"])
+            return LLMExecutionResult(
+                "", 1, "q3-final", model="offline",
+                proposed_rows=cache["rows"], revision_contract=contract, revision_plan=plan.as_dict(),
+                revision_operations=binary_routes._operations(binary_fixtures.ROWS, cache["rows"]),
+                proposal_diagnostics={"selectedStrategyIndex": 1},
+            )
+
+        with self.using_dependencies(
+            settings={"llm_internal_deadline_seconds": 10.0},
+            llm_handlers={
+                "proposal_route_features": RecordedCall(side_effect=record_features),
+                "generate_binary_step": ({"action": "plan", "question": "", "note": "", "branches": []}, []),
+            },
+            llm_options={"revision_search_generator": RecordedCall(side_effect=plan_from_selected)},
+        ):
+            resp = self.client.post(
+                f"/api/sessions/{self.session_id}/proposal-discovery/choices",
+                json={
+                    "baseVersionId": self.version,
+                    "topicId": state["proposalFlowState"]["topicId"],
+                    "questionId": question["questionId"],
+                    "choiceId": question["choices"][0]["choiceId"],
+                    "displayLanguage": "en",
+                    "idempotencyKey": "p2-q3-choice",
+                },
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertTrue(seen_deadlines)
+        self.assertGreater(seen_deadlines[0], started_mono + 5.0)
 
 
 if __name__ == "__main__":

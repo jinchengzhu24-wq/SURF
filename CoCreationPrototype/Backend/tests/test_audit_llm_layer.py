@@ -889,16 +889,9 @@ class AuditProposalPlanningTests(unittest.TestCase):
                 "requiredTransitions": [{"row": 4, "column": 5, "from": "@", "to": "#"}],
             },
         )
-        # Note: proposal_search.validate_revision_plan_against_map lives on sibling worker backend-pipeline;
-        # stubbing it here verifies _deterministic_exact_revision's operator derivation and replay end-to-end.
-        orig_validate = proposal_planning.validate_revision_plan_against_map
-        try:
-            proposal_planning.validate_revision_plan_against_map = lambda *a, **kw: None
-            exact = proposal_planning._deterministic_exact_revision(
-                AUDIT_ROWS, brief, "exact-ww", "en", lambda rows: SimpleNamespace(valid=True, solvable=True, rows=rows)
-            )
-        finally:
-            proposal_planning.validate_revision_plan_against_map = orig_validate
+        exact = proposal_planning._deterministic_exact_revision(
+            AUDIT_ROWS, brief, "exact-ww", "en", lambda rows: SimpleNamespace(valid=True, solvable=True, rows=rows)
+        )
         self.assertEqual(exact.proposed_rows[3][4], "#")
 
     def test_operation_patch_request_and_requirements_review_and_bindings(self):

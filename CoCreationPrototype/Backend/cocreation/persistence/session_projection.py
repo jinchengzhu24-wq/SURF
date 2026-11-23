@@ -483,7 +483,7 @@ def serialize_session(database, session_id, *, now=None, clock=None):
             proposal_flow_status = latest_marker.get('status')
             proposal_flow_question_count = max(0, min(3, int(latest_marker.get('clarificationQuestionCount') or 0)))
             proposal_flow_topic_id = latest_marker.get('topicId')
-    binary_topic = binary_discovery.current_topic(database, session_id, session['current_version_id'])
+    binary_topic = binary_discovery.current_topic(database, session_id, session['current_version_id'], clock=clock)
     for turn in turns:
         question = public_guidance_by_turn.get(turn['id'], {}).get('proposalQuestion')
         if not question:

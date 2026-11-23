@@ -2378,4 +2378,61 @@ test("P2: error codes, challenge choice language, play composer guard, selectVer
     });
     assert.equal(bridgeApp.state.unityPlayActive, false);
     assert.equal(bridgeApp.elements.playButton.disabled, false);
+
+    // 10. PATCH /language 503 sync-failure enters Stage 1 workspace and preserves retryable error
+    let langPatchAttempt = 0;
+    const syncApp = loadApp({
+        overrides: {
+            ensureVisibleTranslations: async () => {},
+            ensureAssessment: async () => {},
+        },
+        fetch: async (url, init = {}) => {
+            const path = String(url);
+            if (path.endsWith("/language") && init.method === "PATCH") {
+                langPatchAttempt += 1;
+                if (langPatchAttempt === 1) {
+                    return {
+                        ok: false,
+                        status: 503,
+                        headers: { get: () => null },
+                        json: async () => ({
+                            code: "ONLINE_FLOW_SYNC_UNAVAILABLE",
+                            message: "Sync temporarily unavailable",
+                            retryable: true,
+                        }),
+                    };
+                }
+                syncApp.state.session.languageLocked = true;
+                return {
+                    ok: true,
+                    status: 200,
+                    headers: { get: () => null },
+                    json: async () => ({ ...syncApp.state.session, languageLocked: true }),
+                };
+            }
+            if (path.endsWith("/api/sessions/session") && (!init.method || init.method === "GET")) {
+                return {
+                    ok: true,
+                    status: 200,
+                    headers: { get: () => null },
+                    json: async () => ({
+                        ...createDefaultSession(),
+                        demoMode: true,
+                        languageLocked: true,
+                        turns: [],
+                    }),
+                };
+            }
+            throw new Error(`Unexpected fetch: ${init.method || "GET"} ${path}`);
+        },
+    });
+    syncApp.state.session = { ...createDefaultSession(), demoMode: true, languageLocked: false, turns: [] };
+    syncApp.elements.workspace.hidden = true;
+    syncApp.elements.landing.hidden = false;
+    await syncApp.app.confirmSessionLanguage();
+    assert.equal(syncApp.elements.workspace.hidden, false);
+    assert.equal(syncApp.state.replyFeedback?.error?.code, "ONLINE_FLOW_SYNC_UNAVAILABLE");
+    assert.equal(syncApp.elements.chatRetryButton.hidden, false);
+    await syncApp.state.replyFeedback.retryAction();
+    assert.equal(langPatchAttempt, 2);
 });
